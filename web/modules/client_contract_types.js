@@ -29,6 +29,7 @@
  * @property {string=} project_id  // per-project memory scope (v6.32.0)
  * @property {Object=} client_surface  // raw sending-surface observables measured at send time (pywebview/ua/viewport/matchMedia/captured_at; optional IANA timezone)
  * @property {string=} profile_scope  // data-profile digest of the serving document (ouroboros-chat-preview-scope meta); a proven mismatch with the serving connection's scope refuses the frame (#3294)
+ * @property {number=} ordinary_room  // a Send again of a copy shown on a history 503's word: that room, which the core's acceptance confirms again before saving
  */
 /**
  * @typedef {Object} CommandInbound
@@ -707,6 +708,7 @@
  * @property {string=} reason_code
  * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one
  * @property {('unavailable'|'restored')=} project_registry  // Main only: its refusal, or the list back from its copy
+ * @property {number=} ordinary_room  // a newest read's 503: the room read, still one of this profile's ordinary rooms
  * @property {string=} profile_scope  // the serving generation's frozen scope; a proven foreign value never paints (#3294)
  */
 

@@ -2019,7 +2019,11 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   not destroyed. The tab's sessionStorage keeps its words, id, routing and
   upload references (never file bytes) across a reload (the asset reload a
   reconnect forces included) and a room's teardown; after a reload the first
-  history read settles it or shows the same doubt. A browser that refuses to
+  history read settles it or shows the same doubt. A read that fails shows it
+  only while the core says, on the connection serving this page's data profile,
+  that the room is still one of its ordinary rooms; Send again sends once, only on
+  the core's fresh word. When the word lapses or the room is left, the copy
+  leaves the feed, kept, until a fresh one. A browser that refuses to
   keep it says so, and Send again then lasts until a reload; a kept copy it
   cannot read back is said too, never silently dropped. A saved row the host
   knows never reached the agent (its write failed before dispatch, in the

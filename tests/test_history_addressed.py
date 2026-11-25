@@ -19,7 +19,7 @@ from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.gateway.task_events import _TaskEventCursorFollower, iter_task_events
 from ouroboros.projects_registry import bind_task_to_project, create_project
 from ouroboros.task_results import write_task_result
-from tests._dialogue import seed
+from tests._dialogue import healthy_main_fixture, seed  # noqa: F401 -- the "healthy_main" fixture
 from tests.test_chat_history_paging import isolated_runtime  # noqa: F401  (autouse: state/queue roots, no lifecycle row)
 from tests.test_dialogue_addressed_readers import metered
 from tests._cases import chosen_rows
@@ -129,7 +129,7 @@ def test_a_project_page_does_equal_sql_work_with_one_or_thirty_other_rooms(tmp_p
     assert counts[0] == counts[1] and counts[0]["steps"] > 0, counts
 
 
-def test_the_import_frontier_is_disclosed_and_never_read_past(tmp_path, monkeypatch):
+def test_the_import_frontier_is_disclosed_and_never_read_past(tmp_path, monkeypatch, healthy_main):
     """Before the archive job ran, a recent page that reaches the frontier says so (one whose quota
     and window end above it does not); the older page that would cross it answers 503 migrating
     with its cursor; after the import the same cursor reads the archived rows and the recent page

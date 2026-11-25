@@ -8,7 +8,7 @@ import test from 'node:test';
 import { buildTimelineItemHtml, clearStickyCardState, renderCollapsedActivity } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
 import { childReportLabel, summarizeChatLiveEvent } from '../modules/log_events.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const REPORT = '## summary\n\nThe shared class is a false word about work that already ended, not a missing status machine.';
 const child = (overrides = {}) => ({
@@ -120,7 +120,7 @@ test('a replayed child card shows the label on its collapsed line', async () => 
         { ...child(), role: 'system', content: '', text: '', narration: false },
     ];
     const { prior, mount } = installDom(async (url) => (String(url).startsWith('/api/chat/history')
-        ? { ok: true, json: async () => ({ messages: rows, window: { complete: true } }) }
+        ? { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: rows, window: { complete: true } }) }
         : { ok: true, json: async () => ({ active_direct_turns: [] }) }));
     const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
     let generation = 0;
@@ -168,7 +168,7 @@ for (const [name, fields, report] of [
             narration: true, ts: '2026-10-25T13:35:40Z', task_id: 'root-1' }, frame];
         let detailReads = 0;
         const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () => {
-            if (String(url).startsWith('/api/chat/history')) return { messages: rows, page_cursor: 'recent',
+            if (String(url).startsWith('/api/chat/history')) return { profile_scope: PREVIEW_SCOPE, messages: rows, page_cursor: 'recent',
                 has_more: false, next_cursor: null, window: { complete: true } };
             if (String(url) === '/api/tasks/child-1') { detailReads++; return detail; }
             return { active_direct_turns: [] };

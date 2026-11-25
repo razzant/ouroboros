@@ -1,6 +1,7 @@
 """Coverage uses delivered coordinate boundaries of the real history endpoint."""
 from ouroboros import dialogue_import, room_appearances
 from ouroboros.gateway.history_paging import decode_cursor
+from tests._dialogue import confirm_first_use
 from tests.test_chat_history_paging import isolated_runtime, write, row, request, pages  # noqa: F401
 
 
@@ -51,6 +52,7 @@ def test_a_frozen_segment_that_changed_before_its_import_is_a_disclosed_gap_neve
     past it. Main also discloses unfinished appearance derivation, which settles independently;
     an untouched segment imports and leaves no gap."""
     for root in (tmp_path / 'changed', tmp_path / 'frozen'):
+        confirm_first_use(root)  # a booted installation: its first use is confirmed before any history is saved
         archives = [root / f'archive/chat_2026090{day}T000000.jsonl' for day in (1, 2)]
         for index, path in enumerate(archives):
             write(path, [row(index)])

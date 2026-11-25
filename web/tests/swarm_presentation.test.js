@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { markSwarmLabel, swarmReceiptText, syncSwarmReceipt } from '../modules/swarm_presentation.js';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const TS = '2026-10-25T00:31:00Z';
 const swarmRoot = (extra = {}) => ({ task_id: 'root-1', status: 'completed', metadata: { subagents_mode: 'swarm' }, ...extra });
@@ -261,7 +261,7 @@ test('the label: `Swarm ·` before the time, only for an owner row the host acce
 
 function chatFixture(history = [], detail = null) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: history, window: { complete: true } }
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : String(url).startsWith('/api/tasks/') ? detail
                 : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true } }));
     globalThis.sessionStorage.setItem('ouro_chat_session_id', 'session-me');

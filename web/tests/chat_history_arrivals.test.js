@@ -38,7 +38,7 @@ function historyServer({ window = 1000 } = {}) {
             && !item.system_type && item.delegation_role !== 'subagent' && !children.has(item.task_id));
         return row && { history_id: row.history_id, out_of_order: false };
     };
-    const answer = (data) => ({ ok: true, status: 200, json: async () => data });
+    const answer = (data) => ({ ok: true, status: 200, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...data }) });
     async function fetchHistory(url) {
         const cursor = new URL(String(url), 'http://local').searchParams.get('cursor');
         const kind = !cursor ? 'newest' : cursor.split(':')[0];

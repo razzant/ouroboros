@@ -15,7 +15,7 @@ import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { noteToolCall, noteToolHostMetrics, toolEvidenceView } from '../modules/chat_activity.js';
 import { summarizeChatLiveEvent, taskTerminalSummary } from '../modules/log_events.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 // The folded row a sequence of observations produces, with no DOM in the way.
 const fold = (...observations) => {
@@ -50,7 +50,7 @@ const VERBS = ['promote_chat_to_task', 'route_to_project', 'steer_task'];
 function fixture(history = [], chatId = 1) {
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/chat/history')
-            ? { messages: history, window: { complete: true } }
+            ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : { active_direct_turns: [] } }));
     const handlers = new Map();
     const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },

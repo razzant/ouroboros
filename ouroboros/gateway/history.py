@@ -32,7 +32,7 @@ from ouroboros.room_archive import registry_reservations
 from ouroboros.gateway._helpers import coerce_int
 from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noqa: F401 — historical import path (router)
 from ouroboros.gateway.history_paging import (
-    HistoryCursorError, RegistryUnavailable, deferred_before, delivered_history_gaps, history_page_coverage, history_page_tokens, progress_quota_predicate,
+    HistoryCursorError, RegistryUnavailable, deferred_before, delivered_history_gaps, failed_read_facts, history_page_coverage, history_page_tokens, progress_quota_predicate,
     replay_evidence_rows, room_lens, room_view_fingerprint, select_history_page,
     latest_arrival, notes_stamp, parse_around,
     chat_quota_predicate, IMPORTING, PROJECTION_FAILED, _PROBE_ROWS, _RECENT_WINDOW_BYTES, _RECENT_WINDOW_ROWS,
@@ -1586,8 +1586,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
             reason = (exc.reason if isinstance(exc, HistoryCursorError) else
                       "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
             detail = {"detail": str(exc)} if type(exc) in (StoreError, RegistryUnavailable) else {}
-            if isinstance(exc, RegistryUnavailable):
-                detail.update(exc.fields)
+            detail.update(await asyncio.to_thread(failed_read_facts, exc, data_dir, thread_id, not (cursor or around), profile_scope))
             return JSONResponse({"messages": [], "error": reason, "reason_code": reason, **detail,
                                  "next_cursor": cursor, "has_more": True,
                                  "window": {"complete": False, "truncated_by": [reason]}},

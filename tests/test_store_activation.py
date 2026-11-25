@@ -95,6 +95,15 @@ def _migrating_body(response) -> dict:
     return body
 
 
+def _outstanding_segments(root) -> list:
+    """The chain segments the dialogue store still owes its import: read from the existing store, never a cutover."""
+    from ouroboros import dialogue_store as ds
+
+    with ds.transaction(root, write=False, existing_only=True) as conn:
+        return [record["name"] for record in conn.execute(
+            "SELECT name FROM import_ledger WHERE state='pending' ORDER BY stream, base")]
+
+
 def test_create_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp_path):
     from ouroboros.gateway import tasks
 
@@ -179,8 +188,10 @@ def test_the_task_reading_gets_answer_503_migrating_instead_of_importing(tmp_pat
     """GET /api/tasks, GET /api/tasks/{id} and GET /api/chat/history on a root whose store is
     not published (never imported: the boot door owns the import) answer 503 ``migrating`` and
     import nothing; after publication they answer (a published store reads inside the window)."""
+    from ouroboros.dialogue_store import path as dialogue_path
     from ouroboros.gateway import tasks
     from ouroboros.gateway.history import make_chat_history_endpoint
+    from tests._dialogue import import_all, seed
 
     root = tmp_path / "data"
     (root / "task_results").mkdir(parents=True)
@@ -190,6 +201,11 @@ def test_the_task_reading_gets_answer_503_migrating_instead_of_importing(tmp_pat
     (root / "logs" / "chat.jsonl").write_text(json.dumps(  # a quiz card: the history reads its task's projection
         {"ts": "2026-10-10T00:00:00+00:00", "chat_id": 1, "direction": "out", "type": "quiz", "task_id": "t1",
          "quiz": {"quiz_id": "q1", "question": "Choose?", "state": "open", "options": ["a", "b"]}}) + "\n")
+    # The chain a legacy install leaves: that live file and an older, rotated segment. Publishing the task store cuts
+    # over the live file (its notice-receipt read opens the dialogue store); only the explicit import job takes the
+    # segment (``test_notice_import_does_not_block_current_store_and_late_receipts_are_found``).
+    seed(root, archives={"chat_20261009T000000.jsonl": [
+        {"ts": "2026-10-09T00:00:00+00:00", "chat_id": 1, "direction": "out", "text": "An older saved reply."}]})
     app = Starlette(routes=[Route("/api/tasks", tasks.api_tasks_list, methods=["GET"]),
                             Route("/api/tasks/{task_id}", tasks.api_task_get, methods=["GET"]),
                             Route("/api/chat/history", make_chat_history_endpoint(root), methods=["GET"])])
@@ -198,16 +214,18 @@ def test_the_task_reading_gets_answer_503_migrating_instead_of_importing(tmp_pat
         for path in ("/api/tasks", "/api/tasks/t1", "/api/chat/history"):
             _migrating_body(client.get(path))
         assert store.probe(root)[0] == "absent"  # no GET imported; the file stays where it was
+        assert not dialogue_path(root).exists()  # nor did one open the dialogue store: its chain files still wait
         ensure_current_store(root)
         assert [row["task_id"] for row in client.get("/api/tasks").json()["tasks"]] == ["t1"]
         assert client.get("/api/tasks/t1").json()["status"] == "completed"
-        # Publishing the task store does not run the dialogue import. A GET must not
+        # Publishing the task store runs no segment import: the older segment still waits for it. A GET must not
         # take over that job or offer registry recovery for an unexamined legacy file.
-        from tests._dialogue import import_all
-        from ouroboros.dialogue_store import path as dialogue_path
         had_dialogue = dialogue_path(root).exists()
+        waiting = _outstanding_segments(root)
+        assert waiting == ["chat_20261009T000000.jsonl"]
         refusal = _migrating_body(client.get("/api/chat/history"))
         assert "project_registry" not in refusal and dialogue_path(root).exists() == had_dialogue
+        assert _outstanding_segments(root) == waiting  # the GET left that very segment outstanding
         import_all(root)
         history = client.get("/api/chat/history")
         assert history.status_code == 200 and any(row.get("quiz", {}).get("quiz_id") == "q1"

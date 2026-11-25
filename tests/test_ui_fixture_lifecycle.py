@@ -218,7 +218,7 @@ def fixture_probe(outer_evidence, tmp_path, monkeypatch, source):
         return proc
 
     def open_fixture():
-        gen = ui.direct_server_with_data.__wrapped__(tmp_path / f"fixture-{len(probe.generators)}", probe.owner)
+        gen = ui.direct_server_with_data.__wrapped__(tmp_path / f"fixture-{len(probe.generators)}", probe.owner, SimpleNamespace())
         probe.generators.append(gen)
         return gen, next(gen)
 
@@ -468,7 +468,7 @@ def test_ui_fixture_preserves_reap_diagnostic_when_parent_survives(tmp_path, mon
     monkeypatch.setattr(ui, "_free_port", lambda: 27991)
     monkeypatch.setattr(ui, "_wait_health", lambda _: None)
     monkeypatch.setattr(ui, "_wait_supervisor_ready", lambda _: None)
-    gen = ui.direct_server_with_data.__wrapped__(tmp_path, copy)
+    gen = ui.direct_server_with_data.__wrapped__(tmp_path, copy, SimpleNamespace())
     next(gen)
     # The interpreter validated is the one launched, with the server's own env and cwd.
     assert probed == spawned and spawned[0][0] == ui._fixture_interpreter()

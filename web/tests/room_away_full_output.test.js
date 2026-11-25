@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { createRoomRetirement, roomSocket } from '../modules/room_retire.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const settle = async () => { for (let i = 0; i < 12; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
 const RESULT = 'REPORT_HEAD\n' + 'The retained answer has a complete paragraph.\n'.repeat(120) + 'REPORT_TAIL';
@@ -30,7 +30,7 @@ async function fixture() {
         const path = String(url);
         if (path === '/api/tasks/child-1' && init.cache === 'no-store') return new Promise((resolve) => fullReads.push(resolve));
         return { ok: true, json: async () => {
-            if (path.startsWith('/api/chat/history')) return { messages: ROWS, page_cursor: 'recent', has_more: false,
+            if (path.startsWith('/api/chat/history')) return { profile_scope: PREVIEW_SCOPE, messages: ROWS, page_cursor: 'recent', has_more: false,
                 next_cursor: null, window: { complete: true } };
             if (path === '/api/tasks/child-1') return DETAIL;  // the card's review detail read
             return { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true };

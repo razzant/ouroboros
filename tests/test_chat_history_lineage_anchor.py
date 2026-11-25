@@ -23,6 +23,7 @@ import pytest
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.store_import import ensure_current_store
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 from tests._store_shared import seed_result
 
 ROOT_FLOOD = 70  # > the default n_progress=60, so the floor lands past the children
@@ -377,7 +378,7 @@ def test_project_thread_keeps_children_of_a_working_root(tmp_path):
     assert _child_rows(main_rows, progress=False) == []
 
 
-def test_a_media_delivery_row_does_not_represent_its_parent(tmp_path):
+def test_a_media_delivery_row_does_not_represent_its_parent(tmp_path, healthy_main):
     """Carrying a task id is not the same as being that task's card.
 
     A photo, document or quiz is delivered mid-run and carries a real task id.
@@ -403,7 +404,7 @@ def test_a_media_delivery_row_does_not_represent_its_parent(tmp_path):
     assert final.get("delegation_role") != "subagent", "an unclosable parent must not keep lineage"
 
 
-def test_a_grandchild_is_kept_with_the_swarm_it_belongs_to(tmp_path):
+def test_a_grandchild_is_kept_with_the_swarm_it_belongs_to(tmp_path, healthy_main):
     """The predicate holds for the whole topology, not one level of it.
 
     A coordinator child finishes and is itself anchored to a represented root.
@@ -426,7 +427,7 @@ def test_a_grandchild_is_kept_with_the_swarm_it_belongs_to(tmp_path):
     assert final.get("delegation_role") == "subagent"
 
 
-def test_a_folded_review_represents_the_task_it_is_shown_under(tmp_path):
+def test_a_folded_review_represents_the_task_it_is_shown_under(tmp_path, healthy_main):
     """A folded review group is stored under the review child, shown under the owner."""
     chat = [
         json.dumps({

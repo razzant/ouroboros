@@ -153,8 +153,9 @@ def _planned_archive(root):
     """This body cuts over three archive segments of Main rows, each a private contact notice of Nova's work, and
     imports none of them yet: ``(Project chat, pending segments newest first)``."""
     from ouroboros import dialogue_import
-    from tests._dialogue import seed
+    from tests._dialogue import confirm_first_use, seed
 
+    confirm_first_use(root)
     contact = {"task_id": "nova-root", "binding_id": "place-1", "label": "Archived chat"}
     seed(root, archives={f"chat_2026100{n}T000000.jsonl": [
         {"ts": f"2026-10-0{n}T01:00:00Z", "direction": "out", "chat_id": 1, "task_id": "nova-root", "type": "main_notice",

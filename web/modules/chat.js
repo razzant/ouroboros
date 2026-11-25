@@ -200,7 +200,7 @@ export function createChatInstance({
         ws, doc: document, chatId, isMain, isProjectOpening,
         isDestroyed: () => destroyed, isLeaving: () => leaving,
         readHistory: args => apiClient.chatHistory(args), nextRecentVersion: () => ++recentRequest,
-        syncHistory, loadUiPreferences, getPreview: () => preview, reconcileSavedSends,
+        syncHistory, loadUiPreferences, getPreview: () => preview, reconcileSavedSends, kept: () => unconfirmed,
         onPreviewShown: () => { updateMessagesPadding(); reading.followAfterLayout(true); },
     });
     const { storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow } = roomProfile;
@@ -316,6 +316,9 @@ export function createChatInstance({
     // Sent attachment messages not yet confirmed saved: "Send again" with one id, kept by this tab across a reload.
     const unconfirmed = createUnconfirmedSends({ send: (frame, options) => ws.send(frame, options),
         root: () => messagesDiv, onDomWrite: withStableViewport, showToast, compose: (...args) => composer?.prepareNewMessage(...args),
+        // A shown copy whose word lapsed leaves the feed; its key goes with it, so a later word draws it again.
+        release: node => withStableViewport(() => (seenMessageKeys.delete(node.dataset.messageKey), releaseMessageNode(node), true),
+            { excludeAnchorNode: node }),
         storage: sessionStorage, storageKey: storeKey('ouro_chat_unconfirmed') });
 
     let _syncPass1Active = false;
@@ -2458,6 +2461,7 @@ export function createChatInstance({
                 roomProfile.resetInitialHydration();
                 // Migration keeps a calm note and retries through the existing 700 ms scheduler.
                 historyControls.endRecent(err); syncLoadOlderControl();
+                roomProfile.noteHistoryFailure(err);  // kept sends may still show, on current proof (chat_preview.js)
                 if (isStoreMigrating(err)) { historyResyncScheduler.schedule(true); return false; }
                 // A fetch that failed while the socket is down is that outage, not an error to report.
                 const expectedDisconnect = ws?.ws?.readyState !== WebSocket.OPEN && err instanceof TypeError;
@@ -2502,9 +2506,9 @@ export function createChatInstance({
         land: (latest, token) => reading.land(() => newestMessageOffset(latest, newestFacts), token),
     });
 
-    function reconcileSavedSends() {
+    function reconcileSavedSends(word) {
         unconfirmed.reconcile(({ frame, reply, views, ts }) => addMessage(frame.content, 'user', false, ts || null,
-            false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views, reply }));
+            false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views, reply }), word);
     }
 
     const opening = roomProfile.startOpening();
@@ -3126,7 +3130,7 @@ export function createChatInstance({
         if (foreignProfile()) return;  // live frames of another profile never render (#3294)
         if (!isMyThread(msg)) return;
         if (msg.system_type === 'initialization_notice') {
-            unconfirmed.unsettle(msg.client_message_id ? [msg.client_message_id] : undefined);
+            unconfirmed.refused(msg);  // its typed cause decides a copy's word (chat_attachments.js)
             if (leaving) return;
         }
         if (msg.system_type === 'project_question_pointer') { chatDecision.appendQuestionPointer(msg); return; }
@@ -3363,6 +3367,8 @@ export function createChatInstance({
         showOutage();
     });
     onWs(SERVER_ANSWERS_EVENT, () => syncChatStatus());
+    onWs('connection_profile', roomProfile.profileConfirmed);  // this socket's proof decides a failed read's kept sends
+    onWs('projects_changed', roomProfile.roomChanged);  // the registry's word on a Project room lapses what it showed
     function showOutage(doubted) {
         unconfirmed.unsettle(doubted);
         workState = reconcileWorkState(workState, null, chatId);
@@ -3435,6 +3441,7 @@ export function createChatInstance({
         // reads stopped, neither shown nor read (reader and playback `closeTransient`'s); `stay` returns.
         leave: () => {
             if (leaving) return;
+            roomProfile.left();  // copies shown on the core's word leave the feed, kept (chat_preview.js)
             catchUp.cancel(recentRequest);  // its return reads, and says so, anew
             // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
             // readiness polled meanwhile. Before the first open there is none: that open keeps the boot read.

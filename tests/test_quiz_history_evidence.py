@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 import asyncio
 import json
@@ -155,7 +156,7 @@ def test_answers_survive_eighteen_quizzes_mailbox_gc_and_rotation(runtime):
     assert not [frame for frame in runtime.frames if frame.get("type") == "chat"]
 
 
-def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, monkeypatch):
+def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(healthy_main, runtime, monkeypatch):
     """В17a=A sibling: a card answered after its task finished keeps the SAME
     durable quiz_answer evidence row, and because no mailbox will be drained the
     answer additionally becomes the owner's own message in the card's chat."""
@@ -220,7 +221,7 @@ def test_same_request_retry_after_rotation_preserves_winning_source(runtime, ini
 
 
 @pytest.mark.parametrize("force_overlap", [False, True])
-def test_competing_answers_preserve_only_the_recorded_winner(runtime, monkeypatch, force_overlap):
+def test_competing_answers_preserve_only_the_recorded_winner(healthy_main, runtime, monkeypatch, force_overlap):
     from ouroboros.dialogue_evidence import read_room_source
     from ouroboros.gateway.history import make_chat_history_endpoint
 
@@ -336,7 +337,7 @@ def test_answer_history_uses_canonical_root_and_project_binding(runtime):
     assert mailbox["text"] == _letter(fact) and MAILBOX_ROUTE_FACT not in fact["text"]
 
 
-def test_history_recovers_evicted_answer_without_an_extra_bubble(runtime):
+def test_history_recovers_evicted_answer_without_an_extra_bubble(healthy_main, runtime):
     import json
     from ouroboros.gateway.history import make_chat_history_endpoint
 
