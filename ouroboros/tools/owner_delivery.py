@@ -96,13 +96,15 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
     if not words:
         return
     # A place's local room is the Ouroboros side of the place, not my human's conversation; a frame landing in
-    # Main or a Project room is, as for any work there (``delivery_audience``). Unreadable proves neither.
-    if presence_caller_binding(ctx) is not None and not private_contact and not _lands_with_my_human(ctx, evt):
+    # a conversation my human reads is, as for any work there (``delivery_audience``). Unreadable proves neither.
+    bound = presence_caller_binding(ctx) is not None
+    if bound and not private_contact and not lands_with_my_human(ctx, evt):
         return
-    if mode == "live" and kind == "send_message":
+    if mode == "live" and kind == "send_message" and (bound or lands_with_my_human(ctx, evt)):
         from ouroboros.loop_messages import owner_input_revision
 
-        # The owner rows admitted so far now have a live reply (loop_messages.owner_reply_owed).
+        # The owner rows admitted so far now have a live reply (loop_messages.owner_reply_owed): only a text that
+        # lands where my human reads it (a reply stored in the hidden task record answers no one there).
         ctx._owner_reply_revision = owner_input_revision(ctx)
     # Card labels, details and declared assumptions remain exact too. Binary
     # attachments and host-composed card facts are not addressed model prose.
@@ -280,16 +282,23 @@ def _resolved_room(ctx: Any, evt: Dict[str, Any]) -> tuple[Any, Any]:
     return chat, (None if is_a2a_chat_id(chat) else project_thread_name(root, chat))
 
 
-def _lands_with_my_human(ctx: Any, evt: Dict[str, Any]) -> bool:
-    """Whether a frame lands in Main or a Project room: the rooms ``delivery_audience`` names as my human's."""
+def lands_with_my_human(ctx: Any, evt: Dict[str, Any]) -> bool:
+    """Whether a frame lands in a conversation its human reads, as ``delivery_audience`` names them: a Project room;
+    Main; or, for a run with no place binding, any other room number in the range of the rooms my human reads
+    (``dialogue_store.OWNER_ROOMS``: an owner transport chat such as a bridge's), so never the hidden task record,
+    a peer chat or a correspondent's place room. A place's local room is not one; a destination that is no room
+    number, unknown or unreadable answers False."""
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.dialogue_store import OWNER_ROOMS
 
     try:
         chat, name = _resolved_room(ctx, evt)
     except Exception:
         log.debug("delivery room unread for task %s", evt.get("task_id"), exc_info=True)
         return False
-    return name is not None or chat == WEB_UI_CHAT_ID
+    return name is not None or type(chat) is int and (chat == WEB_UI_CHAT_ID or (
+        OWNER_ROOMS[0] <= chat <= OWNER_ROOMS[1] and presence_caller_binding(ctx) is None))
 
 
 def delivery_audience(ctx: Any, evt: Dict[str, Any]) -> tuple[str, bool]:

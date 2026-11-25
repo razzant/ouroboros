@@ -73,6 +73,7 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
     """
     from ouroboros import delegate_custody as custody
     from ouroboros.delegate_custody_current import marks, runs as current_runs
+    from ouroboros.execution_domain import is_peer_ref
     from ouroboros.store import StoreError
 
     tid = str(task_id or "")
@@ -122,7 +123,10 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
             succeeded.add(run_id)
         elif entry.terminal_state:
             failure_states.append(entry.terminal_state)
-        if entry.spend_disclosed and entry.cost_usd is not None:
+        if is_peer_ref(entry.engine_ref):
+            # Paid and booked on the receiving Ouroboros, never an undisclosed sender subscription charge.
+            pass
+        elif entry.spend_disclosed and entry.cost_usd is not None:
             cost_known = True
             cost_total += float(entry.cost_usd)
             cost_estimated = cost_estimated or entry.spend_estimated

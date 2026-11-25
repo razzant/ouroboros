@@ -187,7 +187,11 @@ def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = 
     if started_root and is_consciousness_origin(source) and isinstance(owner_basis, Mapping) and owner_basis.get("basis") == "cited":
         kind = WORK_KIND_OWNER
     inherited = {"work_kind": kind}
-    for key in ("focus", "schedule_writer_kind", "origin_wake_task_id"):
+    # Work a letter began keeps its link and agent author in all it starts (``peer_letters.CARRIED``).
+    from ouroboros.peer_letters import CARRIED
+
+    letter = CARRIED if isinstance(source.get("peer_letter"), Mapping) else ()
+    for key in ("focus", "schedule_writer_kind", "origin_wake_task_id", *letter):
         if key in source:
             inherited[key] = deepcopy(source[key])
     focus = inherited.get("focus")

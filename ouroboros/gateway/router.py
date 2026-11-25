@@ -227,6 +227,7 @@ def collect_routes(
     )
     from ouroboros.gateway.settings_secrets import api_settings_secret
     from ouroboros.gateway.places_api import places_routes
+    from ouroboros.gateway.peer_letters_api import peer_letter_routes
     from ouroboros.gateway.ws import ws_endpoint
     from ouroboros.gateway.call_ws import call_routes
     settings_handlers = settings_handlers or {}
@@ -268,6 +269,7 @@ def collect_routes(
         ),
         Route("/api/owner/skills/{skill}/attest-review", endpoint=api_owner_skill_attest_review, methods=["POST"]),
         *places_routes(),
+        *peer_letter_routes(),
         *skill_setup_routes(),
         Route("/api/marketplace/clawhub/search", endpoint=api_marketplace_search, methods=["GET"]),
         Route("/api/marketplace/clawhub/installed", endpoint=api_marketplace_installed, methods=["GET"]),

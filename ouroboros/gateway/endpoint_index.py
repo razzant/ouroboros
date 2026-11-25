@@ -58,6 +58,16 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/circles",
     "POST /api/circles/{circle_id}",
     "DELETE /api/circles/{circle_id}",
+    "POST /api/letters",
+    "GET /api/letters/{letter_id}",
+    "GET /api/letters/{letter_id}/state",
+    "GET /api/letters/{letter_id}/result",
+    "POST /api/letters/{letter_id}/cancel",
+    "POST /api/peer-links/invite",
+    "POST /api/peer-links/accept",
+    "POST /api/peer-links/introduce",
+    "POST /api/peer-links/{link_id}/confirm",
+    "POST /api/peer-links/{link_id}/revoke",
     "POST /api/skills/{skill}/publish-preflight",
     "GET /api/model-catalog",
     "POST /api/tasks",
@@ -346,6 +356,49 @@ HTTP_SHAPES: dict[str, Shape] = {
     "DELETE /api/places/{place_id}": Shape("200:json 400,409:json", "PlaceDisconnectRequest", note="disconnect with optional revision; room history stays"),
     "POST /api/circles": Shape("200:json 400:json", "CircleCreateRequest", note="a new circle last in the order; owner-authored words"),
     "POST /api/circles/{circle_id}": Shape("200:json 400,409:json", "CircleUpdateRequest", note="rename or reword with optional revision"),
+    "POST /api/letters": Shape(
+        "200:json 400,401,403,404,409,429,503:json",
+        headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+        note="gateway/peer_contracts.py LetterCreateRequest -> LetterStatus (a work letter) | LetterAnswerReceipt "
+             "(in_reply_to, once its mailbox row is proven) | PeerMessageReceipt (kind='message') | LetterRefusal: a "
+             "linked Ouroboros's work letter starts ordinary work, an answer wakes the asking letter, and kind='message' "
+             "captures a standalone note in the link's Presence room (no task, no may_start required; received != read; "
+             "429 asks for the same letter later); "
+             "one letter id is one outcome on its link, and 503 is not known now: retry"),
+    "GET /api/letters/{letter_id}": Shape("200:json 400,401,403,404,503:json",
+                                          headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+                                          note="LetterStatus, also while the link is paused: state, an addressed "
+                                               "question (or its held code without its words), a short failure; a "
+                                               "delivered answer's id reads its letter"),
+    "GET /api/letters/{letter_id}/state": Shape("200:json 400,401,403,404,503:json",
+                                                headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+                                                note="LetterStateView {letter_id, state, view: 'state', phase?}: "
+                                                     "what a sender's Stop reads back, also across a Pause; never a "
+                                                     "question, failure text or result"),
+    "GET /api/letters/{letter_id}/result": Shape("200:json 400,401,403,404,409,503:json",
+                                                 headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+                                                 note="LetterResult only when done (result_available says whether an "
+                                                      "addressed answer was kept, result_held names a hold of one "
+                                                      "that was); otherwise 409 not_done with the state"),
+    "POST /api/letters/{letter_id}/cancel": Shape("200:json 400,401,403,404,503:json",
+                                                  headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+                                                  note="the link's own Stop of the letter's root and its helpers (never "
+                                                       "my human's); the Stop's owner decides what of a settled root runs"),
+    "POST /api/peer-links/invite": Shape("200:json 400,503:json",
+                                         note="owner door {own_url?, label?, own_label?, note?, may_start}: a one-time "
+                                              "invitation (15 minutes); its key leaves with it unless a link takes it"),
+    "POST /api/peer-links/accept": Shape("200:json 400,409,410,502,503:json",
+                                         note="owner door {invite, preview?, own_url?, label?, own_label?, note?, "
+                                              "may_start}: preview or accept; one acceptance per link at a time"),
+    "POST /api/peer-links/introduce": Shape("200:json 400,401,403,503:json", headers="X-Ouroboros-Invite!",
+                                            note="the accepting side's call {link_id, install_id, url, key_sha256, "
+                                                 "label?, may_start?, protocol?} under the one-time invitation token"),
+    "POST /api/peer-links/{link_id}/confirm": Shape("200:json 400,401,503:json",
+                                                    note="owner door: the six digits match here; the link's place starts"),
+    "POST /api/peer-links/{link_id}/revoke": Shape("200:json 400,401,503:json",
+                                                   note="owner door: the key, the link's answer and message receipts and "
+                                                        "the replies owed there leave, the place pauses; revoking "
+                                                        "again returns the revoked link"),
     "DELETE /api/circles/{circle_id}": Shape("200:json 400,409:json", "CircleDeleteRequest", note="its places stay connected and leave it atomically; returns its words and the detached places"),
     "POST /api/skills/{skill}/publish-preflight": Shape(
         "200,400,404,409,503:SkillPublishPreflightResponse", "SkillPublishPreflightRequest",

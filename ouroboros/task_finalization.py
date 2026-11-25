@@ -378,6 +378,8 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     origin = str(usage.get("terminal_origin") or "")
     if origin in _STAMPED_TERMINAL_ORIGINS:
         fields["terminal_origin"] = origin
+    if isinstance(stamp := usage.get("peer_reply"), dict):  # what a letter root's final gives its sender (peer_letters)
+        fields["peer_reply"] = dict(stamp) if origin == TERMINAL_ORIGIN_MODEL_FINAL else {}
     path = str(usage.get("terminal_salvage_path") or "")
     if path:
         fields["terminal_salvage_path"] = path
@@ -827,8 +829,9 @@ def build_sealed_final_package(result_row: Any, final_text: str) -> Dict[str, An
         "completion_observations": row.get("completion_observations") or {"status": "unavailable"},
         **({"terminal_host_notice": terminal_host_notice_text(row)} if terminal_host_notice_text(row) else {}),
     }
-    if row.get("wake_silent") is True:  # no model words were submitted; the retained ones are not speech
-        package.update(final_result_text="", wake_silent=True, internal_terminal_text=str(row.get("result") or ""))
+    if row.get("wake_silent") is True:  # the finish submitted no words; the retained ones are not speech
+        package.update(final_result_text="", wake_silent=True, internal_terminal_text=str(row.get("result") or ""),
+                       **({"owner_message_sent": True} if row.get("owner_message_sent") is True else {}))
     if is_presence_task(row):
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         # Remember the event-time body, not today's replay policy: a historical
@@ -880,7 +883,10 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
     heading, presence_facts, internal_text = "Final result text (submitted for delivery):\n", "", ""
     presence = sealed_final.get("presence_delivery")
     if sealed_final.get("wake_silent") is True:
-        heading, final_text = "Final result text:\n", "(none: the run finished silently; no model words were submitted)"
+        heading, final_text = "Final result text:\n", (
+            "(none from the finish: this run sent its own messages earlier; its silent finish sent none)"
+            if sealed_final.get("owner_message_sent") is True else
+            "(none: the run finished silently; no model words were submitted)")
         if raw := str(sealed_final.get("internal_terminal_text") or ""):
             internal_text = "Internal run result (retained, never sent to the owner):\n" + truncate_review_artifact(
                 raw, limit=_SEALED_FINAL_TEXT_PROMPT_CHARS) + "\n"

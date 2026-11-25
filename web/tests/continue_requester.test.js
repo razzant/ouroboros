@@ -93,9 +93,13 @@ test('the app declares its own press and only its own', async () => {
 
 test('the closed helper names why, once', () => {
     assert.equal(CANCEL_SOURCE_PHRASES.work_finished, 'Closed with the work it helped');
+    assert.equal(CANCEL_SOURCE_PHRASES.peer_letter_cancel, 'Stopped by the Ouroboros that sent this letter');
     const detail = taskReasonDetail({ status: 'cancelled', cancel_origin: { source: 'work_finished', reason: CANCEL_SOURCE_LABELS.work_finished } });
     assert.match(detail, /Closed with the work it helped/);
     assert.doesNotMatch(detail, /has ended/);
+    const peerStop = taskReasonDetail({ status: 'cancelled', cancel_origin: { source: 'peer_letter_cancel' } });
+    assert.match(peerStop, /Stopped by the Ouroboros that sent this letter/);
+    assert.doesNotMatch(peerStop, /peer_letter_cancel/);
 });
 
 test('a history page whose only row is the task summary still names who asked', async () => {
