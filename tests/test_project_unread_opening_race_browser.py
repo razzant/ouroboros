@@ -95,7 +95,8 @@ class _Race:
 
     def newest_of_room(self, url):
         parts = urlparse(url)
-        query = parse_qs(parts.query)
+        # Blank values kept: an empty ``around=`` or ``cursor=`` is a selector (refused 400), not the newest read.
+        query = parse_qs(parts.query, keep_blank_values=True)
         return (parts.path == "/api/chat/history" and query.get("chat_id") == [str(self.chat_id)]
                 and "cursor" not in query and "around" not in query)
 
@@ -238,7 +239,7 @@ def test_cancelling_a_rebased_opening_never_resumes_it(direct_server_with_data, 
                 room.release()
                 assert _wait_for(room.page, lambda: len(race.returning) == 1, attempts=200), race.history
                 held = urlparse(race.returning[0].request.url)
-                asked = parse_qs(held.query)
+                asked = parse_qs(held.query, keep_blank_values=True)
                 assert held.path == "/api/chat/history" and asked.get("chat_id") == [str(race.chat_id)] \
                     and "cursor" not in asked and "around" not in asked, ("the room's own newest read is held", held)
             if move == "question":
