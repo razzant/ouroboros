@@ -347,6 +347,10 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     objective = str(evt.get("objective") or "")
     if not objective.strip():
         return {"status": "needs_manual_target", "reason": "empty_objective", "task_id": tid}
+    from ouroboros.peer_letters import separate_work_refusal
+
+    if refusal := separate_work_refusal(evt, "a promoted root"):  # the record seam: no root, project or workspace yet
+        return {"status": "rejected", "reason": "letter_work_starts_no_separate_root", "detail": refusal, "task_id": tid}
     if detail := _promotion_origin_error(evt):
         return {"status": "needs_manual_target", "reason": "project_binding_failed", "detail": detail, "task_id": tid}
     # Reject before project/source/workspace side effects. enqueue_task repeats

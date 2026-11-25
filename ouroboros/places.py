@@ -220,12 +220,16 @@ def _valid_circle(row: Any) -> bool:
 
 
 def _valid_choice(row: Any) -> bool:
-    """Check one connection's circle and authored description. Migration validates its own optional witness."""
+    """Check one connection's circle, authored description and, for a linked Ouroboros, the two facts my human set
+    at its door (``peer``: ``mine``, ``may_start``). Migration validates its own optional witness."""
+    peer = row.get("peer") if isinstance(row, dict) else None
     return (isinstance(row, dict) and type(row.get("connected_revision")) is int and row["connected_revision"] >= 0
             and all(isinstance(row.get(key, ""), str) for key in (
                 "circle_id", "placed_by", "placed_at", "description", "description_author", "description_at"))
             and (not row.get("circle_id") or row.get("placed_by") in AUTHORS)
-            and (not row.get("description") or row.get("description_author") in AUTHORS))
+            and (not row.get("description") or row.get("description_author") in AUTHORS)
+            and (peer is None or isinstance(peer, dict) and set(peer) == {"mine", "may_start"}
+                 and all(type(value) is bool for value in peer.values()) and row.get("peer_by") == AUTHOR_OWNER))
 
 
 def _read(drive_root: Any) -> dict:
@@ -315,6 +319,11 @@ class PlaceRecords:
         choice = self.choices.get(place_id) or {}
         return ({"text": choice["description"], "author": choice.get("description_author", ""),
                  "at": choice.get("description_at", "")} if choice.get("description") else None)
+
+    def peer(self, place_id: str) -> dict[str, bool] | None:
+        """A linked Ouroboros's two owner facts (``mine``, ``may_start``) for this connection, else None."""
+        peer = (self.choices.get(place_id) or {}).get("peer")
+        return dict(peer) if isinstance(peer, dict) else None
 
 
 def place_model_route(place: Place, circle: Mapping[str, Any] | None) -> tuple[str, str]:
@@ -601,7 +610,8 @@ def owner_author(accounts: Mapping[str, Iterable[OwnerAccount]], place_id: str, 
                  conversation_id: str = "", message: Any = None) -> bool:
     """A place message as my human's own words now: its actor is an account its place's connector account confirms
     (``accounts``, one ``place_owner_accounts`` snapshot), reported neither unauthenticated nor a program (``origin:
-    "machine"``, a fact that only lowers authority), and not a message I posted as an account (its provider identity
+    "machine"``, or a linked Ouroboros, ``kind: "ouroboros"``: facts that only lower authority), and not a message I
+    posted as an account (its provider identity
     among ``accounts.sent``, never compared by its words: my human repeating my words is still my human). Provenance
     of the words, never whom they are for; who sent a forward, never whose words it carries (``forwarded_message``)."""
     from ouroboros.own_sends import message_identity
@@ -609,6 +619,7 @@ def owner_author(accounts: Mapping[str, Iterable[OwnerAccount]], place_id: str, 
     actor = actor if isinstance(actor, Mapping) else {}
     actor_id = str(actor.get("platform_actor_id") or actor.get("id") or "").strip()
     return (actor.get("authenticated") is not False and actor.get("origin") != "machine"
+            and actor.get("kind") != "ouroboros"
             and owner_account_matches(accounts.get(place_id, ()), actor_id, str(account_id or ""))
             and message_identity(conversation_id, message) not in getattr(accounts, "sent", frozenset()))
 
@@ -771,7 +782,7 @@ def connect_place(drive_root: Any, *, connector: str, provider: str, label: str 
     return _write(drive_root, place_id, change, choose=choose)
 
 
-_CHOICE_ACTIONS = ("set_circle", "set_description")
+_CHOICE_ACTIONS = ("set_circle", "set_description", "set_peer")
 
 
 def _author(author: str) -> None:
@@ -789,9 +800,12 @@ def edit_place(drive_root: Any, place_id: str, action: str, *, author: str,
         raise PlaceError("place_owner_confirmation_required", "owner_accounts",
                          "Confirm this account from the owner's door or the place sheet.")
 
+    was: list[str] = []
+
     def change(old: Place | None) -> Place | None:
         if old is None:
             raise PlaceError("place_not_found", "place_id")
+        was[:] = [old.state]
         for name, args in changes:
             if name not in _CHOICE_ACTIONS:
                 old = _change_place(old, name, author, args)
@@ -799,18 +813,35 @@ def edit_place(drive_root: Any, place_id: str, action: str, *, author: str,
 
     def choose(choice: dict, document: dict) -> dict:
         for name, args in changes:
+            if name == "set_peer" and document["places"][place_id].get("connector") != "ouroboros":
+                raise PlaceError("place_peer_invalid", "peer", "place_peer_invalid: only a linked Ouroboros's place "
+                                 "holds mine and may_start; this place is another connector's.")
             if name in _CHOICE_ACTIONS:
                 choice = _change_choice(choice, name, author, args, document)
             elif name in ("set_wakes", "add_wake", "remove_wake") and document["places"][place_id].get("legacy_binding_ids"):
                 choice = {k: v for k, v in choice.items() if k != "wake_import"}
                 choice["wakes_reviewed"] = True
         return choice
-    return _write(drive_root, place_id, change, expected_revision, choose, author, by)
+    place = _write(drive_root, place_id, change, expected_revision, choose, author, by)
+    if (author == AUTHOR_OWNER and place is not None and place.connector == "ouroboros" and was
+            and was[0] != STATE_ACTIVE and place.state == STATE_ACTIVE):  # my human made a link's place Active again
+        from ouroboros.peer_replies import resume_returned
+
+        resume_returned(drive_root, link_id=place.conversation_id)  # what that link is still owed goes now
+    return place
 
 
 def _change_choice(choice: dict, action: str, author: str, values: Mapping[str, Any], document: Mapping[str, Any]) -> dict:
     """A place's circle (``circle_id``, "" for none) or its description ("" clears it). The same circle or line saved
-    again keeps an owner's authorship: only my human's deliberate save makes an earlier one of mine theirs."""
+    again keeps an owner's authorship: only my human's deliberate save makes an earlier one of mine theirs.
+    ``set_peer`` (a linked Ouroboros's ``mine`` and ``may_start``) is my human's alone, at their door."""
+    if action == "set_peer":
+        if author != AUTHOR_OWNER:
+            raise PlaceError("place_peer_owner_only", "peer", "place_peer_owner_only: only your human sets these facts.")
+        peer = {key: values.get(key) for key in ("mine", "may_start")}
+        if any(type(value) is not bool for value in peer.values()):
+            raise PlaceError("place_peer_invalid", "peer", "place_peer_invalid: mine and may_start are booleans.")
+        return {**choice, "peer": peer, "peer_by": author, "peer_at": utc_now_iso()}
     key, by, at = (("circle_id", "placed_by", "placed_at") if action == "set_circle"
                    else ("description", "description_author", "description_at"))
     value = values.get(key, "")
@@ -988,6 +1019,9 @@ def _change_place(old: Place | None, action: str, author: str, values: dict) -> 
             raise PlaceError("place_note_invalid", "index")
         return replace(old, notes=old.notes[:index] + old.notes[index + 1:])
     if action in {"confirm_owner_account", "revoke_owner_account"}:
+        if action == "confirm_owner_account" and old.connector == "ouroboros":
+            raise PlaceError("place_account_invalid", "confirm_owner_account",
+                             "a linked Ouroboros is an agent, never an owner account")
         actor = values.get("platform_actor_id", "")
         account = values.get("account_id", old.account_id)
         if not isinstance(actor, str) or not actor.strip():

@@ -1196,6 +1196,9 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
                 "waited_sec": time.monotonic() - started, "answered": exc.observation_answered,
                 "engine_pool": engine_pool_line(),
             })
+        from ouroboros.delegate_collection import _peer_observation_lost, peer_link_loss
+        if _peer_observation_lost(entry, exc):  # the body's own account of that loss (its recorded fault)
+            return _fail("delegate_wait", "peer_observation_lost", run_id=rid, **peer_link_loss(exc)).text
         return _fail("delegate_wait", exc.code, str(exc), run_id=rid).text
     finally:
         if gateway is not None and not borrowed:
@@ -1235,6 +1238,10 @@ def _delegate_cancel(ctx: ToolContext, run_id: str, reason: str = "") -> ToolRes
         gateway = run_gateway(entry, ClaudexorGateway)  # the engine the run was started on, never another
         gateway.handshake()
     except ClaudexorUnavailable as exc:
+        from ouroboros.delegate_collection import _peer_observation_lost, peer_link_loss
+        if _peer_observation_lost(entry, exc):
+            return _fail("delegate_cancel", exc.code, run_id=rid, run_may_still_be_live=True,
+                         **peer_link_loss(exc, lost="Cancellation could not reach the linked Ouroboros"))
         return _fail("delegate_cancel", exc.code, str(exc), run_id=rid)
     try:
         result = custody.cancel_and_verify(custody.custody_root(ctx), gateway, entry, reason)

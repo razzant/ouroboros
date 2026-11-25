@@ -234,10 +234,12 @@ def _terminal_payload(run_id: str, detail: Dict[str, Any],
                       authority: "DelegatedRunShape",
                       entry: Optional[_RunCustody] = None) -> Dict[str, Any]:
     from ouroboros.effort_evidence import terminal_prompt_cache_ttl
+    from ouroboros.execution_domain import is_peer_ref
     from ouroboros.gateways.claudexor import final_attempt_facts
 
     summary = _delegate().custody.summary_of(detail)
     observed = final_attempt_facts(detail, run_id)
+    peer = (entry is not None and is_peer_ref(entry.engine_ref)) or isinstance(detail.get("peerCost"), dict)
     start_ttl = ((entry.request_event if entry is not None else {}).get("prompt_cache_ttl")
                  or (entry.prompt_cache_ttl if entry is not None else None))
     ttl_facts = terminal_prompt_cache_ttl(observed, start_ttl)
@@ -256,7 +258,8 @@ def _terminal_payload(run_id: str, detail: Dict[str, Any],
         "primary_output": detail.get("primaryOutput"),
         "failure": summary.get("failure"),
         "last_seq": int(detail.get("lastSeq") or 0),
-        "cost": _reported_cost(summary, attempt_execution=detail.get("attemptExecution")),
+        "cost": (_reported_peer_cost(detail) if peer
+                 else _reported_cost(summary, attempt_execution=detail.get("attemptExecution"))),
         # The ACCESS half of the same honesty, on EVERY terminal payload — see
         # `_access_evidence`. Both lanes: `readonly` staying `readonly` is the profile
         # that matters most, while `containment` is asked only of marker-carrying runs.
@@ -264,6 +267,19 @@ def _terminal_payload(run_id: str, detail: Dict[str, Any],
     }
     if isinstance(detail.get("attemptExecution"), list):
         payload["attempt_execution"] = detail["attemptExecution"]
+    if isinstance(summary.get("peerHold"), dict):  # a linked Ouroboros holds an answer it cleared: not an empty one
+        payload["held_there"] = dict(summary["peerHold"])
+    if withheld := str(summary.get("contentWithheld") or ""):
+        payload["content_withheld"] = withheld
+        payload["content_withheld_note"] = (
+            "This terminal was observed through a state-only Stop read-back across a Pause "
+            "(contentWithheld='paused'); letter prose, /result and final receiver cost were NOT read, "
+            "so primary_output=None is NOT an empty ordinary result."
+            if withheld == "paused" else
+            "This terminal was observed through a state-only Stop read-back "
+            f"(contentWithheld={withheld!r}); letter prose, /result and final receiver cost were NOT read, "
+            "so primary_output=None is NOT an empty ordinary result."
+        )
     if ttl_facts is not None or "prompt_cache_ttl" in observed:
         payload["prompt_cache_ttl"] = ttl_facts
     from ouroboros.delegate_continuation import terminal_continuity
@@ -371,6 +387,50 @@ def _record_containment(ctx: ToolContext, entry: Optional[_RunCustody],
     })
     if entry is not None:
         entry.containment_disclosed = True
+
+
+def _reported_peer_cost(detail: Dict[str, Any]) -> Dict[str, Any]:
+    """What a peer letter cost on the receiving Ouroboros, separated cleanly from sender ledger spend."""
+    from ouroboros.gateways.peer import _normalized_peer_cost
+
+    raw = detail.get("peerCost")
+    if not isinstance(raw, dict):
+        final = detail.get("finalSummary")
+        raw = final.get("cost") if isinstance(final, dict) else {}
+    peer_cost = _normalized_peer_cost(raw)
+    known, final = peer_cost["known_usd"], peer_cost["final"]
+    base = {"billed_by": "peer", "sender_cost_usd": 0.0, "receiver_cost": peer_cost}
+    if known is None:
+        return {
+            **base,
+            "cost_usd": None,
+            "cost_final": False,
+            "note": (
+                "Paid and booked by the receiving Ouroboros; the receiver disclosed no spend for this letter "
+                "(treat receiver cost as UNKNOWN, not zero). $0.00 charged to this Ouroboros's ledger or caps."
+            ),
+        }
+    if not final:
+        return {
+            **base,
+            "cost_usd": known,
+            "cost_final": False,
+            "cost_partial": True,
+            "note": (
+                "Paid and booked by the receiving Ouroboros; this is a known non-final subtotal on the receiver "
+                "(the receiver's total cost is not final and this subtotal is not an upper bound). "
+                "$0.00 charged to this Ouroboros's ledger or caps."
+            ),
+        }
+    return {
+        **base,
+        "cost_usd": known,
+        "cost_final": True,
+        "note": (
+            "Paid and booked by the receiving Ouroboros (final); "
+            "$0.00 charged to this Ouroboros's ledger or caps."
+        ),
+    }
 
 
 def _reported_cost(summary: Dict[str, Any], *, attempt_execution: Any = None) -> Dict[str, Any]:
@@ -483,6 +543,23 @@ def resolved_terminal_payload(run_id, detail, authority, entry=None, gateway=Non
         from ouroboros.delegate_custody_usage import model_identity_delta
 
         full["capability_delta"] = [model_identity_delta(requested_model, applied_model)]
+    withheld = str(_delegate().custody.summary_of(detail).get("contentWithheld") or "")
+    if withheld:
+        full["primary_output"] = None
+        reason_text = (
+            "State-only Stop read-back across a Pause withheld letter content and did not read /result."
+            if withheld == "paused" else
+            f"State-only Stop read-back ({withheld}) observed terminal state only and did not read /result."
+        )
+        return full, False, {
+            "status": "content_withheld",
+            "withheld_reason": withheld,
+            "retry": "transient",
+            "note": (
+                f"{reason_text} primary_output is omitted (NOT an empty ordinary result). "
+                "Re-read with delegate_wait while the link is Active to collect /result if available."
+            ),
+        }
     primary, full_ok, full_note = _delegate()._resolve_full_primary_output(
         gateway, run_id, full.get("primary_output"))
     full["primary_output"] = primary
@@ -513,12 +590,15 @@ def _delivered_terminal_payload(ctx: ToolContext, run_id: str, detail: Dict[str,
     budget = _delegate().tool_result_limit("delegate_wait")
     text = json.dumps(full, ensure_ascii=False, indent=2)
     if len(text) <= budget - _delegate()._PAYLOAD_ENVELOPE_HEADROOM:
+        withheld_note = (full_note.get("note") if isinstance(full_note, dict)
+                         and full_note.get("status") == "content_withheld" else None)
         full["output_delivery"] = {
-            # An unresolved engine-side truncation makes even an inline-fitting payload
-            # NOT the whole result: complete/consumed follow the verified fact.
+            # An unresolved engine-side truncation or state-only Stop read-back makes even an
+            # inline-fitting payload NOT the whole result: complete/consumed follow the verified fact.
             "complete": full_ok, "consumed": full_ok, "inline_is_preview": False,
             "total_chars": len(text), "artifact": None, "read_next": None,
             "note": ("The whole terminal payload is inline." if full_ok else
+                     withheld_note or
                      "INLINE BUT INCOMPLETE AT THE SOURCE: the engine reported its "
                      "primary output as a bounded preview and the full artifact could "
                      "not be matched to the size or the preview the run itself reported "
@@ -648,8 +728,12 @@ def collect_and_deliver_terminal(ctx, rid, detail, authority, entry, gateway):
 
 def _settlement_projection(entry, result=None):
     """Accounting and registration remain separately disclosed current facts."""
+    from ouroboros.execution_domain import is_peer_ref
+
+    peer = is_peer_ref(getattr(entry, "engine_ref", None))
     return {"retried": False, **(result or {}), "settled": entry.settled,
-            "ledger_recorded": entry.ledger_recorded,
+            "ledger_recorded": False if peer else entry.ledger_recorded,
+            **({"peer_billed": True} if peer else {}),
             **entry.registration_settlement()}
 
 
@@ -715,6 +799,24 @@ def retained_terminal_result(ctx, run_id, *, complete_only=True, retry_money=Fal
 def retained_terminal_after_gap(ctx, run_id, reason):
     """A retained exact result survives engine loss; observation failure is disclosed."""
     payload = retained_terminal_result(ctx, run_id, complete_only=False)
+    if payload is None:
+        from ouroboros.delegate_collection import collect_terminal
+        from ouroboros.delegate_custody_current import run
+        from ouroboros.delegate_shared import retry_result_status
+        from ouroboros.execution_domain import is_peer_ref, recorded_ref
+
+        root = _delegate().custody.custody_root(ctx)
+        entry = run(root, run_id)
+        reader = str(getattr(ctx, "task_id", "") or "")
+        owned = (entry is not None and is_peer_ref(recorded_ref(entry))  # an owned engine's gap stays as it was
+                 and entry.terminal_state in _delegate().custody.TERMINAL_STATES
+                 and bool(entry.terminal_source)
+                 and (entry.task_id == reader or retry_result_status(ctx, root, run_id)[0] == _delegate().custody.OWNED))
+        if owned:
+            # Stage locally from the already-observed terminal_source with zero transport calls
+            # (e.g. a Stop read-back observed terminality while Paused before any body tick ran).
+            collect_terminal(root, run_id, staging_task_id=reader, background=False, output_retry=True)
+            payload = retained_terminal_result(ctx, run_id, complete_only=False)
     if payload is not None:
         payload["current_observation"] = {"status": "unavailable", "reason": reason,
                                           "basis": "retained_terminal_source"}

@@ -1103,17 +1103,21 @@ def _publish_wake_facts(ctx: Any, descriptor: dict[str, Any], woke_by: str, payl
     payload["leaf_live_input"] = live_input
 
 
-def run_wait_reason(ctx: Any) -> str:
+def run_wait_reason(ctx: Any, runs: Any = None) -> str:
     """What else ends a sleep on runs, beside ``model_sleep.wake_reason``'s own sources (mail, owner
     input and controls, a question of any run this task owns, the selected runs' terminals, the chosen
-    time): the task's own cancel intent or spent deadline, and a direct child's attention beacon or
-    terminal past the coordination cursor the last acknowledged wake committed. Reads only: no cursor
-    moves here, no child's artifacts are materialized for it, and a quiet tick reads no row of a child
-    that cursor holds settled unless a pointer redirects it or the queue names it
-    (``_coordination_wakes(readiness=True)``)."""
+    time): the task's own cancel intent or spent deadline, a selected peer run's lost observation (once
+    per episode), and a direct child's attention beacon or terminal past the coordination cursor the
+    last acknowledged wake committed. Reads only: no cursor moves here, no child's artifacts are
+    materialized for it, and a quiet tick reads no row of a child that cursor holds settled unless a
+    pointer redirects it or the queue names it (``_coordination_wakes(readiness=True)``)."""
+    from ouroboros.delegate_collection import peer_observation_lost_wake
+
     controls = _control_wakes(ctx)
     if controls:
         return "control:" + ("cancelled" if controls[0]["type"] == "cancellation_intent" else "deadline")
+    if lost := peer_observation_lost_wake(ctx, runs):
+        return lost
     events, _cursor = _coordination_wakes(ctx, _load_state(ctx, ""), readiness=True)
     for event in events:
         beacon = event.get("beacon") if isinstance(event.get("beacon"), dict) else {}
@@ -1132,7 +1136,7 @@ def _choice(descriptor: dict[str, Any]) -> dict[str, Any]:
 def _target_run(ctx: Any, run_ids: list[str], woke_by: str) -> str:
     """The run a wake speaks for: the selected run its reason names, else the first selected run
     that ended or asks a question (as the body recorded it in custody), else the first selected run."""
-    named = woke_by.split(":", 1)[1] if woke_by.startswith(("run:", "run_question:")) else ""
+    named = woke_by.split(":", 1)[1] if woke_by.startswith(("run:", "run_question:", "run_observation_lost:")) else ""
     if named in run_ids:
         return named
     try:

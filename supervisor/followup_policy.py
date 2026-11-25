@@ -25,8 +25,11 @@ import uuid
 import threading
 from contextlib import ExitStack, contextmanager
 
+from supervisor.cancel_publication import PEER_CANCEL_SOURCE
+
 STOP_SOURCES = frozenset({"http_single", "http_cascade", "http_graceful",
-                          "owner", "owner_stop", "agent_tool", "owner_restart"})
+                          "owner", "owner_stop", "agent_tool", "owner_restart",
+                          PEER_CANCEL_SOURCE})  # a linked Ouroboros's cancel of its letter (gateway/peer_letters_api)
 HOST_FIELDS = ("followup_origin", "followup_relation", "followup_hold",
                "followup_released", "followup_wait")
 _CONTROL_DEPTH = threading.local()

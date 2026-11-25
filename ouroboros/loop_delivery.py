@@ -1519,6 +1519,8 @@ def _no_tool_final_answer(
         solving_again()
         return held("focus_reply_refused")
     accept_focus_completion(tools._ctx, limit_ctx.accumulated_usage, _loop().TERMINAL_ORIGIN_MODEL_FINAL)
+    if isinstance(letter := getattr(tools._ctx, "_letter_reply", None), dict):  # what this final gives a letter's sender
+        limit_ctx.accumulated_usage.update(peer_reply=letter, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or a focus's records-only finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     for key, value in (getattr(tools._ctx, "_completion_selected", None) or {}).items():

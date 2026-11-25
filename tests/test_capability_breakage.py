@@ -607,3 +607,32 @@ def test_a_live_call_hears_what_broke_with_its_next_tool_round_once_in_history_a
     sent = [row for row in broke if breakage.CHANGE_HEADER in str(row.get("content"))]
     assert [row["content"] for row in sent] == [told[0]["content"]]  # and the connection, with that round's results
     assert not any(breakage.CHANGE_HEADER in str(row.get("content")) for row in [*calm, *after])
+
+
+def test_unlinked_install_adds_no_routine_notice_for_inapplicable_peer_tools(monkeypatch, tmp_path):
+    from ouroboros.continuation_tools import restore_omissions
+    from ouroboros.tools import github, search
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    monkeypatch.setenv("GITHUB_TOKEN", "synthetic-token")
+    monkeypatch.setattr(github, "github_cli_configured", lambda: True)
+    monkeypatch.setattr(search, "_available_web_search_backends", lambda: ["synthetic"])
+    for mode in ("max", "nano"):
+        registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+        registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=f"main-{mode}",
+                                         is_direct_chat=True, active_context_mode=mode,
+                                         task_metadata={"client_message_id": f"m-{mode}"}))
+        names = {schema["function"]["name"] for schema in registry.schemas()}
+        assert "ask_sender" not in names and "delegate_to_ouroboros" not in names
+        assert "not_a_letter_root" in str(registry.policy_hidden_reason("ask_sender"))
+        assert "no_linked_ouroboros" in str(registry.policy_hidden_reason("delegate_to_ouroboros"))
+        assert "CAPABILITY_UNAVAILABLE" in registry.execute("ask_sender", {"question": "?"})
+        messages = [{"role": "user", "content": "hello"}]
+        breakage.write_start_notice(registry, messages)
+        assert messages == [{"role": "user", "content": "hello"}]
+        assert restore_omissions(registry) == []
+        from ouroboros.tools import tool_discovery
+        from ouroboros.tool_policy import CAPABILITY_OMISSION_HEADER
+
+        catalog = tool_discovery.list_available_tools(registry, registry._ctx, None)
+        assert CAPABILITY_OMISSION_HEADER not in catalog and "withheld tools" not in catalog, catalog[-400:]

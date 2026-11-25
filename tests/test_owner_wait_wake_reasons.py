@@ -371,7 +371,7 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     from ouroboros.owner_wait import checkpoint_owner_wait, load_owner_wait, resume_native_loop, set_owner_wait
     from ouroboros.task_pacing import CostCeiling
     from ouroboros.task_results import write_task_result
-    from ouroboros.tool_policy import format_capability_omissions, initial_tool_schemas
+    from ouroboros.tool_policy import format_capability_omissions, initial_tool_schemas, routine_capability_omissions
     from ouroboros.tools.registry import ToolRegistry
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
@@ -401,8 +401,9 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **k: (None, "max"))
     messages = []
     resume_native_loop(registry, saved, messages, {}, {}, set())
-    notes = format_capability_omissions(registry.capability_omissions())
-    if notes:
+    routine = routine_capability_omissions(registry.capability_omissions())
+    if routine:
+        notes = format_capability_omissions(routine)
         assert messages.pop(1) == {"role": "user", "content": "[SYSTEM NOTICE]\n" + "\n".join(notes)}
     assert messages[0]["content"] == "go"
     assert "continued from its saved owner wait" in messages[1]["content"]
@@ -437,3 +438,125 @@ def test_after_an_owner_wait_the_first_round_carries_the_hurry_words_only_for_a_
         assert len(rows) == 1 and rows[0][HOST_CONTEXT_KIND_KEY] == OWNER_WORDS_KIND
     else:
         assert rows == [] and not oh.latched(ctx)
+
+
+def test_peer_question_wait_distinguishes_peer_answer_from_other_wakes_and_keeps_handoff(tmp_path, monkeypatch):
+    from ouroboros.owner_wait import prepare_owner_wait_handoffs, set_owner_wait
+    from ouroboros.peer_letters import answer, ask, letter_task_id
+    from supervisor.restart_retention import _recovery_source, working_saved
+    from tests._peer_letters_shared import published
+
+    task_id = letter_task_id("place-1", "letter-1")
+    ctx = native_context(tmp_path)
+    ctx.task_id = task_id
+    ctx.task_metadata = {"peer_letter": {"place_id": "place-1", "letter_id": "letter-1", "sender_label": "Velm"},
+                         "delegation_role": "root"}
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(tmp_path, task_id, "running", root_task_id=task_id, metadata=ctx.task_metadata)
+    asked = ask(tmp_path, task_id, "Which folder?", published=published("place-1", "Which folder?"))
+    qid = asked["question_id"]
+    frames = _bridge(monkeypatch)
+
+    ctx._peer_question_wait = {"question_id": qid, "sender": "Velm"}
+    ctx._owner_wait_requested = f"peer-question:{qid}"
+    monkeypatch.setattr("ouroboros.owner_wait.time.sleep", lambda _s: write_owner_message(
+        tmp_path, "Check logs too", task_id, msg_id="owner:note"))
+    messages: list = []
+    wait_after_tools(ctx, messages, {}, {}, 1, [], set())
+    first = load_task_result(tmp_path, task_id)["owner_wait"]
+    assert (first["reason"], first["quiz_id"], first["resume_reason"]) == ("owner", "", "owner_text")
+    assert first["peer_question"] == {"question_id": qid, "sender": "Velm"}
+    assert len(messages) == 1 and "message from my human" in messages[0]["content"]
+    assert "Velm has not answered: question" in messages[0]["content"] and _quiz_frames(frames) == []
+
+    ctx._loop_mailbox_seen_ids = {entry["msg_id"] for entry in drain_owner_entries(tmp_path, task_id, set())}
+    ctx._peer_question_wait = {"question_id": qid, "sender": "Velm"}
+    ctx._owner_wait_requested = f"peer-question:{qid}"
+
+    def deliver_peer_answer(_s):
+        assert answer(tmp_path, task_id, qid, reply_letter_id="reply-1", reply_sha256="sha") == "answered"
+        write_task_message(tmp_path, "> /var/log", task_id=task_id, source_task_id="", provenance="place_event",
+                           place_arrival={"wake": True, "author": {"kind": "agent", "label": "Velm"},
+                                          "peer_reply": {"letter_id": "reply-1", "question_id": qid}})
+
+    monkeypatch.setattr("ouroboros.owner_wait.time.sleep", deliver_peer_answer)
+    wait_after_tools(ctx, messages, {}, {}, 2, [], set())
+    second = load_task_result(tmp_path, task_id)["owner_wait"]
+    assert (second["reason"], second["resume_reason"]) == ("owner", "answer")
+    assert len(messages) == 1, "the peer's answer adds no non-answer system notice"
+
+    set_owner_wait(tmp_path, task_id, {**second, "state": "waiting"})
+    assert working_saved(tmp_path, task_id, 1) is True
+    recovered_task = {"id": task_id}
+    assert _recovery_source(tmp_path, recovered_task, 1, "restart") is True
+    assert recovered_task["_working_recovery"]["wait_id"] == second["wait_id"]
+    task_row = {"id": task_id}
+    selected = prepare_owner_wait_handoffs(tmp_path, {task_id: {"task": task_row}}, "tx-peer",
+                                           include_sleep=False, direct=())
+    assert selected == {task_id}
+    assert task_row["_owner_wait_resume"]["peer_question"] == {"question_id": qid, "sender": "Velm"}
+
+
+def test_accepted_reply_without_mailbox_entry_never_fakes_answer_and_discloses_incomplete_delivery(
+        tmp_path, monkeypatch):
+    from ouroboros.owner_mailbox import KIND_HURRY
+    from ouroboros.owner_wait import _fresh_wake
+    from ouroboros.peer_letters import answer, ask, letter_task_id
+    from ouroboros.task_results import write_task_result
+    from tests._peer_letters_shared import published
+
+    task_id = letter_task_id("place-1", "letter-2")
+    ctx = native_context(tmp_path)
+    ctx.task_id = task_id
+    ctx.task_metadata = {"peer_letter": {"place_id": "place-1", "letter_id": "letter-2", "sender_label": "Velm"},
+                         "delegation_role": "root"}
+    write_task_result(tmp_path, task_id, "running", root_task_id=task_id, metadata=ctx.task_metadata)
+    qid = ask(tmp_path, task_id, "Which branch?", published=published("place-1", "Which branch?"))["question_id"]
+    # Simulate _accept_reply having marked QUESTION_ANSWERED before write_task_message landed in the mailbox.
+    assert answer(tmp_path, task_id, qid, reply_letter_id="reply-gap", reply_sha256="sha-gap") == "answered"
+
+    ctx._peer_question_wait = {"question_id": qid, "sender": "Velm"}
+    ctx._owner_wait_requested = f"peer-question:{qid}"
+    monkeypatch.setattr("ouroboros.owner_wait.time.sleep", lambda _s: write_owner_message(
+        tmp_path, "hurry", task_id, msg_id="hurry:gap", kind=KIND_HURRY))
+    messages: list = []
+    wait_after_tools(ctx, messages, {}, {}, 1, [], set())
+
+    wait = load_task_result(tmp_path, task_id)["owner_wait"]
+    assert wait["resume_reason"] == "hurry", "QUESTION_ANSWERED without mailbox entry must not become 'answer'"
+    assert _fresh_wake(ctx, "", "hurry", peer_question_id=qid) == "hurry"
+    assert len(messages) == 1
+    notice = messages[0]["content"]
+    assert "its delivery is unconfirmed" in notice and "no receipt of it in this task's mailbox is recorded" in notice
+    assert "remains open" not in notice and "has not answered" not in notice and "not on an answer to it" in notice
+
+
+def test_a_wait_notice_names_a_recorded_mailbox_receipt_apart_from_its_wake(tmp_path):
+    """A wait on a peer question that ended on something else says only what is recorded: an answer whose mailbox
+    receipt is recorded (``confirm_answer``'s ``reply_msg_id``) is in this task's mailbox, apart from the wake that
+    ended the wait; one accepted without a receipt is unconfirmed; the answer's own wake needs no notice."""
+    from ouroboros.peer_letters import answer, ask, confirm_answer, letter_task_id, peer_wait_notice
+    from ouroboros.task_results import write_task_result
+    from tests._peer_letters_shared import published
+
+    task_id = letter_task_id("place-1", "letter-3")
+    metadata = {"peer_letter": {"place_id": "place-1", "letter_id": "letter-3", "sender_label": "Velm"},
+                "delegation_role": "root"}
+    write_task_result(tmp_path, task_id, "running", root_task_id=task_id, metadata=metadata)
+    qid = ask(tmp_path, task_id, "Which branch?", published=published("place-1", "Which branch?"))["question_id"]
+    checkpoint = {"peer_question": {"question_id": qid, "sender": "Velm"}}
+    reserved_now = answer(tmp_path, task_id, qid, reply_letter_id="reply-3", reply_sha256="sha-3", confirmed=False)
+    assert reserved_now == "reserved"
+    reserved = peer_wait_notice(tmp_path, task_id, checkpoint, "owner_text", "")["content"]
+    assert "its delivery is unconfirmed" in reserved and "recorded in this task's mailbox as" not in reserved
+    assert "can still complete it" in reserved and "completes it" not in reserved, "no promise of a repeat"
+    unknown = peer_wait_notice(tmp_path, task_id, {"peer_question": {"question_id": "q-unknown", "sender": "Velm"}},
+                               "owner_text", "")["content"]
+    assert "is unknown" in unknown and "remains open" not in unknown and "not on an answer to it" in unknown
+    assert confirm_answer(tmp_path, task_id, qid, reply_letter_id="reply-3", reply_sha256="sha-3",
+                          msg_id="peer-reply-3") == "answered"
+    confirmed = peer_wait_notice(tmp_path, task_id, checkpoint, "owner_text", "")["content"]
+    assert "recorded in this task's mailbox as peer-reply-3" in confirmed and "unconfirmed" not in confirmed
+    assert "ended after a message from my human, not on an answer to it" in confirmed
+    assert peer_wait_notice(tmp_path, task_id, checkpoint, "answer", "") is None

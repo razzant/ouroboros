@@ -550,7 +550,7 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
     if isinstance(chosen.get("run_wait"), dict):  # a sleep on runs: a cancel, the deadline, a direct child
         from ouroboros.delegate_supervision import run_wait_reason
 
-        if extra := read_source(run_wait_reason, ctx):
+        if extra := read_source(run_wait_reason, ctx, chosen.get("runs")):
             return extra
     for pin in chosen.get("services") or ():
         observed = _service_wake(pin)  # already returns an unknown wake on a read failure

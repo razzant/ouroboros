@@ -514,7 +514,8 @@ def captured_project_request(root, task_id: str, sources: Sequence[dict], origin
     import json
 
     from ouroboros.chat_uploads import stored_refs
-    from ouroboros.owner_continue import API_REQUEST_FIELDS, accepted_api_opening, restore_original_opening
+    from ouroboros.api_continuation import API_REQUEST_FIELDS, accepted_api_opening
+    from ouroboros.owner_continue import restore_original_opening
 
     for row in sources:
         if row.get("task_id") != task_id or row.get("parent_task_id") or "api_admission" not in row:

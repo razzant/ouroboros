@@ -1,0 +1,996 @@
+"""Outgoing ordinary peer messages and automatic replies to a linked Ouroboros."""
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import logging
+import pathlib
+import threading
+import time
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+MESSAGE_PART = "0"  # one letter is one receipt part
+_SEND_ATTEMPTS = 3  # the same bytes again while the receiver's confirmation is lost
+_ATTEMPT_SEC = 20.0  # one attempt's wait: three of them stay inside a tool call's 120 s
+_RETRY_PAUSE_SEC = 0.5  # before the next attempt, growing by one step each time
+_MAX_PASSES = 4  # calls that send one letter without a confirmation, across calls and starts; then it stops
+_MAX_RESUME_LINKS = 8  # concurrent per-link workers during one resume_owed / resume_returned batch
+_FOLLOW_UP_SEC = (30.0, 120.0, 480.0)  # an automatic reply's next passes in this process after a retry or no answer
+_FOLLOW_UP_MAX_SEC = 900.0  # the longest wait of one follow-up, whatever the receiver's own retry_after
+_RECORDERS_LOCK = threading.Lock()
+_RECORDERS: dict[str, Any] = {}
+_SENDING_LOCK = threading.Lock()
+_SENDING: set[str] = set()  # letters a call of this process is sending now (``send_peer_message``'s claim)
+PANIC_HOLD = "panic_hold"  # nothing left while a Panic awaits my human's return: still owed, said nowhere
+_NOTHING_SENT = "; nothing was sent"
+
+# Holds after which an unsent automatic reply stays owed and unsaid for a later start or my human's return:
+# the switch (Panic or unreadable), my place's lawful Pause or Silence, and transient unreadable storage/rules.
+_STILL_OWED = frozenset({
+    PANIC_HOLD, "switch_unreadable", "place_paused", "place_silent",
+    "peer_links_unreadable", "places_unreadable", "rules_unreadable",
+    "sending_unrecorded", "receipts_unreadable", "earlier_attempts_unknown",
+    "peer_link_transient",
+})
+
+
+class AttemptHeld(Exception):
+    """The gate of one physical attempt closed before it (``send_peer_message(gate=...)``): nothing of it left."""
+
+    def __init__(self, code: str, message: str = "") -> None:
+        super().__init__(message or code)
+        self.code = code
+
+
+class _Unrecorded(Exception):
+    """An attempt's sending record could not be written before its POST: nothing of it left."""
+
+
+def message_letter_id(link_id: str, *identity: str) -> str:
+    """The one letter id of one logical message on ``link_id``, from what makes it that message."""
+    return "msg-" + hashlib.sha256("\0".join((link_id, *identity)).encode("utf-8")).hexdigest()[:32]
+
+
+def _receipts(root: Any) -> Any:
+    """This process's writer of peer message receipts (``PresenceDeliveryRecorder``): their identities are the
+    ``ouroboros`` connector's alone, and the store keeps one row per identity across processes."""
+    from ouroboros.presence_delivery import PresenceDeliveryRecorder
+
+    key = str(pathlib.Path(root).resolve())
+    with _RECORDERS_LOCK:
+        if key not in _RECORDERS:
+            _RECORDERS[key] = PresenceDeliveryRecorder(pathlib.Path(root))
+        return _RECORDERS[key]
+
+
+def _held(letter_id: str, code: str, message: str) -> dict:
+    return {"state": "held", "code": code, "message": message, "letter_id": letter_id}
+
+
+def _unknown(letter_id: str, code: str, message: str) -> dict:
+    return {"state": "unknown", "code": code, "message": message, "letter_id": letter_id, "recorded": False}
+
+
+def _earlier(root: Any, link_id: str, account_id: str, letter_id: str) -> tuple[str, set, dict, str]:
+    """What earlier, finished calls left for ``letter_id``, read before this call sends anything.
+
+    Reads canonical receipts and ``sent/`` independently: a confirmed outcome (``delivered`` or ``failed`` in either
+    store) settles the letter even when the other store is temporarily unreadable; without a confirmed outcome, an
+    unreadable store yields ``unknown`` (never proof of none, and never downgraded to a fabricated ``uncertain``
+    receipt). Returns ``(state, recorded_states_set, sending_record_dict, read_error_code)``.
+    """
+    from ouroboros import peer_links
+    from ouroboros.presence_delivery import recorded_states
+
+    states: set[str] = set()
+    states_err = ""
+    try:
+        states = recorded_states(root, peer_links.CONNECTOR, account_id, letter_id, MESSAGE_PART)
+    except Exception:  # noqa: BLE001 - an unreadable receipt store is unknown, never absent
+        states_err = "receipts_unreadable"
+
+    record: dict[str, Any] = {}
+    record_err = ""
+    try:
+        record = peer_links.sending_record(root, link_id, letter_id) or {}
+    except peer_links.PeerLinkError:
+        record_err = "peer_links_unreadable"
+
+    confirmed = str(record.get("confirmed_state") or "")
+    confirmed = confirmed if confirmed in {"delivered", "failed"} else ""
+    if "delivered" in states or confirmed == "delivered":
+        return "delivered", states, record, ""
+    if "uncertain" not in states and ("failed" in states or confirmed == "failed"):
+        return "failed", states, record, ""
+    if states_err or record_err:
+        return "unknown", states, record, states_err or record_err
+    if "uncertain" in states or record:
+        return "uncertain", states, record, ""
+    return "none", states, record, ""
+
+
+def _recorded_receipts(root: Any, link_id: str, account_id: str, letter_id: str) -> list[dict]:
+    """Indexed lookup of canonical receipt payloads for ``(link_id, account_id, letter_id)`` (no history scan)."""
+    from ouroboros import dialogue_store as ds, peer_links
+    from ouroboros.presence_delivery import _STATES, _client_id, _key, _payload_from_row
+
+    ds.require_imported(pathlib.Path(root), "chat")
+    rows: list[dict] = []
+    for state in ("delivered", "failed", "uncertain", "accepted"):
+        if state not in _STATES:
+            continue
+        key = (peer_links.CONNECTOR, account_id, letter_id, MESSAGE_PART, state)
+        for entry in ds.iter_probes(pathlib.Path(root), "chat", [("client_message_id", _client_id(key))]):
+            parsed = _payload_from_row(entry.row)
+            if parsed is not None and _key(*parsed) == key:
+                payload = parsed[1]
+                if str(payload.get("conversation_id") or "") == link_id:
+                    rows.append(payload)
+    return rows
+
+
+def resolve_message_retry(root: Any, link_id: str, account_id: str, letter_id: str) -> tuple[dict | None, str]:
+    """Look up the original recorded message metadata for an explicit ``message_ouroboros(..., retry_of=...)``.
+
+    Checks ``sent/`` first, then indexed canonical receipts so even already-settled messages verify and replay
+    without re-POSTing. Returns ``(record, "")`` when found, ``(None, "")`` when both stores are readable and no such
+    message exists, or ``(None, error_code)`` when a store could not be read.
+    """
+    from ouroboros import peer_links
+
+    record_err = ""
+    try:
+        record = peer_links.sending_record(root, link_id, letter_id)
+    except peer_links.PeerLinkError:
+        record, record_err = None, "peer_links_unreadable"
+    if isinstance(record, dict):
+        return record, ""
+
+    receipts_err = ""
+    try:
+        receipts = _recorded_receipts(root, link_id, account_id, letter_id)
+    except Exception:  # noqa: BLE001
+        receipts, receipts_err = [], "receipts_unreadable"
+    if receipts:
+        payload = receipts[0]
+        msg = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+        return {
+            "letter_id": letter_id,
+            "account_id": str(payload.get("account_id") or ""),
+            "place_id": "",
+            "text": str(payload.get("text") or ""),
+            "reply_to": str(msg.get("reply_to") or ""),
+            "origin": dict(payload.get("origin") or {}) if isinstance(payload.get("origin"), dict) else {},
+        }, ""
+    return None, record_err or receipts_err
+
+
+def _prior_envelope(root: Any, link_id: str, account_id: str, letter_id: str,
+                    record: dict, states: set) -> tuple[dict | None, str]:
+    """Return the recorded envelope (``account_id``, ``text``, ``reply_to``) of an earlier unsettled attempt when
+    present in ``sent/`` or canonical receipts; returns ``(None, err_code)`` on receipt read error."""
+    if isinstance(record, dict) and any(k in record for k in ("account_id", "text", "reply_to")):
+        return record, ""
+    if "uncertain" in states:
+        try:
+            receipts = _recorded_receipts(root, link_id, account_id, letter_id)
+        except Exception:  # noqa: BLE001
+            return None, "receipts_unreadable"
+        if receipts:
+            payload = receipts[0]
+            msg = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+            return {
+                "letter_id": letter_id,
+                "account_id": str(payload.get("account_id") or ""),
+                "text": str(payload.get("text") or ""),
+                "reply_to": str(msg.get("reply_to") or ""),
+            }, ""
+    return None, ""
+
+
+def _pin_prior_envelope(prior: dict | None, *, account_id: str, text: str,
+                        reply_to: str) -> tuple[str, tuple[str, str] | None]:
+    """Validate recipient/text against a recorded prior attempt and return the frozen ``reply_to`` (preserving ``""``)."""
+    if not isinstance(prior, dict):
+        return reply_to, None
+    if prior.get("account_id") and str(prior["account_id"]) != account_id:
+        return reply_to, ("retry_recipient_mismatch",
+                          "this letter id already belongs to another recipient; nothing was sent")
+    if "text" in prior and prior["text"] is not None and str(prior["text"]) != text:
+        return reply_to, ("retry_text_mismatch",
+                          "this letter id already carries different text; nothing was sent")
+    pinned = str(prior["reply_to"]) if ("reply_to" in prior and prior["reply_to"] is not None) else reply_to
+    return pinned, None
+
+
+def _check_link_and_place(root: Any, place_id: str, link_id: str, *,
+                          expected_account_id: str = "") -> tuple[str, str] | None:
+    """Validate registry row (link_id, recipient, revocation, confirmation, remote_unknown) and place speech state."""
+    from ouroboros import peer_links
+    from ouroboros.gateways.peer import peer_outgoing_speech_refusal
+
+    try:
+        found = peer_links.link_of_place(root, place_id)
+    except peer_links.PeerLinkError:
+        return "peer_links_unreadable", "the link registry cannot be read now; nothing was sent"
+    if found is None or found[0] != link_id:
+        return "peer_link_unavailable", ("no usable link to that place here now (revoked, paused, its code "
+                                         "unconfirmed or not marked mine); nothing was sent")
+    row = found[1] if isinstance(found[1], dict) else {}
+    if expected_account_id and str(row.get("peer_install_id") or "") != expected_account_id:
+        return "retry_recipient_mismatch", "the link at this place now names another recipient; nothing was sent"
+    if row.get("revoked_at"):
+        return "peer_link_unavailable", "this link was revoked here; nothing was sent"
+    if row.get("created_at") and not row.get("code_confirmed_at"):
+        return "peer_link_unavailable", "this link's code is not confirmed here yet; nothing was sent"
+    if row.get("remote_unknown_at"):
+        return "link_unknown", (f"the linked Ouroboros has not known this link since {row['remote_unknown_at']}; "
+                                "it needs a new introduction; nothing was sent")
+    return peer_outgoing_speech_refusal(root, place_id)
+
+
+def _explain_missing_outgoing(root: Any, place_id: str, link_id: str, *,
+                              expected_account_id: str = "") -> tuple[str, str]:
+    """Classify why ``outgoing_link`` returned None without turning transient/unproven causes into terminal."""
+    from ouroboros import places
+
+    if (refusal := _check_link_and_place(root, place_id, link_id, expected_account_id=expected_account_id)) is not None:
+        return refusal
+    try:
+        records = places.place_records(root)
+    except (places.PlaceError, OSError, ValueError):
+        return "places_unreadable", "place records could not be read here; nothing was sent"
+    place, peer = records.places.get(str(place_id or "")), records.peer(str(place_id or ""))
+    if place is None or not peer or not peer.get("mine"):
+        return "peer_link_unavailable", ("no usable link to that place here now (revoked, paused, its code "
+                                         "unconfirmed or not marked mine); nothing was sent")
+    if place.state == places.STATE_PAUSED:
+        return "place_paused", f"{place.label or place_id} is Paused here; nothing was sent"
+    if place.state == places.STATE_SILENT:
+        return "place_silent", f"{place.label or place_id} is Silent here; nothing was sent"
+    # Do not re-read peer_links._read_secret here: that helper collapses OSError/unavailability/corruption and absence
+    # into "", so on a proven Active/mine/confirmed link an unreadable key must stay owed as peer_link_transient.
+    return "peer_link_transient", "the link was temporarily unavailable before sending; nothing was sent"
+
+
+def _resolve_outgoing(root: Any, place_id: str, link_id: str, *,
+                      expected_account_id: str = "") -> tuple[Any, tuple[str, str] | None]:
+    """Resolve current outgoing send permission without collapsing Pause, Silence or unreadable stores."""
+    from ouroboros import peer_links
+    from ouroboros.place_projection import switch_state
+
+    sw = switch_state(root)
+    if sw == "panic":
+        return None, (PANIC_HOLD, "a Panic awaits my human's return here; nothing was sent")
+    if sw not in {"on", "off"}:
+        return None, ("switch_unreadable", "the consciousness switch cannot be read now; nothing was sent")
+    if (refusal := _check_link_and_place(root, place_id, link_id, expected_account_id=expected_account_id)) is not None:
+        return None, refusal
+    link = peer_links.outgoing_link(place_id, drive_root=root)
+    if link is None or link.link_id != link_id:
+        return None, _explain_missing_outgoing(root, place_id, link_id, expected_account_id=expected_account_id)
+    if expected_account_id and link.peer_install_id != expected_account_id:
+        return None, ("retry_recipient_mismatch", "the link at this place now names another recipient; nothing was sent")
+    if link.remote_unknown_at:
+        return None, ("link_unknown", (f"the linked Ouroboros has not known this link since {link.remote_unknown_at}; "
+                                       "it needs a new introduction; nothing was sent"))
+    if not peer_links.loopback_url(link.peer_url):
+        return None, ("peer_url_refused", "this step's links are loopback addresses on one computer; nothing was sent")
+    return link, None
+
+
+def _classify_prewire_unavailable(root: Any, place_id: str, link_id: str, *,
+                                  expected_account_id: str = "") -> tuple[str, str]:
+    """Re-classify prewire ``peer_link_unavailable`` against fresh proven state."""
+    _link, hold = _resolve_outgoing(root, place_id, link_id, expected_account_id=expected_account_id)
+    return hold if hold is not None else ("peer_link_transient",
+                                          "the link was temporarily unavailable before sending; nothing was sent")
+
+
+def _check_speech_basis(root: Any, place_id: str, link_id: str, *, kind: str, approved_basis: str,
+                        expected_account_id: str = "") -> tuple[str, str] | None:
+    """Verify conversation rules against ``approved_basis`` without treating lawful Silence or transient holds as
+    terminal ``rules_changed``."""
+    from ouroboros.peer_letters import speech_basis
+
+    current = speech_basis(root, place_id, kind=kind)
+    if current and current == approved_basis:
+        return None
+    _link, hold = _resolve_outgoing(root, place_id, link_id, expected_account_id=expected_account_id)
+    if hold is not None:
+        return hold
+    if current:
+        return "rules_changed", "the rules for this conversation changed after these words were approved; nothing was sent"
+    return "rules_unreadable", "the rules for this conversation could not be read now; nothing was sent"
+
+
+def _kept(earlier: str, why: str = "") -> dict:
+    """The outcome of a letter an earlier attempt of which may have arrived, as this call leaves it (``why`` nothing
+    new left now): unconfirmed, never "nothing was sent"."""
+    tail = "an earlier attempt of this letter is unconfirmed: it may have arrived"
+    if why:
+        clean = why[:-len(_NOTHING_SENT)] if why.endswith(_NOTHING_SENT) else why
+        tail = f"{clean}; nothing new was sent now, and {tail}"
+    return {"state": "uncertain", "code": "earlier_attempt_unconfirmed", "message": tail}
+
+
+def _record_receipt(root: Any, link_id: str, account_id: str, letter_id: str, state: str, *, text: str, reply_to: str,
+                    origin: dict) -> bool:
+    """One receipt of my message in this installation's history (``PresenceDeliveryRecorder``): whether it landed."""
+    from ouroboros import peer_links
+
+    receipt = {"schema_version": 1, "delivery_id": letter_id, "part_id": MESSAGE_PART, "state": state,
+               "provider": peer_links.CONNECTOR, "account_id": account_id, "conversation_id": link_id,
+               "thread_id": "", "text": text, "format": "markdown",
+               "message": {"message_id": letter_id, "peer_message": True, **({"reply_to": reply_to} if reply_to else {})},
+               "origin": dict(origin)}
+    try:
+        _receipts(root).record(peer_links.CONNECTOR, receipt)
+        return True
+    except Exception:  # noqa: BLE001 - the receipt is evidence; without it nothing reads as confirmed
+        log.warning("peer message %s receipt not recorded", letter_id, exc_info=True)
+        return False
+
+
+def _reconcile_confirmed(root: Any, link_id: str, account_id: str, letter_id: str, *, earlier: str, states: set,
+                         record: dict, text: str, reply_to: str, origin: dict,
+                         facts: dict | None = None) -> dict:
+    """Finalize an already-confirmed ``delivered`` or ``failed`` outcome without any wire POST or current-permission
+    check, recording its canonical receipt from ``sent/`` if the original receipt write had failed."""
+    from ouroboros import peer_links
+    from ouroboros.peer_letters import audit
+
+    if earlier in states:
+        if record:
+            with contextlib.suppress(OSError):
+                peer_links.settle_sending(root, link_id, letter_id)
+        return {"state": earlier, "letter_id": letter_id, "recorded": True, "earlier": True,
+                **({"code": "refused_earlier", "message": "the linked Ouroboros refused this letter earlier (its failed "
+                    "receipt is in this room); it is not sent again"} if earlier == "failed" else {})}
+
+    rec_account = str(record["account_id"]) if record.get("account_id") else account_id
+    rec_text = str(record["text"]) if ("text" in record and record["text"] is not None) else text
+    rec_reply_to = str(record["reply_to"]) if ("reply_to" in record and record["reply_to"] is not None) else reply_to
+    rec_origin = record.get("origin") if isinstance(record.get("origin"), dict) and record.get("origin") else origin
+    recorded = _record_receipt(root, link_id, rec_account, letter_id, earlier,
+                               text=rec_text, reply_to=rec_reply_to, origin=rec_origin)
+    if recorded:
+        with contextlib.suppress(OSError):
+            peer_links.settle_sending(root, link_id, letter_id)
+    if facts:
+        audit(root, f"peer_message_{earlier}", receipt_recorded=recorded,
+              **({"code": str(record.get("confirmed_code") or "refused_earlier")} if earlier == "failed" else {}),
+              **facts)
+    failed_fields = ({"code": str(record.get("confirmed_code") or "refused_earlier"),
+                      "message": str(record.get("confirmed_message")
+                                     or "the linked Ouroboros refused this letter earlier; it is not sent again")}
+                     if earlier == "failed" else {})
+    return {"state": earlier, "letter_id": letter_id, "recorded": recorded, "earlier": True, **failed_fields}
+
+
+def _directly(attempt: Any) -> Any:
+    return attempt()
+
+
+def send_peer_message(root: Any, place_id: str, *, letter_id: str, text: str, reply_to: str = "", origin: dict,
+                      ready: Any = None, gate: Any = None,
+                      link_id: str = "", account_id: str = "") -> dict:
+    """Send one ordinary message to the linked Ouroboros behind my place ``place_id`` and record what came of it as its
+    receipt. ``state``: ``delivered``, ``failed``, ``uncertain``, ``unknown`` (earlier history/sending state unreadable:
+    no POST, no fabricated receipt), ``retry``, ``held`` (nothing sent now and no earlier attempt unconfirmed) or
+    ``busy`` (another call in this process is sending this letter now).
+
+    When ``link_id`` and ``account_id`` are supplied (e.g. an explicit tool retry or automatic reply), earlier-outcome
+    lookup stays bound to that exact address without re-resolving ``link_of_place``, and every physical admission
+    verifies both ``link_id`` and ``account_id``."""
+    from ouroboros import peer_links
+
+    bound_link, bound_account = str(link_id or "").strip(), str(account_id or "").strip()
+    if not bound_link or not bound_account:
+        try:
+            found = peer_links.link_of_place(root, place_id)
+        except peer_links.PeerLinkError:
+            return _unknown(letter_id, "peer_links_unreadable",
+                            "the link registry cannot be read now; nothing was sent now, "
+                            "and whether an earlier attempt of this letter arrived is not known here")
+        if found is None:
+            return _held(letter_id, "peer_link_unavailable", "no link to that place here; nothing was sent")
+        if bound_link and found[0] != bound_link:
+            return _held(letter_id, "peer_link_unavailable", "no link to that place here; nothing was sent")
+        bound_link = bound_link or found[0]
+        bound_account = bound_account or str(found[1].get("peer_install_id") or "")
+    claim = f"{pathlib.Path(root).resolve()}\0{bound_link}\0{letter_id}"
+    with _SENDING_LOCK:  # one call sends one letter at a time here; another observer of it never waits on the network
+        if claim in _SENDING:
+            return {"state": "busy", "code": "letter_in_flight", "letter_id": letter_id,
+                    "message": "this letter is being sent now by another call; nothing more was sent"}
+        _SENDING.add(claim)
+    try:
+        return _send_claimed(root, place_id, bound_link, bound_account, letter_id=letter_id, text=text,
+                             reply_to=reply_to, origin=origin, ready=ready, gate=gate)
+    finally:
+        with _SENDING_LOCK:
+            _SENDING.discard(claim)
+
+
+def _send_claimed(root: Any, place_id: str, link_id: str, account_id: str, *, letter_id: str, text: str,
+                  reply_to: str, origin: dict, ready: Any, gate: Any) -> dict:
+    """``send_peer_message`` once this call holds the letter's claim."""
+    from ouroboros import peer_links
+    from ouroboros.gateways.peer import NOTHING_SENT, PeerGateway
+    from ouroboros.peer_letters import audit
+
+    earlier, states, record, read_error = _earlier(root, link_id, account_id, letter_id)
+    facts = {"place_id": str(place_id), "link_id": link_id, "letter_id": letter_id,
+             "task_id": str(origin.get("task_id") or ""), **({"reply_to": reply_to} if reply_to else {})}
+    if earlier in {"delivered", "failed"}:
+        return _reconcile_confirmed(root, link_id, account_id, letter_id, earlier=earlier, states=states,
+                                    record=record, text=text, reply_to=reply_to, origin=origin, facts=facts)
+    if earlier == "unknown":
+        return _unknown(letter_id, read_error or "earlier_attempts_unknown",
+                        "earlier attempts of this letter cannot be read now; nothing was sent now, "
+                        "and whether an earlier attempt arrived is not known here")
+
+    unconfirmed, passes = earlier == "uncertain", int(record.get("passes") or 0)
+    if unconfirmed:
+        prior, prior_err = _prior_envelope(root, link_id, account_id, letter_id, record, states)
+        if prior_err:
+            return _unknown(letter_id, prior_err,
+                            "earlier attempts of this letter cannot be read now; nothing was sent now, "
+                            "and whether an earlier attempt arrived is not known here")
+        reply_to, mismatch = _pin_prior_envelope(prior, account_id=account_id, text=text, reply_to=reply_to)
+        if mismatch is not None:
+            return _held(letter_id, *mismatch)
+        facts = {"place_id": str(place_id), "link_id": link_id, "letter_id": letter_id,
+                 "task_id": str(origin.get("task_id") or ""), **({"reply_to": reply_to} if reply_to else {})}
+
+    if passes >= _MAX_PASSES:
+        link, hold = None, ("attempts_spent", f"this letter went out in {passes} calls without the linked Ouroboros "
+                            "confirming it, and is not sent again")
+    else:
+        link, hold = _resolve_outgoing(root, place_id, link_id, expected_account_id=account_id)
+    outcome: dict = _kept(earlier) if unconfirmed else {}
+    learned = False
+    if hold is not None:
+        if not unconfirmed:
+            return _held(letter_id, *hold)
+        outcome = {**_kept(earlier, hold[1]), "held_code": hold[0],
+                   **({"code": hold[0]} if hold[0] == "attempts_spent" else {})}
+
+    started: list[int] = []
+    attempted_network = False
+    gateway = PeerGateway(link) if hold is None else None
+
+    def attempt() -> None:  # one physical attempt; a call's first records the letter as sending before its POST
+        if not started:
+            try:
+                started.append(peer_links.record_sending(
+                    root, link_id, letter_id, account_id=account_id, place_id=str(place_id),
+                    text=text, reply_to=reply_to, origin=origin,
+                ))
+            except peer_links.PeerLinkError as exc:
+                if exc.code == "sending_identity_mismatch":
+                    raise AttemptHeld(exc.code, str(exc)) from exc
+                raise _Unrecorded(str(exc)) from exc
+        gateway.send_message(text, letter_id=letter_id, reply_to=reply_to, timeout_sec=_ATTEMPT_SEC)
+
+    try:
+        for number in range(_SEND_ATTEMPTS if gateway is not None else 0):
+            try:  # fresh admission before every attempt: switch, link, place, caller rules
+                held = (_resolve_outgoing(root, place_id, link_id, expected_account_id=account_id)[1]
+                        if number else None) or (ready() if ready else None)
+                if held:
+                    raise AttemptHeld(*held)
+                (gate or _directly)(attempt)
+                attempted_network = True
+                outcome, learned = {"state": "delivered"}, True
+                break
+            except (AttemptHeld, _Unrecorded) as exc:
+                code = getattr(exc, "code", "") or "sending_unrecorded"
+                if not outcome:
+                    return _held(letter_id, code, str(exc))
+                if not learned:
+                    outcome = {**_kept(earlier, str(exc)), "held_code": code}
+                elif code in _STILL_OWED:
+                    outcome = {**outcome, "held_code": code}
+                break
+            except Exception as exc:  # noqa: BLE001 - every wire outcome is typed below; an unknown one is uncertain
+                code, status = str(getattr(exc, "code", "") or ""), int(getattr(exc, "status_code", 0) or 0)
+                refused = str(getattr(exc, "refusal_code", "") or "")
+                not_sent = code in NOTHING_SENT or code == "invalid_letter" or (status == 0 and code.startswith("place_"))
+                if not_sent:
+                    msg = str(exc)
+                    if code == "peer_link_unavailable":
+                        code, msg = _classify_prewire_unavailable(root, place_id, link_id,
+                                                                  expected_account_id=account_id)
+                    if not attempted_network:
+                        if started:
+                            with contextlib.suppress(OSError, peer_links.PeerLinkError):
+                                peer_links.rollback_sending(root, link_id, letter_id, expected_passes=started[0])
+                            started.clear()
+                        if not outcome:
+                            return _held(letter_id, code, msg)
+                        outcome = {**_kept(earlier, msg), "held_code": code}
+                    elif code in _STILL_OWED:
+                        outcome = {**outcome, "held_code": code}
+                    break
+                attempted_network = True
+                if outcome and (status == 429 or (refused and 400 <= status < 500)):
+                    if status == 429:
+                        outcome = {**outcome, "retry_code": refused or code,
+                                   "retry_after": getattr(exc, "retry_after", None)}
+                    break
+                if status == 429:
+                    outcome = {"state": "retry", "code": refused or code, "message": str(exc),
+                               "retry_after": getattr(exc, "retry_after", None)}
+                    break
+                if refused and 400 <= status < 500:
+                    outcome, learned = {"state": "failed", "code": refused, "message": str(exc)}, True
+                    break
+                outcome, learned = {"state": "uncertain", "code": code or "unconfirmed", "message": str(exc)}, True
+                if number + 1 < _SEND_ATTEMPTS:
+                    time.sleep(_RETRY_PAUSE_SEC * (number + 1))
+    finally:
+        if gateway is not None:
+            gateway.close()
+
+    spent = bool(started) and started[0] >= _MAX_PASSES and outcome.get("state") in {"uncertain", "retry"}
+    if outcome.get("state") == "retry":
+        if not spent:
+            return {**outcome, "letter_id": letter_id}
+        outcome, learned = {"state": "uncertain", "code": "attempts_spent", "retry_code": outcome["code"],
+                            "retry_after": outcome.get("retry_after"), "message": (
+                                f"the linked Ouroboros could not take this letter in {started[0]} calls "
+                                f"({outcome['code']}); it may hold it unread; it is not sent again")}, True
+    if spent:
+        outcome = {**outcome, "spent": True}
+    if not learned and "uncertain" in states:
+        audit(root, "peer_message_uncertain", code=outcome["code"], **facts)
+        return {**outcome, "letter_id": letter_id, "recorded": True}
+    recorded = _record_receipt(root, link_id, account_id, letter_id, outcome["state"],
+                               text=text, reply_to=reply_to, origin=origin)
+    if outcome["state"] in {"delivered", "failed"}:
+        if recorded:
+            with contextlib.suppress(OSError):
+                peer_links.settle_sending(root, link_id, letter_id)
+        else:
+            with contextlib.suppress(OSError, peer_links.PeerLinkError):
+                peer_links.confirm_sending(
+                    root, link_id, letter_id, state=outcome["state"], account_id=account_id,
+                    place_id=str(place_id), text=text, reply_to=reply_to, origin=origin,
+                    code=str(outcome.get("code") or ""), message=str(outcome.get("message") or ""),
+                )
+    audit(root, f"peer_message_{outcome['state']}", receipt_recorded=recorded,
+          **({"code": outcome["code"]} if outcome.get("code") else {}), **facts)
+    return {**outcome, "letter_id": letter_id, "recorded": recorded}
+
+
+def deliver_owed(root: Any, task_id: str, record: Any = None) -> None:
+    """At one producer's end (a peer turn's settlement, its handed-off work's terminal) hand what it owes its link to
+    one short-lived thread: the event calling here never waits on the network, and a producer speaking to no peer link
+    (most) starts nothing. ``record``: the producer's stored row when the caller already holds it."""
+    from ouroboros.install_identity import acting_as
+    from ouroboros.task_results import load_task_result
+
+    root, task_id = pathlib.Path(root), str(task_id or "")
+    try:
+        with acting_as(root):  # read as the install whose producer ended, as its delivery thread does
+            stored = record if isinstance(record, dict) else (load_task_result(root, task_id) or {}) if task_id else {}
+            successor = str(stored.get("presence_retry_next") or "")
+            place = _peer_speaker(root, stored) or (_peer_speaker(root, load_task_result(root, successor) or {})
+                                                    if successor else None)
+            if not task_id or place is None:
+                return
+        threading.Thread(target=_deliver_quietly, args=(root, [(place.conversation_id, task_id)]),
+                         name=f"peer-reply-{task_id[:24]}", daemon=True).start()
+    except Exception:  # noqa: BLE001 - a producer's end never fails over its delivery
+        log.warning("peer reply of %s was not handed on", task_id, exc_info=True)
+
+
+def _one_pass(root: pathlib.Path, link_id: str, ref: str, gate: Any = None) -> tuple[bool, float | None]:
+    from ouroboros import peer_links
+    from ouroboros.install_identity import acting_as
+
+    guard = gate if gate is not None else contextlib.nullcontext()
+    with guard, acting_as(root):  # read and write as the install whose link it answers; never held across sleeps
+        seen = peer_links.owed_version(root, link_id, ref)
+        return _deliver_producer(root, ref, link_id=link_id, seen=seen)
+
+
+def _deliver_batch(root: pathlib.Path, refs: list[tuple[str, str]], *, gate: Any = None) -> bool:
+    """Run pass 1 for every ref in ``refs`` before any follow-up sleep, then run due follow-ups in earliest-due order
+    up to ``len(_FOLLOW_UP_SEC)`` retries without holding ``gate`` across sleeps."""
+    outcomes: dict[tuple[str, str], bool] = {}
+    pending: list[tuple[float, int, str, str]] = []
+    for link_id, ref in refs:
+        try:
+            settled, wait = _one_pass(root, link_id, ref, gate)
+        except Exception:  # noqa: BLE001 - one producer's failure leaves the others' delivery alone
+            log.warning("peer reply of %s was not delivered", ref, exc_info=True)
+            outcomes[(link_id, ref)] = False
+            continue
+        outcomes[(link_id, ref)] = settled
+        if not settled and wait is not None and _FOLLOW_UP_SEC:
+            delay = min(max(_FOLLOW_UP_SEC[0], float(wait)), _FOLLOW_UP_MAX_SEC)
+            pending.append((time.monotonic() + delay, 0, link_id, ref))
+    while pending:
+        pending.sort(key=lambda item: item[0])
+        due, idx, link_id, ref = pending.pop(0)
+        remaining = due - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        try:
+            settled, wait = _one_pass(root, link_id, ref, gate)
+        except Exception:  # noqa: BLE001
+            log.warning("peer reply of %s was not delivered", ref, exc_info=True)
+            outcomes[(link_id, ref)] = False
+            continue
+        outcomes[(link_id, ref)] = settled
+        if not settled and wait is not None and idx + 1 < len(_FOLLOW_UP_SEC):
+            delay = min(max(_FOLLOW_UP_SEC[idx + 1], float(wait)), _FOLLOW_UP_MAX_SEC)
+            pending.append((time.monotonic() + delay, idx + 1, link_id, ref))
+    return all(outcomes.values())
+
+
+def _deliver_quietly(root: pathlib.Path, refs: list) -> None:
+    _deliver_batch(root, list(refs))
+
+
+def _deliver_until_settled(root: pathlib.Path, link_id: str, ref: str) -> bool:
+    """Deliver one producer's owed outputs and bounded follow-ups until settled or stopped."""
+    return _deliver_batch(root, [(link_id, ref)])
+
+
+def resume_owed(root: Any, *, link_id: str = "", at_start: bool = True) -> None:
+    """Resume addressed ``sending_records`` (at start) and ``owed_refs`` per peer link without head-of-line blocking."""
+    from ouroboros import peer_links
+    from ouroboros.place_projection import switch_state
+
+    root = pathlib.Path(root)
+    try:
+        owed, sending = peer_links.owed_refs(root, link_id), peer_links.sending_records(root) if at_start else []
+    except Exception:  # noqa: BLE001 - an unreadable registry is unknown: its records wait for a later start
+        log.warning("owed peer replies of %s could not be read now", root, exc_info=True)
+        return
+    owed = owed if owed and switch_state(root) in {"on", "off"} else []
+    if owed or sending:
+        threading.Thread(target=_resume_quietly, args=(root, owed, sending), name="peer-replies-owed",
+                         daemon=True).start()
+
+
+def resume_returned(root: Any, *, link_id: str = "") -> None:
+    """Resume owed replies after my human's confirmed return (place Active again or end of Panic)."""
+    try:
+        resume_owed(root, link_id=link_id, at_start=False)
+    except Exception:  # noqa: BLE001 - my human's act never fails over its follow-up
+        log.warning("owed peer replies of %s were not resumed after a return", root, exc_info=True)
+
+
+def _reconcile_sending(root: pathlib.Path, sending: list) -> None:
+    """Reconcile unsettled ``sent/`` records without POSTing, preserving ``confirmed_state`` (even on revoked links)."""
+    from ouroboros import peer_links
+    from ouroboros.presence_delivery import recorded_states
+
+    for link_id, record, revoked in sending:
+        letter_id, account_id = str(record.get("letter_id") or ""), str(record.get("account_id") or "")
+        confirmed = str(record.get("confirmed_state") or "")
+        confirmed = confirmed if confirmed in {"delivered", "failed"} else ""
+        try:
+            states = recorded_states(root, peer_links.CONNECTOR, account_id, letter_id, MESSAGE_PART)
+            origin = record.get("origin") if isinstance(record.get("origin"), dict) else {}
+            text, reply_to = str(record.get("text") or ""), str(record.get("reply_to") or "")
+            if confirmed:
+                if (confirmed in states or (confirmed == "failed" and "delivered" in states)
+                        or _record_receipt(root, link_id, account_id, letter_id, confirmed,
+                                           text=text, reply_to=reply_to, origin=origin)):
+                    peer_links.settle_sending(root, link_id, letter_id)
+                continue
+            said = bool(states & {"delivered", "failed"})
+            if not said and "uncertain" not in states:
+                said = _record_receipt(root, link_id, account_id, letter_id, "uncertain",
+                                       text=text, reply_to=reply_to, origin=origin) and revoked
+            if said or (revoked and "uncertain" in states):
+                peer_links.settle_sending(root, link_id, letter_id)
+        except Exception:  # noqa: BLE001 - one record's failure leaves the others and keeps it for a later start
+            log.warning("sending record of %s was not reconciled", letter_id, exc_info=True)
+
+
+def _resume_quietly(root: pathlib.Path, owed: list, sending: list = ()) -> None:
+    from ouroboros.install_identity import acting_as
+
+    with acting_as(root):
+        _reconcile_sending(root, list(sending))
+    if not owed:
+        return
+    groups: dict[str, list[tuple[str, str]]] = {}
+    for link_id, ref in owed:
+        groups.setdefault(link_id, []).append((link_id, ref))
+    if len(groups) == 1:
+        _deliver_batch(root, next(iter(groups.values())))
+        return
+    gate = threading.BoundedSemaphore(min(len(groups), _MAX_RESUME_LINKS))
+    workers = [threading.Thread(target=_deliver_batch, args=(root, refs), kwargs={"gate": gate},
+                                name=f"peer-reply-{lid[:16]}", daemon=True) for lid, refs in groups.items()]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+
+def _peer_speaker(root: pathlib.Path, stored: Any) -> Any:
+    """The peer place a stored producer speaks to with v1 receipts, else None: most tasks, from their record alone."""
+    from ouroboros import peer_links
+    from ouroboros.places import place_records
+
+    metadata = stored.get("metadata") if isinstance(stored, dict) else None
+    presence = metadata.get("presence") if isinstance(metadata, dict) else None
+    if (not isinstance(presence, dict) or presence.get("delivery_reporting_version") != 1
+            or not str(presence.get("place_id") or "")):
+        return None
+    place = place_records(root).places.get(str(presence["place_id"]))
+    return place if place is not None and place.connector == peer_links.CONNECTOR else None
+
+
+def _no_live_turn(root: pathlib.Path, ref: str) -> bool:
+    """No attempt of ``ref`` runs here now (the Host's execution of it or its live turn), so a newer attempt's owed
+    record is never the one a finished pass removes (``peer_links.settle_owed``)."""
+    from ouroboros.gateway.host_service_places import host_context
+    from ouroboros.presence_runner import presence_turn_is_live
+
+    return host_context(root).presence_turns.find(ref) is None and not presence_turn_is_live(ref, drive_root=root)
+
+
+def _sooner(wait: float | None, after: float | None) -> float | None:
+    return after if wait is None else wait if after is None else min(wait, after)
+
+
+def _deliver_producer(root: pathlib.Path, task_id: str, visited: set | None = None, *, link_id: str,
+                      seen: tuple | None) -> tuple[bool, float | None]:
+    """Send what one producer owes its link now, from its own retained record (``_producer_view``: its words as
+    recorded, never the outward view a place's state gives them for the while it lasts): the speech it released (a
+    parked author's ``outputs``, pending or not) and, once it ended, its terminal output, each once under its stable
+    output identity, addressed to the message it answers (``_automatic_reply_target``)."""
+    from ouroboros import peer_links
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.safety_config import coverage_kind
+    from ouroboros.task_results import load_task_result
+
+    visited = set() if visited is None else visited
+    ref, stored = task_id, {}
+    while task_id and task_id not in visited:  # a certified retry's successor answers the event (``presence_retry_next``)
+        visited.add(task_id)
+        stored = load_task_result(root, task_id, strict=True) or {}  # unreadable raises: unknown, the record stays
+        if not (successor := str(stored.get("presence_retry_next") or "")):
+            break
+        task_id = successor
+    if not stored:
+        return False, None  # no row under this reference yet: unknown, never "nothing owed"
+    place = _peer_speaker(root, stored)
+    if place is None or place.conversation_id != link_id:  # its own row speaks to no place of this link
+        _settle(root, link_id, ref, seen)
+        return True, None
+    handoff = _handoff(root, stored, place)
+    if handoff is not None and not handoff[1]:
+        return False, None  # its turn has not ended: that end answers it, under the input its exit answered
+    if handoff is not None and not _named_exit(handoff[0], stored):  # the turn's end named other work, or none
+        _settle(root, link_id, ref, seen)
+        return True, None
+    status, view = _producer_view(root, stored, task_id)
+    metadata = stored.get("metadata") or {}
+    event = (metadata.get("presence") or {}).get("event")
+    event = event if isinstance(event, dict) else {}
+    reply_to = _automatic_reply_target(stored, event, handoff)
+    key, settled, wait = conversation_key(place.provider, place.account_id, place.conversation_id, ""), True, None
+    for output in [*(view.get("outputs") or ()), *([view] if status == 200 else [])]:
+        text = str(output.get("text") or "")
+        if text and output.get("outcome", "message") in {"message", "deferred"}:
+            done, after = _deliver_output(root, place, key, producer=str(view.get("task_id") or task_id), text=text,
+                                          output_ref=str(output.get("output_ref") or f"{task_id}:terminal"),
+                                          reply_to=reply_to, source_event_id=str(event.get("source_event_id") or ""),
+                                          kind=coverage_kind(metadata))
+            settled, wait = settled and done, _sooner(wait, after)
+    if status != 200:
+        return False, wait
+    if (child := str(view.get("child_work_ref") or "")) and child not in visited:  # its deferred exit, named by itself
+        peer_links.record_owed(root, link_id, child, place_id=place.place_id)  # before its end can miss it
+        child_seen = peer_links.owed_version(root, link_id, child)
+        if str((load_task_result(root, child, strict=True) or {}).get("status") or "") in {"completed", "failed",
+                                                                                         "cancelled"}:
+            wait = _sooner(wait, _deliver_producer(root, child, visited, link_id=link_id,  # it ended first: this pass
+                                                   seen=child_seen)[1])
+    if settled:
+        _settle(root, link_id, ref, seen)
+    return settled, wait
+
+
+def _settle(root: pathlib.Path, link_id: str, ref: str, seen: tuple | None) -> None:
+    """``ref``'s owed record leaves only as this pass read it and while no attempt of it runs here."""
+    from ouroboros import peer_links
+
+    peer_links.settle_owed(root, link_id, ref, seen=seen, unowed=lambda: _no_live_turn(root, ref))
+
+
+def _producer_view(root: pathlib.Path, stored: dict, task_id: str) -> tuple[int, dict]:
+    """``presence_recovery.retained_work_view`` of a producer for its link: an ended record's own words as recorded
+    (read without the place's present outward view, ``place_reply.project_reply``, which a Pause or Silence of the
+    place would empty for its while and say there), a live one's status as this installation observes it."""
+    from ouroboros.presence_recovery import retained_work_view
+    from ouroboros.presence_runner import _terminal_refusal
+
+    if str(stored.get("status") or "") in {"completed", "failed", "cancelled"} and not _terminal_refusal(stored):
+        return retained_work_view(stored, task_id, None)
+    return retained_work_view(stored, task_id, root)
+
+
+def _handoff(root: pathlib.Path, stored: dict, place: Any) -> tuple[dict, bool] | None:
+    """The turn that handed this work off to answer the same place (the task that drafted it, ``objective_author``,
+    speaking there itself), with whether its end is recorded; None when this work is no such handoff."""
+    from ouroboros.presence_recovery import attempt_ended
+    from ouroboros.task_results import load_task_result
+
+    metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
+    author = metadata.get("objective_author") if isinstance(metadata.get("objective_author"), dict) else {}
+    turn_id = str(author.get("task_id") or "") if author.get("kind") == "task" else ""
+    turn = ((load_task_result(root, turn_id, strict=True) or {})  # unreadable raises: unknown, nothing goes now
+            if turn_id and turn_id != str(stored.get("task_id") or "") else {})
+    turn_place = ((turn.get("metadata") or {}).get("presence") or {}).get("place_id") if turn else None
+    if not turn or turn_place != place.place_id:
+        return None
+    return turn, str(turn.get("status") or "") in {"completed", "failed", "cancelled"} or attempt_ended(turn, root)
+
+
+def _named_exit(turn: dict, stored: dict) -> bool:
+    """The turn's own record names this work as its deferred exit (``presence_work_ref``)."""
+    handed = turn.get("metadata") if isinstance(turn.get("metadata"), dict) else {}
+    return str(handed.get("presence_work_ref") or "") == str(stored.get("task_id") or "\0")
+
+
+def _automatic_reply_target(stored: dict, event: dict, handoff: tuple[dict, bool] | None) -> str:
+    """The message an automatic output answers: its producer's own selected input (``presence_reply_anchor``); for
+    work a turn handed off, the input that turn's deferred exit answered once its terminal names this work; else the
+    producer's waking message."""
+    metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
+    anchor = metadata.get("presence_reply_anchor")
+    if not (isinstance(anchor, dict) and isinstance(anchor.get("message"), dict)) and handoff is not None \
+            and _named_exit(handoff[0], stored):
+        anchor = (handoff[0].get("metadata") or {}).get("presence_reply_anchor")
+    message = anchor.get("message") if isinstance(anchor, dict) and isinstance(anchor.get("message"), dict) else {}
+    return str(message.get("message_id") or (event.get("message") or {}).get("message_id") or "")
+
+
+def _tool_sent(root: pathlib.Path, producer: str, key: str, text: str, reply_to: str) -> bool:
+    """These exact words already left through the producer's own tool send into this conversation as its answer to
+    the same message (its delivered or accepted receipt there, naming that ``reply_to``)."""
+    from ouroboros.presence_runner import _live_task_rows
+
+    for row in _live_task_rows(root, producer, key):
+        transport = row.get("transport") if isinstance(row.get("transport"), dict) else {}
+        message = transport.get("message") if isinstance(transport.get("message"), dict) else {}
+        if (row.get("type") == "presence_delivery" and (transport.get("origin") or {}).get("kind") == "tool"
+                and (transport.get("delivery") or {}).get("state") in {"delivered", "accepted"}
+                and row.get("text") == text and str(message.get("reply_to") or "") == reply_to):
+            return True
+    return False
+
+
+def _said_held(root: pathlib.Path, key: str, letter_id: str) -> bool:
+    """An automatic output's one hold (``_deliver_output``) is already said in its room: it stays its end."""
+    from ouroboros import dialogue_store
+    from ouroboros.places import conversation_chat_id
+
+    return bool(dialogue_store.rows_by_client_id(root, f"place-notice:{letter_id}:held",
+                                                 chat_id=conversation_chat_id(key), limit=1))
+
+
+def _deliver_output(root: pathlib.Path, place: Any, key: str, *, producer: str, output_ref: str, text: str,
+                    reply_to: str, source_event_id: str, kind: str) -> tuple[bool, float | None]:
+    """One automatic output, one end: a confirmed delivery or refusal (in canonical receipts or preserved on ``sent/``)
+    reconciles its receipt before any current switch/pause/rules check and sends nothing. Unreadable stores, Panic,
+    unreadable switch, and lawful Pause or Silence keep an unsent reply owed without forgetting it; genuine rule
+    changes, unrecorded approvals, or unusable/revoked links hold it honestly once."""
+    from ouroboros import peer_links
+    from ouroboros.place_reply import record_notice
+
+    letter_id = message_letter_id(place.conversation_id, output_ref)
+    origin = {"kind": "automatic", "task_id": producer, "source_event_id": source_event_id}
+    earlier, states, record, _read_error = _earlier(root, place.conversation_id, place.account_id, letter_id)
+    if earlier in {"delivered", "failed"}:
+        done = _reconcile_confirmed(
+            root, place.conversation_id, place.account_id, letter_id,
+            earlier=earlier, states=states, record=record, text=text, reply_to=reply_to, origin=origin,
+        )
+        return (True, None) if done.get("recorded") else (False, 0.0)
+    if earlier == "unknown":
+        return False, None
+    if earlier == "uncertain":
+        prior, prior_err = _prior_envelope(root, place.conversation_id, place.account_id, letter_id, record, states)
+        if prior_err:
+            return False, None
+        reply_to, mismatch = _pin_prior_envelope(prior, account_id=place.account_id, text=text, reply_to=reply_to)
+        if mismatch is not None:
+            return _hold_output(root, place, key, letter_id, states, text=text, reply_to=reply_to, origin=origin,
+                                why=mismatch[1])
+    if _said_held(root, key, letter_id) or _tool_sent(root, producer, key, text, reply_to):
+        return True, None
+    _link, pre_hold = _resolve_outgoing(root, place.place_id, place.conversation_id,
+                                        expected_account_id=place.account_id)
+    if pre_hold is not None:
+        if pre_hold[0] in _STILL_OWED:
+            return False, None
+        return _hold_output(root, place, key, letter_id, states, text=text, reply_to=reply_to, origin=origin,
+                            why=pre_hold[1])
+    try:
+        owed_row = peer_links.owed_record(root, place.conversation_id, producer)
+    except peer_links.PeerLinkError:
+        return False, None
+    approved = (owed_row or {}).get("approved")
+    basis = approved.get(hashlib.sha256(text.encode("utf-8")).hexdigest()) if isinstance(approved, dict) else None
+    if not basis:
+        return _hold_output(root, place, key, letter_id, states, text=text, reply_to=reply_to, origin=origin,
+                            why="the rules these words were approved under are not recorded; nothing was sent")
+    basis_hold = _check_speech_basis(root, place.place_id, place.conversation_id, kind=kind, approved_basis=basis,
+                                     expected_account_id=place.account_id)
+    if basis_hold is not None:
+        if basis_hold[0] in _STILL_OWED:
+            return False, None
+        return _hold_output(root, place, key, letter_id, states, text=text, reply_to=reply_to, origin=origin,
+                            why=basis_hold[1])
+
+    def ready() -> tuple[str, str] | None:
+        return _check_speech_basis(root, place.place_id, place.conversation_id, kind=kind, approved_basis=basis,
+                                   expected_account_id=place.account_id)
+
+    sent = send_peer_message(root, place.place_id, letter_id=letter_id, text=text, reply_to=reply_to, ready=ready,
+                             origin=origin, link_id=place.conversation_id, account_id=place.account_id)
+    state, code, held = sent["state"], str(sent.get("code") or ""), str(sent.get("held_code") or "")
+    if state in {"delivered", "failed"}:
+        return (True, None) if sent.get("recorded") else (False, 0.0)
+    if state in {"busy", "unknown"} or code in _STILL_OWED or held in _STILL_OWED:
+        return False, None
+    last = bool(sent.get("spent")) or code == "attempts_spent"
+    if state in {"retry", "uncertain"} and not last and not held:
+        return False, float(sent.get("retry_after") or 0.0)
+    why = str(sent.get("message") or code)
+    if last:  # its last pass: said once, and nothing more is sent automatically
+        record_notice(root, place_id=place.place_id, conversation_key=key, task_id=producer,
+                      text=f"Reply not confirmed: {why}; nothing more is sent automatically",
+                      identity=f"{letter_id}:held", held_text=text)
+        return True, None
+    record_notice(root, place_id=place.place_id, conversation_key=key, task_id=producer, text=f"Reply held: {why}",
+                  identity=f"{letter_id}:held", held_text=text)
+    return True, None
+
+
+def _hold_output(root: pathlib.Path, place: Any, key: str, letter_id: str, states: set, *, text: str, reply_to: str,
+                 origin: dict, why: str) -> tuple[bool, float | None]:
+    """An automatic output held before any POST of this pass: its one hold, said in its room with its words beside it.
+    A confirmed earlier outcome reconciles its receipt instead of holding; an unreadable store keeps the reply owed;
+    an earlier unconfirmed attempt is said as ``uncertain`` first and never called unsent."""
+    from ouroboros.place_reply import record_notice
+
+    earlier, cur_states, record, _read_error = _earlier(root, place.conversation_id, place.account_id, letter_id)
+    if earlier in {"delivered", "failed"}:
+        done = _reconcile_confirmed(
+            root, place.conversation_id, place.account_id, letter_id,
+            earlier=earlier, states=cur_states, record=record, text=text, reply_to=reply_to, origin=origin,
+        )
+        return (True, None) if done.get("recorded") else (False, 0.0)
+    if earlier == "unknown":
+        return False, None
+    if earlier == "uncertain" and "uncertain" not in (states | cur_states):
+        sent_as = record.get("origin") if isinstance(record.get("origin"), dict) else {}
+        rec_text = str(record["text"]) if ("text" in record and record["text"] is not None) else text
+        rec_reply_to = (str(record["reply_to"]) if ("reply_to" in record and record["reply_to"] is not None)
+                        else reply_to)
+        if not _record_receipt(
+            root, place.conversation_id, place.account_id, letter_id, "uncertain",
+            text=rec_text, reply_to=rec_reply_to, origin=sent_as or origin,
+        ):
+            return False, None
+    if earlier == "uncertain":
+        why += " now, and an earlier attempt of these words is unconfirmed: it may have arrived"
+    record_notice(root, place_id=place.place_id, conversation_key=key, task_id=str(origin.get("task_id") or ""),
+                  text=f"Reply held: {why}", identity=f"{letter_id}:held", held_text=text)
+    return True, None

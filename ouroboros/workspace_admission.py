@@ -482,3 +482,39 @@ def bounded_workspace_preflight(workspace_root: Any, *, timeout_sec: float = 8.0
             "error": f"preflight exceeded {timeout_sec:.0f}s cap at admission; snapshot skipped (disclosed)",
         }
     return dict(result["summary"])
+
+
+def compose_task_text(
+    description: str,
+    *,
+    workspace_root: Optional[pathlib.Path],
+    workspace_mode: str,
+    memory_mode: str,
+    workspace_preflight: dict[str, Any],
+    attachments: Any,
+) -> str:
+    """The text of a task the HTTP door admits (``gateway.tasks``): its description, then the
+    ``[HEADLESS_WORKSPACE]`` block (``compose_workspace_block``; folded into a block the description
+    already carries) and its ``[ATTACHMENTS]`` lines (``artifacts.render_attachment_lines``)."""
+    from ouroboros.artifacts import render_attachment_lines
+
+    parts = [description]
+    if workspace_root is not None:
+        # SSOT block (v6.58.0): the same [HEADLESS_WORKSPACE] guidance the promote
+        # path embeds, so the two admission surfaces render identical context.
+        workspace_lines = compose_workspace_block(
+            workspace_root=workspace_root,
+            workspace_mode=workspace_mode,
+            memory_mode=memory_mode,
+            workspace_preflight=workspace_preflight,
+        )
+        if "[HEADLESS_WORKSPACE]" in description and "[END_HEADLESS_WORKSPACE]" in description:
+            marker = "[END_HEADLESS_WORKSPACE]"
+            idx = description.rfind(marker)
+            parts = [description[:idx].rstrip(), "\n", workspace_lines, description[idx:]]
+        else:
+            parts.append(f"\n\n[HEADLESS_WORKSPACE]\n{workspace_lines}[END_HEADLESS_WORKSPACE]")
+    rendered = render_attachment_lines(attachments)
+    if rendered:
+        parts.append(f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]")
+    return "".join(parts)

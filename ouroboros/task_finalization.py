@@ -378,6 +378,8 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     origin = str(usage.get("terminal_origin") or "")
     if origin in _STAMPED_TERMINAL_ORIGINS:
         fields["terminal_origin"] = origin
+    if isinstance(stamp := usage.get("peer_reply"), dict):  # what a letter root's final gives its sender (peer_letters)
+        fields["peer_reply"] = dict(stamp) if origin == TERMINAL_ORIGIN_MODEL_FINAL else {}
     path = str(usage.get("terminal_salvage_path") or "")
     if path:
         fields["terminal_salvage_path"] = path

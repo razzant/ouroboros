@@ -551,11 +551,15 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
     my human's reply first (R3) and ends its wake quiet; a root it handed off keeps the final its Project reads. An
     admitted handoff stays deferred either way; words that are not speech never ride it (``quiet`` in the completion).
     A door connector's final is never words (``door``). The selection reads its place once: the records decision, the
-    note and the hold meet the same state, so a reactivation meanwhile changes only the next selection."""
+    note and the hold meet the same state, so a reactivation meanwhile changes only the next selection. A run with no
+    carrier may be a letter's root, whose final is offered to the linked Ouroboros that wrote it across the same
+    boundary (``peer_letters.prepare_letter_reply``)."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = carrier_now(ctx, metadata)
     if not carrier:
-        return True, ""
+        from ouroboros.peer_letters import prepare_letter_reply
+
+        return prepare_letter_reply(ctx, text, quiet=quiet)
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.presence_continuation import _handoff_ref, reply_anchor, selection_for
     root = canonical_data_root(ctx)
@@ -587,7 +591,9 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
         if held:
             ctx._focus_reply_hold = held
         elif not door and getattr(ctx, "_focus_checked_reply", None) != digest:
+            from ouroboros.peer_letters import note_reply_approved, reply_basis
             from ouroboros.safety import check_safety
+            before = reply_basis(root, place, metadata)  # a linked Ouroboros's rules, read ahead of this reading
             allowed, message = check_safety("place_reply", subject, ctx=ctx)
             if not allowed:
                 return False, message
@@ -596,6 +602,8 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
                               task_id=ctx.task_id, text="Safety note on this turn's reply: " + message,
                               identity=f"{ctx.task_id}:{digest}:safety-note")
             ctx._focus_checked_reply = digest
+            if before is not None:  # its words leave later only under the rules this reading met
+                note_reply_approved(root, place, ctx.task_id, text, before, reply_basis(root, place, metadata))
     record = quiet or bool(held) or door
     outcome = "deferred" if _handoff_ref(ctx) else "silent" if record else "message"
     old = getattr(ctx, "_presence_completion", {}) or {}

@@ -399,6 +399,10 @@ def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
             queue.persist_queue_snapshot(reason="presence_turn_settled")
         except Exception:
             log.debug("presence settlement snapshot failed for %s", turn_id, exc_info=True)
+    if root := getattr(ctx, "DRIVE_ROOT", None) or queue.DRIVE_ROOT:
+        from ouroboros.peer_replies import deliver_owed  # a linked Ouroboros's reply leaves at its end
+
+        deliver_owed(Path(root), turn_id)
 
 
 def _same_process(slot: Any, pid: Any) -> bool:

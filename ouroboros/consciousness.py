@@ -727,6 +727,7 @@ class BackgroundConsciousness:
                 return "Background consciousness stays disabled while Panic controls await persistence."
             if source != OWNER_STOP and self._stopped and self._stop_source != AGENT_STOP:
                 return held_stop_text(self._stop_source)  # held here even when its own write failed
+            after_panic = source == OWNER_STOP and self._saved_stop_source() == PANIC_STOP  # my human's own return
             refusal, note = _persist_start(source)
             if refusal:
                 return refusal
@@ -746,6 +747,10 @@ class BackgroundConsciousness:
                 due = min(due, max(named, last + self.floor))
             self._set_next_wake(due, appointment=True)
             at = time.strftime('%H:%M', time.localtime(self._next_wake_at))
+        if after_panic:  # the replies my linked Ouroboroses are still owed go now, as at a start (never after an Off)
+            from ouroboros.peer_replies import resume_returned
+
+            resume_returned(self._drive_root)
         from ouroboros.consciousness_view import on_sentence
         try:  # where it may speak now: one read that never holds the start (the words 15.11, 5A)
             from ouroboros.places import load_places

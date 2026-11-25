@@ -118,6 +118,22 @@ def test_the_outbox_delete_follows_a_locked_fsynced_append_on_a_restored_line_bo
     assert [row["type"] for row in c.custody_rows(tmp_path)] == [c.STARTED, c.SETTLED]  # one row per event id
 
 
+def test_a_yielding_incident_never_replaces_a_standing_one_in_either_order():
+    """Two writers can record one run's incidents in either order (a Stop that could not be verified, an observation
+    that merely stopped). In the one reducer a row its writer marks ``yields`` never replaces a standing incident, so
+    the run keeps the Stop's whichever landed first; alone it stands, and an ordinary row always takes the run's row."""
+    def incident(*rows):
+        state: dict = {}
+        for row in rows:
+            c._apply(state, {"type": c.CONTAINMENT_FAULT, "run_id": "run", "task_id": "task", **row})
+        return state["run"].containment_fault.get("reason")
+
+    stop, lost = {"reason": "cancel_unreachable"}, {"reason": "peer_observation_lost", "yields": True}
+    assert incident(stop, lost) == incident(lost, stop) == "cancel_unreachable"
+    assert incident(lost) == incident(lost, lost) == "peer_observation_lost"
+    assert incident(stop, {"reason": "cancel_unverified"}) == "cancel_unverified", "an ordinary row still replaces"
+
+
 def test_a_repeated_started_keeps_the_settlement_and_the_containment_fault(tmp_path):
     """M6: an idempotent re-start after SETTLED keeps the run's cost, spend disclosure,
     engine model/profile and terminal state; one after CONTAINMENT_FAULT keeps the fault —

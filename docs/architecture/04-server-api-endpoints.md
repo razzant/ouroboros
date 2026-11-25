@@ -2,7 +2,7 @@
 
 Browser/CLI routes: `gateway/router.py`; Host Service: §12. Tests check this table in both directions. Shapes: `GET /api/contract`.
 
-`NetworkAuthGate` runs `browser_boundary.py` first on every request/handshake, loopback included: foreign/opaque pages get 403 (WS 4403), passive files pass (DEPLOYMENT). `OUROBOROS_NETWORK_PASSWORD` gates non-loopback via an expiring HMAC session cookie (refused WS closes pre-accept with 4401); unset leaves remote access open by operator choice (CLIENT_CONTRACT §3, DEPLOYMENT). Widget lease reads take only their lease (§3) and authenticate nothing else.
+`NetworkAuthGate` runs `browser_boundary.py` first on every request/handshake, loopback included: foreign/opaque pages get 403 (WS 4403), passive files pass (DEPLOYMENT). `OUROBOROS_NETWORK_PASSWORD` gates non-loopback via an expiring HMAC session cookie (refused WS closes pre-accept with 4401); unset leaves remote access open by operator choice (CLIENT_CONTRACT §3, DEPLOYMENT). A valid `X-Ouroboros-Link` is my linked Ouroboros, on letter routes only (§12). Widget lease reads take only their lease (§3) and authenticate nothing else.
 
 `server_web.ServedUI` (`server_web.py`) applies `OUROBOROS_UI_DIR` (§7) per generation to `/`, `/static/*`, `onboarding.html` and `auth/index.html`; one record feeds the auth gate, builtin index's response-only owner marker and `StateResponse.served_ui` (source, not digest). Builtin `/onboarding/static/*` and the author kit stay independent; builtin files revalidate `private` (ETag); Telegram phones keep only `GET /static/*`. `GzipText` gzips GET 200 text from 1 KiB (checked against declared `Content-Length`, else the first body chunk, so a stream without `Content-Length` whose first chunk is short passes uncompressed; weak ETag), excluding event streams, downloads and outside stored files (selection, `?builtin=1`, `/auth/*`, fallback: CLIENT_CONTRACT §2–4).
 
@@ -115,6 +115,16 @@ Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity:
 | POST | `/api/places/{place_id}` | atomic owner choices |
 | GET | `/api/places/{place_id}/rooms` | captured canonical rooms (§12) |
 | DELETE | `/api/places/{place_id}` | disconnect, keeping room history |
+| POST | `/api/letters` | a linked Ouroboros's letter, answer or message (§12) |
+| GET | `/api/letters/{letter_id}` | |
+| GET | `/api/letters/{letter_id}/state` | |
+| GET | `/api/letters/{letter_id}/result` | |
+| POST | `/api/letters/{letter_id}/cancel` | |
+| POST | `/api/peer-links/invite` | a link's introduction at the owner doors below; `introduce` under the invitation token (§12) |
+| POST | `/api/peer-links/accept` | |
+| POST | `/api/peer-links/introduce` | |
+| POST | `/api/peer-links/{link_id}/confirm` | |
+| POST | `/api/peer-links/{link_id}/revoke` | |
 | POST | `/api/circles` | |
 | POST | `/api/circles/{circle_id}` | |
 | DELETE | `/api/circles/{circle_id}` | |

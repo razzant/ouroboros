@@ -12,7 +12,7 @@ from ouroboros.store import StoreError
 
 
 def update_place(root, place_id: str, body: dict) -> dict:
-    allowed = {"state", "wakes", "add_note", "remove_note", "working_folder", "model",
+    allowed = {"state", "wakes", "add_note", "remove_note", "working_folder", "model", "peer",
                "confirm_owner_account", "revoke_owner_account", "circle_id", "description", "expected_revision"}
     if not isinstance(body, dict) or not body or set(body) - allowed:
         raise PlaceError("place_update_invalid")
@@ -25,7 +25,9 @@ def update_place(root, place_id: str, body: dict) -> dict:
     for field, value in body.items():
         if field == "expected_revision":
             continue
-        if field == "confirm_owner_account":
+        if field == "peer":  # a linked Ouroboros's two facts, {mine, may_start}: written here, by my human, only
+            actions.append(("set_peer", value if isinstance(value, dict) and set(value) <= {"mine", "may_start"} else {}))
+        elif field == "confirm_owner_account":
             if not isinstance(value, dict) or set(value) - {"platform_actor_id", "label", "account_id"}:
                 raise PlaceError("place_account_invalid")
             actions.append((field, value))

@@ -76,7 +76,8 @@ def _manage_schedules(
     scheduled, from any of its conversations, and may withdraw one (``delete``):
     an admitted guest room never reads or rewrites the rest of this mind's table
     (``queue_schedules.presence_promise``, rechecked on the stored row under the
-    write's transaction).
+    write's transaction). Work a linked Ouroboros's letter began changes only the
+    schedules that letter's work wrote (``peer_letters.letter_schedule``), the same way.
     """
     from supervisor.queue import (
         SCHEDULE_ACTIONS, ScheduleRefused, ScheduleStoreUnreadable, load_schedule_store,
@@ -94,6 +95,20 @@ def _manage_schedules(
                   "one of its questions; the owner's other schedules and other changes stay out of reach."),
         ))
     owned_by = functools.partial(presence_promise, binding) if binding is not None else None
+    from ouroboros.peer_letters import letter_origin, letter_schedule
+
+    letter_meta = getattr(ctx, "task_metadata", None)  # work a letter began changes only that letter's own schedules
+    if owned_by is None and operation not in {"list", "get"} and letter_origin(letter_meta) is not None:
+        owned_by = functools.partial(letter_schedule, letter_meta)  # rechecked under the write's transaction too
+        try:
+            rows = load_schedule_store(getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None))["tasks"]
+        except Exception:  # noqa: BLE001 - an unreadable table proves no row this letter's
+            rows = []
+        row = next((row for row in rows if str(row.get("id") or "") == str(schedule_id or "").strip()), None)
+        if row is None or not owned_by(row):
+            return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
+                "⚠️ LETTER_WORK_CHANGES_ONLY_ITS_SCHEDULES: this work began with a letter, and that schedule is not "
+                "one this letter's work wrote; my human's other schedules stay theirs to change. Nothing changed.")))
     if operation not in {"list", "get"} and not _root_schedule_mutation_authorized(ctx):
         return publish_no_effect(ctx, ToolResult(
             status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
@@ -555,6 +570,11 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not task_id:
         return publish_no_effect(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=("ERROR: FOLLOWUP_TASK_ID_REQUIRED: a durable follow-up must belong to a real task.")))
+    if params.get("notify") is True or str(params.get("relation") or "") != "related":  # a note is independent too
+        from ouroboros.peer_letters import separate_work_refusal
+
+        if refusal := separate_work_refusal(getattr(ctx, "task_metadata", None), "an independent follow-up or a note"):
+            return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
     notify = False if params.get("notify") is None else params.get("notify")  # models may send null
     if not isinstance(notify, bool):
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
@@ -805,6 +825,10 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     record["task"]["metadata"].update(declared_own_origin(writer_metadata) if mine else consciousness_origin_metadata(
         metadata_src, started_root=relation["kind"] == "independent",
         owner_basis=owner_basis if relation["kind"] == "independent" else None))
+    from ouroboros.peer_letters import related_money
+
+    # A letter's related step keeps that letter's producer cap beside the billing group its relation binds.
+    record["task"]["metadata"].update(related_money(metadata_src, relation["kind"]))
     from ouroboros.owner_words import carried_owner_corpus
 
     # My human's words ride by value, as a drafted start's, the cited ones among them; none: no claim.

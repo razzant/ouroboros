@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ouroboros import transcript_prefix
-from ouroboros.tool_policy import format_capability_omissions, initial_tool_schemas
+from ouroboros.tool_policy import format_capability_omissions, initial_tool_schemas, routine_capability_omissions
 from ouroboros.window_learning import RouteSchemas, fit_route_schemas
 
 
@@ -41,7 +41,8 @@ def history_tool_names(messages: list) -> set[str]:
 
 
 def restore_omissions(tools):
-    omissions = tools.capability_omissions() if hasattr(tools, "capability_omissions") else []
+    omissions = routine_capability_omissions(
+        tools.capability_omissions() if hasattr(tools, "capability_omissions") else [])
     return ([{"role": "user", "content": "[SYSTEM NOTICE]\n" + "\n".join(format_capability_omissions(omissions))}]
             if omissions else [])
 

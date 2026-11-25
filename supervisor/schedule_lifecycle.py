@@ -437,6 +437,12 @@ def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | 
             # Normalization below drops template lineage; keep its provenance.
             incoming["followup_origin"] = origin_of(incoming)
         from ouroboros.consciousness_authority import stamp_schedule_writer
+        from ouroboros.peer_letters import separate_work_refusal
+
+        # The record seam: work a letter began writes no independent schedule (refused before stamp, audit and write).
+        if relation_kind(incoming) == "independent" and (refusal := separate_work_refusal(writer_metadata,
+                                                                                          "an independent schedule")):
+            raise ScheduleRefused("letter_work_starts_no_separate_schedule", refusal)
         stamp_schedule_writer(incoming, writer_kind, writer_metadata, declare=declare,  # ``mine`` on a new row
                               started_root=relation_kind(incoming) == "independent")
         incoming["task"] = normalize_template(incoming)

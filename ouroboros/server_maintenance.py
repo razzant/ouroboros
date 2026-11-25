@@ -1464,6 +1464,8 @@ def _run_startup_task_recovery(
     no-provider lifespan calls it without spawning anything. There is no racing
     lifespan recovery once a supervisor can run. Unknown/live prior ownership
     defers the destructive work, without waiting or resurrecting a model task.
+    A completed pass then resumes the replies a restart left owed to linked
+    Ouroboroses (``server_boot.resume_peer_replies``); a deferred one leaves them owed.
     """
     report = {"recovered": [], "unresolved": [], "protected": [], "errors": []}
     if skip_live_data:
@@ -1538,4 +1540,7 @@ def _run_startup_task_recovery(
         report["unresolved"].append("*")
         report["errors"].append("unknown_obligations_unavailable")
         log.warning("Startup repair gaps unavailable; destructive pruning remains deferred", exc_info=True)
+    from ouroboros.server_boot import resume_peer_replies
+
+    resume_peer_replies(drive_root)  # their producers are reconciled above
     return report

@@ -771,12 +771,14 @@ def _preview_payload(full: Dict[str, Any], text: str, artifact: Optional[Dict[st
               "it via start_char. A review or research result is NOT consumed, and must not "
               "be reported as its verdict, until the whole artifact has been read.")
              if full_ok else
-             "PARTIAL and INCOMPLETE AT THE SOURCE: the engine reported its primary output "
-             "as a bounded preview and the full artifact could not be matched to the size "
-             "or the preview the run itself reported (see primary_output_full; the engine "
-             "publishes no content hash for it, so that match is the whole of the check). "
-             "Treat this result as incomplete evidence, not as "
-             "the verdict; it can never be acknowledged as fully read.")
+             (str(full_note.get("note") or "") if isinstance(full_note, dict)
+              and full_note.get("status") == "content_withheld" else
+              "PARTIAL and INCOMPLETE AT THE SOURCE: the engine reported its primary output "
+              "as a bounded preview and the full artifact could not be matched to the size "
+              "or the preview the run itself reported (see primary_output_full; the engine "
+              "publishes no content hash for it, so that match is the whole of the check). "
+              "Treat this result as incomplete evidence, not as "
+              "the verdict; it can never be acknowledged as fully read."))
             if artifact else
             "PARTIAL and UNRECOVERABLE INLINE: the full payload could not be retained. "
             "Treat this result as incomplete evidence, not as the verdict."

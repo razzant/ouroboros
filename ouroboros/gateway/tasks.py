@@ -66,7 +66,8 @@ from ouroboros.contracts.task_contract import (
 )
 from ouroboros.outcomes import public_task_result
 from ouroboros import artifacts as artifact_store
-from ouroboros.artifacts import render_attachment_lines as _render_attachment_lines
+from ouroboros.artifacts import render_attachment_lines as _render_attachment_lines  # noqa: F401 - the chat lanes read it here
+from ouroboros.workspace_admission import compose_task_text as _compose_task_text
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.task_results import (
     STATUS_FAILED,
@@ -119,6 +120,8 @@ _RESERVED_METADATA_KEYS = frozenset({
     # Who wrote the text, the words a tree carries and a control press: host attestations, never a caller's.
     "objective_author", "context_author", "owner_corpus", "ui_control", "declared_author", "admission_author",
     "governing_owner_words", "governing_owner_words_absent", "governing_schedule_text",
+    # A linked Ouroboros's letter and its agent author: stamped by the letter door alone (gateway/peer_letters_api).
+    "peer_letter", "letter_author",
 })
 
 
@@ -497,8 +500,9 @@ def _api_executor_metadata(body: dict, raw_metadata: dict, workspace_root: Optio
     }}
 
 
-def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
-    """Settle the existing reservation, staging and durable admission as one unit."""
+def _create_task_from_body(request: Request, body: Any, *, host_facts: Optional[dict] = None) -> JSONResponse:
+    """Settle the existing reservation, staging and durable admission as one unit. ``host_facts`` (the letter
+    door's: its room ``chat_id`` and reserved ``metadata``) are facts no request body can carry."""
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     if schema_errors := validate_ingress(body, TaskCreateRequest):  # executable gateway ABI (ABI-3, Q7=A): derived-schema ingress gate
@@ -562,8 +566,8 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
     if workspace_root and task_type != "task":
         return json_error("external workspace tasks must use type='task'", 400)
     try:
-        chat_id = ingress_chat_id(body.get("chat_id"), drive_root, _task_project_id,
-                                  source=body.get("source"), project_basis=project_basis)
+        chat_id = host_facts["chat_id"] if host_facts else ingress_chat_id(
+            body.get("chat_id"), drive_root, _task_project_id, source=body.get("source"), project_basis=project_basis)
         depth = parse_task_depth(body.get("depth"), default=0)
     except ProjectThreadConflict as exc:
         return json_error(str(exc), 400)
@@ -594,6 +598,7 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
     except ValueError as exc:
         return json_error(str(exc), 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
+    metadata.update((host_facts or {}).get("metadata") or {})
     allowed_resources, resource_policy, disabled_tools, acceptance_claims, policy_error = (
         _fold_contract_policies(body, raw_metadata, metadata)
     )
@@ -1120,8 +1125,10 @@ def _run_cascade_cancel(task_id: str) -> bool:
         return False
 
 
-def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str) -> Optional[Dict[str, Any]]:
-    """Record a hard Stop's durable intent before anything is torn down.
+def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str, source: str = "",
+                 request_origin: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Record a hard Stop's durable intent before anything is torn down. ``source`` and ``request_origin`` name an
+    ingress that is not the app's Stop (a linked Ouroboros cancelling its letter); absent, it is the app's.
 
     No liveness probe precedes it: a live, queued, or persisted but never
     admitted target gets its intent first, so an admission racing the click is
@@ -1158,11 +1165,11 @@ def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str) -> Optiona
                 return None
         elif not row and not still_owned():
             return None
-    source = "http_cascade" if cascade else "http_single"
+    source = source or ("http_cascade" if cascade else "http_single")
     record = functools.partial(
         request_cancel, DRIVE_ROOT, task_id, source=source, stop_action_id=stop_action_id,
         observation=observe_cancellation_target(
-            DRIVE_ROOT, task_id, request_origin={"kind": "http_client", "source": source}),
+            DRIVE_ROOT, task_id, request_origin=request_origin or {"kind": "http_client", "source": source}),
         # §13.1: an omitted/empty-body or explicit-immediate request IS the
         # immediate policy — it monotonically HARDENS a pending graceful
         # intent (Stop-now during the wait) and mints a legacy row otherwise.
@@ -1505,39 +1512,6 @@ def _normalize_attachments(value: Any) -> List[Dict[str, str]]:
         # ``stage_task_attachments`` owns the typed rejection reason.
         out.append({"path": path, "label": label})
     return out
-
-
-def _compose_task_text(
-    description: str,
-    *,
-    workspace_root: Optional[pathlib.Path],
-    workspace_mode: str,
-    memory_mode: str,
-    workspace_preflight: Dict[str, Any],
-    attachments: Any,
-) -> str:
-    parts = [description]
-    if workspace_root is not None:
-        from ouroboros.workspace_admission import compose_workspace_block
-
-        # SSOT block (v6.58.0): the same [HEADLESS_WORKSPACE] guidance the promote
-        # path embeds, so the two admission surfaces render identical context.
-        workspace_lines = compose_workspace_block(
-            workspace_root=workspace_root,
-            workspace_mode=workspace_mode,
-            memory_mode=memory_mode,
-            workspace_preflight=workspace_preflight,
-        )
-        if "[HEADLESS_WORKSPACE]" in description and "[END_HEADLESS_WORKSPACE]" in description:
-            marker = "[END_HEADLESS_WORKSPACE]"
-            idx = description.rfind(marker)
-            parts = [description[:idx].rstrip(), "\n", workspace_lines, description[idx:]]
-        else:
-            parts.append(f"\n\n[HEADLESS_WORKSPACE]\n{workspace_lines}[END_HEADLESS_WORKSPACE]")
-    rendered = _render_attachment_lines(attachments)
-    if rendered:
-        parts.append(f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]")
-    return "".join(parts)
 
 
 def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
