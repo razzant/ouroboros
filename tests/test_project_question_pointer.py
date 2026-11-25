@@ -316,11 +316,6 @@ def test_project_question_pointer_display_fields_share_one_contract():
     details = get_args(hints["option_details"])[0]
     assert get_origin(details) is list and get_args(details) == (str,)
     assert get_args(hints["stake"]) == (str,)
-    api_types = (REPO_ROOT / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    typedef = re.search(r"@typedef \{Object\} ChatOutbound\b(?P<body>.*?)\n \*/", api_types, re.S)
-    assert typedef, "api_types.js missing ChatOutbound"
-    assert re.search(r"@property \{string\[\]=\} option_details\b", typedef.group("body"))
-    assert re.search(r"@property \{string=\} stake\b", typedef.group("body"))
 
     mirror = re.search(r"const MIRROR_FIELDS = \[([^\]]*)\]",
                        (REPO_ROOT / "web" / "modules" / "chat_decision.js").read_text(encoding="utf-8"))

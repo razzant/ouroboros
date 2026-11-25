@@ -253,12 +253,11 @@ def test_an_earlier_attempts_row_carries_the_stored_end_as_that_results_own_cloc
 
 def test_the_reply_author_label_is_a_published_field_of_live_frames_and_history_rows(chat):
     """What a Reply to a row signs (``chat_references.projection_fields``) rides the live frame and the replay of every
-    stored row, so the published types, their browser twins and the contract's words declare it, and the schema types
+    stored row, so the published types and the contract's words declare it, and the schema types
     it: the owner's row says You, an answer Ouroboros, the host's own row System."""
     import pathlib
 
     from ouroboros.gateway.reference_contracts import ChatReferenceFields
-    from tests.test_gateway_parity import _js_typedef_fields
 
     _produce(chat)
     chat.bridge.handle_web_message("Cue: greet the caller.", client_message_id="call:c1:open",
@@ -277,9 +276,6 @@ def test_the_reply_author_label_is_a_published_field_of_live_frames_and_history_
     assert validate_ingress({**rows[0], "reply_author_label": 3}, ChatHistoryMessage)
     assert "reply_author_label" in typing.get_type_hints(ChatReferenceFields) and "reply_author_label" in ROW_KEYS
     web = pathlib.Path(__file__).resolve().parents[1]
-    assert "reply_author_label" in _js_typedef_fields((web / "web/modules/api_types.js").read_text(encoding="utf-8"), "ChatOutbound")
-    assert "reply_author_label" in _js_typedef_fields(
-        (web / "web/modules/client_contract_types.js").read_text(encoding="utf-8"), "ChatHistoryMessage")
     assert "`reply_author_label`" in (web / "docs/CLIENT_CONTRACT.md").read_text(encoding="utf-8")
 
 
@@ -359,16 +355,13 @@ def test_paging_with_next_cursor_reaches_older_rows_without_repeating_them(chat)
     assert [row["history_id"] for row in again["messages"]] == [row["history_id"] for row in older["messages"]]
 
 
-def test_a_shared_row_and_a_reply_to_it_stay_inside_both_published_twins(chat):
+def test_a_shared_row_and_a_reply_to_it_stay_inside_the_published_contract(chat):
     """A Project's notice written to Main and the owner's direct Reply to it, made by the real producers: their live
     frames and their history rows in both rooms stay inside the published contract, with the facts a shared row adds
-    (``room_revisions``, ``also_rooms``, the Reply reference's ``target_home``) declared and typed on both twins."""
-    import pathlib
-
+    (``room_revisions``, ``also_rooms``, the Reply reference's ``target_home``) declared and typed on the contract."""
     from ouroboros.gateway.reference_contracts import ChatReplyReference
     from ouroboros.projects_registry import create_project
     from ouroboros.task_results import write_task_result
-    from tests.test_gateway_parity import _js_typedef_fields
 
     nova = int(create_project(chat.root, "nova", name="Nova")["chat_id"])
     write_task_result(chat.root, "nova-root", "running", chat_id=nova, title="nova-root")
@@ -399,6 +392,3 @@ def test_a_shared_row_and_a_reply_to_it_stay_inside_both_published_twins(chat):
         assert reply["reply_to"]["target_home"] == "work" and set(reply["reply_to"]) <= reference_keys
     # The reference is typed, not only present: a value outside the published one is refused.
     assert validate_ingress({**reply, "reply_to": {**reply["reply_to"], "target_home": "elsewhere"}}, ChatHistoryMessage)
-    twins = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "client_contract_types.js").read_text(
-        encoding="utf-8")
-    assert _js_typedef_fields(twins, "ChatReplyReference") == reference_keys

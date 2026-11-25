@@ -3,17 +3,15 @@
 Every request below goes through the real router (``collect_routes``) on a disposable data root.
 Each answer must use a status its contract entry lists, and its body must match one of the
 shapes bound to that status. A success body must also carry no key its shape does not declare,
-so a shape can never claim to be complete while the producer says more. Every published shape
-has exactly one field-identical JSDoc twin among the browser modules.
+so a shape can never claim to be complete while the producer says more. The wire fields are
+declared once, in the gateway contracts.
 """
 
 from __future__ import annotations
 
-import importlib
 from datetime import datetime, timedelta, timezone
 import json
 import pathlib
-import re
 import threading
 import typing
 
@@ -22,8 +20,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.router import collect_routes
-from ouroboros.gateway.schema import CONTRACT_MODULES, contract_document, contract_typed_dict, validate_ingress
-from tests.test_gateway_parity import _js_typedef_fields
+from ouroboros.gateway.schema import contract_document, contract_typed_dict, validate_ingress
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DOCUMENT = contract_document()
@@ -290,17 +287,6 @@ def test_spend_project_days_keeps_early_ledger_refusal_bound_to_the_requested_se
     assert alone.json() == {"project_days": {"available": False, "selector": "main", "error_code": "ledger_unavailable"}}
 
 
-# --- the browser mirror ----------------------------------------------------------------------
-
-def _owned_names() -> dict:
-    names = {name: contract_typed_dict(name) for name in DOCUMENT["schemas"]}
-    for module_name in ("ouroboros.gateway.client_contracts", "ouroboros.gateway.management_contracts",
-                        "ouroboros.gateway.history_contracts"):
-        module = importlib.import_module(module_name)
-        names.update({name: getattr(module, name) for name in module.__all__})
-    return names
-
-
 @pytest.mark.parametrize("outcome", ["unlisted", "failed", "unpublished"])
 def test_mcp_listing_evidence_matches_published_contracts(client, monkeypatch, tmp_path, outcome):
     from ouroboros import config, mcp_catalog, mcp_client
@@ -337,29 +323,6 @@ def test_mcp_listing_evidence_matches_published_contracts(client, monkeypatch, t
         assert attempt["ok"] is (outcome != "failed")
         invalid = {**row, "latest_attempt": {**attempt, "partial": "not a boolean"}}
         assert validate_ingress(invalid, contract_typed_dict("McpServerStatus"))
-
-
-def test_every_published_and_owned_shape_has_one_field_identical_browser_twin():
-    from ouroboros.review import is_gated_js_module
-
-    texts = {path.name: path.read_text(encoding="utf-8") for path in (REPO / "web" / "modules").glob("*.js")
-             if is_gated_js_module(path.relative_to(REPO).as_posix())}
-    assert len(DOCUMENT["schemas"]) > 150, "the contract lost its published shapes"
-    for name, cls in sorted(_owned_names().items()):
-        homes = [file for file, text in texts.items() if re.search(rf"@typedef \{{Object\}} {name}\b", text)]
-        assert len(homes) == 1, f"{name} needs exactly one JSDoc twin, found {homes}"
-        assert _js_typedef_fields(texts[homes[0]], name) == set(typing.get_type_hints(cls, include_extras=True)), name
-    assert all(module in CONTRACT_MODULES for module in (
-        "ouroboros.gateway.management_contracts", "ouroboros.gateway.history_contracts"))
-
-
-@pytest.mark.parametrize("name", ["WorkLead", "WorkPrimaryRoute", "WorkPendingRoute", "CitedModelWords", "WorkProcessing", "ProcessingReceipt",
-                                  "ProcessingTiers", "WorkMembers", "WorkMemberState", "WorkReason", "QueuedBehind"])
-def test_nested_work_contracts_have_a_field_identical_browser_twin(name):
-    # Inline schemas do not appear in the published document's top-level name list.
-    text = (REPO / "web" / "modules" / "work_types.js").read_text(encoding="utf-8")
-    assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"work contract twins lack {name}"
-    assert _js_typedef_fields(text, name) == set(typing.get_type_hints(contract_typed_dict(name), include_extras=True)), name
 
 
 def test_every_request_and_header_fact_is_published_for_the_journeys():

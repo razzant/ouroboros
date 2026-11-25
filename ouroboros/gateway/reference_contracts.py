@@ -27,6 +27,7 @@ class ChatInbound(TypedDict):
     project_id: NotRequired[str]
     reply_excerpt: NotRequired[ReplyExcerpt]
     reply_to: NotRequired[str]  # Host resolves the selected row/card at acceptance.
+    # raw surface observables at send time; client_surface.normalize_client_surface keeps their closed key set
     client_surface: NotRequired[dict]
     # The data-profile scope the serving document proves (server_web.data_profile_scope digest, stamped as the
     # builtin index's ouroboros-chat-preview-scope meta and read by the browser from it). gateway/ws.py refuses a

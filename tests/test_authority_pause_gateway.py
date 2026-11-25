@@ -65,12 +65,10 @@ def test_the_http_resume_refusal_keeps_the_launch_evidence(monkeypatch):
 
 
 def test_actual_authority_resume_success_matches_python_and_browser_contract(tmp_path, monkeypatch):
-    import pathlib
     from typing import get_type_hints
     from ouroboros import budget_pause as bp
     from ouroboros.gateway.client_contracts import TaskResumeResponse
     from ouroboros.gateway.schema import validate_ingress
-    from tests.test_gateway_parity import _js_typedef_fields
     from tests.test_authority_pause_composition import _park_with_body
 
     env, _row = _park_with_body(tmp_path, monkeypatch, False)
@@ -83,8 +81,6 @@ def test_actual_authority_resume_success_matches_python_and_browser_contract(tmp
         assert bp.budget_pause_row(tmp_path, "sleeper")["state"] == "resume_granted"
         fields = set(get_type_hints(TaskResumeResponse, include_extras=True))
         assert not validate_ingress(body, TaskResumeResponse) and set(body) <= fields
-        js = pathlib.Path(__file__).resolve().parents[1] / "web/modules/client_contract_types.js"
-        assert _js_typedef_fields(js.read_text(), "TaskResumeResponse") == fields
     finally:
         env.runtime.close(wait=True)
 

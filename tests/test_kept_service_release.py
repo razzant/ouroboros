@@ -358,13 +358,6 @@ def test_a_local_launch_is_one_row_under_its_declaration_id_on_the_windows_branc
         _end(pid, "")
 
 
-def test_the_ui_types_name_every_state_the_kept_contract_returns():
-    types = (Path(__file__).resolve().parents[1] / "web" / "modules" / "task_activity_types.js").read_text(encoding="utf-8")
-    assert "'capture_owed'" in types, "a capture-owed launch is listed"
-    assert "|'')=} backend" in types, "an ended launch has no backend to name"
-    assert "not_found capture-only" in types, "a capture-only retry can be ok"
-
-
 def test_unreadable_owed_declaration_does_not_release_its_producers_scratch(tmp_path, monkeypatch):
     """A temporary declaration read failure cannot turn an outstanding capture into disposable scratch."""
     data, scratch = _started(tmp_path)

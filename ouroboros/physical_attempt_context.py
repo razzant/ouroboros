@@ -152,7 +152,7 @@ class ContextAttemptObservation(TypedDict, total=False):
     applied: Literal["max", "low", "nano"]  # the mode the send is named in (``shown_mode``): Low for Low under Max
     books: Literal["whole", "maps"]  # the books' form in this send
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
-    cause: Literal["", "memory", "request", "route", "window", "after_start"]  # why lower; "" also when unknown
+    cause: Literal["", "memory", "request", "route", "window", "after_start"]  # why applied is lower than preferred_at_send; "" also when unknown
     target_missed: bool  # this send exceeded the owner's mode target (``context_target_miss``)
     no_memory_tokens: Optional[int]  # Low's missed target: the start's request with no memory at all, else None
     observed_at: str
