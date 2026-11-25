@@ -5,6 +5,9 @@ cursor; the working checkpoint makes that acknowledgement durable. A cursor
 never discharges a room duty. ``seen_outcome_states`` retains rendered feedback
 separately in the same ledger wait: it ends unread duties here and lets the
 terminal collector distinguish a received unwaited outcome from mere settlement.
+
+By default a wait wakes on the whole wave plus mail and controls; counted reviewer IDs
+are pinned to wave, operation and slot.
 """
 from __future__ import annotations
 

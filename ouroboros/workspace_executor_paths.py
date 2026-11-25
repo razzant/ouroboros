@@ -2,6 +2,9 @@
 
 General file/cwd mappings remain strict. Declared Docker outputs alone resolve in
 container space and carry a confirmed bind view to the artifact policy owner.
+
+Docker IDs are pinned and ``sh``/``readlink`` probed on confirmed local binds; no new
+roots are added.
 """
 from __future__ import annotations
 
