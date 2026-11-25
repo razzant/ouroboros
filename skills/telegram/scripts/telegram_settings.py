@@ -48,14 +48,17 @@ class TelegramSettingsError(RuntimeError):
 
 def _settings_path(state_dir: Path) -> Path:
     root = Path(state_dir).expanduser()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if path_is_link_or_reparse(root) or not root.is_dir():
-        raise TelegramSettingsError("Telegram state must be a real directory.")
-    root = root.resolve(strict=True)
-    path = root / _SETTINGS_NAME
-    if path_is_link_or_reparse(path):
-        raise TelegramSettingsError("Telegram settings are an unsafe link.")
-    return path
+    try:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if path_is_link_or_reparse(root) or not root.is_dir():
+            raise TelegramSettingsError("Telegram state must be a real directory.")
+        root = root.resolve(strict=True)
+        path = root / _SETTINGS_NAME
+        if path_is_link_or_reparse(path):
+            raise TelegramSettingsError("Telegram settings are an unsafe link.")
+        return path
+    except OSError as exc:
+        raise TelegramSettingsError("Could not access Telegram state directory.") from exc
 
 
 def load_settings(state_dir: Path) -> dict[str, Any]:
@@ -256,8 +259,11 @@ def settings_lock(state_dir: Path):
     """Cross-process exclusive lock guarding Telegram settings and owner pairing transitions."""
     path = _settings_path(state_dir)
     lock_path = path.with_name(_LOCK_NAME)
-    if path_is_link_or_reparse(lock_path):
-        raise TelegramSettingsError("Telegram settings lock is unsafe.")
+    try:
+        if path_is_link_or_reparse(lock_path):
+            raise TelegramSettingsError("Telegram settings lock is unsafe.")
+    except OSError as exc:
+        raise TelegramSettingsError("Could not access Telegram settings lock.") from exc
     try:
         fd = acquire_file_lock(lock_path, timeout_sec=2.0)
     except Exception as exc:

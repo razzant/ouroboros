@@ -457,7 +457,7 @@ class CustodyStore:
             updated = conn.execute(
                 "UPDATE inbox SET state='submitted', lease_until=0, lease_token='', submitted_at=?, submission_ref=?, "
                 "last_error='' WHERE event_id=? AND state='leased'" + held,
-                (now, str(turn_ref or work_ref)[:500], event_id, *args),
+                (now, utf8_safe(str(turn_ref or work_ref)[:500]), event_id, *args),
             )
             if updated.rowcount != 1:
                 conn.rollback()

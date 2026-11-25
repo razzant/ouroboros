@@ -13,7 +13,6 @@ from typing import Any, Dict, Optional
 from . import outbox_files
 from .custody import CustodyStore
 from .delivery import tool_origin
-from .events import utf8_safe
 from .file_access import (
     caller_scope,
     idempotency_fingerprint,
@@ -386,6 +385,21 @@ def _positive_id(value: Any, name: str) -> int:
     return parsed
 
 
+def _validated_request_id(request_id: Any, *, allow_generated: bool = False) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    raw = "" if request_id is None else str(request_id).strip()
+    if not raw:
+        return (uuid.uuid4().hex if allow_generated else "", None)
+    try:
+        raw.encode("utf-8")
+    except UnicodeEncodeError:
+        return None, {
+            "ok": False,
+            "code": "invalid_request_id",
+            "error": "request_id must be valid UTF-8 text.",
+        }
+    return raw, None
+
+
 def make_send_tool(api: Any, confirmed_account=lambda: "", place_binder=lambda *_a, **_k: None):
     def telegram_send(
         ctx=None,
@@ -401,6 +415,9 @@ def make_send_tool(api: Any, confirmed_account=lambda: "", place_binder=lambda *
         markdown: bool = True,
         items: Optional[list] = None,
     ) -> Dict[str, Any]:
+        receipt, id_err = _validated_request_id(request_id, allow_generated=True)
+        if id_err is not None:
+            return id_err
         target = str(chat_id or "").strip()
         selected_kind = str(kind or "message").strip()
         if re.fullmatch(r"-?[0-9]+", target) is None:
@@ -487,7 +504,7 @@ def make_send_tool(api: Any, confirmed_account=lambda: "", place_binder=lambda *
             raise
         if isinstance(binding, dict):
             payload["_place_binding"] = binding
-        receipt = utf8_safe(str(request_id or uuid.uuid4().hex).strip())
+        assert receipt is not None
         delivery_id, store = f"telegram-send:{receipt}", None
         fp = idempotency_fingerprint(payload)
         try:
@@ -582,6 +599,9 @@ def make_moderation_tool(api: Any, confirmed_account=lambda: "", place_binder=la
         until_date: int = 0,
         revoke_messages: bool = False,
     ) -> dict[str, Any]:
+        receipt, id_err = _validated_request_id(request_id)
+        if id_err is not None:
+            return id_err
         store = CustodyStore.shared(pathlib.Path(api.get_state_dir()) / "custody.sqlite3")
         account = _resolve_tool_account(ctx, confirmed_account)
         if not account:
@@ -595,7 +615,7 @@ def make_moderation_tool(api: Any, confirmed_account=lambda: "", place_binder=la
             target = str(chat_id).strip()
             if re.fullmatch(r"-?[0-9]+", target) is None:
                 raise ValueError("chat_id must be an exact numeric Telegram id")
-            if not str(request_id).strip():
+            if not receipt:
                 raise ValueError("request_id is required for a retryable operation")
             local_topic_id = _positive_id(topic_id, "topic_id") if topic_id is not None else None
             parameters: dict[str, Any] = {"chat_id": target}
@@ -631,7 +651,7 @@ def make_moderation_tool(api: Any, confirmed_account=lambda: "", place_binder=la
                 raise ValueError("unsupported Telegram moderation action")
         except (TypeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
-        receipt = str(request_id).strip()
+        assert receipt is not None
         scope = caller_scope(ctx)
         payload: Dict[str, Any] = {
             "kind": "moderation",
@@ -674,7 +694,10 @@ def make_receipt_tool(api: Any):
     def telegram_receipt(ctx: Any = None, *, request_id: str, operation: str = "send") -> dict[str, Any]:
         if operation not in {"send", "moderate", "operation"}:
             return {"ok": False, "error": "operation must be send, moderate, or operation"}
-        delivery_id = f"telegram-{operation}:{str(request_id).strip()}"
+        receipt, id_err = _validated_request_id(request_id)
+        if id_err is not None:
+            return id_err
+        delivery_id = f"telegram-{operation}:{receipt}"
         store = CustodyStore.shared(pathlib.Path(api.get_state_dir()) / "custody.sqlite3")
         payload = store.outbox_payload(delivery_id)
         if not payload or not receipt_visible_to(ctx, payload):
@@ -756,6 +779,9 @@ def make_operation_tool(api: Any, confirmed_account=lambda: "", place_binder=lam
         is_big: bool = False,
         original_delivery_id: str = "",
     ) -> dict[str, Any]:
+        receipt, id_err = _validated_request_id(request_id)
+        if id_err is not None:
+            return id_err
         try:
             if method not in {"editMessageText", "setMessageReaction"}:
                 raise ValueError("unsupported Telegram operation")
@@ -763,7 +789,6 @@ def make_operation_tool(api: Any, confirmed_account=lambda: "", place_binder=lam
             if re.fullmatch(r"-?[0-9]+", target) is None:
                 raise ValueError("chat_id must be an exact numeric Telegram id")
             message = _positive_id(message_id, "message_id")
-            receipt = str(request_id or "").strip()
             if not receipt:
                 raise ValueError("request_id is required for a retryable operation")
             parameters: dict[str, Any] = {"chat_id": target, "message_id": message}

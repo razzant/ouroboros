@@ -620,3 +620,64 @@ def test_on_windows_the_runbook_store_needs_a_windows_path(monkeypatch):
     with pytest.raises(ValueError, match="native"):
         validate(_runbook_example()["TELEGRAM_API_FILES_DIR"])
     assert validate("C:/absolute/path/to/server-file-store/") == "C:\\absolute\\path\\to\\server-file-store"
+
+
+def test_settings_path_resolve_oserror_raises_telegram_settings_error_in_load_lock_and_merge(tmp_path, monkeypatch):
+    import errno
+    from pathlib import Path
+
+    state = tmp_path / "state_io"
+    state.mkdir()
+    real_resolve = Path.resolve
+
+    def fail_state_resolve(self, *a, **k):
+        if self.name == "state_io" and k.get("strict"):
+            raise OSError(errno.EIO, "simulated resolve EIO")
+        return real_resolve(self, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", fail_state_resolve)
+    with pytest.raises(TelegramSettingsError, match="state directory"):
+        load_settings(state)
+    with pytest.raises(TelegramSettingsError, match="state directory"):
+        with telegram_settings_module.settings_lock(state):
+            pass
+    with pytest.raises(TelegramSettingsError, match="state directory"):
+        telegram_settings_module.merge_settings_unlocked(state, {"TELEGRAM_CHAT_ID": "18"})
+
+
+def test_presence_tools_validate_request_id_consistently_and_preserve_identity(tmp_path):
+    from tests.test_telegram_security_boundaries import _StubApi, _load_plugin
+
+    _load_plugin("tg_req_id")
+    from tg_req_id.lib.presence import custody, tools
+
+    state = tmp_path / "tools_state"
+    api = _StubApi(state)
+    send = tools.make_send_tool(api, confirmed_account=lambda: "123456")
+    receipt = tools.make_receipt_tool(api)
+    moderate = tools.make_moderation_tool(api, confirmed_account=lambda: "123456")
+    operation = tools.make_operation_tool(api, confirmed_account=lambda: "123456")
+    react = tools.make_react_tool(operation)
+
+    # Lone surrogates are rejected with structured invalid_request_id across all 5 tools before SQLite/staging
+    for bad_id in ("x\ud800", "x\udfff"):
+        assert send(chat_id="-1001", text="hi", request_id=bad_id)["code"] == "invalid_request_id"
+        assert receipt(request_id=bad_id, operation="send")["code"] == "invalid_request_id"
+        assert moderate(action="ban_member", chat_id="-1001", request_id=bad_id, user_id=5)["code"] == "invalid_request_id"
+        assert operation(method="editMessageText", chat_id="-1001", message_id=5, request_id=bad_id, text="ed")["code"] == "invalid_request_id"
+        assert react(action="set", chat_id="-1001", message_id=5, request_id=bad_id, emoji="👍")["code"] == "invalid_request_id"
+    assert not (state / "custody.sqlite3").exists()
+
+    # Distinct valid IDs (including literal '?') never collapse, same-ID retries deduplicate, and receipt looks up exact ID
+    r1 = send(chat_id="-1001", text="hi", request_id="x?")
+    r2 = send(chat_id="-1001", text="hi", request_id="x?")
+    r3 = send(chat_id="-1001", text="hi", request_id="x2")
+    assert r1["ok"] is True and r1["state"] == "queued" and r1["request_id"] == "x?"
+    assert r2["ok"] is True and r2["state"] == "already_queued" and r2["request_id"] == "x?"
+    assert r3["ok"] is True and r3["state"] == "queued" and r3["request_id"] == "x2"
+    assert receipt(request_id="x?", operation="send")["state"] == "pending"
+    assert receipt(request_id="x2", operation="send")["state"] == "pending"
+    store = custody.CustodyStore.shared(state / "custody.sqlite3")
+    with store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 2
+    store.close()
