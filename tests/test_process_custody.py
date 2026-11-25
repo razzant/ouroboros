@@ -37,9 +37,7 @@ _SPAWN_ALLOWLIST = {
     # The pool's one ``ctx.Process``: the pool's _record_worker_processes ledgers it by measured birth.
     "supervisor/worker_process.py",
     "launcher.py",                        # custody host process (pre-runtime)
-    # exec_source_launcher spawns the next custody host and exits. Interactive OS
-    # installers keep Popen roots in launcher_bootstrap's live Panic stop list;
-    # unlike contained commands, they may outlive an ordinary setup-window close.
+    # exec_source_launcher spawns the next custody host and exits.
     "ouroboros/launcher_bootstrap.py",
     # The same one-shot launcher replacement, before package imports/adoption can wait.
     "ouroboros/launcher_windows_runtime.py",
@@ -215,7 +213,6 @@ _PROCESS_KINDS = {
     "ouroboros/process_containment.py::ProcessContainer.spawn": "contained run",
     "ouroboros/test_bytecode.py::run": "contained run",
     "launcher.py::_hidden_popen": "server generation",
-    "ouroboros/launcher_bootstrap.py::spawn_bootstrap_command": "bootstrap command",
     "ouroboros/launcher_bootstrap.py::exec_source_launcher": "bootstrap command",  # the source launcher successor
     "ouroboros/platform_layer.py::open_path_external": "owner's program",
     "ouroboros/body_switch.py::_windows_handoff": "outside the server",
@@ -347,8 +344,7 @@ _STOPPERS = {
         "fault": ("exits: it exits 1 and the launcher starts it again",),
     },
     "bootstrap command": {
-        "quit": ("launcher close: stop_bootstrap_commands",
-                 "survives: an interactive OS installer keeps its terminal after its setup window closes"),
+        "quit": ("launcher close: stop_bootstrap_commands",),
         "restart": ("outside: the launcher runs it before any server generation",),
         "panic": ("launcher panic: stop_bootstrap_commands",),
         "fault": ("outside: the launcher runs it before any server generation",),

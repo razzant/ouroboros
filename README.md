@@ -79,7 +79,7 @@ brew install --cask razzant/ouroboros/ouroboros
 
 - On Debian, Ubuntu, or Astra Linux, download the `.deb` above and run `sudo apt install ./ouroboros_*_amd64.deb`.
 - On Fedora or RHEL, download the generic `.rpm` above and run `sudo dnf install ./ouroboros-*.x86_64.rpm`. RED OS 8 has its own `red80` package.
-- On another x86_64 distribution, download the AppImage, make it executable with `chmod +x Ouroboros-*.AppImage`, and run it. Git must already be installed.
+- On another x86_64 distribution, download the AppImage, make it executable with `chmod +x Ouroboros-*.AppImage`, and run it (see [Packaged Linux details](#packaged-linux-details) for Git requirements and install steps).
 
 To run tasks, choose a connected Codex account as the Main model source, configure a supported remote provider API key, or use a local GGUF model. Claude Code and Cursor subscriptions can run delegated coding and review; they are not Main model sources. The first-run wizard guides accounts and models, access, background consciousness, the skills to start with, and budget setup.
 
@@ -209,13 +209,13 @@ Normal desktop users can stop after the download and quick-start instructions ab
 - **Debian / Ubuntu / Astra Linux x86_64:** [download the `.deb`][download-linux-deb-amd64] and run `sudo apt install ./ouroboros_*_amd64.deb`. It installs Git as a package dependency, installs Ouroboros to `/opt/ouroboros`, puts `ouroboros` on `PATH`, and adds a desktop entry plus an opt-in systemd user unit.
 - **Fedora / RHEL x86_64:** [download the generic `.rpm`][download-linux-rpm-x86_64] and run `sudo dnf install ./ouroboros-*.x86_64.rpm`. It uses the same layout, Git dependency, and opt-in user unit as the `.deb`.
 - **RED OS 8 x86_64:** [download the `red80` package][download-linux-rpm-red80-x86_64] and run `sudo dnf install ./ouroboros-*.red80.x86_64.rpm`. CI also attempts non-blocking install-and-run smokes on Astra Linux 1.8 and RED OS 8; inspect the tagged workflow run for their outcome.
-- **Other Linux x86_64:** use the [AppImage][download-linux-appimage-x86_64] or the extraction-friendly [tar.gz archive][download-linux-x86_64]. Git must already be installed.
+- **Other Linux x86_64:** use the [AppImage][download-linux-appimage-x86_64] or the extraction-friendly [tar.gz archive][download-linux-x86_64]. Builds without bundled Git require Git on the host; new portable `x86_64` and `aarch64` builds from this source use a bundled Git fallback only when the host has no working Git.
 
 The native `.deb` and `.rpm` never enable or start their user service. It is an alternative to launching from the desktop entry and controls only instances started through `systemctl --user`. See the [systemd user-service guide](packaging/systemd/README.md); under that unit (systemd 254+, cgroup v2) a gated command that reaches its own memory limit is the one killed (two growing together can take a healthy sibling at the shared limit); services, skills and Claudexor runs bypass the gate.
 
 #### Install the Linux AppImage
 
-User-level installation means copying the portable executable to a stable path and making it executable; it does not need root access. Ouroboros bootstrap still requires Git on the host:
+User-level installation means copying the portable executable to a stable path and making it executable; it does not need root access. Builds without bundled Git still need Git on the host; portable builds carrying the bundled Git fallback (`x86_64` and `aarch64`) use it only when the host has no working Git, and the bundled Linux `git-remote-https` HTTPS helper requires host `libcurl.so.4` with `CURL_OPENSSL_4`, which `git --version` alone does not verify:
 
 ```bash
 VERSION=x.y.z
@@ -446,7 +446,7 @@ bash scripts/download_python_standalone.sh
 OUROBOROS_SIGN=0 bash build.sh
 ```
 
-Output: `dist/Ouroboros-<VERSION>.dmg`, containing `Ouroboros.app`, an `Applications` shortcut, and `Install CLI.command`. Omit `OUROBOROS_SIGN=0` when a Developer ID signing identity is configured.
+Output: `dist/Ouroboros-<VERSION>.dmg`, containing `Ouroboros.app`, an `Applications` shortcut, and `Install CLI.command`, plus `dist/git-sources-*.tar`, the source of the pinned Git the app runs on a Mac without a working Git of its own. Omit `OUROBOROS_SIGN=0` when a Developer ID signing identity is configured.
 
 ### Linux (.AppImage and .tar.gz)
 
@@ -457,7 +457,7 @@ bash scripts/download_python_standalone.sh
 bash build_linux.sh
 ```
 
-Outputs: `dist/Ouroboros-<VERSION>-linux-<arch>.AppImage` and the extraction-friendly `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz`. The AppImage needs host Git; run it after `chmod +x`, or pass `--cli` to reach its bundled CLI. If FUSE is unavailable, set `APPIMAGE_EXTRACT_AND_RUN=1` when launching it. The tarball contains `./Ouroboros/bin/install-ouroboros-cli`. If bundled browser tools need host libraries, run `./Ouroboros/_internal/python-standalone/bin/python3 -m playwright install-deps chromium webkit` from the extracted tarball.
+Outputs: `dist/Ouroboros-<VERSION>-linux-<arch>.AppImage` and the extraction-friendly `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz`. On pinned architectures (`x86_64` and `aarch64`), both carry a pinned Git that runs only where the host has no working Git; its source is `dist/git-sources-*.tar` (HTTPS host-library caveat: [Install the Linux AppImage](#install-the-linux-appimage)). Run the AppImage after `chmod +x`, or pass `--cli` to reach its bundled CLI. If FUSE is unavailable, set `APPIMAGE_EXTRACT_AND_RUN=1` when launching it. The tarball contains `./Ouroboros/bin/install-ouroboros-cli`. If bundled browser tools need host libraries, run `./Ouroboros/_internal/python-standalone/bin/python3 -m playwright install-deps chromium webkit` from the extracted tarball.
 
 On a build host where system packages are managed separately, set `OUROBOROS_SKIP_PLAYWRIGHT_INSTALL_DEPS=1`; Chromium and WebKit are still downloaded and bundled, but the build does not invoke `sudo` to install host libraries.
 
@@ -472,7 +472,7 @@ sudo apt-get install -y dpkg-dev rpm   # rpm provides rpmbuild
 bash scripts/build_linux_packages.sh
 ```
 
-Output: `dist/ouroboros_<VERSION>_amd64.deb`, `dist/ouroboros-<VERSION>-1.x86_64.rpm` and `dist/ouroboros-<VERSION>-1.red80.x86_64.rpm` (RED OS 8). All three declare Git as a runtime dependency and install to `/opt/ouroboros` with a `/usr/bin/ouroboros` symlink, a desktop entry, and an opt-in systemd user unit. Portable Python builds the launcher, but the bundled native payload also carries Jammy libraries: its native-window and launcher-side behaviour targets glibc 2.35 and the Jammy graphics stack, not an invariant portable-Python glibc floor. `bash scripts/smoke_linux_packages.sh official <deb> <rpm> <red80-rpm>` installs all three through `apt` or `dnf` in Ubuntu 22.04 and Fedora 42 containers, resolves Git, verifies the installed unit, and checks both the real CLI and a bounded desktop-launcher start; this lane gates the release.
+Output: `dist/ouroboros_<VERSION>_amd64.deb`, `dist/ouroboros-<VERSION>-1.x86_64.rpm` and `dist/ouroboros-<VERSION>-1.red80.x86_64.rpm` (RED OS 8). All three declare Git as a runtime dependency instead of carrying the pinned copy and install to `/opt/ouroboros` with a `/usr/bin/ouroboros` symlink, a desktop entry, and an opt-in systemd user unit. Portable Python builds the launcher, but the bundled native payload also carries Jammy libraries: its native-window and launcher-side behaviour targets glibc 2.35 and the Jammy graphics stack, not an invariant portable-Python glibc floor. `bash scripts/smoke_linux_packages.sh official <deb> <rpm> <red80-rpm>` installs all three through `apt` or `dnf` in Ubuntu 22.04 and Fedora 42 containers, resolves Git, verifies the installed unit, and checks both the real CLI and a bounded desktop-launcher start; this lane gates the release.
 
 `astra <deb>` and `redos <red80-rpm>` check the pinned Astra Linux 1.8 and RED OS 8 images. Locally, `vendor <deb> <rpm> <red80-rpm>` runs Astra Linux first and RED OS second. Local runs use an exact cached image when available. A cache miss uses Docker’s ordinary registry TLS and can fail while the vendor serves an incomplete or incorrect chain. CI reports each vendor independently. Only its GitHub-hosted RED OS image download uses the pinned issuing CA for `registry.red-soft.ru`. Both vendor checks are informational.
 
@@ -483,7 +483,7 @@ powershell -ExecutionPolicy Bypass -File scripts/download_python_standalone.ps1
 powershell -ExecutionPolicy Bypass -File build_windows.ps1
 ```
 
-Output: `dist\Ouroboros-<VERSION>-windows-x64.zip`, containing `Ouroboros\bin\install-ouroboros-cli.cmd`.
+Output: `dist\Ouroboros-<VERSION>-windows-x64.zip`, containing `Ouroboros\bin\install-ouroboros-cli.cmd` and a pinned MinGit that runs only where the computer has no working Git. Its source archive (about 380 MB) is written separately: `python scripts/download_git_standalone.py --sources dist --layout mingit`.
 
 
 ## Architecture and Runtime Data

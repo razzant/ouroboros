@@ -50,6 +50,11 @@ if [ ! -f "ripgrep-standalone/bin/rg" ]; then
     bash scripts/download_ripgrep_standalone.sh
 fi
 
+# The pinned Git the app runs only where the Mac has no working Git; always re-verified and proven here.
+# The signing pass below signs its Mach-O files like every other one in the bundle.
+echo "--- Verifying and staging the pinned Git ---"
+python-standalone/bin/python3 scripts/download_git_standalone.py
+
 echo "--- Verifying bundled Betterleaks runtime ---"
 python-standalone/bin/python3 -m ouroboros.betterleaks_runtime install \
     --build-output betterleaks-standalone
@@ -181,6 +186,10 @@ xcrun clang -std=c11 -Wall -Wextra -Werror -mmacosx-version-min=12.0 \
 
 echo "--- Running PyInstaller ---"
 "$BUILD_PYTHON" -m PyInstaller Ouroboros.spec --clean --noconfirm
+python-standalone/bin/python3 scripts/download_git_standalone.py --check "$APP_PATH/Contents/Frameworks/git-standalone"
+# The Git source archive (GPLv2) the release publishes beside the DMG: the pinned bytes or a failed build.
+GIT_SOURCES_PREVIOUS_TAG="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+python-standalone/bin/python3 scripts/download_git_standalone.py --sources dist --previous-tag="$GIT_SOURCES_PREVIOUS_TAG"
 
 echo "--- Installing the macOS source-launcher entry ---"
 cp build/macos/ouroboros-shell "$APP_PATH/Contents/MacOS/ouroboros-shell"
@@ -295,6 +304,8 @@ if [ "$SIGN_MODE" != "0" ]; then
     codesign -dvv "$APP_PATH"
     codesign --verify --strict --deep "$APP_PATH"
     echo "Signature OK"
+    echo "--- Verifying signed bundled Git ---"
+    python-standalone/bin/python3 scripts/download_git_standalone.py --check "$APP_PATH/Contents/Frameworks/git-standalone"
 else
     echo ""
     echo "=== Skipping signing (OUROBOROS_SIGN=0) ==="

@@ -75,11 +75,30 @@ def _verdict(tmp_path: Path, *, flaky=(), accepted=(), failed=(), not_run=()) ->
     return path
 
 
+GIT_SOURCES = b"the corresponding source of the Git the desktop builds carry"
+WINDOWS_GIT_SOURCE_NAME = "git-sources-windows-9.9.windows.1.tar"
+WINDOWS_GIT_SOURCES = b"corresponding source packages for MinGit"
+
+
+def _git_pin(tmp_path: Path) -> Path:
+    """The fixture's Git pin, where the release step's default --git-pin finds it when it runs in tmp_path."""
+    return tmp_path / "scripts" / "git_standalone_pin.json"
+
+
 def _fixture_release(
     tmp_path: Path, version: str = "6.87.5", signer: str = "", notarized: bool = False
 ) -> tuple[Path, Path, Path]:
     release_dir = tmp_path / "release"
     release_dir.mkdir()
+    _git_pin(tmp_path).parent.mkdir()
+    _git_pin(tmp_path).write_text(json.dumps({"git_version": "9.9", "sources": {
+        "dugite": {"archive": "git-sources-macos-linux-9.9.tar", "label": "macOS and Linux", "release": True,
+                   "size_bytes": len(GIT_SOURCES), "sha256": hashlib.sha256(GIT_SOURCES).hexdigest()},
+        "mingit": {"archive": WINDOWS_GIT_SOURCE_NAME, "label": "Windows", "release": True,
+                   "size_bytes": len(WINDOWS_GIT_SOURCES),
+                   "sha256": hashlib.sha256(WINDOWS_GIT_SOURCES).hexdigest()}}}), encoding="utf-8")
+    (release_dir / "git-sources-macos-linux-9.9.tar").write_bytes(GIT_SOURCES)
+    (release_dir / WINDOWS_GIT_SOURCE_NAME).write_bytes(WINDOWS_GIT_SOURCES)
     version_file = tmp_path / "VERSION"
     version_file.write_text(f"{version}\n", encoding="utf-8")
     readme = tmp_path / "README.md"
@@ -163,7 +182,7 @@ def test_assemble_binds_every_asset_smoke_and_sbom(tmp_path: Path):
     args = argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir,
         version_file=version_file,
-        readme=readme,
+        readme=readme, git_pin=_git_pin(tmp_path),
         repository="razzant/ouroboros",
         tag="v6.87.5",
         commit="a" * 40,
@@ -183,7 +202,9 @@ def test_assemble_binds_every_asset_smoke_and_sbom(tmp_path: Path):
     assert len(evidence["artifacts"]) == 9
     assert evidence["experimentalAndroid"]["status"] == "verified"
     upload = json.loads(args.github_output.read_text(encoding="utf-8").split("=", 1)[1]).splitlines()
-    assert len(upload) == 29
+    assert len(upload) == 31
+    assert {row["name"] for row in evidence["gitSources"]} == {"git-sources-macos-linux-9.9.tar", WINDOWS_GIT_SOURCE_NAME}
+    assert {(release_dir / row["name"]).as_posix() for row in evidence["gitSources"]} <= set(upload)
     assert {Path(path).name for path in upload} >= {row["name"] for row in evidence["artifacts"]}
     assert {row["proofId"] for row in evidence["artifacts"]} == set(
         release_proof.PROOF_IDS
@@ -194,15 +215,16 @@ def test_assemble_binds_every_asset_smoke_and_sbom(tmp_path: Path):
         "ouroboros-6.87.5-1.red80.x86_64.rpm",
         "Ouroboros-6.87.5-linux-x86_64.AppImage",
     }
-    # One archive + one smoke receipt + one SBOM per proof id.
+    # One archive + one smoke receipt + one SBOM per proof id, plus both Git source archives.
     checksum_lines = (release_dir / "SHA256SUMS").read_text().splitlines()
-    assert len(checksum_lines) == 3 * len(release_proof.PROOF_IDS)
+    assert len(checksum_lines) == 3 * len(release_proof.PROOF_IDS) + 2
+    assert all(f"{row['sha256']}  {row['name']}" in checksum_lines for row in evidence["gitSources"])
     assert checksum_lines == sorted(checksum_lines, key=lambda line: line.split("  ", 1)[1])
     notes_text = notes.read_text()
     assert "A clear release note." in notes_text
     assert "## Download" in notes_text
     assert "verification evidence, not additional installers" in notes_text
-    assert "every installable platform artifact, its SBOM, and its smoke receipt" in notes_text
+    assert "its SBOM, and its smoke receipt, and the Git source archives." in notes_text
     assert "Each installable platform artifact has GitHub build provenance" in notes_text
     assert "/releases/latest" not in notes_text
     for proof_id in release_proof.PROOF_IDS:
@@ -230,7 +252,7 @@ def test_prerelease_notes_link_to_the_exact_prerelease_assets(tmp_path: Path):
     args = argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir,
         version_file=version_file,
-        readme=readme,
+        readme=readme, git_pin=_git_pin(tmp_path),
         repository="razzant/ouroboros",
         tag=f"v{version}",
         commit="a" * 40,
@@ -260,7 +282,7 @@ def test_assemble_rejects_smoke_digest_drift(tmp_path: Path):
     args = argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir,
         version_file=version_file,
-        readme=readme,
+        readme=readme, git_pin=_git_pin(tmp_path),
         repository="razzant/ouroboros",
         tag="v6.87.5",
         commit="a" * 40,
@@ -301,6 +323,7 @@ def test_unavailable_android_pair_keeps_verified_desktop_release(tmp_path, failu
         (release_dir / "sbom-android-apk.cdx.json").write_text("{}", encoding="utf-8")
     output, notes = tmp_path / "github-output", tmp_path / "notes.md"
     args = argparse.Namespace(test_verdict=_verdict(tmp_path), directory=release_dir, version_file=version_file, readme=readme,
+        git_pin=_git_pin(tmp_path),
         repository="razzant/ouroboros", tag="v6.87.5", commit="a" * 40,
         run_url="https://example.test/failed-run", previous_tag=None, generated_at=None,
         notes_output=notes, android_build_result=build_result,
@@ -313,9 +336,9 @@ def test_unavailable_android_pair_keeps_verified_desktop_release(tmp_path, failu
     assert evidence["experimentalAndroid"]["buildResult"] == build_result
     assert evidence["experimentalAndroid"]["reason"]
     assert next(row for row in evidence["workflow"]["gates"] if row["name"] == "android-build")["status"] == build_result
-    assert len((release_dir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()) == 21
+    assert len((release_dir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()) == 23  # includes both source sets
     upload = json.loads(output.read_text(encoding="utf-8").split("=", 1)[1]).splitlines()
-    assert len(upload) == 23
+    assert len(upload) == 25
     assert not any("android" in Path(path).name for path in upload)
     text = notes.read_text(encoding="utf-8")
     assert "Android artifacts are unavailable" in text and args.run_url in text
@@ -352,7 +375,7 @@ def test_assemble_rejects_unbound_or_incomplete_smoke_receipt(
     args = argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir,
         version_file=version_file,
-        readme=readme,
+        readme=readme, git_pin=_git_pin(tmp_path),
         repository="razzant/ouroboros",
         tag="v6.87.5",
         commit="a" * 40,
@@ -374,7 +397,7 @@ def test_assemble_rejects_tag_version_mismatch(tmp_path: Path):
     args = argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir,
         version_file=version_file,
-        readme=readme,
+        readme=readme, git_pin=_git_pin(tmp_path),
         repository="razzant/ouboros",
         tag="v6.87.6",
         commit="a" * 40,
@@ -395,6 +418,7 @@ def test_verify_uploaded_requires_exact_names_sizes_and_digests(tmp_path: Path):
     release_dir, version_file, readme = _fixture_release(tmp_path)
     release_proof.command_assemble(argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir, version_file=version_file, readme=readme,
+        git_pin=_git_pin(tmp_path),
         repository="razzant/ouroboros", tag="v6.87.5", commit="a" * 40,
         run_url="https://example.test/run", previous_tag=None, generated_at=None,
         notes_output=tmp_path / "notes.md", android_build_result="success",
@@ -406,10 +430,67 @@ def test_verify_uploaded_requires_exact_names_sizes_and_digests(tmp_path: Path):
         for path in release_dir.iterdir()
     ]}), encoding="utf-8")
     release_proof.command_verify_uploaded(argparse.Namespace(test_verdict=_verdict(tmp_path), directory=release_dir, metadata=metadata))
-    asset = release_dir / release_proof.release_asset_name("macos-arm64", "6.87.5")
-    asset.write_bytes(asset.read_bytes().upper())
-    with pytest.raises(ValueError, match="digest mismatch"):
+    installer = release_dir / release_proof.release_asset_name("macos-arm64", "6.87.5")
+    installer_bytes = installer.read_bytes()
+    installer.write_bytes(installer_bytes.upper())
+    with pytest.raises(ValueError, match=f"digest mismatch for {re.escape(installer.name)}"):
         release_proof.command_verify_uploaded(argparse.Namespace(test_verdict=_verdict(tmp_path), directory=release_dir, metadata=metadata))
+    installer.write_bytes(installer_bytes)
+    asset = release_dir / WINDOWS_GIT_SOURCE_NAME
+    asset.write_bytes(asset.read_bytes().upper())
+    with pytest.raises(ValueError, match=f"digest mismatch for {re.escape(WINDOWS_GIT_SOURCE_NAME)}"):
+        release_proof.command_verify_uploaded(argparse.Namespace(test_verdict=_verdict(tmp_path), directory=release_dir, metadata=metadata))
+    remote = json.loads(metadata.read_text(encoding="utf-8"))  # a draft without just the Windows sources is incomplete
+    metadata.write_text(json.dumps({"assets": [row for row in remote["assets"]
+                                               if row["name"] != WINDOWS_GIT_SOURCE_NAME]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="uploaded asset set differs"):
+        release_proof.command_verify_uploaded(argparse.Namespace(directory=release_dir, metadata=metadata))
+
+
+def test_release_publishes_the_pinned_git_sources_and_refuses_other_bytes(tmp_path: Path):
+    release_dir, version_file, readme = _fixture_release(tmp_path)
+    _, notes = _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+    evidence = json.loads((release_dir / "release-evidence.json").read_text(encoding="utf-8"))
+    assert evidence["schemaVersion"] == 4 and evidence["gitSources"] == [{
+        "name": "git-sources-macos-linux-9.9.tar", "size": len(GIT_SOURCES), "layout": "dugite",
+        "sha256": hashlib.sha256(GIT_SOURCES).hexdigest(), "label": "macOS and Linux", "gitVersion": "9.9"}, {
+        "name": WINDOWS_GIT_SOURCE_NAME, "size": len(WINDOWS_GIT_SOURCES), "layout": "mingit",
+        "sha256": hashlib.sha256(WINDOWS_GIT_SOURCES).hexdigest(), "label": "Windows", "gitVersion": "9.9"}]
+    for row in evidence["gitSources"]:
+        assert (f"`{row['name']}` is the corresponding source (GNU GPL version 2) of the Git 9.9 "
+                f"that the {row['label']} builds carry") in notes
+        archive = release_dir / row["name"]
+        good = archive.read_bytes()
+        archive.write_bytes(good[:-1] + b"!")
+        with pytest.raises(ValueError, match=f"{re.escape(archive.name)} is not the archive .* pins"):
+            _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+        archive.unlink()
+        with pytest.raises(ValueError, match=f"missing the Git source archive {re.escape(archive.name)}"):
+            _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+        archive.write_bytes(good)
+    pin = json.loads(_git_pin(tmp_path).read_text(encoding="utf-8"))
+    pin["sources"]["mingit"].update(size_bytes=None, sha256=None)  # no archive can satisfy an unpinned source set
+    _git_pin(tmp_path).write_text(json.dumps(pin), encoding="utf-8")
+    with pytest.raises(ValueError, match=f"{re.escape(WINDOWS_GIT_SOURCE_NAME)} is not the archive"):
+        _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+
+
+def test_git_sources_have_one_producer_per_archive_and_stay_out_of_windows_packaging():
+    """Only one POSIX leg transfers its archive; Windows sources are produced after the ZIP is final."""
+    jobs = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+    steps = {step.get("name"): step for step in jobs["build"]["steps"] + jobs["windows-proof"]["steps"]}
+    sources = steps["Upload the Git sources"]
+    assert sources["if"] == "matrix.os == 'ubuntu-latest'" and sources["with"]["name"].startswith("ouroboros-")
+    assert set(sources["with"]["path"].split()) == {"dist/git-sources-*.tar", "dist/git-sources-*.tar.sha256"}
+    assert "git-sources" not in steps["Upload build artifact"]["with"]["path"]  # the macOS leg's copy stays home
+    assert "git-sources" not in steps["Upload Windows release asset and proof"]["with"]["path"]
+    release_steps = {step.get("name"): step for step in jobs["release"]["steps"]}
+    assert "windows-proof" in jobs["release"]["needs"] and jobs["release"]["runs-on"] == "ubuntu-latest"
+    order = list(release_steps)
+    assert (order.index("Download release artifacts (exclude unsigned build handoff)")
+            < order.index("Capture the Windows Git sources") < order.index("Assemble release proof capsule and notes"))
+    assembled = release_steps["Assemble release proof capsule and notes"]["run"]
+    assert "--git-pin" not in assembled and (REPO / "scripts" / "git_standalone_pin.json").is_file()
 
 
 def test_linux_package_smoke_pins_third_party_vendor_images_by_digest():
@@ -839,7 +920,7 @@ def test_release_workflow_orders_smoke_sbom_attestation_and_draft_verification()
         "- name: Attest SBOM",
         "- name: Build Linux .deb and .rpm packages",
         "- name: Smoke Linux packages in Ubuntu and Fedora containers",
-        "- name: Record Linux package smoke and reuse payload SBOM",
+        "- name: Record Linux package smoke and generate package SBOMs",
         "- name: Attest Linux package provenance",
         "- name: Upload build artifact",
         "- name: Verify artifact attestations",
@@ -903,12 +984,11 @@ def test_release_workflow_orders_smoke_sbom_attestation_and_draft_verification()
     assert "sbom-path: dist/sbom-linux-rpm-x86_64.cdx.json" in workflow
     assert "sbom-path: dist/sbom-linux-rpm-red80-x86_64.cdx.json" in workflow
     package_proof = workflow[
-        workflow.index("- name: Record Linux package smoke and reuse payload SBOM") :
+        workflow.index("- name: Record Linux package smoke and generate package SBOMs") :
         workflow.index("- name: Attest Linux package provenance")
     ]
-    assert 'PAYLOAD_SBOM="dist/sbom-linux-x86_64.cdx.json"' in package_proof
-    assert 'cp "$PAYLOAD_SBOM" "dist/sbom-$1.cdx.json"' in package_proof
-    assert "steps.syft.outputs.path" not in package_proof
+    assert "dist/sbom-linux-x86_64.cdx.json" not in package_proof
+    assert "steps.syft.outputs.path" in package_proof
     assert "lipo -archs" in workflow
     assert "Refusing to modify the published release" in workflow
     assert "group: release-${{ github.ref }}" in workflow
@@ -954,6 +1034,7 @@ def _assemble_windows(tmp_path: Path, release_dir: Path, version_file: Path, rea
     notes = tmp_path / "notes.md"
     release_proof.command_assemble(argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir, version_file=version_file, readme=readme,
+        git_pin=_git_pin(tmp_path),
         repository="razzant/ouroboros", tag="v6.87.5", commit="a" * 40,
         run_url="https://example.test/run", previous_tag=None, generated_at=None,
         notes_output=notes, android_build_result="success",
@@ -1154,10 +1235,10 @@ def test_windows_receipt_records_signing_state_and_android_callers_stay_compatib
     assert "authenticode" not in android and "notarization" not in android
 
 
-@pytest.mark.parametrize("version", ["7.6.0", "7.6.1-rc.1"])
+@pytest.mark.parametrize(("version", "previous_tag"), [("7.6.0", "v7.5.9"), ("7.6.1-rc.2", "v7.6.1-rc.1")])
 @pytest.mark.parametrize("signer", ["", SIGNER])
-def test_workflow_shell_handoff_receipt_and_release_consumer(tmp_path: Path, version: str, signer: str):
-    """Execute the YAML's digest selector, receipt writer and release assembler.
+def test_workflow_shell_handoff_receipt_and_release_consumer(tmp_path: Path, version: str, previous_tag: str, signer: str):
+    """Execute the YAML's digest selector, receipt writer, source capture and release assembler.
 
     Only the Windows signature observation and the other platforms' receipts
     are fixtures; no native app, attestation service or signing service runs.
@@ -1168,6 +1249,23 @@ def test_workflow_shell_handoff_receipt_and_release_consumer(tmp_path: Path, ver
     jobs = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
     release_dir, _, _ = _fixture_release(tmp_path, version=version)
     release_dir = release_dir.rename(tmp_path / "release-artifacts")
+    releases = tmp_path / "releases"
+    previous = releases / "download" / previous_tag
+    previous.mkdir(parents=True)
+    latest = releases / "latest" / "download"
+    latest.mkdir(parents=True)
+    (latest / "git-sources-windows-9.8.windows.1.tar").write_bytes(b"the latest stable has an older Git")
+    windows_sources = release_dir / WINDOWS_GIT_SOURCE_NAME
+    windows_sources.rename(previous / windows_sources.name)
+    pin_path = _git_pin(tmp_path)
+    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    pin["sources"]["mingit"]["files"] = [{
+        "name": "missing-source-fixture.tar.xz", "url": (tmp_path / "unavailable-upstream").as_uri(),
+        "size_bytes": len(WINDOWS_GIT_SOURCES), "sha256": hashlib.sha256(WINDOWS_GIT_SOURCES).hexdigest(),
+    }]
+    pin_path.write_text(json.dumps({**pin, "releases": releases.as_uri()}), encoding="utf-8")
+    stager = Path("scripts/download_git_standalone.py")
+    shutil.copyfile(REPO / stager, tmp_path / stager)
     dist = tmp_path / "dist"
     dist.mkdir()
     name = release_proof.release_asset_name("windows-x64", version)
@@ -1192,10 +1290,11 @@ def test_workflow_shell_handoff_receipt_and_release_consumer(tmp_path: Path, ver
         step = next(step for step in jobs[job_id]["steps"] if step.get("name") == name)
         script = step["run"].replace("python scripts/release_proof.py", " ".join(map(shlex.quote, [
             Path(sys.executable).as_posix(), (REPO / "scripts/release_proof.py").as_posix()])))
+        script = script.replace(f"python {stager.as_posix()}", f"{shlex.quote(sys.executable)} {stager.as_posix()}")
         script = script.replace("${{ steps.release_asset.outputs.path }}", archive.as_posix())
         # Supply a previous-tag fixture without discovering the enclosing checkout.
         return subprocess.run([bash, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                               "git() { echo v0.0.0; }\n" + script], cwd=tmp_path, env=env,
+                               f"git() {{ echo {shlex.quote(previous_tag)}; }}\n" + script], cwd=tmp_path, env=env,
                               capture_output=True, text=True)
 
     check_name = "Check final archive digest before extraction"
@@ -1215,9 +1314,17 @@ def test_workflow_shell_handoff_receipt_and_release_consumer(tmp_path: Path, ver
     _verdict(tmp_path)
     for path in (archive, dist / "release-smoke-windows-x64.json"):
         shutil.copyfile(path, release_dir / path.name)
+    assert not windows_sources.exists()
+    captured = run_step("release", "Capture the Windows Git sources")
+    assert captured.returncode == 0, captured.stderr
+    assert json.loads(captured.stdout.splitlines()[-1])["from"] == f"our release {previous_tag}"
+    env["PREVIOUS_TAG"] = output.read_text(encoding="utf-8").strip().removeprefix("previous_tag=")
+    assert env["PREVIOUS_TAG"] == previous_tag
+    assert windows_sources.read_bytes() == WINDOWS_GIT_SOURCES and not (dist / windows_sources.name).exists()
     assembled = run_step("release", "Assemble release proof capsule and notes")
     assert assembled.returncode == 0, assembled.stderr
     evidence = json.loads((release_dir / "release-evidence.json").read_text())
+    assert next(row for row in evidence["gitSources"] if row["layout"] == "mingit")["sha256"] == _digest(windows_sources)
     assert {row["proofId"] for row in evidence["artifacts"]} == set(release_proof.DESKTOP_DOWNLOAD_IDS)
     windows = next(row for row in evidence["artifacts"] if row["proofId"] == "windows-x64")
     assert windows["sha256"] == _digest(archive)
@@ -1226,6 +1333,7 @@ def test_workflow_shell_handoff_receipt_and_release_consumer(tmp_path: Path, ver
                                         "pythonUpstream": CATALOG["pythonUpstream"]}
                                        if signer else {"status": "unsigned"})
     notes = (tmp_path / "release-notes.md").read_text()
+    assert f"[Compare {previous_tag}...v{version}]" in notes
     assert ("timestamped Authenticode signature" if signer else "this ZIP is unsigned") in notes
     # The assembly consumer also rejects bytes changed after proof generation.
     (release_dir / archive.name).write_bytes(b"replaced ZIP")
@@ -1239,3 +1347,115 @@ def _gate_env(jobs, results=None):
                 if step.get("name") == "Assemble release proof capsule and notes")
     return re.sub(r"\$\{\{ needs\.([\w-]+)\.result \}\}",
                   lambda match: (results or {}).get(match.group(1), "success"), step["env"]["RELEASE_GATE_RESULTS"])
+
+
+def test_linux_native_package_sbom_step_scans_each_package_not_portable_sbom(tmp_path: Path):
+    """Execute ci.yml's Linux native-package smoke/SBOM step with in-shell stubs."""
+    if os.name == "nt":
+        pytest.skip("Linux package extraction step runs on ubuntu-latest")
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("workflow shell execution requires bash")
+    jobs = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+    step = next(
+        step for step in jobs["build"]["steps"]
+        if step.get("name") == "Record Linux package smoke and generate package SBOMs"
+    )
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    portable_sentinel = json.dumps({"bomFormat": "CycloneDX", "from": "portable-tarball"})
+    (dist / "sbom-linux-x86_64.cdx.json").write_text(portable_sentinel, encoding="utf-8")
+    packages = {
+        "deb": ("linux-deb-amd64", dist / "ouroboros_7.6.0_amd64.deb"),
+        "rpm": ("linux-rpm-x86_64", dist / "ouroboros-7.6.0-1.x86_64.rpm"),
+        "rpm_red80": ("linux-rpm-red80-x86_64", dist / "ouroboros-7.6.0-1.red80.x86_64.rpm"),
+    }
+    for _key, (_proof_id, path) in packages.items():
+        path.write_bytes(f"package:{path.name}".encode())
+
+    script = step["run"].replace(
+        "python scripts/release_proof.py",
+        " ".join(map(shlex.quote, [Path(sys.executable).as_posix(), (REPO / "scripts/release_proof.py").as_posix()])),
+    )
+    script = script.replace('SYFT="${{ steps.syft.outputs.path }}"', 'SYFT="fake_syft"')
+    script = script.replace('test -x "$SYFT"', 'declare -F "$SYFT" >/dev/null')
+    for key, (_proof_id, path) in packages.items():
+        script = script.replace(f"${{{{ steps.linux_packages.outputs.{key} }}}}", f"dist/{path.name}")
+
+    stubs = """
+dpkg-deb() {
+  test "$1" = "-x"
+  mkdir -p "$3/opt/ouroboros/bin" "$3/usr/bin"
+  printf '%s\\n' "$(basename "$2")" > "$3/opt/ouroboros/pkg.txt"
+  ln -s /opt/ouroboros/bin/ouroboros "$3/usr/bin/ouroboros"
+}
+rpm2cpio() {
+  if [ "${FAIL_RPM:-0}" = "1" ]; then return 1; fi
+  printf '%s\\n' "$(basename "$1")"
+}
+cpio() {
+  IFS= read -r pkg_name
+  mkdir -p ./opt/ouroboros/bin ./usr/bin
+  printf '%s\\n' "$pkg_name" > ./opt/ouroboros/pkg.txt
+  ln -s /opt/ouroboros/bin/ouroboros ./usr/bin/ouroboros
+}
+fake_syft() {
+  local root="${1#dir:}" out="${3#cyclonedx-json=}"
+  test "$root" != "$1" && test "$2" = "--output" && test ! -L "$root/usr/bin/ouroboros"
+  printf '{"bomFormat":"CycloneDX","scanned":"%s"}\\n' "$(cat "$root/opt/ouroboros/pkg.txt")" > "$out"
+}
+"""
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    env = dict(os.environ, TMPDIR=str(scratch), GITHUB_SHA="a" * 40, GITHUB_REF_NAME="v7.6.0")
+    run_cmd = [bash, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", stubs + script]
+
+    ok = subprocess.run(run_cmd, cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
+    assert ok.returncode == 0, ok.stderr
+    assert list(scratch.iterdir()) == []
+    for _key, (proof_id, path) in packages.items():
+        receipt = json.loads((dist / f"release-smoke-{proof_id}.json").read_text(encoding="utf-8"))
+        assert receipt["proofId"] == proof_id and receipt["artifact"] == path.name and receipt["sha256"] == _digest(path)
+        sbom_text = (dist / f"sbom-{proof_id}.cdx.json").read_text(encoding="utf-8")
+        assert sbom_text != portable_sentinel and json.loads(sbom_text)["scanned"] == path.name
+
+    for _key, (proof_id, _path) in packages.items():
+        (dist / f"sbom-{proof_id}.cdx.json").unlink()
+    failed = subprocess.run(run_cmd, cwd=tmp_path, env={**env, "FAIL_RPM": "1"},
+                            capture_output=True, text=True, check=False)
+    assert failed.returncode != 0
+    assert (dist / "sbom-linux-deb-amd64.cdx.json").exists()
+    assert not (dist / "sbom-linux-rpm-x86_64.cdx.json").exists()
+    assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("script_name", ["build.sh", "build_linux.sh"])
+def test_posix_build_scripts_wire_previous_tag_into_git_sources(tmp_path: Path, script_name: str):
+    """Execute build.sh/build_linux.sh's Git-sources snippet and check --previous-tag wiring."""
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("build script execution requires bash")
+    lines = (REPO / script_name).read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("GIT_SOURCES_PREVIOUS_TAG="))
+    snippet = "\n".join(lines[start : start + 2]) + "\n"
+    snippet = snippet.replace("python-standalone/bin/python3", "record_args").replace('"$PORTABLE_PYTHON"', "record_args")
+    stub = 'record_args() { printf "%s\\n" "$@"; }\n'
+
+    for git_fn, expected_tag in (
+        ('git() { test "$*" = "describe --tags --abbrev=0 HEAD^" && echo "v7.6.1-rc.1"; }', "v7.6.1-rc.1"),
+        ("git() { return 128; }", ""),
+    ):
+        done = subprocess.run(
+            [bash, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", f"{stub}{git_fn}\n{snippet}"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.splitlines() == [
+            "scripts/download_git_standalone.py",
+            "--sources",
+            "dist",
+            f"--previous-tag={expected_tag}",
+        ]

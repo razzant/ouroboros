@@ -224,6 +224,20 @@ if _is_macos:
         a.datas = a.datas + [(dest, src, 'DATA') for dest, src, _typecode in _cft_entries]
 # --- end Chrome for Testing payload ---
 
+# --- Bundled Git, collected verbatim on every platform ---
+# scripts/download_git_standalone.py stages the pinned MinGit/dugite-native Git as git-standalone/; the app runs it
+# only where the computer has no working Git (ouroboros/git_selection.py). Added after Analysis as data, byte for
+# byte: PyInstaller neither rewrites nor re-signs its programs nor gathers this builder's libraries for them (they
+# use the host's own), and its relative links stay links. build.sh still signs every Mach-O in the bundle.
+if os.path.isdir('git-standalone'):
+    _git_paths = [os.path.join(_dir, _name) for _dir, _subdirs, _names in os.walk('git-standalone') for _name in _names]
+    a.datas = a.datas + [(_path, os.readlink(_path), 'SYMLINK') if os.path.islink(_path)
+                         else (_path, os.path.abspath(_path), 'DATA') for _path in _git_paths]
+else:
+    print('WARNING: git-standalone/ not found — where the computer has no Git, the app will only say how to '
+          'install it. Run scripts/download_git_standalone.py before PyInstaller for a release build.')
+# --- end bundled Git ---
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(

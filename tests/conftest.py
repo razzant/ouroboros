@@ -37,7 +37,7 @@ _SAFE_TEMP_ROOT = os.environ.get("OUROBOROS_TEST_TEMP_ROOT", "")
 # so the hermetic lane never creates an unused temp dir.
 _PYTEST_REPO_FALLBACK = None
 _NEVER_INHERITED = ("OUROBOROS_MANAGED_BY_LAUNCHER", "OUROBOROS_MANAGED_REPO_DIR",
-                    "OUROBOROS_REVIEW_RUN_CAP_USD", "OUROBOROS_CLAUDEXOR_ATTACH_HOME")
+                    "OUROBOROS_REVIEW_RUN_CAP_USD", "OUROBOROS_CLAUDEXOR_ATTACH_HOME", "OUROBOROS_GIT")
 if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
     _LIVE_DATA_ROOT = (
         os.environ.get("OUROBOROS_TEST_LIVE_DATA_ROOT")
@@ -71,8 +71,8 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
     # launcher's root under safe_test, the invoking temp directory otherwise.
     _PYTEST_DEFAULTS["GIT_CEILING_DIRECTORIES"] = str(_PYTEST_ROOT.parent)
     os.environ.update(_PYTEST_DEFAULTS)
-    # Run identities, never lane controls: launcher authority, and the isolated
-    # review's run cap / attach-only engine selection (no test reaches a host engine).
+    # Run identities, never lane controls: launcher authority, the isolated review's run cap /
+    # attach-only engine selection (no test reaches a host engine) and the host's chosen Git.
     for _key in _NEVER_INHERITED:
         os.environ.pop(_key, None)
     os.environ["OUROBOROS_TEST_LIVE_DATA_ROOT"] = _LIVE_DATA_ROOT
