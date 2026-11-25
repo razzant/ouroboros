@@ -1,0 +1,65 @@
+name: Paired Windows review-checkout verification
+on:
+  push:
+    branches: [ci/compare-persist-checkout-custody-4fe7e9b7-2]
+permissions:
+  contents: read
+
+env:
+  BASE: bf736865a85813ce67c85aad3ff90b7d3d8e9d2e
+  PRODUCT: 4fe7e9b79699172d30af1f1635d58342286ee666
+
+jobs:
+  checkouts:
+    name: Windows PERSIST ${{ matrix.side }}
+    runs-on: windows-latest
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [base, product]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind one of the original two trees
+        env:
+          SIDE: ${{ matrix.side }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$PRODUCT^")" = "$BASE"
+          test "$(git rev-parse "${PRODUCT}:tests/test_review_explicit_continuation.py")" = "$(git rev-parse "${BASE}:tests/test_review_explicit_continuation.py")"
+          case "$SIDE" in base) subject="$BASE" ;; product) subject="$PRODUCT" ;; *) exit 1 ;; esac
+          git checkout --detach "$subject"
+          test "$(git rev-parse HEAD)" = "$subject"
+          git show --no-patch --format='exact subject %H, tree %T'
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: setup-python
+          install-project: 'false'
+      - name: Check the three named review-checkout cases, with fresh test roots
+        run: |
+          set -euo pipefail
+          python -c "import pathlib, sys, tempfile; from ouroboros import store; p=pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; p.touch(); mode=store._journal_mode(p,store.TIER_ENFORCED); print('stores run',mode); sys.exit(mode != 'PERSIST')"
+          python -m pytest -q --tb=short --junitxml="$RUNNER_TEMP/paired-checkouts.xml" \
+            'tests/test_review_explicit_continuation.py::test_a_recorded_continue_successor_continues_its_predecessors_released_seat_and_owns_the_checkout' \
+            'tests/test_review_explicit_continuation.py::test_an_existing_checkout_is_held_for_the_deciding_task_against_a_pass_that_already_judged_it[successor]' \
+            'tests/test_review_explicit_continuation.py::test_an_existing_checkout_is_held_for_the_deciding_task_against_a_pass_that_already_judged_it[same_owner]'
+      - name: Confirm all three cases ran and keep failures visible
+        if: ${{ !cancelled() }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+          cases = list(ElementTree.parse(Path(os.environ['RUNNER_TEMP']) / 'paired-checkouts.xml').getroot().iter('testcase'))
+          assert len(cases) == 3
+          outcomes = [(c.get('name'), next((e.tag for e in c if e.tag in ('failure', 'error', 'skipped')), 'passed')) for c in cases]
+          for name, outcome in outcomes:
+              print(outcome, name)
+          assert not any(outcome != 'passed' for _, outcome in outcomes)
+          PY
