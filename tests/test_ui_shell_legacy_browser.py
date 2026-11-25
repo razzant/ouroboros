@@ -158,13 +158,15 @@ def _document(shape):
 # The version's anchors: how many #nav-version and version rows, and where the one version stands.
 ANCHORS = """() => ({versions: document.querySelectorAll('#nav-version').length,
     rows: document.querySelectorAll('.sidebar-foot-meta').length,
-    inRail: Boolean(document.querySelector('.nav-rail-system > .sidebar-foot-meta #nav-version'))})"""
+    inRail: Boolean(document.querySelector('.nav-rail-system > .sidebar-foot-meta #nav-version')),
+    inColumn: Boolean(document.querySelector('#primary-sidebar > .sidebar-foot-meta #nav-version'))})"""
 
 
 def _anchors(shape):
-    """One version in one row at the rail's foot in every supported document: the rail also mounts into a retained
-    v7.7.0 document and adopts its lone #nav-version, so no shape keeps a second, plain version beside it."""
-    return {"versions": 1, "rows": 1, "inRail": True}
+    """One version in one row in every supported document, standing in the column's own foot under the Projects list
+    (owner 25.11): the rail also mounts into a retained v7.7.0 document and adopts its lone #nav-version into that
+    foot, so no shape keeps a second, plain version beside it."""
+    return {"versions": 1, "rows": 1, "inRail": False, "inColumn": True}
 
 
 def _rest(page, before):
@@ -323,7 +325,7 @@ def test_a_retained_document_gets_the_same_rail_as_a_fresh_one(gate_ui, width, h
         page.close()
     fresh = feet["fresh"]
     for shape, rail in feet.items():
-        assert rail["versions"] == 1 and rail["rows"] == 1 and rail["inRail"], feet
+        assert rail["versions"] == 1 and rail["rows"] == 1 and rail["inColumn"] and not rail["inRail"], feet
         assert rail["destinations"] == DESTINATIONS and len(set(rail["destinations"])) == 5, feet
         assert rail["version"] == "v7.12.0", feet
         assert rail["sidebar"] == DESTINATIONS + ["chat"], ("one set of destinations on the entire sidebar, rail first", feet)
