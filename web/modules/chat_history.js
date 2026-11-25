@@ -104,6 +104,7 @@ export function createChatHistoryPager({
     canArrive = () => false,  // a hydrated, healthy window that needs no rebuild
     arrivalGate = () => '',  // the gate `canArrive` closed, by name: it labels the newest read sent instead
     newestInFlight = () => null,
+    catchingUp = () => null,  // a reconnect's whole read still to come (room_retire.js createCatchUp)
     isPageProtected = () => false,
     onState = () => {},
     isAlive = () => true,
@@ -366,8 +367,11 @@ export function createChatHistoryPager({
                 }
                 admitted = true;
                 // `repairs`: the rows the window holds of a task it shows that settled, as the newest page shows them now.
+                const repairs = data.repairs ?? [], card = row => row.presentation_owner_task_id || row.task_id;
+                // A card only repairs changed is no arrival: it marks nothing new (one that also gained a row does).
+                const quiet = new Set(repairs.map(card).filter(id => id && !data.messages.some(row => card(row) === id)));
                 applyArrivals(data.messages, { window: data.window ?? null, fromReconnect: ask.fromReconnect,
-                    requestedAt: data.requestedAt, repairs: data.repairs ?? [] });
+                    requestedAt: data.requestedAt, repairs, quiet });
                 // The arrivals go on from this answer only once it is drawn: one that failed to apply reads the newest page.
                 after = data.after_cursor;
                 arrived += rowCount(data.messages);
@@ -410,15 +414,14 @@ export function createChatHistoryPager({
     // arrived since the newest read, else the newest page (`whole`, no cursor yet, a
     // window grown full, one `canArrive` declines, a refusal or a failure). When
     // arrivals cannot answer, chat's newest read starts within this very call. `reason`
-    // and `decision` (a `whole` read's, else the arrivals read's) say why, with `detail`. `owed()` false: a read begun
-    // after this one was asked (the newest read in flight it waited for) already did its work, so it reads nothing.
-    function read({ fromReconnect = false, whole = false, current = () => true, owed = () => true, reason = '', decision = '', detail = '' } = {}) {
+    // and `decision` (a `whole` read's, else the arrivals read's) say why, with `detail`. While a reconnect's whole
+    // read is still to come, any other read waits for it and then reads only what is left.
+    function read({ fromReconnect = false, whole = false, current = () => true, reason = '', decision = '', detail = '' } = {}) {
         const started = visit;
         // A superseded reconnect leaves its queued read to the current catch-up.
         if (!alive() || !current()) return Promise.resolve(false);
-        if (!owed()) return Promise.resolve(true);
-        const inFlight = newestInFlight();
-        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole, current, owed, reason, decision, detail }));
+        const inFlight = newestInFlight() || !fromReconnect && catchingUp();
+        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole, current, reason, decision, detail }));
         if (whole || !canArrive() || !(arrival || arrivable())) {
             // The first gate that chose the newest page, in the order they are weighed.
             const gate = whole ? decision || 'explicit_whole' : !canArrive() ? arrivalGate() : unarrivable().decision;

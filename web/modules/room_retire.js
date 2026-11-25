@@ -203,11 +203,14 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
  * whole; a fault owes repair even without an absence. `end` ends only the matching read's
  * feedback; `cancel` records absence. `retry` distinguishes an unconfirmed attempt from absence alone. */
 export function createCatchUp(changed, bound = 300) {
-    let timer = null, active = false, reading = null, after = null, failed = false;
+    let timer = null, active = false, reading = null, after = null, failed = false, awaited = null;
     const stop = () => { clearTimeout(timer); timer = null; };
     return {
         get active() { return active; },
         get reading() { return reading; },
+        // A real reconnect's own whole read, still to come or out: the room's other reads wait for it, then read only
+        // what is left (a return shares its paint receipt's read instead).
+        get reconnecting() { return awaited && awaited === reading ? reading : null; },
         get owed() { return after !== null; },
         get retry() { return after !== null && failed && !reading; },
         confirmWindow({ recentVersion, reason_code: refused, window }) {
@@ -218,10 +221,11 @@ export function createCatchUp(changed, bound = 300) {
             return !cut;
         },
         async settled(current) { while (current() && reading) await reading; },
-        begin(current, read = null, requested = 0) {
+        begin(current, read = null, requested = 0, reconnect = false) {
             stop();
             after = requested;
             reading = read;
+            awaited = reconnect ? read : null;
             timer = setTimeout(() => { timer = null; if (current()) { active = true; changed(); } }, bound);
         },
         end(read = null) {

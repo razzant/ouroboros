@@ -2121,7 +2121,7 @@ export function createChatInstance({
     }
     // `requestedAt`: when the read that carried these rows was asked for (api_client chatHistory), dating a question's records.
     function applyHistoryMessages(messages, { fromReconnect = false, archived = false, direction = '', anchor = null,
-        requestedAt } = {}) {
+        requestedAt, quiet } = {}) {
         // A returning room reads arrivals instead of receiving socket frames. Only newly drawn content marks ↓:
         // the first page, older pages and adopting a stored identity for already seen live words stay quiet.
         const reportActivity = historyLoaded && !archived;
@@ -2346,6 +2346,7 @@ export function createChatInstance({
                 return reportActivity && ([...messagesDiv.children].some(node => node.classList.contains('chat-bubble') && !knownRows.has(node))
                     || [...liveCardRecords].some(([id, record]) => {
                         const before = knownCards.get(id);
+                        if (quiet?.has(id)) return false;  // repaired only
                         // Reconciliation can change liveness or placement of words already seen; that is no arrival.
                         return record.root?.isConnected && (record.items.length > (before?.items || 0)
                             || (!before?.projection || isoMicros(record.latestSourceTs) > isoMicros(before.source))
@@ -2367,7 +2368,6 @@ export function createChatInstance({
         if (foreignProfile()) return false;  // the socket serves another profile: read nothing into this window (#3294)
         if (historySyncPromise) return historySyncPromise;
         historySyncPromise = (async () => {
-            fromReconnect ||= catchUp.owed;  // the read that pays a return's or reconnect's catch-up reconciles as one
             const startedVisit = visit;
             const abort = historyReadAbort = new AbortController();
             const armedAtStart = liveCardBound.begin();
@@ -2853,14 +2853,14 @@ export function createChatInstance({
             withStableViewport(() => releaseHistoryIds(ids));
         },
         // Rows stored since the newest read join its window (and the saved preview).
-        applyArrivals: (messages, { window, fromReconnect, requestedAt, repairs }) => {
+        applyArrivals: (messages, { window, fromReconnect, requestedAt, repairs, quiet }) => {
             if (foreignProfile()) return;
+            applyHistoryMessages([...repairs, ...messages], { fromReconnect, requestedAt, quiet });
             preview.append(messages);
             for (const id of messages.flatMap(historyRowIds)) recentHistoryIds.add(id);
-            applyHistoryMessages([...repairs, ...messages], { fromReconnect, requestedAt });
             readReceipt.arrived(window);
         },
-        readNewest: syncHistory, newestInFlight: () => historySyncPromise,
+        readNewest: syncHistory, newestInFlight: () => historySyncPromise, catchingUp: () => catchUp.reconnecting,
         canArrive: () => !arrivalGate(), arrivalGate,
         isPageProtected: isHistoryPageProtected,
         onState: snapshot => syncLoadOlderControl(snapshot),
@@ -3338,11 +3338,10 @@ export function createChatInstance({
             // a read newer than any it interrupted.
             .then(() => (destroyed || openedVisit !== visit ? false
                 : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
-                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read,
-                    owed: () => catchUp.owed })
+                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read })
                     : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
-        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen);
+        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen, !msg?.resumed);
     });
 
     // A disconnect: written sends not yet saved say so and the room shows the outage; away, which sends it doubts is

@@ -826,9 +826,9 @@ test('arrivals go on from an answer only once it is drawn', async () => {
     assert.deepEqual([p.calls, p.newest.map(({ decision }) => decision)], [['after:1'], ['after_rejected', 'no_cursor']]);
 });
 
-test('a reconnect whose catch-up a newer newest read already paid reads nothing more', async (t) => {
-    // An unread room's receipt asks right after the socket opened: its newest read, begun after the open, is the
-    // reconnect's read too. Only a read the reconnect interrupted would leave it owed.
+test('a read asked while a reconnect\'s whole read is still to come waits for it, then reads only what arrived', async (t) => {
+    // An unread room's receipt asks right after the socket opened, before the reconnect's own read (which waits for the
+    // preferences) is out: it no longer takes a second whole page; the reconnect's read stays the one recovery read.
     const s = historyServer();
     s.say(1);
     const r = openRoom(t, s);
@@ -838,11 +838,9 @@ test('a reconnect whose catch-up a newer newest read already paid reads nothing 
     assert.equal((await r.instance.refreshHistory({ revision: 2 })).read, true);
     await until(() => r.shown().includes('chat:2'));
     await quiet();
-    assert.deepEqual(s.reads, ['newest', 'newest'], 'one newest read, not two');
-    assert.deepEqual(s.tags[1], { reason: 'read_receipt', mode: 'newest', decision: 'catch_up_owed' });
-    s.say(3);
-    assert.equal((await r.instance.refreshHistory({ revision: 3 })).read, true);
-    assert.deepEqual(s.reads.slice(2), ['after'], 'arrivals go on from the page that paid the catch-up');
+    assert.deepEqual(s.reads, ['newest', 'newest', 'after'], 'one whole read for the reconnect, then only what arrived');
+    assert.deepEqual(s.tags.slice(1), [{ reason: 'reconnect', mode: 'newest', decision: 'explicit_whole' },
+        { reason: 'read_receipt', mode: 'after' }]);
 });
 
 test('a settled task\'s rows sent again with what arrived settle its card without the newest page', async (t) => {
@@ -866,4 +864,68 @@ test('a settled task\'s rows sent again with what arrived settle its card withou
     assert.deepEqual(s.reads, ['newest', 'after'], 'what arrived and the settled rows, in one read');
     assert.equal(card().dataset.finished, '1');
     assert.deepEqual(s.tags.slice(1), [{ reason: 'read_receipt', mode: 'after' }], 'no newest page answered for it');
+});
+
+// The arrivals server above, its next `after` answers also carrying `repairs` handed in by the test.
+function repairingRoom(t, s) {
+    const repairs = [];
+    const r = openRoom(t, { ...s, fetchHistory: async (url) => {
+        const response = await s.fetchHistory(url);
+        if (!String(url).includes('cursor=after') || !repairs.length) return response;
+        const data = await response.json();
+        return { ok: true, status: 200, json: async () => ({ ...data, repairs: repairs.splice(0) }) };
+    } });
+    return { r, repairs };
+}
+
+test('a card only repairs settled marks no new activity; what arrived with it does', async (t) => {
+    const s = historyServer();
+    s.say(1);
+    s.work(2, 'task-7');
+    const { r, repairs } = repairingRoom(t, s);
+    await r.instance.refreshHistory({ revision: 1 });
+    await quiet();
+    r.messages.scrollHeight = 1000;
+    r.readUp();
+    await quiet();
+    const button = globalThis.document.byId.get('chat-scroll-bottom');
+    assert.equal(button.getAttribute('aria-label'), 'Scroll to latest message');
+    const settled = { ...s.rows[1], task_terminal_status: 'completed', outcome_final: true, outcome_phase: 'done',
+        outcome_axes: { execution: { status: 'ok' }, lifecycle: { status: 'completed' } } };
+    repairs.push(settled);
+    await r.instance.refreshHistory({ revision: 2 });
+    await quiet();
+    const card = r.messages.children.find((node) => node.classList?.contains('chat-live-card'));
+    assert.equal(card.dataset.finished, '1', 'the card settled from its repaired row');
+    assert.equal(button.getAttribute('aria-label'), 'Scroll to latest message', 'nothing arrived: no new activity');
+    s.say(3);
+    await r.instance.refreshHistory({ revision: 3 });
+    await quiet();
+    assert.equal(button.getAttribute('aria-label'), 'New activity — scroll to latest message', 'a new message is');
+});
+
+test('arrivals are saved only once they are drawn', async (t) => {
+    const s = historyServer();
+    s.say(1);
+    const r = openRoom(t, s);
+    await r.instance.refreshHistory({ revision: 1 });
+    await quiet();
+    const key = previewEntryKey(PREVIEW_SCOPE, [2, 'room']);
+    const saved = () => JSON.parse(globalThis.localStorage.getItem(key)).rows.map((row) => row.id);
+    assert.deepEqual(saved(), ['chat:1']);
+    const append = r.messages.append.bind(r.messages), insertBefore = r.messages.insertBefore.bind(r.messages);
+    let fail = true, savedAtThrow = null;
+    const trap = (draw) => (...args) => {
+        if (!fail) return draw(...args);
+        fail = false;
+        savedAtThrow = saved();
+        throw new Error('a renderer failed');
+    };
+    r.messages.append = trap(append);
+    r.messages.insertBefore = trap(insertBefore);
+    s.say(2);
+    await r.instance.refreshHistory({ revision: 2 });
+    await quiet();
+    assert.deepEqual(savedAtThrow, ['chat:1'], 'nothing undrawn was saved when the draw failed');
+    assert.deepEqual(s.tags[2], { reason: 'read_receipt', mode: 'newest', decision: 'after_rejected', detail: 'apply_failed' });
 });
