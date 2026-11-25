@@ -1,0 +1,99 @@
+name: Multibrain two-install qualification
+on:
+  push:
+    branches: ['verify/multibrain-first-step-*']
+permissions:
+  contents: read
+env:
+  PRODUCT_SHA: b293106bb7305a1543e828233541a46f83f636da
+  WORKFLOW_PATH: .github/workflows/verify-multibrain-first-step.yml
+jobs:
+  two-installs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the one-file child commit and check out P
+        shell: bash
+        run: |
+          [[ "$PRODUCT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P HEAD)" = "$PRODUCT_SHA"
+          test "$(git diff --no-renames --name-status "$PRODUCT_SHA" HEAD --)" = "$(printf 'A\t%s' "$WORKFLOW_PATH")"
+          git checkout --detach --quiet "$PRODUCT_SHA"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git status --porcelain)"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Run and attest exactly S45 and S46
+        id: scenarios
+        shell: bash
+        env:
+          OUROBOROS_E2E_DEEP: mock
+          PYTHONUNBUFFERED: '1'
+          OUROBOROS_APP_ROOT: ${{ runner.temp }}/mb-e2e/app
+          OUROBOROS_REPO_DIR: ${{ runner.temp }}/mb-e2e/repo
+          OUROBOROS_DATA_DIR: ${{ runner.temp }}/mb-e2e/data
+          OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/mb-e2e/data/settings.json
+        run: |
+          out="$RUNNER_TEMP/mb-verdict"
+          mkdir -p "$out"
+          suite=tests/system_e2e/test_system_scenarios_w11.py
+          s45=test_s45_two_installations_meet_confirm_and_exchange_one_letter
+          s46=test_s46_two_installations_exchange_standalone_messages_off_and_on
+          rc=0
+          python -m pytest "$suite::$s45" "$suite::$s46" -o addopts= \
+            --timeout=900 -o faulthandler_timeout=540 -q \
+            --basetemp="$RUNNER_TEMP/mb-pytest" --junitxml="$out/junit.xml" \
+            > "$out/pytest.log" 2>&1 || rc=$?
+          python -I - "$rc" "$suite" "$s45" "$s46" <<'PY'
+          import hashlib, json, os, subprocess, sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          rc, suite, *names = sys.argv[1:]
+          env = os.environ
+          out = Path(env['RUNNER_TEMP']) / 'mb-verdict'
+          module = suite.removesuffix('.py').replace('/', '.')
+          try:
+              cases = list(ET.parse(out / 'junit.xml').getroot().iter('testcase'))
+          except (OSError, ET.ParseError):
+              cases = []
+          results = {}
+          for name in names:
+              matches = [c for c in cases if (c.get('classname'), c.get('name')) == (module, name)]
+              results[name] = (
+                  'missing' if not matches else 'duplicate' if len(matches) != 1 else
+                  next((x.tag for x in matches[0] if x.tag in {'failure', 'error', 'skipped'}), 'passed')
+              )
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          clean = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0
+          lock = Path('uv.lock').read_bytes()
+          ok = (rc == '0' and len(cases) == len(names) == 2
+                and all(v == 'passed' for v in results.values())
+                and head == env['PRODUCT_SHA'] and clean and bool(lock))
+          verdict = {
+              'status': 'pass' if ok else 'fail', 'product_sha': head,
+              'workflow_sha': env['GITHUB_SHA'], 'run_id': env['GITHUB_RUN_ID'],
+              'run_attempt': env['GITHUB_RUN_ATTEMPT'], 'pytest_exit': int(rc),
+              'tracked_tree_clean': clean, 'junit_cases': len(cases), 'tests': results,
+              'uv_lock_sha256': hashlib.sha256(lock).hexdigest(),
+          }
+          (out / 'verdict.json').write_text(json.dumps(verdict, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(verdict))
+          sys.exit(0 if ok else 1)
+          PY
+      - name: Retain only the bounded verdict
+        if: ${{ !cancelled() && (steps.scenarios.outcome == 'success' || steps.scenarios.outcome == 'failure') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: multibrain-verdict-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mb-verdict/verdict.json
+          if-no-files-found: error
+          retention-days: 14
