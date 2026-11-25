@@ -95,8 +95,16 @@ def test_enable_installs_for_every_admitting_gate_reason_and_refuses_before_any_
     make_skill(drive)
     skill = find_skill(drive, "demo", repo_path="")
     admits = reason in ADMITTING
-    monkeypatch.setattr(skill.review, "gate_for", lambda _hash: {
-        "executable_review": admits, "blocking_reason": reason, "review_enforcement": "advisory", "summary": ""})
+    original_gate_for = skill.review.gate_for
+
+    def gate_for(current_hash, *, ordinary_only=False):
+        if ordinary_only:
+            return original_gate_for(current_hash, ordinary_only=True)
+        return {
+            "executable_review": admits, "blocking_reason": reason, "review_enforcement": "advisory", "summary": "",
+        }
+
+    monkeypatch.setattr(skill.review, "gate_for", gate_for)
     monkeypatch.setattr(skill.review, "is_stale_for", lambda _hash: False)
 
     result = enable(drive, skill)
