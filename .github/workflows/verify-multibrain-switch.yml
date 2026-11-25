@@ -1,0 +1,56 @@
+name: Check Consciousness wording with and without linked installations
+on:
+  push:
+    branches: ['verify/multibrain-switch-f6bd50088508']
+permissions:
+  contents: read
+jobs:
+  switch-words:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind the verification child, product and baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git show -s --format=%P HEAD)" = f6bd500885080b80ca3bc9bd27f4b7b4200c9e5b
+          test "$(git diff --name-status f6bd500885080b80ca3bc9bd27f4b7b4200c9e5b HEAD)" = "$(printf 'A\t%s' '.github/workflows/verify-multibrain-switch.yml')"
+          git checkout --quiet --detach f6bd500885080b80ca3bc9bd27f4b7b4200c9e5b
+          test "$(git rev-parse HEAD^{tree})" = 0581706ee5a52e72bc5c4b7358f81e83d30387dd
+          test "$(git show -s --format=%P HEAD)" = 4d618a7700e49cce2d5f60d346ca2f79f51a7a4e
+          test "$(git diff --name-only 4d618a7700e49cce2d5f60d346ca2f79f51a7a4e HEAD)" = "$(printf '%s\n' ouroboros/consciousness_view.py tests/test_consciousness_switch_words.py tests/test_consciousness_view.py web/tests/fixtures/consciousness_contract.json)"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+          profile: test
+      - name: Test the six reported cases and neighboring switch states
+        shell: bash
+        run: |
+          set -euo pipefail
+          d=$(mktemp -d /tmp/mb-switch-XXXXXX)
+          mkdir -p "$d/h" "$d/t" "$d/e"
+          py=$(command -v python)
+          rc=0
+          sudo --non-interactive unshare --net -- /bin/bash -c '
+            set -eu
+            ip link set lo up
+            exec /usr/bin/setpriv --reuid "$1" --regid "$2" --clear-groups /usr/bin/env -i PATH="$3" HOME="$4/h" LANG=C.UTF-8 "$5" -I -S scripts/safe_test.py --temp-parent "$4/t" --evidence-dir "$4/e" --timeout 180 -- "$5" -m pytest -o addopts= -q --junitxml="$4/words.xml"               tests/test_consciousness_client_fixture.py::test_browser_fixture_matches_the_producers               tests/test_consciousness_switch_words.py::test_the_positions_are_named_by_meaning_and_unknown_is_never_off               tests/test_consciousness_view.py::test_off_says_its_position_and_how_many_places_are_heard_not_answered               tests/test_docs_sync.py::test_architecture_endpoint_table_mirrors_route_registries tests/test_peer_switch_words.py
+          ' _ "$(id -u)" "$(id -g)" "$PATH" "$d" "$py" >"$d/console" 2>&1 || rc=$?
+          "$py" -I - "$d/words.xml" "$rc" <<'PY'
+          import sys, xml.etree.ElementTree as E
+          from collections import Counter
+          cases = E.parse(sys.argv[1]).findall('.//testcase')
+          status = lambda r: next((c.tag for c in r if c.tag in {'failure', 'error', 'skipped'}), 'passed')
+          for r in cases: print(r.get('classname'), r.get('name'), status(r))
+          assert int(sys.argv[2]) == 0
+          assert len(cases) == len({(r.get('classname'),r.get('name')) for r in cases}) == 15
+          assert all(status(r) == 'passed' for r in cases)
+          assert Counter(r.get('classname').split('.')[-1] for r in cases) == {'test_consciousness_client_fixture':1, 'test_consciousness_switch_words':1,'test_consciousness_view':6,'test_docs_sync':1,'test_peer_switch_words':6}
+          print('ALL_15_SWITCH_CASES_PASSED')
+          PY
+          test -z "$(git status --porcelain --untracked-files=no)"
