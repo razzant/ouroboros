@@ -882,7 +882,7 @@ def extract_forced_work_replies(body: str) -> tuple[dict[str, str], list[dict]] 
     return (pending, rejected) if (pending or rejected) else None
 
 
-def commit_forced_work_replies(tools: object, llm_trace: dict, usage: dict) -> None:
+def commit_forced_work_replies(tools: object, llm_trace: dict) -> None:
     """Dispatch staged forced ``work_reply`` returns through ``tools.execute_result('send_user_message', ...)``."""
     from collections.abc import Mapping
     from ouroboros.model_wait import ModelWaitInterrupted
@@ -1325,18 +1325,13 @@ def _confirmed_handoff(ctx: ToolContext | None, work: str) -> bool:
 
 
 def _spoke_live_to_my_human(ctx: ToolContext | None) -> bool:
-    """A root whose live text message of this run reached a conversation its human reads.
-
-    The reply mark (``owner_delivery._retain_dialogue``: a live ``send_message`` only, zero included, reset per turn)
-    read with the room this run's own messages land in, by the supervisor's rule (``lands_with_my_human``). The
-    hidden task record does not count (its reader is the caller, who would receive an empty result), nor a place's
-    local room; an unreadable room is not proof."""
+    """A root whose live text message of this run reached a conversation its human reads: the reply mark
+    (``owner_delivery._retain_dialogue``), set only for a live ``send_message`` frame that lands there by the
+    supervisor's rule (``lands_with_my_human``; zero included, reset per turn). A text stored in the hidden task
+    record, whose reader is the caller, sets no mark, nor does a place's local room."""
     from ouroboros.task_results import resolve_ctx_lineage
-    from ouroboros.tools.owner_delivery import lands_with_my_human, stamp_lineage
 
-    if getattr(ctx, "_owner_reply_revision", None) is None or not resolve_ctx_lineage(ctx)["is_root_task"]:
-        return False
-    return lands_with_my_human(ctx, stamp_lineage(ctx, {"chat_id": getattr(ctx, "current_chat_id", None)}))
+    return getattr(ctx, "_owner_reply_revision", None) is not None and resolve_ctx_lineage(ctx)["is_root_task"]
 
 
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,

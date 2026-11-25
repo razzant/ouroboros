@@ -1533,7 +1533,7 @@ def _forced_final_answer(
     keep_reply = usable and not stale_selection
     if (usable and not stop_now and isinstance(request, dict) and ctx.tools is not None
             and getattr(tools_ctx, "_forced_work_replies_pending", None)):
-        commit_forced_work_replies(ctx.tools, llm_trace, ctx.accumulated_usage)
+        commit_forced_work_replies(ctx.tools, llm_trace)
     elif tools_ctx is not None:
         tools_ctx._forced_work_replies_pending = None
     if not stop_now and stale_selection:

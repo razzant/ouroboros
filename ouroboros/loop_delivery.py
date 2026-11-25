@@ -1209,11 +1209,14 @@ def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: An
     _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
     held = getattr(tools._ctx, "_delivery_candidate", None)
     quiet_held = not explicit and getattr(held, "quiet", False)  # replaced even by empty prose, never published
+    from ouroboros.dialogue_provenance import presence_caller_binding
     from ouroboros.loop_messages import owner_reply_owed
 
     # Prose after one-shot facts inherits a silent selection (delivery_facts), never while my human's reply is owed:
-    # it is then a fresh visible answer, and the replaced quiet bytes stay internal.
-    keep_quiet = quiet_held and noted(held) and not owner_reply_owed(tools._ctx)
+    # it is then a fresh visible answer, and the replaced quiet bytes stay internal. A place-bound run's final is
+    # speech to its place, not to my human, so it keeps the inherited silence.
+    keep_quiet = quiet_held and noted(held) and not (owner_reply_owed(tools._ctx)
+                                                     and presence_caller_binding(tools._ctx) is None)
     if resumed and quiet_held:
         return False, content  # a quiet selection lost with its execution id is chosen again
     fresh = control == "fresh" and (explicit or str(content or "").strip() or quiet_held)

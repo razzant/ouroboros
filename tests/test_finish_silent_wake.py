@@ -1084,7 +1084,8 @@ def test_a_silent_finish_stays_silent_through_the_facts(wake, monkeypatch):
     pending, _stored = emit(wake, text, usage, trace, bus=bus)
     assert not sends(pending) and shown == []
     # the model is told before it writes that its next words stay unspoken (review 8, Fable)
-    assert "You chose silence, so it stays unspoken; only finish_task without silent speaks." in str(wake.calls[-1])
+    assert ("You chose silence, so it stays unspoken unless your human awaits a reply; finish_task without silent "
+            "speaks.") in str(wake.calls[-1])
 
 
 def test_an_explicit_spoken_finish_ends_the_silence(wake, monkeypatch):
@@ -1165,7 +1166,7 @@ def test_a_hidden_session_root_that_sent_its_message_finishes_visibly(wake):
     wake.ctx.is_direct_chat, wake.ctx.current_chat_id = False, 0
     text, usage, trace, bus = wake.run([call("send_user_message", {"text": SPOKE}), finish(silent=True),
                                         finish("Ordinary answer.")], metadata=OWNER)
-    assert wake.ctx._owner_reply_revision is not None, "the send was live text; only its room refuses the silence"
+    assert getattr(wake.ctx, "_owner_reply_revision", None) is None, "a live text in the hidden record sets no mark"
     assert [e["chat_id"] for e in sends(drained(bus))] == [0]
     assert _refused(trace) and "wake_silent" not in usage and text == "Ordinary answer."
 
@@ -1238,22 +1239,24 @@ def test_the_late_phase_and_the_notice_read_true_for_a_run_that_spoke(wake):
     assert "no model words were submitted" not in section and SPOKE not in section
 
 
-
 def test_a_place_bound_root_in_its_local_room_is_not_admitted_by_the_spoken_case(wake):
     """The same transport-like chat counts as my human's for a run with no place binding, never for a place-bound one:
-    a place's local room is the Ouroboros side of the place (``owner_delivery.lands_with_my_human``)."""
-    from ouroboros.tools.control_runtime import completion_request
+    a place's local room is the Ouroboros side of the place (``owner_delivery.lands_with_my_human``), so its live text
+    there sets no reply mark and the spoken case does not admit its silence."""
     from ouroboros.tools.owner_delivery import lands_with_my_human
 
-    wake.ctx.is_direct_chat, wake.ctx.task_id, wake.ctx.current_chat_id = False, TASK_ID, BRIDGE_CHAT
     frame = {"chat_id": BRIDGE_CHAT, "task_id": TASK_ID}
-    wake.ctx.task_metadata, wake.ctx._owner_reply_revision = dict(OWNER), 0
+    wake.ctx.task_metadata = dict(OWNER)
     assert lands_with_my_human(wake.ctx, dict(frame)) is True
-    assert completion_request(wake.ctx, {"action": "finish", "silent": True})[0]["wake_silent"] is True
-    wake.ctx.task_metadata = {**OWNER, "presence": {"binding_id": "b1", "place_id": "place-1"}}
+    place = {**OWNER, "presence": {"binding_id": "b1", "place_id": "place-1"}}
+    wake.ctx.task_metadata = dict(place)
     assert lands_with_my_human(wake.ctx, dict(frame)) is False
-    request, error = completion_request(wake.ctx, {"action": "finish", "silent": True})
-    assert request is None and error.startswith("silent needs a finish that owes no one words")
+    wake.ctx.is_direct_chat, wake.ctx.current_chat_id = False, BRIDGE_CHAT
+    text, usage, trace, bus = wake.run([call("send_user_message", {"text": SPOKE}), finish(silent=True),
+                                        finish("Ordinary answer.")], metadata=place)
+    assert [e["chat_id"] for e in sends(drained(bus))] == [BRIDGE_CHAT]
+    assert getattr(wake.ctx, "_owner_reply_revision", None) is None, "a place's local room answers no one there"
+    assert _refused(trace) and "wake_silent" not in usage and text == "Ordinary answer."
 
 
 def _steer_while_the_facts_hold(wake, monkeypatch, words):
@@ -1291,3 +1294,105 @@ def test_prose_after_the_facts_inherits_silence_only_while_no_reply_is_owed(wake
     assert steered and words in str(wake.calls[-1]), "the human's words reached the round that answered them"
     assert "wake_silent" not in usage and text == FOLLOW_UP and stored["result"] == FOLLOW_UP
     assert FOLLOW_UP in spoken, "the answer to my human's later words is published"
+
+
+# --- the reply mark is set only where my human reads (a relay answer stored in the hidden record answers no one) ----
+
+def _hidden_relay(wake, monkeypatch, human_room):
+    """A headless task in the hidden record tells this owner root; returns the relay id the root may answer."""
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_relay import _tell_task
+    from supervisor import queue as worker_queue
+    from supervisor.message_bus import log_chat
+    from supervisor.steering import _handle_steer_task
+    from tests.test_owner_relay import context
+
+    root = wake.root
+    monkeypatch.setattr(worker_queue, "DRIVE_ROOT", root)
+    row = log_chat("in", human_room, 7, "Please tell me what the report found.", client_message_id="owner-q",
+                   drive_root=root)
+    ref, _ = owner_row_source(row)
+    metadata = {**OWNER, "origin_message_ref": ref}
+    task = {"id": TASK_ID, "type": "task", "text": row["text"], "chat_id": human_room, "root_task_id": TASK_ID,
+            "drive_root": str(root), "metadata": metadata, "_skip_post_task_synthesis": True}
+    write_task_result(root, TASK_ID, "running", chat_id=human_room, root_task_id=TASK_ID, metadata=metadata,
+                      origin_message_ref=ref)
+    teller = context(root)
+    teller.current_chat_id = 0
+    write_task_result(root, teller.task_id, "running", chat_id=0, root_task_id=teller.task_id)
+    sup = SimpleNamespace(DRIVE_ROOT=root, PENDING=[], RUNNING={TASK_ID: {"task": task}},
+                          persist_queue_snapshot=lambda **_kw: None)
+    emitted = []
+
+    def dispatch(event):
+        emitted.append(event)
+        _handle_steer_task(event, sup)
+    teller.event_queue = SimpleNamespace(put_nowait=dispatch)
+    assert "Message written" in _tell_task(teller, TASK_ID, "Please confirm the handoff to me.")
+    wake.ctx.current_chat_id, wake.ctx.is_direct_chat = human_room, False
+    return emitted[0]["relay_id"], metadata, task
+
+
+@pytest.mark.parametrize("human_room", [1, BRIDGE_CHAT], ids=["main", "bridge"])
+@pytest.mark.parametrize("also_spoke", [False, True], ids=["relay-answer-only", "then-its-own-conversation"])
+def test_a_relay_answer_stored_in_the_hidden_record_answers_no_one_there(wake, monkeypatch, human_room, also_spoke):
+    relay_id, metadata, task = _hidden_relay(wake, monkeypatch, human_room)
+    own = [call("send_user_message", {"text": SPOKE}, "own")] if also_spoke else []
+    text, usage, trace, bus = wake.run([
+        call("send_user_message", {"text": "Handoff confirmed for the headless caller.", "reply_to_relay": relay_id}),
+        *own, finish(silent=True), finish("Here are the findings you asked for."),
+    ], metadata=metadata, messages=[{"role": "user", "content": task["text"]}])
+    live = sends(drained(bus))
+    assert [e["chat_id"] for e in live if e.get("system_type") == "relay_reply"] == [0]
+    if also_spoke:
+        assert usage.get("wake_silent") is True and text == "", "its own live message reached its human"
+        return
+    assert getattr(wake.ctx, "_owner_reply_revision", None) is None
+    assert _refused(trace) and "wake_silent" not in usage and text == "Here are the findings you asked for."
+
+
+@pytest.mark.parametrize("room", ["project", "bridge"])
+def test_a_main_notice_answers_its_human_from_a_project_room_or_a_bridge_chat(wake, room):
+    metadata = dict(OWNER)
+    if room == "project":
+        _project_root(wake)
+    else:  # an owner turn from the bridge carries the door's stamp, which lets it address Main
+        from ouroboros.owner_relay import owner_row_source
+        from supervisor.message_bus import log_chat
+
+        row = log_chat("in", BRIDGE_CHAT, 7, "What did the report find?", client_message_id="owner-b",
+                       drive_root=wake.root)
+        metadata["origin_message_ref"] = owner_row_source(row)[0]
+        wake.ctx.is_direct_chat, wake.ctx.current_chat_id = False, BRIDGE_CHAT
+    text, usage, trace, bus = wake.run([call("send_user_message", {"text": SPOKE, "destination": "main"}),
+                                        finish(silent=True), finish("Ordinary answer.")], metadata=metadata)
+    assert [e["chat_id"] for e in sends(drained(bus))] == [1]
+    assert not trace.get("completion_refusals") and usage.get("wake_silent") is True and text == ""
+
+
+@pytest.mark.parametrize("chat", ["0", "not-a-chat", -1001, None, True, 1 << 40],
+                         ids=["string-zero", "not-a-chat", "peer", "unknown", "bool", "place-room"])
+def test_only_a_room_number_my_human_reads_counts(wake, chat):
+    from ouroboros.tools.owner_delivery import lands_with_my_human
+
+    wake.ctx.task_id, wake.ctx.task_metadata = TASK_ID, dict(OWNER)
+    assert lands_with_my_human(wake.ctx, {"chat_id": BRIDGE_CHAT, "task_id": TASK_ID}) is True
+    assert lands_with_my_human(wake.ctx, {"chat_id": chat, "task_id": TASK_ID}) is (chat is True)
+    # ``True == 1`` is Main by value, as for every reader that compares with WEB_UI_CHAT_ID; any other row is refused.
+
+
+@pytest.mark.parametrize("room,owed", [(0, True), (1, False)], ids=["hidden-record", "main"])
+def test_a_reply_discharges_the_owed_reply_only_where_my_human_reads_it(wake, room, owed):
+    from ouroboros.loop_messages import _record_owner_directive, owner_reply_owed
+    from ouroboros.tools.owner_delivery import deliver_owner_event, stamp_lineage
+
+    ctx = wake.ctx
+    ctx.task_id, ctx.task_metadata, ctx.messages, ctx.event_queue = TASK_ID, dict(OWNER), [], queue.Queue()
+    ctx._owner_directives, ctx._owner_reply_revision = [], None
+    _record_owner_directive(ctx, source="owner_mailbox", content="And the appendix?", msg_id="m1")
+    assert owner_reply_owed(ctx)
+    frame = stamp_lineage(ctx, {"type": "send_message", "chat_id": room, "text": "Attached.", "is_progress": False,
+                                "system_type": "proactive_message"})
+    assert deliver_owner_event(ctx, frame) == "live"
+    assert owner_reply_owed(ctx) is owed

@@ -1525,3 +1525,45 @@ def test_a_routed_focus_says_why_on_every_root_child_and_continue_that_inherits_
     assert "focus_allowance" not in heir, "the allowance stays with the focus"
     plain = started(task_for(focus)["metadata"])
     assert "routed" not in plain["focus"] and "routed" not in place_origin(plain)
+
+
+def test_a_place_focus_keeps_its_inherited_silence_when_its_human_writes(focus, monkeypatch):
+    """A place-bound run's final is speech to its place, not a message to its human: a focus turn that selected silence,
+    met the one-shot facts and then read its human's words keeps the silence its prose inherits (outcome "silent"), as
+    on the base; only a run with no place binding turns that prose into a visible answer (``loop_delivery``)."""
+    import queue
+
+    import ouroboros.loop as loop
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.presence_runner import build_presence_result_event
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_finish_silent_wake import call, finish
+
+    root = focus[0]
+    task = task_for(focus)
+    registry = ToolRegistry(repo_dir=root, drive_root=root)
+    registry._ctx.task_metadata, registry._ctx.task_contract = task["metadata"], task["task_contract"]
+    registry._ctx.is_direct_chat = True
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _ctx: frozenset())
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, ""))
+    actual, steered = loop._maybe_inject_finalization_nudges, []
+
+    def steer(*args, **kwargs):
+        held = actual(*args, **kwargs)
+        if held and not steered:
+            steered.append(write_owner_message(root, "What about the appendix?", task["id"], msg_id="m3"))
+        return held
+    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", steer)
+    responses = iter([call("write_file", {"path": "report.md", "content": "Report", "root": "user_files"}),
+                      finish("INTERNAL: a private note.", silent=True),
+                      {"role": "assistant", "content": "The appendix is attached."},
+                      finish("Fallback."), finish("Fallback.")])
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_kw: (next(responses), 0.0))
+    text, usage, _trace = loop.run_llm_loop([{"role": "user", "content": "Hello"}], registry,
+                                            SimpleNamespace(default_model=lambda: "test-model"), root / "logs",
+                                            lambda *_a, **_k: None, queue.Queue(), task_id=task["id"], drive_root=root)
+    result = build_presence_result_event(task, text, registry._ctx, terminal_origin=usage.get("terminal_origin"),
+                                         silent=usage.get("wake_silent") is True)
+    assert steered, "my human wrote while the facts held the silent selection"
+    assert usage.get("wake_silent") is True and result.get("outcome") == "silent", result
