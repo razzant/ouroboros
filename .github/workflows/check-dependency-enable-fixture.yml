@@ -1,0 +1,61 @@
+name: Verify dependency-enable test contract
+'on':
+  push:
+    branches: ['ci-check/dependency-enable-8c9a7785']
+permissions:
+  contents: read
+jobs:
+  fixture:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c9a77850775bf9df370b71b87e1910f1588099e
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+      - name: Verify dependency installation with the fake installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 8c9a77850775bf9df370b71b87e1910f1588099e
+          case_id='tests/test_skill_enable_dependencies.py::test_enable_installs_for_every_admitting_gate_reason_and_refuses_before_any_install_otherwise'
+          python -m pytest -o addopts= -vv --tb=short --junitxml=dependency-enable.xml "${case_id}[cyber_authority]" "${case_id}[ready]" "${case_id}[review_pending]"
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('dependency-enable.xml').findall('.//testcase')
+          assert sorted(c.get('name').split('[')[-1] for c in cases) == ['cyber_authority]', 'ready]', 'review_pending]']
+          assert not any(c.find(t) is not None for c in cases for t in ('skipped', 'error', 'failure'))
+          PY
+      - name: Check size and reference-book contracts
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ef95fba2af1ee31f25f8a527f42885b1e8dc8a4d
+        run: |
+          set -euo pipefail
+          env -u GITHUB_EVENT_NAME OURO_BOOK_GROWTH_MODE=block python -m pytest -o addopts= -q --tb=short --junitxml=size.xml \
+            tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact \
+            tests/test_smoke.py::test_no_oversized_modules \
+            tests/test_smoke.py::test_no_extremely_oversized_functions \
+            tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree \
+            tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base \
+            tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book \
+            tests/test_reference_book_budgets.py::test_a_change_does_not_grow_bible_or_the_prompts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: dependency-enable-${{ matrix.os }}
+          path: |
+            dependency-enable.xml
+            size.xml
+          if-no-files-found: warn
