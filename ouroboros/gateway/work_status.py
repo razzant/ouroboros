@@ -185,6 +185,13 @@ def reason(code: str, *, count: Optional[int] = None, ids: Iterable[str] = (), s
     return row
 
 
+def _peer_wait(wait: Any) -> bool:
+    return isinstance(wait, Mapping) and (
+        isinstance(wait.get("peer_question"), Mapping)
+        or wait.get("reason") == "peer"
+        or str(wait.get("quiz_id") or "").startswith("peer-question:"))
+
+
 def _owner_wait(row: Mapping[str, Any]) -> str:
     """``owner_wait`` while a question positively waits for the owner, ``unknown`` on a gap, else ``''``.
 
@@ -192,6 +199,8 @@ def _owner_wait(row: Mapping[str, Any]) -> str:
     question = row.get("owner_wait") if isinstance(row.get("owner_wait"), dict) else row.get("required_question")
     question = question if isinstance(question, dict) else None
     if question:
+        if _peer_wait(question):
+            return ""
         state = question.get("quiz_state") or question.get("state")
         if (question.get("owner_wait_state") == "resumed" or question.get("wait_ended_at")
                 or state in {"answered", "expired_terminal", "superseded", "closed"}):
@@ -333,6 +342,16 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         state["activity"] = "waiting"
         state["reasons"].append(sleep_reason(waiting["sleep"], names))
         state["waits_on"] = _waits_on(waiting["sleep"])
+        return state
+    # A peer-question wait executes nothing either; its own census row says so when no worker answers (only there).
+    peer = waiting if isinstance(waiting, Mapping) else row.get("owner_wait")
+    if _peer_wait(peer) and peer.get("state") == "waiting" \
+            and peer.get("task_attempt") == int(row.get("task_attempt") or 1):
+        pq = peer.get("peer_question") if isinstance(peer.get("peer_question"), Mapping) else {}
+        sender = str(pq.get("sender") or "").strip()
+        text = f"Waiting for {sender}'s answer" if sender else "Waiting for the linked Ouroboros's answer"
+        state["activity"] = "waiting"
+        state["reasons"].append({"code": "peer_answer", "text": text})
         return state
     waits = _current_waits(row)
     if waits:

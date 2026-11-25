@@ -611,6 +611,15 @@ class PlaceSummary(TypedDict):
     shared_owner_accounts: List[Dict[str, str]]  # confirmed in another place of this bot/app; count here
     circle: Optional[PlaceCircleChoice]
     description: Optional[PlaceDescription]
+    # A linked Ouroboros (connector "ouroboros", peer_links): my human's two stored choices; what is in effect now
+    # beside them, derived on every read ({messages, assignments: true | false | null when the link registry cannot
+    # be read, reason: "" | unlinked | revoked | code_check_pending | paused | not_mine | may_not_start | silent |
+    # panic | unknown}); the host's line stating both; and its link (id, six-digit code and whether it was confirmed
+    # here, when made or revoked, since when the other side no longer knows it); never a key or a hash.
+    peer: NotRequired[Optional[Dict[str, bool]]]
+    peer_effective: NotRequired[Dict[str, Any]]
+    peer_facts: NotRequired[str]
+    link: NotRequired[Optional[Dict[str, Any]]]
 
 
 class PlaceDisconnectRequest(TypedDict, total=False):
@@ -661,6 +670,7 @@ class PlaceUpdateRequest(TypedDict, total=False):
     model: str
     confirm_owner_account: PlaceOwnerAccountRequest
     revoke_owner_account: str
+    peer: Dict[str, bool]  # a linked Ouroboros's {mine, may_start}: my human's door only
     circle_id: str  # "" takes it out of its circle
     description: str  # "" clears it
     expected_revision: int

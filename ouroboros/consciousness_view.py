@@ -338,12 +338,20 @@ QUIET = {
 }
 # A $0 allowance has no reset to wait for: only the owner's change opens it.
 ZERO_ALLOWANCE = "Its allowance is $0.00: nothing here starts a new wake until you raise it in Costs."
+# A linked Ouroboros's place: the switch and the allowance decide what wakes it there on its own, never the work a
+# letter of that Ouroboros assigns, which the link's own choices admit or refuse (``peer_links.effective_permissions``).
+ASSIGNMENT_NOTES = {
+    True: " A letter from the linked Ouroboros that assigns work is no wake: that work still starts here.",
+    False: " A letter from the linked Ouroboros that assigns work is refused here."}
 
 
-def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str = "", limit_usd: Any = None) -> dict | None:
+def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str = "", limit_usd: Any = None,
+                assignments: bool | None = None) -> dict | None:
     """``{cause, word, note, door}`` when a place that would speak is quiet for a cause beyond its own stored word, else
     ``None``. ``switch``: "on" | "off" | "panic" | "unknown" (no claim); ``allowance``: the window's status and
-    ``limit_usd`` its daily limit. A Paused place says Paused and a Silent one Silent: their own words already say it."""
+    ``limit_usd`` its daily limit. A Paused place says Paused and a Silent one Silent: their own words already say it.
+    ``assignments`` (a linked Ouroboros's place only; ``None`` elsewhere) is whether a letter of that Ouroboros that
+    assigns work starts work here now: an Off or spent-allowance note then says so apart, since neither governs it."""
     if state == "paused" or switch == "unknown":
         return None
     if switch in ("panic", "off"):
@@ -357,6 +365,8 @@ def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str =
     word, note, door = QUIET[cause]
     if cause == "allowance" and isinstance(limit_usd, (int, float)) and limit_usd <= 0:
         note = ZERO_ALLOWANCE
+    if assignments is not None and cause in ("off", "allowance"):
+        note += ASSIGNMENT_NOTES[bool(assignments)]
     return {"cause": cause, "word": word, "door": door, "note": note}
 
 

@@ -86,11 +86,14 @@ def _field(container: Dict[str, Any], key: str, *, nullable: bool = False) -> Op
 
 def locate(gateway: Any, record: Dict[str, Any]) -> Lookup:
     """Read the accepted work behind ``record`` (an invocation record with its resolved ``request``)."""
+    from ouroboros.execution_domain import is_peer_ref, recorded_ref
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     body, key = record.get("request"), str(record.get("invocation_id") or "")
     if not isinstance(body, dict) or not body or not key:
         return Lookup("unavailable", detail="the recorded request or its invocation key is unavailable")
+    if is_peer_ref(recorded_ref(record)) or is_peer_ref(getattr(gateway, "engine_ref", None)):
+        return _locate_peer(gateway, key)
     thread_id = str(body.get("_thread_id") or "")
     method, path = TURN_LOOKUP if thread_id else RUN_LOOKUP
     try:
@@ -113,6 +116,28 @@ def locate(gateway: Any, record: Dict[str, Any]) -> Lookup:
                    "refused" if 400 <= status < 500 else "unavailable")
         return Lookup(outcome, detail=f"{exc.code}: {exc}"[:500])
     return _validated(answer, record, thread_id, getattr(gateway, "engine_ref", None))
+
+
+def _locate_peer(gateway: Any, letter_id: str) -> Lookup:
+    """Non-creating read of a peer letter (``GET /api/letters/{id}``): the receiver answers it while its side is
+    paused, while a Pause of my own place for the link leaves it ``unavailable`` here (only a Stop's read crosses it)."""
+    from ouroboros.delegate_custody_usage import summary_of
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    try:
+        detail = gateway.get_run(letter_id)
+    except ClaudexorUnavailable as exc:
+        status = int(getattr(exc, "status_code", 0) or 0)
+        named_refusal = str(getattr(exc, "refusal_code", "") or "")
+        if status == 404 and (named_refusal or exc.code) == "letter_not_found":
+            return Lookup("not_found")
+        if named_refusal and 400 <= status < 500:
+            return Lookup("refused", detail=f"{exc.code}: {exc}"[:500], facts={"refusal_code": named_refusal})
+        return Lookup("unavailable", detail=f"{exc.code}: {exc}"[:500])
+    state = str(summary_of(detail).get("state") or "")
+    if not isinstance(detail, dict) or str(detail.get("runId") or "") != letter_id or state not in RUN_STATES:
+        return Lookup("unavailable", detail="malformed peer letter lookup answer")
+    return Lookup("found", run_id=letter_id, state=state, facts={"letterId": letter_id, "state": state})
 
 
 def _validated(answer: Any, record: Dict[str, Any], thread_id: str, engine: Any) -> Lookup:
@@ -283,7 +308,10 @@ def recover(drive_root: Any, gateway: Any, record: Dict[str, Any], *,
         reason = "accepted_turn_without_run" if located.outcome == "turn_only" else f"accepted_start_{located.outcome}"
         turn = ({"thread_id": located.facts["threadId"], "turn_id": located.facts["turnId"],
                  "enqueue_error": located.facts["enqueueError"]} if located.outcome == "turn_only" else {})
-        return None, {**receipt, "action": "invocation_retained", "reason": reason, **turn}
+        refusal = ({"refusal_code": located.facts["refusal_code"]}
+                   if located.outcome == "refused" and isinstance(located.facts, dict)
+                   and located.facts.get("refusal_code") else {})
+        return None, {**receipt, "action": "invocation_retained", "reason": reason, **turn, **refusal}
     entry, shape = recovered_custody(drive_root, gateway, record, located.run_id, located.store_id)
     shape.update(facts or {}, accepted_start_lookup=located.outcome)
     bound = bind_started(drive_root, entry, shape=shape, exclusive=True, observed_state=located.state)

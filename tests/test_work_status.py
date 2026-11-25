@@ -249,6 +249,35 @@ def test_a_sleep_says_what_it_chose_to_wait_for(sleep, text, wake):
     assert warm["activity"] == cold["activity"] == "waiting"
 
 
+def test_only_the_workers_own_wait_proves_a_warm_sleep():
+    """A warm sleep is read from the worker's current wait alone (``raw``): the census row's own copy of an ended sleep
+    never makes its member wait. Only a peer question's wait falls back to the row (the test below)."""
+    sleep = {"state": "waiting", "reason": "sleep", "task_attempt": 1, "sleep": {"mode": "warm"}}
+    stale = ws.classify_member(row("root", owner_wait={**sleep, "wait_ended_at": "2026-11-25T00:00:00Z"}))
+    assert stale["activity"] != "waiting" and not stale["reasons"]
+    assert ws.classify_member(row("root"), {"running": True, "owner_wait": sleep})["activity"] == "waiting"
+
+
+def test_a_peer_question_wait_waits_on_the_linked_ouroboros_and_never_lights_the_owners_turn():
+    from tests._work_projection_shared import work_fields
+
+    peer_wait = {"state": "waiting", "reason": "owner", "quiz_id": "", "task_attempt": 1,
+                 "peer_question": {"question_id": "q1", "sender": "Velm"}}
+    member = ws.classify_member(row("letter-1"), {"running": True, "owner_wait": peer_wait})
+    assert (member["activity"], member["release"], member["turn"], member["live"]) == ("waiting", "self", [], False)
+    assert member["reasons"] == [{"code": "peer_answer", "text": "Waiting for Velm's answer"}]
+    direct_row = ws.classify_member(row("letter-1", owner_wait=peer_wait))
+    assert (direct_row["activity"], direct_row["release"], direct_row["turn"]) == ("waiting", "self", [])
+    legacy = ws.classify_member(row("letter-1", owner_wait={"state": "waiting", "quiz_id": "peer-question:q1",
+                                                            "task_attempt": 1}))
+    assert (legacy["activity"], legacy["release"], legacy["turn"]) == ("waiting", "self", [])
+    snap = work_fields([row("letter-1", chat_id=77)], {"letter-1": {"running": True, "owner_wait": peer_wait}})
+    (work,) = snap["works"]
+    assert (work["activity"], work["mark"], work["turn"]) == ("waiting", "still", [])
+    assert work["because"] == [{"code": "peer_answer", "text": "Waiting for Velm's answer"}]
+    assert snap["work_summary"]["turn"] == 0 and snap["rooms"]["77"]["amber"] is False
+
+
 def test_the_projection_names_a_sleeps_helper_from_its_own_census_row():
     """No stored result is read here (``work_fields`` answers none): the name is the census row's own."""
     from tests._work_projection_shared import work_fields

@@ -376,7 +376,8 @@ def _actor_scope(task: Mapping, drive_root: Path) -> tuple[Path, Mapping]:
     actor["scheduled"] = bool(metadata.get("schedule_writer_kind"))
     actor["autonomous"] = not actor["scheduled"] and bool(
         task.get("type") == "evolution" or metadata.get("evolution_root_task_id") or metadata.get("evolution_transaction")
-        or is_consciousness_origin(metadata) or metadata.get("work_kind") == "consciousness" or actor["presence"])
+        or is_consciousness_origin(metadata) or metadata.get("work_kind") == "consciousness" or actor["presence"]
+        or isinstance(metadata.get("peer_letter"), Mapping))  # a linked Ouroboros's letter, as a place's work
     return (Path(task.get("budget_drive_root") or metadata.get("budget_drive_root") or drive_root),
             MappingProxyType(actor))
 

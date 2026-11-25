@@ -256,11 +256,14 @@ def cost_coverage(snapshot, txn, root) -> dict:
     be collected and stays unrecorded only.
     """
     from ouroboros.delegate_custody import TERMINAL_STATES
+    from ouroboros.execution_domain import is_peer_ref
 
     root = pathlib.Path(root).resolve()
     ledger_roots = {"": root}
     missing = set()
     for rid, entry in sorted(snapshot["runs"].items()):
+        if is_peer_ref(entry.engine_ref):
+            continue  # paid and booked on the receiving Ouroboros, never on the sender's ledger or caps
         address = str(entry.ledger_root or "")
         if address not in ledger_roots:
             ledger_roots[address] = pathlib.Path(address).resolve()
@@ -274,11 +277,14 @@ def cost_coverage(snapshot, txn, root) -> dict:
     return {**snapshot, "unrecorded": missing,
             "closed_unrecorded": {rid for rid in missing if snapshot["runs"][rid].settled},
             "open": {rid for rid, entry in snapshot["runs"].items()
-                     if not entry.settled and entry.terminal_state not in TERMINAL_STATES}}
+                     if not is_peer_ref(entry.engine_ref)
+                     and not entry.settled and entry.terminal_state not in TERMINAL_STATES}}
 
 
 def with_cost_coverage(summary, joined, *, task_id="", root_task_id=""):
     """Project the already joined facts onto one bucket without rereading receipts."""
+    from ouroboros.execution_domain import is_peer_ref
+
     def selected(task, tree):
         return (not task_id or task == task_id) and (not root_task_id or (tree or task) == root_task_id)
 
@@ -288,7 +294,8 @@ def with_cost_coverage(summary, joined, *, task_id="", root_task_id=""):
         "unrecorded_run_ids": sorted(runs & joined["unrecorded"]),
         "closed_unrecorded_run_ids": sorted(runs & joined["closed_unrecorded"]),
         "pending_invocation_ids": sorted({str(p["invocation_id"]) for p in joined["pending"]
-                                          if selected(p.get("task_id"), p.get("root_task_id"))}),
+                                          if not is_peer_ref(p.get("engine_ref"))
+                                          and selected(p.get("task_id"), p.get("root_task_id"))}),
     }
     result = {**summary, "cost_custody": coverage}
     if cost_coverage_open(result):

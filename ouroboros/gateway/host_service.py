@@ -904,6 +904,7 @@ from ouroboros.gateway.host_service_places import (  # noqa: E402
     _api_presence_work as _api_presence_work,
     _api_presence_place as _api_presence_place,
     _presence_work_view as _presence_work_view,
+    host_service_context,
 )
 
 
@@ -1517,13 +1518,10 @@ def create_host_service_app(
             WebSocketRoute("/events", _ws_events),
         ]
     )
-    app.state.host_service_context = HostServiceContext(
-        pathlib.Path(data_dir),
-        bridge_getter=bridge_getter,
-        tool_schemas_getter=tool_schemas_getter,
-        ws_broadcaster_getter=ws_broadcaster_getter,
-        presence_runner=presence_runner,
-    )
+    # The data root's one context: a linked Ouroboros's messages share it, also one that came before this service.
+    app.state.host_service_context = host_service_context(
+        data_dir, bridge_getter=bridge_getter, tool_schemas_getter=tool_schemas_getter,
+        ws_broadcaster_getter=ws_broadcaster_getter, presence_runner=presence_runner)
     return app
 
 

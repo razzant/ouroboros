@@ -506,17 +506,69 @@ def observe_bound_state(root, entry, state):
     return None
 
 
-def recovered_cancel_store(gateway, entry):
+def _recovered_peer_binding(gateway, entry, ref, *, for_stop=False):
+    """Verify a recovered peer letter against its genuine PeerGateway, exact link binding and run id."""
+    from ouroboros import peer_links
     from ouroboros.execution_domain import same_engine
+    from ouroboros.gateways.peer import PeerGateway
 
+    place_id, link_id = ref.get("place_id"), ref.get("link_id")
+    run_id, invocation_id = getattr(entry, "run_id", ""), getattr(entry, "invocation_id", "")
+    if (not isinstance(gateway, PeerGateway) or not same_engine(gateway, entry)
+            or not isinstance(place_id, str) or not place_id.strip()
+            or not isinstance(link_id, str) or not link_id.strip()
+            or not isinstance(run_id, str) or not run_id.strip()
+            or (invocation_id and invocation_id != run_id)
+            or getattr(entry, "daemon_store_id", "") or getattr(gateway, "store_identity", "")):
+        return False
+    link = getattr(gateway, "_link", None)
+    if (not isinstance(link, peer_links.OutgoingLink)
+            or link.place_id != place_id or link.link_id != link_id):
+        return False
+    now = peer_links.outgoing_link(link.place_id, drive_root=link.drive_root)
+    if now is None and for_stop:
+        now = peer_links.stopping_link(link.place_id, drive_root=link.drive_root)
+    return (now is not None
+            and (now.link_id, now.place_id, now.peer_url, now.peer_install_id)
+            == (link.link_id, link.place_id, link.peer_url, link.peer_install_id)
+            and peer_links.loopback_url(now.peer_url))
+
+
+def stop_read_run(gateway, run_id):
+    """Operational Stop read-back: on a linked Ouroboros, uses the Pause-safe Stop read channel."""
+    from ouroboros.gateways.peer import PeerGateway
+
+    if isinstance(gateway, PeerGateway):
+        return gateway.get_run(run_id, for_stop=True)
+    return gateway.get_run(run_id)
+
+
+def recovered_cancel_store(gateway, entry, *, for_stop=False):
+    from ouroboros.execution_domain import is_peer_ref, recorded_ref, same_engine
+
+    ref = recorded_ref(entry)
+    if is_peer_ref(ref):
+        return _recovered_peer_binding(gateway, entry, ref, for_stop=for_stop)
     return (same_engine(gateway, entry) and bool(entry.daemon_store_id)
             and entry.daemon_store_id == getattr(gateway, "store_identity", ""))
 
 
-def recovered_cancel_detail(gateway, entry, detail):
+def recovered_cancel_detail(gateway, entry, detail, *, for_stop=False):
     """A recovered run's terminal and active facts must name its run in its store."""
+    from ouroboros import delegate_custody as custody
     from ouroboros.delegate_custody_usage import run_names
+    from ouroboros.execution_domain import is_peer_ref, recorded_ref
 
+    if not isinstance(detail, dict):
+        return False
+    if is_peer_ref(recorded_ref(entry)):
+        if not recovered_cancel_store(gateway, entry, for_stop=for_stop):
+            return False
+        if detail.get("storeId") not in (None, ""):
+            return False
+        if not for_stop and custody.summary_of(detail).get("contentWithheld"):
+            return False
+        return entry.run_id in run_names(detail) and not custody.names_another_run(detail, entry.run_id)
     return (recovered_cancel_store(gateway, entry) and entry.run_id in run_names(detail)
             and detail.get("storeId") in (None, "", entry.daemon_store_id))
 
@@ -591,6 +643,7 @@ def prepare_recovered_cancel(root, gateway, entry, reason, owner_stop):
     this read shows the exact run active in its store and the earlier sender has returned
     (``_prior_sender_returned``). The same press and automatic reconciliation never do.
     """
+    from ouroboros.execution_domain import recorded_ref
     from ouroboros.tool_custody import owner_proof
     from ouroboros import delegate_custody as custody
     from ouroboros.delegate_custody_current import run
@@ -601,14 +654,15 @@ def prepare_recovered_cancel(root, gateway, entry, reason, owner_stop):
                 "state": "", "fault_reason": reason, "detail": explanation, "control_owed": owed}
 
     fresh = run(root, entry.run_id)
-    if fresh is None and custody._CUSTODY.get(entry.run_id) is entry and recovered_cancel_store(gateway, entry):
+    if (fresh is None and custody._CUSTODY.get(entry.run_id) is entry
+            and recovered_cancel_store(gateway, entry, for_stop=True)):
         # The starter kept the exact physical handle when STARTED failed. Rejoin its invocation,
         # not a new start, before reserving Stop; another engine name is not a match here.
         bound = custody.bind_started(root, entry, exclusive=True, accepted_only=True)
         if bound.durable and bound.custody.run_id == entry.run_id:
             fresh = bound.custody
-    if not fresh or (fresh.task_id, fresh.invocation_id, fresh.daemon_store_id) != (
-            entry.task_id, entry.invocation_id, entry.daemon_store_id):
+    if not fresh or (fresh.task_id, fresh.invocation_id, fresh.daemon_store_id, recorded_ref(fresh)) != (
+            entry.task_id, entry.invocation_id, entry.daemon_store_id, recorded_ref(entry)):
         return blocked("custody_owner_mismatch", "The run's custody identity is unavailable or changed.", owed=True)
     prior = fresh._recovered_cancel
     accepted = prior == custody.CANCEL_REQUESTED
@@ -626,11 +680,11 @@ def prepare_recovered_cancel(root, gateway, entry, reason, owner_stop):
 
     if fresh.settled:
         return result(custody.CANCEL_CONFIRMED, "settled")
-    if not recovered_cancel_store(gateway, fresh):
+    if not recovered_cancel_store(gateway, fresh, for_stop=True):
         return result(custody.CANCEL_CONTAINMENT_FAULT, explanation="The run's owning store was not verified.")
     read_error = ""
     try:
-        detail = gateway.get_run(entry.run_id)
+        detail = stop_read_run(gateway, entry.run_id)
     except ClaudexorUnavailable as exc:
         if custody.daemon_says_absent(exc, gateway=gateway, run=fresh):
             custody.close_absent_run(root, gateway, fresh, "get_run_absent", absence=exc)
@@ -641,7 +695,8 @@ def prepare_recovered_cancel(root, gateway, entry, reason, owner_stop):
     if (custody.names_another_run(detail, entry.run_id)
             or custody.admitted_store_id(detail) not in ("", fresh.daemon_store_id)):
         return result(custody.CANCEL_CONTAINMENT_FAULT, explanation="The read-back names another run or store.")
-    state = str(custody.summary_of(detail).get("state") or "") if recovered_cancel_detail(gateway, fresh, detail) else ""
+    state = (str(custody.summary_of(detail).get("state") or "")
+             if recovered_cancel_detail(gateway, fresh, detail, for_stop=True) else "")
     if state in custody.TERMINAL_STATES:
         custody.settle_run(root, gateway, fresh, detail)
         return result(custody.CANCEL_CONFIRMED, state, terminal=detail)
@@ -657,9 +712,9 @@ def prepare_recovered_cancel(root, gateway, entry, reason, owner_stop):
     earlier = getattr(fresh, "_cancel_action", {})
     if state in ACTIVE and _prior_sender_returned(earlier):  # never on a penumbral GET or beside a live sender
         event["after_unknown_event"] = earlier.get("unknown_event")
-    if (recovered_cancel_store(gateway, fresh) and can_reserve_cancel(fresh, event)
+    if (recovered_cancel_store(gateway, fresh, for_stop=True) and can_reserve_cancel(fresh, event)
             and custody.emit(root, custody.CANCEL_HANDOFF, event)):
-        if recovered_cancel_store(gateway, fresh):
+        if recovered_cancel_store(gateway, fresh, for_stop=True):
             return None
         return custody._cancel_result(root, fresh, custody.CANCEL_CONTAINMENT_FAULT, accepted=False,
                                       control_status="", state=state, fault_reason="cancel_unverified",

@@ -68,6 +68,27 @@ def _key(skill: str, payload: dict[str, Any]) -> tuple[str, ...]:
     return (skill, *(payload[key] for key in ("account_id", "delivery_id", "part_id", "state")))
 
 
+def _client_id(key: tuple[str, ...]) -> str:
+    """The one deterministic chat client id of a receipt identity."""
+    return "presence-delivery:" + hashlib.sha256(_canonical({"key": key})).hexdigest()
+
+
+def recorded_states(data_dir: Path, skill: str, account_id: str, delivery_id: str, part_id: str) -> set[str]:
+    """The states this receipt identity already holds in canonical history, read by its indexed client ids and never
+    written. Pending import or an unreadable store raises (``dialogue_store.require_imported``): unknown, not none."""
+    from ouroboros import dialogue_store as ds
+
+    ds.require_imported(Path(data_dir), "chat")
+    found = set()
+    for state in _STATES:
+        key = (skill, account_id, delivery_id, part_id, state)
+        for entry in ds.iter_probes(Path(data_dir), "chat", [("client_message_id", _client_id(key))]):
+            parsed = _payload_from_row(entry.row)
+            if parsed is not None and _key(*parsed) == key:
+                found.add(state)
+    return found
+
+
 def _payload_from_row(row: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     if row.get("type") != "presence_delivery":
         return None
@@ -153,7 +174,7 @@ class PresenceDeliveryRecorder:
         payload = validate_delivery(value)
         key = _key(skill, payload)
         digest = hashlib.sha256(_canonical(payload)).hexdigest()
-        client_id = "presence-delivery:" + hashlib.sha256(_canonical({"key": key})).hexdigest()
+        client_id = _client_id(key)
         with self._lock:
             if self._index is None:
                 self._index, self._checked = {}, set()

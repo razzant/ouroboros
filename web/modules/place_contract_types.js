@@ -157,6 +157,10 @@
  * @property {Array<Object<string,string>>} shared_owner_accounts Confirmed in another place of this bot or app; they count here.
  * @property {PlaceCircleChoice|null} circle
  * @property {PlaceDescription|null} description
+ * @property {{mine: boolean, may_start: boolean}|null=} peer A linked Ouroboros: my human's two stored choices.
+ * @property {{messages: boolean|null, assignments: boolean|null, reason: string}=} peer_effective What is in effect now beside them (null: the link registry could not be read).
+ * @property {string=} peer_facts The host's line stating both.
+ * @property {Object|null=} link Its link: id, six-digit code and its check, times; never a key.
  */
 
 /**
@@ -185,6 +189,7 @@
  * @property {string=} revoke_owner_account
  * @property {string=} circle_id  // "" takes it out of its circle
  * @property {string=} description  // "" clears it
+ * @property {{mine: boolean, may_start: boolean}=} peer  // a linked Ouroboros's facts: my human's door only
  * @property {number=} expected_revision
  */
 

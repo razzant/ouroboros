@@ -21,6 +21,127 @@ def _set(run_id: str) -> str:
     return "delegate_messages-" + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
 
 
+def _peer_answer_pin_set(run_id: str) -> str:
+    return "peer_answer_pins-" + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+
+
+def _peer_answer_pin_id(starter_task_id: str, invocation_id: str, run_id: str, interaction_id: str) -> str:
+    key = json.dumps([starter_task_id, invocation_id, run_id, interaction_id],
+                     ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def claim_peer_answer_pin(ctx: Any, entry: Any, interaction_id: str, letter_id: str, raw_bytes: bytes) -> None:
+    """Atomically compare-or-insert the SHA-256 of serialized peer reply ``letter_bytes`` before POST.
+
+    Stores only the durable digest and identity keys in a dedicated per-run ``obligations`` set (never
+    a copy of the answer text, never in live-message/owner-placement rows or starter journals). Matching
+    bytes pass; different bytes raise ``peer_answer_conflict`` before POST; an unreadable/unwritable
+    store raises ``peer_answer_pin_unavailable`` before POST.
+    """
+    from ouroboros.gateways.peer import _unavailable
+
+    starter_task_id = str(getattr(entry, "task_id", "") or "").strip()
+    invocation_id = str(getattr(entry, "invocation_id", "") or "").strip()
+    run_id = str(getattr(entry, "run_id", "") or "").strip()
+    iid = str(interaction_id or "").strip()
+    lid = str(letter_id or "").strip()
+    if not (starter_task_id and invocation_id and run_id and iid and lid and isinstance(raw_bytes, (bytes, bytearray))):
+        raise _unavailable("peer_answer_pin_unavailable",
+                           "peer answer identity is incomplete; nothing was sent")
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    set_name = _peer_answer_pin_set(run_id)
+    pin_id = _peer_answer_pin_id(starter_task_id, invocation_id, run_id, iid)
+    try:
+        root = custody_root(ctx)
+        require_owned_root(root)
+        with store.open_store(root, write=True) as txn:
+            existing = txn.get_row(set_name, pin_id)
+            if existing is None:
+                txn.put_row(set_name, pin_id, {
+                    "schema": 1,
+                    "kind": "peer_answer_pin",
+                    "starter_task_id": starter_task_id,
+                    "invocation_id": invocation_id,
+                    "run_id": run_id,
+                    "interaction_id": iid,
+                    "letter_id": lid,
+                    "letter_bytes_sha256": digest,
+                    "delivery_state": "unconfirmed",
+                    "pinned_at": utc_now_iso(),
+                })
+                return
+    except Exception as exc:
+        raise _unavailable("peer_answer_pin_unavailable",
+                           f"could not record peer answer digest before send ({exc}); nothing was sent") from exc
+    if (not isinstance(existing, dict) or existing.get("kind") != "peer_answer_pin"
+            or not isinstance(existing.get("letter_bytes_sha256"), str)):
+        raise _unavailable("peer_answer_pin_unavailable",
+                           "recorded peer answer pin is unreadable; nothing was sent")
+    if peer_answer_pin_matches(existing, entry, iid, lid, raw_bytes):
+        return
+    raise _unavailable(
+        "peer_answer_conflict",
+        "another answer was already pinned for this peer question; replacing it with different bytes "
+        "is forbidden — retry the exact same answer or re-read with delegate_wait; nothing was sent",
+    )
+
+
+def peer_answer_pin_matches(pin: Any, entry: Any, interaction_id: str, letter_id: str, raw_bytes: bytes) -> bool:
+    """Whether ``pin`` matches this starter, invocation, run, question, letter id and exact serialized bytes."""
+    if not isinstance(pin, dict) or pin.get("kind") != "peer_answer_pin" or not isinstance(raw_bytes, (bytes, bytearray)):
+        return False
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    return (pin.get("starter_task_id") == str(getattr(entry, "task_id", "") or "").strip()
+            and pin.get("invocation_id") == str(getattr(entry, "invocation_id", "") or "").strip()
+            and pin.get("run_id") == str(getattr(entry, "run_id", "") or "").strip()
+            and pin.get("interaction_id") == str(interaction_id or "").strip()
+            and pin.get("letter_id") == str(letter_id or "").strip()
+            and pin.get("letter_bytes_sha256") == digest)
+
+
+def read_peer_answer_pin(ctx: Any, entry: Any, interaction_id: str) -> dict | None:
+    """Read the durable peer answer pin (digest and confirmation state only, never answer text)."""
+    starter_task_id = str(getattr(entry, "task_id", "") or "").strip()
+    invocation_id = str(getattr(entry, "invocation_id", "") or "").strip()
+    run_id = str(getattr(entry, "run_id", "") or "").strip()
+    iid = str(interaction_id or "").strip()
+    if not (starter_task_id and invocation_id and run_id and iid):
+        return None
+    try:
+        root = custody_root(ctx)
+        with store.open_store(root, write=False) as txn:
+            row = txn.get_row(_peer_answer_pin_set(run_id), _peer_answer_pin_id(starter_task_id, invocation_id, run_id, iid))
+    except Exception:
+        return None
+    return dict(row) if isinstance(row, dict) and row.get("kind") == "peer_answer_pin" else None
+
+
+def confirm_peer_answer_pin(ctx: Any, entry: Any, interaction_id: str, letter_id: str, msg_id: str) -> None:
+    """Mark a matching peer answer pin confirmed once the receiver's LetterAnswerReceipt proves mailbox delivery."""
+    starter_task_id = str(getattr(entry, "task_id", "") or "").strip()
+    invocation_id = str(getattr(entry, "invocation_id", "") or "").strip()
+    run_id = str(getattr(entry, "run_id", "") or "").strip()
+    iid, lid, mid = str(interaction_id or "").strip(), str(letter_id or "").strip(), str(msg_id or "").strip()
+    if not (starter_task_id and invocation_id and run_id and iid and lid and mid):
+        return
+    try:
+        root = custody_root(ctx)
+        require_owned_root(root)
+        set_name = _peer_answer_pin_set(run_id)
+        pin_id = _peer_answer_pin_id(starter_task_id, invocation_id, run_id, iid)
+        with store.open_store(root, write=True) as txn:
+            row = txn.get_row(set_name, pin_id)
+            if (isinstance(row, dict) and row.get("kind") == "peer_answer_pin"
+                    and row.get("starter_task_id") == starter_task_id and row.get("invocation_id") == invocation_id
+                    and row.get("run_id") == run_id and row.get("interaction_id") == iid
+                    and row.get("letter_id") == lid):
+                row.update(delivery_state="confirmed", msg_id=mid, confirmed_at=row.get("confirmed_at") or utc_now_iso())
+                txn.put_row(set_name, pin_id, row)
+    except Exception:
+        return
+
+
 def _wire(frame: dict, text: str) -> str:
     # One JSON value: text cannot close the host frame or replace its fields.
     return json.dumps({"kind": "task_message", "frame": frame, "text": text},

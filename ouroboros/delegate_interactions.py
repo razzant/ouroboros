@@ -431,7 +431,9 @@ def _normalized_answers(
 
 def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
                              exc: Exception,
-                             seconds_left: Optional[float] = None) -> ToolResult:
+                             seconds_left: Optional[float] = None,
+                             *, is_peer: bool = False,
+                             pin: Optional[Dict[str, Any]] = None) -> ToolResult:
     """The typed outcome for a transport that died mid-answer: re-read, never re-guess.
 
     An ambiguous failure means the answer MAY have landed. The one forbidden move
@@ -444,6 +446,7 @@ def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
     spent issues no further wire calls — and otherwise bounds it.
     """
     still_pending: Optional[bool] = None
+    reserved = False
     if seconds_left is None or seconds_left > 0:
         try:
             from ouroboros.delegate_progress import poll_bound
@@ -452,10 +455,44 @@ def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
             kwargs = ({} if seconds_left is None
                       else {"timeout_sec": poll_bound(seconds_left)})
             detail = gateway.get_run(run_id, **kwargs)
-            still_pending = interaction_id in {
-                row["interaction_id"] for row in cx_pending(detail)}
+            matched = next((row for row in cx_pending(detail) if row["interaction_id"] == interaction_id), None)
+            still_pending = matched is not None
+            reserved = bool(matched and matched.get("delivery_state") == "reserved")
         except Exception:
             still_pending = None
+    if is_peer:
+        delivery_state = ("reserved_unconfirmed" if reserved else "pending_unconfirmed" if still_pending is True
+                          else "unconfirmed")
+        if reserved:
+            hint = ("the receiver reserved this answer on the wire, but mailbox delivery to the asking task is "
+                    "INCOMPLETE (not confirmed). Retry delegate_answer with the EXACT SAME answers (and the same "
+                    "reply_to) while permitted to verify or complete delivery; NEVER post a different answer for "
+                    "this interaction.")
+        elif still_pending is True:
+            hint = ("the interaction is STILL PENDING, so the answer most likely never arrived: retry "
+                    "delegate_answer with the EXACT SAME answers while permitted; NEVER post a different answer.")
+        elif still_pending is False:
+            hint = ("the question is not listed as pending now (the answer may have landed with a lost receipt, "
+                    "been held while the link is paused or its rules changed, or resolved another way). Delivery is "
+                    "NOT confirmed: check with delegate_wait or retry delegate_answer with ONLY the EXACT SAME "
+                    "pinned answer while permitted to verify confirmation; NEVER post a different answer.")
+        elif seconds_left is not None and seconds_left <= 0:
+            hint = ("this call's own time budget is spent, so the detail was NOT re-read. Delivery is NOT "
+                    "confirmed: re-check with delegate_wait or retry ONLY the EXACT SAME pinned answer while "
+                    "permitted; NEVER post a different answer for this interaction.")
+        else:
+            hint = ("the run detail could not be re-read either. Delivery is NOT confirmed: re-check with "
+                    "delegate_wait or retry ONLY the EXACT SAME pinned answer while permitted; NEVER post a "
+                    "different answer for this interaction.")
+        payload: Dict[str, Any] = {
+            "status": "delivery_unknown", "delivery_state": delivery_state, "confirmed": False,
+            "run_id": run_id, "interaction_id": interaction_id, "still_pending": still_pending,
+            "transport_error": f"{getattr(exc, 'code', type(exc).__name__)}: {exc}",
+            "note": f"The answer POST did not come back confirmed; {hint}",
+        }
+        if isinstance(pin, dict) and pin.get("letter_id"):
+            payload["pinned_letter_id"] = str(pin["letter_id"])
+        return delegate_result(payload)
     if still_pending is True:
         hint = ("the interaction is STILL PENDING, so the answer most likely never "
                 "arrived: retry delegate_answer with the SAME answers.")
@@ -480,6 +517,130 @@ def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
         "transport_error": f"{getattr(exc, 'code', type(exc).__name__)}: {exc}",
         "note": f"The answer POST did not come back typed; {hint}",
     })
+
+
+_PEER_REMOTE_REFUSALS = frozenset({
+    "link_paused", "peer_may_not_start", "link_silent", "install_mismatch", "link_unknown", "panic_hold",
+})
+
+
+def _peer_address_exact(address: dict, entry: Any, iid: str) -> bool:
+    """A peer question address must carry this exact starter, run, interaction and single question_id."""
+    return (
+        set(address) == {"starter_task_id", "run_id", "interaction_id", "question_ids"}
+        and address.get("starter_task_id") == entry.task_id
+        and address.get("run_id") == entry.run_id
+        and address.get("interaction_id") == iid
+        and address.get("question_ids") == [iid]
+    )
+
+
+def _peer_answer_receipt(ctx: ToolContext, entry: Any, rid: str, iid: str, wire: list) -> Optional[ToolResult]:
+    """An answer to a linked Ouroboros's question already settled for this exact starter, run, question and bytes
+    (``delegate_message_store`` pin): its confirmed receipt (the ``msg_id`` the asking work's mailbox recorded),
+    returned before any new decision (the words' reading, the link's state, this task's launch gate) with nothing
+    sent or read again; another answer pinned for that question is refused before its reading. ``None`` when this
+    answer still needs its send: no pin, an unconfirmed one of these same bytes, or rows the send path refuses."""
+    from ouroboros.delegate_message_store import peer_answer_pin_matches, read_peer_answer_pin
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.gateways.peer import peer_answer_letter
+
+    pin = read_peer_answer_pin(ctx, entry, iid)
+    if pin is None:
+        return None
+    try:
+        lid, _body, raw = peer_answer_letter(rid, iid, wire)
+    except ClaudexorUnavailable:
+        return None
+    if not peer_answer_pin_matches(pin, entry, iid, lid, raw):
+        return _fail("delegate_answer", "peer_answer_conflict",
+                     "another answer was already pinned for this peer question; replacing it with different bytes "
+                     "is forbidden — retry the exact same answer or re-read with delegate_wait; nothing was sent",
+                     run_id=rid, host_code=AGENT_FAULT_CODE)
+    msg_id = str(pin.get("msg_id") or "").strip()
+    if pin.get("delivery_state") != "confirmed" or not msg_id:
+        return None
+    return delegate_result({
+        "status": "delivered", "run_id": rid, "interaction_id": iid, "accepted": True, "detail": "",
+        "confirmed": True, "delivery_state": "confirmed", "replayed": True,
+        "receipt": {"letter_id": lid, "msg_id": msg_id},
+        "note": (f"This exact answer was delivered earlier: the linked Ouroboros recorded it in the asking work's "
+                 f"mailbox as {msg_id}. Nothing was sent, read or checked again; delivered is not read."),
+    })
+
+
+def _peer_answer_post(ctx: ToolContext, entry: Any, gateway: Any, rid: str, iid: str, wire: list,
+                      timeout_sec: float) -> Dict[str, Any]:
+    """One answer letter's physical POST: its bytes pinned first (``claim_peer_answer_pin``), the POST then through
+    this task's launch gate (``owner_pause.run_operation``), as a work letter and a message go: a Pause or Stop of
+    this task that landed during the reading or the address read keeps it from leaving (``answer_held``, nothing
+    sent or pinned). The receiver's own refusals and unknown outcomes keep their types."""
+    from ouroboros import owner_pause
+    from ouroboros.delegate_message_store import claim_peer_answer_pin
+    from ouroboros.gateways.peer import _unavailable
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+
+    def post() -> Dict[str, Any]:
+        return gateway.answer_interaction(rid, iid, wire, timeout_sec=timeout_sec,
+                                          before_send=lambda lid, raw: claim_peer_answer_pin(ctx, entry, iid, lid, raw))
+    try:
+        return owner_pause.run_operation(ctx, post)
+    except (owner_pause.OwnerPauseRefused, PhysicalDispatchInterrupted) as exc:
+        code = getattr(exc, "code", "") or str(exc) or "owner_paused"
+        raise _unavailable("answer_held", f"this task's own Pause or Stop holds the answer ({code}); nothing was "
+                                          "sent; the same answer goes once this task runs again") from exc
+
+
+def _validate_answer_address_live(ctx: ToolContext, entry: Any, gateway: Any, address: dict,
+                                  iid: str, wire: list, left_fn: Any) -> Tuple[Optional[str], Optional[ToolResult]]:
+    """Verify reply_to against current pending questions; a pinned peer answer may recover only when the exact
+    single-question address matches and no live row for this interaction disagrees."""
+    from ouroboros.delegate_progress import _strict_poll, poll_bound
+    from ouroboros.execution_domain import is_peer_ref
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable, pending_interactions
+
+    rid = entry.run_id
+    peer = is_peer_ref(entry.engine_ref)
+    if peer and not _peer_address_exact(address, entry, iid):
+        return None, _fail(
+            "delegate_answer", "reply_to_mismatch",
+            "peer reply_to must match starter_task_id, run_id, interaction_id and carry exactly one question_id",
+            run_id=rid,
+        )
+    try:
+        detail = _strict_poll(gateway, rid, poll_bound(left_fn(), strict=True))
+        rows = pending_interactions(detail, strict=True)
+        live_matching = [row for row in rows if row.get("interaction_id") == iid]
+        if live_matching:
+            # A live row exists for this interaction: require exact live address match; never bypass a live mismatch.
+            require_pending_address(address, rows)
+            return live_matching[0]["delivery"], None
+        if not peer:
+            require_pending_address(address, rows)
+            return None, None
+        from ouroboros.delegate_message_store import peer_answer_pin_matches, read_peer_answer_pin
+        from ouroboros.gateways.peer import peer_answer_letter
+
+        pin = read_peer_answer_pin(ctx, entry, iid)
+        if pin is None:
+            require_pending_address(address, rows)
+        lid, _body, raw = peer_answer_letter(rid, iid, wire)
+        if peer_answer_pin_matches(pin, entry, iid, lid, raw):
+            return "blocking", None
+        return None, _fail(
+            "delegate_answer", "peer_answer_conflict",
+            "another answer was already pinned for this peer question; replacing it with different bytes "
+            "is forbidden — retry the exact same answer or re-read with delegate_wait; nothing was sent",
+            run_id=rid, host_code=AGENT_FAULT_CODE,
+        )
+    except (ValueError, ClaudexorUnavailable) as exc:
+        if getattr(exc, "code", "") in {"answer_row_mismatch", "empty_answer", "invalid_letter"}:
+            return None, delegate_result({
+                "status": "rejected", "ok": False, "host_code": AGENT_FAULT_CODE,
+                "run_id": rid, "interaction_id": iid, "accepted": False, "detail": str(exc),
+                "note": _ANSWER_NOTES["rejected"],
+            })
+        return None, _fail("delegate_answer", "reply_to_unresolved", str(exc), run_id=rid)
 
 
 def _observed_delivery(gateway: Any, run_id: str, interaction_id: str, seconds_left: float) -> Optional[str]:
@@ -587,16 +748,28 @@ def _delegate_answer(
     wire, arg_error = _normalized_answers(answers, source_response)
     if arg_error or wire is None:
         return arg_error
+    from ouroboros.execution_domain import is_peer_ref
+    from ouroboros.peer_letters import answer_refusal
+
+    peer_run = is_peer_ref(entry.engine_ref)
     try:
         address = validate_answer_address(reply_to, entry.task_id, rid, iid, wire)
+        if address is not None and peer_run and not _peer_address_exact(address, entry, iid):
+            raise ValueError("peer reply_to must carry exactly one question_id matching interaction_id")
     except ValueError as exc:
         return _fail("delegate_answer", "reply_to_mismatch", str(exc), run_id=rid)
+    if peer_run and (earlier := _peer_answer_receipt(ctx, entry, rid, iid, wire)) is not None:
+        return earlier  # this exact answer's confirmed receipt, or another answer's pin: before any new decision
     deadline = time.monotonic() + _ANSWER_DEADLINE_SEC
     delivery: Optional[str] = None  # the answered row's own kind, when this call read it
 
     def _left() -> float:
         return deadline - time.monotonic()
 
+    # A letter's answer: its exact words, read once within this call's time and before its bytes are pinned or sent.
+    # A refusal here is this side's alone: the receiver was not read, so it says nothing of the question there.
+    if refused := answer_refusal(ctx, entry, iid, wire):
+        return _fail("delegate_answer", "answer_words_refused", refused, run_id=rid)
     try:  # the engine the run was started on (``execution_domain``), never the current default
         gateway = run_gateway(entry, ClaudexorGateway, timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
         gateway.handshake(timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
@@ -615,22 +788,18 @@ def _delegate_answer(
                     gateway, rid, iid,
                     TimeoutError(f"local time budget ({_ANSWER_DEADLINE_SEC:.0f}s) "
                                  "exhausted before the answer POST was sent"),
-                    seconds_left=0.0)
+                    seconds_left=0.0, is_peer=peer_run)
             if address is not None:
-                from ouroboros.delegate_progress import _strict_poll
-                from ouroboros.gateways.claudexor import pending_interactions
-
-                try:
-                    detail = _strict_poll(gateway, rid, poll_bound(_left(), strict=True))
-                    rows = pending_interactions(detail, strict=True)
-                    require_pending_address(address, rows)
-                    delivery = next((row["delivery"] for row in rows if row["interaction_id"] == iid), None)
-                except (ValueError, ClaudexorUnavailable) as exc:
-                    return _fail("delegate_answer", "reply_to_unresolved", str(exc), run_id=rid)
+                delivery, addr_error = _validate_answer_address_live(ctx, entry, gateway, address, iid, wire, _left)
+                if addr_error is not None:
+                    return addr_error
                 if _left() <= 0:
                     return _fail("delegate_answer", "reply_to_unresolved",
                                  "Question validation exhausted the deadline; no answer was sent.", run_id=rid)
-            body = gateway.answer_interaction(rid, iid, wire, timeout_sec=poll_bound(_left(), strict=True))
+            if peer_run:  # its bytes pinned, then one physical POST through this task's launch gate
+                body = _peer_answer_post(ctx, entry, gateway, rid, iid, wire, poll_bound(_left(), strict=True))
+            else:
+                body = gateway.answer_interaction(rid, iid, wire, timeout_sec=poll_bound(_left(), strict=True))
         except ClaudexorUnavailable as exc:
             status_code = int(getattr(exc, "status_code", 0) or 0)
             if isinstance(exc, ClaudexorSubscriptionWindowExhausted):
@@ -674,17 +843,23 @@ def _delegate_answer(
                     "accepted": False, "detail": str(exc),
                     "note": _ANSWER_NOTES["not_found"],
                 })
-            if status_code in _REJECTED_STATUS_CODES:
-                # F3 (races #1), narrowed by R2-1: only a PAYLOAD-SEMANTIC 4xx
-                # is the engine ANSWERING about these bytes — relayed in the
-                # rejected shape so the model fixes the rows instead of
-                # treating a definite refusal as an ambiguous delivery. An
-                # auth/rate/timeout 4xx says nothing about the rows and falls
-                # through to delivery_unknown below, whose re-read correctly
-                # advises retrying the SAME answers while the row is pending.
+            refusal_code = str(getattr(exc, "refusal_code", "") or "")
+            if refusal_code == "no_budget":  # a linked Ouroboros (gateways/peer.py)
                 return delegate_result({
-                    # The engine answered about these bytes: a definite refusal of
-                    # the model's own rows, recorded as the agent fault it is.
+                    "status": "no_budget", "ok": False, "host_code": SUBSTRATE_REFUSAL_CODE,
+                    "run_id": rid, "interaction_id": iid, "accepted": False, "detail": str(exc),
+                    "note": "The receiving Ouroboros refused the answer: that letter's cost ceiling is spent there. "
+                            "Nothing was delivered and the rows are not at fault; its human may resume the work."})
+            from ouroboros.gateways.peer import NOTHING_SENT as _PEER_NOTHING_SENT
+            if peer_run and exc.code in _PEER_NOTHING_SENT:
+                hc = AGENT_FAULT_CODE if exc.code == "peer_answer_conflict" else SUBSTRATE_REFUSAL_CODE
+                return _fail("delegate_answer", exc.code, str(exc), run_id=rid, host_code=hc)
+            if peer_run and refusal_code in _PEER_REMOTE_REFUSALS and status_code in (401, 403):
+                return _fail("delegate_answer", refusal_code, str(exc), run_id=rid,
+                             refusal_code=refusal_code, host_code=SUBSTRATE_REFUSAL_CODE)
+            if status_code in _REJECTED_STATUS_CODES:
+                # F3/R2-1: payload-semantic 4xx -> rejected; auth/rate/timeout 4xx -> delivery_unknown.
+                return delegate_result({
                     "status": "rejected", "ok": False, "host_code": AGENT_FAULT_CODE,
                     "run_id": rid, "interaction_id": iid,
                     "accepted": False, "detail": str(exc),
@@ -692,8 +867,12 @@ def _delegate_answer(
                         f" This was a definite engine refusal (HTTP {status_code}): "
                         "fix the rows; do not re-post the same bytes."),
                 })
+            pin = None
+            if peer_run:
+                from ouroboros.delegate_message_store import read_peer_answer_pin
+                pin = read_peer_answer_pin(ctx, entry, iid)
             return _answer_delivery_unknown(gateway, rid, iid, exc,
-                                            seconds_left=_left())
+                                            seconds_left=_left(), is_peer=peer_run, pin=pin)
         status = str(body.get("status") or "")
         source_receipt = None
         # ``delivered`` proves the answer reached a session that was HELD on it. For a question
@@ -746,6 +925,9 @@ def _delegate_answer(
             # promptly (a re-ask, or the remaining questions of the same set,
             # are news again) instead of holding a full window over them.
             _REPORTED_INTERACTIONS.pop(rid, None)
+        if peer_run and status == "delivered" and body.get("msg_id"):
+            from ouroboros.delegate_message_store import confirm_peer_answer_pin
+            confirm_peer_answer_pin(ctx, entry, iid, str(body.get("letter_id") or ""), str(body["msg_id"]))
         _emit(ctx, "delegate_interaction_answered", {
             "run_id": rid, "interaction_id": iid, "status": status,
             "questions_answered": len(wire),
@@ -760,6 +942,9 @@ def _delegate_answer(
             "detail": str(body.get("message") or ""),
             "note": kind_note or _ANSWER_NOTES.get(status, ""),
         }
+        if peer_run and status == "delivered" and body.get("msg_id"):
+            result.update(confirmed=True, delivery_state="confirmed",
+                          receipt={"letter_id": str(body.get("letter_id") or ""), "msg_id": str(body["msg_id"])})
         if status in ("rejected", "not_found"):
             # A definite typed refusal is recorded, never an OK observation: rejected
             # rows are the agent's fault; an absent interaction or run is a substrate
@@ -775,7 +960,7 @@ def _delegate_answer(
         # not have landed, and a traceback teaches the model nothing except to
         # retry blindly.
         log.warning("delegate_answer failed untyped for %s/%s", rid, iid, exc_info=True)
-        return _answer_delivery_unknown(gateway, rid, iid, exc, seconds_left=_left())
+        return _answer_delivery_unknown(gateway, rid, iid, exc, seconds_left=_left(), is_peer=peer_run)
     finally:
         gateway.close()
 
@@ -1184,15 +1369,19 @@ def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], st
     always reaches the engine, its recorded bytes under its id. Only owed rows, which may take a new frame, read the
     route's capability first: a new frame on a route with no live input, or an engine without the operation,
     records ``unsupported`` with no POST. An engine that cannot be discovered or reached, or a read that fails,
-    sends nothing; the host's frames then wait ``prepared`` for the body, which replays them with no read.
+    sends nothing; the host's frames then wait ``prepared`` for the body, which replays them with no read. A letter
+    to a linked Ouroboros takes no live words (``peer_letters.takes_no_live_input``): every row and replay ends
+    ``unsupported`` here, with no engine reached, and stays with the starter.
     ``(address, verdict, prior outcome, frame row)`` per frame sent."""
     from ouroboros.delegate_message_store import PLACEMENT_REPLAYS, place_frame
     from ouroboros.delegate_progress import poll_bound
     from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
+    from ouroboros.peer_letters import takes_no_live_input
 
     deadline = time.monotonic() + _MESSAGE_DEADLINE_SEC
     sent: List[Tuple[str, Dict[str, Any], str, Dict[str, Any]]] = []
+    unheard = takes_no_live_input(run)  # my human's rows never leave for another installation on their own
 
     def waits(why: str) -> list:
         log.warning("owner words placement into run %s waits: %s", run.run_id, why, exc_info=True)
@@ -1200,17 +1389,20 @@ def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], st
             place_frame(ctx, run, *_placement_text(quote, address, went), host=True)  # ahead of the engine's answer
         return sent
     try:  # a missing or unreadable daemon descriptor is the engine's absence this pass, never the task's end
-        gateway = run_gateway(run, ClaudexorGateway,  # the run's own engine (``execution_domain``)
-                              timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
+        gateway = None if unheard else run_gateway(  # the run's own engine (``execution_domain``)
+            run, ClaudexorGateway, timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
     except ClaudexorUnavailable:
         return waits("engine not discovered")
     try:
-        try:
-            gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
-        except ClaudexorUnavailable:
-            return waits("engine handshake failed")
         reason = detail = live_input = ""
-        if owed:
+        if unheard:
+            reason, detail, live_input = unheard, "a letter to a linked Ouroboros takes no live words", "none"
+        else:
+            try:
+                gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
+            except ClaudexorUnavailable:
+                return waits("engine handshake failed")
+        if owed and not unheard:
             reason, detail, live_input = _live_input_unsupported(
                 gateway, str(run.route_id or ""), lambda: deadline - time.monotonic())
             if reason in ("capability_read_failed", "deadline_exhausted"):
@@ -1220,7 +1412,7 @@ def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], st
             facts = {"run_id": run.run_id, "message_id": record["frame"]["message_id"], "text_chars": len(record["text"]),
                      "text_sha256": hashlib.sha256(record["text"].encode("utf-8", "replace")).hexdigest(),
                      "frame": record["frame"]}
-            if reason and prior not in PLACEMENT_REPLAYS:  # a replay always reaches the engine: it may be delivered
+            if reason and (unheard or prior not in PLACEMENT_REPLAYS):  # a replay reaches the engine: it may be delivered
                 verdict: Dict[str, Any] = dict(outcome="unsupported", reason=reason, host_code=SUBSTRATE_REFUSAL_CODE,
                                                detail=detail, live_input=live_input)
             else:
@@ -1239,7 +1431,8 @@ def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], st
             if record is not None:  # None: another placer's frame ended the row for this run
                 send(address, record, prior)
     finally:
-        gateway.close()
+        if gateway is not None:
+            gateway.close()
     return sent
 
 

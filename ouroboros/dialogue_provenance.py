@@ -521,7 +521,9 @@ def run_origin(record: Mapping[str, Any] | None) -> dict[str, Any]:
     names the correspondent only for a Presence turn itself (the transport's display
     name or username; the platform id rides in ``presence.actor_id``); a follow-up or
     promoted root that inherits ``metadata.presence`` carries the room, not an author,
-    because a model wrote its text. Booleans are always written, empty values never.
+    because a model wrote its text. ``letter_author`` is the agent author of a linked
+    Ouroboros's letter (``declared_author``), on its root and all that root began: an agent,
+    never my human. Booleans are always written, empty values never.
     """
     source = _mapping(record)
     metadata = _mapping(source.get("metadata"))
@@ -537,6 +539,8 @@ def run_origin(record: Mapping[str, Any] | None) -> dict[str, Any]:
     }
     for key in ("initiator", "origin_task_id", "schedule_id", "objective_author"):
         origin[key] = metadata.get(key)
+    # A linked Ouroboros whose letter began this work (its root, and all it started): the letter door's record only.
+    origin["letter_author"] = declared_author(metadata, key="letter_author")
     for key in ("delegation_role", "parent_task_id"):
         origin[key] = source.get(key) or metadata.get(key)
     presence = presence_provenance_from_task(source)

@@ -28,7 +28,8 @@ from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalo
 from ouroboros.deployment_policy import (
     RELEASE_AFTER_DANGEROUS, RELEASE_UNJUDGED, REPEAT_AFTER_DANGEROUS, checker, organization_rules, safety_exit_open,
 )
-from ouroboros.safety_config import OWNER_RULES_KEY
+from ouroboros.safety_config import OWNER_RULES_KEY, coverage_kind
+from ouroboros.peer_letters import check_peer_assignment, letter_evidence  # noqa: F401 - the letter seam is bound here
 
 from ouroboros.safety_records import (
     _safety_drive_root, _record_safety_usage, _emit_durable_safety_event, _emit_safety_mode_skip, coalesce_verdicts,
@@ -569,7 +570,7 @@ def _runtime_mode(ctx):
 
 def _needs_checker(ctx):
     return bool(str(runtime_setting("OUROBOROS_MODEL_SAFETY", "") or "").strip()) or (
-        work_kind(getattr(ctx, "task_metadata", None)) == "consciousness"
+        coverage_kind(getattr(ctx, "task_metadata", None)) == "consciousness"
         and get_safety_mode("consciousness") == "full")
 
 
@@ -580,9 +581,9 @@ def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
 
 
 def _declared_speech(tool_name, effect):
-    """Words the host knows before any verdict, from declarations only: the automatic reply or a ``message`` effect
-    (a connector's ``sends.when`` included); never an argument name."""
-    return tool_name == "place_reply" or effect.effect == "message"
+    """Words the host knows before any verdict, from declarations only: the automatic reply, a letter to a linked
+    Ouroboros or a ``message`` effect (a connector's ``sends.when`` included); never an argument name."""
+    return tool_name in ("place_reply", "delegate_to_ouroboros", "message_ouroboros") or effect.effect == "message"
 
 
 def _exact_call(tool_name, arguments):
@@ -598,13 +599,13 @@ def _address(account, conversation, thread=""):
 def _exit_subject(ctx, tool_name, arguments, effect, ext_tool=None):
     """What my human's card must hold, as ``(words, destinations, exact, speech)``: declared words with every place and
     address the call changes, else the exact call (``_exact_call``): any other call, or words or recipients the host
-    cannot tell. The card names each place the declared target reaches by its label, and by its exact address too
-    where another place the call changes shares that label; every recipient outside such a place's own conversation;
-    and every group address with its effect: one label or place never covers another address. ``speech`` is where the
-    words are spoken, all ``_words_key`` holds them to: the labels of the places they land in, else their recipients
-    (a grouped row's audience), as before groups; a group's write or read beside them (a folder, a draft) is no part
-    of it, nor the account a grouped row naming no conversation acts in. Words with no such address keep the exact
-    call, never a card approving them for less than the whole call; so does a rich call declaring no words."""
+    cannot tell. The card names each place the declared target reaches by its label, and by its exact address too where
+    another place the call changes shares that label; every recipient outside such a place's own conversation; every
+    group address with its effect; and the rest of a call that assigns work: one label or place never covers another
+    address. ``speech`` is where the words are spoken, all ``_words_key`` holds them to: the labels of the places they
+    land in, else their recipients (a grouped row's audience); a group's write or read beside them (a folder, a draft)
+    is no part of it, nor the account a grouped row naming no conversation acts in. Words with no such address keep the
+    exact call, never a card approving them for less than the whole call; so does a rich call declaring no words."""
     from ouroboros.place_guard import call_place_facts
     from ouroboros.tool_effects import argument_value, target_values
 
@@ -631,6 +632,8 @@ def _exit_subject(ctx, tool_name, arguments, effect, ext_tool=None):
         grouped = [row for row in facts.get("touches") or () if row.get("effect") != "read"]  # a read changes nothing
         writes = [f"{row['effect']}: {_address(row.get('account', ''), row['conversation'], row.get('thread', ''))}"
                   for row in grouped]
+        if tool_name == "delegate_to_ouroboros":  # it starts and funds work there too: the rest of the operation
+            writes.append(_exact_call(tool_name, {key: arguments[key] for key in arguments if key != "text"}))
         destinations = list(dict.fromkeys(labels + twins + recipients + writes))
         voiced = {row.get("conversation_id") for row in spoken}
         speech = list(dict.fromkeys(row["place_label"] for row in spoken)) or list(dict.fromkeys(recipients + [
@@ -681,6 +684,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     focus = metadata.get("focus") or {}
     place = dict(call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {})
     place_ids = {row["place_id"] for row in place.get("places", []) if row.get("place_id")}
+    said, link, letter = letter_evidence(ctx, metadata, place_ids)  # a linked Ouroboros occasioned it: who, link facts now
     # A focus occasions the work; it does not establish where this call lands.
     # Only these two built-ins take an actual place reference as their subject.
     referenced = arguments.get("place_id") if tool_name in {"configure_presence", "place_reply"} else None
@@ -695,12 +699,14 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
             place["targets"] = {"destination": arguments.get("destination")}
     occasion = "unknown"
     if metadata.get("schedule_writer_kind"):  # whose work; who supplied its text is its ``schedule_text`` sources' fact
-        occasion = metadata["schedule_writer_kind"] + " work's schedule"
+        occasion = metadata["schedule_writer_kind"] + " work's schedule" + (f", work a {said} began" if said else "")
     elif focus:  # read at this check: a confirmation made after the admission ``focus`` records counts
         from ouroboros.presence_context import focus_owner_now
-        occasion = "confirmed owner account" if focus_owner_now(ctx) else "person in a place"
+        occasion = "confirmed owner account" if focus_owner_now(ctx) else (said or "person in a place")
     elif metadata.get("wake_cause") == "own_clock":
         occasion = "own clock"
+    elif letter:  # a linked Ouroboros wrote it: an agent author, never my human's door (peer_letters_api)
+        occasion = said
     elif kind == "owner":
         occasion = "owner door"
     directives = getattr(ctx, "_owner_directives", None)
@@ -714,12 +720,12 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     with _PRIOR_LOCK:
         pending = dict(_RETURNED.get(_work_key(ctx), {}).get(tool_name) or {})
     bundle = {
-        "work": {"kind": kind, "label": "your work" if kind == "owner" else "consciousness",
+        "work": {"kind": kind, "label": "linked Ouroboros" if letter else ("your work" if kind == "owner" else "consciousness"),
                  "root_task_id": _root_id(ctx), "task_id": getattr(ctx, "task_id", ""), "runtime_mode": _runtime_mode(ctx),
                  "consciousness_autonomy": metadata.get("consciousness_autonomy"), "now": utc_now_iso("seconds")},
         "occasion": {"cause": occasion, "consciousness_cause": metadata.get("consciousness_cause"),
                      "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus,
-                     "sources": sources, "retained_host_sources": isinstance(directives, list)},
+                     "sources": sources, "retained_host_sources": isinstance(directives, list), **link},
         "subject": {"tool": tool_name, "physical_target": target, "place": place, **sends_as,
                     **({"returned_and_pending": {"note": _PENDING_NOTE, **pending}} if pending else {})},
         # The acting mind's context reads the same key through the same snapshot (``owner_rules_section``);
@@ -1402,6 +1408,8 @@ def check_safety(
     """Return ``(allowed, warning_or_error)`` for one tool call (``_assess_call``); the reading a returned call came
     back with stays beside its tool until a call through that tool is let through (``_track_returned``)."""
     tool_name = str(tool_name or "").strip()
+    if tool_name == "delegate_to_ouroboros" and not isinstance(resolved_binding, dict):  # no prepared letter resolved
+        return True, ""  # raw arguments are not its effect: its sender asks ``check_peer_assignment`` before a send
     result = _assess_call(tool_name, arguments or {}, messages, ctx, python_resolution, resolved_binding,
                           declared_policy, ext_tool)
     _track_returned(ctx, tool_name, result)
@@ -1470,7 +1478,7 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     # Preserve the selected assessment coverage independently of resource
     # admission. Cyber changes the authority of an assessment, never its verdict.
     # Non-full modes retain their existing disclosed skips: an unchecked call meets no flag, wait or card.
-    safety_mode = get_safety_mode(work_kind(getattr(ctx, "task_metadata", None)))
+    safety_mode = get_safety_mode(coverage_kind(getattr(ctx, "task_metadata", None)))
     if safety_mode != "full":
         skip_llm = safety_mode == "off" or (safety_mode == "light" and policy == POLICY_CHECK_CONDITIONAL)
         if skip_llm:

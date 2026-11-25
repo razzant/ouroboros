@@ -1383,7 +1383,8 @@ def pending_interactions(detail: Dict[str, Any], *, strict: bool = False) -> Lis
                     or not row["questions"]):
                 raise ValueError("malformed pendingInteractions row")
             if any(row.get(key) is not None and not isinstance(row[key], str) for key in (
-                    "runId", "attemptId", "harnessId", "sourceTool", "requestedAt", "timeoutAt", "delivery")):
+                    "runId", "attemptId", "harnessId", "sourceTool", "requestedAt", "timeoutAt", "delivery",
+                    "deliveryState")):
                 raise ValueError("malformed pendingInteractions identity, timestamp or delivery")
             for question in row["questions"]:
                 if (not isinstance(question, dict) or not isinstance(question.get("id"), str)
@@ -1426,6 +1427,8 @@ def pending_interactions(detail: Dict[str, Any], *, strict: bool = False) -> Lis
             "requested_at": str(row.get("requestedAt") or ""),
             "timeout_at": str(row.get("timeoutAt") or "") or None,
             "delivery": "blocking" if row.get("delivery") is None else row["delivery"] if isinstance(row["delivery"], str) and row["delivery"] else "malformed",
+            **({"delivery_state": row["deliveryState"]}
+               if isinstance(row.get("deliveryState"), str) and row["deliveryState"] else {}),
             "questions": questions,
         })
     return out

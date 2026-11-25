@@ -109,6 +109,12 @@ def build_user_content(task: Dict[str, Any], *, attachment_facts=None) -> Any:
 
         text = (f"[OBJECTIVE_AUTHOR] The objective below was {objective_author_line({'objective_author': author})}. "
                 "My human's words keep their own source. [/OBJECTIVE_AUTHOR]\n\n" + str(text or ""))
+    from ouroboros.dialogue_provenance import declared_author
+    from ouroboros.peer_letters import is_letter_root, letter_objective
+
+    letter, agent = metadata.get("peer_letter"), declared_author(metadata, key="letter_author")
+    if agent and is_letter_root(metadata, str(task.get("id") or "")):  # the letter's own root, never what it starts
+        text = letter_objective(task.get("drive_root"), letter, agent, text)
     image_b64 = task.get("image_base64")
     if not image_b64 and task.get("image_source_ref"):
         # A prestart Pause has original input, but no checkpointed transcript.

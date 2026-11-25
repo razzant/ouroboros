@@ -735,7 +735,10 @@ def _thread_snapshot(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
 def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive_root: Any = None) -> dict:
     """The focus's host facts at admission; ``actor.owner_confirmed`` is what the admission saw, from the accounts
     its connector account confirms (``places.place_owner_accounts``), and readers that decide later read it again
-    (``focus_owner_now``)."""
+    (``focus_owner_now``). ``actor.kind`` is ``ouroboros`` (with ``link_id``, ``install_id`` and ``link_facts``, the
+    link's facts as this admission read them) only for my human's linked Ouroboros writing through its own link: the
+    mind's frame and Safety read that writer from here (``peer_letters.letter_evidence``), never from a connector's
+    own description of an actor."""
     from copy import deepcopy
     from ouroboros.consciousness_authority import FOCUS_ROUTE_FIELDS, FOCUS_TRANSPORT_KEY
     from ouroboros.config import get_consciousness_autonomy, runtime_setting
@@ -755,6 +758,16 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     named = {fact: words[fact] for fact in matched if fact in words}  # what the connector's declaration calls a kind
     actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "")
     owner_address = is_owner_account(place, actor, event.account_id, accounts[place.place_id])
+    # A linked Ouroboros is the writer only where the letter door stamped it for this very link: the place is that
+    # link's own (its conversation the link, its account the other installation) and the actor names both. Any other
+    # event's ``kind`` is its connector's claim and never becomes this host fact; no kind makes a writer my human.
+    linked = (place.connector == "ouroboros" and event.actor.get("kind") == "ouroboros"
+              and event.actor.get("authenticated") is True and bool(place.conversation_id and place.account_id)
+              and (event.actor.get("link_id"), event.actor.get("install_id")) == (place.conversation_id, place.account_id))
+    link_facts = ""
+    if linked:  # my human's choices for that link and what is in effect, as this admission reads them
+        from ouroboros.peer_links import letter_facts_line
+        link_facts = letter_facts_line(drive_root, {"place_id": place.place_id})
     identity = deepcopy(event.identity)
     allowance = dict(admission.allowance or {})
     metadata = {
@@ -773,6 +786,8 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
                             **({"origin": MACHINE_ORIGIN} if event.actor.get("origin") == MACHINE_ORIGIN else {}),
                             "is_bot": "from_bot" in facts,
+                            **({"kind": "ouroboros", "link_id": place.conversation_id, "install_id": place.account_id,
+                                **({"link_facts": link_facts} if link_facts else {})} if linked else {}),
                             **speaker_pages(drive_root, event.provider, event.account_id, actor,
                                             unverified=event.actor.get("authenticated") is False)},
                   "matched_wakes": matched, **({"matched_labels": named} if named else {}),

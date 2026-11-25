@@ -442,6 +442,15 @@ def _builtin_tool_availability(name: str, ctx: Any = None) -> tuple[bool, str, s
         if not metadata and not contract:
             return True, "", ""
     tool = str(name or "").strip()
+    if tool == "ask_sender":  # only a letter's own root asks its sender (peer_letters.is_letter_root)
+        from ouroboros.peer_letters import is_letter_root
+        if not is_letter_root(getattr(ctx, "task_metadata", None) or {}, str(getattr(ctx, "task_id", "") or "")):
+            return False, "not_a_letter_root", "the root of a letter from a linked Ouroboros"
+    if tool in {"delegate_to_ouroboros", "message_ouroboros"} and getattr(ctx, "drive_root", None) is not None:  # shown once a link exists
+        from ouroboros.peer_links import has_outgoing_link
+        from ouroboros.tool_access import canonical_data_root
+        if not has_outgoing_link(canonical_data_root(ctx)):
+            return False, "no_linked_ouroboros", "a confirmed link to another Ouroboros of my human"
     if tool == "web_search":
         try:
             from ouroboros.tools.search import _available_web_search_backends, _web_search_unavailability

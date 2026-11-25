@@ -12,6 +12,7 @@ export const CANCEL_SOURCE_PHRASES = {
     owner_restart: 'Stopped by the Restart command',
     snapshot_restore: 'The server stopped while this task was still running',
     agent_tool: 'Stopped by Ouroboros',
+    peer_letter_cancel: 'Stopped by the Ouroboros that sent this letter',
     silence_resolved: 'Silence check withdrawn: the observed work no longer needed it',
     work_finished: 'Closed with the work it helped',
     deadline_close: 'Closed after deadline expired',
