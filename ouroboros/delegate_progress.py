@@ -495,6 +495,9 @@ def present_payload(
     the full ``detail`` (``claudexor_observation.question_attention``), never on
     ``pending_interactions``, a bounded preview that may shed the only blocking row. Present,
     the run keeps working: its questions hold nothing (the wake's note says so, ``paused_note``).
+
+    A linked Ouroboros that holds its question or answer there now (``summary.peerHold``,
+    ``gateways/peer.py``) rides as ``held_there`` with its next step.
     """
     payload: Dict[str, Any] = {
         "status": "progress" if moved else "no_progress",
@@ -522,4 +525,8 @@ def present_payload(
     else:
         payload["reason"] = "non_terminal_and_no_new_session_events_since_cursor"
     _fitted_pending(payload, list(pending_interactions or []), budget)
+    from ouroboros.delegate_custody_usage import summary_of
+
+    if isinstance(hold := summary_of(detail).get("peerHold"), dict):
+        payload["held_there"] = dict(hold)
     return payload

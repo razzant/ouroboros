@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.answer_facts import (card_input, card_reference_view, forwarded_bubble_matches,
                                    option_answer, press_record, retained_card_input, row_source, submitted_fields_line)
+from ouroboros.api_continuation import accepted_api_opening, valid_api
 from ouroboros.chat_uploads import answer_evidence, stored_refs
 from ouroboros.owner_quiz import late_answer_owner_text, secret_outcome_block
 from ouroboros.owner_source import (_retained_start_quote as _retained_start_quote, start_answer as _start_answer,
@@ -55,7 +56,7 @@ from ouroboros.owner_source import (_retained_start_quote as _retained_start_quo
 from ouroboros.owner_words import (OWNER_CARD_INPUT, OWNER_PRESS, OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT,
                                    answered_card, answered_card_reply, attachments_line, carded,
                                    reply_target, scheduled_text_items)
-from ouroboros.peer_letters import continued_letter_lines, opening_author
+from ouroboros.peer_letters import continued_letter_lines
 from ouroboros.question_answers import answer_message_id
 from ouroboros.review_evidence_sections import renders_exactly
 from ouroboros.utils import utc_now_iso
@@ -192,10 +193,7 @@ def _same_opening_client(row, ref, original, words):
 # The binding's copy of the work's explicit execution budget (``execution_carry``).
 EXECUTION_CARRY_KEYS = ("execution_timeout_sec", "execution_consumed_sec")
 WAKE_OPENING = "consciousness_wake"
-API_OPENING = "api_request"
 AGENT_NOTE_OPENING = "agent_note"  # a program's note under its declared author, never an owner message
-# The request words the API door saved on the root (``gateway/tasks._complete_api_task_admission``).
-API_REQUEST_FIELDS = ("description", "context", "expected_output", "constraints")
 
 
 def valid_nonce(nonce: Any) -> str:
@@ -456,29 +454,6 @@ def valid_wake(wake: Any) -> bool:
             and isinstance(wake.get("reported", ""), str)
             and isinstance(focus, dict) and isinstance(focus.get("actor"), dict)
             and all(isinstance(focus.get(key), str) and focus[key].strip() for key in ("place_id", "conversation_key")))
-
-
-def accepted_api_opening(result: Dict[str, Any], metadata: Dict[str, Any], task_id: str,
-                         gaps: List[str]) -> Optional[Dict[str, Any]]:
-    """The request the API door saved with its accepted receipt, copied by value, or a named gap. The words are its
-    caller's under the channel it declared (``client_surface``, the door's one stamp of it); the receipt marks the
-    opening, it proves no caller identity. Its inputs are the work's declared inputs (``declared_inputs``)."""
-    receipt = result.get("api_admission")
-    surface = metadata.get("client_surface") if isinstance(metadata.get("client_surface"), dict) else {}
-    opening = {"source": API_OPENING, "task_id": task_id, "channel": surface.get("channel"),
-               **{key: result[key] for key in API_REQUEST_FIELDS if isinstance(result.get(key), str) and result[key]},
-               **opening_author(metadata)}  # a linked Ouroboros's letter keeps its agent author
-    if not (isinstance(receipt, dict) and receipt.get("status") == "accepted" and valid_api(opening)):
-        gaps.append("api_request_unreadable")
-        return None
-    return opening
-
-
-def valid_api(api: Any) -> bool:
-    """An API opening exactly as ``accepted_api_opening`` builds it (also its chained copy)."""
-    return (isinstance(api, dict) and api.get("source") == API_OPENING
-            and all(isinstance(api.get(key), str) and api[key].strip() for key in ("task_id", "channel", "description"))
-            and all(isinstance(api.get(key, ""), str) for key in API_REQUEST_FIELDS))
 
 
 def _agent_note_opening(root: pathlib.Path, result: Dict[str, Any], task_id: str,

@@ -1148,7 +1148,7 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
         # durable start row; absent facts (an old row, an unknown run) stay null, never invented.
         started_ts, max_seconds = custody.run_timing(custody.custody_root(ctx), rid)
         started_at = parse_deadline_ts(started_ts)
-        payload = progress.present_payload(
+        return json.dumps(progress.present_payload(
             run_id=rid, state=state, last_seq=last_seq,
             moved=since_seq is not None and last_seq > int(since_seq),
             elapsed_seconds=None if started_at is None else max(0, int(
@@ -1156,10 +1156,7 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
             max_seconds=max_seconds or None,
             waiting_on_user=bool(summary.get("waitingOnUser")) or bool(pending),
             pending_interactions=_bounded_interactions(pending) if pending else None,
-            detail=detail, budget=tool_result_limit("delegate_wait"))
-        if isinstance(summary.get("peerHold"), dict):  # a linked Ouroboros holds its question or answer there now
-            payload["held_there"] = dict(summary["peerHold"])
-        return json.dumps(payload, ensure_ascii=False, indent=2)
+            detail=detail, budget=tool_result_limit("delegate_wait")), ensure_ascii=False, indent=2)
     except ClaudexorUnavailable as exc:
         from ouroboros.tools.delegate_terminal_evidence import retained_terminal_after_gap
         retained = retained_terminal_after_gap(ctx, rid, str(exc.code))
@@ -1175,16 +1172,9 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
                 "waited_sec": time.monotonic() - started, "answered": exc.observation_answered,
                 "engine_pool": engine_pool_line(),
             })
-        from ouroboros.delegate_collection import _peer_observation_lost
-        if _peer_observation_lost(entry, exc):
-            code = str(getattr(exc, "refusal_code", "") or exc.code)
-            return _fail(
-                "delegate_wait", "peer_observation_lost",
-                f"Observation stopped because the peer link is unavailable ({code}: {exc}). "
-                "This does NOT prove the remote work stopped or failed — it may still be running on the "
-                "receiving Ouroboros and its outcome is unknown.",
-                run_id=rid, link_error=code, remote_work_state="unknown_may_still_be_running",
-            ).text
+        from ouroboros.delegate_collection import _peer_observation_lost, peer_link_loss
+        if _peer_observation_lost(entry, exc):  # the body's own account of that loss (its recorded fault)
+            return _fail("delegate_wait", "peer_observation_lost", run_id=rid, **peer_link_loss(exc)).text
         return _fail("delegate_wait", exc.code, str(exc), run_id=rid).text
     finally:
         if gateway is not None and not borrowed:
@@ -1224,14 +1214,10 @@ def _delegate_cancel(ctx: ToolContext, run_id: str, reason: str = "") -> ToolRes
         gateway = run_gateway(entry, ClaudexorGateway)  # the engine the run was started on, never another
         gateway.handshake()
     except ClaudexorUnavailable as exc:
-        from ouroboros.delegate_collection import _peer_observation_lost
+        from ouroboros.delegate_collection import _peer_observation_lost, peer_link_loss
         if _peer_observation_lost(entry, exc):
-            return _fail(
-                "delegate_cancel", exc.code,
-                f"{exc}. Cancellation could not reach the linked Ouroboros; this does NOT prove the remote work "
-                "stopped — it may still be running.",
-                run_id=rid, run_may_still_be_live=True, remote_work_state="unknown_may_still_be_running",
-            )
+            return _fail("delegate_cancel", exc.code, run_id=rid, run_may_still_be_live=True,
+                         **peer_link_loss(exc, lost="Cancellation could not reach the linked Ouroboros"))
         return _fail("delegate_cancel", exc.code, str(exc), run_id=rid)
     try:
         result = custody.cancel_and_verify(custody.custody_root(ctx), gateway, entry, reason)

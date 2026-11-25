@@ -45,6 +45,17 @@ def _peer_observation_lost(entry, exc) -> bool:
     return refusal == "link_unknown" or code in ("link_unknown", "peer_link_unavailable")
 
 
+def peer_link_loss(exc, *, lost: str = "Observation stopped") -> dict:
+    """What such a loss (``_peer_observation_lost``) proves, one account for the run's recorded fault and for the
+    answers of ``delegate_wait`` and ``delegate_cancel`` (``lost``: the act that no longer reaches the receiving
+    Ouroboros): ``detail`` and the typed ``link_error`` and ``remote_work_state``, never that the remote work ended."""
+    code = str(getattr(exc, "refusal_code", "") or getattr(exc, "code", "") or "peer_link_unavailable")
+    return {"detail": f"{lost} because the peer link is unavailable ({code}: {exc}). This does NOT prove the remote "
+                      "work stopped or failed; it may still be running on the receiving Ouroboros and its outcome is "
+                      "unknown.",
+            "link_error": code, "remote_work_state": "unknown_may_still_be_running"}
+
+
 def peer_observation_lost_wake(ctx, runs) -> str:
     """Wake reason when a selected held peer run stopped observation after its link became unusable here: once per
     episode of that fault (``_fault_shown``), so a Pause that lasts costs one model round, not one per wait."""
@@ -835,15 +846,8 @@ class BodyRuntime:
         fault is recorded once per episode and never over another one (an unverified Stop stays the run's incident),
         whichever writer lands first: the row ``yields`` to a standing incident in the reducer."""
         fresh = current.run(self.root, entry.run_id) or entry
-        code = str(getattr(exc, "refusal_code", "") or getattr(exc, "code", "") or "peer_link_unavailable")
         if not fresh.containment_fault:
-            c.record_containment_fault(
-                self.root, fresh, "peer_observation_lost",
-                f"Observation stopped because the peer link is unavailable ({code}: {exc}). "
-                "This does NOT prove the remote work stopped or failed; it may still be running on the "
-                "receiving Ouroboros and its outcome is unknown.",
-                link_error=code, remote_work_state="unknown_may_still_be_running", yields=True,
-            )
+            c.record_containment_fault(self.root, fresh, "peer_observation_lost", yields=True, **peer_link_loss(exc))
         with self.lock:
             self.observation_gaps[fresh.run_id] = self._observation_key(fresh)
 
