@@ -834,7 +834,7 @@ def test_pre_admission_continuation_producers_tracks_pinned_runtime_without_open
     ("work_ref_store_mismatch", 409, _cont_problem(), {},
      {"engine_ref": {"kind": "work", "descriptor": "/srv/work/control-api.json", "store": "store-b"}}),
     ("legacy_min_version", 409, _cont_problem(), {}, {"version": CLAUDEXOR_MIN_VERSION}),
-    ("unknown_future_version", 409, _cont_problem(), {}, {"version": "6.4.0"}),
+    ("known_version_foreign_build_sha", 409, _cont_problem(), {}, {"version": "6.4.0"}),
     ("short_build_sha", 409, _cont_problem(), {}, {"sha": "0ff3df717"}),
     ("missing_build_sha", 409, _cont_problem(), {}, {"sha": None}),
     ("unknown_build_sha", 409, _cont_problem(), {}, {"sha": "a" * 40}),
