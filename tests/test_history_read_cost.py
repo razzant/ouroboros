@@ -178,15 +178,17 @@ def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path,
     reads no journal: neither a room of answers and agent notes carrying ids nor an empty delta of a Project with a
     retained origin. Each message resolves alone, so every page keeps the bytes the whole-journal read gave it:
     Main's newest page and an older one, a Project whose retained origin copy wears its receipt with its row gone,
-    also when the page's read of its Project's refs failed or predates the binding (the copy then asks for itself)."""
+    also when the page's read of its Project's refs failed or predates the binding (the copy then asks for itself).
+    A page asks an id as its row looks it up (``str``): one another writer saved as a number is asked and worn."""
     from ouroboros import chat_annotations, dialogue_store, project_dialogue
-    from ouroboros.chat_chain import format_address
+    from ouroboros.chat_chain import format_address, row_address
     from ouroboros.dialogue_provenance import recorded_author
     from ouroboros.gateway import history
     from ouroboros.owner_relay import owner_row_source
     from ouroboros.projects_registry import bind_task_to_project, create_project
 
-    alpha, beta, gamma = (create_project(tmp_path, slug, name=slug.title())["chat_id"] for slug in ("alpha", "beta", "gamma"))
+    alpha, beta, gamma, delta = (create_project(tmp_path, slug, name=slug.title())["chat_id"]
+                                 for slug in ("alpha", "beta", "gamma", "delta"))
     gone = {"direction": "in", "chat_id": 1, "client_message_id": "origin-gone", "ts": "2026-09-01T00:00:00Z",
             "text": "Start alpha"}
     ref, words = owner_row_source(gone)  # never stored: the binding's exact copy is all that is left of it
@@ -197,11 +199,16 @@ def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path,
                   row(1, chat_id=gamma, client_message_id="gamma-note", system_type="agent_note_received",
                       agent_note_text="A program's words", declared_author=recorded_author("Scout"))]
     unnamed = row(2, chat_id=gamma, text="An owner's words saved without an id", client_message_id=None)
-    write(tmp_path / "logs" / "chat.jsonl", [*(entry for rows in owners.values() for entry in rows), *ineligible, unnamed])
+    numbered = row(3, chat_id=delta, text="Words another writer saved under a number", client_message_id=4242)
+    write(tmp_path / "logs" / "chat.jsonl",
+          [*(entry for rows in owners.values() for entry in rows), *ineligible, unnamed, numbered])
     for rows in (*owners.values(), ineligible):  # id-only receipts, as older installs wrote them: the store places each
         for entry in rows:
             chat_annotations.append_chat_annotation(tmp_path, entry["client_message_id"], action="steer_task",
                                                     status="delivered", routing_token="act")
+    chat_annotations.append_chat_annotation(tmp_path, "4242", action="steer_task", status="delivered",  # addressed, as
+                                            routing_token="act", source_chat_id=delta,  # this tree writes them
+                                            source_row_address=format_address(row_address(numbered)))
     chat_annotations.append_chat_annotation(tmp_path, "origin-gone", action="ensure_project_scope", status="delivered",
                                             routing_token="act", source_chat_id=1, source_row_address=format_address(ref))
     status, first = request(tmp_path, n_human="2")  # imports the rows; its cursor reads the older page below them
@@ -241,7 +248,7 @@ def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path,
 
     main, alpha_ids, beta_ids = ({entry["client_message_id"] for entry in owners[room]} for room in ("main", "alpha", "beta"))
     pages = {"main": {}, "main older": {"cursor": first["next_cursor"]}, "alpha": {"chat_id": str(alpha)},
-             "gamma": {"chat_id": str(gamma)}}
+             "gamma": {"chat_id": str(gamma)}, "delta": {"chat_id": str(delta)}}
     for name, params in pages.items():
         body, page_asked, page_resolved, page_parsed = read(params)
         old_body, old_asked, old_resolved, old_parsed = read(params, unscoped=True)
@@ -256,12 +263,12 @@ def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path,
         [ids] = page_asked  # one question per page, about its own owner messages only
         assert ids is not None and page_parsed == 1, f"{name}: the page read every receipt of the install"
         assert shown and set(shown.values()) == {"delivered"} and set(shown) <= ids, name
-        assert not ids & beta_ids and page_resolved == ids - {"origin-gone"}, name
+        assert not ids & beta_ids and page_resolved == ids - {"origin-gone", "4242"}, name  # addressed: none placed
         if name == "main older":
             newer = {message["client_message_id"] for message in first["messages"] if message["role"] == "user"}
             assert ids < main and newer and not ids & newer, "the newer page's rows are not asked again"
         else:
-            assert ids == {"main": main, "alpha": alpha_ids | {"origin-gone"}}[name], name
+            assert ids == {"main": main, "alpha": alpha_ids | {"origin-gone"}, "delta": {"4242"}}[name], name
         assert name != "alpha" or "origin-gone" in shown, "the retained origin copy wears its receipt"
 
     # The Project's delta with nothing new renders no origin: it asks about nobody and opens no journal.

@@ -1427,7 +1427,7 @@ def _assemble_history_response(
               and str(entry.get("direction", "")).lower() == "in" and not declared_author(entry))
     # Receipts for its owner rows and, on the newest page that renders them, its origins; never the install's others.
     asked = {message for entry in (*owners, *(project_source_refs if recent and n_human > 0 else ()))
-             if isinstance(message := entry.get("client_message_id"), str) and message}
+             if (message := str(entry.get("client_message_id") or ""))}  # as a row looks its id up; none: none asked
     chat_annotations = page_receipts(data_dir, asked)
     historical_terminals: Dict[str, dict] = {}
     replay_evidence: list = []
