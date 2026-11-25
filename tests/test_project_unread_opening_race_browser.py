@@ -88,8 +88,16 @@ class _Race:
             elif kind == "after":
                 self.arrivals.append(body)
 
-        self.room.page.route(lambda url: "/api/chat/history?" in url and "cursor=" not in url, recent_route)
+        # Only this room's newest read is held: Main's newest read carries a query too (its tags), as a page or a
+        # read around a place carries its selector.
+        self.room.page.route(self.newest_of_room, recent_route)
         self.room.page.on("response", record)
+
+    def newest_of_room(self, url):
+        parts = urlparse(url)
+        query = parse_qs(parts.query)
+        return (parts.path == "/api/chat/history" and query.get("chat_id") == [str(self.chat_id)]
+                and "cursor" not in query and "around" not in query)
 
     def admit(self, kind="named"):
         """``named``: 160 child words; the reconnect's fresh read names the reply. ``searched``: 1310, more
@@ -229,6 +237,10 @@ def test_cancelling_a_rebased_opening_never_resumes_it(direct_server_with_data, 
                 race.hold_return = True
                 room.release()
                 assert _wait_for(room.page, lambda: len(race.returning) == 1, attempts=200), race.history
+                held = urlparse(race.returning[0].request.url)
+                asked = parse_qs(held.query)
+                assert held.path == "/api/chat/history" and asked.get("chat_id") == [str(race.chat_id)] \
+                    and "cursor" not in asked and "around" not in asked, ("the room's own newest read is held", held)
             if move == "question":
                 room.page.evaluate("""project => window.dispatchEvent(new CustomEvent('ouro:open-project', {
                     detail: {project, task_id: 'rebase-task', quiz_id: 'q-rebase'}}))""", race.question)
