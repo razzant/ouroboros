@@ -288,7 +288,7 @@ test('storage refusal, corrupt data and unsupported versions open cold and leave
     // A store that takes no writes (a full origin, a refused private window) keeps no older text for a newer read.
     const g = fixture(t);
     g.make().save([row('chat:1', 'Read before the store filled')]);
-    const full = { ...g.storage, setItem() { throw new Error('QuotaExceededError'); } };
+    const full = { ...g.storage, setItem() { throw Object.assign(new Error('full'), { name: 'QuotaExceededError' }); } };
     createChatPreview({ feed: g.mount, room: [1, ''], scope: PREVIEW_SCOPE, label: senderLabel, mutate: fn => fn(),
         storage: () => full }).save([row('chat:2', 'Read once it was full')]);
     assert.equal(g.raw(), undefined, 'the room opens cold rather than with its older words');
@@ -324,6 +324,68 @@ test('more than eight rooms keep their words; past the total the rooms read leas
     read([13, 'p'], big);
     assert.equal(f.values.has(oldest), true, 'read again, it stands');
     assert.equal(f.values.has(second), false, 'the one read least recently since gave way');
+    assert.ok(f.size() <= TOTAL_CHARS);
+});
+
+// Ten rooms of five 19,000-character rows each (about 95,000 characters with its key): together just under the total.
+const BIG = Array.from({ length: 5 }, (_, j) => row(`chat:${j}`, 'long exact passage '.repeat(1000), { role: 'user' }));
+function tenRooms(f, t) {
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    const read = (room) => { f.make({ room }).save(BIG); t.mock.timers.tick(1000); };
+    for (let i = 1; i <= 10; i += 1) read([i, 'p']);
+    assert.ok(f.size() <= TOTAL_CHARS && f.family().length === 11, 'all ten stand');
+    return read;
+}
+const entryOf = room => previewEntryKey(PREVIEW_SCOPE, room);
+
+test('a room shown, or read with nothing new, was read then: it stands while rooms read before give way', t => {
+    // Astra 6: the order is when a room was last read, not when its rows last changed; its rows stay as they were.
+    const f = fixture(t), read = tenRooms(f, t);
+    const before = f.rows([1, 'p']);
+    assert.equal(f.make({ room: [1, 'p'] }).show(), true, 'the room read least recently: its copy is shown');
+    t.mock.timers.tick(1000);
+    f.make({ room: [2, 'p'] }).append([row('progress:9', 'narration only', { is_progress: true })]);  // nothing new
+    t.mock.timers.tick(1000);
+    read([11, 'p']);
+    assert.deepEqual([1, 2, 3, 4].map(i => f.values.has(entryOf([i, 'p']))), [true, true, false, true],
+        'the room read least recently since gave way, and only it');
+    assert.deepEqual(f.rows([1, 'p']), before, 'a room shown keeps its rows');
+    assert.ok(f.size() <= TOTAL_CHARS);
+    // A room without an entry notes nothing: it keeps no fragment.
+    f.make({ room: [12, 'p'] }).append([]);
+    assert.equal(f.values.has(entryOf([12, 'p'])), false);
+});
+
+test('a room\'s own entry is written before any other gives way: one that fails takes no other room\'s', t => {
+    // Grok 1: a write that does not land takes this room's older text (it never stands for a newer read) and nothing
+    // else; only an origin too full to take it makes room, the rooms read least recently first, and asks once more.
+    const f = fixture(t), read = tenRooms(f, t);
+    const target = entryOf([11, 'p']);  // an eleventh room: its text does not fit beside the ten
+    const others = () => [...f.values].filter(([key]) => key !== target);
+    const storing = setItem => createChatPreview({ feed: f.mount, room: [11, 'p'], scope: PREVIEW_SCOPE, label: senderLabel,
+        mutate: fn => fn(), storage: () => ({ get length() { return f.storage.length; }, key: f.storage.key,
+            getItem: f.storage.getItem, removeItem: f.storage.removeItem, setItem }) });
+    const refusing = (name, times = Infinity) => (key, value) => {
+        if (key === target && times-- > 0) throw Object.assign(new Error('refused'), { name });
+        f.storage.setItem(key, value);
+    };
+    const kept = others();
+    storing(refusing('SecurityError')).save(BIG);
+    assert.deepEqual(others(), kept, 'a refusal that is not a full origin takes no other room\'s entry');
+    assert.equal(f.values.has(target), false);
+    read([11, 'p']);  // written: the room read least recently gave way for it
+    assert.equal(f.values.has(entryOf([1, 'p'])), false);
+    storing(refusing('SecurityError')).save([]);
+    assert.equal(f.values.has(target), false, 'a write that did not land leaves no older text for the newer read');
+    read([11, 'p']);
+    const stand = others().map(([key]) => key);
+    storing(refusing('QuotaExceededError', 1)).save([...BIG].reverse());
+    assert.deepEqual(f.rows([11, 'p']).map(item => item.id), [...BIG].reverse().map(item => item.history_id),
+        'a full origin: written on its second ask');
+    assert.deepEqual(stand.filter(key => !f.values.has(key)), [entryOf([2, 'p'])],
+        'the room read least recently made room for it, one room for one room\'s text');
+    storing(refusing('QuotaExceededError')).save(BIG);
+    assert.equal(f.values.has(target), false, 'still full: its older text goes too');
     assert.ok(f.size() <= TOTAL_CHARS);
 });
 
@@ -365,16 +427,17 @@ test('the one v2 record moves into entries once, the order it kept by time read'
         { key: JSON.stringify([PREVIEW_SCOPE, [1, '']]), rows: saved('Read first') },
         { key: JSON.stringify([OTHER_PROFILE, [1, '']]), rows: [...saved('Another profile'), { id: 'chat:2', role: 'intruder' }] }] }));
     f.values.set('ouroboros.theme', 'dark');
-    assert.equal(f.make({ room: [1, ''] }).show(), true);
+    assert.equal(f.make({ room: [2, 'p'] }).show(), true);
     assert.equal(f.values.get(PREVIEW_KEY), '{"v":3}', 'the record names the form of entries');
     assert.deepEqual([f.rows([2, 'p']), f.rows([1, '']), f.rows([1, ''], OTHER_PROFILE)].map(rows => rows.map(item => item.text)),
         [['Read last'], ['Read first'], ['Another profile']]);
     assert.ok(f.entry([2, 'p']).read > f.entry([1, '']).read && f.entry([1, '']).read > f.entry([1, ''], OTHER_PROFILE).read);
     assert.equal(f.values.get('ouroboros.theme'), 'dark');
-    // Once: later opens find the form in place and write nothing.
-    const moved = JSON.stringify([...f.values]);
-    assert.equal(f.make({ room: [2, 'p'] }).show(), true);
-    assert.equal(JSON.stringify([...f.values]), moved);
+    // Once: later opens find the form in place and move nothing again (a room shown only notes when it was read).
+    const words = () => [...f.values].map(([key, value]) => [key, value.replace(/^\{"read":\d+,/, '')]);
+    const moved = words();
+    assert.equal(f.make({ room: [1, ''] }).show(), true);
+    assert.deepEqual(words(), moved);
 });
 
 test('entries standing without the record are erased before any is read: an older version\'s eraser took the record', t => {

@@ -3,15 +3,15 @@
  * `historyLoaded`, and a row's `data-preview-history-id` only locates a passage for the reading anchor
  * (chat_render_batch.js). Every room read in this origin keeps, under the data profile the serving document proves,
  * an entry of its own (MAX_ROWS rows within ROOM_CHARS; whole rows give way, a person's text is never cut), all of
- * them within TOTAL_CHARS: a write that would pass it takes the entries read least recently first, and a room's show
- * reads its own entry alone. chat.js writes only what it admitted: its newest window replaces a room's rows, an
- * arrivals read that accounted for everything since merges into them; a failed, unavailable, older, around, stale or
- * late read writes nothing; bounded newest windows are valid. Each row goes where the feed puts its bubble
- * (chat_render_batch.js insertTimelineNode): by the time it is stamped with (a missing one is the moment it is drawn,
- * a delayed delivery keeps its earlier one), equal times by stream position (chat_history_replay.js
- * compareHistoryPosition), a row already there keeping its place; time and position are kept for that alone, and the
- * bound keeps the rows that placement puts last. Live echoes, controls, attachments and session metadata never enter
- * it; another origin, a document proving no data profile, or refused storage opens cold.
+ * them within TOTAL_CHARS: past it the entries read least recently give way (a room shown, or read with nothing new,
+ * was read then), and a room's show reads its own entry alone. chat.js writes only what it admitted: its newest
+ * window replaces a room's rows, an arrivals read that accounted for everything since merges into them; a failed,
+ * unavailable, older, around, stale or late read writes nothing; bounded newest windows are valid. Each row goes where
+ * the feed puts its bubble (chat_render_batch.js insertTimelineNode): by the time it is stamped with (a missing one is
+ * the moment it is drawn, a delayed delivery keeps its earlier one), equal times by stream position
+ * (chat_history_replay.js compareHistoryPosition), a row already there keeping its place; time and position are kept
+ * for that alone, and the bound keeps the rows that placement puts last. Live echoes, controls, attachments and
+ * session metadata never enter it; another origin, a document proving no data profile, or refused storage opens cold.
  *
  * The first canonical replay retires the painted copy, and no later show paints one. A passage the owner holds
  * selected stays, labelled, until the selection is released: the live selection, or the copy room_retire.js keeps on
@@ -95,6 +95,8 @@ function entryText(rows, read) {
     return `${head}${pieces.slice(from).join(',')}]}`;
 }
 const readOf = text => Number(/^\{"read":(\d+),/.exec(text)?.[1]) || 0;
+// The origin's storage is full (QuotaExceededError; NS_ERROR_DOM_QUOTA_REACHED in older Firefox).
+const full = error => ['QuotaExceededError', 'NS_ERROR_DOM_QUOTA_REACHED'].includes(error?.name);
 // Whether `store` holds this form's record. v2's one record moves into entries once, the order it kept by time read;
 // entries standing without a record (an eraser took it) are erased before anything is read or written. `create` starts
 // an empty record.
@@ -155,39 +157,56 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     const entry = previewEntryKey(profile, room);
     // `landed`: a canonical replay drew the room.
     let root = null, retiring = false, disposed = false, landed = false;
-    // This room's rows; null when it has no entry (never read here, or it gave way to rooms read since).
+    // This room's entry text; '' when it has none (never read here, or it gave way to rooms read since).
+    const stored = store => (store && current(store) ? store.getItem(entry) || '' : '');
     const saved = () => {
         try {
-            const store = storage();
-            if (!store || !current(store)) return null;
-            const raw = store.getItem(entry);
+            const raw = stored(storage());
             const rows = raw && raw.length <= ROOM_CHARS ? JSON.parse(raw)?.rows : null;
             return Array.isArray(rows) ? rows.filter(savedRow) : null;
         } catch { return null; }
     };
-    // This room's entry (an empty one too: it was read empty), stamped with when it was read; then the entries read
-    // least recently give way until all fit TOTAL_CHARS. One that cannot be written goes: an older text never stands
-    // for a newer read.
+    // The room was read now (its copy shown, or read with nothing new): its entry keeps its rows and gives way after
+    // the rooms read before it.
+    const touch = () => {
+        try {
+            const store = storage(), raw = stored(store);
+            if (readOf(raw)) store.setItem(entry, `{"read":${Date.now()},${raw.slice(raw.indexOf(',') + 1)}`);
+        } catch { /* storage unavailable: its place in the order stays */ }
+    };
+    // This room's entry first (an empty one too: it was read empty), stamped with when it was read; then the entries
+    // read least recently give way until all fit TOTAL_CHARS. An origin too full to take it makes that room first, then
+    // asks once more. One that cannot be written goes, alone: an older text never stands for a newer read.
     const write = (rows) => {
-        let store = null;
+        let store = null, written = false;
         try {
             store = storage();
             if (!store || !current(store, true)) return;
             const text = entryText(rows, Date.now());
-            const others = familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
-                const value = store.getItem(name) || '';
-                return { name, size: name.length + value.length, read: readOf(value) };
-            }).sort((a, b) => a.read - b.read);
-            let total = PREVIEW_KEY.length + RECORD.length + entry.length + text.length
-                + others.reduce((sum, other) => sum + other.size, 0);
-            for (const other of others) {
-                if (total <= TOTAL_CHARS) break;
-                store.removeItem(other.name);
-                total -= other.size;
+            // The others, read least recently first, give way until all fit and `need` more characters are free.
+            const giveWay = (need) => {
+                const others = familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
+                    const value = store.getItem(name) || '';
+                    return { name, size: name.length + value.length, read: readOf(value) };
+                }).sort((a, b) => a.read - b.read);
+                let total = PREVIEW_KEY.length + RECORD.length + entry.length + text.length
+                    + others.reduce((sum, other) => sum + other.size, 0);
+                for (const other of others) {
+                    if (total <= TOTAL_CHARS && need <= 0) break;
+                    store.removeItem(other.name);
+                    total -= other.size;
+                    need -= other.size;
+                }
+            };
+            try { store.setItem(entry, text); } catch (error) {
+                if (!full(error)) throw error;
+                giveWay(text.length);
+                store.setItem(entry, text);
             }
-            store.setItem(entry, text);
+            written = true;
+            giveWay(0);
         } catch {
-            try { store?.removeItem(entry); } catch { /* storage unavailable */ }
+            if (!written) try { store?.removeItem(entry); } catch { /* storage unavailable */ }
         }
     };
     // Each row keeps the time and position its bubble is stamped with (chat.js addMessage, stampNodeTimestamp,
@@ -259,6 +278,7 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
                 root.append(bubble);
             }
             feed.prepend(root);
+            touch();
             return true;
         },
         /** A painted copy stands in the feed: the room has words to come in with (app.js's docked panel). */
@@ -270,10 +290,13 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             write(fromHistory(messages).reduce(place, []));
         },
         /** Rows an arrivals read accounted for since the newest window: one the room has stays where it stands, a new
-         * one goes where the feed puts it. A room without an entry waits for its next newest window. */
+         * one goes where the feed puts it; one that brought none still read the room now. A room without an entry
+         * waits for its next newest window. */
         append(messages) {
-            const incoming = profile && !disposed ? fromHistory(messages) : [];
-            const rows = incoming.length ? saved() : null;
+            if (!profile || disposed) return;
+            const incoming = fromHistory(messages);
+            if (!incoming.length) { touch(); return; }
+            const rows = saved();
             if (!rows) return;
             for (const row of incoming) {
                 const at = rows.findIndex(other => other.id === row.id);

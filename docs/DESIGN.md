@@ -1469,11 +1469,12 @@ data profile, a bounded preview stands under one `Saved text preview · updating
 line: plain words under their speakers, no times, actions or read credit
 (`web/modules/chat_preview.js`). Every Main and Project room read in this browser keeps
 such a copy: its newest 80 whole rows within 200,000 characters, all rooms within 1,000,000
-(about 2 MB of the origin's storage), the room read least recently giving way first. The
-first canonical page replaces it, a selected passage staying until released; a failed read
-leaves it `not current` beside Retry; a refused session, sign-out or a deletion this browser
-sees erases only these copies; a Project deleted unseen keeps its copy, never shown, until
-the total gives it way. Task activity remains separate.
+(about 2 MB of the origin's storage), the room read least recently (its copy shown or its
+history read) giving way first. The first canonical page replaces it, a selected passage
+staying until released; a failed read leaves it `not current` beside Retry; a refused
+session, sign-out or a deletion this browser sees erases only these copies; a Project
+deleted unseen keeps its copy, never shown, until the total gives it way. Task activity
+remains separate.
 Failure and approximate-restoration notices are wrapping text in the room's header
 chrome: the Project status bar, or Main's floating note on its float-sheet backing (§5).
 
