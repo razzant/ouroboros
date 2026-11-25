@@ -1474,8 +1474,8 @@ saves it) giving way first. The first canonical page replaces it, a selected pas
 staying until released; after a failed read it says `not current` beside Retry, painted
 before or after; a refused session or sign-out erases only these copies, and a deleted
 Project's copy in its data profile goes once this browser learns of the deletion (a `deleting`
-row, a lookup of that Project, or the complete list Find a project and Show more read),
-staying within the total until then. Task activity remains separate.
+row a state read brings once the socket proved that profile, a lookup of that Project, or the
+complete list Find a project and Show more read), staying within the total until then. Task activity remains separate.
 Failure and approximate-restoration notices are wrapping text in the room's header
 chrome: the Project status bar, or Main's floating note on its float-sheet backing (§5).
 
