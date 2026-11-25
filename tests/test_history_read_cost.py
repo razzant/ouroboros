@@ -16,6 +16,8 @@ import pathlib
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 from tests._store_shared import seed_result
 from tests.test_chat_history_paging import isolated_runtime, request, row, write  # noqa: F401
 
@@ -172,14 +174,16 @@ def test_remembered_bound_children_read_their_parents_lineage_in_one_batch(tmp_p
     assert costs[30] == costs[3], costs  # one read of the parents together, not one per child
 
 
-def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path, monkeypatch):
+@pytest.mark.parametrize("number", [0, 4242])
+def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path, monkeypatch, number):
     """A page asks the routing-receipt journal about the owner messages it can show (its selected owner rows; on
     the newest page, its Project's origins), never the install's other id-only receipts, and a room showing none
     reads no journal: neither a room of answers and agent notes carrying ids nor an empty delta of a Project with a
     retained origin. Each message resolves alone, so every page keeps the bytes the whole-journal read gave it:
     Main's newest page and an older one, a Project whose retained origin copy wears its receipt with its row gone,
     also when the page's read of its Project's refs failed or predates the binding (the copy then asks for itself).
-    A page asks an id as its row looks it up (``str``): one another writer saved as a number is asked and worn."""
+    A page asks an id as its row looks it up (``str``): one another writer saved as a number, zero too, is asked and
+    worn; a null or empty id asks nothing."""
     from ouroboros import chat_annotations, dialogue_store, project_dialogue
     from ouroboros.chat_chain import format_address, row_address
     from ouroboros.dialogue_provenance import recorded_author
@@ -199,16 +203,17 @@ def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path,
                   row(1, chat_id=gamma, client_message_id="gamma-note", system_type="agent_note_received",
                       agent_note_text="A program's words", declared_author=recorded_author("Scout"))]
     unnamed = row(2, chat_id=gamma, text="An owner's words saved without an id", client_message_id=None)
-    numbered = row(3, chat_id=delta, text="Words another writer saved under a number", client_message_id=4242)
+    blank = row(4, chat_id=gamma, text="An owner's words saved with an empty id", client_message_id="")
+    numbered = row(3, chat_id=delta, text="Words another writer saved under a number", client_message_id=number)
     write(tmp_path / "logs" / "chat.jsonl",
-          [*(entry for rows in owners.values() for entry in rows), *ineligible, unnamed, numbered])
+          [*(entry for rows in owners.values() for entry in rows), *ineligible, unnamed, blank, numbered])
     for rows in (*owners.values(), ineligible):  # id-only receipts, as older installs wrote them: the store places each
         for entry in rows:
             chat_annotations.append_chat_annotation(tmp_path, entry["client_message_id"], action="steer_task",
                                                     status="delivered", routing_token="act")
-    chat_annotations.append_chat_annotation(tmp_path, "4242", action="steer_task", status="delivered",  # addressed, as
-                                            routing_token="act", source_chat_id=delta,  # this tree writes them
-                                            source_row_address=format_address(row_address(numbered)))
+    chat_annotations.append_chat_annotation(tmp_path, str(number), action="steer_task", status="delivered",
+                                            routing_token="act", source_chat_id=delta,  # addressed, as this tree
+                                            source_row_address=format_address(row_address(numbered)))  # writes them
     chat_annotations.append_chat_annotation(tmp_path, "origin-gone", action="ensure_project_scope", status="delivered",
                                             routing_token="act", source_chat_id=1, source_row_address=format_address(ref))
     status, first = request(tmp_path, n_human="2")  # imports the rows; its cursor reads the older page below them
@@ -257,18 +262,18 @@ def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path,
         shown = {message["client_message_id"]: message.get("chat_annotation", {}).get("status")
                  for message in json.loads(body)["messages"] if message["role"] == "user"}
         if name == "gamma":  # an answer and an agent's note carry ids and receipts, yet neither wears one; an owner
-            assert "gamma-note" in shown and len(shown) == 2 and not any(shown.values()), shown  # row's null id is none
+            assert "gamma-note" in shown and len(shown) == 3 and not any(shown.values()), shown  # row without an id
             assert (page_asked, page_parsed, page_resolved) == ([set()], 0, set()), "no owner row: no journal read"
             continue
         [ids] = page_asked  # one question per page, about its own owner messages only
         assert ids is not None and page_parsed == 1, f"{name}: the page read every receipt of the install"
         assert shown and set(shown.values()) == {"delivered"} and set(shown) <= ids, name
-        assert not ids & beta_ids and page_resolved == ids - {"origin-gone", "4242"}, name  # addressed: none placed
+        assert not ids & beta_ids and page_resolved == ids - {"origin-gone", str(number)}, name  # addressed: not placed
         if name == "main older":
             newer = {message["client_message_id"] for message in first["messages"] if message["role"] == "user"}
             assert ids < main and newer and not ids & newer, "the newer page's rows are not asked again"
         else:
-            assert ids == {"main": main, "alpha": alpha_ids | {"origin-gone"}, "delta": {"4242"}}[name], name
+            assert ids == {"main": main, "alpha": alpha_ids | {"origin-gone"}, "delta": {str(number)}}[name], name
         assert name != "alpha" or "origin-gone" in shown, "the retained origin copy wears its receipt"
 
     # The Project's delta with nothing new renders no origin: it asks about nobody and opens no journal.
