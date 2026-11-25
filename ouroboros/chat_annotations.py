@@ -179,6 +179,16 @@ def addressed_chat_annotations(root, *, by_token=False, message_ids=None):
     return {key: row for key, row in placed.items() if key[2]}
 
 
+def page_receipts(root, message_ids) -> dict:
+    """The receipts a history page's named owner messages can wear (``addressed_chat_annotations``, nothing else of
+    the journal); a journal that cannot be read answers none, so a page never fails on its receipts."""
+    try:
+        return addressed_chat_annotations(root, message_ids=message_ids)
+    except Exception:
+        log.debug("Routing receipts unreadable for a history page", exc_info=True)
+        return {}
+
+
 def placed_token_receipts(root, message_ids, token):
     """One act's saved facts per source, including a legacy fact that remains unplaced."""
     placed, _ = _placed_annotations(root, by_token=True, message_ids=message_ids)
