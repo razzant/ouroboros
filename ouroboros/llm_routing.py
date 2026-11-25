@@ -90,6 +90,9 @@ def openrouter_chat_routing(target: Mapping[str, Any], messages: Optional[list])
     pin can widen Flex's price pool unless this family can replay even sealed reasoning anywhere.
     The adapter always supplies its actual send copy, including an empty list when appropriate.
     OpenRouter publishes the accepted fields per endpoint at ``/api/v1/models/{author}/{slug}/endpoints``.
+    The ``anthropic/`` ``require_parameters`` pin rests on that list (undated; declared in
+    ``tests/test_model_name_invariance.py``). If stale: excess filtering narrows failover; a
+    missing filter lets an endpoint drop or refuse fields.
     """
     from ouroboros.reasoning_artifacts import sealed_reasoning_is_portable, transcript_has_sealed_reasoning
 

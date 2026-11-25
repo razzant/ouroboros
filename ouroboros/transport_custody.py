@@ -497,7 +497,7 @@ def provider_reported_cost_only(target: Mapping[str, Any]) -> bool:
 
 
 # The OpenRouter ``provider`` fields the host itself sends as filters (``openrouter_chat_routing``:
-# ``require_parameters``, recorded in DEVELOPMENT "External facts"; ``allow_fallbacks``, ``_OR_PROVIDER_PRESETS``).
+# ``require_parameters``, its evidence in that docstring; ``allow_fallbacks``, ``_OR_PROVIDER_PRESETS``).
 _FILTER_ROUTING = frozenset({"require_parameters", "allow_fallbacks"})
 
 

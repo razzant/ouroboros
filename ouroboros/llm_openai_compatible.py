@@ -248,7 +248,9 @@ class _OpenAICompatibleLaneMixin:
                 # auto/none (probed 2026-09-03: required and named 400 on both
                 # v4 models), so a forced tool call is served with thinking
                 # disabled. Any tier change is disclosed on usage as
-                # ``reasoning_effort_clamped``.
+                # ``reasoning_effort_clamped``. Re-probe the exact endpoint when the
+                # dialect changes: removed early, forced calls break; kept after a
+                # change, supported thinking is suppressed.
                 forced_tool = bool(prepared_tools) and tool_choice not in (None, "", "auto", "none")
                 applied = "none" if forced_tool else normalize_deepseek_reasoning_effort(requested_effort)
                 if applied == "none":
@@ -260,16 +262,9 @@ class _OpenAICompatibleLaneMixin:
                     reason="provider_forced_tool_choice" if forced_tool else "provider_wire_mapping",
                 )
             elif provider == "zai":
-                # Same carriage family, Z.ai's OWN projection table (NOT
-                # DeepSeek's: medium does not exist at Z.ai and xhigh maps to
-                # max, not high). GLM reasoning cannot be disabled — the
-                # DeepSeek ``thinking={"type":"disabled"}`` arm answers
-                # 400 code 1210 ("please use low, high or max") on PAYG — and
-                # forced tool_choice WORKS with thinking enabled (measured
-                # 2026-09-21), so there is no forced-tool exception either.
-                # An absent parameter is served at MAX: dropping the tier
-                # silently billed every call at max. Any tier change is
-                # disclosed on usage as ``reasoning_effort_clamped``.
+                # Use Z.ai's map, not DeepSeek's; see the scoped evidence at
+                # ZAI_REASONING_EFFORT_ALIASES in provider_models.py. Send the
+                # applied tier (unmapped -> low), disclosing changes on usage.
                 applied = normalize_zai_reasoning_effort(requested_effort)
                 kwargs["reasoning_effort"] = applied
                 _stage_effort_clamp_disclosure(requested_effort, applied, resolved_model)

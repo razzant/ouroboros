@@ -257,6 +257,8 @@ def supports_message_cache_control(model: str) -> bool:
     block's ``cache_control`` becomes ``prompt_cache_breakpoint`` on supporting
     OpenAI models (GPT-5.6+), and its TTL is dropped toward OpenAI. Keeping the hint
     is not a claim that every ``openai/`` model caches it; older ones ignore it.
+    ``openai/`` rests on that guide alone, no live probe: re-probe before widening.
+    If stale: a false positive invalidates a request; a false negative loses the prompt cache.
     """
     m = str(model or "").strip().lstrip("~")
     return m.startswith(("anthropic/", "google/gemini-", "openai/"))
@@ -273,6 +275,9 @@ def openai_family_model(model: str) -> bool:
     (``llm_messages.split_leading_system_prefix``) and shares one sticky session per model
     and governance prefix (``_openrouter_session_identity``). OpenRouter ``openai/gpt-oss-*``
     ids are served by third parties and merely inherit the projection: disclosed, not gated.
+    Before widening, re-probe ``cached_tokens`` across two conversations, never a substring such
+    as ``gpt``. If stale: a false positive moves a prefix-caching family's cache boundary; a false
+    negative pays cold prefixes.
     """
     from ouroboros.provider_models import normalize_model_identity
 

@@ -323,6 +323,8 @@ def cache_key_for_model(model: str) -> str:
     instead of paying it cold under a per-execution key — once ``_request`` has
     projected the declared prefix into its own input item. Empty for every other
     provider: API-compatible lanes keep their prefix-derived session identity.
+    Re-measure cache reads and turn state across two conversations before changing the
+    key's scope: a stale fact pays cold prefixes or breaks turn state.
     """
     from ouroboros.provider_models import provider_for_model
 
