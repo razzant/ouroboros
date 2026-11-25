@@ -45,7 +45,6 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 from ouroboros.tools.governance_context import RETRIEVING_DELIVERY, governance_context
 from ouroboros.tools.review_helpers import (
     _ANTI_THRASHING_RULE_VERDICT,
-    _CONVERGENCE_RULE_TEXT,
     _HISTORY_VERIFICATION_ONLY_RULE,
     build_goal_section,
     build_rebuttal_section,
@@ -469,15 +468,9 @@ def _touched_slot(brief: BriefInputs) -> str:
     return f"{lead}\n\n{manifest}" if manifest else lead
 
 
-def build_coupling_history_section(coupling_history: Optional[list], history_section: str = "") -> str:
-    """Prior ``coupling`` rounds of this subject as a brief section.
-
-    A coupling-only retry chain leaves the Part-1 history empty, so the shared
-    anti-thrashing block never reaches its convergence rule; from the third
-    coupling round on it is appended here instead. ``history_section`` is the
-    already-rendered Part-1 history: when it carries the rule, this section does
-    not repeat it.
-    """
+def build_coupling_history_section(coupling_history: Optional[list]) -> str:
+    """Prior ``coupling`` rounds of this subject as a brief section, under the
+    same two rules the Part-1 history carries."""
     if not coupling_history:
         return ""
     rounds = []
@@ -514,8 +507,6 @@ def build_coupling_history_section(coupling_history: Optional[list], history_sec
         f"\nIMPORTANT: {_HISTORY_VERIFICATION_ONLY_RULE}\n"
         f"\nIMPORTANT: {_ANTI_THRASHING_RULE_VERDICT}\n"
     )
-    if len(coupling_history) >= 2 and _CONVERGENCE_RULE_TEXT not in str(history_section or ""):
-        section = section.rstrip() + f"\n\n**IMPORTANT: {_CONVERGENCE_RULE_TEXT}**\n"
     return section
 
 
@@ -583,7 +574,7 @@ def build_retrieving_brief(
     rebuttal_section = build_rebuttal_section(intent.review_rebuttal)
     history_section = review_history_brief(intent.review_history, drive_root=brief.drive_root,
                                            repo_root=repo_dir, task_id=brief.task_id)
-    coupling_history_section = build_coupling_history_section(intent.coupling_history, history_section)
+    coupling_history_section = build_coupling_history_section(intent.coupling_history)
 
     bound = first_send_bound(brief)
     from ouroboros.review_words import section_budget, words_for_diff
