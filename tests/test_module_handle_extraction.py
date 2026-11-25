@@ -429,7 +429,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "review_executions_from_actor_usage",
     })),
     "ouroboros/review_state_custody.py": ("ouroboros/review_state.py", "_rs", frozenset({
-        "ReviewStateMutation", "_truncate_review_artifact", "_utc_now", "load_state", "update_state",
+        "ReviewStateMutation", "_STATE_RELPATH", "_load_state_unlocked",
+        "_truncate_review_artifact", "_utc_now", "load_state", "update_state",
     })),
     "ouroboros/review_state_model.py": ("ouroboros/review_state.py", "_rs", frozenset({
         "_DEFAULT_TOOL_NAME", "_LEGACY_CURRENT_REPO_KEY", "_MAX_ATTEMPT_HISTORY",
