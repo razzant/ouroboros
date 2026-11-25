@@ -11,7 +11,7 @@ from ouroboros.project_dialogue import (
     append_chat_annotation, build_owner_message_ref, latest_chat_annotations, resolve_owner_message_source,
     resolve_legacy_continuation_narrative,
 )
-from tests._dialogue import seed
+from tests._dialogue import healthy_main_fixture, seed  # noqa: F401 -- the "healthy_main" fixture
 
 
 def owner(client_id="owner-one", *, chat_id=1, **extra):
@@ -343,7 +343,7 @@ def test_quiz_last_inbound_only_needs_coverage_after_the_known_owner_row(tmp_pat
     assert "2026-10-17 01:00 UTC" in facts and "invalid intervals" not in facts
 
 
-def test_routing_recent_text_rows_report_only_missing_parts_of_the_window(tmp_path, monkeypatch):
+def test_routing_recent_text_rows_report_only_missing_parts_of_the_window(tmp_path, monkeypatch, healthy_main):
     from types import SimpleNamespace
     from ouroboros import server_routing_context as routing
 

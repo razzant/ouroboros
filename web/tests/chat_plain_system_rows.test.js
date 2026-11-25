@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 
 import { createChatInstance } from '../modules/chat.js';
 import { applyPayload, flushMisses, setMissTransport } from '../modules/i18n.js';
-import { TextStub, installDom as installHistoryDom } from './chat_dom_fixture.js';
+import { PREVIEW_SCOPE, TextStub, installDom as installHistoryDom } from './chat_dom_fixture.js';
 
 // Source pins below match across line breaks; normalize CRLF so a Windows
 // checkout (core.autocrlf) reads the same bytes the regexes were written for.
@@ -787,7 +787,7 @@ for (const unfinished of [false, true]) test(`untyped System replay keeps markdo
         { role: 'system', markdown: true, text: 'Host notice line one\nline two', ts: '2026-09-03T00:00:01Z' },
     ].map(row => ({ ...row, chat_id: 2, task_id: 'notice-task', ...(unfinished ? { task_phase: 'unfinished' } : {}) }));
     const { prior, mount } = installHistoryDom(async url => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages, window: { complete: true } } : { active_direct_turns: [] } }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages, window: { complete: true } } : { active_direct_turns: [] } }));
     let instance;
     try {
         ({ instance } = makeInstance(mount));

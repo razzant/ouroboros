@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
 
 const TS = '2026-09-12T12:00:00.000Z';
 const row = (id, text) => ({
@@ -27,7 +27,7 @@ function fixture(t, options = {}) {
             return { ok: true, json: async () => ({ active_direct_turns: [] }) };
         }
         return new Promise((resolve, reject) => reads.push({
-            ok: data => resolve({ ok: true, status: 200, json: async () => data }),
+            ok: data => resolve({ ok: true, status: 200, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...data }) }),
             http: (status, reason_code) => resolve({ ok: false, status, json: async () => ({ error: `HTTP ${status}`, reason_code }) }),
             drop: () => reject(new TypeError('Failed to fetch')),
         }));
@@ -73,9 +73,17 @@ const assertLoading = (f, why) => {
 };
 
 for (const room of ['Main', 'Project']) test(`${room} migration retries until history publishes without a click`, async t => {
+    const priorError = console.error;
     const f = fixture(t, room === 'Main' ? { chatId: 1, asPanel: false } : {});
-    await t.waitFor(() => assert.equal(f.reads.length, 1, 'opening the room starts its first read'));
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const captureError = console.error;
+    console.error = priorError;
+    try {
+        await t.waitFor(() => assert.equal(f.reads.length, 1, 'opening the room starts its first read'));
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        await new Promise(setImmediate); // Let Node report its timer warning before observing the first response.
+    } finally {
+        console.error = captureError;
+    }
     const advance = async ms => {
         t.mock.timers.tick(ms);
         await new Promise(setImmediate);

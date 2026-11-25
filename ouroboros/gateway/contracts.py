@@ -141,6 +141,9 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField, AgentNo
     origin_message_ref: NotRequired[Dict[str, Any]]
     # X3: a repair receipt whose managed task id the router mints only at promotion (typed truth, no invented id).
     task_id_pending: NotRequired[bool]
+    # The confirmed work this final answer replies about (finish_task about_work): a direct turn's
+    # terminal frame addresses exactly the task this owner turn started or told, never a fresher id.
+    about_work_task_id: NotRequired[str]
     # "finalizing": early answer during synthesis, NOT terminal; task_done settles the card/turn.
     task_phase: NotRequired[str]
     # Direct/ephemeral completed/failed/cancelled/rejected_duplicate settles activity, not early answers.
@@ -324,8 +327,6 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField, AgentNo
     scheduled_for: NotRequired[str]  # the due point it was written for
     delivered_at: NotRequired[str]  # when the host showed it (later than due after downtime)
     chat_id: NotRequired[int]  # present on some transport re-broadcast paths
-    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
-    project_thread: NotRequired[bool]
 
 
 class _MediaOutbound(ChatReferenceFields):
@@ -350,8 +351,6 @@ class _MediaOutbound(ChatReferenceFields):
     transport: NotRequired[TransportMetadata]
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
-    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
-    project_thread: NotRequired[bool]
 
 
 class PhotoOutbound(_MediaOutbound):
@@ -396,7 +395,6 @@ class LinksOutbound(ChatReferenceFields):
     title: NotRequired[str]
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
-    project_thread: NotRequired[bool]
     transport: NotRequired[TransportMetadata]
 
 
@@ -442,7 +440,6 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     closed_request_id: NotRequired[str]
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
-    project_thread: NotRequired[bool]
     transport: NotRequired[TransportMetadata]
     secret_request: NotRequired[SecretRequestMeta]  # an integration-secret request: answered only by its form
 

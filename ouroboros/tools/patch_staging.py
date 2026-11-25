@@ -49,11 +49,13 @@ def index_entries(target: pathlib.Path, paths: List[str]) -> Dict[str, tuple]:
     and ``+intent-to-add``. Raises when the index cannot be read: unknown is not untracked."""
     wanted, entries, flags, listed = set(paths), {}, {}, b""
     # Only PATHS are listed, as literal pathspecs (the exact match below drops a directory's other entries),
-    # in argv batches well under Windows' command-line limit: never a whole-index inventory.
+    # in argv batches well under Windows' command-line limit: never a whole-index inventory. Both argv lookups
+    # disable core.precomposeunicode so macOS Git matches decomposed (NFD) index names verbatim.
     batch: List[str] = []
     for path in [*sorted(wanted), None]:
         if batch and (path is None or sum(len(item) + 1 for item in batch) + len(path) > 16000):
-            listed += work_domain.run(["git", "--literal-pathspecs", "ls-files", "--stage", "-v", "-z", "--", *batch],
+            listed += work_domain.run(["git", "-c", "core.precomposeunicode=false", "--literal-pathspecs",
+                                       "ls-files", "--stage", "-v", "-z", "--", *batch],
                                       cwd=str(target), capture_output=True, check=True).stdout
             batch = []
         if path is not None:
@@ -67,7 +69,8 @@ def index_entries(target: pathlib.Path, paths: List[str]) -> Dict[str, tuple]:
                 {"+assume-unchanged"} if tag.islower() else set(), {"+skip-worktree"} if tag.upper() == "S" else set())
     # Porcelain status alone tells intent-to-add (index mode 000000) from a staged empty file; it writes no index.
     if candidates := [path for path, rows in entries.items() if len(rows) == 1 and rows[0].split()[1] in _EMPTY_BLOBS]:
-        status = work_domain.run(["git", "--no-optional-locks", "--literal-pathspecs", "status", "--porcelain=v2", "-z",
+        status = work_domain.run(["git", "-c", "core.precomposeunicode=false", "--no-optional-locks",
+                                 "--literal-pathspecs", "status", "--porcelain=v2", "-z",
                                  "--untracked-files=no", "--ignore-submodules=all", "--no-renames", "--", *candidates],
                                 cwd=str(target), capture_output=True, check=True)
         for record in status.stdout.split(b"\0"):

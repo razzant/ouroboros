@@ -1,6 +1,6 @@
 // Chat timeline ordering, keyed item reconciliation and reading anchors.
 // These helpers own no history source, navigation or task authority.
-import { compareHistoryPosition, timelineReadFields } from './chat_history_replay.js';
+import { adoptsCardRowAddress, compareHistoryPosition, timelineReadFields } from './chat_history_replay.js';
 import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
@@ -920,9 +920,13 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
         const it = record.items[existingIdx];
         if (Number.isSafeInteger(it.cardRowRevision)
             && (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision <= it.cardRowRevision)) {
-            return { timelineUpdate: 'duplicate-skip', patchIndex };
+            if (!adoptsCardRowAddress(it, summary)) return { timelineUpdate: 'duplicate-skip', patchIndex };
+            Object.assign(it, { replyAddress: summary.replyAddress, replyRole: summary.replyRole });
+            return { timelineUpdate: 'patch-at', patchIndex: existingIdx };
         }
         const patch = {
+            replyAddress: summary.replyAddress,
+            replyRole: summary.replyRole,
             cardRowRevision: summary.cardRowRevision, phase: summary.phase || it.phase,
             headline: headline || it.headline, fullHeadline: summary.fullHeadline || headline || it.fullHeadline,
             body: summary.body || '', fullBody: summary.fullBody || summary.body || it.fullBody || '',
@@ -954,6 +958,8 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
     } else {
         const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         record.items.push({
+            replyAddress: summary.replyAddress,
+            replyRole: summary.replyRole,
             cardRowRevision: summary.cardRowRevision, phase: summary.phase || 'working',
             headline: headline || 'Update', fullHeadline: summary.fullHeadline || headline || 'Update',
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
@@ -968,14 +974,9 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
     return { timelineUpdate, patchIndex };
 }
 
-/** The block's folded tool evidence row. Live frames and the host's metrics
- * reach it through the same keyed in-place upsert, so neither route can mint a
- * second row, and the row keeps the position and timestamp of its first frame.
- */
+/** Live frames and host metrics upsert one folded tool row, keeping its first position and time through a burst. */
 export function upsertToolFoldRow(record, view, ts, rawTs) {
     const syntheticKey = `tools|${record.groupId}`;
-    // Stationary: the row keeps the place and the time of the first frame it
-    // counted, so a burst of calls never walks it down the timeline.
     const first = !record.items.some((item) => item.dedupeKey === syntheticKey);
     return updateLiveTimelineItem(record, view, {
         ts: first ? ts : '', rawTs, syntheticKey, headline: view.headline, inPlaceByKey: true,

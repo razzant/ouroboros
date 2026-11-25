@@ -1072,9 +1072,9 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
     The reports are the real reader's over real sealed attempts. A stale CSP hash, a body shown under another
     attempt's facts, an earlier result left under a failed selection, text drawn as markup, a request held
     twice in the frame, a gap explained only inside a closed disclosure or a ledger state read as a final
-    charge each fail here. So does a frame whose text is not readable on what lies under it for any pairing of the
-    host's choice and the device's scheme (nothing stored, Dark on a light device, System on a light device, Light on
-    a dark device), or that sends anything out: a message to its parent, a request or a WebSocket frame, before or
+    charge each fail here. So does unreadable text when System follows an emulated device (dark to light) or when
+    the host manually switches away from and back to the browser's unforced preference on the open report. The
+    frame must not send anything out: a message to its parent, a request or a WebSocket frame, before or
     after a file is chosen (the frame's own page load is the observers' positive control). The route lease is a
     credential, so no address with it is kept, shown or pictured.
     """
@@ -1119,10 +1119,11 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
     try:
         with sync_playwright() as pw:
             browser = getattr(pw, browser_name).launch(headless=True)
-            context = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+            context = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="null")
             context.add_init_script(_REPORT_MESSAGES)
             context.on("request", on_request)
             page = context.new_page()
+            page.emulate_media(color_scheme="dark")  # Start in System with a deterministic device preference.
             page.on("websocket", on_socket)
             page.set_default_timeout(15_000)
             errors, failed_loads = record_console_errors(page), record_failed_loads(page)
@@ -1326,44 +1327,55 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 # tool, and a row's text exists only while that row is open.
                 assert stored_body.text_content() == stored
                 assert rows.count() == 4 and frame.locator(".part").count() == 0
-                # The host's choice and the device's scheme turn independently while the report is open, and the frame
-                # follows the host alone, through the colour scheme it inherits: no message, no token. What is held to
-                # account is what is painted: the report's text and its button's text, each on what lies under it, as a
-                # direction (light on dark, dark on light) and as a ratio, measured again until the paint has settled.
+                # Measure the painted result: both the report headline and the button text must have the expected
+                # polarity and contrast against their backgrounds, and the button keeps its shadow.
                 def painted(theme: str) -> dict:
                     outside = report.evaluate(_LAYERS)
                     return {part: _painted(frame.locator(node).evaluate(_LAYERS), outside, theme)
                             for part, node in (("headline", "#headline"), ("button", "label[for='report-file']"))}
 
-                def readable(theme: str) -> dict:
+                def readable(theme: str, label: str) -> None:
                     def right(seen: dict) -> bool:
                         return seen["button"]["shadow"] != "none" and all(
                             each["ink_lighter"] == (theme == "dark") and each["contrast"] >= 4.5 for each in seen.values())
 
+                    def witness(seen: dict) -> str:
+                        host = report.evaluate("""iframe => ({choice: document.documentElement.dataset.themeChoice,
+                            theme: document.documentElement.dataset.theme,
+                            topPrefersLight: matchMedia('(prefers-color-scheme: light)').matches,
+                            embeddingScheme: getComputedStyle(iframe).colorScheme})""")
+                        return f"{label}: expected readable {theme}; host={host}, report={seen}"
+
                     deadline = time.monotonic() + 8
                     while not right(seen := painted(theme)):
-                        assert time.monotonic() < deadline, f"the report is not readable as {theme} text on its own surface: {seen}"
+                        assert time.monotonic() < deadline, witness(seen)
                         page.wait_for_timeout(100)
-                    # A frame that still follows the device would flip a moment after a first, right-looking paint.
+                    # A first readable paint is not enough if styles then settle to the other scheme.
                     page.wait_for_timeout(300)
-                    assert right(seen := painted(theme)), f"the report did not stay readable as {theme} text: {seen}"
-                    return seen
+                    assert right(seen := painted(theme)), witness(seen)
 
-                frame.locator("h1").scroll_into_view_if_needed()  # the pictures below show the report from its top
-                for number, (label, choice, device, theme) in enumerate((
-                        ("default-dark", None, "dark", "dark"),   # nothing chosen: the device decides
-                        ("strict-dark", "dark", "light", "dark"),  # Dark stays Dark when the device turns light
-                        ("device-light", "system", "light", "light"),  # System follows the device to light
-                        ("manual-light", "light", "dark", "light")), 2):  # Light stays Light on a dark device
-                    page.emulate_media(color_scheme=device)
-                    assert page.evaluate("() => matchMedia('(prefers-color-scheme: light)').matches") == (device == "light")
-                    if choice:
-                        page.evaluate("(choice) => window.ouroTheme.set(choice)", choice)
-                    expect(page.locator("html")).to_have_attribute("data-theme", theme)
-                    readable(theme)
+                appearance = page.locator("html")
+
+                def check_theme(label: str, theme: str) -> None:
+                    expect(appearance).to_have_attribute("data-theme", theme)
+                    readable(theme, label)
                     assert first in facts.text_content() and stored_body.text_content() == stored and rows.count() == 4
                     expect(frame.locator("#report-result")).to_be_visible()
-                    shoot(f"{number}-{label}")
+                    shoot(label)
+
+                frame.locator("h1").scroll_into_view_if_needed()  # the pictures below show the report from its top
+                check_theme("2-default-dark", "dark")
+                page.emulate_media(color_scheme="light")  # Only System: browser emulation can force the iframe too.
+                check_theme("3-device-light", "light")
+                page.emulate_media(color_scheme="null")
+                ambient = "light" if page.evaluate("() => matchMedia('(prefers-color-scheme: light)').matches") else "dark"
+                expect(appearance).to_have_attribute("data-theme", ambient)  # Still System before either manual choice.
+                opposite = "dark" if ambient == "light" else "light"
+                for label, theme in (("4-manual-opposite", opposite), ("5-manual-return", ambient)):
+                    # Same setter as Appearance, without leaving Widgets and replacing the open frame.
+                    page.evaluate("(choice) => window.ouroTheme.set(choice)", theme)
+                    expect(appearance).to_have_attribute("data-theme-choice", theme)
+                    check_theme(f"{label}-{theme}", theme)
                 page.evaluate("() => window.ouroTheme.set('system')")
                 page.emulate_media(color_scheme="dark")
                 expect(page.locator("html")).to_have_attribute("data-theme", "dark")

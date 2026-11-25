@@ -180,7 +180,8 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     box-shadow: var(--elev-float);
     animation: rw-unfold var(--motion-fade) var(--ease-sheet);
 }
-.rw-shade-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+/* Reserve the scrollbar on the inner scrollport so growing rows keep their width. */
+.rw-shade-body { min-height: 0; overflow-y: scroll; overscroll-behavior: contain; }
 /* Main and Project: the header floats over the transcript, so its anchor hangs from the header's bottom edge. */
 :is(.chat-page-header, .project-panel-bar) > .rw-shade-anchor { position: absolute; left: 0; right: 0; top: 100%; height: 0; z-index: 30; }
 /* Main's history note hangs on the place an open list covers, so it waits behind the list (Project's note is in

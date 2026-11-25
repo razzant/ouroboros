@@ -833,7 +833,7 @@ def _max_start_room(snapshot, texts, books, *, fixed, ratio, schemas, forms, win
 
 
 def _final_view(shown, snapshot, core, mode, room_fact, *, fixed, ratio, window, reserve, output_reserve, window_record,
-                start_room, require_admission, work, optional_map):
+                start_room, require_admission, work, optional_map, cold_return=False):
     """Draw the selected room as system text and program data; then add the required handbook.
 
     A start yields maps for it (``optional_map``) or names its refusal. ``require_admission`` is off on a local
@@ -846,7 +846,7 @@ def _final_view(shown, snapshot, core, mode, room_fact, *, fixed, ratio, window,
     room, room_data, note, unfit = floor.fit_required_book(shown, book=book, fixed=fixed, ratio=ratio, reserve=reserve,
         output_reserve=output_reserve, window=window, window_record=window_record, mode=mode, work=work() if book else 0,
         lowered=bool(room_fact) and mode == "low", note_window=start_room, admit=require_admission,
-        optional_map=optional_map, opening_address=core.opening_program_address)
+        optional_map=optional_map, opening_address=core.opening_program_address, cold_return=cold_return)
     if unfit is not None:
         raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
             window_tokens=window, ratio=ratio, required_book_tokens=book, **unfit)
@@ -1196,8 +1196,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return measure(mode, sent, section_views(sections[mode], receipts))
     story, room, room_data, receipt = _final_view(shown, snapshot, whole_core, mode, room_fact, fixed=fixed, ratio=ratio,
         window=window, reserve=reserve, output_reserve=output_reserve, work=work, window_record=limits(mode)[3], optional_map=optional_map,
-        start_room=known_window and (kept is None or start_work),
-        require_admission=kept is None and not cold_resume and known_window and current_messages is None and provider != "local")
+        start_room=known_window and (kept is None or start_work), cold_return=cold_resume,
+        require_admission=kept is None and known_window and current_messages is None and provider != "local")
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
     contents = {}

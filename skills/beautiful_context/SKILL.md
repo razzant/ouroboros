@@ -45,8 +45,10 @@ from the Widgets board.
   does not pass it on shows the report in the device's colours.
 
 Leaving Widgets clears the open report unless the card's launch policy is
-**Keep running**, which may retain it while you are on other pages; the
-card's Stop or disabling the skill always clears it.
+**Keep running**, which may retain it while you are on other pages. The card's
+Stop clears it at once; disabling the skill — from this window or another —
+removes the card when the change reaches this page, after the connection is
+restored if this window was offline.
 
 ## Exporting a local report
 

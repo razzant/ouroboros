@@ -372,7 +372,8 @@ def _cmd_passes_on(line: str) -> bool:
 def _printed_command(err: str) -> str:
     import re
 
-    return re.search(r'without --report: (python -m ouroboros\.context_attempt_reader .+) > request\.json\)', err).group(1)
+    return re.search(r'without --report: (python -m ouroboros\.context_attempt_reader .+) '
+                    r'> "/path/to/private-directory/[^"]*-request\.json"\)', err).group(1)
 
 
 def test_local_request_report_too_large_for_the_page_is_a_bounded_gap_whose_command_reads_it(
@@ -482,10 +483,15 @@ def test_local_request_reader_gives_windows_a_command_cmd_exe_passes_on(tmp_path
     words = ['python', '-m', 'ouroboros.context_attempt_reader', '--data-root']
     for folder in ('D:\\a\\temp\\data', 'D:\\R&D\\data', 'C:\\Program Files (x86)\\Ouroboros\\data', 'D:\\data\\'):
         line = reader._retry_command(SimpleNamespace(data_root=folder, task_id='t-1', attempt='a1'), 7)
-        line = line.removesuffix(' > request.json')
+        line = line.removesuffix(' > "/path/to/private-directory/a1-request.json"')
         assert _cmd_passes_on(line) and _windows_argv(line) == [*words, folder, 't-1', '--attempt', 'a1', '--max-bytes', '7']
     line = reader._retry_command(SimpleNamespace(data_root='D:\\%TEMP%\\data', task_id='t 1', attempt='a1'), 7)
-    assert '--data-root DATA "t 1" --attempt a1 ' in line and _cmd_passes_on(line.removesuffix(' > request.json'))
+    assert '--data-root DATA "t 1" --attempt a1 ' in line and _cmd_passes_on(line.removesuffix(
+        ' > "/path/to/private-directory/a1-request.json"'))
+    # The sample file keeps the page's safe name: an attempt that is not a plain word names it ATTEMPT_ID.
+    line = reader._retry_command(SimpleNamespace(data_root='D:/data', task_id='t-1', attempt='a 1'), 7)
+    line = line.removesuffix(' > "/path/to/private-directory/ATTEMPT_ID-request.json"')
+    assert '--attempt "a 1" ' in line and _cmd_passes_on(line)
 
 
 def test_local_request_reader_names_a_receipt_recorded_without_a_request(data_root, capsys):

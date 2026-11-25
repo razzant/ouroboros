@@ -22,7 +22,8 @@ from starlette.testclient import TestClient
 
 from ouroboros import dialogue_store, places
 from ouroboros.conversation_lease import (
-    _intake_path, author_intake_accepting, close_author_intake, open_author_intake, open_root_intake,
+    _intake_path, author_intake_accepting, author_intake_closed, close_author_intake, open_author_intake,
+    open_root_intake,
 )
 from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.owner_mailbox import _mailbox_path, drain_owner_entries
@@ -271,7 +272,9 @@ def test_a_connectors_untagged_message_wakes_the_promoted_root_and_its_model_rea
     until(lambda: (load_task_result(world.data, task["id"]) or {}).get("status") == "completed", "the root's terminal")
     box["thread"].join(30)
     assert "error" not in box
-    assert not _intake_path(world.data, task["id"]).exists(), "the loop's end removes its own fact"
+    # The loop's end leaves its own fact closed until the task's mailbox settlement removes it (tests/test_work_reply_
+    # recipient.py holds that removal); a later arrival reads it as no reader.
+    assert author_intake_closed(world.data, task["id"], key, attempt=1), "the loop's end leaves its own fact closed"
 
 
 def test_a_wake_landing_before_the_roots_final_close_reopens_it_and_one_after_is_refused_unread(host, monkeypatch):
@@ -636,7 +639,7 @@ def test_a_controlled_or_absent_reader_receives_nothing_and_stays_as_it_was(host
     elif control == "budget_fence":
         world.queue.BUDGET_ROOT_FENCES[task["id"]] = {"status": "active", "root_task_id": task["id"], "fence_id": "f"}
     elif control in {"owner_hold", "project_hold"}:
-        task["_owner_hold" if control == "owner_hold" else "_project_admission_hold"] = {"reason": "test"}
+        task["_owner_hold" if control == "owner_hold" else "_project_admission_restore_hold"] = {"reason": "test"}
     elif control == "cancel_requested":
         write_task_result(world.data, task["id"], "cancel_requested")
     elif control == "terminal":
@@ -1519,7 +1522,7 @@ def test_a_promoted_root_in_a_spawned_worker_process_wakes_on_an_untagged_messag
         assert PLACE_EVENT in second["messages"] and "Also check the backup job." in second["messages"]
         assert world.focus_inputs == [], "no second focus: the work itself read it"
         until(lambda: (load_task_result(world.data, task["id"]) or {}).get("status") == "completed", "its terminal", 120)
-        until(lambda: not _intake_path(world.data, task["id"]).exists(), "its loop's end to remove its own fact")
+        until(lambda: author_intake_closed(world.data, task["id"], key, attempt=1), "its loop's end to close its own fact")
         msg_id = place_rows(world.data, task["id"])[0]["msg_id"]
         assert msg_id in acknowledged_task_message_ids(world.data, task["id"], attempt_key=1), "its drain acknowledged it"
         _completed(world, task)

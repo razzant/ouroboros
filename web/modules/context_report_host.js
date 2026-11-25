@@ -1,30 +1,35 @@
 // Beautiful Context's local requests on Dashboard › Logs (DESIGN, Widgets board: "Beautiful Context"): one action in the
 // band beside Clear, offered only on a supported Windows WebView2 shell whose DesktopApi exposes
 // `open_local_context_report` and reports `shell_info().local_context_archive === true`. The opener receives only a
-// state; no archive data reaches this page or any skill. The press answers in the shared action result (ui.css
-// .ui-action-row / .ui-result): an acknowledgement ends by itself, an unavailable viewer stays until the next press.
-import { setResult } from './ui_primitives.js';
+// state; no archive data reaches this page or any skill. The shared toast keeps the answer out of the filter band's
+// measure: an acknowledgement ends by itself, an unavailable viewer stays until dismissal or the next press.
+import { showToast } from './toast.js';
+import { SAVE_ACK_MS } from './ui_primitives.js';
 
 const ANSWERS = new Map([
-    ['opened', { text: 'Opened in a separate local window.', tone: 'ok', ends: true }],
-    ['already_open', { text: 'The local viewer is already open.', tone: 'muted', ends: true }],
+    ['opened', { text: 'Opened in a separate local window.', tone: 'ok', ttl: SAVE_ACK_MS }],
+    ['already_open', { text: 'The local viewer is already open.', tone: 'muted', ttl: SAVE_ACK_MS }],
 ]);
-const UNAVAILABLE = { text: 'The local viewer is unavailable in this window.', tone: 'warn' };
+const UNAVAILABLE = { text: 'The local viewer is unavailable in this window.', tone: 'warn', ttl: 0 };
 
 export function bindLocalContextReport(mount) {
     if (!mount) return () => {};
     let stopBridge = () => {};
-    let result = null;
+    let notice = null;
     let generation = 0;
     const detachBridge = () => {
         const detach = stopBridge;
         stopBridge = () => {};
         detach();
     };
+    const clearNotice = () => {
+        notice?.dispose();
+        notice = null;
+    };
     const dispose = () => {
         ++generation;
         detachBridge();
-        setResult(result, {});  // an acknowledgement's timer ends with its line
+        clearNotice();
         mount.replaceChildren();
         mount.hidden = true;
     };
@@ -39,22 +44,18 @@ export function bindLocalContextReport(mount) {
         local.type = 'button';
         local.className = 'btn btn-default';
         local.textContent = 'Open recent requests';
-        const line = document.createElement('span');
-        line.className = 'ui-result';
-        line.setAttribute('role', 'status');
-        line.setAttribute('aria-live', 'polite');
-        result = line;
         local.addEventListener('click', async () => {
             if (mountedGeneration !== generation) return;
             local.disabled = true;
-            setResult(line, {});
+            clearNotice();
             let state;
             try { ({ state } = await native.open_local_context_report()); } catch { state = 'unavailable'; }
             if (mountedGeneration !== generation) return;
             local.disabled = false;
-            setResult(line, ANSWERS.get(state) || UNAVAILABLE);
+            const { text, tone, ttl } = ANSWERS.get(state) || UNAVAILABLE;
+            notice = showToast(text, tone, { ttl });
         });
-        mount.replaceChildren(local, line);
+        mount.replaceChildren(local);
         Promise.resolve().then(() => mountedGeneration === generation && native.shell_info()).then((facts) => {
             if (mountedGeneration === generation && facts?.local_context_archive === true) mount.hidden = false;
         }, () => {});

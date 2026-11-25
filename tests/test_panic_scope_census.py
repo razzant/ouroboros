@@ -223,7 +223,8 @@ def test_launcher_completion_and_known_only_startup_keep_their_admission_and_exi
     assert "exclude\": {os.getpid(), os.getppid(), 1}" in panic_branch.replace("'", '"'), "the launcher and its parent are excluded"
     server = (REPO / "server.py").read_text(encoding="utf-8")
     main = server[server.index("def main() -> int:"):]
-    assert (main.index("admit_data_root(DATA_DIR)") < main.index("process_scope.initialize_installation_scope(DATA_DIR)")
+    assert (main.index("admit_data_root(DATA_DIR, reset_launch=reset_launch)")
+            < main.index("process_scope.initialize_installation_scope(DATA_DIR)")
             < main.index("automatic_launch_allowed("))
     # Ordinary doors never sweep the installation scope: close, quit, planned and manual Restart.
     for path in ("ouroboros/server_restart.py", "ouroboros/owned_shutdown.py"):

@@ -179,6 +179,7 @@ _PROCESS_KINDS = {
     "ouroboros/extension_companion.py::CompanionSupervisor.start": "companion",
     "ouroboros/local_model.py::LocalModelManager.start_server": "local model",
     "ouroboros/local_model.py::LocalModelManager._run_install": "local model",  # no ledger row: no next-start reap
+    "ouroboros/maintenance.py::MaintenanceChild._recover_dialogue": "maintenance child",
     "ouroboros/maintenance.py::MaintenanceChild._run": "maintenance child",
     "ouroboros/storage.py::StorageCounter._run": "storage count",
     "ouroboros/storage_free.py::FreeSpace._size": "free space sizing",

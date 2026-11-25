@@ -4,13 +4,16 @@ Swiped left past the reply point, a saved message replies as its Reply does: the
 fills and takes the accent, the composer stages the quote, and the row settles back; short of the point nothing is
 staged, and a thumb that drifts down once the swipe is sideways never scrolls the feed. Rightwards the finger stays the
 drawer's. A long press sinks the row while the finger holds, then lifts it over the dimmed feed while its menu is
-open (the header stays bright), and the row is back at rest once the menu closes. Saved rows come from the real
-history endpoint (test_shell_interactions_browser.saved_history); synthetic CDP touch is Chromium's input pipeline, not
-a claim about an iPhone.
+open (the header stays bright), and the row is back at rest once the menu closes. Inside a work card the same finger
+answers for the target the reader meant: a line with an address takes a colour step and offers its own Reply; a line
+without one presses its card, which offers its own commands and no Reply, and its swipe does nothing. Saved rows come
+from the real history endpoint (test_shell_interactions_browser.saved_history); synthetic CDP touch is Chromium's input
+pipeline, not a claim about an iPhone.
 """
 from __future__ import annotations
 
 import io
+import json
 
 import pytest
 from PIL import Image
@@ -30,7 +33,8 @@ ROW = """sel => { const row = document.querySelector(sel); const r = row.getBoun
         select: getComputedStyle(row).userSelect || getComputedStyle(row).webkitUserSelect,
         mark: mark ? { armed: mark.dataset.armed || '', k: Number(mark.style.getPropertyValue('--reply-k')), shown: mark.isConnected } : null,
         staged: document.getElementById('chat-input-reply')?.textContent || '', scrollTop: document.getElementById('chat-messages').scrollTop,
-        menu: [...document.querySelectorAll('.chat-row-menu:not([data-leaving]) [data-row-action]')].map((item) => item.dataset.rowAction) }; }"""
+        menu: [...document.querySelectorAll('.chat-row-menu:not([data-leaving]) [data-row-action]')].map((item) => item.dataset.rowAction),
+        label: document.querySelector('.chat-row-menu:not([data-leaving])')?.getAttribute('aria-label') || '' }; }"""
 # Playwright leaves the order of init scripts undefined: the recorder patches the stub's Telegram whether the stub is
 # already there or assigns it later.
 RECORD_HAPTICS = """(() => { const played = window.__haptics = [];
@@ -69,12 +73,24 @@ def luminance(png, x, y):
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
+def scoped_history(tmp_path):
+    """The shared saved history, answered as the serving core does: with the profile scope the page's own document
+    proves (a scoped page refuses history that names none)."""
+    client, _ = saved_history(tmp_path)
+
+    def respond(route):
+        response = client.get('/' + route.request.url.split('/', 3)[3])
+        route.fulfill(status=response.status_code, content_type='application/json',
+                      body=json.dumps({**response.json(), 'profile_scope': setup_browser.PREVIEW_SCOPE}))
+    return client, respond
+
+
 def booted(chromium_ui, tmp_path, theme='light', telegram=False):
     page = seed_page(chromium_ui, 390, 844, telegram=telegram)
     page.add_init_script(f"try {{ localStorage.setItem('ouroboros.theme', '{theme}'); }} catch (e) {{}}")
     if telegram:  # the Telegram stub's HapticFeedback records what the page asks Telegram to play
         page.add_init_script(RECORD_HAPTICS)
-    client, respond = saved_history(tmp_path)
+    client, respond = scoped_history(tmp_path)
     page.route('**/api/chat/history**', respond)
     boot(page, chromium_ui)
     page.wait_for_selector(ASSISTANT, timeout=20_000)
@@ -271,3 +287,130 @@ def test_inside_telegram_each_moment_plays_its_one_haptic(chromium_ui, tmp_path)
     assert facts['press'] == ['medium'], ('one tap as the long press opens the menu', facts)
     assert facts['drawer']['open'] is True and facts['latch'] == ['light'], ('the finger latched the drawer open', facts)
     assert facts['menu_open']['open'] is True and facts['menu'] == [], ('a press on ☰ is its own feedback', facts)
+
+
+# A running work with a nested helper: every row a finger can meet inside a work card. A system row the host stamped
+# no address on (a placed card row without `row_address`) is a line nothing can quote.
+LINEAGE = {'parent_task_id': 'root-1', 'root_task_id': 'root-1', 'delegation_role': 'subagent',
+           'subagent_task_id': 'child-1', 'subagent_role': 'worker'}
+CARD = '#chat-messages .chat-live-card[data-task-id="%s"]'
+ROOT, CHILD = CARD % 'root-1', CARD % 'child-1'
+LINES = {'addressed': CHILD + ' .chat-live-line[data-work-reply-row]',
+         'bare_child': CHILD + ' .chat-live-line:not([data-work-reply-row])',
+         'bare_root': ROOT + ' > .chat-live-timeline > .chat-live-line'}
+
+
+def with_work_card(page):
+    """The card and its helper as the live socket delivers them, both open."""
+    def frame(**row):
+        page.evaluate("row => window.__ouroWs.emit('chat', row)", {'type': 'chat', 'chat_id': 1, **row})
+    frame(role='assistant', is_progress=True, narration=True, task_id='root-1', cancelable=True,
+          content='Auditing the three archive shards.', ts='2026-11-24T10:00:01+00:00')
+    frame(role='assistant', is_progress=True, narration=True, task_id='child-1', subagent_event='progress',
+          content='Shard two matches its checksum; reading shard three next.', ts='2026-11-24T10:00:05+00:00',
+          row_address='row:1@2026-11-24T10:00:05+00:00#child-n1', **LINEAGE)
+    frame(role='system', system_type='host_progress', task_id='child-1', card_row='timeline', card_row_id='sys-1',
+          card_row_revision=1, content='Worker paused for verification', ts='2026-11-24T10:00:09+00:00', **LINEAGE)
+    page.wait_for_selector(ROOT)
+    page.evaluate("""() => { for (const id of ['root-1', 'child-1']) {
+        const card = document.querySelector(`.chat-live-card[data-task-id="${id}"]`);
+        if (card && card.dataset.expanded !== '1') card.querySelector('[data-live-disclosure]').click(); } }""")
+    for selector in LINES.values():
+        page.wait_for_selector(selector, state='visible')
+    page.wait_for_timeout(500)
+
+
+ROWS = ("sels => { const read = " + ROW + "; return Object.fromEntries(Object.entries(sels)"
+        ".map(([name, sel]) => [name, read(sel)])); }")
+
+
+def rows(page, line):
+    """The pressed line and the two cards around it, read in one beat: who sinks, who lifts."""
+    return page.evaluate(ROWS, {'line': line, 'child': CHILD, 'root': ROOT})
+
+
+def long_press(page, finger, line):
+    """A finger held on `line` through the sink and the lift, then lifted off; the menu closed by a press on the feed.
+    Returns each moment's rows and the frames at rest and while lifted."""
+    box = page.evaluate(ROW, line)
+    mid = box['y'] + box['h'] / 2
+    rest = page.screenshot()
+    finger.send('touchStart', box['x'] + 40, box['y'] + min(box['h'] / 2, 24))
+    page.wait_for_timeout(250)
+    held = rows(page, line)
+    page.wait_for_timeout(500)
+    lifted_rows, lifted = rows(page, line), page.screenshot()
+    finger.send('touchEnd')
+    page.wait_for_timeout(200)
+    after_up = rows(page, line)
+    finger.send('touchStart', 8, mid)
+    finger.send('touchEnd')
+    page.wait_for_timeout(450)
+    sample = lambda x: [luminance(rest, x, mid), luminance(lifted, x, mid)]  # noqa: E731
+    # Beside the line: its own halo, the card's margin just past it, the feed outside the card.
+    return {'box': box, 'hold': held, 'lift': lifted_rows, 'open': after_up, 'closed': rows(page, line),
+            'pixels': {'halo': sample(box['x'] - 2), 'card': sample(box['x'] - 10), 'feed': sample(8)}}, lifted
+
+
+def swipe_left(page, finger, line):
+    """A finger dragged 120 px to the left from the line's right end: the line mid-drag, and after release."""
+    box = page.evaluate(ROW, line)
+    start = (box['x'] + box['w'] - 30, box['y'] + min(box['h'] / 2, 24))
+    finger.send('touchStart', *start)
+    finger.path(start, (start[0] - 120, start[1] + 2), steps=10)
+    during = page.evaluate(ROW, line)
+    finger.send('touchEnd')
+    page.wait_for_timeout(450)
+    return {'during': during, 'after': page.evaluate(ROW, line)}
+
+
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_a_line_inside_a_work_card_answers_for_the_target_the_reader_meant(chromium_ui, tmp_path, theme):
+    page, client = booted(chromium_ui, tmp_path, theme)
+    finger = Finger(page)
+    facts = {'theme': theme}
+    try:
+        with_work_card(page)
+        for name, line in LINES.items():
+            facts[name], frame = long_press(page, finger, line)
+            (tmp_path / f'work-card-{name}-{theme}.png').write_bytes(frame)
+        # A swipe replies only to a line that has an address; the same finger on a bare line moves nothing.
+        facts['swipe'] = {name: swipe_left(page, finger, LINES[name]) for name in ('bare_child', 'bare_root', 'addressed')}
+        # A right button on a bare line opens its card's menu, as a long press does.
+        page.locator(LINES['bare_root']).click(button='right')
+        facts['right_click'] = page.evaluate(ROW, LINES['bare_root'])
+        page.keyboard.press('Escape')
+    finally:
+        finger.close()
+        evidence(tmp_path, f'row-gestures-work-card-{theme}', facts)
+        page.close()
+        client.close()
+    addressed, bare_root, bare_child = facts['addressed'], facts['bare_root'], facts['bare_child']
+    # An addressed line: its own Reply alone, and a colour step for a press: nothing sinks or lifts, nothing dims.
+    assert addressed['lift']['line']['menu'] == ['reply'] and addressed['lift']['line']['label'] == 'Message actions', facts
+    assert [addressed[at]['line']['press'] for at in ('hold', 'lift', 'open', 'closed')] == ['hold', 'lift', 'lift', ''], facts
+    for moment in ('hold', 'lift', 'open'):
+        assert {name: addressed[moment][name]['transform'] for name in ('line', 'child', 'root')} == {
+            'line': 'none', 'child': 'none', 'root': 'none'}, (moment, facts)
+    assert addressed['lift']['child']['press'] == addressed['lift']['root']['press'] == '', facts
+    halo, margin, feed = (addressed['pixels'][name] for name in ('halo', 'card', 'feed'))
+    assert abs(halo[1] - halo[0]) >= 3, ('the pressed line takes the colour step', facts)
+    assert abs(margin[1] - margin[0]) <= 2 and abs(feed[1] - feed[0]) <= 2, ('and nothing beside it dims', facts)
+    # A bare line: its card's own doors and never a Reply to it; the card is what sinks and lifts.
+    for fact, owner in ((bare_root, 'root'), (bare_child, 'child')):
+        menu = fact['lift']['line']['menu']
+        assert 'reply' not in menu and 'copy' in menu and fact['lift']['line']['label'] == 'Work actions', facts
+        assert fact['hold'][owner]['press'] == 'hold' and fact['lift'][owner]['press'] == 'lift', facts
+        assert fact['lift']['line']['press'] == '' and fact['closed'][owner]['press'] == '', facts
+    assert bare_root['lift']['line']['menu'] == ['copy', 'pause', 'stop'], ("the root's commands, as its own card offers", facts)
+    assert bare_root['lift']['child']['press'] == '' and bare_child['lift']['root']['press'] == '', facts
+    assert bare_root['pixels']['feed'][1] < bare_root['pixels']['feed'][0] * 0.85, ('the lifted card dims the feed', facts)
+    assert facts['right_click']['menu'] == ['copy', 'pause', 'stop'], ('a right button gives the same menu', facts)
+    # The swipe: a bare line neither moves nor quotes its card; an addressed line follows the finger and quotes itself.
+    for name in ('bare_child', 'bare_root'):
+        moved = facts['swipe'][name]
+        assert moved['during']['swipe'] == '' and moved['during']['mark'] is None, facts
+        assert moved['during']['transform'] == 'none' and moved['after']['staged'] == '', facts
+    drag = facts['swipe']['addressed']
+    assert drag['during']['swipe'] == 'drag' and drag['during']['mark']['armed'] == 'true', facts
+    assert 'Shard two matches its checksum' in drag['after']['staged'], ('released past the point, it quotes the line', facts)

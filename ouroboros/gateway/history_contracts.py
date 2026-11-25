@@ -347,7 +347,9 @@ class ChatHistoryResponse(TypedDict, total=False):
     a 503 history_source_unavailable may name the store's cause in ``detail``. ``project_registry`` is Main's
     alone: ``"unavailable"`` on its refusal while the registry cannot tell its rows from a Project's (its read-only
     archive is ``GET /api/chat/archive``), ``"restored"`` on a successful newest page after the registry came back
-    from its saved copy; an absent field says neither."""
+    from its saved copy; an absent field says neither. A newest read's 503 other than Main's refusal names
+    ``ordinary_room`` (the room read) and ``profile_scope`` when that room is still one of this profile's ordinary rooms
+    (``room_archive.ordinary_room``); no other answer carries them, and without them nothing about the room is confirmed."""
 
     messages: Required[List[ChatHistoryMessage]]
     has_more: Required[bool]
@@ -362,8 +364,9 @@ class ChatHistoryResponse(TypedDict, total=False):
     reason_code: str
     detail: str  # a 503 history_source_unavailable: the store's cause, when it has one
     project_registry: Literal["unavailable", "restored"]  # Main only: its refusal, or the list back from its copy
-    profile_scope: str  # the serving generation's frozen data-profile scope, on a successful page; the
-                        # browser binds a delayed body to it before consuming it (#3294)
+    ordinary_room: int  # a newest read's 503: the room read, still one of this profile's ordinary rooms
+    profile_scope: str  # the serving generation's frozen data-profile scope, on a successful page or beside
+                        # ``ordinary_room``; the browser binds a delayed body to it before consuming it (#3294)
 
 
 class ChatSearchAttachment(TypedDict):

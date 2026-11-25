@@ -11,11 +11,40 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# The dispatcher's own holds on a row (``worker_assignment._candidate_ineligible``; an unknown cancel authority from
+# restore, which ``workers`` resolves before any dispatch): no drain comes while one stands. Money, saved pauses and
+# continuation refusals are ``budget_pause_fact``'s. Readers name no hold key of their own.
+DISPATCH_HOLDS = ("_owner_hold", "_project_admission_restore_hold", "_cancel_intent_authority_hold")
+
+
+def dispatch_held(task) -> bool:
+    return any(task.get(key) for key in DISPATCH_HOLDS)
+
+
+def owner_visible_reader(task):
+    """An owner work may take a browser Reply; calls, external actors, a late result's local return
+    (``extension_late_result.restricted_return``) and Presence-bound or ceiling-bound work keep their own intake. The
+    record decides (``presence_task_binding``): an old owner root carries its door beside its binding authority at top
+    level and stays the owner's, a lost carrier under a ceiling does not."""
+    from ouroboros.dialogue_provenance import is_presence_task, presence_task_binding
+    from ouroboros.extension_late_result import restricted_return
+    from ouroboros.task_carrier import EXECUTOR_INLINE_CALL, carrier_executor, execution_kind
+
+    return bool(task and not (task.get("parent_task_id") or task.get("delegation_role") == "subagent"
+        or is_presence_task(task) or execution_kind(task) == "presence" or presence_task_binding(task) is not None
+        or carrier_executor(task) == EXECUTOR_INLINE_CALL or restricted_return(task)))
+
+
+def drains_mail(task) -> bool:
+    """False for an executor with no tool loop: a deep self-review (``/review``, ``agent._handle_task_scoped``) never
+    drains its mailbox, so no word written there is ever read."""
+    return str(task.get("type") or "").lower() != "deep_self_review"
+
 
 def is_reading(root, task_id: str, task: dict, *, running: bool, fences=None, drain_ended=None, canonical=None) -> bool:
     """``drain_ended``: the caller's own read of the actor's settlement, else read here. ``root`` is the actor's
     drive (its mailbox, its settlement); ``canonical`` the data root whose owner Pause governs it, when they differ."""
-    if not running or task.get("_owner_hold") or task.get("_project_admission_hold"):
+    if not running or dispatch_held(task):
         return False
     from ouroboros.owner_mailbox import mailbox_drain_ended
     from ouroboros.owner_pause import fence_closed, read_fence
@@ -39,7 +68,7 @@ def unheld_cold_sleep(root, task_id: str, task: dict, *, fences=None, canonical=
         pause = grant.get("pause") if isinstance(grant, dict) else None
     if not isinstance(pause, dict) or pause.get("reason") != "sleep" or not isinstance(pause.get("sleep"), dict):
         return False
-    if task.get("_owner_hold") or task.get("_project_admission_hold"):
+    if dispatch_held(task):
         return False
     from ouroboros.owner_mailbox import mailbox_drain_ended
     from ouroboros.owner_pause import fence_closed, read_fence
@@ -103,8 +132,9 @@ def _controlled(work: dict) -> bool:
 
 def work_reads(work: dict, conversation_key: str) -> bool:
     """Whether this live root takes its conversation's new text now: the dispatcher's current attempt's loop with
-    its own durable intake open (no fact: preparing or finishing), or an unheld cold sleep, whose vetoes still
-    decide its wake. Queued, cancelling, held, owner-paused and money-paused work reads nothing and resumes for nothing."""
+    its own durable intake open (no open fact — preparing, or a final close left standing — reads nothing), or an
+    unheld cold sleep, whose vetoes still decide its wake. Queued, cancelling, held, owner-paused and money-paused
+    work reads nothing and resumes for nothing."""
     from ouroboros.conversation_lease import author_intake_accepting
 
     if _controlled(work):

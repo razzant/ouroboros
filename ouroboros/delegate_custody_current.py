@@ -63,16 +63,16 @@ def _decode(raw):
 def collection_pending(entry, root=None) -> bool:
     """Collection debt, never retry eligibility. Only custody facts, even with a root."""
     from ouroboros.delegate_capture_attempt import capture_required, named_required
+    from ouroboros.delegate_registration_policy import evidence_only
 
     if entry is None or entry.review_owned:
         return False
-    if entry.terminal_source and (not entry.ledger_recorded or not entry.settled
+    return bool(entry.terminal_source and (not entry.ledger_recorded or not entry.settled
         or not entry.output_source or not entry.output_complete
         or entry.output_terminal_sha != entry.terminal_source.get("sha256")
-        or (capture_required(entry) and (not entry.patch_captured or entry.capture_job.get("state") == "ready"))
-        or (named_required(entry) and entry.named_evidence.get("status") != "retained")):
-        return True
-    return False
+        or (capture_required(entry) and (not entry.patch_captured or entry.capture_job.get("state") == "ready"
+            or (entry.resource_ref.get("workspace_kind") == "directory" and evidence_only(entry))))
+        or (named_required(entry) and entry.named_evidence.get("status") != "retained")))
 
 
 def _held(entry) -> bool:

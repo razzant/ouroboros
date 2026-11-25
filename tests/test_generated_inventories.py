@@ -123,6 +123,39 @@ def test_fixed_translated_selection_and_menu_actions_are_in_the_inventory():
     assert "| Select text | `(no class)` | modules/chat_row_menu.js |" in text
 
 
+def test_row_menu_entries_are_listed_however_the_menu_is_built():
+    """A row menu's [key, label, action] entry is the same control whether the menu appends it,
+    unshifts it or splices it in at an index: the inventory lists all three. The push-only
+    pattern missed `items.unshift(['reply', …])`, so Reply left the file; `items.splice(…,
+    0, ['project', …])` was invisible for the same reason."""
+    from scripts.ui_control_inventory import scan_controls
+
+    rows, interpolated = scan_controls(
+        """
+        menu.setAttribute('role', 'menuitem');
+        if (copy) items.push(['copy', tr('code.copy', 'Copy'), () => copy.click(), true]);
+        if (ref) items.unshift(['reply', tr('chat.reply.reply', 'Reply'), () => replies.start(ref)]);
+        if (reference) items.splice(Math.min(items.length, 2), 0,
+            ['project', tr('chat.row.open_project', 'Open project'), () => reference.click()]);
+        items.push([action.key, presentAction(action, view).label, () => run(action), true]);
+        """
+    )
+    assert rows == [("Copy", "(no class)"), ("Reply", "(no class)"), ("Open project", "(no class)")]
+    assert interpolated == 0, "a computed entry label is counted, never invented"
+
+
+def test_the_row_menu_entries_the_source_has_are_in_the_generated_inventory():
+    """The tracked snapshot carries the English Reply row-menu action (PR #3759 moved it to the
+    front of the menu) beside the menu's other fixed entries."""
+    text = inv.build_ui_control_inventory()[0]
+    for row in ("| Reply | `(no class)` | modules/chat_row_menu.js | 1 |",
+                "| Open project | `(no class)` | modules/chat_row_menu.js | 1 |",
+                "| Resume | `(no class)` | modules/chat_row_menu.js | 1 |",
+                "| Pause | `(no class)` | modules/chat_row_menu.js | 1 |",
+                "| Copy | `(no class)` | modules/chat_row_menu.js | 2 |"):
+        assert row in text, row
+
+
 def test_ui_control_scan_lists_fixed_text_and_only_counts_the_rest():
     from scripts.ui_control_inventory import scan_controls
 

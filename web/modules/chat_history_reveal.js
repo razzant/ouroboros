@@ -17,7 +17,7 @@
  *   hydrate?: (record: Object, wasOpen: boolean) => void, // the card owner decides if shown Details need a read
  * }} owners
  */
-export function createHistoryReveal({ pager, reading, feed, records, present, expand = () => {}, hydrate = () => {} }) {
+export function createHistoryReveal({ pager, reading, feed, records, present, expand = () => {}, hydrate = () => {}, pin = () => {} }) {
     // One history read for a navigation (the pager lets a window read in flight finish first): null once
     // the reader has moved on.
     async function read(isCurrent, load, claim = true) {
@@ -58,8 +58,13 @@ export function createHistoryReveal({ pager, reading, feed, records, present, ex
                 || (id && nodes.find(node => node.dataset.historyId === id && !node.dataset.rowAddress)) || null;
         }
         let target = find();
-        if (!target && id) {
-            const record = [...records.values()].find(record => record.items?.some(item => item.historyId === id));
+        if (!target) {
+            // A collapsed child card keeps an evolving System line by its source row (`sourceHistoryId`) and the
+            // address a Reply to it names (`replyAddress`), never by `historyId` once the page is read again.
+            // A line that already carries a different address cannot match this exact reference.
+            const names = item => item.replyAddress === address
+                || (id && !item.replyAddress && (item.historyId === id || item.sourceHistoryId === id));
+            const record = [...records.values()].find(record => record.root?.dataset.portal !== '1' && record.items?.some(names));
             for (let owner = record; owner && !opened.has(owner); owner = records.get(owner.parentGroupId)) {
                 if (owner.root?.dataset.portal === '1') return null;
                 disclose(owner);
@@ -84,6 +89,7 @@ export function createHistoryReveal({ pager, reading, feed, records, present, ex
 
     return {
         exact,
+        pin,
         // Reply's caller claims once before any I/O and carries that intent across destination lookup.
         // Task references keep their work-card semantics; only row references require an exact node.
         // A failed read keeps its typed error (the host's reason code); `left`: a page was drawn without it.

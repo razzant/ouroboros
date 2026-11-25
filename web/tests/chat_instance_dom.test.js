@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 // The stub's querySelector reads direct children only; the conversion button
 // lives inside the card's actions row, so find it by walking the subtree.
@@ -105,7 +105,7 @@ test('first task-bound review hydrates a progress-created owner once and reconci
     const { prior, mount } = installDom(async (url) => {
         calls.push(String(url));
         if (String(url).startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: reconnectRows, window: {
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: reconnectRows, window: {
                 complete: false, truncated_by: ['quota'] } }) };
         }
         if (String(url).startsWith('/api/tasks/root-review')) {
@@ -361,7 +361,7 @@ test('review-only reconnect anchors stay inert until task truth arrives', async 
     let historyRows = [];
     const { prior, mount } = installDom(async (url) => {
         if (String(url).startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: historyRows }) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: historyRows }) };
         }
         if (String(url).startsWith('/api/tasks/review-404')) {
             return { ok: false, status: 404, text: async () => 'not found' };
@@ -611,7 +611,7 @@ test('terminal task-bound review lifecycle resyncs canonical verdict without rec
         const value = String(url);
         calls.push(value);
         if (value.startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: historyRows }) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: historyRows }) };
         }
         return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     });
@@ -682,7 +682,13 @@ test('terminal task-bound review lifecycle resyncs canonical verdict without rec
     }
 });
 test('duplicate lifecycle pointer never mints a task and enriches only an existing exact owner', async () => {
-    const { prior, mount } = installDom();
+    // The room is open on a healthy, empty read of its own history; every other read keeps the fixture's answer.
+    const { prior, mount } = installDom(async (url) => {
+        if (String(url).startsWith('/api/chat/history')) {
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: [], window: { complete: true } }) };
+        }
+        return { ok: true, json: async () => ({ active_direct_turns: [] }) };
+    });
     const handlers = new Map();
     const ws = {
         on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
@@ -818,7 +824,7 @@ test('history replay keeps one duplicate lifecycle acknowledgement without a tas
     };
     const { prior, mount } = installDom(async (url) => {
         if (String(url).startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: [pointerRow] }) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: [pointerRow] }) };
         }
         return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     });
@@ -865,7 +871,7 @@ test('history replay keeps an ownerless duplicate acknowledgement without a task
     };
     const { prior, mount } = installDom(async (url) => {
         if (String(url).startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: [pointerRow] }) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: [pointerRow] }) };
         }
         return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     });
@@ -912,7 +918,7 @@ test('an alias-free subagent terminal keeps the honest amount, live and on reloa
     let historyRows = [];
     const { prior, mount } = installDom(async (url) => {
         if (String(url).startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: historyRows, window: { complete: true } }) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: historyRows, window: { complete: true } }) };
         }
         return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     });
@@ -1033,7 +1039,7 @@ test('a stopped direct turn replays its persisted terminal word, never a blanket
         ];
         const { prior, mount } = installDom(async (url) => {
             if (String(url).startsWith('/api/chat/history')) {
-                return { ok: true, json: async () => ({ messages: rows }) };
+                return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: rows }) };
             }
             return { ok: true, json: async () => ({ active_direct_turns: [] }) };
         });
@@ -1101,7 +1107,7 @@ test('history rebuild keeps a lineage-known branch nested, never appended top-le
     ];
     const { prior, mount } = installDom(async (url) => {
         if (String(url).startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: rows, window: { complete: true } }) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: rows, window: { complete: true } }) };
         }
         return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     });
@@ -1273,7 +1279,7 @@ test(`history replay of a direct turn preserves ${execution}`, async () => {
     ];
     const { prior, mount } = installDom(async (url) => {
         if (String(url).startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: rows, window: { complete: true } }) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: rows, window: { complete: true } }) };
         }
         return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     });
@@ -1405,7 +1411,7 @@ for (const order of ['final-first', 'done-first', 'cold']) {
                 used_model: 'provider/model-b', reported_model: 'model-b-provider', provider: 'provider', used_local: false } };
         const done = { ...final, type: 'task_done', status: 'completed', ts: '2026-09-09T10:00:01Z' };
         const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-            String(url).startsWith('/api/chat/history') ? { messages: order === 'cold' ? [{ ...final, system_type: 'task_summary' }] : [] }
+            String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: order === 'cold' ? [{ ...final, system_type: 'task_summary' }] : [] }
                 : { active_direct_turns: [] } }));
         const handlers = new Map();
         const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
@@ -1489,7 +1495,7 @@ test('native terminal replay retains the actual narration as title', async () =>
           tool_calls: 1, rounds: 2, outcome_final: true, outcome_phase: 'done', outcome_axes: { execution: { status: 'ok' } } },
     ];
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] } }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: rows } : { active_direct_turns: [] } }));
     const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
     let instance;
     try {
@@ -1517,7 +1523,7 @@ test('a late acceptance settlement row without a placement fact never rewrites t
           tool_calls: 3, rounds: 2, outcome_final: true, outcome_phase: 'done', outcome_axes: { execution: { status: 'ok' } } },
     ];
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] } }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: rows } : { active_direct_turns: [] } }));
     const handlers = new Map();
     const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); }, isConnected: () => true, send() {} };
     let instance;
@@ -1579,7 +1585,7 @@ function a5Instance(pages) {
         if (!String(url).startsWith('/api/chat/history')) return { ok: true, json: async () => ({ active_direct_turns: [] }) };
         const rows = pages[Math.min(page, pages.length - 1)];
         page += 1;
-        return { ok: true, json: async () => ({ messages: rows, window: { complete: true } }) };
+        return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: rows, window: { complete: true } }) };
     });
     const handlers = new Map();
     const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); }, isConnected: () => true, send() {} };
@@ -1697,7 +1703,7 @@ test('an answer saved before its result is stored replays as Finalizing…, neve
                 ts: '2026-11-09T06:14:02Z', task_id: 'early', ...finalRow },
         ];
         const { prior, mount } = installDom(async (url) => (String(url).startsWith('/api/chat/history')
-            ? { ok: true, json: async () => ({ messages: rows }) }
+            ? { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: rows }) }
             : { ok: true, json: async () => ({ active_direct_turns: [] }) }));
         const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
         let generation = 0;

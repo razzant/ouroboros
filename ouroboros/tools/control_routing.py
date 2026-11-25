@@ -151,7 +151,8 @@ def _selected_source_fields(ctx: ToolContext, row: Dict[str, Any]) -> Dict[str, 
     (``owner_relay.owner_row_source``), its client id, its files from the root it was read from, its sending
     surface, each or its absence. The caller's chat, project and workspace stay the call's addressing. The files
     are a held row's (``inherited``): staging names one it cannot copy and refuses nothing, unlike a turn's own."""
-    from ouroboros.owner_relay import origin_snapshot, owner_row_source, upload_specs
+    from ouroboros.chat_uploads import upload_specs
+    from ouroboros.owner_relay import origin_snapshot, owner_row_source
     from ouroboros.tool_access import canonical_data_root
 
     ref, words = owner_row_source(row)
@@ -492,6 +493,17 @@ def _mine_refusal(ctx: ToolContext, mine: Any, *, owner_words: Any, owner_source
     return ""
 
 
+def _focus_start_note(metadata, private, owner_basis) -> str:
+    from ouroboros.consciousness_authority import is_focus_wake
+
+    if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
+        return (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"
+                      else " Started as your human's work on their cited words." if owner_basis else
+                     " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
+                     "the Off switch stops it.")
+    return ""
+
+
 def _start_task(
     ctx: ToolContext,
     objective: str,
@@ -720,14 +732,10 @@ def _start_task(
     source_note = (_source_note(ctx, evt, selected if source_row else "") if isinstance(evt.get("source_ref"), dict)
                    and evt["source_ref"] and not private and not presence_carrier else "")
     kind_note += source_note
-    if mine:
-        kind_note += _MINE_NOTE.format(level=evt.get("consciousness_autonomy"))
-    elif is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
-        kind_note += (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"
-                      else " Started as your human's work on their cited words." if owner_basis else
-                     " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
-                     "the Off switch stops it.")
-    mode, confirmation = _emit_and_wait_for_routing(ctx, evt)
+    kind_note += (_MINE_NOTE.format(level=evt.get("consciousness_autonomy")) if mine
+                  else _focus_start_note(metadata, private, owner_basis))
+    replyable = not private and not presence_carrier and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN
+    mode, confirmation = _emit_and_wait_for_routing(ctx, evt, **({"about_work": tid} if replyable else {}))
     confirmation_status = str(confirmation.get("status") or "unconfirmed")
     reason = str(confirmation.get("reason") or "")
     detail = str(confirmation.get("detail") or "")
@@ -746,6 +754,9 @@ def _start_task(
                "and it is not this turn's deferred work." if private else "")
             + (f"\n{effort_note}" if effort_note else "")
         )
+        if replyable:
+            ctx._confirmed_reply_works = {*getattr(ctx, "_confirmed_reply_works", ()), tid}
+            response += f"\nFor a reply confirming this handoff, use finish_task(about_work={tid!r}, …) so Replies address it."
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")
     if confirmation_status in {"rejected", "needs_manual_target", "not_started"}:
         shown_reason = (

@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-K/7+nvBgvNxCfhzlmSQPo5SQcStdf71u5BbegBVqa3k='; style-src 'sha256-yQoP+il22cDA2SkaokdY7VLYb+7mUAxBIRBym94Tjrg='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-K/7+nvBgvNxCfhzlmSQPo5SQcStdf71u5BbegBVqa3k='; style-src 'sha256-XVBibiwh/cdPsZWEXePYhggsKZiXopwU4yV78/48+fc='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -8,18 +8,20 @@
    the iframe that embeds it (CSS Color Adjust), whose colour scheme is inherited from the host's root: the theme the
    host painted (ui.css .ouro-ui; Light, Dark, or the device's under System). An engine that does not pass it on, and
    its own window, leave the device's. Each scheme restates the host's values (ui.css :root and
-   :root[data-theme="light"]): ink, meta, tray, warning and failure words, focus, and the neutral capsule on its rest
-   shadow (ui.css .btn-default) with its press. Sizes, radii and spacing are the design book's. */
+   :root[data-theme="light"]): ink, meta, tray, warning and failure words, focus, the neutral capsule on its rest
+   shadow (ui.css .btn-default) with its press, and the page's own opaque card surface (ui.css
+   --surface-object-opaque) behind its ink, so the text keeps its contrast whatever canvas it lands on. Sizes,
+   radii and spacing are the design book's. */
 :root { color-scheme: light dark; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   --ink: #20232b; --meta: #555d69; --tray: rgba(32, 35, 43, 0.03); --warn: #805300; --bad: #b42332; --focus: #bf2f40;
-  --capsule: #ffffff; --capsule-hover: #f5f6f8; --press: brightness(0.95);
+  --page: #ffffff; --capsule: #ffffff; --capsule-hover: #f5f6f8; --press: brightness(0.95);
   --rest: 0 1px 2px rgba(28, 33, 51, 0.05), 0 6px 18px rgba(28, 33, 51, 0.06); }
 @media (prefers-color-scheme: dark) {
   :root { --ink: #efeff2; --meta: rgba(255, 255, 255, 0.7); --tray: rgba(255, 255, 255, 0.045); --warn: #f7cb58;
-    --bad: #fe9498; --focus: #fe7d85; --capsule: rgba(255, 255, 255, 0.09); --capsule-hover: rgba(255, 255, 255, 0.135);
+    --bad: #fe9498; --focus: #fe7d85; --page: #1c1c1f; --capsule: rgba(255, 255, 255, 0.09); --capsule-hover: rgba(255, 255, 255, 0.135);
     --press: brightness(1.12); --rest: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.28); }
 }
-body { margin: 0; padding: 16px; color: var(--ink); overflow-wrap: anywhere; }
+body { margin: 0; padding: 16px; color: var(--ink); background: var(--page); overflow-wrap: anywhere; }
 h1, h2, p, ol, dl, pre { margin: 0; }
 h1, h2 { font-size: 16px; line-height: 1.3; font-weight: 600; }
 h2 { margin-block: 24px 8px; }

@@ -223,7 +223,7 @@ def test_a_live_route_names_the_saved_connection_it_dispatches_on(monkeypatch):
     assert not any(secret in text for secret in ("router-old", "row-old", "key-old", "compat-old")
                    for text in (built_in, named, record))
     call = {"model": _ROUTER, "physical_provider": "openrouter", "physical_model": _ROUTER,
-            "dispatch_account": built_in, "use_local": False}
+            "dispatch_account": built_in, "use_local": False, "processing_preference": ""}
     assert _captured_route(SimpleNamespace(_current_llm_call_meta=call))["dispatch_account"] == built_in
 
     save_owner({**unchanged, "OUROBOROS_TOOL_TIMEOUT_SEC": 601})  # an unrelated save

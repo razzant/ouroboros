@@ -129,6 +129,34 @@ def _accept_with_attachments(bridge: Any, payload: str, send_kwargs: dict, attac
     bridge.ui_send(payload, **send_kwargs)
 
 
+class _RoomWordLapsed(RuntimeError):
+    """The core no longer confirms the room a Send again stood on: nothing of it was saved or handed over. Its notice
+    names it by ``reason_code`` (the typed fact a page acts on, never the notice's words)."""
+
+    reason_code = "ordinary_room_unconfirmed"
+
+
+def _accept_on_room_word(accept, chat_id: int, named: Any, claimed: str, serving: str) -> None:
+    """Accept a Send again of a copy the page showed on the core's word that this room is one of its profile's
+    ordinary rooms (``ChatInbound.ordinary_room``) only while that word still holds.
+
+    It runs in the ordered acceptance, off the loop, before anything is measured, saved or handed over: the frame names
+    this room, its page's ``profile_scope`` is this connection's own proven one, and ``room_archive.ordinary_room``
+    still counts the room in the data root the canonical writer uses (``message_bus.DATA_DIR``). Otherwise
+    ``_RoomWordLapsed`` answers the sender and nothing is written. Only such a frame comes here, ordinary frames never
+    do. Panic and commands never wait for it; the chat frames after it on the same socket settle behind it in their
+    order, as behind any acceptance.
+    """
+    from ouroboros.room_archive import ordinary_room
+    from supervisor import message_bus
+
+    root = message_bus.DATA_DIR
+    if not (serving and claimed == serving and type(named) is int and named == chat_id
+            and root is not None and ordinary_room(root, chat_id)):
+        raise _RoomWordLapsed(f"room {chat_id} is not confirmed as one of this profile's ordinary rooms")
+    accept()
+
+
 def has_ws_clients() -> bool:
     with _ws_lock:
         return bool(_ws_clients)
@@ -397,15 +425,18 @@ async def _dispatch_extension_message(
     return True
 
 
-def _initialization_notice(client_message_id: str = "", chat_id: int = 1, *, reason: str = "") -> str:
+def _initialization_notice(client_message_id: str = "", chat_id: int = 1, *, reason: str = "",
+                           reason_code: str = "") -> str:
     """The refusal of this socket's frame; it names that frame so only its Sending settles.
-    ``reason`` says why the frame was not accepted, without exposing internal errors."""
+    ``reason`` says why the frame was not accepted, without exposing internal errors; ``reason_code``, given only for
+    a refusal a page must tell apart (``_RoomWordLapsed``), is that typed cause."""
     return json.dumps({
         "type": "chat", "chat_id": chat_id,
         "role": "system", "system_type": "initialization_notice",
         "content": reason or "⚠️ System is still initializing. Please wait a moment and try again.",
         "ts": utc_now_iso(),
         **({"client_message_id": client_message_id} if client_message_id else {}),
+        **({"reason_code": reason_code} if reason_code else {}),
     })
 
 
@@ -439,14 +470,20 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
 
         busy = isinstance(exc, StoreBusy) or isinstance(exc.__cause__, StoreBusy)
         reason = "⚠️ Your message was not saved: the dialogue store is busy. Please send it again." if busy else ""
+        code = ""
         if isinstance(exc, ReplyExcerptUnavailable):
             reason = "The quoted message is unavailable. Retry or clear the quote."
         elif isinstance(exc, ReplyExcerptNotAuthored):
             reason = "This message has no text you can quote. Clear the quote or select another passage."
         elif isinstance(exc, ClientMessageIdConflict):
             reason = "This send already belongs to a different message. Send these words as a new message."
+        elif isinstance(exc, _RoomWordLapsed):
+            reason = ("⚠️ Your message was not saved: Ouroboros could not confirm this room just now. "
+                      "This tab keeps it.")
+            code = exc.reason_code
         try:
-            await websocket.send_text(_initialization_notice(client_message_id, chat_id, reason=reason))
+            await websocket.send_text(_initialization_notice(client_message_id, chat_id, reason=reason,
+                                                             reason_code=code))
         except Exception:
             log.debug("WebSocket closed before its chat failure notice", exc_info=True)
 
@@ -595,6 +632,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                         accept = (functools.partial(_accept_with_attachments, bridge, payload, send_kwargs,
                                                     msg["attachments"]) if msg.get("attachments")
                                   else functools.partial(bridge.ui_send, payload, **send_kwargs))
+                        if msg.get("ordinary_room") is not None:  # a Send again on the core's word: asked again first
+                            accept = functools.partial(_accept_on_room_word, accept, thread_id,
+                                                       msg.get("ordinary_room"), claimed_scope,
+                                                       connection.profile_scope)
                         accepting = asyncio.create_task(_accept_chat_after(
                             websocket, accepting, accept, send_kwargs["client_message_id"], thread_id))
                     else:

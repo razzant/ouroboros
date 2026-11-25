@@ -477,7 +477,7 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
     """Why the sleep is ready now (``""`` = not yet). Owner input is never filtered."""
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
     from ouroboros.owner_mailbox import (KIND_CARD_INPUT, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED,
-                                         KIND_TASK_MESSAGE, place_arrival_wake, tier_only)
+                                         KIND_TASK_MESSAGE, passive_mail, place_arrival_wake, tier_only)
     from ouroboros.owner_wait import _wait_entries
     first_error = None
     if wake_fact is not None:
@@ -501,9 +501,9 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
     for entry in sorted(entries, key=lambda row: 2 if row.get("kind") == KIND_TASK_MESSAGE
                         else 1 if row.get("kind", KIND_OWNER_TEXT) in owner_kinds else 0):
         kind = str(entry.get("kind") or KIND_OWNER_TEXT)
-        if kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_CARD_INPUT}:
+        if kind in owner_kinds or entry.get("work_reply") is True:
             return "owner_text"
-        if tier_only(entry):
+        if tier_only(entry) or passive_mail(entry):
             continue  # the next round's drain applies it to the next call; it ends no sleep
         if kind != KIND_TASK_MESSAGE:
             return f"control:{kind}"  # finalize_now, hurry, owner_pause, ... always wake

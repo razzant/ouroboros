@@ -13,6 +13,7 @@ Three small contracts that the browser already keeps and the host did not:
 from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture as healthy_main_fixture  # noqa: F401
 
 import json
 
@@ -193,7 +194,7 @@ def test_cancel_cause_is_bounded_by_unicode_characters():
     }}, {}) == "🙂" * 160 + "."
 
 
-def test_settled_early_speech_keeps_canonical_warning_axes(tmp_path):
+def test_settled_early_speech_keeps_canonical_warning_axes(tmp_path, healthy_main):
     from ouroboros.gateway.history import _assemble_history_response
     from ouroboros.task_finalization import stamp_root_final_phase
     from ouroboros.task_results import write_task_result

@@ -33,6 +33,10 @@ class ChatInbound(TypedDict):
     # chat frame whose claim positively differs from the serving connection's own confirmed scope (#3294);
     # absent or empty is no proof and is admitted, so legacy pages and unproven profiles keep working.
     profile_scope: NotRequired[str]
+    # A Send again of a copy the page showed only on a newest history read's 503 word
+    # (``ChatHistoryResponse.ordinary_room``): the room that word named. The ordered acceptance asks it again before
+    # saving or handing over anything (gateway/ws.py ``_accept_on_room_word``); frames without it pass as before.
+    ordinary_room: NotRequired[int]
 
 
 class ConnectionProfileOutbound(TypedDict):
@@ -48,8 +52,8 @@ class ConnectionProfileOutbound(TypedDict):
 
 
 class ChatReplyReference(TypedDict, total=False):
-    """A ``reply_to`` reference as the host resolved it (``chat_references.reference_from_row``); an
-    unresolved one is ``{address, unresolved: true}``."""
+    """A ``reference_from_row`` reference as the host resolved it; an unresolved one has the base form
+    ``{address, unresolved: true}``, and a browser ``task:`` address without a card also keeps ``work_task_id: ""``."""
     address: str
     row_sha256: str  # full digest of a resolved row; older references only carry the display address
     chat_id: int
@@ -64,6 +68,8 @@ class ChatReplyReference(TypedDict, total=False):
     chars: int  # the quoted text's whole length, present when ``snippet`` cuts it
     ts: str
     task_id: str
+    work_task_id: str  # addressed work, not the quoted author; empty means the work could not be resolved
+    ordinary: Literal[True]  # the host proved the quoted row addresses no work; with neither key it could not tell
     target_home: Literal["work", "room", "none"]  # what decides the quoted row's room; an older reference lacks it
     telegram_room_chat_id: int | None  # the owner bot's Reply only: its Project's turn, 0 its chat's own, null refused
     unresolved: bool
@@ -78,6 +84,7 @@ class ChatReferenceFields(TypedDict, total=False):
     reply_to_relay: str
     kind: str
     room_revisions: dict[str, int]  # a row shown in several rooms: the revision it took in each room it counted in
+    project_thread: bool  # server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it
 
 
 class SharedRowFrame(TypedDict, total=False):

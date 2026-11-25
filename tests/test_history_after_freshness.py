@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from ouroboros import dialogue_import, dialogue_store as ds
 from ouroboros.gateway import history, history_paging
 from ouroboros.gateway.history import make_chat_history_endpoint
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 from tests._store_shared import seed_result
 
 TS = "2026-10-16T10:00:{:02d}Z"
@@ -148,7 +149,7 @@ def test_a_window_too_large_for_its_cursor_reads_its_newest_page(tmp_path, monke
     assert status == 400 and refused["reason_code"] == "history_cursor_invalid"  # longer than the bound
 
 
-def test_rows_that_show_no_task_facts_do_not_tie_the_window_to_their_task(tmp_path):
+def test_rows_that_show_no_task_facts_do_not_tie_the_window_to_their_task(tmp_path, healthy_main):
     """An owner's row and a notice pinned to Main show no facts of their task: its later writes
     (a Project task finishing in its own room) leave the window's delta alone."""
     _task(tmp_path, "asked", "completed", 0)

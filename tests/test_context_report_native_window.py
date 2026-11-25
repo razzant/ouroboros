@@ -252,7 +252,7 @@ def _exercise(window, fixture, artifacts):
 def _desktop_app():
     """The shipped page behind the core's own ``/`` and ``/static``, with only the answers its boot and Logs need.
 
-    No Ouroboros server or skill runs: setup reads as done, every log read is empty and other API calls are 404s.
+    No Ouroboros server or skill runs: setup reads as done, Logs gets invented events and other API calls are 404s.
     """
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse, Response
@@ -263,8 +263,23 @@ def _desktop_app():
     async def set_up(_request):
         return Response(status_code=204)  # no onboarding cover over the page
 
-    async def empty_log(_request):
-        return JSONResponse({'entries': []})
+    log_rows = {
+        'events': [
+            {'type': 'task_started', 'task_id': 'log-invented-task', 'ts': '2026-01-03T12:00:01Z'},
+            # Unbound events show their own kinds; a task's model and tool calls fold into its Tasks card.
+            {'type': 'llm_usage', 'model': 'example-model', 'ts': '2026-01-03T12:00:02Z'},
+            {'type': 'llm_api_error', 'task_id': 'log-invented-error', 'error': 'Example model error',
+             'ts': '2026-01-03T12:00:03Z'},
+        ],
+        'tools': [{'type': 'tool_call_finished', 'tool': 'read_file',
+                   'ts': '2026-01-03T12:00:04Z', 'is_error': False}],
+        'progress': [{'type': 'task_progress', 'task_id': 'log-invented-wake', 'is_progress': True,
+                      'initiator': 'consciousness', 'ts': '2026-01-03T12:00:05Z', 'text': 'Example wake'}],
+        'supervisor': [{'type': 'startup', 'ts': '2026-01-03T12:00:06Z', 'message': 'Example host startup'}],
+    }
+
+    async def log_history(request):
+        return JSONResponse({'entries': log_rows.get(request.path_params['name'], [])})
 
     async def quiet_socket(websocket):
         await websocket.accept()
@@ -273,7 +288,7 @@ def _desktop_app():
 
     served = ServedUI(ROOT)
     return Starlette(routes=[Route('/', served.index_page), Route('/api/onboarding', set_up),
-                             Route('/api/logs/{name}', empty_log), WebSocketRoute('/ws', quiet_socket),
+                             Route('/api/logs/{name}', log_history), WebSocketRoute('/ws', quiet_socket),
                              *served.mounts()])
 
 
@@ -315,28 +330,46 @@ def _observed_desktop_api():
     return ObservedDesktopApi()
 
 
-# Every button of that name as a person meets it: where it stands, and whether it has a box with nothing over its
-# middle and is enabled. With `press`, the first such button inside Logs is pressed.
-_LOGS_ENTRY = r'''((label, press) => {
+# Read layout without revealing or focusing either action. Revealing a clipped button first would hide the regression.
+_LOGS_ENTRY = r'''(label => {
   const said = node => (node.getAttribute('aria-label') || node.textContent).replace(/\s+/g, ' ').trim();
   const found = [...document.querySelectorAll('button, [role="button"]')].filter(node => said(node) === label);
-  const entries = found.map(node => {
-    node.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  const rect = ({left, top, right, bottom}) => [left, top, right, bottom];
+  const hit = (node, box) => node.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+  const action = node => {
     const box = node.getBoundingClientRect();
-    const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const word = range.getBoundingClientRect();
     return {
       inLogs: !!node.closest('#dashboard-panel-logs, [data-dashboard-controls="logs"]'),
-      reachable: box.width > 0 && box.height > 0 && node.contains(hit),
-      disabled: node.disabled === true || node.getAttribute('aria-disabled') === 'true',
+      reachable: box.width > 0 && box.height > 0 && hit(node, box) && node.tabIndex >= 0
+        && !node.disabled && node.getAttribute('aria-disabled') !== 'true',
+      oneLine: range.getClientRects().length === 1 && word.left >= box.left && word.right <= box.right
+        && word.top >= box.top && word.bottom <= box.bottom,
+      box: rect(box),
+      trusted: node.dataset.qaTrustedClick === 'true',
     };
-  });
-  const usable = entries.findIndex(entry => entry.inLogs && entry.reachable && !entry.disabled);
-  if (press && usable >= 0) found[usable].click();
+  };
+  const clear = document.getElementById('btn-clear-logs');
+  const rail = document.getElementById('log-filters');
+  const list = document.getElementById('page-logs');
+  const kinds = [...(rail?.querySelectorAll('button:not([hidden])') || [])];
+  const tail = kinds.at(-1);
   return {
     page: document.querySelector('.page.active')?.id ?? null,
     tab: document.querySelector('[data-dashboard-tab][aria-selected="true"]')?.dataset.dashboardTab ?? null,
-    entries,
-    pressed: press && usable >= 0,
+    entries: found.map(action),
+    clear: clear && action(clear),
+    rail: rail && rect(rail.getBoundingClientRect()),
+    railOverflow: rail && rail.scrollWidth > rail.clientWidth,
+    railScroll: rail?.scrollLeft,
+    tailReachable: !!tail && hit(tail, tail.getBoundingClientRect()),
+    kinds: kinds.map(node => node.dataset.logKind),
+    list: list && rect(list.getBoundingClientRect()),
+    listScroll: list?.scrollTop,
+    openedNotice: [...document.querySelectorAll('#toast-stack [role="status"] .toast-words')]
+      .some(node => node.textContent === 'Opened in a separate local window.'),
   };
 })'''
 
@@ -357,19 +390,68 @@ def _press_logs_entry(window, api, artifacts):
     _await_page(window, 'the app opens its Dashboard', lambda p: p['page'] == 'page-dashboard', _OPEN_DASHBOARD,
                 seconds=20)
     window.run_js('''document.querySelector('[data-dashboard-tab="logs"]').click()''')
-    probe = f'{_LOGS_ENTRY}({json.dumps(ENTRY)}, false)'
+    probe = f'{_LOGS_ENTRY}({json.dumps(ENTRY)})'
     offered = _await_page(
-        window, f'Dashboard > Logs offers {ENTRY!r}',
-        lambda p: p['tab'] == 'logs' and bool(p['entries']) and all(e['inLogs'] for e in p['entries'])
-        and any(e['reachable'] and not e['disabled'] for e in p['entries']), probe, seconds=20)
+        window, f'Dashboard > Logs offers {ENTRY!r} beside populated filters',
+        lambda p: p['tab'] == 'logs' and any(e['box'][2] > e['box'][0] for e in p['entries'])
+        and p['kinds'] == ['', 'tools', 'llm', 'errors', 'tasks', 'system', 'consciousness'], probe, seconds=20)
+    assert offered['railOverflow'], ('the populated filter strip did not exercise its scroll edge', offered)
+    opener, = offered['entries']
+    clear = offered['clear']
+    for action in (opener, clear):
+        assert action['inLogs'] and action['reachable'] and action['oneLine'], offered
+    assert offered['rail'][2] <= opener['box'][0] and opener['box'][2] < clear['box'][0], offered
+    assert abs(sum(opener['box'][1::2]) - sum(clear['box'][1::2])) <= 2, offered  # same center line
     assert not api._calls, ('the viewer was asked for before the press', api._calls)
     _screenshot(window, artifacts / 'logs-entry.png')
-    pressed = window.run_js(f'{_LOGS_ENTRY}({json.dumps(ENTRY)}, true)')
-    assert isinstance(pressed, dict) and pressed['pressed'], ('the entry could not be pressed', pressed)
-    _await_page(window, 'the launcher answers the press', lambda _: api._answers, probe, seconds=25)
+
+    window.run_js(r'''(() => {
+      const rail = document.getElementById('log-filters');
+      rail.scrollLeft = rail.scrollWidth;
+      const button = document.querySelector('[data-local-context-report] button');
+      button.addEventListener('click', event => { button.dataset.qaTrustedClick = String(event.isTrusted); }, {once: true});
+    })()''')
+    scrolled = _await_page(window, 'the last filter is reachable after scrolling',
+                           lambda p: p['railScroll'] > 0 and p['tailReachable'], probe)
+    _same_logs_geometry(offered, scrolled)
+    _click_logs_entry(window, scrolled['entries'][0]['box'])
+    answered = _await_page(window, 'the launcher opens the viewer and the page shows the answer',
+                           lambda p: bool(api._answers) and p['openedNotice'], probe, seconds=25)
     assert api._calls == [()] and api._answers == [{'state': 'opened'}], (api._calls, api._answers)
+    assert answered['entries'][0]['trusted'], answered
+    assert answered['entries'][0]['reachable'] and answered['clear']['reachable'], answered
+    assert answered['railScroll'] == scrolled['railScroll'], answered
+    _same_logs_geometry(scrolled, answered)
+    _screenshot(window, artifacts / 'logs-entry-answered.png')
     return {'page': offered['page'], 'tab': offered['tab'], 'button': ENTRY, 'arguments': list(api._calls[0]),
-            'answer': api._answers[0]}
+            'answer': api._answers[0], 'layout': {'before': offered, 'scrolled': scrolled, 'answered': answered}}
+
+
+def _same_logs_geometry(before, after):
+    def boxes(page):
+        return (page['rail'], page['entries'][0]['box'], page['clear']['box'], page['list'])
+
+    for left, right in zip(boxes(before), boxes(after)):
+        assert all(abs(a - b) <= 1 for a, b in zip(left, right)), (before, after)
+    assert before['listScroll'] == after['listScroll'], (before, after)
+
+
+def _click_logs_entry(window, box):
+    from System import Action
+
+    # WebView2 native Chromium input at the measured CSS-pixel center: unlike HTMLElement.click(), it hit-tests.
+    x1, y1, x2, y2 = box
+    for kind, buttons in [('mousePressed', 1), ('mouseReleased', 0)]:
+        pending = []
+        args = json.dumps({'type': kind, 'x': (x1 + x2) / 2, 'y': (y1 + y2) / 2,
+                           'button': 'left', 'buttons': buttons, 'clickCount': 1})
+
+        def begin(args=args, pending=pending):
+            core = window.native.browser.webview.CoreWebView2
+            pending.append(core.CallDevToolsProtocolMethodAsync('Input.dispatchMouseEvent', args))
+
+        window.native.Invoke(Action(begin))
+        assert pending[0].Wait(10000), f'WebView2 did not answer {kind}'
 
 
 def _open_native(root, artifacts):
@@ -432,7 +514,7 @@ def test_native_beautiful_context_switches_to_single_request_project(tmp_path, m
                if line.startswith('NATIVE_CONTEXT_REPORT ')]
     observed, = records
     assert not list(root.rglob('SKILL.md')), 'this profile holds no skill: the entry needs none'
-    for name in ('logs-entry.png', 'a-compared.png', 'b-after-switch.png'):
+    for name in ('logs-entry.png', 'logs-entry-answered.png', 'a-compared.png', 'b-after-switch.png'):
         assert (artifacts / name).read_bytes().startswith(b'\x89PNG\r\n\x1a\n'), name
     record_property('native_context_report', json.dumps(observed, sort_keys=True))
 
@@ -448,7 +530,8 @@ def test_windows_case_serves_the_shipped_page_and_the_launchers_bridge(monkeypat
     for name in ('app.js', 'modules/dashboard.js', 'modules/logs.js'):
         assert client.get(f'/static/{name}').content == (ROOT / 'web' / name).read_bytes(), name
     assert client.get('/api/onboarding').status_code == 204
-    assert client.get('/api/logs/events', params={'view': 'compact', 'limit': 150}).json() == {'entries': []}
+    events = client.get('/api/logs/events', params={'view': 'compact', 'limit': 150}).json()['entries']
+    assert [row['type'] for row in events] == ['task_started', 'llm_usage', 'llm_api_error']
     assert client.get('/api/widgets').status_code == 404  # no skill, so no card of one
     with client.websocket_connect('/ws') as socket_:
         socket_.send_text('{}')

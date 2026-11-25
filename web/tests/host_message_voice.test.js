@@ -2,11 +2,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 function openChat(rows = []) {
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: rows }
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: rows }
             : { active_direct_turns: [], status: 'running' } }));
     const handlers = new Map();
     const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },

@@ -20,6 +20,7 @@ from ouroboros import dialogue_recall, dialogue_store as ds
 from ouroboros.gateway import recall
 from ouroboros.gateway.history_contracts import RecallRowResponse, RecallSearchResponse
 from ouroboros.gateway.schema import validate_ingress
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MARKERS = ("SECRETVALUEMARK", "SECRETLABELMARK", "SECRETQUESTIONMARK", "ATTACHMARK", "NOTEMARK", "SETTINGSMARK",
@@ -240,7 +241,7 @@ print(json.dumps({"statuses": [status, again], "rows": [rows, len(list(ds.iter_r
 """
 
 
-def test_the_door_starts_no_model_turn_dispatches_nothing_and_writes_no_row(tmp_path):
+def test_the_door_starts_no_model_turn_dispatches_nothing_and_writes_no_row(tmp_path, healthy_main):
     """In a fresh interpreter a search and a reopen import no turn, model, tool, queue or supervisor module (code
     that is not loaded cannot run) and append no dialogue row."""
     env = {**os.environ, "OUROBOROS_DATA_DIR": str(tmp_path), "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1",

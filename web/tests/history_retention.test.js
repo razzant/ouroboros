@@ -4,7 +4,7 @@ import { historyRetentionView, syncHistoryRetentionItem } from '../modules/histo
 import { renderLiveCardMeta } from '../modules/chat_activity.js';
 import { categorizeLogEvent, summarizeChatLiveEvent, summarizeLogEvent, taskTerminalPhase } from '../modules/log_events.js';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 test('normal history progress is detail-only; problems clear after successful retry', () => {
     const { prior } = installDom();
@@ -98,7 +98,7 @@ test('cold history shows storage problems before expansion and a newer summary c
             task_terminal_status: 'completed', ts: '2026-09-27T12:00:00Z', history_retention: { status: 'problem' } },
     ];
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] } }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: rows } : { active_direct_turns: [] } }));
     let instance;
     try {
         instance = createChatInstance({ ws: { on() { return () => {}; }, isConnected: () => true, send() {} },

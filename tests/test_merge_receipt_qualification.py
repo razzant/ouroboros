@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import merge_receipts, review_ledger
+from ouroboros.chat_chain import format_address, row_address
 from ouroboros.tools import github
 from tests import test_pr_merge_receipts as merge_fixture
 from tests.test_pr_merge_receipts import BASE, HEAD, MERGE, NOT_MERGEABLE, ROUTE, TREE, _receipts, sent
@@ -278,13 +279,42 @@ def closed_receipt_projection(world, monkeypatch, act=None):
                            history=[row for row in payload["messages"] if row.get("card_row_id")])
 
 
+def exact_page(world, address):
+    """An exact read of ``address`` in its work's room (Main, or the room the read names): its anchor's history id and
+    the page's receipt rows."""
+    from ouroboros.gateway.history import make_chat_history_endpoint
+
+    def read(chat_id):
+        return json.loads(asyncio.run(make_chat_history_endpoint(world.root)(
+            SimpleNamespace(query_params={"chat_id": str(chat_id), "around": address}))).body)
+
+    page = read(1)
+    page = read(page["anchor"]["chat_id"]) if page["anchor"]["state"] == "moved" else page
+    assert page["anchor"]["state"] == "found", page["anchor"]
+    return page["anchor"]["history_id"], [row for row in page["messages"] if row.get("card_row_id")]
+
+
+def current_on_newest_row(world, seen, receipt):
+    """History shows the receipt's current words on its newest row, at that row's own address; an older revision keeps
+    the words and revision it was sent with, so a Reply to it quotes what the reader saw. An exact read of the newest
+    row, which already says the current words, changes no other row."""
+    sent = {row["row_address"]: row for row in seen.live}
+    *older, newest = seen.history
+    assert (newest["text"], newest["card_row_revision"]) == (merge_receipts.card_row_text(receipt), receipt["revision"])
+    assert sent[newest["row_address"]]["content"] == newest["text"]
+    assert older and [(row["text"], row["card_row_revision"]) for row in older] == [
+        (sent[row["row_address"]]["content"], sent[row["row_address"]]["card_row_revision"]) for row in older]
+    shown = [{row["history_id"]: (row["text"], row.get("row_address"), row["card_row_revision"]) for row in rows}
+             for rows in (seen.history, exact_page(world, newest["row_address"])[1])]
+    assert shown[1] == shown[0]
+
+
 def test_a_closed_pr_reaches_the_card_through_outbox_history_and_the_consumer(world, monkeypatch):
     seen = closed_receipt_projection(world, monkeypatch)
     note = merge_fixture.QUEUED_CLOSED
     assert note not in seen.texts[0] and all(note in text for text in seen.texts[1:])
     assert sorted({row["card_row_revision"] for row in seen.live}) == [seen.stored["revision"] - 1, seen.stored["revision"]]
-    assert [row["text"] for row in seen.history] == [merge_receipts.card_row_text(seen.stored)] * len(seen.history)
-    assert {row["card_row_revision"] for row in seen.history} == {seen.stored["revision"]}
+    current_on_newest_row(world, seen, seen.stored)
     fixture = world.root / "closed-projection.json"
     fixture.write_text(json.dumps({"live": seen.live, "history": seen.history, "expect": note}), encoding="utf-8")
     result = run_in_group([shutil.which("node"), "--test", "--test-name-pattern=canonical receipt revisions",
@@ -349,7 +379,7 @@ def test_a_published_foreign_queue_switched_off_refreshes_to_refused_and_a_new_r
     assert {row["card_row_id"] for row in seen_rows.live} == {f"merge-receipt:{first['receipt_id']}"}
     assert max(row["card_row_revision"] for row in seen_rows.live) == first["revision"]
     assert any("merge: queued" in row["content"] for row in seen_rows.live)
-    assert [row["text"] for row in seen_rows.history] == [merge_receipts.card_row_text(first)] * len(seen_rows.history)
+    current_on_newest_row(world, seen_rows, first)
     fixture = world.root / "refused-projection.json"
     fixture.write_text(json.dumps({"live": seen_rows.live, "history": seen_rows.history,
                                    "expect": "merge: refused (by GitHub)"}), encoding="utf-8")
@@ -481,6 +511,23 @@ def test_cold_bounded_history_supplies_current_receipt_to_new_chat(world, monkey
     assert result.returncode == 0, result.stdout + result.stderr
     (receipt,) = [r for r in payload["messages"] if r.get("card_row_id")]
     assert receipt["card_row_revision"] == 3 and "merge: merged" in receipt["text"]
+    # These current words are not the queued row's own, so no address lets a Reply quote them as that row; an exact
+    # read of the row lands on the words it was sent with, at its address.
+    assert "row_address" not in receipt
+    stale, address, landed = row_read_exactly(world, 2)
+    assert (landed["row_address"], landed["card_row_revision"], landed["text"]) == (address, 2, stale["text"])
+    assert "merge: queued" in landed["text"]
+
+
+def row_read_exactly(world, revision):
+    """The receipt row of ``revision`` that ``bounded_receipt_history`` stored (r3 delivered first, r2 late), its
+    address, and that row on an exact read of it."""
+    (stored,) = [row for row in dialogue_test.log_rows(world.root / "logs/progress.jsonl")
+                 if row.get("card_row_revision") == revision]
+    address = format_address(row_address(stored))
+    anchor, rows = exact_page(world, address)
+    (landed,) = [row for row in rows if row["history_id"] == anchor]
+    return stored, address, landed
 
 
 @pytest.mark.parametrize("gap", ["missing_result", "older_revision", "other_task"])
@@ -512,6 +559,12 @@ def test_bounded_history_discloses_unavailable_canonical_receipt(world, monkeypa
     assert "merge: queued" in row["text"] and "merge: merged" not in row["text"]
     assert "Current merge receipt unavailable; showing recorded event." in row["text"]
     assert row["card_row_revision"] == 2 and dialogue_test.log_bytes(source) == before
+    # The note is not the row's words: no address quotes it as the row. An exact read shows a row's own bytes, the
+    # shown stale row's and the newest one's alike.
+    assert "row_address" not in row
+    for revision in (2, 3):
+        stored, address, landed = row_read_exactly(world, revision)
+        assert (landed["row_address"], landed["text"]) == (address, stored["text"])
 
 
 def test_frozen_history_page_refreshes_receipt_without_changing_positions(world, monkeypatch):

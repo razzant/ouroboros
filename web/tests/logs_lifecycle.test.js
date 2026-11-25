@@ -505,11 +505,11 @@ test('Logs offers the native recent-requests action beside Clear only on a capab
     await button.fire('click');
     await settle();
     assert.equal(opens, 1);
-    const result = slot.querySelector('[role="status"]');
-    assert.equal(result.textContent, 'Opened in a separate local window.');
-    assert.equal(result.dataset.tone, 'ok');
+    assert.equal(slot.querySelector('[role="status"]'), null, 'the answer does not reflow the header');
+    assert.deepEqual(logs.toasts(), ['Opened in a separate local window.']);
 
     logs.window.dispatchEvent({ type: 'pagehide', persisted: false });
     assert.equal(slot.hidden, true);
     assert.equal(slot.children.length, 0);
+    assert.deepEqual(logs.toasts(), []);
 });

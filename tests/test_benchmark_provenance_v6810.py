@@ -355,6 +355,22 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         "skill_publish_github.py typed ambiguous remote effect; task receipt veto remains separate",
     ),
     "unexpected_publish_error": (False, "tools/skill_publish.py recoverable typed tool failure; never a task terminal"),
+    # #4123 expired-park Close: the 200 that names the PRESERVED result. The
+    # attempt had ended by itself (or this request released an answered root's
+    # late-work pause), so that result or answer STANDS; nothing was cut short.
+    "result_kept": (
+        False,
+        "gateway/task_close.py: an exact Close found the attempt already ended by itself, or released an answered "
+        "root's late-work pause, so that result or answer STANDS; a preserved result, never a truncation",
+    ),
+    # A late-result turn whose shared-execution custody could not be bound to
+    # its durable RUNNING row: the letter was kept and no turn started, so no
+    # execution was cut short.
+    "late_result_source_unavailable": (
+        False,
+        "extension_late_result.py: the late-result turn's shared execution custody could not be bound to its durable "
+        "RUNNING row, so the letter was kept without starting a turn; no execution was truncated",
+    ),
 }
 
 _REASON_CODE_LITERAL = re.compile(r"""reason_code(?:=|["']\s*:\s*)\s*["']([a-z0-9_]+)["']""")

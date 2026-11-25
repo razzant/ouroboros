@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { cardRowSummary } from '../modules/chat_activity.js';
+import { cardRowSummary } from '../modules/chat_row_placement.js';
 import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { summarizeChatLiveEvent, summarizeLogEvent } from '../modules/log_events.js';

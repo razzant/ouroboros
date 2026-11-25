@@ -705,6 +705,10 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
         # Unknown, never none: the roots of this chat and of Main could not be read now.
         **({"live_roots_unavailable": roots.gap} if roots.gap else {}),
     }
+    if fallback := md.pop("work_reply_fallback", None):
+        from ouroboros.work_reply import FALLBACK_RULE
+
+        routing_contract["work_reply"] = {"rule": FALLBACK_RULE, **fallback}
     from ouroboros.routing_wait import message_routing_acts
     try:
         address = routing_source_address(ref, source_room, client_message_id)

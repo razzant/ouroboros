@@ -12,7 +12,7 @@ import pytest
 from ouroboros import dialogue_import, dialogue_store as ds
 from ouroboros.gateway import history
 from ouroboros.store import StoreError
-
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +126,7 @@ def test_an_unreadable_archive_changes_nothing_once_its_rows_are_in_the_store(tm
 
 
 @pytest.mark.parametrize("handle", ["next_cursor", "page_cursor"])
-def test_cursor_bound_unavailable_store_keeps_the_exact_retry(tmp_path, monkeypatch, handle):
+def test_cursor_bound_unavailable_store_keeps_the_exact_retry(tmp_path, monkeypatch, handle, healthy_main):
     write(tmp_path / "logs" / "chat.jsonl", [row(index) for index in range(200)])
     first_status, first = request(tmp_path)
     assert first_status == 200

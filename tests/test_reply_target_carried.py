@@ -427,7 +427,7 @@ def test_whole_reply_and_selected_passage_keep_their_own_source_in_a_helper(tmp_
     picked = by_words["About the north trail."]
     assert picked["reply_to"] == {"address": address, "author": author, "text": body}
     assert picked["reply_citation"] == excerpt_citation(selection)
-    carried, = [quote["owner_row"]["reply_to"] for _, _, quote, _, _ in _rows_to_carry(child, root)
+    carried, = [quote["owner_row"]["reply_to"] for _, _, quote, *_rest in _rows_to_carry(child, root)
                 if quote["text"] == "About the north trail."]
     assert (carried["address"], carried["author"], carried["text"], carried["excerpt"]) == (address, author, body, excerpt)
     assert carried.get("role") == (None if source_read == "unresolved" else "assistant"), "the host's role rides on"
@@ -585,7 +585,7 @@ def test_held_owner_row_carries_the_captured_source_without_rewriting_its_addres
         [quote], error = quote_rows(parent, [address])
         assert not error
     else:
-        _, address, quote, _, _ = _rows_to_carry(parent, tmp_path)[0]
+        _, address, quote, *_rest = _rows_to_carry(parent, tmp_path)[0]
     internal = quote["owner_row"]["_owner_reply_target"]  # the source rides the internal row, never the client's fields
     assert internal["text"] == full and internal["attachments"] == files
     assert "text" not in quote["reply_to"] and "attachments" not in quote["reply_to"], "a client reads the preview alone"

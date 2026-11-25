@@ -111,6 +111,23 @@ def archive_needed(drive_root: Any) -> bool:
     return registry_reservations(drive_root) is None
 
 
+def ordinary_room(drive_root: Any, chat_id: int) -> bool:
+    """Whether ``chat_id`` is one of this profile's ordinary rooms now, by the same readiness answer: Main while the
+    registry tells every room apart (``registry_reservations`` names a set), a Project room while it reserves the room
+    and its one strict row is active. An importing, unconfirmed or unreadable answer, a room no row reserves and an
+    inactive row confirm nothing; ``False`` is no answer about the room, never its absence. Read-only."""
+    from ouroboros.projects_registry import PROJECT_ACTIVE, list_reserved_projects
+
+    try:
+        reserved = registry_reservations(drive_root)
+        if reserved is None or chat_id == WEB_UI_CHAT_ID:
+            return reserved is not None
+        rows = [row for row in list_reserved_projects(drive_root, strict=True) if row.get("chat_id") == chat_id]
+        return chat_id in reserved and len(rows) == 1 and rows[0].get("lifecycle") == PROJECT_ACTIVE
+    except Exception:
+        return False
+
+
 def _probe(conn: sqlite3.Connection, keys, *, limit: int, before: Optional[int] = None, lower: int = 0) -> List[int]:
     return sorted(ds._probe_seqs(conn, "chat", keys, before=before, lower=lower, limit=limit, newest_first=True),
                   reverse=True)[:limit]
@@ -702,4 +719,4 @@ def _page(conn, root, room, cursor, files: _RoomFiles):
 
 
 __all__ = ["MAIN", "PAGE_ROWS", "ArchiveCursorChanged", "ArchiveCursorError", "ArchiveRoomUnknown", "archive_needed",
-           "archive_page", "recognized_rooms", "registry_reservations"]
+           "archive_page", "ordinary_room", "recognized_rooms", "registry_reservations"]

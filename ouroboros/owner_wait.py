@@ -62,10 +62,10 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     """
     from ouroboros.owner_mailbox import (
         KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER,
-        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, KIND_OWNER_MODEL, place_arrival_wake, tier_only,
+        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, KIND_OWNER_MODEL, passive_mail, place_arrival_wake, tier_only,
     )
 
-    entries = [row for row in entries if not tier_only(row)]  # a tier act is applied by the drain, never a wake
+    entries = [row for row in entries if not (tier_only(row) or passive_mail(row))]
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
     if KIND_FINALIZE_NOW in kinds:
         return "control:finalize_now"
@@ -79,7 +79,8 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     if any(kind == KIND_QUIZ_CLOSED and row.get("msg_id") == f"quiz_closed:{quiz_id}"
            for kind, row in zip(kinds, entries)):
         return "question_closed"
-    if any(kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_CARD_INPUT} for kind in kinds):
+    if any(kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_CARD_INPUT} or row.get("work_reply") is True
+           for kind, row in zip(kinds, entries)):
         return "owner_text"
     if KIND_HURRY in kinds:
         return "hurry"
@@ -249,6 +250,11 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "held_state_seed": None if (seed := getattr(ctx, "_held_state_seed", None)) is None else sorted(seed),
         # Own routing acts still unconfirmed: a resumed turn reports their outcomes too.
         "unconfirmed_routing_acts": list(getattr(ctx, "unconfirmed_routing_acts", None) or []),
+        # Confirmed handoffs this owner turn may reply about (finish_task / send_user_message
+        # about_work). A start/tell confirmed at call time never enters unconfirmed_routing_acts,
+        # so the exact set rides the same-task continuation itself; restore guards the task identity
+        # and nothing is guessed from a fresher id.
+        "confirmed_reply_works": sorted(getattr(ctx, "_confirmed_reply_works", ()) or ()),
         "restart": {
             "request": dict(getattr(ctx, "pending_restart_request", None) or {}),
             "reason": getattr(ctx, "pending_restart_reason", None),
@@ -275,7 +281,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_presence_forced_declaration", "_presence_forced_pending", "_presence_completion_accepted",
             "_presence_selection_seq", "_presence_released", "_presence_delivered", "_presence_covered",
             "_swarm_handoff_attempt", "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation",
-            "_owner_reply_revision", "_owner_message_sent", "_pre_delivery_noticed", "_red_check_noticed", "_subagent_handoff_shown",
+            "_owner_reply_revision", "_answered_reply_rows", "_owner_message_sent", "_pre_delivery_noticed",
+            "_red_check_noticed", "_subagent_handoff_shown",
         ) if getattr(ctx, key, None) is not None},
         # The block keeps its stored name; the task-acceptance flags it once carried are gone
         # (a pre-fold continuation still has them: ``restore_continuation_state`` ignores them).
@@ -1241,6 +1248,12 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
         ctx._held_state_dirty = seed is not None or getattr(ctx, "_held_state_persisted", None) != (
             ctx._held_owner_messages, ctx._open_relays)  # written at the next persist unless the record has them
     ctx.unconfirmed_routing_acts = [dict(act) for act in state.get("unconfirmed_routing_acts") or [] if isinstance(act, dict)]
+    # The confirmed reply set survives only this same task's continuation: a successor (a different
+    # task id, e.g. working_checkpoint's idle retry) borrows no reply authority. An empty or legacy
+    # state leaves the attribute absent, exactly as a fresh turn that confirmed nothing.
+    if str(state.get("task_id") or "") == str(ctx.task_id):
+        if confirmed := {w for w in state.get("confirmed_reply_works") or () if isinstance(w, str) and w}:
+            ctx._confirmed_reply_works = confirmed
     restart = state.get("restart") or {}
     request = restart.get("request") or {}
     # Cold Pause/Resume keeps the requester's obligation without sending again.

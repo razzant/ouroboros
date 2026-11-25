@@ -9,14 +9,15 @@ import test from 'node:test';
 import { markIngressSaved } from '../modules/chat_activity.js';
 import { createUnconfirmedSends, placeIngressNote } from '../modules/chat_attachments.js';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { ordinaryUnavailability } from '../modules/chat_preview.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, roomKey } from './chat_dom_fixture.js';
 
 const ME = 'session-me';
 const TS = '2026-09-25T09:00:00Z';
 
 function fixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: history, window: { complete: true } }
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true } }));
     globalThis.sessionStorage.setItem('ouro_chat_session_id', ME);
     const handlers = new Map();
@@ -153,7 +154,7 @@ test('a sent attachment message stays recoverable until the host says it is save
     const env = installDom(async (url) => ({ ok: true, status: 200, json: async () =>
         String(url).startsWith('/api/chat/upload') ? { ok: true, filename: upload, display_name: 'plan.pdf',
             mime: 'application/pdf', view }
-            : String(url).startsWith('/api/chat/history') ? { messages: history, window: { complete: true } }
+            : String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
                 : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true } }));
     globalThis.sessionStorage.setItem('ouro_chat_session_id', ME);
     const handlers = new Map();
@@ -299,13 +300,17 @@ test('Send again while offline keeps the doubt and says why', () => {
 // the bubble's views — never bytes or the send-time surface) until the host says it is saved, so a
 // reload or a room's teardown cannot lose its manual retry. The next instance reconciles the kept
 // copy with its FIRST history read: confirmed dispatch ends it, pending dispatch keeps it,
-// and anything else — no row, or no readable history — is in
+// and anything else — no row, or a read that fails while the core says the room is still one of the
+// page's profile's ordinary rooms — is in
 // doubt. Nothing resends by itself; "Discard" forgets only this tab's copy, never an upload.
-function keptTab() {
+function keptTab({ chatId = 7 } = {}) {
     const upload = `${'b'.repeat(32)}_scan.pdf`;
     const view = { name: 'scan.pdf', kind: 'file', mime: 'application/pdf', size: 4, available: true,
         url: `/api/files/download?upload=${upload}` };
-    const host = { history: [], fails: false, calls: [] };
+    // `socket`: the page's one socket (null while it is down); `profile`: whether it proved the page's data profile
+    // (ws.js `connection_profile`); `ordinary`: whether the core still counts the room among the profile's ordinary rooms;
+    // `gate`: a promise the history door's answers wait for, when a case holds them.
+    const host = { history: [], fails: false, calls: [], socket: { readyState: 1 }, profile: true, ordinary: true, gate: null };
     const env = installDom(async (url, init = {}) => {
         host.calls.push([String(url), String(init.method || 'GET')]);
         const reply = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
@@ -313,7 +318,12 @@ function keptTab() {
             return reply({ ok: true, filename: upload, display_name: 'scan.pdf', mime: 'application/pdf', view });
         }
         if (String(url).startsWith('/api/chat/history')) {
-            return host.fails ? reply({ error: 'HTTP 503' }, 503) : reply({ messages: host.history, window: { complete: true } });
+            if (host.gate) await host.gate;
+            // The core's answer while the room's source cannot be read (gateway/history.py): a 503 naming its reason and,
+            // while the room is still one of the profile's ordinary rooms, that room under the profile's scope.
+            return host.fails ? reply({ messages: [], error: 'history_source_unavailable', reason_code: 'history_source_unavailable',
+                has_more: true, ...(host.ordinary ? { ordinary_room: chatId, profile_scope: PREVIEW_SCOPE } : {}) }, 503)
+                : reply({ profile_scope: PREVIEW_SCOPE, messages: host.history, window: { complete: true } });
         }
         return reply({ active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true });
     });
@@ -325,22 +335,24 @@ function keptTab() {
     // A saved row is the live host process's (its dispatch entered) unless dispatch is pending, or `restarted`:
     // taken by a host process that has since ended, which no longer knows what became of it.
     const live = ({ restarted, ...extra } = {}) => ({ ...(extra.ingress_pending || restarted ? {} : { ingress_dispatched: true }), ...extra });
-    // One Project room instance, as a reload or a reopened room creates it on this tab's storage.
+    // One room instance (a Project room, or Main for `chatId: 1`), as a reload or a reopened room creates it on this tab's storage.
     function open() {
         const handlers = new Map();
         const sent = [];
         let generation = 0;
         const instance = createChatInstance({
-            ws: { ws: { readyState: 1 },
+            ws: { get ws() { return host.socket; },
                 on(type, fn) { if (!handlers.has(type)) handlers.set(type, new Set()); handlers.get(type).add(fn); return () => handlers.get(type).delete(fn); },
-                isConnected: () => true,
+                isConnected: () => host.socket !== null,
+                // The profile the current socket's server named at accept (ws.js `connection_profile`), once it has.
+                servingProfileScope: () => (host.socket && host.profile ? PREVIEW_SCOPE : ''),
                 send(frame, options) {
                     const id = frame.client_message_id || `cm-${++coined}`;
                     sent.push({ frame: { ...frame, client_message_id: id }, options });
                     return { status: 'sent', clientMessageId: id };
                 } },
             state: { activePage: 'chat', projectChatIds: new Set([7]), unreadCount: 0 },
-            updateUnreadBadge() {}, chatId: 7, idPrefix: 'chat', mountEl: env.mount, asPanel: true,
+            updateUnreadBadge() {}, chatId, idPrefix: 'chat', mountEl: env.mount, asPanel: chatId !== 1,
             stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
                 gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {}, fail() {}, latest: () => null },
         });
@@ -365,14 +377,14 @@ function keptTab() {
                 for (const fn of document.byId.get('chat-send').listeners.get('click')) fn();
                 await settle();
             },
-            echo: (cmid, content, extra = {}) => room.fire('chat', { type: 'chat', role: 'user', chat_id: 7, ts: TS, source: 'web',
+            echo: (cmid, content, extra = {}) => room.fire('chat', { type: 'chat', role: 'user', chat_id: chatId, ts: TS, source: 'web',
                 content, sender_session_id: ME, client_message_id: cmid, ingress_accepted: true, attachments: [view], ...live(extra) }),
         };
         rooms.push(room);
         return room;
     }
-    const kept = () => JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_unconfirmed:7') || '[]');
-    const row = (cmid, text, extra = {}) => ({ role: 'user', text, ts: TS, chat_id: 7, source: 'web', sender_session_id: ME,
+    const kept = () => JSON.parse(globalThis.sessionStorage.getItem(roomKey('ouro_chat_unconfirmed', chatId)) || '[]');
+    const row = (cmid, text, extra = {}) => ({ role: 'user', text, ts: TS, chat_id: chatId, source: 'web', sender_session_id: ME,
         client_message_id: cmid, history_id: `h-${cmid}`, ingress_accepted: true, attachments: [view], ...live(extra) });
     return {
         host, view, open, kept, row,
@@ -439,7 +451,7 @@ test('a sent attachment message outlives a reload and a room teardown: Send agai
         assert.equal(reloaded.notes('cm-1').length, 0, 'resent: the doubt waits for the next fact');
         reloaded.echo('cm-1', frame.content);
         assert.deepEqual(reloaded.notes('cm-1').map((node) => node.textContent), ['Input saved']);
-        assert.equal(globalThis.sessionStorage.getItem('ouro_chat_unconfirmed:7'), null, 'the saved row ends the kept copy');
+        assert.equal(globalThis.sessionStorage.getItem(roomKey('ouro_chat_unconfirmed', 7)), null, 'the saved row ends the kept copy');
         assert.equal(reloaded.bubbles('cm-1'), 1, 'the saved echo settles the restored bubble, never a second one');
         assert.equal(reloaded.instance.hasPendingWork(), false);
     } finally { tab.close(); }
@@ -474,26 +486,267 @@ test('the first read settles dispatch and keeps a pending row until its confirma
     } finally { tab.close(); }
 });
 
-test('Discard forgets only the kept copy, and unreadable history is no proof either way', async () => {
+// A reload whose first read fails shows the kept copy in doubt when the core says, on the socket serving this page's
+// profile, that the room is still one of that profile's ordinary rooms. Discard forgets the tab's copy alone. Send again,
+// the owner's own press, asks the core anew: a read begun by the press, no frame before its answer, then the SAME frame
+// and id once; a second click meanwhile asks nothing more. Nothing goes by itself.
+test('in a Project room the core still counts, unreadable history is no proof either way: Discard forgets only the kept copy, Send again asks anew and keeps its id', async () => {
+    const tab = keptTab();
+    try {
+        const first = tab.open();
+        await first.send('maybe');
+        await first.send('again');
+        const resent = first.sent[1].frame;
+        first.instance.destroy();
+        tab.host.fails = true;
+        const reloaded = tab.open();
+        await until(() => reloaded.actions('cm-2').length === 2, 'the kept bubbles are in doubt, not declared unsaved');
+        for (const id of ['cm-1', 'cm-2']) {
+            assert.ok(reloaded.notes(id)[0].textContent.startsWith('Not confirmed as saved.'), 'never "not saved"');
+            assert.deepEqual(reloaded.actions(id).map((node) => node.textContent), ['Send again', 'Discard']);
+        }
+        assert.equal(reloaded.sent.length, 0, 'nothing resends by itself');
+        reloaded.press('cm-1', 'Discard');
+        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-2'], 'only that copy is forgotten');
+        assert.equal(reloaded.sent.length, 0);
+        assert.deepEqual(tab.host.calls.filter(([, method]) => method === 'DELETE'), [], 'no upload is deleted');
+        assert.equal(reloaded.actions('cm-1').length, 0);
+        assert.equal(reloaded.notes('cm-1').length, 1, 'the bubble still says what is known');
+        const reads = () => tab.host.calls.filter(([url]) => url.startsWith('/api/chat/history')).length;
+        const before = reads();
+        let answer;
+        tab.host.gate = new Promise((resolve) => { answer = resolve; });
+        reloaded.press('cm-2', 'Send again');
+        reloaded.press('cm-2', 'Send again');
+        await until(() => reads() > before, 'the press began a read of its own');
+        await settle();
+        assert.equal(reads(), before + 1, 'one ask, whatever the clicks');
+        assert.deepEqual(reloaded.sent, [], 'no frame before the core answers');
+        answer();
+        await until(() => reloaded.sent.length > 0, 'the fresh word still counts the room: the frame goes');
+        await settle();
+        assert.deepEqual(reloaded.sent.map((item) => [item.frame, item.options]), [[{ ...resent, ordinary_room: 7 }, { queue: false }]],
+            'once, the same words, id, routing and upload refs, naming the room the word stood on for the core to ask again');
+        assert.ok(tab.kept().every((entry) => !('ordinary_room' in entry.frame)), 'the kept copy stays as it was');
+        assert.equal(reloaded.notes('cm-2').length, 0, 'resent: the doubt waits for the next fact');
+        reloaded.echo('cm-2', resent.content);
+        assert.deepEqual(reloaded.notes('cm-2').map((node) => node.textContent), ['Input saved']);
+        assert.deepEqual(tab.kept(), [], 'the saved row ends the kept copy');
+        assert.equal(reloaded.instance.hasPendingWork(), false);
+        reloaded.fire('close');
+        assert.equal(reloaded.actions('cm-1').length, 0, 'a discarded message is not offered again');
+    } finally { tab.close(); }
+});
+
+// Main the same way: the core counts it among the profile's ordinary rooms while the registry tells every room apart.
+test('in Main the core still counts, an unreadable first read shows the kept copy in doubt', async () => {
+    const tab = keptTab({ chatId: 1 });
+    try {
+        const first = tab.open();
+        await first.send('main words');
+        first.instance.destroy();
+        tab.host.fails = true;
+        const reloaded = tab.open();
+        await until(() => reloaded.actions('cm-1').length === 2, 'Main\'s kept copy is in doubt');
+        assert.ok(reloaded.notes('cm-1')[0].textContent.startsWith('Not confirmed as saved.'));
+        assert.deepEqual(reloaded.actions('cm-1').map((node) => node.textContent), ['Send again', 'Discard']);
+        assert.equal(reloaded.sent.length, 0, 'nothing resends by itself');
+        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-1']);
+    } finally { tab.close(); }
+});
+
+// Shown, the copy stands only while the core's word does. The socket that word was read on closes: the copy leaves the
+// feed, kept. The next socket's own read brings the word and the copy back. The registry's word that the room changed
+// lapses it again, and a room the core no longer counts stays unshown. Nothing is sent by itself throughout.
+test('a copy shown on the core\'s word leaves the feed, kept, when that word lapses, and returns with a new one', async () => {
+    const tab = keptTab();
+    const kept = () => tab.kept().map((entry) => entry.frame.client_message_id);
+    try {
+        const first = tab.open();
+        await first.send('later');
+        first.instance.destroy();
+        tab.host.fails = true;
+        const room = tab.open();
+        await until(() => room.actions('cm-1').length === 2, 'the core\'s word: the kept copy is in doubt');
+
+        tab.host.socket = null;  // the socket the word was read on closes
+        room.fire('close');
+        assert.equal(room.bubble('cm-1'), undefined, 'the word lapsed with its socket: the copy left the feed');
+        assert.deepEqual(kept(), ['cm-1'], 'and stays kept');
+
+        tab.host.socket = { readyState: 1 };  // a new socket of the same profile, and its own read
+        room.fire('open', { previouslyConnected: true });
+        await until(() => room.actions('cm-1').length === 2, 'the new word brings the copy back');
+        assert.equal(room.bubbles('cm-1'), 1, 'one bubble, drawn again');
+
+        tab.host.ordinary = false;  // the registry let the room go
+        room.fire('projects_changed', { type: 'projects_changed', project_id: 'p7', chat_id: 7 });
+        assert.equal(room.bubble('cm-1'), undefined, 'the registry\'s word on the room lapses what was shown');
+        await settle();
+        assert.equal(room.bubble('cm-1'), undefined, 'the room the core no longer counts stays unshown');
+        assert.deepEqual(kept(), ['cm-1']);
+        assert.deepEqual(room.sent, [], 'nothing was sent by itself');
+    } finally { tab.close(); }
+});
+
+// A reload's first read can fail before its socket named the profile it serves: the core's word then waits, the copy
+// kept and unshown, and the socket's handshake asks for it again on that socket.
+test('a word read before this socket proved the profile is asked again on its handshake', async () => {
+    const tab = keptTab();
+    const reads = () => tab.host.calls.filter(([url]) => url.startsWith('/api/chat/history')).length;
+    try {
+        const first = tab.open();
+        await first.send('early');
+        first.instance.destroy();
+        Object.assign(tab.host, { fails: true, profile: false });
+        const before = reads();
+        const room = tab.open();
+        await until(() => reads() > before, 'the first read');
+        await settle();
+        assert.equal(room.bubble('cm-1'), undefined, 'no socket has proved the profile: the copy stays unshown');
+        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-1'], 'and kept');
+        tab.host.profile = true;
+        room.fire('connection_profile', { type: 'connection_profile', profile_scope: PREVIEW_SCOPE });
+        await until(() => room.actions('cm-1').length === 2, 'asked again on the socket that proved it: shown');
+        assert.ok(reads() > before + 1, 'by a read of its own');
+        assert.deepEqual(room.sent, [], 'nothing was sent by itself');
+    } finally { tab.close(); }
+});
+
+// The core's state can change with nothing broadcast. A press asks it afresh and sends nothing unless that answer still
+// counts the room: here the core stops counting it, and then, the room reopened, its history reads again.
+test('a press sends nothing when the fresh answer no longer counts the room, or when history reads again', async () => {
     const tab = keptTab();
     try {
         const first = tab.open();
         await first.send('maybe');
         first.instance.destroy();
         tab.host.fails = true;
-        const reloaded = tab.open();
-        await until(() => reloaded.actions('cm-1').length === 2, 'the preview bubble is in doubt, not declared unsaved');
-        assert.ok(reloaded.notes('cm-1')[0].textContent.startsWith('Not confirmed as saved.'), 'never "not saved"');
-        reloaded.press('cm-1', 'Discard');
-        assert.deepEqual(tab.kept(), []);
-        assert.equal(reloaded.sent.length, 0);
-        assert.deepEqual(tab.host.calls.filter(([, method]) => method === 'DELETE'), [], 'no upload is deleted');
-        assert.equal(reloaded.actions('cm-1').length, 0);
-        assert.equal(reloaded.notes('cm-1').length, 1, 'the bubble still says what is known');
-        assert.equal(reloaded.instance.hasPendingWork(), false);
-        reloaded.fire('close');
-        assert.equal(reloaded.actions('cm-1').length, 0, 'a discarded message is not offered again');
+        let room = tab.open();
+        await until(() => room.actions('cm-1').length === 2, 'shown on the core\'s word');
+        tab.host.ordinary = false;  // the core stops counting the room; nothing is broadcast
+        room.press('cm-1', 'Send again');
+        await until(() => room.bubble('cm-1') === undefined, 'the fresh answer ends the word: the copy leaves the feed');
+        assert.deepEqual(room.sent, [], 'and nothing was sent');
+        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-1'], 'the copy stays kept');
+        room.instance.destroy();
+
+        tab.host.ordinary = true;
+        room = tab.open();
+        await until(() => room.actions('cm-1').length === 2, 'shown again on a new word');
+        tab.host.fails = false;  // history reads again; nothing is broadcast
+        room.press('cm-1', 'Send again');
+        await until(() => room.instance.hasPaintedHistory(), 'the ordinary read takes over');
+        await settle();
+        assert.deepEqual(room.sent, [], 'the press itself sent nothing');
     } finally { tab.close(); }
+});
+
+// Leaving the room lapses the core's word: what it showed leaves the feed, kept, and no answer asked before the leave
+// brings it back. The return shows it again only on the word its own read brings.
+test('leaving the room takes a copy shown on the core\'s word off the feed; the return shows it only on a fresh word', async () => {
+    const tab = keptTab();
+    const reads = () => tab.host.calls.filter(([url]) => url.startsWith('/api/chat/history')).length;
+    try {
+        const first = tab.open();
+        await first.send('later');
+        first.instance.destroy();
+        tab.host.fails = true;
+        const room = tab.open();
+        await until(() => room.actions('cm-1').length === 2, 'shown on the core\'s word');
+        room.instance.leave();
+        assert.equal(room.bubble('cm-1'), undefined, 'leaving lapses the word: the copy left the feed');
+        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-1'], 'and stays kept');
+        let answer;
+        tab.host.gate = new Promise((resolve) => { answer = resolve; });
+        const before = reads();
+        room.instance.stay();
+        room.fire('open', { previouslyConnected: true, resumed: true });
+        await until(() => reads() > before, 'the return reads anew');
+        await settle();
+        assert.equal(room.bubble('cm-1'), undefined, 'nothing shows before that read answers');
+        answer();
+        await until(() => room.actions('cm-1').length === 2, 'the fresh word shows it again');
+        assert.equal(room.bubbles('cm-1'), 1, 'one bubble, drawn again');
+        assert.deepEqual(room.sent, [], 'nothing was sent by itself');
+    } finally { tab.close(); }
+});
+
+// ouro:panic reaches the page's own work through its global event bus (chat_activity.js raises it once its Panic frame
+// is sent); the DOM fixture has none, so a case installs one. Nothing here sends a Panic.
+function panicBus() {
+    const keys = ['addEventListener', 'removeEventListener', 'dispatchEvent'];
+    const prior = keys.map((key) => Object.getOwnPropertyDescriptor(globalThis, key));
+    const bus = new EventTarget();
+    for (const key of keys) globalThis[key] = bus[key].bind(bus);
+    return () => keys.forEach((key, i) => (prior[i] ? Object.defineProperty(globalThis, key, prior[i]) : delete globalThis[key]));
+}
+
+// A Panic ends a Send again still asking the core, as it ends the composer's send (composer.js): whatever the core then
+// answers, nothing goes, and only a press made after it asks anew.
+test('a Panic ends a Send again still asking the core; a press after it is a new one', async () => {
+    const restoreBus = panicBus();
+    const tab = keptTab();
+    try {
+        const first = tab.open();
+        await first.send('maybe');
+        const resent = first.sent[0].frame;
+        first.instance.destroy();
+        tab.host.fails = true;
+        const room = tab.open();
+        await until(() => room.actions('cm-1').length === 2, 'shown on the core\'s word');
+        let answer;
+        tab.host.gate = new Promise((resolve) => { answer = resolve; });
+        room.press('cm-1', 'Send again');
+        globalThis.dispatchEvent(new CustomEvent('ouro:panic'));
+        answer();
+        await settle();
+        assert.deepEqual(room.sent, [], 'the press made before the Panic sends nothing, though the core still counts the room');
+        assert.deepEqual(room.actions('cm-1').map((node) => node.textContent), ['Send again', 'Discard'], 'the copy still waits');
+        tab.host.gate = null;
+        room.press('cm-1', 'Send again');
+        await until(() => room.sent.length > 0, 'a press after the Panic asks anew and sends');
+        assert.deepEqual(room.sent.map((item) => [item.frame, item.options]), [[{ ...resent, ordinary_room: 7 }, { queue: false }]]);
+    } finally { tab.close(); restoreBus(); }
+});
+
+// The core's acceptance refuses a Send again whose room it no longer confirms by a typed cause (gateway/ws.py): that
+// copy loses its word and leaves the feed, kept, until a fresh word shows it again. The same notice without that cause
+// leaves it offered as before.
+test('a refusal typed as the room\'s lapsed word takes that copy off the feed, kept, until a fresh word', async () => {
+    const tab = keptTab();
+    try {
+        const first = tab.open();
+        await first.send('later');
+        first.instance.destroy();
+        tab.host.fails = true;
+        const room = tab.open();
+        await until(() => room.actions('cm-1').length === 2, 'shown on the core\'s word');
+        const refuse = (extra = {}) => room.fire('chat', { type: 'chat', role: 'system', system_type: 'initialization_notice',
+            chat_id: 7, client_message_id: 'cm-1', content: 'Not saved.', ...extra });
+        refuse();
+        assert.deepEqual(room.actions('cm-1').map((node) => node.textContent), ['Send again', 'Discard'], 'another refusal keeps it offered');
+        refuse({ reason_code: 'ordinary_room_unconfirmed' });
+        assert.equal(room.bubble('cm-1'), undefined, 'its word lapsed: the copy left the feed');
+        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-1'], 'and stays kept');
+        room.fire('open', { previouslyConnected: true });
+        await until(() => room.actions('cm-1').length === 2, 'a fresh word shows it again');
+        assert.deepEqual(room.sent, [], 'nothing was sent by itself');
+    } finally { tab.close(); }
+});
+
+test('only the core\'s word that this room is still one of the page profile\'s ordinary rooms is an ordinary unavailability', () => {
+    const answer = (body, status = 503) => Object.assign(new Error(`HTTP ${status}`), { status, body });
+    const word = { reason_code: 'history_source_unavailable', ordinary_room: 7, profile_scope: PREVIEW_SCOPE };
+    assert.equal(ordinaryUnavailability(answer(word), 7, PREVIEW_SCOPE), true, 'the source cannot be read now');
+    assert.equal(ordinaryUnavailability(answer({ ...word, reason_code: 'migrating' }), 7, PREVIEW_SCOPE), true, 'still importing');
+    for (const [why, error, chatId = 7, scope = PREVIEW_SCOPE] of [
+        ['no word on the room', answer({ reason_code: 'history_source_unavailable' })],
+        ['a word on another room', answer(word), 8],
+        ['Main\'s archive offer', answer({ reason_code: 'history_source_unavailable', project_registry: 'unavailable' }), 1],
+        ['no answer at all', new TypeError('Failed to fetch')],
+        ['a page that proves no profile', answer(word), 7, ''],
+    ]) assert.equal(ordinaryUnavailability(error, chatId, scope), false, why);
 });
 
 test('a tab that cannot keep the copy says so, and Send again still works until a reload', () => {

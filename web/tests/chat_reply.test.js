@@ -102,7 +102,7 @@ test('a quote landing clears the bar and its frosted edge; without an edge it cl
     assert.equal(await land('0px'), 600 - (80 + 12));
 });
 
-test('a drawn row is a destination app needs no read for; a portal or a row not drawn is not', t => {
+test('a drawn row is a destination app needs no read for; a portal or a row not drawn is not', async t => {
     const env = installDomDouble();
     t.after(() => env.restore());
     const feed = env.el('div'), input = env.el('textarea');
@@ -110,12 +110,18 @@ test('a drawn row is a destination app needs no read for; a portal or a row not 
     const card = env.el('div', { dataset: { rowAddress: 'task:c0ffee42' } });
     const portal = env.el('div', { dataset: { rowAddress: 'task:d3adb33f', portal: '1' } });
     const drawn = new Map([[card.dataset.rowAddress, card], [portal.dataset.rowAddress, portal]]);
-    const replies = createChatReplies({ feed, input, reading: () => ({}),
-        history: () => ({ exact: (address) => drawn.get(address) || null }) });
+    const pinned = [];
+    const replies = createChatReplies({ feed, input, reading: () => ({ cancel() {}, scroll() {}, remember() {}, stick: true }),
+        history: () => ({ exact: (address) => drawn.get(address) || null, pin: (address, node) => pinned.push([address, node]) }) });
     t.after(() => replies.destroy());
     assert.equal(replies.draws('task:c0ffee42'), true);
     assert.equal(replies.draws('task:d3adb33f'), false, 'its work lives in another room, which the read names');
     assert.equal(replies.draws('task:0badf00d'), false);
+    assert.deepEqual(pinned, [], 'draws() inspection never sets an explicit pin');
+    assert.deepEqual(await replies.reveal('task:c0ffee42', () => false), null);
+    assert.deepEqual(pinned, [], 'a superseded reveal never sets an explicit pin');
+    assert.deepEqual(await replies.reveal('task:c0ffee42'), { state: 'found', target: card });
+    assert.deepEqual(pinned, [['task:c0ffee42', card]], 'only a successful mounted fastpath landing notifies history.pin');
 });
 
 test('a reveal that moves nothing hands a following reader the live edge back; a gesture, newer reveal or exit decides instead', async t => {
@@ -527,4 +533,79 @@ test('the registered message actions stand between Reply and Copy on the rows th
         actions.register({ key: 'late', label: 'Late', applies: () => true, run() {} });
         assert.deepEqual(row(mine), ['chat-message-reply', 'chat-message-copy'], 'a destroyed room draws nothing more');
     } finally { f.restore(); }
+});
+
+
+test('a quote to an earlier work reply lands visibly in the feed reading band, not just focused behind its clip', async () => {
+    const f = fixture();
+    try {
+        const target = f.bubble('user', 'Earlier task reply');
+        target.dataset.rowAddress = 'row:1@then#123456789abc';
+        // The work reply is the feed's own chronological bubble (owner 23.11), never a card's Details copy.
+        f.feed.append(target);
+        Object.assign(f.feed, { clientHeight: 400, scrollHeight: 1200, scrollTop: 0 });
+        f.feed.getBoundingClientRect = () => ({ top: 0, bottom: 400 });
+        target.getBoundingClientRect = () => ({ top: 520 - f.feed.scrollTop, bottom: 540 - f.feed.scrollTop });
+        const result = await f.replies.reveal(target.dataset.rowAddress);
+        assert.equal(result.target, target);
+        assert.equal(f.doc.activeElement, target);
+        const line = target.getBoundingClientRect();
+        assert.ok(line.top >= 72 && line.bottom <= 400,
+            'the target is visible in the room reading band, below the header and above the composer');
+    } finally { f.close(); }
+});
+
+test('System voice survives from the exact addressed timeline line to its staged and saved quote', () => {
+    const f = fixture();
+    try {
+        const address = 'row:1@then#123456789abc';
+        const systemRow = f.el('div', { className: 'chat-live-line', dataset: { workReplyRow: '1', rowAddress: address } },
+            f.el('span', { className: 'chat-live-line-title', text: 'Paused by the host' }));
+        f.feed.append(systemRow);
+        f.replies.start(f.replies.bubbleRef(systemRow));
+        assert.equal(f.strip().dataset.author, 'system');
+        assert.equal(f.strip().querySelector('.chat-quote-author').textContent, 'System');
+        const reloaded = f.bubble('user', 'Please leave it paused');
+        f.replies.decorate(reloaded, { reply_to: { address, kind: 'system', role: 'system', snippet: 'Paused by the host' } });
+        assert.equal(f.quote(reloaded).dataset.author, 'system');
+        assert.equal(f.quote(reloaded).querySelector('.chat-quote-author').textContent, 'System');
+    } finally { f.close(); }
+});
+
+test('child narration and expanded final report lines quote their own words and address, never the role label', () => {
+    const f = fixture();
+    try {
+        const child = f.el('div', { className: 'chat-live-card subagent', dataset: { taskId: 'child-7' } });
+        const narration = f.el('div', { className: 'chat-live-line', dataset: {
+            workReplyRow: 'assistant', rowAddress: 'row:1@2026-10-16T09:41:00Z#narr00000001',
+        } },
+            f.el('span', { className: 'chat-live-line-title', text: 'worker' }),
+            f.el('div', { className: 'chat-live-line-body', text: 'Inspecting the archive index.' }));
+        const report = f.el('div', { className: 'chat-live-line expandable', dataset: {
+            workReplyRow: 'assistant', rowAddress: 'row:1@2026-10-16T09:42:00Z#rprt00000002',
+            rowWords: 'All three shards matched the checksum.',
+        } },
+            f.el('span', { className: 'chat-live-line-title', text: 'worker' }),
+            f.el('div', { className: 'chat-live-line-body', text: 'Report to parent\nAll three shards matched the checksum.' }));
+        child.append(narration, report);
+        f.feed.append(child);
+
+        const narrRef = f.replies.bubbleRef(narration);
+        assert.deepEqual(
+            [narrRef.address, narrRef.role, narrRef.kind, narrRef.author_label, narrRef.snippet, narrRef.ts, narrRef.task_id],
+            ['row:1@2026-10-16T09:41:00Z#narr00000001', 'assistant', 'message', 'Ouroboros', 'Inspecting the archive index.', '2026-10-16T09:41:00Z', 'child-7'],
+        );
+        f.replies.start(narrRef);
+        assert.deepEqual(f.replies.frameField(), { reply_to: 'row:1@2026-10-16T09:41:00Z#narr00000001' });
+        assert.equal(f.strip().querySelector('.chat-quote-author').textContent, 'Ouroboros');
+        assert.equal(f.strip().querySelector('.chat-quote-text').textContent, 'Inspecting the archive index.');
+
+        const reportRef = f.replies.bubbleRef(report);
+        assert.deepEqual(
+            [reportRef.address, reportRef.snippet, reportRef.ts],
+            ['row:1@2026-10-16T09:42:00Z#rprt00000002', 'All three shards matched the checksum.', '2026-10-16T09:42:00Z'],
+        );
+        f.replies.start(reportRef);
+        assert.equal(f.strip().querySelector('.chat-quote-text').textContent, 'All three shards matched the checksum.');
+    } finally { f.close(); }
 });

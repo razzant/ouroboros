@@ -28,6 +28,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros import chat_uploads, confined_files
+from tests._dialogue import healthy_main_fixture as healthy_main_fixture  # noqa: F401
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 56
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 60
@@ -472,7 +473,7 @@ def _history(tmp_path, chat_id=1):
     return json.loads(response.body.decode("utf-8"))["messages"]
 
 
-def test_web_acceptance_records_refs_and_echo_equals_history(files_app, tmp_path, monkeypatch):
+def test_web_acceptance_records_refs_and_echo_equals_history(files_app, tmp_path, monkeypatch, healthy_main):
     from ouroboros.gateway import ws
     from supervisor import message_bus
 
@@ -512,7 +513,7 @@ def _skill_client(tmp_path, bridge):
     return _client(tmp_path, bridge)
 
 
-def test_transport_inline_photo_is_parked_once_and_still_reaches_vision(tmp_path, monkeypatch):
+def test_transport_inline_photo_is_parked_once_and_still_reaches_vision(tmp_path, monkeypatch, healthy_main):
     from supervisor import message_bus
     from tests.test_host_service_api import FakeBridge
 
@@ -618,7 +619,7 @@ def _rows(tmp_path):
     return chat_rows(tmp_path)
 
 
-def test_every_attachment_is_recorded_echoed_and_replayed_past_the_text_tail(files_app, tmp_path, monkeypatch):
+def test_every_attachment_is_recorded_echoed_and_replayed_past_the_text_tail(files_app, tmp_path, monkeypatch, healthy_main):
     bridge, echoes = _web_bridge(tmp_path, monkeypatch)
     uploads = [_upload(files_app, f"shot-{index:02d}.png", PNG) for index in range(27)]
     uploads += [_upload(files_app, f"note-{index}.txt", b"note") for index in range(3)]
@@ -634,7 +635,7 @@ def test_every_attachment_is_recorded_echoed_and_replayed_past_the_text_tail(fil
     assert len(queued["task_metadata"]["chat_attachment_uploads"]) == 30
 
 
-def test_a_placeholder_is_marked_only_when_the_host_wrote_it(tmp_path, monkeypatch):
+def test_a_placeholder_is_marked_only_when_the_host_wrote_it(tmp_path, monkeypatch, healthy_main):
     from supervisor import message_bus
 
     bridge = message_bus.LocalChatBridge()
@@ -817,7 +818,7 @@ def test_an_inline_photo_beside_files_reaches_the_model_with_them(tmp_path, monk
     assert len(agent.task["attachment_images"]) == 1 and "image_base64" not in agent.task
 
 
-def test_replay_shows_an_upload_deleted_or_rewritten_since_as_unavailable(files_app, tmp_path, monkeypatch):
+def test_replay_shows_an_upload_deleted_or_rewritten_since_as_unavailable(files_app, tmp_path, monkeypatch, healthy_main):
     """Replay compares each upload with its recorded stat witness (size and mtime): a delete, a
     replace and a same-size rewrite all show unavailable, and nothing is hashed to say so."""
     import ouroboros.artifacts as artifacts
@@ -848,7 +849,7 @@ def test_replay_shows_an_upload_deleted_or_rewritten_since_as_unavailable(files_
 
 
 def test_a_failed_web_write_keeps_its_uploads_and_one_retry_hands_a_proven_undispatched_row_over(
-        files_app, tmp_path, monkeypatch):
+        files_app, tmp_path, monkeypatch, healthy_main):
     """A refused canonical write keeps the attachment originals (they stay claimed, never
     deletable); the sender's retry under the same id then lands once. If the row DID land before
     the failure, its dispatch is still owed: history says so (``ingress_pending``), and the ONE
@@ -1024,7 +1025,7 @@ def test_a_named_acceptance_whose_write_raised_reads_lost_until_one_retry_hands_
     assert bridge._inbox.qsize() == 1 and dialogue_store.dispatch_state(tmp_path, 42, "tg:10") == "completed"
 
 
-def test_live_echoes_carry_the_rows_placeholder_mark(files_app, tmp_path, monkeypatch):
+def test_live_echoes_carry_the_rows_placeholder_mark(files_app, tmp_path, monkeypatch, healthy_main):
     """An echo is the accepted row as history replays it: when the host wrote the text (no words
     were sent), the echo has that text AND ``text_placeholder``; the owner's words never do."""
     from supervisor import message_bus

@@ -737,14 +737,14 @@ def test_the_app_line_is_the_python_line_for_every_recorded_part_and_for_none():
 
 
 _CARD_ON_LOAD = """
-import { installDom, restoreDom, walkCard } from '%(fixture)s';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from '%(fixture)s';
 import { createChatInstance } from '%(chat)s';
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 const messages = JSON.parse(input);
 const reads = [];
 const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () => {
     if (String(url).startsWith('/api/tasks/')) reads.push(String(url));
-    return String(url).startsWith('/api/chat/history') ? { messages } : { active_direct_turns: [] };
+    return String(url).startsWith('/api/chat/history') ? { messages, profile_scope: PREVIEW_SCOPE } : { active_direct_turns: [] };
 } }));
 const instance = createChatInstance({ ws: { on() { return () => {}; }, isConnected: () => true, send() {} },
     state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 }, updateUnreadBadge() {},

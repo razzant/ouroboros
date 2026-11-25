@@ -16,6 +16,7 @@ render arm is pinned in ``web/tests/chat_plain_system_rows.test.js``.
 from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 import asyncio
 import json
@@ -176,7 +177,7 @@ def test_host_salvage_terminal_incident_drops_inherited_markdown_format(tmp_path
     assert notice["text"] == raw
 
 
-def test_history_normalizes_old_project_rows_on_read_without_rewriting_log(tmp_path):
+def test_history_normalizes_old_project_rows_on_read_without_rewriting_log(tmp_path, healthy_main):
     """Bug report #10: rows persisted BEFORE the producer stripped markdown are
     normalized on read; ``chat.jsonl`` stays byte-identical; only the two
     Project lifecycle types are touched (assistant markdown and other system

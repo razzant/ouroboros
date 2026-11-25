@@ -1,7 +1,7 @@
 import pytest
 
 import supervisor.message_bus as message_bus
-from tests._dialogue import chat_rows
+from tests._dialogue import chat_rows, healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 import ouroboros.event_bus as event_bus
 
 
@@ -72,7 +72,7 @@ def test_web_ingress_write_failure_never_echoes_or_enqueues(monkeypatch, tmp_pat
     assert bridge.get_updates(offset=0, timeout=0) == []
 
 
-def test_saved_web_ingress_replays_from_canonical_history(monkeypatch, tmp_path):
+def test_saved_web_ingress_replays_from_canonical_history(monkeypatch, tmp_path, healthy_main):
     """The live echo and reload agree about a saved input, not task admission."""
     import asyncio
     import json
@@ -194,7 +194,7 @@ def test_requeue_updates_replays_the_tail_before_new_arrivals_with_ids_intact(mo
 
 
 def test_project_completion_summary_keeps_event_time_label_live_and_on_reload(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, healthy_main,
 ):
     """The message bus is the one live/durable transport for Main's host row."""
     import asyncio
@@ -251,7 +251,7 @@ def test_project_completion_summary_keeps_event_time_label_live_and_on_reload(
 
 
 def test_terminal_incident_persists_and_replays_as_system_without_raw_salvage(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, healthy_main,
 ):
     import asyncio
     import json

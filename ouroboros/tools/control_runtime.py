@@ -556,7 +556,7 @@ def _main_notice_refusal(ctx: ToolContext, chat_id: object, *, asked_main: bool 
 
 
 def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destination: str = "current",
-                       reply_to_relay: str | None = None, request_id: str = "") -> str:
+                       reply_to_relay: str | None = None, request_id: str = "", about_work: str = "") -> str:
     """Send a separate owner reply without completing the ongoing task.
 
     ``destination="main"`` addresses the owner's main chat from an owner-visible
@@ -621,20 +621,45 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
 
     relay = {}
     reply_meta = {}
+    work = str(about_work or "").strip()
+    if work:
+        if reply_to_relay is not None or not _confirmed_handoff(ctx, work) or owner_contact_refusal(ctx, chat_id):
+            return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
+                "WORK_REPLY_TARGET_UNVERIFIED: choose a task this owner turn just started or told. Nothing was sent.")))
+        reply_meta["about_work_task_id"] = work
     if reply_to_relay is not None:
+        from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
         from ouroboros.owner_relay import select_return
         from ouroboros.chat_references import resolve_reply
+        from ouroboros.task_results import resolve_ctx_lineage
         from ouroboros.tool_access import canonical_data_root
         relay, error = select_return(ctx, reply_to_relay)
         error = error or owner_contact_refusal(ctx, chat_id)
-        if relay and relay["source"]["chat_id"] != chat_id:
+        if not error and relay.get("work_reply"):
+            source_chat = relay["source"].get("chat_id")
+            if (isinstance(chat_id, bool) or str(chat_id) == str(HIDDEN_CHAT_ID)
+                    or not resolve_ctx_lineage(ctx).get("is_root_task")
+                    or type(source_chat) is not int or source_chat <= 0 or is_a2a_chat_id(source_chat)):
+                error = "RELAY_RETURN_UNRESOLVED: only an owner-visible root task may answer a direct owner Reply in its source room. Nothing was sent."
+        elif relay and relay["source"]["chat_id"] != chat_id:
             error = error or _main_notice_refusal(ctx, chat_id)
         if error:
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=error, meta={"reason_code": "RELAY_RETURN_UNRESOLVED"}))
         chat_id, system_type = relay["source"]["chat_id"], "relay_reply"
         source_root = relay.get("_owner_source_roots", {}).get(relay["source"]["address"]) or canonical_data_root(ctx)
-        reply_meta = {"reply_to": resolve_reply(source_root, relay["source"]["address"]),
-                      "reply_to_relay": relay["relay_id"]}
+        try:
+            resolved = resolve_reply(source_root, relay["source"]["address"]) if source_root is not None else {}
+        except Exception:
+            if relay.get("work_reply"):
+                resolved = {}
+            else:
+                raise
+        if relay.get("work_reply") and (not isinstance(resolved, dict) or not resolved
+                                        or resolved.get("unresolved") or resolved.get("chat_id") != chat_id):
+            return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
+                f"RELAY_RETURN_UNRESOLVED: originating message {relay['source']['address']} is unavailable in room {chat_id}. Nothing was sent."
+            ), meta={"reason_code": "RELAY_RETURN_UNRESOLVED"}))
+        reply_meta = {"reply_to": resolved, "reply_to_relay": relay["relay_id"]}
     from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, stamp_lineage
     from ouroboros.utils import append_jsonl
     event = stamp_lineage(ctx, {
@@ -650,14 +675,20 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
     if relay:
         # A relay's answer is owed before the queue sees it (the terminal outbox, as Presence Main contact is):
         # a send that fails after enqueue is retried under this id, and the open return retires only once owed.
+        # My human's Reply to a work is owed one answer: its id is the accepted relay's alone, so a Continue or retry
+        # still holding it meets the first answer as registered (words, author, source row) and sends nothing new.
         from supervisor.terminal_delivery import register_pending_delivery
         from ouroboros.tool_access import canonical_data_root
 
-        event["delivery_id"] = f"relay-return:{relay['relay_id']}:{getattr(ctx, 'task_id', '') or ''}"
-        if not register_pending_delivery(canonical_data_root(ctx), event):
+        once = relay.get("work_reply") is True
+        event["delivery_id"] = f"relay-return:{relay['relay_id']}" + ("" if once else f":{getattr(ctx, 'task_id', '') or ''}")
+        standing = _first_answer_witness(ctx, event) if once else {}
+        if not register_pending_delivery(canonical_data_root(ctx), event, **({"standing": standing} if once else {})):
             return publish_no_effect(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=(
                 f"⚠️ RELAY_RETURN_NOT_OWED: the answer to relay {relay['relay_id']} could not be recorded for delivery. "
                 "Nothing was sent and the relay stays open; retry the same words."), meta={"reason_code": "RELAY_RETURN_NOT_OWED"}))
+        if standing.get("state"):
+            return _relay_answered(ctx, relay, event["delivery_id"], standing["state"])
     mode = deliver_owner_event(ctx, event)
     append_jsonl(ctx.drive_logs() / "events.jsonl", {
         "ts": utc_now_iso(),
@@ -669,14 +700,233 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         "text_preview": text[:200],
     })
     if relay:
-        ctx._open_relays.pop(relay["relay_id"], None)
-        from ouroboros.owner_relay import persist_held_state
-        persist_held_state(ctx)
-        return (f"OK: answer to relay {relay['relay_id']} owed to {relay['source'].get('label') or 'its source room'} "
-                f"(delivery {event['delivery_id']}); the outbox retries it until sent.")
+        return _relay_answered(ctx, relay, event["delivery_id"])
     if target == "main":
         return "OK: notice accepted for delivery to the main chat." if mode == "live" else "OK: notice queued for delivery to the main chat."
     return publish_delivery_receipt(ctx, event, mode, "message")
+
+
+_FIRST_ANSWER_WITNESS_LIMIT = 50
+
+
+def _is_first_answer_row(row: object, *, chat_id: int, delivery_id: str, relay_id: str,
+                         reply_address: str, reply_sha256: str = "") -> bool:
+    """Whether one saved chat row is the genuine ``relay_reply`` answer to this Reply in its source room."""
+    if not isinstance(row, dict):
+        return False
+    row_chat = row.get("chat_id")
+    if (type(row_chat) is not int or row_chat != chat_id
+            or row.get("direction") != "out" or row.get("role") == "system"
+            or row.get("type") != "relay_reply" or row.get("is_progress")
+            or row.get("client_message_id") != delivery_id
+            or row.get("reply_to_relay") != relay_id):
+        return False
+    row_delivery = row.get("delivery_id")
+    if row_delivery not in (None, "", delivery_id):
+        return False
+    reply = row.get("reply_to")
+    if not isinstance(reply, dict) or reply.get("unresolved") or reply.get("address") != reply_address:
+        return False
+    reply_chat = reply.get("chat_id")
+    if reply_chat is not None and (type(reply_chat) is not int or reply_chat != chat_id):
+        return False
+    row_sha = reply.get("row_sha256")
+    if reply_sha256 and row_sha not in (None, "", reply_sha256):
+        return False
+    return True
+
+
+def _first_answer_witness(ctx: ToolContext, event: dict) -> dict:
+    """``register_pending_delivery``'s ``standing`` for my human's Reply to a work. Its answer is saved in history under
+    its own name, the delivery id (``row_client_message_id``), so one indexed read (``rows_by_client_id``) still finds
+    a genuine ``relay_reply`` for this Reply in its source room after the outbox's bounded registry forgot it:
+    ``recorded`` True on a verified row, False only on an empty read over complete gap-free chat history from the
+    originating Reply onward, None on any doubt (unreadable, incomplete, truncated or non-matching rows under that id in
+    the room). A row in history is the answer kept there, never a transport receipt."""
+    from ouroboros import chat_chain, dialogue_store
+    from ouroboros.tool_access import canonical_data_root
+
+    meta = event.get("progress_meta") if isinstance(event.get("progress_meta"), dict) else {}
+    did = meta["row_client_message_id"] = str(event.get("delivery_id") or "")
+    chat_id = event.get("chat_id")
+    relay_id = str(meta.get("reply_to_relay") or "")
+    reply_to = meta.get("reply_to") if isinstance(meta.get("reply_to"), dict) else {}
+    reply_address = str(reply_to.get("address") or "")
+    reply_sha256 = str(reply_to.get("row_sha256") or "")
+    if (not did or type(chat_id) is not int or chat_id <= 0
+            or not relay_id or not reply_address or reply_to.get("unresolved")):
+        return {"recorded": None}
+    root = canonical_data_root(ctx)
+    try:
+        coverage = None
+        try:
+            source_row, resolution = chat_chain.resolve_row(root, reply_address)
+            source_seq = resolution.get("seq") if source_row is not None and isinstance(resolution, dict) else None
+            lower = source_seq + 1 if type(source_seq) is int and source_seq >= 0 else 0
+            coverage = dialogue_store.range_coverage(root, "chat", lower=lower)
+        except Exception:
+            log.warning("History coverage unreadable for %s: negative witness will stay unknown", did, exc_info=True)
+        rows = dialogue_store.rows_by_client_id(root, did, chat_id=chat_id, limit=_FIRST_ANSWER_WITNESS_LIMIT)
+        if any(_is_first_answer_row(
+            getattr(entry, "row", None), chat_id=chat_id, delivery_id=did,
+            relay_id=relay_id, reply_address=reply_address, reply_sha256=reply_sha256,
+        ) for entry in rows):
+            return {"recorded": True}
+        if rows or not isinstance(coverage, dict) or not coverage.get("imported") or coverage.get("gaps"):
+            log.warning("History witness for %s is inconclusive (rows=%d, coverage=%s); standing is unknown",
+                        did, len(rows), coverage)
+            return {"recorded": None}
+        return {"recorded": False}
+    except Exception:
+        log.warning("History unreadable for %s: its first answer's standing is unknown", did, exc_info=True)
+        return {"recorded": None}
+
+
+def _relay_answered(ctx: ToolContext, relay: dict, delivery_id: str, earlier: str = "") -> str:
+    """Retire an open return whose answer is owed: these words, or with ``earlier`` the outbox standing of a first
+    answer already registered under this id (or only in history: ``recorded``), these words unsent and that answer
+    answering the Reply's own owner row (``discharge_reply_row``). ``unknown`` (forgotten there, history inconclusive
+    or unreadable) sends nothing and keeps the relay open. Meta names the id and its state."""
+    if earlier == "unknown":
+        return publish_no_effect(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=(
+            f"⚠️ RELAY_RETURN_UNKNOWN: whether relay {relay['relay_id']} already has its answer cannot be read now (the "
+            f"outbox no longer holds {delivery_id} and history is inconclusive or unreadable). Nothing was sent and the relay stays "
+            "open; retry later."), meta={"reason_code": "RELAY_RETURN_UNKNOWN", "delivery_id": delivery_id}))
+    from ouroboros.loop_messages import discharge_reply_row
+    from ouroboros.owner_relay import persist_held_state
+
+    ctx._open_relays.pop(relay["relay_id"], None)
+    if earlier:
+        discharge_reply_row(ctx, relay)
+    persist_held_state(ctx)
+    rid, said = relay["relay_id"], {"owed": "owed: the outbox retries it until sent",
+                                    "exhausted": "not confirmed as sent; a copy is saved",
+                                    "recorded": "in history; its transport receipt is no longer kept"}.get(earlier, earlier)
+    text = (f"OK: relay {rid} already has its first answer (delivery {delivery_id}, {said}); "
+            "these words were not sent and the relay is closed." if earlier else
+            f"OK: answer to relay {rid} owed to {relay['source'].get('label') or 'its source room'} "
+            f"(delivery {delivery_id}); the outbox retries it until sent.")
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text, meta={
+        "delivery_id": delivery_id, "delivery_state": earlier or "owed", **({"answered_earlier": True} if earlier else {})}))
+
+
+def open_work_reply_ids(tools: object) -> tuple[str, ...]:
+    """In-memory open ``work_reply`` IDs of this owner-visible root when ``send_user_message`` is schema-permitted."""
+    ctx = getattr(tools, "_ctx", None)
+    relays = getattr(ctx, "_open_relays", None)
+    if not isinstance(relays, dict) or not any(isinstance(r, dict) and r.get("work_reply") is True for r in relays.values()):
+        return ()
+    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
+    from ouroboros.task_results import resolve_ctx_lineage
+
+    chat_id = getattr(ctx, "current_chat_id", None)
+    if (chat_id is None or chat_id == "" or isinstance(chat_id, bool)
+            or str(chat_id) == str(HIDDEN_CHAT_ID) or owner_contact_refusal(ctx, chat_id)
+            or not resolve_ctx_lineage(ctx).get("is_root_task")
+            or not hasattr(tools, "get_schema_by_name")
+            or tools.get_schema_by_name("send_user_message") is None):
+        return ()
+    ids: list[str] = []
+    for rid, relay in relays.items():
+        if not (isinstance(rid, str) and rid and rid == rid.strip()
+                and isinstance(relay, dict) and relay.get("relay_id") == rid and relay.get("work_reply") is True):
+            continue
+        source = relay.get("source") if isinstance(relay.get("source"), dict) else {}
+        source_chat, address = source.get("chat_id"), source.get("address")
+        if (type(source_chat) is int and source_chat > 0 and not is_a2a_chat_id(source_chat)
+                and isinstance(address, str) and address.strip() and address == address.strip()):
+            ids.append(rid)
+    return tuple(ids)
+
+
+def forced_work_reply_prompt_clause(tools: object) -> str:
+    """Forced-prompt instruction for answering eligible open ``work_reply`` relays, or ``""`` when none apply."""
+    work_replies = open_work_reply_ids(tools)
+    if not work_replies:
+        return ""
+    return (
+        " Open owner Reply relay(s) " + ", ".join(repr(rid) for rid in work_replies)
+        + ': to answer any under its originating message in its source room, return the JSON object form '
+        '(no tool call) with "relay_replies":{"<relay_id>":"<answer to that Reply>"} while keeping '
+        "this task's own result in answer/answer_sha256."
+    )
+
+
+def extract_forced_work_replies(body: str) -> tuple[dict[str, str], list[dict]] | None:
+    """Purely extract ``relay_replies`` from a forced JSON-text completion body without executing anything."""
+    from ouroboros.loop_delivery import _parse_delivery_control_body
+
+    parsed, duplicate_proto, embedded = _parse_delivery_control_body(body if isinstance(body, str) else "")
+    if duplicate_proto or embedded or not isinstance(parsed, dict) or "relay_replies" not in parsed:
+        return None
+    pending: dict[str, str] = {}
+    rejected: list[dict] = []
+    raw_map = parsed.get("relay_replies")
+    if "relay_replies" in getattr(parsed, "duplicate_keys", set()):
+        rejected.append({"relay_id": "", "status": "error", "code": "DUPLICATE_RELAY_REPLIES_KEY"})
+    elif raw_map is not None and not isinstance(raw_map, dict):
+        rejected.append({"relay_id": "", "status": "error", "code": "INVALID_RELAY_REPLIES"})
+    elif isinstance(raw_map, dict):
+        dup_keys = set(getattr(raw_map, "duplicate_keys", set()))
+        for rid in sorted(dup_keys):
+            rejected.append({"relay_id": str(rid), "status": "error", "code": "DUPLICATE_RELAY_ID"})
+        for rid, text in raw_map.items():
+            if rid in dup_keys:
+                continue
+            if not isinstance(rid, str) or not rid.strip() or rid != rid.strip():
+                rejected.append({"relay_id": rid if isinstance(rid, str) else "", "status": "error", "code": "INVALID_RELAY_ID"})
+            elif not isinstance(text, str) or not text.strip():
+                rejected.append({"relay_id": rid, "status": "error", "code": "EMPTY_RELAY_ANSWER"})
+            else:
+                pending[rid] = text
+    return (pending, rejected) if (pending or rejected) else None
+
+
+def commit_forced_work_replies(tools: object, llm_trace: dict, usage: dict) -> None:
+    """Dispatch staged forced ``work_reply`` returns through ``tools.execute_result('send_user_message', ...)``."""
+    from collections.abc import Mapping
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.owner_pause import OwnerPauseRefused
+    from ouroboros.usage_accounting import UsageAccountingError
+
+    ctx = getattr(tools, "_ctx", None)
+    pending = getattr(ctx, "_forced_work_replies_pending", None) if ctx is not None else None
+    if ctx is not None:
+        ctx._forced_work_replies_pending = None
+    if not pending:
+        return
+    relay_replies, rejected = pending
+    outcomes: list[dict] = [dict(item) for item in (rejected or ()) if isinstance(item, dict)]
+    for rid, answer in (relay_replies or {}).items():
+        relays = getattr(ctx, "_open_relays", None)
+        relay = relays.get(rid) if isinstance(relays, dict) else None
+        if not (isinstance(relay, dict) and relay.get("relay_id") == rid and relay.get("work_reply") is True):
+            outcomes.append({"relay_id": rid, "status": "blocked", "code": "ACCESS_BLOCKED", "reason_code": "RELAY_RETURN_UNRESOLVED"})
+            continue
+        if not hasattr(tools, "execute_result"):
+            outcomes.append({"relay_id": rid, "status": "unavailable", "code": "CAPABILITY_UNAVAILABLE"})
+            continue
+        try:
+            res = tools.execute_result("send_user_message", {
+                "text": answer, "reply_to_relay": rid, "reason": "forced_final_work_reply",
+            })
+        except (OwnerPauseRefused, ModelWaitInterrupted, UsageAccountingError):
+            raise
+        except Exception as exc:
+            log.warning("Forced work_reply dispatch failed for %s", rid, exc_info=True)
+            outcomes.append({"relay_id": rid, "status": "unknown", "error": type(exc).__name__})
+            continue
+        meta = res.meta if isinstance(res.meta, Mapping) else {}
+        entry: dict[str, object] = {"relay_id": rid, "status": res.status, "code": res.code}
+        if meta.get("reason_code"):
+            entry["reason_code"] = meta["reason_code"]
+        if res.status == "ok":  # the id the send registered and its outbox standing (``_relay_answered``)
+            entry.update({key: meta[key] for key in ("delivery_id", "delivery_state", "answered_earlier") if key in meta})
+        outcomes.append(entry)
+    if outcomes:
+        llm_trace["forced_work_replies"] = outcomes
+    if getattr(ctx, "_owner_message_sent", False):
+        usage["owner_message_sent"] = True
 
 
 def _update_identity(ctx: ToolContext, content: str | None = None, expected_revision: str | None = None,
@@ -1069,11 +1319,18 @@ def _effort_switch(ctx: ToolContext, requested: str) -> tuple[str, str]:
                 "delegated — schedule_subagent(effort=…).")
 
 
+def _confirmed_handoff(ctx: ToolContext | None, work: str) -> bool:
+    from ouroboros.tools.control_routing import ISSUER_OWNER_TURN, _routing_issuer
+
+    return (work in getattr(ctx, "_confirmed_reply_works", ())
+            and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN)
+
+
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  answer_sha256: str | None = None, rationale: str = "",
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
                  silent: bool = False, swarm_comparison: str | None = None, summary: str = "",
-                 fold_read: bool = False) -> str:
+                 fold_read: bool = False, about_work: str = "") -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
     without a Presence binding) may choose silence and may leave a gist for its human.
     A task that answers its place conversation or a program's note may choose silence too;
@@ -1081,7 +1338,7 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
     request, error = completion_request(ctx, {
         "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
         "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
-        "swarm_comparison": swarm_comparison, "summary": summary, "fold_read": fold_read,
+        "swarm_comparison": swarm_comparison, "summary": summary, "fold_read": fold_read, "about_work": about_work,
     })
     if error:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
@@ -1134,6 +1391,12 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         return None, ("silent is available only on a self-started run: "
                       "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
                       "silent also on a task answering its own place conversation or a program's note")
+    work = arguments.get("about_work")
+    if work is not None and not isinstance(work, str):
+        return None, "about_work must name a confirmed task"
+    work = (work or "").strip()
+    if work and (action != "finish" or silent or not _confirmed_handoff(ctx, work)):
+        return None, "about_work requires a visible finish and an exact task this owner turn confirmed starting or telling"
     if silent and answer is None and not selector:
         answer = ""  # silence needs no words; complete bytes given anyway stay an internal result
     return checked_completion_request(ctx, {
@@ -1142,6 +1405,7 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         "pending_review": arguments.get("pending_review"), "wake_silent": bool(silent) or None,
         "wake_summary": (not ignored and summary) or None, "fold_read": True if fold_read and not ignored else None,
         "swarm_comparison": arguments.get("swarm_comparison"), "ignored": ignored or None,
+        "about_work_task_id": work or None,
     }, allow_empty=bool(silent))
 
 

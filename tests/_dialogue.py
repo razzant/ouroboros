@@ -10,7 +10,23 @@ import json
 import pathlib
 from typing import Any, Dict, Iterable, List
 
+import pytest
+
 from ouroboros import dialogue_store
+
+
+def confirm_first_use(root: Any) -> None:
+    """Confirm a fresh data root's empty Project registry, as normal first boot does."""
+    from ouroboros.project_registry_recovery import initialize_new_root, registry_path
+
+    root = pathlib.Path(root)
+    initialize_new_root(root)
+    assert registry_path(root).is_file()
+
+
+@pytest.fixture(name="healthy_main")
+def healthy_main_fixture(tmp_path):
+    confirm_first_use(tmp_path)
 
 
 def import_all(root: Any) -> None:

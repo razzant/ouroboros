@@ -2,7 +2,7 @@
 // may belong to different snapshots. Exercise their real createChatInstance seam.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ElementStub } from './chat_dom_fixture.js';
+import { ElementStub, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 import { row, room, until, quiet } from './project_read_state_fixture.js';
 
 const note = n => ({ ...row(n), role: 'user', text: `owner note ${n}` });
@@ -53,7 +53,7 @@ function raceRoom(t, { old = snapshot('old', 1000, 9), fresh = snapshot('fresh',
             gate = server.recentGates.shift();
         }
         await gate;
-        return { ok: true, json: async () => data };
+        return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...data }) };
     } });
     const rect = ElementStub.prototype.getBoundingClientRect;
     ElementStub.prototype.getBoundingClientRect = function () {

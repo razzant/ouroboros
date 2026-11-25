@@ -16,6 +16,7 @@ same-size edit inside the index's timestamp tick still reaches B and C.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import pathlib
@@ -486,6 +487,88 @@ def test_a_copy_recorded_before_the_update_keeps_its_old_capture_and_checkout_un
         assert not copy.exists() and find_execution_snapshot(handle.snapshot_id) is None and _pins(target) == []
     finally:
         custody._CUSTODY.clear()
+
+
+@pytest.mark.parametrize("case", ["apply", "reject", "taken_over", "lineage_missing", "lineage_unreadable"])
+def test_a_legacy_continuation_without_its_capture_row_is_decided_only_while_its_hand_over_holds(
+        tmp_path, monkeypatch, case):
+    """A continuation in a copy recorded before the update (7.11's format: rules version 3) captured its work, but
+    its capture row did not land. Its predecessor's durable record naming it as the run that took this very copy
+    over makes the copy its own; a later continuation, or a predecessor record that is gone or unreadable, does not."""
+    from ouroboros import delegate_custody_current as current
+    from ouroboros import subagent_worktrees
+    from tests.test_delegate_continuation import _settle, _start
+
+    first, _payload, ctx, _calls = _start(tmp_path, monkeypatch, acting=True, run_id="run-first")
+    copy = pathlib.Path(first["execution"]["workspaceRoot"])
+    subagent_worktrees._update_record(str(copy), lambda row: {**row, "file_baseline": {}}, op="test")
+    (copy / "first.txt").write_text("from the first run\n", encoding="utf-8")
+    _settle(tmp_path, "run-first", ctx.task_id)
+    assert capture_terminal_patch_for_drive(tmp_path, custody.replay(tmp_path)["run-first"])["status"] == "ready_with_changes"
+    _request, payload, ctx, _calls = _start(tmp_path, monkeypatch, acting=True, run_id="run-next",
+                                            start_kwargs={"continue_from": "run-first"})
+    assert payload["continuation"]["workspace"] == "same_snapshot" and copy.is_dir(), payload
+    (copy / "second.txt").write_text("from the continuation\n", encoding="utf-8")
+    _settle(tmp_path, "run-next", ctx.task_id)
+    emit = custody.emit
+    with monkeypatch.context() as unavailable:  # the capture saves its files; its receipt row does not land
+        unavailable.setattr(custody, "emit", lambda root, event, row, **kw:
+                            event != custody.PATCH_CAPTURED and emit(root, event, row, **kw))
+        block = capture_terminal_patch_for_drive(tmp_path, custody.replay(tmp_path)["run-next"])
+    assert (block["status"], block["retry"]) == ("failed", "transient"), block
+    cap_dir = pathlib.Path(block["manifest_artifact"]).parent
+    manifest = json.loads((cap_dir / "workspace_patch.json").read_bytes())
+    assert "result_commit" not in manifest and {"first.txt", "second.txt"} <= set(manifest["untracked_included"])
+    manifest["exclude_rules_version"] = 3
+    (cap_dir / "workspace_patch.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    custody._CUSTODY.clear()
+    prior = current.run(tmp_path, "run-first")
+    assert (prior.superseded_by, prior.patch_disposed) == ("run-next", custody.SUPERSEDED)
+    target = pathlib.Path(current.run(tmp_path, "run-next").target_root)
+    if case == "taken_over":  # a later continuation now holds the copy
+        third = _start(tmp_path, monkeypatch, acting=True, run_id="run-third",
+                               start_kwargs={"continue_from": "run-next"})[1]
+        assert third["continuation"]["workspace"] == "same_snapshot", third
+    elif case.startswith("lineage_"):
+        read = current.run
+
+        def lineage(root, run_id):
+            if run_id != "run-first":
+                return read(root, run_id)
+            if case == "lineage_unreadable":
+                raise OSError("custody store unavailable")
+            return None
+
+        monkeypatch.setattr(current, "run", lineage)
+    saved = {path.name: path.read_bytes() for path in cap_dir.iterdir() if path.is_file()}
+    def receipts():
+        return [row for row in custody.custody_rows(tmp_path)
+                if row["type"] == custody.PATCH_CAPTURED and row["run_id"] == "run-next"]
+    out = _integrate_delegated_patch(ctx, "run-next", "reject" if case == "reject" else "apply", "decided")
+    if case == "apply":
+        assert "INTEGRATE_DELEGATED_INSPECT_CAPTURE" in out and not (target / "second.txt").exists(), out
+        receipt, = receipts()
+        assert receipt["manifest_sha256"] == hashlib.sha256(saved["workspace_patch.json"]).hexdigest()
+        out = _integrate_delegated_patch(ctx, "run-next", "apply", "decided")
+        assert "✅ Integrated" in out, out
+        assert (target / "first.txt").read_text(encoding="utf-8") == "from the first run\n"
+        assert (target / "second.txt").read_text(encoding="utf-8") == "from the continuation\n"
+    elif case == "reject":
+        assert "Rejected" in out and current.run(tmp_path, "run-next").patch_disposed == "rejected", out
+        assert not (target / "second.txt").exists()
+    else:
+        assert "✅" not in out and "Rejected" not in out and not receipts(), out
+        assert {"taken_over": "INTEGRATE_DELEGATED_SUPERSEDED", "lineage_missing": "not provably this run's own",
+                "lineage_unreadable": "predecessor's hand-over could not be read"}[case] in out, out
+        # A later continuation's start marks this run superseded; no decision of this call disposed it.
+        assert current.run(tmp_path, "run-next").patch_disposed == (custody.SUPERSEDED if case == "taken_over" else "")
+        assert not (target / "first.txt").exists() and not (target / "second.txt").exists()
+    if not case.startswith("lineage_"):  # the predecessor rides this run's capture and is never decided alone
+        prior_out = _integrate_delegated_patch(ctx, "run-first", "apply", "decided")
+        assert "INTEGRATE_DELEGATED_SUPERSEDED" in prior_out, prior_out
+        assert current.run(tmp_path, "run-first").patch_disposed == custody.SUPERSEDED
+    assert {name: (cap_dir / name).read_bytes() for name in saved} == saved  # advertised bytes are never replaced
+    custody._CUSTODY.clear()
 
 
 def test_a_legacy_capped_investigation_receipt_is_retaken_whole_once_then_released(tmp_path, monkeypatch):

@@ -924,6 +924,7 @@ export function initWidgets(ctx = {}) {
     let activeSync = 0;
     let listDirty = false;
     let uiPreferences = { widget_order: [], widget_size: {}, widget_start_mode: {}, nested_subagents_expanded: false };
+    let stopLifecycleFacts = null;
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
         ctx.ws.on('message', (msg) => {
@@ -933,7 +934,7 @@ export function initWidgets(ctx = {}) {
         // (contributions.js: `extension_lifecycle`, and the end of any lifecycle job, whoever started it: a Browse
         // install that turns a skill on sends no `extension_lifecycle`), and every (re)connect — events may have been
         // missed while offline, or the server restarted with the same SHA (no SPA reload then). No polling.
-        contributions?.onLifecycle?.(reconcileWidgetList);
+        stopLifecycleFacts = contributions?.onLifecycle?.(reconcileWidgetList);
         ctx.ws.on('open', reconcileWidgetList);
     }
 
@@ -1394,6 +1395,7 @@ export function initWidgets(ctx = {}) {
         cardMenus.destroy();
         widths.dispose();
         stopContributionFacts?.();
+        stopLifecycleFacts?.();
         for (const tab of lastTabs || []) if (!isBoardFrame(tab)) disposeWidgetByKey(widgetKey(tab));
         bodiesObserver.disconnect();
         BODY_SIZED.forEach((type) => list.removeEventListener(type, refitBodies, true));

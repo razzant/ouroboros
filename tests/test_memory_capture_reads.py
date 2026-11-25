@@ -13,6 +13,7 @@ import sys
 
 from ouroboros import chat_chain as cc, dialogue_store as ds, memory_view as mv
 from tests import _memory_capture_shape as shape
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 
 def _counted(monkeypatch, module, name):
@@ -37,7 +38,7 @@ def _one_at_a_time(root, addresses, **_kwargs):
     return found
 
 
-def test_main_view_reads_its_open_rows_a_page_at_a_time_and_reads_as_before(tmp_path, monkeypatch):
+def test_main_view_reads_its_open_rows_a_page_at_a_time_and_reads_as_before(tmp_path, monkeypatch, healthy_main):
     made = shape.open_rows(tmp_path, 1_300)
     opened = _counted(monkeypatch, ds, "transaction")
     batched = mv.capture_memory_view(tmp_path, made["task"], made["spec"])

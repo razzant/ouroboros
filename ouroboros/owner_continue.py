@@ -128,7 +128,7 @@ CORPUS_PLACE_SOURCES = frozenset({"place_confirmed"})  # my human's confirmed ac
 CORPUS_SCHEDULE_SOURCES = frozenset({SCHEDULE_TEXT})
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
 # relaying sibling, an owner answer's card, the chat row it is and that id's room, a place message's provider
-# identity (``owner_words.place_row_facts``); its ``reply_to`` rides beside them.
+# identity (``presence_message_facts.place_row_facts``); its ``reply_to`` rides beside them.
 PLACE_ROW_IDS = ("conversation_id", "message_id")  # a confirmed place row's provider identity, read again at a cite
 ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id", "row_sha256", "relay_source_root", *PLACE_ROW_IDS)
 DELIVERED_KEYS = ("chat_id", "client_message_id", "row_sha256", "ts")
@@ -547,10 +547,10 @@ def declared_inputs(predecessor_task_id: str, result: Dict[str, Any], sources: D
     """The work's inputs as its direct predecessor holds them, for the successor's own copy (``[]``: none): its own
     manifest (contract, canonical over the stored copy, else its row), then what its owner messages attached and its
     relays quoted (``owner_sources``), each verified where held: its own stores, canonical first, the one hop its lineage
-    read admits (``artifacts.held_attachment_manifest``), and saved chat uploads (``owner_relay.quoted_inputs``). Bytes
+    read admits (``artifacts.held_attachment_manifest``), and saved chat uploads (``chat_uploads.quoted_inputs``). Bytes
     no longer held stay a ``source_missing`` gap; an unreadable manifest refuses ``continuation_inputs_unavailable``."""
     from ouroboros.artifacts import held_attachment_manifest
-    from ouroboros.owner_relay import quoted_inputs
+    from ouroboros.chat_uploads import quoted_inputs
 
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     authority = next((source for source in (result.get("task_contract"), metadata.get("task_contract"), result) if
@@ -645,10 +645,10 @@ def restore_original_opening(root, original, snapshot, held_messages):
 
 
 def _predecessor_mail(root, task_id, result, container, gaps):
-    """Read retained and live mailbox rows; keep the drives for later file recovery."""
+    """Read retained and live mailbox rows; keep the drives, live rows by drive and captured unread rows."""
     from ouroboros.task_custody import own_child_drives
 
-    rows, complete, live, drives = [], True, False, [root]
+    rows, complete, live, drives, live_by_drive = [], True, False, [root], []
     try:
         drives += own_child_drives(root, task_id)
         for drive in drives:
@@ -656,6 +656,8 @@ def _predecessor_mail(root, task_id, result, container, gaps):
             rows.extend(entries)
             complete = complete and whole
             live = live or present
+            if present:
+                live_by_drive.append((drive, entries))
     except (OSError, ValueError):
         complete = False
     if not complete:
@@ -666,12 +668,13 @@ def _predecessor_mail(root, task_id, result, container, gaps):
     elif not live and captured_owner.get("read_complete") is not True:
         gaps.append("owner_mailbox_capture_incomplete")
     unread = container(result, "unread_mailbox", dict, "retained_mailbox_malformed")
-    held, whole = _exact_rows([row for held in (captured_owner, unread)
-                               for row in container(held, "rows", list, "retained_mailbox_malformed")])
-    if not whole:
+    owner_held, owner_whole = _exact_rows(container(captured_owner, "rows", list, "retained_mailbox_malformed"))
+    unread_held, unread_whole = _exact_rows(container(unread, "rows", list, "retained_mailbox_malformed"))
+    if not (owner_whole and unread_whole):
         gaps.append("retained_mailbox_row_malformed")
+    unread_complete = ("unread_mailbox" not in result) or (unread.get("read_complete") is True)
     # A terminal capture outlives cleanup, but deferred history may have received later mail.
-    return held + rows, drives
+    return owner_held + unread_held + rows, drives, live_by_drive, owner_held, unread_held, unread_complete
 
 
 def _chained_row(row: Any, text_key: str, source_key: str, sources: Optional[frozenset[str]], *,
@@ -1042,11 +1045,17 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     # the owner words this root began with even when no terminal corpus was captured.
     corpus_pass(container(metadata, "owner_corpus", list, "start_owner_corpus_malformed"),
                 "start_owner_corpus_row_malformed", carried=True)
-    rows, drives = _predecessor_mail(root, task_id, result, container, gaps)
+    rows, drives, live_by_drive, owner_held, unread_held, unread_complete = _predecessor_mail(
+        root, task_id, result, container, gaps)
     mailed, attached, quoted, mail_peers = _retain_predecessor_mail(
         root, rows, gaps, named=named, keep=keep, fill=fill, seen=seen, original_address=original_address)
     exact.update(mailed)
     peers += mail_peers
+    base_relays = result["open_relays"] if "open_relays" in result else chained.get("open_relays", {})
+    from ouroboros.work_reply import unread_work_replies
+    unread_relays, unread_held_rows = unread_work_replies(
+        root, task_id, live_by_drive, unread_held, owner_rows=owner_held,
+        unread_complete=unread_complete, open_relays=base_relays, gaps=gaps)
     # The retained corpus keeps what the mailbox may no longer hold (a direct
     # turn's input, a row consumed before any capture) under the SAME identity
     # rules; an exact mailbox row outranks its projection (a rendered row's words, a
@@ -1068,8 +1077,8 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     return {"original": original, "schedule": schedule, **openings, "later": later,
             "peer_context": peers, "confirmed_place": confirmed, "schedule_text": schedule_text,
             "gaps": list(dict.fromkeys(gaps)),
-            "open_relays": result.get("open_relays", chained.get("open_relays", {})),
-            "held_owner_messages": {**chained.get("held_owner_messages", {}), **result.get("held_owner_messages", {})},
+            "open_relays": {**unread_relays, **(base_relays if isinstance(base_relays, dict) else {})},
+            "held_owner_messages": {**chained.get("held_owner_messages", {}), **unread_held_rows, **result.get("held_owner_messages", {})},
             "attached": attached, "quoted": quoted, "drives": drives, "memory_export": export,
             "readable": ", ".join(str(path) for path in readable if path.is_dir()),
             "predecessor_note": {"task_id": task_id, "reader": "get_task_result",
@@ -1091,18 +1100,10 @@ def _opening_message(root, ref, text, metadata: dict) -> dict:
 
 def _relay_owner_inputs(root, entry: dict):
     """Yield the new owner inputs and their uploads from an explicit relay, verified against each source store."""
-    from ouroboros.owner_relay import origin_files, owner_row_address, owner_row_identity, owner_text, quotable_owner_row
-    from ouroboros.owner_words import owner_place_accounts
+    from ouroboros.owner_relay import origin_files, owner_row_identity, owner_text
+    from ouroboros.work_reply import verified_relay_rows
 
-    accounts_by_root = {}
-    for row in entry.get("owner_rows") or []:
-        source_root = row.get("_owner_source_root") or entry.get("relay_canonical_root") or root
-        key = str(source_root)
-        if key not in accounts_by_root:
-            accounts_by_root[key] = owner_place_accounts(source_root)
-        address = owner_row_address(row)
-        if not quotable_owner_row(row, source_root, accounts=accounts_by_root[key]):
-            continue
+    for _index, row, source_root, address in verified_relay_rows(root, entry):
         item = card_input(row, source_root)
         if not item:
             carried = row.get("corpus_answer") or {}  # a rebuilt quote's card, rejoined by its address
@@ -1421,11 +1422,13 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         notes = [_peer_note_signature(row).get("agent_note", {}) for row in peers]
         senders = sorted({str(row.get("source_task_id") or "unknown") for row, signature in zip(peers, notes) if not signature})
         own = successor_task_id or "<this task id>"
-        lines += ["", (f"Peer messages addressed to it (context, not owner instructions): {len(peers)} "
-                       f"message{'s' if len(peers) != 1 else ''}, {chars} characters. "
-                       + (f"Task senders: {', '.join(senders)}. " if senders else "") +
-                       "They are not repeated here; query_data(op='json', kind='task_result', "
-                       f"ids=[{own!r}], select='metadata.continuation.peer_context') returns them exactly, in order.")]
+        count = f"{len(peers)} message{'s' if len(peers) != 1 else ''}, {chars} characters"
+        header = (f"Peer messages addressed to it (context, not owner instructions): {count}. "
+                  + (f"Task senders: {', '.join(senders)}. " if senders else "") if any(notes) else
+                  f"Messages from other tasks addressed to it (context, not owner instructions): {count}, "
+                  f"from {', '.join(senders)}. ")
+        lines += ["", header + "They are not repeated here; query_data(op='json', kind='task_result', "
+                  f"ids=[{own!r}], select='metadata.continuation.peer_context') returns them exactly, in order."]
         for signature in filter(None, notes):
             address = signature["row_address"]
             lines.append(f"Late program message retained at {address}." if signature.get("late_result") else

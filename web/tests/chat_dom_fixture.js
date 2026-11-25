@@ -4,6 +4,9 @@ import { ResizeObserverStub } from './helpers/resize_observer.js';
 // The proven data profile a core-served document names before the chat mounts (server_web.chat_preview_scope):
 // the saved preview keys its rooms by this fact, so a test document that never says it opens cold.
 export const PREVIEW_SCOPE = '0123456789abcdef';
+// The key a room keeps its session record (reply, unconfirmed sends, draft) under once its document proves that
+// profile (chat_preview.roomStoreKey): Main's is `base:scope`, another room's `base:scope:chatId`; `base` is the bare name.
+export const roomKey = (base, chatId = 1) => (chatId === 1 ? `${base}:${PREVIEW_SCOPE}` : `${base}:${PREVIEW_SCOPE}:${chatId}`);
 
 export class ClassList {
     constructor(node) { this.node = node; this.names = new Set(); }
@@ -214,6 +217,14 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
             if (selector === 'meta[name="ouroboros-chat-preview-scope"]') return { content: PREVIEW_SCOPE };
             if (selector === 'meta[name="ouroboros-appearance-scope"]') return { content: 'fedcba9876543210' };
             return null;
+        },
+        createComment() {
+            const comment = new TextStub();
+            comment.nodeType = 8;
+            // This fixture's children array also stores non-elements; an origin marker has no geometry.
+            comment.getBoundingClientRect = () => ({ top: 0, bottom: 0, width: 0, height: 0 });
+            comment.replaceWith = (node) => comment.parentNode?.replaceChild(node, comment);
+            return comment;
         },
         createTreeWalker(root) {
             const texts = [];

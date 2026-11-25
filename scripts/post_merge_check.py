@@ -17,7 +17,7 @@ gates are FAILED with no retry: each finding of the release's lint gate (`ruff c
 owner decision 2A, 2026-10-22) and each red test of its size check (`pytest -m size_ratchet`,
 measured against the check's base; the window's book-growth mode comes from the `growth` step).
 First-parent bisection needs comparable evidence for blame, not for RED. Historical probes omit
-the protected path if not comparable and take only fresh, coherent Python exports. Routing comments
+the protected path if not comparable and take only fresh, coherent Python exports and Node results their runner confirms. Routing comments
 on culprit PRs at new or expanded filings, even if filing fails. It narrows or closes per-leg
 `post-merge-red` issues as IDs clear and files returning reds anew. No block, revert or schedule; GitHub uses only
 the job's GITHUB_TOKEN. The script imports only stdlib-based code (`base` runs on the bare `window`
@@ -54,7 +54,7 @@ from scripts.post_merge_routing import (  # noqa: E402
     BRANCH, LINT_PREFIX, NODE_LANE, SIZE_PREFIX, SYSTEMS, GitHub, _reason, route,
 )
 from scripts.post_merge_bisect import (  # noqa: E402
-    MAX_PROBES, PROTECTED, bisect, comparable, fresh_pytest_export, grep_names, node_blocker, probe_files, protected_projection,
+    MAX_PROBES, PROTECTED, bisect, comparable, confirmed_node_exit, fresh_pytest_export, grep_names, node_blocker, probe_files, protected_projection,
 )
 from scripts.post_merge_window import (  # noqa: E402
     carried_records, choose_window, gap_text, listed_runs, merge_records, prior_window, read_handoff, records,
@@ -310,8 +310,8 @@ def _tells_tests_apart(session: dict) -> bool:
 def outcomes(session: dict, ids, *, whole: bool = False) -> dict[str, str]:
     """Classify ids within the selected lane: failures/hangs fail, test/collector skips never pass, executed xfails stay
     xfailed (ci_verdicts). Aggregates need every selected member to run whole; excluded exact ids stay unknown.
-    Without selection, exact calls and completed (exit 0/1) aggregate exports retain legacy semantics (the bisection
-    reader, `check_ids`) unless `whole`: the recheck that retires a red needs setup, call and teardown of every member.
+    Without selection, exact calls and completed (exit 0/1) aggregates retain legacy semantics unless `whole`:
+    attribution probes and rechecks that retire a red need setup, call and teardown of every passing member.
     Only check_ids/recheck_ids establish absence; a filtered member is not missing."""
     failed = set(session["running"]) | {row["nodeid"] for row in session["rows"]
                                         if row["outcome"] == "failed" or row["phase"] == "crash"}
@@ -399,9 +399,13 @@ def run_pytest(args, directory: Path, *, cwd: Path | None = None, env: dict | No
 
 
 def run_node_lane(cwd: Path | None = None) -> int:
+    """The revision's own runner answers in a directory of its own; its exit 0 or 1 counts only beside the node.json it wrote."""
     cwd = Path(cwd or REPO_ROOT)
     try:
-        return subprocess.call([sys.executable, str(cwd / "scripts" / "run_tests.py"), "--node"], cwd=str(cwd))
+        with tempfile.TemporaryDirectory(prefix="post-merge-node-", ignore_cleanup_errors=True) as evidence:
+            code = subprocess.call([sys.executable, str(cwd / "scripts" / "run_tests.py"), "--node",
+                                    "--evidence-dir", evidence], cwd=str(cwd))
+            return confirmed_node_exit(code, _read_json(Path(evidence) / "node.json"))
     except OSError:
         return 127
 
@@ -410,7 +414,7 @@ def _confirmed_probe_session(session: dict | None) -> bool:
     """Attribution needs normal, matching exits and the export's red observations must agree."""
     return bool(session and session["final"] and session["exit"] in (0, 1)
                 and type(session.get("runner_exit")) is int and session["runner_exit"] == session["exit"]
-                and bool(candidates(session)) == (session["exit"] == 1))
+                and bool(candidates(session)) == (session["exit"] == 1) and _parent_calls(session) is not None)
 
 
 def check_ids(ids, directory: Path, *, read_source, run=run_pytest) -> dict[str, str]:
@@ -430,7 +434,8 @@ def check_ids(ids, directory: Path, *, read_source, run=run_pytest) -> dict[str,
     if args:
         session = fresh_pytest_export(directory, lambda: run(args, directory), read_session)
         pending = [nodeid for nodeid in ids if nodeid not in result]
-        result.update(outcomes(session, pending) if _confirmed_probe_session(session) else dict.fromkeys(pending, "unknown"))
+        result.update(outcomes(session, pending, whole=True) if _confirmed_probe_session(session)
+                      else dict.fromkeys(pending, "unknown"))
     return result
 
 
@@ -620,11 +625,11 @@ def size_session(directory: Path, *, base: str, mode: str = "block", cwd: Path |
         env={"OURO_SIZE_RATCHET_BASE_REF": base, "OURO_BOOK_GROWTH_MODE": mode}), read_session)
 
 
-def size_status(session: dict | None, ids) -> dict[str, str]:
+def size_status(session: dict | None, ids, *, whole: bool = False) -> dict[str, str]:
     """`outcomes` of size ids in one size session; every one unknown when it did not run to its end."""
     ended = (session and session["final"] and session["exit"] in (0, 1)
              and session.get("runner_exit", session["exit"]) == session["exit"])
-    found = outcomes(session, [nodeid.removeprefix(SIZE_PREFIX) for nodeid in ids]) if ended else {}
+    found = outcomes(session, [nodeid.removeprefix(SIZE_PREFIX) for nodeid in ids], whole=whole) if ended else {}
     return {nodeid: found.get(nodeid.removeprefix(SIZE_PREFIX), "unknown") for nodeid in ids}
 
 
@@ -872,7 +877,7 @@ def classify(evidence: Path, *, run=run_pytest, node=run_node_lane, lint=None, s
     outcomes_by_lane = selection["outcomes"] if isinstance(selection.get("outcomes"), dict) else {}
     inventories = selection["inventory"] if isinstance(selection.get("inventory"), dict) else {}
     found = {}  # id -> (pass, why)
-    original_phases, shared = {}, set()
+    original_phases, confirmed_phases, shared = {}, {}, set()
     calls = record["selection"]["calls"] = {}  # a zero here is a confirmed empty pass
     for label in ("parallel", "serial"):
         outcome = outcomes_by_lane.get(label)
@@ -882,8 +887,11 @@ def classify(evidence: Path, *, run=run_pytest, node=run_node_lane, lint=None, s
         session = read_session(evidence / label, session_id=inventory.get("session"))
         red = _failure_phases(session)
         shared |= _shared(session)
+        confirmed = outcome == "failure" and session["exit"] == 1 and _parent_calls(session) is not None
         for nodeid, phases in red.items():
             original_phases.setdefault(nodeid, set()).update(phases)
+            if confirmed:
+                confirmed_phases.setdefault(nodeid, set()).update(phases)
             found.setdefault(nodeid, (label, ", ".join(phases.values())))
         expected, executed = inventory.get("expected", []), inventory.get("executed", [])
         if all(isinstance(ids, list) and all(isinstance(item, str) for item in ids) for ids in (expected, executed)):
@@ -933,23 +941,20 @@ def classify(evidence: Path, *, run=run_pytest, node=run_node_lane, lint=None, s
     status = {}
     if ids:
         directory = evidence / "retry"
-        code = run(ids, directory)
-        session = read_session(directory)
-        observed = retry_phases = _failure_phases(session)
-        if code == session["exit"] == _USAGE_ERROR and not session["rows"]:
+        session = fresh_pytest_export(directory, lambda: run(ids, directory), read_session)
+        observed = retry_phases = _failure_phases(session) if session else {}
+        if session and session["runner_exit"] == session["exit"] == _USAGE_ERROR and not session["rows"]:
             # One id pytest cannot find (a redacted parameter) refuses the whole session.
             args, absent = container_args(ids, read_source)
             status.update(dict.fromkeys(absent, "absent"))
             if args:
                 directory = directory / "nodes"
-                code = run(args, directory)
-                session = read_session(directory)
-                retry_phases = _failure_phases(session)
+                session = fresh_pytest_export(directory, lambda: run(args, directory), read_session)
+                retry_phases = _failure_phases(session) if session else {}
                 for nodeid, phases in retry_phases.items():
                     observed.setdefault(nodeid, {}).update(phases)
         if pending := [nodeid for nodeid in ids if nodeid not in status]:
-            if (session["final"] and session["exit"] == code and code in (0, 1)
-                    and _parent_calls(session) is not None and bool(retry_phases) == (code == 1)):
+            if _confirmed_probe_session(session):
                 shared |= _shared(session)
                 for nodeid, answer in outcomes(session, pending).items():
                     if nodeid in shared and answer in ("failed", "passed"):
@@ -958,9 +963,11 @@ def classify(evidence: Path, *, run=run_pytest, node=run_node_lane, lint=None, s
                         found[nodeid], answer = (label, why + "; its public id names several tests"), "unknown"
                     # An aggregate red can be a different test, a different phase, or a collector
                     # that prevented the original test from running. None confirms an exact repeat.
-                    status[nodeid] = ("unknown" if answer == "failed"
-                                      and not original_phases[nodeid].intersection(retry_phases.get(nodeid, ()))
-                                      else answer)
+                    if answer == "failed":
+                        repeated = original_phases[nodeid].intersection(retry_phases.get(nodeid, ()))
+                        answer = ("unknown" if not repeated else "first confirmed on retry"
+                                  if repeated.isdisjoint(confirmed_phases.get(nodeid, ())) else "failed")
+                    status[nodeid] = answer
             else:
                 record["complete"] = False
                 record["problems"].append("the retry has no complete test reports and matching terminal exit")
@@ -1082,14 +1089,14 @@ class Prober:
         try:
             answers = lint_answers(tree, linted, self.lint, omitted=PROTECTED if reason and state != "absent" else "")
             session = self.size(tree, self.evidence / "probes" / f"{label}-size", modules) if modules else None
-            found = size_status(session if _confirmed_probe_session(session) else None, sized)
+            found = size_status(session if _confirmed_probe_session(session) else None, sized, whole=True)
             if tests:
                 found.update(check_ids(tests, self.evidence / "probes" / label, read_source=tree_source(sha),
                                        run=lambda args, directory: self.run(args, directory, cwd=tree)))
             answers.update({nodeid: {"failed": "fail", "passed": "pass", "absent": "pass"}.get(value, "error")
                             for nodeid, value in found.items()})
             if node:
-                answers[NODE_LANE] = {0: "pass", 1: "fail"}.get(self.node(tree), "error")
+                answers[NODE_LANE] = {0: "pass", 1: "fail"}.get(self.node(tree), ("error", "its runner left no confirmed Node test result"))
             answers.update({nodeid: ("error", why) for nodeid, why in excluded.items()})
             record["answers"] = {nodeid: answer[0] if isinstance(answer, tuple) else answer
                                  for nodeid, answer in answers.items()}

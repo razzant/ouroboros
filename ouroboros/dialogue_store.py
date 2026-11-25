@@ -898,11 +898,15 @@ def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str,
         return False
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
-            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=json_remove("
-            "json_patch(dispatch_input, ?), '$.text', '$.message') "
+            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=json_patch("
+            "json_object('dispatcher', json_extract(dispatch_input, '$.dispatcher'), "
+            "'process', json_extract(dispatch_input, '$.process')), "
+            "json_object('refused', json_extract(dispatch_input, '$.refused'), "
+            "'delivery', coalesce(nullif(?, ''), json_extract(dispatch_input, '$.delivery')), "
+            "'claim', json_extract(dispatch_input, '$.claim'))) "
             "WHERE stream='chat' AND client_message_id=? AND chat_id IS ? AND direction='in' AND dispatch='dispatched' "
             "AND (?='' OR json_extract(dispatch_input, '$.claim')=?)",
-            (json.dumps({"delivery": delivery} if delivery else {}), client_message_id, chat_id, claim, claim))
+            (delivery, client_message_id, chat_id, claim, claim))
         return cursor.rowcount == 1
 
 

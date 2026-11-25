@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const page = (messages, cursor = 'recent', next = null) => ({
-    messages, page_cursor: cursor, next_cursor: next, has_more: next !== null,
+    profile_scope: PREVIEW_SCOPE, messages, page_cursor: cursor, next_cursor: next, has_more: next !== null,
     window: { complete: next === null, truncated_by: next ? ['page'] : [] },
 });
 const progress = index => ({

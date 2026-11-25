@@ -1,7 +1,54 @@
 // Where a task-keyed chat row belongs, read from its declared facts the same way live
 // and on replay (DESIGN "Unread"). A row's task_id names a task; by itself
 // it says neither who speaks, nor whether the row stands alone, nor whether it ends that task.
-import { isNonTerminalMediaHistoryRow, positiveTaskTerminalFact } from './chat_activity.js';
+import { cardRowSummary as summarizeCardRow, isNonTerminalMediaHistoryRow, positiveTaskTerminalFact } from './chat_activity.js';
+import { normalizeLogTs } from './log_events.js';
+import { detachAnchoredCardRow, itemMatchesExactAnchor, mergeHistoricalTimelineItem, sortBySource } from './chat_history_replay.js';
+import { updateLiveTimelineItem } from './chat_render_batch.js';
+
+const taskKey = value => String(value || '').trim();
+// Host placement: custody warns; settled reviews show results.
+const CARD_ROW_PHASES = new Map([['timeline', 'warn'], ['reviews', 'result']]);
+
+export function placedCardRow(msg) {
+    const placement = taskKey(msg?.card_row);
+    const phase = CARD_ROW_PHASES.get(placement);
+    const taskId = taskKey(msg?.task_id);
+    return phase && taskId ? { placement, phase, taskId } : null;
+}
+
+// A work's own saved line (a root's or a child's) is quoted by its own address, never its card's.
+export const lineReplyFields = (msg) => (msg?.row_address && !msg.lifecycle
+    && msg.role !== 'system' && msg.system_type !== 'subagent_terminal_notice'
+    ? { replyAddress: msg.row_address, replyRole: 'assistant' } : {});
+
+export function cardRowSummary(msg, phase, rawTs = '') {
+    const system = msg?.role === 'system' && msg?.narration !== true
+        && !msg?.lifecycle_virtual && !msg?.origin_projected;
+    return { ...summarizeCardRow(msg, phase, rawTs),
+        replyAddress: system ? msg.row_address || '' : '',
+        replyRole: system ? 'system' : (msg?.role && msg.role !== 'system' ? String(msg.role) : 'unauthored') };
+}
+
+export function mergePlacedCardRow(record, msg, { phase }, rawTs, { anchor = null, anchoredRecords = null } = {}) {
+    const summary = cardRowSummary(msg, phase, rawTs);
+    const ts = normalizeLogTs(rawTs);
+    // Replay keeps source/order/page identity.
+    if (msg.history_id) return mergeHistoricalTimelineItem(record, summary, msg, ts, { anchor, anchoredRecords });
+    const existing = anchor ? record.items.find((it) => it.dedupeKey === summary.dedupeKey) : null;
+    const stale = existing && Number.isSafeInteger(existing.cardRowRevision)
+        && (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision <= existing.cardRowRevision);
+    const detached = Boolean(existing && !stale
+        && (!summary.replyAddress || summary.replyAddress !== existing.replyAddress)
+        && itemMatchesExactAnchor(existing, anchor)
+        && detachAnchoredCardRow(existing, summary.dedupeKey));
+    if (detached) anchoredRecords?.add(record);
+    const { timelineUpdate } = updateLiveTimelineItem(record, summary, {
+        ts, rawTs, syntheticKey: summary.dedupeKey, headline: summary.headline, inPlaceByKey: true,
+    });
+    if (detached) sortBySource(record);
+    return !['none', 'duplicate-skip'].includes(timelineUpdate);
+}
 
 // project_dialogue.ORIGIN_ADDRESSED_NOTICE_TYPES: a routing refusal names the task it
 // refused, never its speaker; it stays the issuing chat's own row.

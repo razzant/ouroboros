@@ -23,6 +23,7 @@ from ouroboros.gateway.history_contracts import ChatSearchResponse
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.projects_registry import bind_task_to_project, create_project
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 
 def _ts(index):
@@ -504,7 +505,7 @@ def test_the_cursor_binds_its_room_query_view_and_frozen_end(tmp_path, monkeypat
     assert (code, body["reason_code"]) == (409, "search_view_changed"), "a binding may move rows out of the room"
 
 
-def test_the_import_frontier_is_older_history_not_yet_searched_never_no_match(tmp_path):
+def test_the_import_frontier_is_older_history_not_yet_searched_never_no_match(tmp_path, healthy_main):
     from ouroboros import dialogue_import
 
     dialogue_test.seed(tmp_path, archives={"chat_20261013T110000.jsonl": [

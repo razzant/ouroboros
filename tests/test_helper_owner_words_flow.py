@@ -29,6 +29,7 @@ from ouroboros.loop_round_limits import _drain_incoming_messages
 from ouroboros.memory_view import _owner_words_block
 from ouroboros.owner_mailbox import drain_owner_entries, write_owner_message
 from ouroboros.owner_relay import held_owner_messages, owner_quote, write_relay
+from ouroboros.subagent_work_order import DECLARED_WORDS_FACT
 from ouroboros.task_results import load_task_result
 from ouroboros.tools import control
 from ouroboros.tools.control_scheduling import _schedule_task
@@ -84,9 +85,9 @@ def _child(tmp_path, payload):
     return ctx
 
 
-def _late_row(tmp_path, text=LATEST, client_message_id="msg-2", ts="2026-10-04T06:00:00+00:00"):
+def _late_row(tmp_path, text=LATEST, client_message_id="msg-2", ts="2026-10-04T06:00:00+00:00", chat_id=1):
     """A later message of my human: its chat row saved, its delivery in the root's mailbox; its address."""
-    row = {"chat_id": 1, "direction": "in", "ts": ts, "text": text, "client_message_id": client_message_id}
+    row = {"chat_id": chat_id, "direction": "in", "ts": ts, "text": text, "client_message_id": client_message_id}
     dialogue_store.append(tmp_path, "chat", row)
     write_owner_message(tmp_path, text, "root", msg_id=f"mail-{client_message_id}", client_message_id=client_message_id)
     return row, format_address(row_address(row))
@@ -256,6 +257,195 @@ def test_a_parent_writes_one_entry_to_each_member_born_without_the_row_and_raise
     messages, controls = _drain(sibling, [{"role": "user", "content": sibling_payload["text"]}])
     assert controls["owner_carried_addressed"] == [address] and len(messages) == 2
     assert str(messages[1]["content"]) == f"{_carried_line(row, address)}\n{LATEST}"
+
+
+REPLIED = "Use the smaller set of regions."
+
+
+def _replied(tmp_path, root, chat=1):
+    """My human's Reply to the root, read by it: it quotes a passage of an answer of Ouroboros and names a file."""
+    from ouroboros.chat_uploads import claim_refs, store_upload
+
+    _path, ref = store_upload(b"regional figures", "regions.txt", data_dir=tmp_path)
+    claim_refs([ref], tmp_path)
+    quoted = {"chat_id": chat, "direction": "out", "ts": "2026-10-04T06:30:00+00:00", "text": "Which regions?"}
+    dialogue_store.append(tmp_path, "chat", quoted)
+    excerpt = {"text": "regions", "start_utf16": 6}
+    reference = {"address": format_address(row_address(quoted)), "chat_id": chat, "role": "assistant",
+                 "author_label": "Ouroboros", "excerpt": excerpt}
+    row = {"chat_id": chat, "direction": "in", "ts": "2026-10-04T07:00:00+00:00", "text": REPLIED,
+           "client_message_id": "reply-1", "attachments": [ref], "reply_to": reference}
+    dialogue_store.append(tmp_path, "chat", row)
+    address = format_address(row_address(row))
+    captured = {"address": reference["address"], "author": "Ouroboros", "role": "assistant", "excerpt": excerpt,
+                "text": quoted["text"]}  # what the door captured of the passage's source before it saved the row
+    write_relay(tmp_path, root.task_id, relay_id=f"work-reply:{address}", note="", chat_id=chat, teller_task_id="",
+                quotes=[owner_quote(tmp_path, {**row, "_owner_reply_target": captured}, address=address)],
+                canonical_root=tmp_path, work_reply=True)
+    _drain(root)
+    assert held_owner_messages(root)[address]["carried"] == {"went_to": "", "work_reply": True}
+    return row, address, ref
+
+
+def test_a_direct_reply_reaches_a_helper_born_after_it_as_the_same_context_as_one_running(tmp_path):
+    """The root has read my human's Reply and has not drained again: a helper it schedules now is born holding the Reply
+    by value in the standing a helper running when it arrived gets by mail (``went to root``): its words, source, time,
+    reference, file and the message it replies to, as context and never an order. No second copy is mailed to it, a
+    helper of its own is born with the same standing, and an ordinary row beside it stays an order for all of them."""
+    from ouroboros.owner_relay import owner_row_identity, task_words_text
+
+    root = _root(tmp_path)
+    _e, _s, early_payload = _schedule(root)
+    early = _child(tmp_path, early_payload)
+    row, address, ref = _replied(tmp_path, root)
+    event, stored, late_payload = _schedule(root, objective="Check one region")
+    late = _child(tmp_path, late_payload)
+    assert not _holds(early_payload["metadata"][ow.FIELD], REPLIED), "born before it: the mail brings it"
+    for handed in (event["origin_metadata"][ow.FIELD], stored[ow.FIELD], late_payload["metadata"][ow.FIELD]):
+        assert [(item["text"], item["carrier"]) for item in handed if item["source"] != ow.REPLY_TARGET] == [
+            (ASKED, "ctx"), (LATER, "ctx"), (REPLIED, "went to root")], "ordinary words stay as they were"
+    field = late_payload["metadata"][ow.FIELD]
+    at = [item["text"] for item in field].index(REPLIED)
+    assert (field[at + 1]["source"], field[at + 1]["text"]) == (ow.REPLY_TARGET, "Which regions?"), "its target stays beside it"
+    assert field[at]["reply_citation"]["excerpt"] == {"text": "regions", "start_utf16": 6}
+    birth = task_words_text(tmp_path, late_payload, stage=True)
+    stamp = f"[{row['ts']} · owner · owner_mailbox of task root · went to root · chat 1 / reply-1]\n{REPLIED}\n"
+    assert birth.count(stamp) == 1 and birth.count(REPLIED) == 1 and birth.count("Which regions?") == 1
+    assert "[Ouroboros: the message my human replied to, not my human's words" in birth
+    assert "Sender-selected passage of" in birth and '"regions"' in birth, "the passage it selected, with its source"
+    assert "regions.txt (text/plain, 16 bytes, not given to this work: " in birth and "read_file(" not in birth, "named, not copied"
+    _drain(root)  # its next drain: the helper running when the Reply came is mailed it, the one born after it never is
+    assert not [item for item in _mail(late) if address in item["msg_id"]]
+    [entry] = [item for item in _mail(early) if address in item["msg_id"]]
+    carried = entry["host_carried"]
+    assert (carried["went_to"], carried["context_only"]) == ("root", True) and not entry.get("work_reply")
+    messages, controls = _drain(early, [{"role": "user", "content": early_payload["text"]}])
+    assert "owner_carried_addressed" not in controls
+    assert [str(item["content"]) for item in messages[1:]][0].startswith(f"{_carried_line(row, address, 'went to root')}\n{REPLIED}\n")
+    seen = {(item["carrier"], item["ref"], item["row_sha256"], item["text"]) for helper in (early, late)
+            for item in ow.work_words(helper)[0] if item["text"] == REPLIED}
+    assert seen == {("went to root", "chat 1 / reply-1", owner_row_identity(row)["row_sha256"], REPLIED)}, "one context"
+    assert all(REPLIED not in str(ow.safety_sources(helper)) for helper in (early, late)), "no permission of theirs"
+    _e, _s, grand_payload = _schedule(late, objective="Check one village")
+    grand = _child(tmp_path, grand_payload)
+    assert [item["carrier"] for item in grand_payload["metadata"][ow.FIELD] if item["text"] == REPLIED] == ["went to root"]
+    _drain(late)
+    _drain(root)
+    assert not [item for item in _mail(grand) if address in item["msg_id"]], "a grandchild is mailed no order from it"
+    ordinary, ordinary_address = _late_row(tmp_path)  # control: an ordinary row stays an order
+    _drain(root)
+    _e, _s, third_payload = _schedule(root, objective="Check a third region")
+    assert [(item["text"], item["carrier"].startswith("went to")) for item in third_payload["metadata"][ow.FIELD]
+            if item["source"] != ow.REPLY_TARGET] == [(ASKED, False), (LATER, False), (REPLIED, True), (LATEST, False)]
+    for helper in (early, late):
+        [entry] = [item for item in _mail(helper) if ordinary_address in item["msg_id"]]
+        assert entry["msg_id"] == f"relay:carry:{ordinary_address}:{helper.task_id}"
+        assert entry["host_carried"]["went_to"] == "" and "context_only" not in entry["host_carried"], "addressed, not passive"
+
+
+@pytest.mark.parametrize("room", [False, True], ids=["main", "project-room"])
+def test_a_direct_reply_is_one_context_row_in_each_first_input_of_a_helper_in_main_and_in_the_room_it_was_said_in(tmp_path, room):
+    """The same Reply, said in Main or in the Project room the root works in, stands once in the first words of a helper
+    born after it, native or an external session's work order, declared or not, as the row the root's tree hears
+    (``went to root``) with its words, file and the message it replies to; the room's own copy of it never stands beside
+    it as an ordinary room message with no addressee, and the ordinary row beside it keeps its standing."""
+    from ouroboros.context_input_selection import owner_row_standing
+    from ouroboros.owner_relay import task_words_text
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.subagent_work_order import compile_external_work_order
+
+    chat = 1
+    if room:
+        chat = int(create_project(tmp_path, "quotas", name="Quotas")["chat_id"])
+        bind_task_to_project(tmp_path, "root", "quotas", chat, origin={"absent": "system"})
+    root = _root(tmp_path)
+    row, address, ref = _replied(tmp_path, root, chat)
+    _late_row(tmp_path, chat_id=chat)
+    _drain(root)
+    _e, _s, payload = _schedule(root, input_sources="declared", objective="Take a position")
+    assert payload["metadata"][DECLARED_WORDS_FACT] is True
+    sources = {}
+    birth = task_words_text(tmp_path, payload, stage=True, source_metadata=sources)
+    facts = ow.governing_words_for_schedule(root, session=True)
+    order = compile_external_work_order({**payload, "metadata": {**payload["metadata"], ow.ROOM_FIELD: facts[ow.ROOM_FIELD]}})
+    assert bool(facts[ow.ROOM_FIELD]) is room, "the room's rows are read where the root works in one"
+    for text in (birth, order):
+        assert text.count(f"· went to root · chat {chat} / reply-1]\n{REPLIED}\n") == 1 and text.count(REPLIED) == 1
+        assert text.count("Which regions?") == 1 and text.count("regions.txt (") == 1 and "room_message" not in text
+        assert text.count("Sender-selected passage of") == 1 and '"regions"' in text
+        assert text.count(LATEST) == 1 and f"· owner_mailbox of task root · chat {chat} / msg-2]\n{LATEST}" in text
+    assert "not given to this work" in order and ("read_file(" in birth) is room, \
+        "its file stays named; a room's own rows are copied at a birth as before, so its copy is"
+    standing = {item["ref"]: owner_row_standing(item) for item in sources["rows"]}
+    assert (standing[f"chat {chat} / reply-1"], standing[f"chat {chat} / msg-2"]) == ("context", "tree")
+
+
+def test_a_helper_that_heard_the_reply_from_its_own_tree_hands_its_helper_the_same_context_as_a_late_born_one(tmp_path):
+    """The root has read my human's Reply and has not drained again. A helper running when it came holds the passive copy
+    its root's tree mailed it (the host's ``from`` and ``went_to`` name the root); the helper it schedules now is born
+    holding that row by value exactly as a late-born helper's helper is (``went to root``, its words, source, time,
+    citation, the message it replies to, files named and never copied), at its first input as at its actual birth, is
+    mailed no second copy by the root's next drain and takes no frame or wake from it. The ordinary words stay orders."""
+    from ouroboros.owner_relay import task_words_text
+
+    root = _root(tmp_path)
+    _e, _s, early_payload = _schedule(root)
+    early = _child(tmp_path, early_payload)
+    row, address, ref = _replied(tmp_path, root)
+    _e, _s, late_payload = _schedule(root, objective="Check one region")
+    late = _child(tmp_path, late_payload)
+    _drain(early, [{"role": "user", "content": early_payload["text"]}])
+    carried = held_owner_messages(early)[address]["carried"]
+    assert (carried["went_to"], carried["from"], carried["context_only"]) == ("root", "root", True), "the real passive copy"
+    _e, _s, from_early = _schedule(early, objective="Check one village")
+    _e, _s, from_late = _schedule(late, objective="Check one lake")
+    handed = from_early["metadata"][ow.FIELD]
+
+    def read(rows):  # the quoted message's own carrier and task name which carrier supplied it: no reader or stamp uses them
+        return [{key: value for key, value in item.items() if not (item["source"] == ow.REPLY_TARGET and key in ("carrier", "task_id"))}
+                for item in rows]
+
+    assert read(handed) == read(from_late["metadata"][ow.FIELD]), "by value, the same as a late-born helper's helper is handed"
+    assert [(item["text"], item["carrier"]) for item in handed if item["source"] != ow.REPLY_TARGET] == [
+        (ASKED, "ctx"), (LATER, "ctx"), (REPLIED, "went to root")], "the ordinary words are untouched"
+    [reply] = [item for item in handed if item["text"] == REPLIED]
+    [target] = [item for item in handed if item["source"] == ow.REPLY_TARGET]
+    assert (reply["source"], reply["ts"], reply["ref"], reply["task_id"]) == ("owner_mailbox", row["ts"], "chat 1 / reply-1", "root")
+    assert reply["reply_citation"]["excerpt"] == {"text": "regions", "start_utf16": 6} and target["text"] == "Which regions?"
+    assert reply["attachments"][0]["sha256"] == ref["sha256"] and reply["attachments"][0]["staged"].startswith("not given to this work")
+    birth = task_words_text(tmp_path, from_early, stage=True)
+    assert birth == task_words_text(tmp_path, from_late, stage=True), "the first prompt of both, as it is actually rendered"
+    stamp = f"[{row['ts']} · owner · owner_mailbox of task root · went to root · chat 1 / reply-1]\n{REPLIED}\n"
+    assert birth.count(stamp) == 1 and birth.count(REPLIED) == 1 and birth.count("Which regions?") == 1
+    assert "Sender-selected passage of" in birth and "regions.txt (" in birth and "read_file(" not in birth
+    kid = _child(tmp_path, from_early)
+    assert not _mail(kid) and REPLIED not in str(ow.safety_sources(kid)), "no frame, no wake, no permission"
+    _drain(root)  # the root's next drain, whenever it comes, adds nothing for a helper born holding the row
+    assert not _mail(kid)
+    messages, controls = _drain(kid, [{"role": "user", "content": from_early["text"]}])
+    assert len(messages) == 1 and "owner_carried_addressed" not in controls
+
+
+def test_another_roots_observer_of_the_reply_hands_its_helper_nothing_of_it(tmp_path):
+    """A different root that was told of the Reply as context (``work_reply.carry_reply_context``) holds it with the
+    answering work's name and no teller of its own tree: the helper it schedules is born without it, by value and at
+    its birth."""
+    from ouroboros.owner_relay import task_words_text
+
+    root = _root(tmp_path)
+    _row, address, _ref = _replied(tmp_path, root)
+    [mailed] = [item for item in _mail(root) if address in item["msg_id"]]
+    quote = owner_quote(tmp_path, mailed["owner_rows"][0], address=address)
+    watcher = _root(tmp_path, metadata={"root_task_id": "other-root"}, owner_said=False)
+    watcher.task_id = "other-root"
+    write_relay(tmp_path, "other-root", relay_id=f"context:{address}", note="", quotes=[quote], chat_id=1, teller_task_id="",
+                canonical_root=tmp_path, host_carried={"went_to": "root", "context_only": True})
+    _drain(watcher)
+    seen = held_owner_messages(watcher)[address]["carried"]
+    assert (seen["went_to"], seen["from"], seen["context_only"]) == ("root", "", True), "it holds the row as context"
+    _e, _s, payload = _schedule(watcher, objective="Watch")
+    assert ow.FIELD not in payload["metadata"] and REPLIED not in str(payload["metadata"])
+    assert REPLIED not in task_words_text(tmp_path, payload, stage=True)
 
 
 def _carried_mail(tmp_path, task_id, row, address, *, went_to=""):

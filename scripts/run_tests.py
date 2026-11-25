@@ -6,7 +6,7 @@
     python scripts/run_tests.py --selected --keep-going ...  the same, but a red lane does not skip the next
     python scripts/run_tests.py --selected --each-commit ...  also what each first-parent commit since --base changed
     python scripts/run_tests.py --node            only the complete Node lane (CI runs it as its own step)
-    python scripts/run_tests.py --evidence-dir DIR  pytest diagnostics in DIR/<phase>, passed by argv
+    python scripts/run_tests.py --evidence-dir DIR  pytest diagnostics in DIR/<phase>, passed by argv; with --node, DIR/node.json
     python scripts/run_tests.py tests/test_x.py  focused run; every argument is forwarded to pytest
     python scripts/run_tests.py --lane-pass parallel|exclusive PATHS ...  one CI pass over explicit test targets
 
@@ -298,6 +298,35 @@ def _node_lane() -> tuple[int, str]:
                                           f"--test-concurrency={admitted.workers}", *files], REPO / WEB_DIR, node), node
 
 
+def _node_only(evidence: pathlib.Path | None) -> int:
+    """`--node`: the Node lane's exit status and, with `--evidence-dir`, its terminal result as `node.json`.
+
+    An exit 1 alone does not say whose it is: a runner that predates the receipt returns it for a lane that never ran, and
+    any launcher that crashes does too. scripts/post_merge_check.py therefore trusts a 0 or 1 only beside this receipt. It is
+    written after the lane and its cleanup ended, only for a Node that exited 0 or 1; one an earlier run left is removed
+    before the lane starts, and a record that cannot be kept ends the run as the launcher's failure: exit 2.
+    """
+    receipt = None if evidence is None else evidence / "node.json"
+    try:
+        if receipt is not None:
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.unlink(missing_ok=True)  # only a result written after this lane ends may stand
+    except OSError as exc:
+        print(f"=== node: {receipt.parent} cannot hold its result: {exc}", file=sys.stderr, flush=True)
+        return 2
+    code, node = _node_lane()
+    code = 2 if code == 1 and not node else code
+    if receipt is not None and node and code in (0, 1):
+        from tests.ci_verdicts import write_json
+
+        try:
+            write_json(receipt, {"exit": code})
+        except OSError as exc:
+            print(f"=== node: its result could not be recorded: {exc}", file=sys.stderr, flush=True)
+            return 2
+    return code
+
+
 def _retain_selected_evidence(root: pathlib.Path) -> None:
     """Park the previous battery's fixed files together before any lane can replace them.
 
@@ -500,7 +529,8 @@ def main(argv: list[str] | None = None, *, caller_dir: pathlib.Path | None = Non
     parser.add_argument("--lane-pass", choices=("parallel", "exclusive"),
                         help="one CI pass over test targets; keeps the gate's -m, process and timeout policy")
     parser.add_argument("--evidence-dir", type=pathlib.Path,
-                        help="write pytest diagnostics under DIR/<phase>; never inherited by nested pytest",
+                        help="write pytest diagnostics under DIR/<phase> (never inherited by nested pytest); with --node, "
+                             "the terminal DIR/node.json",
                         metavar="DIR")
     args, pytest_args = parser.parse_known_args(argv)
     evidence = args.evidence_dir.resolve() if args.evidence_dir is not None else None
@@ -517,8 +547,7 @@ def main(argv: list[str] | None = None, *, caller_dir: pathlib.Path | None = Non
     if args.node:
         if args.selected or pytest_args or args.lane_pass:
             parser.error("--node runs only the Node lane")
-        code, node = _node_lane()
-        return 2 if code == 1 and not node else code
+        return _node_only(evidence if args.evidence_dir is not None else None)
     if args.selected:
         if pytest_args or args.lane_pass:
             parser.error("--selected cannot be combined with --lane-pass or arbitrary pytest arguments")

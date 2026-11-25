@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { createRoomRetirement, roomSocket } from '../modules/room_retire.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, roomKey, walkCard } from './chat_dom_fixture.js';
 
 const ME = 'session-me';
 const TS = '2026-11-04T09:40:00Z';
@@ -43,7 +43,7 @@ function fixture({ detail = null } = {}) {
         const path = String(url);
         if (path.startsWith('/api/tasks/') && detail) return new Promise((resolve) => reads.push(resolve));
         return { ok: true, json: async () => (path.startsWith('/api/chat/history')
-            ? { messages: [], window: { complete: true } }
+            ? { profile_scope: PREVIEW_SCOPE, messages: [], window: { complete: true } }
             : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true }) };
     });
     globalThis.sessionStorage.setItem('ouro_chat_session_id', ME);
@@ -123,7 +123,7 @@ test('a send saved while the room was away is not put in doubt by an earlier dis
 
 test('a saved row of an ended host reaching the room while it is away is a kept doubt that its return shows and the host\'s fact removes', async () => {
     const f = fixture();
-    const kept = () => JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_unconfirmed:7') || '[]');
+    const kept = () => JSON.parse(globalThis.sessionStorage.getItem(roomKey('ouro_chat_unconfirmed', 7)) || '[]');
     const echo = (cmid, extra = {}) => f.socket.fire('chat', { type: 'chat', role: 'user', chat_id: 7, ts: TS, source: 'web',
         content: 'look at the logs', sender_session_id: ME, client_message_id: cmid, ingress_accepted: true, ...extra });
     try {

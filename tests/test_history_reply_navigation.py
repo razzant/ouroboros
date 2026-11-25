@@ -18,6 +18,7 @@ from ouroboros.project_dialogue import build_owner_message_ref
 from ouroboros.projects_registry import bind_task_to_project, create_project
 from ouroboros.store import StoreError
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 from tests.test_history_around import _read, _say, _ts
 
 
@@ -341,7 +342,7 @@ def test_answer_quote_can_reopen_after_its_question_imports(tmp_path):
 
 @pytest.mark.parametrize("gap_first", [True, False], ids=["before_answer", "after_answer"])
 @pytest.mark.parametrize("imported", [False, True], ids=["pending", "unreadable_line"])
-def test_missing_question_only_depends_on_gaps_before_its_answer(tmp_path, gap_first, imported):
+def test_missing_question_only_depends_on_gaps_before_its_answer(tmp_path, gap_first, imported, healthy_main):
     from ouroboros import dialogue_import
 
     answer = {"ts": "2024-04-09T10:14:00+00:00", "chat_id": 1, "task_id": "asker", "direction": "system", "type": "quiz_answer",

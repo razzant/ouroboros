@@ -907,6 +907,9 @@ def test_every_settings_writer_routes_through_the_shared_prologue():
             "into authorship.",
         ("ouroboros/usage_journal.py", "legacy_snapshot"):
             "reads/hashes the settings file for the usage archive; its writes target the archive.",
+        ("ouroboros/provider_connections.py", "record_connection_revisions"):
+            "serializes settings in memory to compare with the already committed document; "
+            "its only write is state/connection_revisions.json, after the owner settings commit.",
         ("ouroboros/query_data_sql.py", "run_sql"):
             "forwards OUROBOROS_SETTINGS_PATH to its child; writes only the temporary SQL request, not settings.",
         ("ouroboros/review_run_isolation.py", "isolate_review_data"):

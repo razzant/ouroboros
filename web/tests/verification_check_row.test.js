@@ -9,7 +9,7 @@ import { noteToolCall, toolEvidenceView } from '../modules/chat_activity.js';
 import { summarizeChatLiveEvent, summarizeLogEvent } from '../modules/log_events.js';
 import { replayedEvidenceTs } from '../modules/chat_render_batch.js';
 import { checkFailureCause, checkFailureView, checkProcessSentence } from '../modules/verification_presentation.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const TS = '2026-10-13T01:00:00Z';
 const TASK = 'check-turn';
@@ -56,7 +56,7 @@ Object.defineProperty(ElementStub.prototype, 'innerHTML', {
 
 function fixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () => String(url).startsWith('/api/chat/history')
-        ? { messages: history, window: { complete: true } } : { active_direct_turns: [] } }));
+        ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } } : { active_direct_turns: [] } }));
     const handlers = new Map();
     let generation = 0;
     const instance = createChatInstance({

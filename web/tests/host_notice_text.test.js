@@ -9,9 +9,9 @@ import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { HOST_NOTICE_PREFIXES, RETIRED_HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText, noticeLine, toolErrorDisplayText } from '../modules/host_notice_text.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
-import { cardRowSummary } from '../modules/chat_activity.js';
+import { cardRowSummary } from '../modules/chat_row_placement.js';
 import { loadSkillReviewDetail, renderSkillReviewDisclosure, summarizeSkillReviewMessage } from '../modules/skill_review_card.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
 
 const STARTUP = '♻️ Restored pending queue from snapshot: 2 tasks.';
 const TS = '2026-10-10T12:00:00Z';
@@ -110,7 +110,7 @@ test('a retired producer\'s old rows still lose only their mark, and nothing wri
 function chatFixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/chat/history')
-            ? { messages: history, window: { complete: true } }
+            ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : { active_direct_turns: [] } }));
     const handlers = new Map();
     let generation = 0;

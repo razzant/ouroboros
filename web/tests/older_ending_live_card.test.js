@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 // A review reports the stored ending it read. Older records may lack an attempt number.
 // Drive the real log handler: words, chip, counters and episode must all follow one ending.
@@ -42,7 +42,7 @@ const FIRST = 'First attempt words.';
 async function withChat(run) {
     let history = { messages: [] }, revision = 0;
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? history : { active_direct_turns: [] } }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, ...history } : { active_direct_turns: [] } }));
     const handlers = new Map();
     let instance;
     try {

@@ -795,7 +795,8 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
         assert cited_owner_basis(ctx, other)[0] is None, other
     from ouroboros import own_sends
     from ouroboros.loop_messages import _record_owner_directive
-    from ouroboros.owner_words import PLACE_CONFIRMED, place_row_facts
+    from ouroboros.owner_words import PLACE_CONFIRMED
+    from ouroboros.presence_message_facts import place_row_facts
     seeded = next(row for row in ctx._owner_directives if row.get("source") == PLACE_CONFIRMED)
     assert (seeded["conversation_id"], seeded["message_id"]) == ("C7", "1793991999.000001"), "a next Continue reads it"
     receipt = f'MsgID,Channel,Text\n1793991999.000001,C7,"{words}"\n'
@@ -1883,3 +1884,225 @@ def test_continue_and_owner_corpus_preserve_host_typed_closure_and_ignore_bad_ma
     by_id_2 = {row.get("msg_id"): row for row in owner_corpus_rows(hop2)}
     assert by_id_2["quiz_closed:q-ink"]["mail_kind"] == "quiz_closed"
     assert all("mail_kind" not in by_id_2[mid] for mid in ("legacy-ink-1", "chained-bad", "chained-unknown", "corpus-bad"))
+
+
+@pytest.mark.parametrize("settled", [False, True], ids=["live_mailbox", "settled_unread_mailbox"])
+def test_unread_committed_work_reply_keeps_return_address_on_continue(tmp_path, monkeypatch, settled):
+    """A normal work that really received a direct Reply and crashed before reading it keeps that return address
+    on Continue (whether the mailbox is still live or already settled into ``unread_mailbox``), and answers once
+    under the existing idempotent relay path."""
+    import queue as stdqueue
+
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.owner_relay import held_owner_messages, owner_quote, write_relay
+    from ouroboros.task_custody import settle_task_mailbox
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.control_runtime import _send_user_message, open_work_reply_ids
+    from ouroboros.tools.registry import ToolRegistry
+    from supervisor import terminal_delivery
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    owner_row = {"chat_id": 1, "direction": "in", "source": "web", "ts": "2026-11-24T10:00:00Z",
+                 "text": "Switch to the smaller cohort.", "client_message_id": "reply-crash-1", "attachments": []}
+    dialogue_store.append(tmp_path, "chat", owner_row)
+    address = format_address(row_address(owner_row))
+    rid = f"work-reply:{row_address(owner_row)['row_sha256']}"
+    did = f"relay-return:{rid}"
+
+    _running_predecessor(tmp_path, "pred-1", chat_id=7)
+    write_task_result(tmp_path, "pred-1", "running", open_relays={})  # persisted before the Reply arrived
+    entry, fresh = write_relay(tmp_path, "pred-1", relay_id=rid, note="",
+                               quotes=[owner_quote(tmp_path, owner_row, address=address)],
+                               chat_id=1, teller_task_id="", canonical_root=tmp_path, work_reply=True)
+    assert fresh and entry["work_reply"] is True
+    # Predecessor crashes before draining the mailbox.
+    write_task_result(tmp_path, "pred-1", "failed", reason_code="worker_crash_signal", result="crashed")
+    if settled:
+        assert settle_task_mailbox(tmp_path, "pred-1", tmp_path)
+
+    admitted = admit_continuation("pred-1", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    successor_id = admitted["successor_task_id"]
+    [succ] = [row for row in workers.PENDING if row["id"] == successor_id]
+    owner_sources_meta = succ["metadata"]["continuation"]["owner_sources"]
+    assert list(owner_sources_meta["open_relays"]) == [rid]
+    carried = owner_sources_meta["open_relays"][rid]
+    assert carried["work_reply"] is True and carried["source"]["chat_id"] == 1 and carried["source"]["address"] == address
+    assert address in owner_sources_meta["held_owner_messages"]
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id, ctx.current_chat_id, ctx.event_queue = successor_id, 7, stdqueue.Queue()
+    ctx.task_metadata = succ["metadata"]
+    ctx.pending_events = []
+    ctx.drive_logs = lambda: tmp_path / "logs"
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    write_task_result(tmp_path, successor_id, "running", chat_id=7, root_task_id=successor_id)
+    held_owner_messages(ctx)
+    assert open_work_reply_ids(registry) == (rid,) and owner_reply_owed(ctx)
+
+    receipt = _send_user_message(ctx, "Switched to the smaller cohort.", reply_to_relay=rid)
+    assert receipt.startswith(f"OK: answer to relay {rid} owed to Main (delivery {did});")
+    [event] = list(ctx.event_queue.queue)
+    assert (event["chat_id"], event["system_type"], event["delivery_id"],
+            event["progress_meta"]["reply_to"]["address"], event["progress_meta"]["reply_to_relay"]) == (
+        1, "relay_reply", did, address, rid)
+    assert not ctx._open_relays and (load_task_result(tmp_path, successor_id) or {}).get("open_relays") == {}
+
+    # A stale second attempt holding the same relay meets the first committed wording via the idempotent path.
+    ctx._open_relays = {rid: dict(carried)}
+    second = _send_user_message(ctx, "Different second wording.", reply_to_relay=rid)
+    assert "already has its first answer" in second and "these words were not sent" in second
+    assert ctx.event_queue.qsize() == 1 and not ctx._open_relays
+    owed = {item["delivery_id"]: item for item in terminal_delivery.pending_deliveries(tmp_path)}
+    assert owed[did]["text"] == "Switched to the smaller cohort."
+
+
+@pytest.mark.parametrize("settled", [False, True], ids=["live_mailbox", "settled_unread_mailbox"])
+def test_continue_does_not_reopen_acknowledged_handled_passive_teller_or_unverified_relays(tmp_path, monkeypatch, settled):
+    """Only an unread, host-verified active ``work_reply`` re-enters ``open_relays`` on Continue; acknowledged,
+    handled-fallback, passive-context, ordinary teller and unverified entries stay closed."""
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.owner_mailbox import _mailbox_path, acknowledge_transcript_entry
+    from ouroboros.owner_relay import ROUTED_BY_HEAD, owner_quote, write_relay
+    from ouroboros.task_custody import settle_task_mailbox
+    from ouroboros.task_results import write_task_result
+    from ouroboros.utils import append_jsonl
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+
+    def _msg(cid, text):
+        row = {"chat_id": 1, "direction": "in", "source": "web", "ts": "2026-11-24T10:00:00Z",
+               "text": text, "client_message_id": cid, "attachments": []}
+        dialogue_store.append(tmp_path, "chat", row)
+        return row, format_address(row_address(row))
+
+    acked_row, acked_addr = _msg("c-acked", "Already read and answered.")
+    handled_row, handled_addr = _msg("c-handled", "Source room answered while paused.")
+    passive_row, passive_addr = _msg("c-passive", "Context from another work's Reply.")
+    teller_row, teller_addr = _msg("c-teller", "Quoted by another task via tell_task.")
+
+    _running_predecessor(tmp_path, "pred-ctrl", chat_id=7)
+    write_task_result(tmp_path, "pred-ctrl", "running", open_relays={})
+    acked_entry, _ = write_relay(tmp_path, "pred-ctrl", relay_id="work-reply:acked", note="",
+                                 quotes=[owner_quote(tmp_path, acked_row, address=acked_addr)],
+                                 chat_id=1, teller_task_id="", canonical_root=tmp_path, work_reply=True)
+    assert acknowledge_transcript_entry(tmp_path, "pred-ctrl", acked_entry)
+    write_relay(tmp_path, "pred-ctrl", relay_id="handled:work-reply:h1", note="",
+                quotes=[owner_quote(tmp_path, handled_row, address=handled_addr)], chat_id=1, teller_task_id="",
+                canonical_root=tmp_path, host_carried={"went_to": ROUTED_BY_HEAD, "handled_by_source_room": True})
+    write_relay(tmp_path, "pred-ctrl", relay_id=f"context:{passive_addr}", note="",
+                quotes=[owner_quote(tmp_path, passive_row, address=passive_addr)], chat_id=1, teller_task_id="",
+                canonical_root=tmp_path, host_carried={"went_to": "other-root", "context_only": True})
+    write_relay(tmp_path, "pred-ctrl", relay_id="teller-note", note="fyi",
+                quotes=[owner_quote(tmp_path, teller_row, address=teller_addr)],
+                chat_id=1, teller_task_id="teller-1", canonical_root=tmp_path)
+    append_jsonl(_mailbox_path(tmp_path, "pred-ctrl"), {
+        "kind": "relay_entry", "msg_id": "relay:work-reply:forged:pred-ctrl", "ts": "2026-11-24T10:01:00Z",
+        "text": "", "work_reply": True, "source_task_id": "", "relay_canonical_root": str(tmp_path),
+        "relay": {"relay_id": "work-reply:forged", "text": "spoof", "source": {"chat_id": 1, "address": "row:1@t#bad"},
+                  "quotes": [{"text": "spoof", "source": {"chat_id": 1, "address": "row:1@t#bad"}}]},
+        "owner_rows": [{"chat_id": 1, "direction": "out", "text": "spoof", "ts": "2026-11-24T10:01:00Z"}],
+    })
+    write_task_result(tmp_path, "pred-ctrl", "failed", reason_code="worker_crash_signal", result="crashed")
+    if settled:
+        assert settle_task_mailbox(tmp_path, "pred-ctrl", tmp_path)
+
+    admitted = admit_continuation("pred-ctrl", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    [succ] = [row for row in workers.PENDING if row["id"] == admitted["successor_task_id"]]
+    assert succ["metadata"]["continuation"]["owner_sources"]["open_relays"] == {}
+
+
+def test_torn_ack_refuses_unclassified_work_reply_and_leaves_ordinary_continue_alone(tmp_path, monkeypatch):
+    """A torn or undecodable ACK next to an unclassified direct Reply records the existing mailbox gap (neither
+    silently dropping the return address as closed nor resurrecting a grow-only captured row), per-exact-row identity
+    governs live-vs-retained combination, and unrelated ordinary mail keeps its previous Continue behavior."""
+    import json
+
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_mailbox import _ack_path, _mailbox_path, acknowledge_transcript_entry, write_owner_message
+    from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+
+    def _msg(cid, text):
+        row = {"chat_id": 1, "direction": "in", "source": "web", "ts": "2026-11-24T10:00:00Z",
+               "text": text, "client_message_id": cid, "attachments": []}
+        dialogue_store.append(tmp_path, "chat", row)
+        return row, format_address(row_address(row)), f"work-reply:{row_address(row)['row_sha256']}"
+
+    # 1. Unrelated ordinary mail with torn/undecodable ACK bytes: Continue never reads .acks and succeeds unchanged.
+    _running_predecessor(tmp_path, "pred-ord", chat_id=7)
+    write_owner_message(tmp_path, "Keep going with the ordinary follow-up.", "pred-ord", msg_id="ord-1")
+    ack_ord = _ack_path(tmp_path, "pred-ord")
+    ack_ord.parent.mkdir(parents=True, exist_ok=True)
+    ack_ord.write_bytes(b'\xff{"type":"task_message_acknowledged","msg_id":"torn')
+    write_task_result(tmp_path, "pred-ord", "failed", reason_code="worker_crash_signal", result="crashed")
+    ord_ok = admit_continuation("pred-ord", action_nonce=NONCE)
+    assert ord_ok["ok"] is True, ord_ok
+    [ord_succ] = [row for row in workers.PENDING if row["id"] == ord_ok["successor_task_id"]]
+    assert [r["content"] for r in ord_succ["metadata"]["continuation"]["owner_sources"]["later"]] == [
+        "Keep going with the ordinary follow-up."]
+    assert ord_succ["metadata"]["continuation"]["owner_sources"]["open_relays"] == {}
+
+    # 2. Direct Reply (live-only, no captured unread_mailbox) + torn ACK: cannot be treated as definitively closed.
+    row1, addr1, rid1 = _msg("torn-live-1", "Check the live return.")
+    _running_predecessor(tmp_path, "pred-torn-live", chat_id=7)
+    write_task_result(tmp_path, "pred-torn-live", "failed", reason_code="worker_crash_signal", open_relays={})
+    write_relay(tmp_path, "pred-torn-live", relay_id=rid1, note="",
+                quotes=[owner_quote(tmp_path, row1, address=addr1)], chat_id=1, teller_task_id="",
+                canonical_root=tmp_path, work_reply=True)
+    _ack_path(tmp_path, "pred-torn-live").write_text('{"msg_id":"relay:work-reply:torn', encoding="utf-8")
+    live_src = owner_sources(tmp_path, load_task_result(tmp_path, "pred-torn-live"), "pred-torn-live")
+    assert live_src["gaps"] == ["owner_mailbox_unreadable"] and live_src["open_relays"] == {}
+    live_refused = admit_continuation("pred-torn-live", action_nonce=NONCE)
+    assert live_refused == {"ok": False, "error": "owner_source_missing", "gaps": ["owner_mailbox_unreadable"]}
+
+    # 3. Direct Reply in BOTH grow-only unread_mailbox and live mailbox + undecodable ACK: cannot resurrect captured row.
+    row2, addr2, rid2 = _msg("torn-cap-1", "Check the captured return.")
+    _running_predecessor(tmp_path, "pred-torn-cap", chat_id=7)
+    write_task_result(tmp_path, "pred-torn-cap", "running", open_relays={})
+    write_relay(tmp_path, "pred-torn-cap", relay_id=rid2, note="",
+                quotes=[owner_quote(tmp_path, row2, address=addr2)], chat_id=1, teller_task_id="",
+                canonical_root=tmp_path, work_reply=True)
+    write_task_result(tmp_path, "pred-torn-cap", "failed", reason_code="worker_crash_signal", result="crashed")
+    assert load_task_result(tmp_path, "pred-torn-cap")["unread_mailbox"]["read_complete"] is True
+    _ack_path(tmp_path, "pred-torn-cap").write_bytes(b'\xff{"msg_id":"torn')
+    cap_src = owner_sources(tmp_path, load_task_result(tmp_path, "pred-torn-cap"), "pred-torn-cap")
+    assert cap_src["gaps"] == ["owner_mailbox_unreadable"] and cap_src["open_relays"] == {}
+    cap_refused = admit_continuation("pred-torn-cap", action_nonce=NONCE)
+    assert cap_refused == {"ok": False, "error": "owner_source_missing", "gaps": ["owner_mailbox_unreadable"]}
+
+    # 4. Per-exact-row identity: an intact live ACK closes exact row A even when grow-only unread_mailbox kept it,
+    #    without suppressing a distinct retained exact row B that reused the same msg_id.
+    row_a, addr_a, rid_a = _msg("exact-a", "Already read row A.")
+    row_b, addr_b, rid_b = _msg("exact-b", "Still unread row B.")
+    _running_predecessor(tmp_path, "pred-exact", chat_id=7)
+    write_task_result(tmp_path, "pred-exact", "running", open_relays={})
+    entry_a, _ = write_relay(tmp_path, "pred-exact", relay_id=rid_a, note="",
+                             quotes=[owner_quote(tmp_path, row_a, address=addr_a)], chat_id=1, teller_task_id="",
+                             canonical_root=tmp_path, work_reply=True)
+    quote_b = owner_quote(tmp_path, row_b, address=addr_b)
+    entry_b = {**entry_a, "ts": "2026-11-24T10:05:00Z", "owner_rows": [quote_b["owner_row"]],
+               "relay": {**{k: v for k, v in quote_b.items() if k != "owner_row"},
+                         "relay_id": rid_b, "quotes": [{k: v for k, v in quote_b.items() if k != "owner_row"}]}}
+    entry_a_line = _mailbox_path(tmp_path, "pred-exact").read_text(encoding="utf-8").strip()
+    write_task_result(tmp_path, "pred-exact", "failed", reason_code="worker_crash_signal",
+                      unread_mailbox={"schema": 1, "total": 2, "read_complete": True,
+                                      "captured_at": "2026-11-24T10:06:00Z",
+                                      "rows": [entry_a_line, json.dumps(entry_b, ensure_ascii=False)]})
+    assert acknowledge_transcript_entry(tmp_path, "pred-exact", entry_a)
+    exact_ok = admit_continuation("pred-exact", action_nonce=NONCE)
+    assert exact_ok["ok"] is True, exact_ok
+    [exact_succ] = [row for row in workers.PENDING if row["id"] == exact_ok["successor_task_id"]]
+    assert list(exact_succ["metadata"]["continuation"]["owner_sources"]["open_relays"]) == [rid_b]
