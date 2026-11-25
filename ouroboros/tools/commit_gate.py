@@ -9,7 +9,7 @@ import hashlib
 import json
 import logging
 import pathlib
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED, review_max_cycles
 from ouroboros.review_owner_custody import stamp_paid_review_owner
@@ -271,44 +271,184 @@ def commit_review_contract_material(own: Sequence[str] = (), *, packet: Optional
                                          retrieving=retrieving)}
 
 
+_CODE_REVIEW_TOOLS = frozenset({"review_change", "commit_reviewed", "vcs_commit_reviewed"})
+
+
+def _seat_model(row: Dict[str, Any]) -> str:
+    observed = str(row.get("observed_model") or "").strip()
+    if observed and observed.lower() != "unknown":
+        return observed
+    eff = row.get("effective") if isinstance(row.get("effective"), dict) else {}
+    req = row.get("requested") if isinstance(row.get("requested"), dict) else {}
+    for candidate in (
+        row.get("model"),
+        eff.get("model"),
+        row.get("model_id"),
+        req.get("model"),
+        row.get("request_model"),
+    ):
+        val = str(candidate or "").strip()
+        if val and val.lower() != "unknown":
+            return val
+    return "reviewer"
+
+
+def build_seat_summary(rows: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """Compact per-seat verdict & critical-item attribution for handbacks."""
+    summary: list[Dict[str, Any]] = []
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        raw_findings = [f for f in (row.get("findings") or []) if isinstance(f, dict)]
+        if not raw_findings and isinstance(row.get("answers"), dict):
+            for ans in row["answers"].values():
+                if isinstance(ans, dict):
+                    raw_findings.extend(f for f in (ans.get("findings") or []) if isinstance(f, dict))
+        items = [
+            it
+            for it in (row.get("parsed_items") or row.get("items") or [])
+            if isinstance(it, dict)
+        ]
+        if not raw_findings and items:
+            raw_findings = items
+        active_findings = [
+            f for f in raw_findings
+            if not f.get("verdict") or str(f.get("verdict") or "").strip().upper() == "FAIL"
+        ]
+        crit_items = [
+            str(f.get("item") or "?")
+            for f in active_findings
+            if str(f.get("severity") or "").strip().lower() == "critical"
+        ]
+        adv_count = sum(
+            1 for f in active_findings if str(f.get("severity") or "").strip().lower() != "critical"
+        )
+        raw_verdict = str(row.get("verdict") or "").strip().upper()
+        if raw_verdict not in {"PASS", "FAIL"}:
+            verdicts: list[str] = []
+            if isinstance(row.get("answers"), dict) and row["answers"]:
+                verdicts = [
+                    str(a.get("verdict") or "").strip().upper()
+                    for a in row["answers"].values()
+                    if isinstance(a, dict)
+                ]
+            elif items:
+                verdicts = [
+                    str(it.get("verdict") or "").strip().upper()
+                    for it in items
+                ]
+            if "FAIL" in verdicts:
+                raw_verdict = "FAIL"
+            elif verdicts and all(v == "PASS" for v in verdicts):
+                raw_verdict = "PASS"
+        fallback_crit = row.get("critical_count") if row.get("critical_count") is not None else row.get("critical")
+        crit_count = len(crit_items) if raw_findings else int(fallback_crit or 0)
+        summary.append({
+            "seat_id": str(row.get("seat_id") or row.get("slot_id") or ""),
+            "model": _seat_model(row),
+            "status": str(row.get("status") or ""),
+            "verdict": raw_verdict or "NONE",
+            "critical": crit_count,
+            "advisory": adv_count,
+            **({"critical_items": crit_items} if crit_items else {}),
+            **({"additional": True} if row.get("additional") else {}),
+        })
+    return summary
+
+
+def format_seat_summary_line(summary: Iterable[Dict[str, Any]]) -> str:
+    parts = []
+    for seat in summary or ():
+        tag = f"{seat.get('model') or '?'}[{seat.get('seat_id') or '?'}]"
+        verdict = seat.get("verdict") or seat.get("status") or "?"
+        crit = seat.get("critical_items") or []
+        parts.append(f"{tag}={verdict}" + (f"({','.join(crit)})" if crit else ""))
+    return "Seats: " + "; ".join(parts) + ". " if parts else ""
+
+
+def _lineage_root_checker(drive_root: pathlib.Path, root_task_id: str):
+    """Return a cached predicate identifying root_task_id and verified Continue predecessors."""
+    from ouroboros.owner_continue import recorded_continuation
+
+    cache = {root_task_id: True}
+
+    def in_lineage(candidate_root: str) -> bool:
+        cid = str(candidate_root or "")
+        if cid in cache:
+            return cache[cid]
+        if not cid:
+            cache[cid] = False
+            return False
+        try:
+            cache[cid] = bool(recorded_continuation(drive_root, cid, root_task_id))
+        except Exception:
+            cache[cid] = False
+        return cache[cid]
+
+    return in_lineage
+
+
 def count_paid_review_cycles(ctx: ToolContext, *, root_task_id: str) -> int:
-    """Paid triad/scope cycles already spent by this root task on this
-    (repo, tool) gate, derived from the existing attempt ledger (P7 — no new
-    counter file). The ceiling counts MONEY (machine-5): every attempt that
-    physically dispatched a wave (``paid`` recorded at dispatch) counts,
-    whatever its terminal — a dispatched-then-crashed or quorum-failed wave
-    still spent reviewer money. Only UNDISPATCHED attempts (free refusals,
-    replays, preflight/assembly failures — all ``paid=False``) stay outside
-    the count; that is the whole "infra retries freely" carve-out."""
+    """Paid review cycles spent on this (Continue-lineage, repo) or gate pool.
+
+    Code reviews (``commit_reviewed``, ``vcs_commit_reviewed``, ``review_change`` on
+    code subjects) share ONE allowance per ``(Continue-lineage of root tasks, repo_key)``;
+    ``review_result`` and ``review_skill`` keep separate per-root pools. Independent
+    non-Continue tasks always start fresh.
+    """
     root = str(root_task_id or "")
     if not root:
         return 0
     from ouroboros.review_state import load_state, make_repo_key
 
     tool = _current_review_tool_name(ctx)
-    if tool in ("review_change", "review_result", "review_skill"):  # review_change waves: canonical custody
-        from ouroboros.tools.review_change_custody import paid_repo_key, review_state_root
+    if tool in ("review_result", "review_skill"):
+        from ouroboros.tools.review_change_custody import review_state_root
 
         state = load_state(review_state_root(ctx))
+        return sum(
+            1 for item in state.filter_attempts(tool_name=tool)
+            if bool(getattr(item, "paid", False)) and str(getattr(item, "root_task_id", "") or "") == root
+        )
+    if tool in _CODE_REVIEW_TOOLS:
+        from ouroboros.review_state_records import _attempt_identity_tuple
+        from ouroboros.tools.review_change_custody import paid_repo_key, review_state_root
+
+        canonical = review_state_root(ctx)
+        local = pathlib.Path(ctx.drive_root).resolve()
         owner = paid_repo_key(ctx, ctx.repo_dir)
-        # Filter unrelated history before filesystem provenance reads; equal
-        # physical keys share one resolution within this observation only.
-        owners = {str(pathlib.Path(ctx.repo_dir).resolve()): owner}
+        owners = {str(pathlib.Path(ctx.repo_dir).resolve()): owner, str(make_repo_key(pathlib.Path(ctx.repo_dir))): owner}
+        in_lineage = _lineage_root_checker(canonical, root)
+        seen_ids: set = set()
         paid = 0
-        for item in state.filter_attempts(tool_name=tool):
-            if not item.paid or item.root_task_id != root:
-                continue
-            if tool in ("review_result", "review_skill"):  # a root's allowance, wherever the material lives
-                paid += 1
-                continue
-            key = item.review_budget_repo_key or owners.get(item.repo_key)
-            if key is None:
-                key = owners[item.repo_key] = paid_repo_key(ctx, item.repo_key)
-            paid += key == owner
+        roots = [canonical] if local == canonical else [canonical, local]
+        for state_root in roots:
+            state = load_state(state_root)
+            for item in state.attempts:
+                if not bool(getattr(item, "paid", False)) or item.tool_name not in _CODE_REVIEW_TOOLS:
+                    continue
+                ident = _attempt_identity_tuple(item)
+                if ident in seen_ids:
+                    continue
+                if not in_lineage(str(getattr(item, "root_task_id", "") or "")):
+                    continue
+                key = str(getattr(item, "review_budget_repo_key", "") or "")
+                if not key:
+                    if not item.repo_key:
+                        key = ""
+                    else:
+                        key = owners.get(item.repo_key)
+                        if key is None:
+                            try:
+                                key = owners[item.repo_key] = paid_repo_key(ctx, item.repo_key)
+                            except (OSError, ValueError):
+                                key = owners[item.repo_key] = str(item.repo_key)
+                if key == owner:
+                    seen_ids.add(ident)
+                    paid += 1
         return paid
-    else:
-        state = load_state(pathlib.Path(ctx.drive_root))
-        attempts = state.filter_attempts(repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)), tool_name=tool)
+    state = load_state(pathlib.Path(ctx.drive_root))
+    attempts = state.filter_attempts(repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)), tool_name=tool)
     return sum(
         1
         for item in attempts
@@ -1005,11 +1145,16 @@ def _return_commit_feedback(ctx: ToolContext, message: str, started: float, befo
     if offers:  # a stopped session seat continues only by the author's explicit choice, in the same wave
         choice += ("A reviewer in continuable_seats stopped with work its engine can continue: the same commit tool with "
                    "review_reference and continue_seats (no author_disposition) continues it over its frozen subject. ")
-    text = ("Review outcome returned before commit" + (": reviewers are still running. " if pending else ". ") + note + choice +
-            "Current files are preserved; no commit, tag or push occurred.\n" + json.dumps({"review_reference": reference,
-            "review_outcome": asdict(row) if row is not None else {}, **({"continuable_seats": offers} if offers else {})},
-            ensure_ascii=False, default=str))
-    return {"status": "reviewed", "message": text, "review_reference": reference,
+    outcome_dict = asdict(row) if row is not None else {}
+    seat_summary = build_seat_summary(outcome_dict.get("triad_raw_results") or [])
+    summary_line = format_seat_summary_line(seat_summary)
+    text = ("Review outcome returned before commit" + (": reviewers are still running. " if pending else ". ")
+            + summary_line + note + choice
+            + "Current files are preserved; no commit, tag or push occurred.\n"
+            + json.dumps({"seat_summary": seat_summary, "review_reference": reference,
+                          "review_outcome": outcome_dict, **({"continuable_seats": offers} if offers else {})},
+                         ensure_ascii=False, default=str))
+    return {"status": "reviewed", "message": text, "seat_summary": seat_summary, "review_reference": reference,
             "pre_fingerprint": before, "post_fingerprint": after}
 
 

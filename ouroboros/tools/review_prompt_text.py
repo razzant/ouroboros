@@ -17,40 +17,12 @@ import re
 CRITICAL_FINDING_CALIBRATION = """\
 ## Critical severity threshold — READ BEFORE MARKING ANY FINDING CRITICAL
 
-Before marking any finding CRITICAL you MUST:
-1. Name the **exact file, symbol, function, test, or config path** in this repo
-   that makes the problem live RIGHT NOW (not hypothetically in the future).
-2. Confirm this artifact actually exists in the repo context you have been given.
-3. If the concern depends on a hypothetical plugin, future integration, custom
-   environment, fixture, or finalizer that does NOT appear in this repo's
-   codebase — mark it **advisory**, not critical. An extension installed through
-   the public extension API is not hypothetical (item 8).
-4. One root cause = one FAIL entry. Do NOT split one problem into multiple FAIL
-   items that all require the same fix.
-5. If a previous CRITICAL finding was concretely fixed and only a broader
-   future-risk variant remains, mark that broader concern **advisory**.
-   Do NOT hold an obligation open by reformulating a fixed concrete issue into
-   a more abstract version.
-6. Pre-existing gaps that exist entirely outside the touched area are advisory
-   unless this diff directly depends on them or introduces a regression.
-7. Narrative or descriptive mismatches are advisory unless they affect a real
-   contract: release/version metadata, actual runtime behavior, safety guidance,
-   or instructions a user/reviewer must rely on to use the changed feature correctly.
-   Examples that should normally stay advisory: README test counts, descriptive
-   "N fixes" summaries, or marketing-style numeric claims.
-8. Name who or what triggers the problem on a supported install — a user flow,
-   a crash or restart, a concurrent writer Ouroboros itself runs, a platform it
-   ships on. A fault that needs someone who already holds the power (the owner
-   or Ouroboros editing, planting or restoring files under its own data root) is
-   **advisory**, and disclosure is a valid fix. Ordinary use of a supported
-   capability — installing an official or OuroborosHub skill through the public
-   extension API, choosing a supported provider or setting — is a supported-install
-   trigger, not such a power: the extension need not ship in this repo. A remedy
-   that adds a check, re-read, proof or refusal states what it costs on the path it
-   sits on at today's history size, or what work it refuses.
+Use ONE consequence-based standard (authoritative definitions live in the checklist below):
+- **critical**: concrete, repo-local, reachable defect evidenced in THIS diff or touched context (bugs/regressions, security/secrets, untested changed behavior, false-green or weakened/deleted/skipped tests, platform breakage, silent breaking removals, or critical whitelist mismatches).
+- **advisory**: test overlap/surplus (name the home module), speculative or pre-existing concerns outside touched paths, hypothetical external-setup gaps, and narrative/prose drift outside the whitelist.
+- One root cause = one FAIL entry; when an earlier critical finding was fixed, resolve it PASS (any broader follow-up concern stays advisory); fixes narrowing/gating capability must name a surviving positive path; state path cost on real history if proposing checks/refusals.
 
-When in doubt: use "advisory". Reserve "critical" for clear, concrete,
-repo-local, reachable defects.
+When in doubt: use "advisory". Reserve "critical" for clear, concrete, repo-local, reachable defects.
 """
 
 
@@ -87,10 +59,7 @@ REVIEW_THOROUGHNESS_BLOCK = """\
 
 
 REVIEW_SEVERITY_THRESHOLDS = """\
-- Bible, security, concrete runtime bugs, and changed safety contracts are critical.
-- Development, version, tool-schema, gateway-contract, and architecture-map violations are critical when the checklist says they are.
-- Narrative/prose mismatches are advisory unless they affect release metadata, runtime behavior, safety guidance, or user/reviewer instructions.
-- If no exact current artifact proves the issue, mark it advisory.
+- Use the consequence-based severity definitions in docs/CHECKLISTS.md: concrete runtime/security/secret bugs, untested changed behavior, false-green or weakened/deleted/skipped tests, platform breakage, silent breaking removals, and critical whitelist items are critical; test overlap/surplus and ungrounded prose mismatches are advisory.
 """
 
 
@@ -122,10 +91,10 @@ _ANTI_THRASHING_RULE_VERDICT = (
 
 
 _CONVERGENCE_RULE_TEXT = (
-    "CONVERGENCE RULE (attempt 3+): Do NOT raise new critical findings on code that "
-    "was not changed between this attempt and the previous attempt. New critical "
-    "findings are allowed only on genuinely new code introduced in this revision. "
-    "Pre-existing issues in unchanged code are advisory at most."
+    "CONVERGENCE RULE: On follow-up rounds, do NOT raise new critical findings on "
+    "unchanged code without concrete new evidence of a regression or defect introduced "
+    "or exposed by this revision (no reformulations or speculative re-scans of unchanged "
+    "code; pre-existing issues unrelated to the revision stay advisory)."
 )
 
 
@@ -194,7 +163,7 @@ def build_review_history_section(
             lines.append(format_prompt_code_block(json.dumps(details, ensure_ascii=False, indent=2, default=str), "json"))
         lines.append("")
 
-    lines.append(build_anti_thrashing_rules_section(convergence_fires=len(history) >= 2))
+    lines.append(build_anti_thrashing_rules_section(convergence_fires=bool(history)))
     return "\n".join(lines)
 
 

@@ -701,13 +701,17 @@ def test_the_ceiling_is_shared_by_every_subject_of_one_root(h: Harness, monkeypa
     assert h.run(subject="base..head", base=base, head=head)["reused"] is True
     assert len(h.wave.calls) == 1
 
-    # Another root keeps its own ceiling, and the gate's spend on that root is not this tool's.
+    # Another root keeps its own ceiling, while commit_reviewed on the same root/repo shares this pool (2.A).
     update_state(h.drive, lambda state: state.record_attempt(CommitAttemptRecord(
-        ts="2026-10-07T00:00:00+00:00", commit_message="gate", task_id="task-rc", root_task_id="task-rc",
+        ts="2026-10-07T00:00:00+00:00", commit_message="gate", task_id="task-other", root_task_id="task-other",
         repo_key=make_repo_key(h.system.resolve()), tool_name="commit_reviewed", status="reviewed", paid=True, attempt=1)))
     _stage(h.system, "body.py", "z = 3\n")
     assert h.run(root="system_repo", subject="index")["reused"] is False
     assert len(h.wave.calls) == 2
+    assert commit_gate.count_paid_review_cycles(
+        SimpleNamespace(drive_root=h.drive, repo_dir=h.system, _current_review_tool_name="commit_reviewed"),
+        root_task_id=h.ctx.task_id,
+    ) == 1
 
 
 # --- The call surface ---------------------------------------------------------------------

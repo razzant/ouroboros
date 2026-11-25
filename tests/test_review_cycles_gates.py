@@ -460,3 +460,91 @@ def test_no_review_outcome_refuses_a_commit_and_an_owner_stop_still_ends_it(cand
         "disposition": "accepted", "rationale": "I read the returned outcome and accept these bytes."})
     assert git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir) != head, landed
     assert git.run_cmd(["git", "show", "HEAD:change.py"], cwd=ctx.repo_dir).strip() == "value = 2"
+
+
+def test_code_review_cycle_cap_unifies_review_change_commit_and_continue_lineage(tmp_path):
+    """2.A: commit_reviewed and review_change share one cap per (Continue-lineage, repo) while
+    independent roots start fresh and result/skill waves stay separate."""
+    from ouroboros.owner_continue import claim_on_predecessor, mark_claim_admitted
+    from ouroboros.review_state import AdvisoryReviewState, make_repo_key, save_state
+    from ouroboros.review_state_records import CommitAttemptRecord
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.commit_gate import count_paid_review_cycles
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rk = make_repo_key(repo)
+    drive = tmp_path / "drive"
+    drive.mkdir()
+
+    # Bind Continue chain: root-1 -> root-2 (root-3 stays independent).
+    write_task_result(
+        drive,
+        "root-1",
+        "cancelled",
+        cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"},
+    )
+    binding = {
+        "verb": "continue", "binding_version": 1, "predecessor_task_id": "root-1",
+        "successor_task_id": "root-2", "action_nonce": "nonce12345",
+        "execution_carry": None, "destination": {"room": "r", "repo": str(repo)},
+    }
+    claim_on_predecessor(drive, "root-1", "nonce12345", binding)
+    mark_claim_admitted(drive, "root-1", "nonce12345")
+    write_task_result(drive, "root-2", "running")
+
+    rows = [
+        CommitAttemptRecord(
+            ts="2026-11-24T00:00:00+00:00", commit_message="c1",
+            task_id="root-1", root_task_id="root-1", repo_key=rk,
+            tool_name="review_change", paid=True, attempt=1, status="reviewed", phase="review",
+        ),
+        CommitAttemptRecord(
+            ts="2026-11-24T00:01:00+00:00", commit_message="c2",
+            task_id="root-2", root_task_id="root-2", repo_key=rk,
+            tool_name="commit_reviewed", paid=True, attempt=1, status="reviewed", phase="review",
+        ),
+        CommitAttemptRecord(
+            ts="2026-11-24T00:02:00+00:00", commit_message="r1",
+            task_id="root-1", root_task_id="root-1", repo_key=rk,
+            tool_name="review_result", paid=True, attempt=1, status="reviewed", phase="review",
+        ),
+        CommitAttemptRecord(
+            ts="2026-11-24T00:03:00+00:00", commit_message="s1",
+            task_id="root-1", root_task_id="root-1", repo_key=rk,
+            tool_name="review_skill", paid=True, attempt=1, status="reviewed", phase="review",
+        ),
+    ]
+    save_state(drive, AdvisoryReviewState(attempts=rows))
+
+    gate_root2 = types.SimpleNamespace(drive_root=drive, repo_dir=repo, _current_review_tool_name="commit_reviewed")
+    gate_root3 = types.SimpleNamespace(drive_root=drive, repo_dir=repo, _current_review_tool_name="commit_reviewed")
+    res_root2 = types.SimpleNamespace(drive_root=drive, repo_dir=repo, _current_review_tool_name="review_result")
+    assert count_paid_review_cycles(gate_root2, root_task_id="root-2") == 2
+    assert count_paid_review_cycles(gate_root3, root_task_id="root-3") == 0
+    assert count_paid_review_cycles(res_root2, root_task_id="root-2") == 0
+
+
+def test_seat_summary_attributes_per_seat_criticals():
+    from ouroboros.tools.commit_gate import build_seat_summary, format_seat_summary_line
+
+    summary = build_seat_summary([
+        {
+            "seat_id": "s_codex", "model": "openai/gpt-6.2-astra", "status": "responded",
+            "answers": {"change": {"verdict": "FAIL", "findings": [
+                {"item": "code_quality", "severity": "critical"},
+                {"item": "tests_affected", "severity": "advisory"},
+            ]}},
+        },
+        {"seat_id": "s_claude", "model": "anthropic/claude-opus-5-5", "status": "responded",
+         "answers": {"change": {"verdict": "PASS", "findings": []}}},
+    ])
+    assert summary == [
+        {"seat_id": "s_codex", "model": "openai/gpt-6.2-astra", "status": "responded",
+         "verdict": "FAIL", "critical": 1, "advisory": 1, "critical_items": ["code_quality"]},
+        {"seat_id": "s_claude", "model": "anthropic/claude-opus-5-5", "status": "responded",
+         "verdict": "PASS", "critical": 0, "advisory": 0},
+    ]
+    line = format_seat_summary_line(summary)
+    assert "openai/gpt-6.2-astra[s_codex]=FAIL(code_quality)" in line
+    assert "anthropic/claude-opus-5-5[s_claude]=PASS" in line

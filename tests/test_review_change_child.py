@@ -329,7 +329,12 @@ def test_cycle_pools_keep_repo_tool_and_root_partitions(tree, tmp_path):
     assert _call(child)['aggregate'] == 'PASS'
     gate = SimpleNamespace(drive_root=parent.drive_root, repo_dir=project,
                            _current_review_tool_name='commit_reviewed')
-    assert count_paid_review_cycles(gate, root_task_id=parent.task_id) == 0
+    # Code reviews (review_change + commit_reviewed) share ONE pool per (Continue lineage, repo);
+    # skill/result gates, unrelated repo copies, and separate task roots keep their own pools.
+    assert count_paid_review_cycles(gate, root_task_id=parent.task_id) == 1
+    skill_gate = SimpleNamespace(drive_root=parent.drive_root, repo_dir=project,
+                                 _current_review_tool_name='review_skill')
+    assert count_paid_review_cycles(skill_gate, root_task_id=parent.task_id) == 0
     # Identical Git history and remote without host copy provenance is NOT a
     # shared paid owner. A different task tree is independently counted too.
     unrelated = tmp_path / 'unregistered-repo'

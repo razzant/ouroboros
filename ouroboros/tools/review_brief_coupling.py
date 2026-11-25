@@ -473,8 +473,8 @@ def build_coupling_history_section(coupling_history: Optional[list], history_sec
     """Prior ``coupling`` rounds of this subject as a brief section.
 
     A coupling-only retry chain leaves the Part-1 history empty, so the shared
-    anti-thrashing block never reaches its convergence rule; from the third
-    coupling round on it is appended here instead. ``history_section`` is the
+    anti-thrashing block never reaches its convergence rule; on follow-up
+    coupling rounds it is appended here instead. ``history_section`` is the
     already-rendered Part-1 history: when it carries the rule, this section does
     not repeat it.
     """
@@ -514,7 +514,7 @@ def build_coupling_history_section(coupling_history: Optional[list], history_sec
         f"\nIMPORTANT: {_HISTORY_VERIFICATION_ONLY_RULE}\n"
         f"\nIMPORTANT: {_ANTI_THRASHING_RULE_VERDICT}\n"
     )
-    if len(coupling_history) >= 2 and _CONVERGENCE_RULE_TEXT not in str(history_section or ""):
+    if coupling_history and _CONVERGENCE_RULE_TEXT not in str(history_section or ""):
         section = section.rstrip() + f"\n\n**IMPORTANT: {_CONVERGENCE_RULE_TEXT}**\n"
     return section
 

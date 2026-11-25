@@ -369,9 +369,7 @@ locally; an existing owner instruction governs, including release-only
 installs that receive a prepared contribution without local adoption. Publishing
 a candidate branch is an explicit Git/PR action; candidate commits never auto-push.
 
-Identical bytes are never reviewed again for pay. After a verdict block, change
-the diff, offer a genuinely new `review_rebuttal`, or decide under P3. At the paid
-review ceiling, I may land on my judgment with the missing review stated.
+Identical bytes never pay twice. After critical findings, fix and re-review; if mistaken or out of scope, send a new `review_rebuttal` or decide under P3. At the paid ceiling, land on judgment with the missing review stated.
 Serving-checkout commits (manual
 owner edits or Cyber Pro's in-place choice) stage only task-attributed paths clean
 at the task baseline, never pre-existing owner dirt hidden in an explicit list.

@@ -807,9 +807,11 @@ def _settle(ctx: ToolContext, wave: _Wave, facts: Dict[str, Any], outcome: Dict[
 def review_result(record: Dict[str, Any], *, reused: bool) -> Dict[str, Any]:
     """The tool's answer (contract item 3), read from one ledger record."""
     from ouroboros.review_continuation import continuable_seats
+    from ouroboros.tools.commit_gate import build_seat_summary
 
     verdict = dict(record.get("verdict") or {})
     checklist = dict((record.get("brief") or {}).get("checklist") or {})
+    rows = list(record.get("rows") or [])
     return {
         "record_id": str(record.get("record_id") or ""), "state": str(record.get("state") or ""),
         "revision": record.get("revision", 1),
@@ -817,8 +819,9 @@ def review_result(record: Dict[str, Any], *, reused: bool) -> Dict[str, Any]:
                              "task_id": str(record.get("task_id") or ""),
                              "surface": record.get("surface") if record.get("surface") in SINGLE_QUESTION else "change"},
         "aggregate": str(verdict.get("aggregate") or ""), "per_question": dict(verdict.get("per_question") or {}),
+        "seat_summary": build_seat_summary(rows),
         "quorum": dict(verdict.get("quorum") or {}), "panel": dict(record.get("panel") or {}),
-        "rows": list(record.get("rows") or []), "subject": dict(record.get("subject") or {}),
+        "rows": rows, "subject": dict(record.get("subject") or {}),
         "checklist": {"layer": str(checklist.get("layer") or "core"),
                       "body_fact": str(checklist.get("body_fact") or "unknown"),
                       "how": str(checklist.get("how") or "unknown"),

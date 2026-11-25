@@ -1,9 +1,9 @@
-"""Convergence rule regression tests (Phase 2.2 + 2.3).
+"""Convergence rule regression tests (Phase 2.2 + evidence-delta update).
 
 Verify that the anti-scope-creep CONVERGENCE RULE block is injected into
-reviewer prompts from the 3rd attempt onward (i.e. when at least 2 prior
-review rounds exist in history) and NOT on earlier attempts. Text of the
-rule is pinned so it cannot drift silently.
+reviewer prompts whenever prior review rounds exist in history and NOT on
+an initial round with empty history. Text of the rule is pinned so it cannot
+drift silently.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import pytest
 # seat and the two-part brief render history through ONE owner,
 # review_helpers.build_review_history_section / review_history_brief).
 _EXPECTED_RULE_SUBSTRING = (
-    "CONVERGENCE RULE (attempt 3+): Do NOT raise new critical findings on "
-    "code that was not changed between this attempt and the previous attempt."
+    "CONVERGENCE RULE: On follow-up rounds, do NOT raise new critical findings on "
+    "unchanged code without concrete new evidence"
 )
 
 
@@ -60,14 +60,13 @@ class TestConvergenceRuleInjection:
         out = fn(_make_history(0))
         assert "CONVERGENCE RULE" not in out
 
-    def test_attempt_2_no_rule(self, module_path, func_name):
-        """With 1 prior round, we are on attempt 2 — rule must NOT fire."""
+    def test_follow_up_with_1_prior_round_fires_rule(self, module_path, func_name):
+        """Whenever prior rounds exist, the evidence-delta convergence rule MUST fire."""
         fn = self._fn(module_path, func_name)
         out = fn(_make_history(1))
-        assert "CONVERGENCE RULE" not in out
+        assert "CONVERGENCE RULE" in out
 
     def test_attempt_3_rule_present(self, module_path, func_name):
-        """With 2 prior rounds, we are on attempt 3 — rule MUST fire."""
         fn = self._fn(module_path, func_name)
         out = fn(_make_history(2))
         assert "CONVERGENCE RULE" in out
@@ -144,10 +143,14 @@ class TestCouplingOnlyRetryPath:
         )
 
     def test_coupling_only_first_attempt_no_rule(self, tmp_path, monkeypatch):
-        """First coupling-only attempt (no prior coupling rounds) must NOT carry
-        the rule — only kicks in from attempt 3."""
+        """First coupling-only attempt (no prior coupling rounds) must NOT carry the rule."""
         out = self._brief([], [], tmp_path, monkeypatch)
         assert "CONVERGENCE RULE" not in out
+
+    def test_coupling_only_followup_fires_rule(self, tmp_path, monkeypatch):
+        """Part 1 passed (review_history empty) and 1 prior coupling round exists."""
+        out = self._brief([], [{"attempt": 1, "commit_message": "m", "critical": ["s1"]}], tmp_path, monkeypatch)
+        assert "CONVERGENCE RULE" in out
 
     def test_rule_not_duplicated_when_part_one_history_fires_it(self, tmp_path, monkeypatch):
         """If `review_history` already triggers the rule (>=2 Part-1 rounds),
@@ -181,7 +184,7 @@ class TestConvergenceRuleSharedConstant:
     def test_shared_constant_exists(self):
         from ouroboros.tools.review_helpers import _CONVERGENCE_RULE_TEXT
         assert "CONVERGENCE RULE" in _CONVERGENCE_RULE_TEXT
-        assert "previous attempt" in _CONVERGENCE_RULE_TEXT
+        assert "introduced or exposed by this revision" in _CONVERGENCE_RULE_TEXT
 
     def test_packet_and_brief_emit_identical_rule_line(self):
         from ouroboros.tools.review import _build_review_history_section as rh

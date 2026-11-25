@@ -483,3 +483,69 @@ def test_review_blocked_retry_note_owes_outcome_not_procedure():
 # exercised by the actual triad-review integration tests in
 # test_review_fidelity.py, test_review_observability.py, and the
 # git+review pipeline suite.
+
+
+def test_build_seat_summary_handles_triad_and_ledger_shapes():
+    from ouroboros.review_ledger import _seat_from_plan
+    from ouroboros.tools.commit_gate import build_seat_summary, format_seat_summary_line
+    from ouroboros.triad_review import ReviewActorRecord
+
+    triad_row = ReviewActorRecord(
+        model_id="gpt-6.2-astra",
+        status="responded",
+        raw_text="[]",
+        slot=1,
+        slot_id="seat_a",
+        parsed_items=[
+            {"item": "secrets_check", "verdict": "PASS", "severity": "critical"},
+            {"item": "code_quality", "verdict": "FAIL", "severity": "critical"},
+            {"item": "changelog_accuracy", "verdict": "FAIL", "severity": "advisory"},
+        ],
+    ).to_dict()
+    ledger_row = _seat_from_plan(
+        "seat_b",
+        ("change", "coupling"),
+        {"model": "opus-5-5", "additional": True},
+    )
+    ledger_row["status"] = "responded"
+    ledger_row["answers"]["change"]["verdict"] = "PASS"
+    ledger_row["answers"]["coupling"]["verdict"] = "PASS"
+
+    partial_row = _seat_from_plan("seat_c", ("change", "coupling"), {"model": "gemini-carbon"})
+    partial_row["status"] = "responded"
+    partial_row["answers"]["change"]["verdict"] = "PASS"
+    partial_row["answers"]["coupling"]["verdict"] = ""
+
+    summary = build_seat_summary([triad_row, ledger_row, partial_row])
+    assert summary == [
+        {
+            "seat_id": "seat_a",
+            "model": "gpt-6.2-astra",
+            "status": "responded",
+            "verdict": "FAIL",
+            "critical": 1,
+            "advisory": 1,
+            "critical_items": ["code_quality"],
+        },
+        {
+            "seat_id": "seat_b",
+            "model": "opus-5-5",
+            "status": "responded",
+            "verdict": "PASS",
+            "critical": 0,
+            "advisory": 0,
+            "additional": True,
+        },
+        {
+            "seat_id": "seat_c",
+            "model": "gemini-carbon",
+            "status": "responded",
+            "verdict": "NONE",
+            "critical": 0,
+            "advisory": 0,
+        },
+    ]
+    line = format_seat_summary_line(summary)
+    assert "gpt-6.2-astra[seat_a]=FAIL(code_quality)" in line
+    assert "opus-5-5[seat_b]=PASS" in line
+

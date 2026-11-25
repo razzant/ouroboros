@@ -102,9 +102,19 @@ def test_a_declared_severity_policy_decides_the_seats_verdict_before_it_is_read(
     assert {f["item"]: f["severity"] for f in answer["findings"]} == {
         "hard": "critical", "soft": "advisory", "own": "advisory", "invented": "advisory"}
     assert (answer["verdict"], answer["critical"]) == ("FAIL", 1)
-    # Without a policy the seat's own severities stand (a change seat today).
+    # Without a policy the seat's own severities stand (warning -> advisory, missing/unknown -> critical).
     plain = parse_seat_answers({"results": [{"model": "m1", "slot_id": "s1", "text": text}]}, {"s1": ("skill",)})
     assert plain.actor_records[0].answers["skill"]["critical"] == 2
+    lax = json.dumps([
+        {"item": "a", "verdict": "FAIL", "reason": "missing severity"},
+        {"item": "b", "verdict": "FAIL", "severity": "blocker", "reason": "nonstandard severity"},
+        {"item": "c", "verdict": "FAIL", "severity": "warning", "reason": "warning alias"},
+    ])
+    lax_parsed = parse_seat_answers({"results": [{"model": "m1", "slot_id": "s1", "text": lax}]}, {"s1": ("change",)})
+    assert lax_parsed.actor_records[0].answers["change"]["critical"] == 2
+    assert [f["severity"] for f in lax_parsed.actor_records[0].answers["change"]["findings"]] == [
+        "critical", "critical", "advisory",
+    ]
 
 
 def test_quorum_and_degraded_reasons_follow_the_responsive_seats():

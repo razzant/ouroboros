@@ -394,9 +394,14 @@ def _change_items(entries: List[Dict[str, Any]], *, model_label: str, slot_id: s
         verdict = str(entry.get("verdict") or "").upper()
         if not item or verdict not in {"PASS", "FAIL"}:
             continue
+        raw_sev = str(entry.get("severity") or "").strip().lower()
+        if verdict == "FAIL":
+            severity = "advisory" if raw_sev in ("advisory", "warning", "warn") else "critical"
+        else:
+            severity = "critical" if raw_sev == "critical" else "advisory"
         items.append({
             "item": item, "verdict": verdict,
-            "severity": str(entry.get("severity") or "advisory").lower(),
+            "severity": severity,
             "reason": str(entry.get("reason") or entry.get("evidence") or "").strip(),
             "model": model_label, "slot_id": slot_id,
             **({"obligation_id": str(entry.get("obligation_id") or "")} if entry.get("obligation_id") else {}),

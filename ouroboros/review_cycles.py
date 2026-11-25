@@ -25,17 +25,19 @@ never sent again):
   number bounds the free reminders asking the author to reword a reviewed answer
   (``tools/review_result._revised``, counted by its saved questions), while an
   unread outcome and newer owner words still reach the author regardless;
-* commit gate — paid review-wave cycles per ROOT task (the whole task tree
-  shares one ceiling; a manual session is its own task; a follow-up task is a
-  fresh root). The paid fact is recorded on the attempt row AT DISPATCH and
-  the count is derived from the attempt ledger; the ceiling counts MONEY —
-  every dispatched wave counts whatever its terminal, and only UNDISPATCHED
-  attempts (free refusals/replays, preflight and assembly failures) stay
-  outside the count, which is also the only sense in which "infra retries
-  freely" applies to the ceiling. A rebuttal is content-hashed into the
-  round's identity, so a new one buys a new paid wave within the ceiling.
-  Exhaustion returns the outcome with a typed disclosure for explicit author
-  continuation, without another paid dispatch;
+* commit gate & code change review (``commit_reviewed``, ``vcs_commit_reviewed``,
+  ``review_change`` on code subjects) — paid code-review waves share ONE
+  allowance per ``(Continue-lineage root tasks, repo_key)`` (owner Q2=A): every
+  root task in a task tree and its verified owner-``Continue`` predecessors
+  (``owner_continue.recorded_continuation``) on the same canonical repository
+  pool shares the ceiling, while independent tasks start fresh. The paid fact is
+  recorded on the attempt row AT DISPATCH and the count is derived from the
+  attempt ledger; the ceiling counts MONEY — every dispatched wave counts
+  whatever its terminal, and only UNDISPATCHED attempts (free refusals/replays,
+  preflight and assembly failures) stay outside the count ("infra retries freely").
+  A rebuttal is content-hashed into the round's identity, so a new one buys a new
+  paid wave within the ceiling. Exhaustion returns the outcome with a typed
+  disclosure for explicit author continuation, without another paid dispatch;
 * skill review (``skill_review`` → ``review_change(subject="skill")``) — paid skill waves per
   root task for a task-driven review (shared across every skill that task reviews; a
   follow-up starts fresh), counted apart from the task's change and result waves (its own
