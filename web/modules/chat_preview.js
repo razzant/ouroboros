@@ -1,31 +1,43 @@
 /** This browser's bounded copy of each room's newest text, painted before the room's first canonical read
  * (docs/DESIGN.md "History edges"). It is never history: it sets no coverage, read receipt, unread credit, action or
  * `historyLoaded`, and a row's `data-preview-history-id` only locates a passage for the reading anchor
- * (chat_render_batch.js). One same-origin record keeps, under the data profile the serving document proves, the rooms
- * read most recently (MAX_ROOMS rooms, MAX_ROWS rows, MAX_CHARS serialized; whole rows give way, a person's text is
- * never cut). chat.js writes only what it admitted: its newest window replaces a room's rows, an arrivals read that
- * accounted for everything since merges into them; a failed, unavailable, older, around, stale or late read writes
- * nothing; bounded newest windows are valid. Each row goes where the feed puts its bubble (chat_render_batch.js
- * insertTimelineNode): by the time it is stamped with (a
- * missing one is the moment it is drawn, a delayed delivery keeps its earlier one), equal times by stream position
- * (chat_history_replay.js compareHistoryPosition), a row already there keeping its place; time and position are kept
- * for that alone, and the bound keeps the rows that placement puts last. Live echoes, controls, attachments and
- * session metadata never enter it; another origin, a document proving no data profile, or refused storage opens cold.
+ * (chat_render_batch.js). Every room read in this origin keeps, under the data profile the serving document proves,
+ * an entry of its own (MAX_ROWS rows within ROOM_CHARS; whole rows give way, a person's text is never cut), all of
+ * them within TOTAL_CHARS: a write that would pass it takes the entries read least recently first, and a room's show
+ * reads its own entry alone. chat.js writes only what it admitted: its newest window replaces a room's rows, an
+ * arrivals read that accounted for everything since merges into them; a failed, unavailable, older, around, stale or
+ * late read writes nothing; bounded newest windows are valid. Each row goes where the feed puts its bubble
+ * (chat_render_batch.js insertTimelineNode): by the time it is stamped with (a missing one is the moment it is drawn,
+ * a delayed delivery keeps its earlier one), equal times by stream position (chat_history_replay.js
+ * compareHistoryPosition), a row already there keeping its place; time and position are kept for that alone, and the
+ * bound keeps the rows that placement puts last. Live echoes, controls, attachments and session metadata never enter
+ * it; another origin, a document proving no data profile, or refused storage opens cold.
  *
- * The first canonical replay retires the painted copy. A passage the owner holds selected stays, labelled, until the
- * selection is released: the live selection, or the copy room_retire.js keeps on the room (`kept`) while an inert
- * layer covers it or it is away, where WebKit drops the live range. A history read refused for authentication, current
- * and not aborted (the room's fetchHistory below, app.js's link preparation, a Place's in place_history.js),
- * removes the record and every copy painted in this document at once, selection or not (`previewsRefused`);
- * api_client.js clears the record on sign-in, the core's sign-in page on every sign-out, and the registry's word that
- * a Project is going away takes its rooms' rows (`forgetProjectPreviews`, app.js). Its imports are the feed's tie
- * rule and the words a bubble draws (a host notice's line), so neither the order nor the words fork. */
+ * The first canonical replay retires the painted copy. A passage the owner holds selected stays, labelled, until the selection is released: the live selection, or the copy room_retire.js keeps on
+ * the room (`kept`) while an inert layer covers it or it is away, where WebKit drops the live range. A history read
+ * refused for authentication, current and not aborted (the room's fetchHistory below, app.js's link preparation, a
+ * Place's in place_history.js), removes every entry and every copy painted in this document at once, selection or not
+ * (`previewsRefused`); api_client.js clears them on sign-in, the core's sign-in page on every sign-out (server_auth.py,
+ * by PREVIEW_FAMILY), and the registry's word that a Project is going away takes its rooms' entries
+ * (`forgetProjectPreviews`, app.js). A Project deleted while this origin did not hear that word keeps its entry, never
+ * painted (its room no longer opens), until the total gives it way. Its imports are the feed's tie rule and the words
+ * a bubble draws (a host notice's line), so neither the order nor the words fork. */
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 
+// The record names the form, under the one key every eraser of every earlier version removes: entries are read only
+// beside it, so such an eraser (it takes this key alone) still takes their words at this version's next touch.
 export const PREVIEW_KEY = 'ouroboros.chat-preview.v1';
+// Every key this preview writes: the record, and each room's entry (previewEntryKey). An eraser takes them all.
+export const PREVIEW_FAMILY = 'ouroboros.chat-preview.';
 export const PREVIEW_SCOPE_META = 'ouroboros-chat-preview-scope';
-const MAX_CHARS = 200000, MAX_ROOMS = 8, MAX_ROWS = 80;
+const RECORD = '{"v":3}';  // the entries' form; {"v":2,"rooms":[…]} was every room in this one key
+// A room: its newest 80 rows within 100,000 characters, key included (screens of words, one long answer too). Every
+// room: 1,000,000, about 2 MB at WebKit's 2 bytes a character, under half an origin's 5 MB localStorage, the rest left
+// to the shell's own keys. The one record of v2 held 200,000 in all.
+const MAX_ROWS = 80, ROOM_CHARS = 100000, TOTAL_CHARS = 1000000, V2_CHARS = 200000;
+/** The key of one room's entry under a proven profile; `room` is chat.js's [chatId, projectId]. */
+export const previewEntryKey = (scope, room) => `${PREVIEW_KEY}:${JSON.stringify([scope, room])}`;
 // server_web.chat_preview_scope: a 16-hex digest of the profile identity the current state and its completed
 // witness both name. Only that fact makes a saved record this profile's; an installation scope, an older document
 // and any other text are no proof, so their rooms read the canonical history and save nothing here.
@@ -62,37 +74,76 @@ export function dropPaintedPreviews() {
     for (const release of [...painted]) release();
 }
 
+const savedRow = row => Boolean(row) && ROLES.includes(row.role) && typeof row.id === 'string'
+    && typeof row.text === 'string' && typeof row.speaker === 'string';
+// The family's keys in `store`; a store that cannot list them throws.
+const familyOf = store => Array.from({ length: store.length }, (_, index) => store.key(index))
+    .filter(name => typeof name === 'string' && name.startsWith(PREVIEW_FAMILY));
+// The record first: without it no entry is read again, even where listing the rest fails.
+function erase(store) {
+    store.removeItem(PREVIEW_KEY);
+    for (const name of familyOf(store)) store.removeItem(name);
+}
+// `{"read":<ms>,"rows":[…]}`: the newest whole rows that keep the entry, its key counted, within ROOM_CHARS.
+function entryText(rows, name, read) {
+    const head = `{"read":${read},"rows":[`;
+    const pieces = rows.slice(-MAX_ROWS).map(row => JSON.stringify(row));
+    let budget = ROOM_CHARS - name.length - head.length - ']}'.length;
+    let from = pieces.length;
+    while (from > 0 && pieces[from - 1].length + 1 <= budget) budget -= pieces[--from].length + 1;
+    return `${head}${pieces.slice(from).join(',')}]}`;
+}
+const readOf = text => Number(/^\{"read":(\d+),/.exec(text)?.[1]) || 0;
+// Whether `store` holds this form's record. v2's one record moves into entries once, the order it kept by time read;
+// entries standing without a record (an eraser took it) are erased before anything is read or written. `create` starts
+// an empty record.
+function current(store, create = false) {
+    const raw = store.getItem(PREVIEW_KEY);
+    if (raw === RECORD) return true;
+    let rooms = [];
+    try {
+        const data = raw && raw.length <= V2_CHARS ? JSON.parse(raw) : null;
+        if (data?.v === 2 && Array.isArray(data.rooms)) rooms = data.rooms.filter(room => typeof room?.key === 'string'
+            && Array.isArray(room.rows));
+    } catch { /* unreadable: nothing to move */ }
+    erase(store);
+    if (!rooms.length && !create) return false;
+    store.setItem(PREVIEW_KEY, RECORD);
+    const read = Date.now();
+    rooms.forEach(({ key, rows }, index) => {
+        const name = `${PREVIEW_KEY}:${key}`;
+        store.setItem(name, entryText(rows.filter(savedRow), name, read - index));
+    });
+    return true;
+}
+
 export function clearChatPreviews(storage) {
-    try { (storage || globalThis.localStorage)?.removeItem(PREVIEW_KEY); } catch { /* storage unavailable */ }
+    try { erase(storage || globalThis.localStorage); } catch { /* storage unavailable */ }
     dropPaintedPreviews();
 }
 
-/** The registry says these Projects are going away (app.js, where their rooms are let go): their rooms' rows leave the
- * record in every scope; every other room keeps its own as it was, and nothing to remove writes nothing. */
+/** The registry says these Projects are going away (app.js, where their rooms are let go): their rooms' entries leave,
+ * in every scope; every other room keeps its own as it was, and nothing to remove writes nothing. */
 export function forgetProjectPreviews(projectIds, storage) {
     const going = new Set((projectIds || []).filter(Boolean).map(String));
     if (!going.size) return;
+    const project = (name) => {
+        try { return String(JSON.parse(name.slice(PREVIEW_KEY.length + 1))?.[1]?.[1] ?? ''); } catch { return ''; }
+    };
     try {
         const store = storage || globalThis.localStorage;
-        const raw = store?.getItem(PREVIEW_KEY);
-        const data = raw ? JSON.parse(raw) : null;
-        if (data?.v !== 2 || !Array.isArray(data.rooms)) return;
-        const project = (entry) => { try { return String(JSON.parse(entry?.key)?.[1]?.[1] ?? ''); } catch { return ''; } };
-        const rooms = data.rooms.filter(entry => !going.has(project(entry)));
-        if (rooms.length < data.rooms.length) store.setItem(PREVIEW_KEY, JSON.stringify({ v: 2, rooms }));
+        if (!current(store)) return;
+        for (const name of familyOf(store)) if (going.has(project(name))) store.removeItem(name);
     } catch { /* storage unavailable or unreadable: nothing here to take */ }
 }
 
-/** A history read made in this document, current and refused for authentication: the record and every painted copy go,
- * selection or not. True when it was one; any other failure changes nothing here. */
+/** A history read made in this document, current and refused for authentication: every entry and every painted copy
+ * go, selection or not. True when it was one; any other failure changes nothing here. */
 export function previewsRefused(error, storage) {
     if (!refusal(error)) return false;
     clearChatPreviews(storage);
     return true;
 }
-
-const savedRow = row => Boolean(row) && ROLES.includes(row.role) && typeof row.id === 'string'
-    && typeof row.text === 'string' && typeof row.speaker === 'string';
 
 /** `label(role, isProgress, systemType, opts)` is chat_activity.js `senderLabel`: the speaker frozen as the canonical
  * bubble names it, never the row's source or session. `mutate` is the room's stable-viewport write. */
@@ -101,37 +152,42 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     storage = () => globalThis.localStorage }) {
     const doc = feed.ownerDocument;
     const profile = provenScope(scope);
-    const key = JSON.stringify([profile, room]);
+    const entry = previewEntryKey(profile, room);
     let root = null, retiring = false, disposed = false;
-    const rooms = () => {
-        try {
-            const raw = storage()?.getItem(PREVIEW_KEY);
-            const data = raw && raw.length <= MAX_CHARS ? JSON.parse(raw) : null;
-            return data?.v === 2 && Array.isArray(data.rooms) ? data.rooms : [];
-        } catch { return []; }
-    };
-    // This room's rows; null when it has no record (never read here, or it gave way to rooms read since).
+    // This room's rows; null when it has no entry (never read here, or it gave way to rooms read since).
     const saved = () => {
-        const rows = rooms().find(entry => entry?.key === key)?.rows;
-        return Array.isArray(rows) ? rows.filter(savedRow) : null;
+        try {
+            const store = storage();
+            if (!store || !current(store)) return null;
+            const raw = store.getItem(entry);
+            const rows = raw && raw.length <= ROOM_CHARS ? JSON.parse(raw)?.rows : null;
+            return Array.isArray(rows) ? rows.filter(savedRow) : null;
+        } catch { return null; }
     };
-    // This room first (an empty one too: it was read empty), newest rows kept; then the other rooms, most recent
-    // first, while they fit. Every row and room is serialized once and charged a separator: the record stays under
-    // MAX_CHARS.
+    // This room's entry (an empty one too: it was read empty), stamped with when it was read; then the entries read
+    // least recently give way until all fit TOTAL_CHARS. One that cannot be written goes: an older text never stands
+    // for a newer read.
     const write = (rows) => {
-        const head = `{"key":${JSON.stringify(key)},"rows":[`;
-        const pieces = rows.slice(-MAX_ROWS).map(row => JSON.stringify(row));
-        let budget = MAX_CHARS - '{"v":2,"rooms":[]}'.length - head.length - ']},'.length;
-        let from = pieces.length;
-        while (from > 0 && pieces[from - 1].length + 1 <= budget) budget -= pieces[--from].length + 1;
-        const parts = [`${head}${pieces.slice(from).join(',')}]}`];
-        for (const entry of rooms().filter(item => item?.key !== key).slice(0, MAX_ROOMS - 1)) {
-            const text = JSON.stringify(entry);
-            if (text.length + 1 > budget) break;  // it and every older room give way
-            budget -= text.length + 1;
-            parts.push(text);
+        let store = null;
+        try {
+            store = storage();
+            if (!store || !current(store, true)) return;
+            const text = entryText(rows, entry, Date.now());
+            const others = familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
+                const value = store.getItem(name) || '';
+                return { name, size: name.length + value.length, read: readOf(value) };
+            }).sort((a, b) => a.read - b.read);
+            let total = PREVIEW_KEY.length + RECORD.length + entry.length + text.length
+                + others.reduce((sum, other) => sum + other.size, 0);
+            for (const other of others) {
+                if (total <= TOTAL_CHARS) break;
+                store.removeItem(other.name);
+                total -= other.size;
+            }
+            store.setItem(entry, text);
+        } catch {
+            try { store?.removeItem(entry); } catch { /* storage unavailable */ }
         }
-        try { storage()?.setItem(PREVIEW_KEY, `{"v":2,"rooms":[${parts.join(',')}]}`); } catch { /* the room still works */ }
     };
     // Each row keeps the time and position its bubble is stamped with (chat.js addMessage, stampNodeTimestamp,
     // stampHistoryNode): a missing time is the moment it is drawn, one that does not parse leaves it untimed.
@@ -174,7 +230,7 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     const release = () => { if (root) mutate(() => { drop(); return true; }); drop(); };
     painted.add(release);
     const discard = () => {
-        try { storage()?.removeItem(PREVIEW_KEY); } catch { /* storage unavailable */ }
+        try { erase(storage()); } catch { /* storage unavailable */ }
         dropPaintedPreviews();
     };
     return {
@@ -204,13 +260,13 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             return true;
         },
         /** The room's newest window, admitted (chat.js): its rows replace this room's. A window that could not read
-         * the conversation stream, or a refusal, keeps the record; a bounded `complete: false` window is a window. */
+         * the conversation stream, or a refusal, keeps its entry; a bounded `complete: false` window is a window. */
         save(messages, { window: frame = null, reason_code: refused = '' } = {}) {
             if (!profile || disposed || refused || frame?.truncated_by?.includes?.('chat_source_unavailable')) return;
             write(fromHistory(messages).reduce(place, []));
         },
         /** Rows an arrivals read accounted for since the newest window: one the room has stays where it stands, a new
-         * one goes where the feed puts it. A room without a record waits for its next newest window. */
+         * one goes where the feed puts it. A room without an entry waits for its next newest window. */
         append(messages) {
             const incoming = profile && !disposed ? fromHistory(messages) : [];
             const rows = incoming.length ? saved() : null;

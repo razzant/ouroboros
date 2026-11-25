@@ -266,9 +266,7 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         removeItem: (key) => storage.delete(key),
     };
     // The origin's persistent store (the saved preview, chat_preview.js), apart from the tab's.
-    const persistent = new Map();
-    globalThis.localStorage = { getItem: (key) => persistent.get(key) ?? null,
-        setItem: (key, value) => persistent.set(key, String(value)), removeItem: (key) => persistent.delete(key) };
+    globalThis.localStorage = memoryStorage();
     globalThis.fetch = fetchImpl;
     globalThis.ResizeObserver = ResizeObserverStub;
     globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
@@ -276,6 +274,18 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
 }
 export function restoreDom(prior) {
     Object.assign(globalThis, prior);
+}
+
+/** A browser's Storage over `values`: the saved preview lists its keys (length, key) as well as reading them. */
+export function memoryStorage(values = new Map()) {
+    return {
+        values,
+        get length() { return values.size; },
+        key: (index) => [...values.keys()][index] ?? null,
+        getItem: (key) => values.get(key) ?? null,
+        setItem: (key, value) => { values.set(key, String(value)); },
+        removeItem: (key) => { values.delete(key); },
+    };
 }
 
 // The chat double's textContent does not include nested elements. Read the notice's words,

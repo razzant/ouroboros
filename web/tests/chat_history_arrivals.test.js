@@ -10,7 +10,7 @@ import { REVIEW_DETAIL_READS, REVIEW_DETAIL_SLOT_MS, createReviewHydrator } from
 import { createChatHistoryPager } from '../modules/chat_history.js';
 import { ElementStub, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 import { quiet, room, until } from './project_read_state_fixture.js';
-import { PREVIEW_KEY } from '../modules/chat_preview.js';
+import { previewEntryKey } from '../modules/chat_preview.js';
 
 const ts = (n) => new Date(Date.UTC(2026, 9, 16, 12, 0, 0, n * 1000)).toISOString();
 
@@ -717,25 +717,25 @@ test('a room replaying sixty review owners reads their details two at a time; cl
     assert.equal(detail.started.length, 12, 'the closed room started none of its queued reads');
 });
 
-test('the saved preview takes the newest page, then merges what arrived by identity; a room without a record keeps no fragment', async (t) => {
+test('the saved preview takes the newest page, then merges what arrived by identity; a room without an entry keeps no fragment', async (t) => {
     const s = historyServer();
     s.say(1);
     const r = openRoom(t, s);
     await r.instance.refreshHistory({ revision: 1 });
-    const saved = () => (JSON.parse(localStorage.getItem(PREVIEW_KEY) || '{"rooms":[]}').rooms
-        .find((entry) => entry.key === JSON.stringify([PREVIEW_SCOPE, [2, 'room']]))?.rows || []).map((row) => row.text);
+    const entry = previewEntryKey(PREVIEW_SCOPE, [2, 'room']);
+    const saved = () => (JSON.parse(localStorage.getItem(entry) || '{"rows":[]}').rows).map((row) => row.text);
     assert.deepEqual(saved(), ['answer 1']);
     s.work(2);
     s.say(3);
     await r.instance.refreshHistory({ revision: 2 });
     assert.deepEqual(s.reads, ['newest', 'after']);
     assert.deepEqual(saved(), ['answer 1', 'answer 3'], 'what arrived joins in order; narration never does');
-    // The record gave way to rooms read since: what arrives next waits for the room's next newest page.
-    localStorage.removeItem(PREVIEW_KEY);
+    // The entry gave way to rooms read since: what arrives next waits for the room's next newest page.
+    localStorage.removeItem(entry);
     s.say(4);
     await r.instance.refreshHistory({ revision: 3 });
     assert.deepEqual(s.reads, ['newest', 'after', 'after']);
-    assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'no fragment stands for the room');
+    assert.equal(localStorage.getItem(entry), null, 'no fragment stands for the room');
 });
 
 for (const mode of ['after', 'newest']) for (const following of [false, true]) for (const confirmed of [false, true]) {

@@ -8,7 +8,8 @@ import { wakeFactWord } from '../modules/consciousness_words.js';
 import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeHistoryState, placeRoomsHtml, shownTime } from '../modules/place_history.js';
 import { openPlaceSheet } from '../modules/place_sheet.js';
 import { mountConnectorPlaces } from '../modules/connector_places.js';
-import { PREVIEW_KEY } from '../modules/chat_preview.js';
+import { previewEntryKey, PREVIEW_KEY } from '../modules/chat_preview.js';
+import { memoryStorage, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const unsafeText = '<img src="x" onerror="bad()"> & "hello"';
@@ -592,23 +593,23 @@ test('a row shows the send time its arrival recorded; the title keeps when it wa
 
 test('a current refused read takes the saved conversation text; a failed one, or one the closed sheet left, does not', async (t) => {
     // The Place sheet reads history outside any room (chat_preview.js previewsRefused): the session's refusal is the same.
-    const f = fixture(t), values = new Map(), prior = globalThis.localStorage;
-    globalThis.localStorage = { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)),
-        removeItem: (key) => values.delete(key) };
+    const f = fixture(t), prior = globalThis.localStorage, storage = memoryStorage(), { values } = storage;
+    globalThis.localStorage = storage;
     t.after(() => { globalThis.localStorage = prior; });
-    const seed = () => values.set(PREVIEW_KEY, '{"v":2,"rooms":[]}');
+    const room = previewEntryKey(PREVIEW_SCOPE, [1, '']);
+    const seed = () => { values.set(PREVIEW_KEY, '{"v":3}'); values.set(room, '{"read":1,"rows":[]}'); };
     const failing = (status) => async () => { throw Object.assign(new Error('Authentication required.'), { status }); };
     seed();
     let reader = mount(f, { readHistory: failing(500) }); await tick();
-    assert.equal(values.has(PREVIEW_KEY), true, 'a failed read is no statement about the session');
+    assert.equal(values.has(room), true, 'a failed read is no statement about the session');
     reader.close();
     reader = mount(f, { readHistory: failing(401) }); await tick();
-    assert.equal(values.has(PREVIEW_KEY), false, 'a current refusal takes it at once');
+    assert.deepEqual([...values.keys()], [], 'a current refusal takes the record and every entry at once');
     reader.close();
     seed();
     const pending = deferred();
     reader = mount(f, { readHistory: () => pending.promise.then(failing(403)) });
     f.q('[data-history-back]').click(); reader.close();
     pending.resolve(); await tick(); await tick();
-    assert.equal(values.has(PREVIEW_KEY), true, 'a read the closed sheet abandoned decides nothing');
+    assert.equal(values.has(room), true, 'a read the closed sheet abandoned decides nothing');
 });
