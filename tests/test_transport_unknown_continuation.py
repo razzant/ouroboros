@@ -194,7 +194,7 @@ def test_deadline_closes_unknown_wait_without_a_probe_or_send(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("status,ready", [(200, True), (401, True), (405, True), (503, False)])
-def test_upstream_probe_is_non_generating_and_uses_resolved_route(monkeypatch, status, ready):
+def test_upstream_probe_is_non_generating_and_uses_resolved_route(tmp_path, monkeypatch, status, ready):
     from ouroboros.llm import LLMClient
 
     seen = []
@@ -207,9 +207,10 @@ def test_upstream_probe_is_non_generating_and_uses_resolved_route(monkeypatch, s
         return original(**kwargs, transport=httpx.MockTransport(respond))
     monkeypatch.setattr(httpx, "Client", client)
     llm = LLMClient()
-    monkeypatch.setattr(llm, "_resolve_remote_target",
-                        lambda model: {"base_url": "https://exact-provider.invalid/api"})
-    observed = transport.upstream_transport_reachable(llm, "vendor/model", timeout=3)
+    from tests._shared import saved_settings
+    saved_settings(monkeypatch, tmp_path, OPENAI_COMPATIBLE_BASE_URL="https://exact-provider.invalid/api",
+                   OPENAI_COMPATIBLE_API_KEY="synthetic")
+    observed = transport.upstream_transport_reachable(llm, "openai-compatible::stub-model", timeout=3)
     assert bool(observed) is ready
     assert len(seen) == 1 and seen[0].method == "HEAD"
     assert str(seen[0].url) == "https://exact-provider.invalid/api"
@@ -419,3 +420,37 @@ def test_unknown_policy_admits_configured_session_model_to_managed_continuation(
         emit_progress=lambda *a, **kw: None)
     assert episode is not None and episode.wait_cause == "provider_outcome_unknown"
     assert not episode.interactive
+
+
+@pytest.mark.parametrize("fault", ["", "wrong_model", "loading", "proxy", "cloud", "redirect", "wrong_capability", "llamacpp"])
+def test_local_model_recovery_requires_fresh_ollama_and_model(monkeypatch, fault):
+    from ouroboros.llm import LLMClient
+    requests = []
+    original = httpx.Client
+    def respond(request):
+        requests.append(request)
+        path = request.url.path
+        if fault == "redirect": return httpx.Response(302, headers={"location": "https://example.invalid/"})
+        if fault == "loading": return httpx.Response(503)
+        if fault == "llamacpp":
+            return httpx.Response(200, json={"default_generation_settings": {}}) if path == "/props" else httpx.Response(404)
+        if path == "/api/version":
+            return httpx.Response(200, json={"version": "0.40.16"} if fault != "proxy" else {})
+        if path == "/api/show":
+            assert json.loads(request.content)["model"] == "fixture-model"
+            if fault == "wrong_model": return httpx.Response(404)
+            return httpx.Response(200, json={"model_info": {"general.architecture": "qwen35"},
+                "capabilities": "not completion" if fault == "wrong_capability" else ["completion", "tools"],
+                **({"remote_host": "https://ollama.com", "remote_model": "fixture"} if fault == "cloud" else {})})
+        return httpx.Response(404)
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(**kw, transport=httpx.MockTransport(respond)))
+    llm = LLMClient()
+    monkeypatch.setattr(llm, "_resolve_remote_target", lambda model: {"provider": "openai-compatible",
+        "resolved_model": "fixture-model", "keyless": True, "base_url": "http://127.0.0.1:18080/v1"})
+    result = transport.upstream_transport_reachable(llm, "openai-compatible::fixture-model", timeout=2)
+    expected = fault == ""
+    assert bool(result) is expected
+    if expected:
+        assert result["program"] == "ollama" and result["model"] == "fixture-model"
+        assert result["kind"] == "local_model_server" and result["observed_at"]
+    assert all(r.method == "GET" or (r.method == "POST" and r.url.path == "/api/show") for r in requests)

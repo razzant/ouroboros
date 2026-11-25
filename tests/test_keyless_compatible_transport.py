@@ -24,8 +24,9 @@ from tests._cases import chosen_rows
 
 MODEL = "openai-compatible::stub-model"
 MESSAGES = [{"role": "user", "content": "Reply OK"}]
+CONSENT = "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED"  # the endpoint names no program: its owner's consent sends
 _AMBIENT = ("OPENAI_API_KEY", "OPENAI_ADMIN_KEY", "OPENAI_CUSTOM_HEADERS", "OPENAI_BASE_URL",
-            "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL")
+            "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL", CONSENT)
 
 
 class _Endpoint:
@@ -112,6 +113,7 @@ def endpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(ua, "_reservation_cost", lambda _request: 0.01)
     monkeypatch.setattr(LLMClient, "_get_supported_parameters", lambda *a, **k: None)
     served = _Endpoint()
+    monkeypatch.setenv(CONSENT, served.base_url)
     try:
         with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="keyless-task", root_task_id="keyless-task")):
             yield served
@@ -149,7 +151,7 @@ CONSUMERS = {
     "chat-async-stream": lambda client, url: _chat_async(client, stream=True),
     # Settings' provider test: a request-local mapping, a one-shot client and ``with_options``.
     "provider-test": lambda client, url: client.probe_provider_readiness(
-        MODEL, settings={"OPENAI_COMPATIBLE_BASE_URL": url}, timeout=20)["ok"],
+        MODEL, settings={"OPENAI_COMPATIBLE_BASE_URL": url, CONSENT: url}, timeout=20)["ok"],
     # The context-window probe: the cached client and ``with_options``.
 }
 
@@ -212,7 +214,7 @@ def test_a_key_on_the_route_is_always_sent(endpoint, monkeypatch):
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "compat-key")
     assert _chat(LLMClient()) == "OK" and _chat_async(LLMClient(), no_proxy=True) == "OK"
     assert LLMClient().probe_provider_readiness(
-        MODEL, settings={"OPENAI_COMPATIBLE_BASE_URL": endpoint.base_url,
+        MODEL, settings={"OPENAI_COMPATIBLE_BASE_URL": endpoint.base_url, CONSENT: endpoint.base_url,
                          "OPENAI_COMPATIBLE_API_KEY": "compat-key"}, timeout=20)["ok"] is True
     assert [r["authorization"] for r in endpoint.completions()] == ["Bearer compat-key"] * 3
 

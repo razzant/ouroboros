@@ -122,7 +122,7 @@ def refusal_identity(error: BaseException, model: str, fallback: Any) -> tuple[s
     refusal = completed_image_refusal(error)
     if refusal is None:
         return model, None, []
-    digests = candidate_images(getattr(getattr(error, "physical_attempt_capture", None), "candidate_raw_sha256", None))
+    digests = candidate_images(getattr(error, "physical_attempt_capture", None))
     return model, refusal, digests if digests is not None else receipt.get("digests") or fallback(model)
 
 

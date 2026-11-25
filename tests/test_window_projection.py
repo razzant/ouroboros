@@ -178,7 +178,8 @@ def test_the_request_under_way_reading_is_named_for_a_main_work_only(tmp_path):
     assert "usable input 234,464; reply reserve 65,536" in single["text"] and "under way" not in single["text"]
     assert "usable input 234,464 at a start, 291,808 for a request under way (" in main["text"]
     assert single["usable"] == main["usable"] == 234_464 and single["admitted"] == main["admitted"] == 291_808
-    proved = resolve_window(ce.CapabilityEvidence(300_000, "confirmed", "local_health", "r"), 65_536, root=tmp_path)
+    proved = resolve_window(ce.CapabilityEvidence(300_000, "confirmed", "local_health", "r", ts=ce.utc_now_iso()), 65_536, root=tmp_path)
+    assert proved.total.tokens == 300_000 and proved.usable == 234_464
     assert "under way" not in window_projection(proved, under_way=True)["text"]  # one reading: nothing to name
 
 

@@ -1025,6 +1025,8 @@ def refusal_failure_payload(error: BaseException) -> Any:
             except Exception:
                 pass  # Some SDKs have already released or never loaded the response body.
         return body
+    if getattr(error, "adapter_typed_body", False):
+        return envelope  # a native adapter's typed reading of this same envelope (``llm_ollama._http_error``): no conflict
     if isinstance(body, dict) and "error" not in envelope and "usage" in envelope and "code" not in envelope:
         envelope = {"error": body.get("error", body), **envelope}
     if body and body != envelope and body != envelope.get("error") and not (

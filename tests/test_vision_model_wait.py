@@ -376,12 +376,24 @@ def test_strict_child_schema_rejects_false_capture_and_wrong_receipt(reserve, bo
         "owner_low", "low", "cold_estimate", "route", "round", None, None, False, False,
         view_kind="focus", response_reserve_tokens=reserve, window_witness_bound=bound))
     receipt = {"receipt_id": "ours", "custody": None, "capture": capture}
+    capture.pop("candidate_image_digests")  # workers predating native source-image attribution
+    vision_process._read_receipt(receipt, "ours")
+    assert vision_process._restore_capture(capture).candidate_image_digests is None
+    capture["candidate_image_digests"] = ["b" * 64]
+    vision_process._read_receipt(receipt, "ours")
+    assert vision_process._restore_capture(capture).candidate_image_digests == ("b" * 64,)
+    assert capture["physical_context"].pop("requested_load_window") is None
+    vision_process._read_receipt(receipt, "ours")
+    assert vision_process._restore_capture(capture).physical_context.requested_load_window is None
+    capture["physical_context"]["requested_load_window"] = 0 if not bound else 80000
     vision_process._read_receipt(receipt, "ours")
     restored = vision_process._restore_capture(capture).physical_context
+    assert restored.requested_load_window == (80000 if bound else 0)
     assert restored.view_kind == "focus"
     assert restored.response_reserve_tokens == reserve and restored.window_witness_bound is bound
     for key, invalid in (("response_reserve_tokens", -1), ("response_reserve_tokens", "8192"),
-                         ("response_reserve_tokens", True), ("window_witness_bound", "true")):
+                         ("response_reserve_tokens", True), ("window_witness_bound", "true"),
+                         ("requested_load_window", -1), ("requested_load_window", True)):
         saved = capture["physical_context"][key]
         capture["physical_context"][key] = invalid
         with pytest.raises(Exception):
