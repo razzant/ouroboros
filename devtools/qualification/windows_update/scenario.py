@@ -656,6 +656,11 @@ class QualificationRun:
         else:
             raise Unconfirmed("wizard", "wizard_summary_not_reached")
 
+        self.driver.wait_unique_node(
+            setup_hwnd, phase="wizard", label="Summary Main source and model", role="text",
+            name=f"{COMPATIBLE_OPTION_LABEL} · {fm.MODEL_ID}", timeout_sec=8.0,
+        )
+        self.check("main_model_source_selected_via_option_row", True, phase="wizard", witness="summary_main_binding")
         self._invoke_start_ouroboros(setup_hwnd)
         main_hwnd = self.driver.transition_setup_to_fresh_main()
         self.mark("main_window_ready")
@@ -667,17 +672,12 @@ class QualificationRun:
             setup_hwnd, phase="wizard", label=MAIN_SOURCE_LABEL, query={"role": "combo_box", "name": MAIN_SOURCE_LABEL}, verbs=("expand", "invoke"), wizard=True,
             post_condition=lambda: bool(self.driver.find_nodes(setup_hwnd, phase="wizard", roles={"list_item", "menu_item"}, name=COMPATIBLE_OPTION_LABEL, require_visible=True)),
         )
-        self.driver.act_or_click(setup_hwnd, phase="wizard", label=COMPATIBLE_OPTION_LABEL, query={"roles": {"list_item", "menu_item"}, "name": COMPATIBLE_OPTION_LABEL}, verbs=("select", "invoke"), wizard=False)
-
-        def _source_held() -> bool:
-            combos = self.driver.find_nodes(setup_hwnd, phase="wizard", role="combo_box", name=MAIN_SOURCE_LABEL, require_visible=False)
-            if len(combos) != 1 or (combos[0].get("state") or {}).get("expanded") == "expanded":
-                return False
-            return str(combos[0].get("value") or "").strip() == COMPATIBLE_OPTION_LABEL or any(str(ch.get("name") or "").strip() == COMPATIBLE_OPTION_LABEL for ch in flatten_tree_nodes(combos[0])[1:])
-
-        if not poll_until(8.0, _source_held, interval=0.25):
-            raise Unconfirmed("wizard", "main_source_selection_not_held")
-        self.check("main_model_source_selected_via_option_row", True, phase="wizard")
+        option = {"roles": {"list_item", "menu_item"}, "name": COMPATIBLE_OPTION_LABEL}
+        # Dismissal only clears the menu for typing; Summary proves the actual choice.
+        self.driver.act_or_click(
+            setup_hwnd, phase="wizard", label=COMPATIBLE_OPTION_LABEL, query=option, verbs=(),
+            post_condition=lambda: not self.driver.find_nodes(setup_hwnd, phase="wizard", require_visible=False, **option),
+        )
 
     def _wizard_step_changed(self, setup_hwnd: int, prev_step: str) -> bool:
         assert self.driver is not None
