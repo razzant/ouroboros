@@ -150,7 +150,8 @@ export function createSectionLevels({ place, pane, layers = null, shown = () => 
     }
 
     // A jump's landing stays under its return; the first level IS that return. A child opened afterwards goes above
-    // it. Crossing 40rem changes only which local levels hide their parent, never the owed jump or its return.
+    // it. Crossing 40rem changes only which local levels hide their parent, never the owed jump or its return;
+    // reinstating a lower level keeps it below any already placed higher level and its owed jump.
     function layer(beside, onClose) {
         if (!layers) return;
         const owed = level => level.jump && layers.has(level.jump) ? level.jump : undefined;
@@ -161,13 +162,22 @@ export function createSectionLevels({ place, pane, layers = null, shown = () => 
                 layers.remove(id);
                 layered.delete(id);
             }
-            for (const level of wanted) {
+            const beforeOf = (level, at) => {
+                const targets = new Set([owed(level)]);
+                for (const higher of wanted.slice(at + 1)) {
+                    targets.add(higher.id);
+                    targets.add(owed(higher));
+                }
+                targets.delete(undefined);
+                return targets.size ? layers.ids().find((id) => targets.has(id)) : undefined;
+            };
+            wanted.forEach((level, at) => {
                 layers.push({ id: level.id, el: level.el, page: true, modal: false, focus: false, opener: null,
-                    before: owed(level),
+                    before: beforeOf(level, at),
                     back: { label: levels.indexOf(level) > 0 ? title(levels[levels.indexOf(level) - 1].path) : place === 'settings' ? 'Settings' : 'Extensions' },
                     onClose: () => onClose(level) });
                 layered.add(level.id);
-            }
+            });
         });
     }
 

@@ -1,43 +1,39 @@
 """Look at Ouroboros's own live interface without changing anything — an optional instrument of the ui_design skill.
 
-When it helps: you changed a shared part of the interface (a control, a card, a status line, a list) and want every place
-that uses it before and after, on the owner's real data, in both themes and at desk and phone widths; or the owner asks
-you to look over the whole interface. It returns pictures and numbers, never a verdict. Nothing runs it on its own: it
-runs when someone asks (a command below, or Ouroboros's `ui_look` tool). Its own tests run in the UI browser lane; no
+When it helps: a change to a shared part of the interface (a control, a card, a status line, a list) needs every place that uses it before and after,
+on the owner's real data, in both themes and at desk and phone widths; or the owner asks you to look over the whole interface. It returns pictures and
+numbers, never a verdict, and runs only when asked — a command below, or Ouroboros's `ui_look` tool. Its own tests run in the UI browser lane; no
 test, CI job, release step or schedule checks the product's screens with it.
 
-Safety, enforced here (do not open the live interface any other way while using it):
-  * only plain reads (GET/HEAD) reach the live server; reads that ask it for fresh work (?fresh= ?refresh= ?force=
-    ?probe= ?checkLatest= ...) are answered locally;
+Safety, enforced here (do not open the live interface any other way):
+  * only plain reads (GET/HEAD) reach the live server; reads asking for fresh work (?fresh= ?refresh= ?force= ?probe= ?checkLatest= ...) are answered
+    locally;
   * every write is answered locally: --mutations ok fakes success (to see a state after Save), abort shows the failure state;
-  * every frame the page sends on its WebSocket is dropped (server -> page frames still flow, so the page stays live).
+  * every frame the page sends on its WebSocket is dropped (server -> page frames still flow, so the page stays live);
   So pressing Save, Stop, Restart or Panic inside it changes nothing on the install.
 
-Before/after of code you have not merged: --web-root <worktree>/web serves the interface (index.html and /static/*; a
-file your branch deleted answers 404) from your branch while all data still comes from the live server (the running
-server's API must match your branch's).
+Before/after of unmerged code: --web-root <worktree>/web serves the interface from your branch (index.html and /static/*; a file your branch deleted
+answers 404) while data still comes from the live server (the running server's API must match your branch's).
 
 CLI (run with a Python that imports Playwright; Playwright's own browsers unless --executable-path names one):
   python live_stand.py capture --out DIR [--places all|chat,dashboard,...] [--themes dark,light] [--widths 1440,390]
                                [--web-root PATH/web] [--mutations ok|abort] [--rooms N] [--url URL]
-      -> DIR/<theme>-<width>/<place>[-<tab>].png, __pNN.png scroll frames, .measure.json (uneven rows of controls,
-         long texts, measure.js findings) ; places and tabs are discovered from the page ([data-nav-page], [role="tab"]).
+      -> DIR/<theme>-<width>/<place>[-<tab>].png, __pNN.png scroll frames, .measure.json (uneven rows of controls, long texts, measure.js findings) ;
+         places are the registry's (web/modules/pages.js) plus the page's [data-nav-page] rows (those rows alone when the registry cannot be read), a
+         door place opening through its host; tabs are its [role="tab"] and the rows of its section list.
   python live_stand.py diff --base PATH/web --cand PATH/web --out DIR [--themes dark] [--widths 1440] [--places ...]
-      -> DIR/<theme>-<width>/<place>.json computed-style differences, DIR/SUMMARY.md. One page and one moment of data:
-         on every screen the stylesheets are swapped from --base to --cand and back while live updates are held, so a
-         difference is caused by the stylesheets alone. It measures CSS changes; a JavaScript change shows in captures.
+      -> DIR/<theme>-<width>/<place>.json computed-style differences, DIR/SUMMARY.md. One page and one moment of data: on every screen the stylesheets
+         are swapped from --base to --cand and back while live updates are held, so a difference is caused by the stylesheets alone. It measures CSS
+         changes; a JavaScript change shows in captures.
   python live_stand.py look --spec SPEC.json --report OUT.json
-      -> the places a change touches (place_plan.py beside this file reads its diff against the served web/) or the
-         places SPEC names, at each of its viewports, themes and engines: per screen the measurements (measure.js
-         beside this file: covered text, small targets, overflow, cut text; plus uneven rows and long texts) in
-         OUT.json, rewritten after every screen, and on request frames as flat files captioned with the engine that
-         drew them; a place or view that does not show when pressed is named, not measured under its name. With a draft
-         and frames a second page shows the served interface on the same data: every screen it also has is a pair,
-         served then draft, the changed classes are looked for on both, and a finding the served page lacks (matched
-         one by one) is marked new. Ouroboros's `ui_look` tool writes SPEC; look() reads its keys.
-  --engine webkit|chromium (default webkit, the owner's macOS app engine; falls back to chromium when WebKit is missing).
-  --executable-path PATH launches exactly that Chromium (Ouroboros's pinned headless shell, as browse_page) and nothing
-  else: no fallback to another engine or build.
+      -> the places a change touches (place_plan.py beside this file reads its diff against the served web/) or the places SPEC names, at each of its
+         viewports, themes and engines: per screen the measurements (measure.js beside this file: covered text, small targets, overflow, cut text;
+         plus uneven rows and long texts) in OUT.json, rewritten after every screen, and on request frames as flat files captioned with the engine
+         that drew them; a place or view that does not show when pressed is named, not measured under its name. With a draft and frames a second page
+         shows the served interface on the same data: every screen it also has is a pair, served then draft, the changed classes are looked for on
+         both, and a finding the served page lacks (matched one by one) is marked new. Ouroboros's `ui_look` tool writes SPEC; look() reads its keys.
+  --engine webkit|chromium (default webkit, the owner's macOS app engine; falls back to chromium when WebKit is missing). --executable-path PATH
+  launches exactly that Chromium (Ouroboros's pinned headless shell, as browse_page) and nothing else: no fallback to another engine or build.
 Library: from live_stand import Stand; with Stand(theme="dark", width=1440) as s: s.open(); s.nav("settings"); s.shot("x").
 """
 from __future__ import annotations
@@ -136,9 +132,19 @@ _JS = r"""
       if (path === want) return res(); const nl = l.cloneNode(); nl.href = want; nl.onload = () => { l.remove(); res(); };
       nl.onerror = () => res(); l.after(nl); })));
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); };
-  const places = () => [...new Set([...document.querySelectorAll('[data-nav-page]')].map((n) => n.getAttribute('data-nav-page')))];
+  let regP = null; const registry = () => (/^https?:$/.test(location.protocol) ? (regP ||= import('/static/modules/pages.js').catch(() => null)) : Promise.resolve(null));
+  const doorHost = (p) => (p && p.zone === 'door' && p.door) || '';
   const placeRow = (id) => [...document.querySelectorAll('[data-nav-page]')].find((n) => n.getAttribute('data-nav-page') === id);
-  const go = (id) => { const b = placeRow(id); if (b) b.click(); return Boolean(b); };
+  // Registered places from pages.js (including door-backed places when their host exists), else DOM [data-nav-page].
+  const places = async () => { const nav = [...new Set([...document.querySelectorAll('[data-nav-page]')].map((n) => n.getAttribute('data-nav-page')))], reg = await registry();
+    return !reg || !Array.isArray(reg.PAGES) ? nav : [...new Set([...reg.PAGES.filter((p) => placeRow(p.id) || (doorHost(p) && placeRow(doorHost(p)))).map((p) => p.id), ...nav])]; };
+  const go = async (id) => { const b = placeRow(id); if (b) { b.click(); return true; }
+    const reg = await registry(), hostId = doorHost((reg && Array.isArray(reg.PAGES) ? reg.PAGES : []).find((p) => p.id === id)), hostBtn = hostId && placeRow(hostId);
+    if (!hostBtn) return false; hostBtn.click();
+    for (let i = 0, idle = 0; i < 40; i++) { const hp = document.getElementById(`page-${hostId}`);
+      if (hp && vis(hp)) { const door = hp.querySelector(`[data-settings-open="page:${id}"]`), back = [...hp.querySelectorAll('.app-page-header [data-shell-back]')].find(vis);
+        if (door && vis(door)) { door.click(); return true; } if (back) { back.click(); idle = 0; } else if (++idle >= 10) return false; }
+      await new Promise((r) => setTimeout(r, 40)); } return false; };
   // "" when the place a press asked for is the one shown: its page-<id> section, else its row chosen.
   const placeShown = (id) => { const page = document.getElementById(`page-${id}`);
     if (page) return vis(page) ? '' : 'did not open';

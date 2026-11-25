@@ -4,6 +4,7 @@ import json
 import pytest
 
 from tests.settings_browser_helpers import open_settings
+from tests.settings_section_helpers import open_extensions
 from tests.test_subscription_setup_browser import capture
 from tests.test_subscription_setup_browser import subscription_ui as _subscription_ui
 
@@ -53,7 +54,10 @@ def test_theme_choice_reload_and_main_surfaces(subscription_ui):
     assert page.evaluate("getComputedStyle(document.documentElement).colorScheme") == 'light'
     capture(page, 'theme-light-settings')
     for name in ['files', 'skills', 'widgets', 'dashboard']:
-        page.locator(f'[data-nav-page="{name}"]').click()
+        if name == 'skills':
+            open_extensions(page)  # through Settings' door: it has no place in the rail (owner 24.11)
+        else:
+            page.locator(f'[data-nav-page="{name}"]').click()
         page.wait_for_selector(f'#page-{name}.active')
         capture(page, f'theme-light-{name}')
     ui['errors'].watch(page)  # the reloads may cut off the page's own reads (tests/ui_console_errors.py)

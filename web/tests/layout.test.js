@@ -96,18 +96,19 @@ test('a pinch is read against the layout width, so a smaller Interface size is n
     assert.equal(pinchMagnified({ innerWidth: 390 }), false, 'no visual viewport, no pinch');
 });
 
-test('measurePinnedBars writes the pinned head and foot heights, and says when they leave no room for a row', async () => {
+test('measurePinnedBars writes the pinned head\'s height, and says when it leaves no room for a row', async () => {
     const { measurePinnedBars } = await import('../modules/layout.js');
     const props = new Map();
     const box = (height) => ({ getBoundingClientRect: () => ({ height }) });
-    const head = box(104), foot = box(60.5);
+    const head = box(104);
     const row = box(48);
     const attrs = new Set();
-    // The foot is the whole bar a short window pins: the six sections, the version and the update.
+    // The head is the one bar a short window pins: the rail stands beside the column (owner 24.11), never over its rows,
+    // and the column has no foot.
     const sidebar = { style: { setProperty: (name, value) => props.set(name, value) }, clientHeight: 500,
         ownerDocument: { defaultView: { getComputedStyle: () => ({ getPropertyValue: name => name === '--space-4' ? '16px' : '' }) } },
         toggleAttribute: (name, on) => { if (on) attrs.add(name); else attrs.delete(name); },
-        querySelector: (sel) => ({ '.sidebar-head': head, '.sidebar-foot': foot, '.nav-project-row': row })[sel] ?? null };
+        querySelector: (sel) => ({ '.sidebar-head': head, '.nav-project-row': row })[sel] ?? null };
     const observed = [];
     let fire = null;
     let disconnected = false;
@@ -117,34 +118,120 @@ test('measurePinnedBars writes the pinned head and foot heights, and says when t
         disconnect() { disconnected = true; }
     }
     const dispose = measurePinnedBars(sidebar, { Observer });
-    // The border box: a band or a safe area that arrives later changes only the bars' padding.
-    // The column too: a window that grows or shrinks changes whether a row still fits between the bars.
-    assert.deepEqual(observed, [[head, 'border-box'], [foot, 'border-box'], [sidebar, 'border-box']]);
+    // The border box: a band or a safe area that arrives later changes only the head's padding.
+    // The column too: a window that grows or shrinks changes whether a row still fits under the head.
+    assert.deepEqual(observed, [[head, 'border-box'], [sidebar, 'border-box']]);
     assert.equal(props.get('--sidebar-head-h'), '104px');
-    assert.equal(props.get('--sidebar-foot-h'), '60.5px');
-    assert.equal(attrs.has('data-bars-crowd'), false, 'head, a row and foot fit in 500 px');
-    foot.getBoundingClientRect = () => ({ height: 188 });  // the sections two to a line, the version under them
-    fire();
-    assert.equal(props.get('--sidebar-foot-h'), '188px');
-    assert.equal(attrs.has('data-bars-crowd'), false, '104 + 48 + 188 = 340 still fit');
-    sidebar.clientHeight = 330;  // a shorter window: no Project row between the two bars
+    assert.equal(props.has('--sidebar-foot-h'), false, 'no foot to measure');
+    assert.equal(attrs.has('data-bars-crowd'), false, 'the head and a row fit in 500 px');
+    sidebar.clientHeight = 150;  // a window shorter than the head, a row and their clearance
     fire();
     assert.equal(attrs.has('data-bars-crowd'), true, 'the head scrolls away with the list there');
     sidebar.clientHeight = 500;
     fire();
     assert.equal(attrs.has('data-bars-crowd'), false, 'and is pinned again when the room returns');
     head.getBoundingClientRect = () => ({ height: 106 });
-    foot.getBoundingClientRect = () => ({ height: 152 });
-    for (const [height, crowded] of [[340, false], [320, true], [306, true], [300, true], [340, false]]) {
+    for (const [height, crowded] of [[186, false], [185, true], [170, true], [186, false]]) {
         sidebar.clientHeight = height;
         fire();
-        assert.equal(attrs.has('data-bars-crowd'), crowded, `${height}px includes the 16px scroll clearance at both bars`);
+        assert.equal(attrs.has('data-bars-crowd'), crowded, `${height}px includes the 16px scroll clearance at both edges`);
     }
     dispose();
     assert.equal(disconnected, true);
-    // A page without the bars, or without ResizeObserver, measures nothing and still returns a disposer.
+    // A page without the head, or without ResizeObserver, measures nothing and still returns a disposer.
     assert.equal(typeof measurePinnedBars({ querySelector: () => null }, { Observer }), 'function');
     assert.equal(typeof measurePinnedBars(sidebar, { Observer: undefined }), 'function');
+});
+
+test('measurePinnedBars sets data-rail-crowd from natural rail groups, independent of data-bars-crowd and free stretch space', async () => {
+    const { measurePinnedBars } = await import('../modules/layout.js');
+    const props = new Map();
+    const attrs = new Set();
+    const styles = new Map();
+    const mk = (height, style = {}, classes = []) => {
+        const el = {
+            h: height,
+            classList: { contains: (name) => classes.includes(name) },
+            getBoundingClientRect() { return { height: this.h }; },
+        };
+        styles.set(el, style);
+        return el;
+    };
+    const head = mk(110);
+    const row = mk(44);
+    const close = mk(44, { marginTop: '0px', marginBottom: '4px' }, ['nav-drawer-close']);
+    const sections = mk(140, { marginTop: '0px', marginBottom: '0px' }, ['nav-rail-sections']);
+    // Simulate CSSOM used marginTop of `margin-top: auto` under `align-self: stretch` (must not feed back).
+    const system = mk(152, { marginTop: '1300px', marginBottom: '0px' }, ['nav-rail-system']);
+    const rail = { children: [close, sections, system], getBoundingClientRect: () => ({ height: 1590 }) };
+    styles.set(rail, { paddingTop: '14px', paddingBottom: '0px', rowGap: '8px' });
+    const sidebar = {
+        style: { setProperty: (name, value) => props.set(name, value) },
+        clientHeight: 570,
+        ownerDocument: { defaultView: { getComputedStyle: (el) => styles.get(el) || {} } },
+        toggleAttribute: (name, on) => { if (on) attrs.add(name); else attrs.delete(name); },
+        querySelector: (sel) => ({ '.sidebar-head': head, '.nav-project-row': row, '.nav-rail': rail })[sel] ?? null,
+    };
+    styles.set(sidebar, { paddingTop: '0px', paddingBottom: '12px', getPropertyValue: (n) => (n === '--space-4' ? '16px' : '') });
+    const observed = [];
+    let fire = null;
+    let disconnected = false;
+    class Observer {
+        constructor(callback) { fire = callback; }
+        observe(el, options) { observed.push([el, options?.box]); }
+        disconnect() { disconnected = true; }
+    }
+    const dispose = measurePinnedBars(sidebar, { Observer });
+    assert.deepEqual(observed, [
+        [head, 'border-box'], [sidebar, 'border-box'], [rail, 'border-box'],
+        [close, 'border-box'], [sections, 'border-box'], [system, 'border-box'],
+    ]);
+    // Natural rail height: 14 + (44 + 4) + 140 + 152 + 2*8 = 370px; available content room at 570px is 558px.
+    assert.equal(attrs.has('data-rail-crowd'), false, 'stretched auto-margin on .nav-rail-system never triggers crowd');
+    assert.equal(attrs.has('data-bars-crowd'), false);
+
+    // 568x320 drawer: room = 308px (< 370px), while head + row + clearance = 186px (<= 320px).
+    sidebar.clientHeight = 320;
+    fire();
+    assert.equal(attrs.has('data-rail-crowd'), true, 'crowded rail unpins when natural groups pass available room');
+    assert.equal(attrs.has('data-bars-crowd'), false, 'head crowd remains independent');
+    // Re-firing with stretched auto-margin and tall rail box holds steady (no self-feedback loop).
+    for (let i = 0; i < 4; i += 1) {
+        styles.get(system).marginTop = `${1200 + i * 50}px`;
+        fire();
+        assert.equal(attrs.has('data-rail-crowd'), true);
+    }
+
+    // Exact 1px edge around 370px natural height (+ 12px sidebar padding-bottom = 382px).
+    for (const [height, crowded] of [[382, false], [381, true], [381, true], [382, false]]) {
+        sidebar.clientHeight = height;
+        fire();
+        assert.equal(attrs.has('data-rail-crowd'), crowded, `${height}px around the 370px rail + 12px bottom padding edge`);
+    }
+
+    // Update pill + close control grows .nav-rail-system from 152px -> 216px (natural height 434px vs 408px room).
+    sidebar.clientHeight = 420;
+    fire();
+    assert.equal(attrs.has('data-rail-crowd'), false);
+    system.h = 216;
+    fire();
+    assert.equal(attrs.has('data-rail-crowd'), true, 'update notice growth tips the rail into crowd');
+    assert.equal(attrs.has('data-bars-crowd'), false);
+    system.h = 152;
+    fire();
+    assert.equal(attrs.has('data-rail-crowd'), false);
+
+    // Docked layout hides #nav-drawer-close (height 0): excluded along with its margin and one flex gap (need = 314px).
+    close.h = 0;
+    sidebar.clientHeight = 326;
+    fire();
+    assert.equal(attrs.has('data-rail-crowd'), false, 'hidden close button contributes neither height nor gap');
+    sidebar.clientHeight = 325;
+    fire();
+    assert.equal(attrs.has('data-rail-crowd'), true);
+
+    dispose();
+    assert.equal(disconnected, true);
 });
 
 test('app startup binds the column fade to hidden rows, and clears it at settled edges', () => {

@@ -259,11 +259,13 @@
     --widget-fault-status-max-width: min(240px, 35vw);
     /* App shell: persistent desktop sidebar + optional project detail pane. */
     --sidebar-width: 280px;
-    /* The narrowest the sidebar is drawn (panel_widths.js stops its handle here and raises a narrower stored width):
-       Ouroboros's card with its name and its mark inside, the search row with New project, two sections to a line
-       with whole names and the foot hold whole down to it, measured on the owner's data (14.11). CSS px, so it
-       follows the Interface size, which zooms the window. */
+    /* The narrowest sidebar column (panel_widths.js stops its handle here and raises a narrower stored width):
+       Ouroboros's card with its name and mark inside, the search row with New project, and the Projects list hold
+       whole down to it (the sections and foot live in the external rail beside the column). CSS px, so it follows
+       the Interface size, which zooms the window. */
     --sidebar-min-width: 270px;
+    /* The widest sidebar column (style.css adds --nav-rail-extra for the docked box; panel_widths.js reads this). */
+    --sidebar-max-width: 560px;
     /* A docked room holds the fully folded composer, a question count and Latest's reserved end on one line. */
     --room-min-width: 320px;
     --project-panel-width: clamp(340px, 36vw, 440px);

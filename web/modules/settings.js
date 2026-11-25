@@ -99,6 +99,12 @@ export function initSettings(ctx = {}) {
             if (levels.length > at + 1) closeLevels(at + 1);
             return true;
         }
+        if (path === 'page:skills'
+            && options.opener && homeEl.contains(options.opener)
+            && options.opener.dataset?.settingsOpen === 'page:skills'
+            && !options.opener.dataset?.settingsResult) {
+            return leave(path, { row: options.row || '', opener: options.opener, resume: true });
+        }
         return go(path, { ...options, fresh: true });
     };
     const home = mountSettingsHome(homeEl, { open: pressed,
@@ -186,7 +192,9 @@ export function initSettings(ctx = {}) {
     // A door uses the shell's ordinary jump: no return callback belongs to a link.
     async function leave(door, { row = '', ...options } = {}) {
         const [kind, name] = door.split(':');
-        if (kind === 'skills' || door === 'page:skills') return openExtensions?.(kind === 'skills' ? door.slice(7) : '', { row, ...options });
+        if (kind === 'skills' || door === 'page:skills') {
+            return openExtensions?.(kind === 'skills' ? door.slice(7) : '', { row, ...options });
+        }
         if (kind === 'dashboard') return openDashboardTab?.(name, { row, ...options });
         return showPage?.(kind === 'main' ? 'chat' : name, options);
     }
@@ -304,7 +312,7 @@ export function initSettings(ctx = {}) {
 
     // From outside Settings (app.js `openSettings`): Settings is shown first, and refused when the page left vetoes.
     // A path already open keeps its level and its place (a Dashboard tab's Back returns there); any other starts anew.
-    async function openFromOutside(path = '', { row = '', ...options } = {}) {
+    async function openFromOutside(path = '', { row = '', resume: _ignored, ...options } = {}) {
         const target = settingsTarget(path, row);
         if (isDoorId(target)) return leave(target, { row, ...options });
         if (extensionsPageOf(target)) return openExtensions?.(target, { row, ...options });

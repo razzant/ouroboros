@@ -2,8 +2,10 @@
  *
  * Every place the sidebar offers is declared here once: its id (the `page-<id>` section app.js shows and the
  * `data-nav-page` of its row), the label the row and the stack layout's header title say verbatim, its icon key in
- * page_icons.js, and its zone in the sidebar (the pinned head holds Main; the foot after the Projects the tools, in
- * this order), a tool with its group: the foot's first card holds the sections, its second the system rows.
+ * page_icons.js, and its zone: the pinned head holds Main; the rail beside the Projects (owner 24.11, «Рельс
+ * снаружи») holds the sections at its top and the system rows at its foot, in this order, each with its group; a place
+ * whose zone is `door` has no row of its own and opens through a door of the place it names (Extensions is a
+ * Settings row under Connections, owner 24.11, «как задумано»), whose row stands chosen while it shows.
  * The rows are rendered from this list (app.js), the headers read their titles from it (page_header.js), and the
  * gate lane walks it; index.html keeps no nav markup of its own (tests/test_pages_registry_static.py). */
 
@@ -13,18 +15,25 @@ import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 export const PAGES = Object.freeze([
     Object.freeze({ id: 'chat', label: 'Main Chat', icon: 'chat', zone: 'head', hint: 'Main Ouroboros chat', init: 'initChat' }),
-    Object.freeze({ id: 'circles', label: 'Circles', icon: 'circles', zone: 'foot', group: 'sections', init: 'initCircles' }),
-    Object.freeze({ id: 'files', label: 'Files', icon: 'files', zone: 'foot', group: 'sections', init: 'initFiles' }),
-    Object.freeze({ id: 'skills', label: 'Extensions', icon: 'skills', zone: 'foot', group: 'sections', init: 'initSkills' }),
-    Object.freeze({ id: 'widgets', label: 'Widgets', icon: 'widgets', zone: 'foot', group: 'sections', init: 'initWidgets' }),
-    Object.freeze({ id: 'dashboard', label: 'Dashboard', icon: 'dashboard', zone: 'foot', group: 'system', init: 'initDashboard' }),
-    Object.freeze({ id: 'settings', label: 'Settings', icon: 'settings', zone: 'foot', group: 'system', init: 'initSettings' }),
+    Object.freeze({ id: 'circles', label: 'Circles', icon: 'circles', zone: 'rail', group: 'sections', init: 'initCircles' }),
+    Object.freeze({ id: 'files', label: 'Files', icon: 'files', zone: 'rail', group: 'sections', init: 'initFiles' }),
+    Object.freeze({ id: 'skills', label: 'Extensions', icon: 'skills', zone: 'door', door: 'settings', init: 'initSkills' }),
+    Object.freeze({ id: 'widgets', label: 'Widgets', icon: 'widgets', zone: 'rail', group: 'sections', init: 'initWidgets' }),
+    Object.freeze({ id: 'dashboard', label: 'Dashboard', icon: 'dashboard', zone: 'rail', group: 'system', init: 'initDashboard' }),
+    Object.freeze({ id: 'settings', label: 'Settings', icon: 'settings', zone: 'rail', group: 'system', init: 'initSettings' }),
 ]);
 
-export const ZONES = Object.freeze(['head', 'foot']);
+export const ZONES = Object.freeze(['head', 'rail', 'door']);
 
 export function pageById(id) {
     return PAGES.find((page) => page.id === String(id || '')) || null;
+}
+
+/** The sidebar row that stands for a place while it shows: its own, or for a place behind a door, the row of the place
+ * that holds the door (Extensions shows with Settings chosen). */
+export function navRowFor(id) {
+    const page = pageById(id);
+    return page?.zone === 'door' ? page.door : String(id || '');
 }
 
 /** The label a header says in the stack layout: the registry's words, verbatim. */
@@ -61,45 +70,59 @@ export function renderNavRows(zone, group = '') {
     return pagesInZone(zone).filter((page) => !group || page.group === group).map(renderNavRow).join('\n');
 }
 
-/** The foot's two cards (owner 21.11; docs/DESIGN.md "Navigation"): the sections, each in a cell of its own (the cells
- * keep the two-to-a-line columns and let a longer name take the room it needs, style.css), then the system rows over
- * a hairline and the version row, where `#nav-version` (utils.js writes it) and the update's controls
- * (update_status.js) stand. */
-export function renderNavFoot() {
-    const sections = pagesInZone('foot').filter((page) => page.group === 'sections')
-        .map((page) => `<div class="nav-cell">${renderNavRow(page)}</div>`).join('');
-    return `<div class="nav-card nav-sections">${sections}</div>`
-        + `<div class="nav-card nav-system"><div class="nav-system-rows">${renderNavRows('foot', 'system')}</div>`
-        + '<div class="sidebar-foot-meta"><span id="nav-version"></span></div></div>';
+/** The rail's places (owner 24.11; docs/DESIGN.md "Navigation"): the sections at its top, then at its foot the system
+ * rows over the version row, where `#nav-version` (utils.js writes it) and the update's controls (update_status.js)
+ * stand. A row is its glyph; its word stays its name (style.css). */
+export function renderNavRail() {
+    const rows = (group) => pagesInZone('rail').filter((page) => page.group === group).map(renderNavRow).join('');
+    return `<div class="nav-rail-sections">${rows('sections')}</div>`
+        + `<div class="nav-rail-system">${rows('system')}<div class="sidebar-foot-meta"><span id="nav-version"></span></div></div>`;
 }
 
-/** Puts the two cards into a document's foot, once: the document's own `.sidebar-foot`, or one this gives the oldest
- * retained document (v7.7.0, whose rows and lone `#nav-version` stand in the old .sidebar-scroll wrapper with no foot
- * of their own). A retained document already holds the version anchor: in the foot's own meta row (an index.html kept
- * across an update, v7.7.1 to v7.11) or beside the old rows (v7.7.0). The system card adopts that row in place of its
- * own, so the document keeps one `.sidebar-foot-meta` with one `#nav-version`, and the status controller
- * (update_status.js) finds its row through the anchor as usual. Once the cards stand, v7.7.0's own Utilities group —
- * the rows the cards replace — leaves the document, so each destination and its focus stop stay one; Main, the
- * Projects, the version and the old wrapper keep their place. */
-export function mountNavFoot(sidebar) {
-    let foot = sidebar?.querySelector('.sidebar-foot') || null;
-    if (!foot && !sidebar?.querySelector('#nav-version')) return;
-    if (!foot) {
-        foot = document.createElement('div');
-        foot.className = 'sidebar-foot';
-        sidebar.appendChild(foot);
+/** Puts the rail's places into a document, once: into its `.nav-rail`, or into a rail that leads `#primary-sidebar` in
+ * DOM order (explicit column 1 in style.css) in place of a retained document's foot (an index.html kept across an
+ * update, v7.7.1 to v7.12) or ahead of the oldest one's wrapper (v7.7.0, whose rows and lone `#nav-version` stand with
+ * `.sidebar-scroll` and no foot of their own). A retained document already holds the version anchor: in its foot's meta
+ * row (v7.7.1 to v7.11) or beside the old rows (v7.7.0). The rail adopts it in place of its own, so the document keeps
+ * one `.sidebar-foot-meta` with one `#nav-version`, and the status controller (update_status.js) finds its row through
+ * the anchor as usual. The drawer's one close control caps the rail first in DOM order so keyboard and assistive-tech
+ * navigation hit it immediately: a newer retained head's `#nav-drawer-close` node is reused and its emptied row leaves,
+ * while v7.7.0 (which had none) gets the matching control synthesized before app.js binds it. v7.7.0's own Utilities
+ * group (the rows the rail replaces) leaves the document too, so each destination and its focus stop stay one; Main,
+ * the Projects, the version and the old wrapper keep their place. */
+export function mountNavRail(sidebar) {
+    const doc = sidebar?.ownerDocument;
+    let rail = sidebar?.querySelector('.nav-rail') || null;
+    const foot = rail ? null : sidebar?.querySelector('.sidebar-foot') || null;
+    const version = doc?.getElementById('nav-version') || null;
+    if (!doc || (!rail && !foot && !version) || rail?.querySelector('[data-nav-page]')) return;
+    const kept = version?.closest('.sidebar-foot-meta') || null;
+    if (!rail) {
+        rail = doc.createElement('div');
+        rail.className = 'nav-rail';
+        foot?.remove();
+        sidebar.prepend(rail);
+    } else if (rail.parentElement && rail.parentElement.firstElementChild !== rail) {
+        rail.parentElement.prepend(rail);
     }
-    if (foot.querySelector('.nav-card')) return;
-    const kept = [...foot.children].find((el) => el.matches('.sidebar-foot-meta') && el.querySelector('#nav-version')) || null;
-    const loose = kept ? null : foot.parentElement?.querySelector('#nav-version') || null;
-    foot.insertAdjacentHTML('afterbegin', renderNavFoot());
-    const fresh = foot.querySelector('.nav-system > .sidebar-foot-meta');
+    rail.insertAdjacentHTML('beforeend', renderNavRail());
+    const fresh = rail.querySelector('.nav-rail-system > .sidebar-foot-meta');
+    // The anchor keeps its id and its row; utils.js writes it, update_status.js mounts the check in the row.
     if (kept) fresh.replaceWith(kept);
-    else if (loose) {
-        const meta = document.createElement('div');
-        meta.className = 'sidebar-foot-meta';
-        meta.appendChild(loose);  // the anchor keeps its id; utils.js writes it, update_status.js mounts the check in the row
-        fresh.replaceWith(meta);
+    else if (version) fresh.children[0].replaceWith(version);
+    let close = doc.getElementById('nav-drawer-close');
+    if (!close) {
+        close = doc.createElement('button');
+        close.id = 'nav-drawer-close';
+        close.className = 'shell-icon-control nav-drawer-close';
+        close.setAttribute('type', 'button');
+        close.setAttribute('aria-label', 'Close navigation');
+        close.setAttribute('aria-controls', 'primary-sidebar');
+    }
+    if (close.parentElement !== rail || rail.firstElementChild !== close) {
+        const row = close.closest?.('.drawer-head');
+        rail.prepend(close);
+        row?.remove();
     }
     sidebar.querySelector('.nav-utilities')?.remove();
 }

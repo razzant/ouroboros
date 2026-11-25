@@ -38,8 +38,9 @@ def _runtime_branch_defaults(request: Request) -> tuple[str, str]:
 
 
 def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any]:
+    from ouroboros.contracts.schema_versions import read_schema_version
     from supervisor.git_ops import compute_managed_update_status, git_capture
-    from supervisor.update_merge import active_update_tx
+    from supervisor.update_merge import UPDATE_TX_SCHEMA_VERSION, active_update_tx
 
     status = {"running_sha": "", **compute_managed_update_status(fetch=fetch)}
     # Only a fetching check records facts. Apply uses checkout HEAD even if the letter is unreadable.
@@ -70,6 +71,9 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
             **({"attempt_id": str(tx["attempt_id"])} if tx.get("attempt_id") else {}),
             **({"local_work_recovery": True} if tx.get("stash_restore")
                or tx.get("gate_blocked_reason") == "rollback_restart_pending" else {}),
+            # Its own check before the restart as the lanes write it; a newer release's marker proves nothing here.
+            **({"pre_restart_smoke": tx["pre_restart_smoke"]} if tx.get("pre_restart_smoke") in ("pending", "passed")
+               and read_schema_version(tx) <= UPDATE_TX_SCHEMA_VERSION else {}),
         }
         if tx
         else {"active": False}

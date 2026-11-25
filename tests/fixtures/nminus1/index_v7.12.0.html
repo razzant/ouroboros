@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en" class="ouro-ui">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Ouroboros</title>
+    <script src="/static/theme.js"></script>
+    <!-- The macOS desktop window may run this page under its transparent title bar (launcher_window_chrome.py);
+         after theme.js, so the shell reads the painted palette with it. style.css reserves what it measures. -->
+    <meta name="ouroboros-window-chrome" content="integrated">
+    <link rel="stylesheet" href="/static/ui.css">
+    <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/settings.css">
+    <link rel="stylesheet" href="/static/model_roles.css">
+    <link rel="stylesheet" href="/static/model_wait.css">
+    <link rel="stylesheet" href="/static/room_work.css">
+    <link rel="stylesheet" href="/static/cards.css">
+    <link rel="stylesheet" href="/static/consciousness.css">
+    <link rel="icon" href="/static/favicon.png" type="image/png">
+    <script src="/static/chart.umd.min.js"></script>
+    <script src="/static/purify.min.js"></script>
+    <script src="/static/marked.min.js"></script>
+    <script src="/static/highlight.min.js"></script>
+    <script src="/static/vendor/katex/katex.min.js"></script>
+    <script src="/static/vendor/katex/contrib/auto-render.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <div id="nav-drawer-backdrop" class="nav-drawer-backdrop" hidden></div>
+        <nav id="primary-sidebar" class="primary-sidebar" aria-label="Ouroboros navigation">
+            <!-- Zones (docs/DESIGN.md "Shell"): a pinned head, the Projects list as the one scroller, the tools after it in two cards, the version and the update at the bottom edge. -->
+            <div class="sidebar-head">
+                <!-- The drawer's head (stack layout only): its one close control, exactly where the header's ☰ was. -->
+                <div class="drawer-head">
+                    <button id="nav-drawer-close" class="shell-icon-control nav-drawer-close" type="button" aria-label="Close navigation" aria-controls="primary-sidebar"></button>
+                </div>
+                <!-- Main Chat: rendered from the page registry (pages.js) -->
+            </div>
+            <section id="nav-projects" class="nav-section nav-projects" aria-label="Projects" hidden>
+                <div class="nav-projects-header"><!-- rendered from pages.js --></div>
+                <div id="nav-projects-list" class="nav-projects-list"></div>
+            </section>
+            <div class="sidebar-foot">
+                <!-- Two cards with the version row, rendered from the page registry (pages.js) — the registry names the places -->
+            </div>
+        </nav>
+        <main id="content">
+            <!-- Pages injected by JS -->
+        </main>
+        <div id="project-panel-backdrop" class="project-panel-backdrop" hidden></div>
+        <aside id="project-panel" class="project-panel" hidden>
+            <!-- Its header is the one page header, rendered by app.js (page_header.js): ☰ · name · status … × -->
+            <div id="project-panel-body" class="project-panel-body"></div>
+        </aside>
+    </div>
+    <script type="module" src="/static/app.js"></script>
+</body>
+</html>
