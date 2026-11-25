@@ -5,7 +5,7 @@ system-wide auditing (no ``auditpol``/``wevtutil``), screenshots, raw UI dumps, 
 unpacks A's ZIP, builds fast-forward commit B in a local bare mirror, removes host Git, checks the
 trace instrument once on the package's own Git, passes the Setup wizard via candidate A's
 ``WindowsComputerUse`` UIA skill + owned ``SendInput`` fallback, verifies fresh ``Main`` HWND handoff,
-runs Turn 1, applies plain ``Check for updates`` -> ``#update-pill`` -> ``Update to ...`` -> single
+runs Turn 1, opens a proved ``#update-pill`` (using plain ``Check for updates`` if needed) -> ``Update to ...`` -> single
 ``Update now``, verifies boot-concluded B + retained Turn 1 + Turn 2 + one attempt carried across both,
 then judges the Git traces (``git_traces``).
 """
@@ -27,9 +27,11 @@ from typing import Any, Callable
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import chat_reply_witness as cw  # noqa: E402
 import fixture_model as fm  # noqa: E402
 import git_traces as gt  # noqa: E402
 import prepare_build as pb  # noqa: E402
+import update_offer as uo  # noqa: E402
 import windows_host as wh  # noqa: E402
 from uia_reading import MessageWitness, flatten_tree_nodes, visible_rect  # noqa: E402
 
@@ -698,7 +700,9 @@ class QualificationRun:
             return
         witness.observe(root)
         state["uia_gap"] = ""
-        if state["durable"] and state.get("answered", True) and (target := witness.next_reveal()):
+        if not state["durable"] or not state.get("answered", True):
+            return
+        if target := witness.next_reveal():
             try:
                 receipt = self.driver._element_act(hwnd, phase=phase, select={"role": "text", "name_contains": target[1]}, do="scroll_into_view", timeout_ms=10000, max_nodes=4500, max_depth=64)
             except Unconfirmed as gap:
@@ -706,6 +710,14 @@ class QualificationRun:
                     raise
                 receipt = gap.code
             witness.revealed(target[0], receipt)
+            return
+        for key, (text, marker) in witness.wants.items():
+            if key in witness.seen:
+                continue
+            author = "You" if key == "prompt" else "Ouroboros"
+            if cw.reply_from_visible_leaf(self.driver, self.wh, hwnd, phase, root, text, marker, author, poll_until):
+                witness.seen[key] = "reply_action"
+                break  # after the composer layout changes, the next row needs its own fresh reading
 
     def judge_witness(self, witness: MessageWitness, *, phase: str, check: str, code: str, uia_gap: str, **fields: Any) -> None:
         """Only a missing witness in a confirmed Main permits independent checks to continue."""
@@ -786,39 +798,7 @@ class QualificationRun:
         assert self.driver is not None
         self.step = "update_check"
         hwnd = self.driver.main_hwnd
-        checked = lambda **want: gt.completed_check(self.api("/api/update/status"), **want)  # noqa: E731
-        # The boot's own fetching check (server._boot_managed_update_tasks) settles on Stable's A before the channel moves.
-        if poll_until(180.0, lambda: checked(target=self.candidate, development=False), interval=1.0) is None:
-            raise Unconfirmed("update_check", "startup_stable_check_unobserved")
-
-        # Dashboard opens on Logs (hundreds of rows): only positive lookups there, read from a cut tree if need be.
-        tab = {"automation_id": "dashboard-tab-updates", "allow_truncated": True}
-        dev = {"role": "button", "name_prefix": "Development", "require_visible": False, "allow_truncated": True}
-        saved = lambda: (pb.read_json_retry(self.data / "settings.json") or {}).get("OUROBOROS_UPDATE_CHANNEL") == "development"  # noqa: E731
-        self.driver.act_or_click(hwnd, phase="update_check", label="Dashboard", query={"role": "button", "name": "Dashboard"},
-                                 post_condition=lambda: bool(self.driver.find_nodes(hwnd, phase="update_check", **tab)))
-        self.driver.act_or_click(hwnd, phase="update_check", label="Dashboard > Updates", query=tab, verbs=("select", "invoke"),
-                                 post_condition=lambda: bool(self.driver.find_nodes(hwnd, phase="update_check", **dev)))
-        self.driver.act_or_click(hwnd, phase="update_check", label="Which updates > Development", query=dev,
-                                 verbs=("toggle", "invoke"), post_condition=saved)
-        self.check("development_channel_saved", True, phase="update_check")
-        self.ensure_main_chat_open(phase="update_check", click_sidebar=True)
-        if self.driver.find_nodes(hwnd, phase="update_check", automation_id="update-pill"):  # it hides the plain check
-            raise Unconfirmed("update_check", "update_pill_visible_before_plain_check")
-
-        # Sidebar plain Check for updates (#nav-version-check) -> #update-pill (NEVER 'Check and describe').
-        # The check window of the Git traces runs from this click to the "Update to" click, whose preflight is later.
-        self.driver.wait_unique_node(hwnd, phase="update_check", label="nav-version-check", automation_id="nav-version-check", name_prefix="Check for updates", timeout_sec=30.0)
-        self.mark("plain_check_clicked")
-        self.driver.act_or_click(
-            hwnd, phase="update_check", label="Sidebar Check for updates", select={"automation_id": "nav-version-check"},
-            query={"automation_id": "nav-version-check", "name_prefix": "Check for updates"}, post_timeout=120.0,
-            post_condition=lambda: bool(self.driver.find_nodes(hwnd, phase="update_check", automation_id="update-pill")))
-        clicked = self.result["marks"]["plain_check_clicked"]
-        if poll_until(120.0, lambda: checked(target=self.b_sha, development=True, after=clicked), interval=1.0) is None:
-            raise Unconfirmed("update_check", "plain_check_of_b_unobserved")
-        self.driver.act_or_click(hwnd, phase="update_check", label="Sidebar update pill", query={"automation_id": "update-pill"}, select={"automation_id": "update-pill"}, post_condition=lambda: bool(self.driver.find_nodes(hwnd, phase="update_check", automation_id="btn-update-primary")))
-        self.check("plain_update_check_used_without_describe", True, phase="update_check")
+        uo.open_development_offer(self, poll_until)
 
         if not poll_until(45.0, lambda: len(b := self.driver.find_nodes(hwnd, phase="update_check", automation_id="btn-update-primary")) == 1 and str(b[0].get("name") or "").startswith("Update to ") and (b[0].get("state") or {}).get("enabled") is not False, interval=0.35):
             btns = self.driver.find_nodes(hwnd, phase="update_check", automation_id="btn-update-primary")
@@ -838,10 +818,11 @@ class QualificationRun:
         range_label = f"{self.candidate[:8]} \u2192 {self.b_sha[:8]}"  # a detail only; the status API names the target
         dialog_shows_range = bool(poll_until(8.0, lambda: self.driver.find_nodes(hwnd, phase="update_apply", name_contains=range_label, require_visible=False), interval=0.25))
         tie, state_before = self.api("/api/update/status"), self.state_doc()
+        self.result["facts"]["confirmation_update_status"] = uo.status_facts(tie, self.candidate, self.b_sha)
         if tie is None or state_before is None:
             raise Unconfirmed("update_apply", "status_or_state_unreadable_at_confirmation")
         self.baseline_ops = {str(op) for op in ((state_before.get("managed_update_attempt") or {}).get("operation_id"), (tie.get("update_progress") or {}).get("operation_id")) if op}
-        targets_b = tie.get("latest_sha") == self.b_sha and tie.get("running_sha") == self.candidate and tie.get("update_channel") == "development" and tie.get("available") is True and tie.get("safe_to_apply") is True
+        targets_b = uo.offered_b(tie, self.candidate, self.b_sha)
         self.check("confirmation_targets_b", targets_b, phase="update_apply", failure="confirmation_not_a_to_b", dialog_range_shown=dialog_shows_range)
 
         self.mark("update_now_clicked")
@@ -859,7 +840,7 @@ class QualificationRun:
         if concluded is None:
             raise Unconfirmed("update_apply", "update_attempt_conclusion_timeout")
         if (outcome := str(concluded.get("outcome") or "")) == "unknown":
-            raise Unconfirmed("update_apply", "update_attempt_outcome_unknown", reason=concluded.get("reason"))
+            raise Unconfirmed("update_apply", "update_attempt_outcome_unknown")
         applied_ok = outcome == "applied" and concluded.get("concluded_by") == "boot" and concluded.get("base_sha") == self.candidate and concluded.get("target_sha") == self.b_sha
         self.check("update_concluded_by_boot_applied_a_to_b", applied_ok, phase="update_apply", failure="update_outcome_not_applied", outcome=outcome, concluded_by=concluded.get("concluded_by"))
         self.attempt = dict(concluded)

@@ -190,25 +190,29 @@ def control_passed(claim: dict[str, Any], found: dict[str, Any]) -> bool:
 
 
 def bounds(marks: dict[str, str], attempt: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
-    """The three windows: launch to the Setup window (first-run clone); the plain check's click to the "Update to"
-    click (whose preflight fetch starts after it); the normal apply of the carried attempt, from ``begin`` to the
+    """The three windows: launch to Setup (first-run clone), then either the plain check's click to "Update to"
+    or (for an already offered B) "Update to" to "Update now" (preflight), then the carried apply from ``begin`` to the
     ``restart_requested`` stage its executor recorded after checkout, reset and smoke (gateway/control.py
     ``_restart_response``), and only when that attempt began after the recorded "Update now" click. Anything else
     leaves apply unbounded: it is never widened to the next boot."""
     clicked, begun = when(marks.get("update_now_clicked")), when(attempt.get("started_at"))
     applied = (attempt.get("stage") == attempt.get("result") == "restart_requested"
                and clicked is not None and begun is not None and begun >= clicked)
-    return {"bootstrap": (marks.get("launched"), marks.get("setup_window_ready")),
-            "check": (marks.get("plain_check_clicked"), marks.get("update_to_clicked")),
+    already_offered = "development_offer_observed" in marks and "plain_check_clicked" not in marks
+    fetch_window = ({"preflight": (marks.get("update_to_clicked"), marks.get("update_now_clicked"))} if already_offered
+                    else {"check": (marks.get("plain_check_clicked"), marks.get("update_to_clicked"))})
+    return {"bootstrap": (marks.get("launched"), marks.get("setup_window_ready")), **fetch_window,
             "apply": (attempt.get("started_at"), attempt.get("stage_started_at")) if applied else (None, None)}
 
 
 def phase_requirements(windows: dict[str, dict[str, Any] | None]) -> dict[str, bool | None]:
     """Each required command succeeded at least once in its window; None for a window not evaluated."""
+    commands_by_phase = {("preflight" if phase == "check" and "preflight" in windows and "check" not in windows else phase): commands
+                         for phase, commands in REQUIRED.items()}
     return {phase: None if windows.get(phase) is None
             else all(windows[phase]["to_target" if phase == "apply" else "succeeded"].get(cmd, 0) >= 1
                      for cmd in commands)
-            for phase, commands in REQUIRED.items()}
+            for phase, commands in commands_by_phase.items()}
 
 
 def completed_check(status: Any, *, target: str, development: bool, after: str = "") -> datetime | None:
@@ -219,7 +223,7 @@ def completed_check(status: Any, *, target: str, development: bool, after: str =
     moment, floor = when(body.get("checked_at")), when(after)
     if moment is None or body.get("checked_target_sha") != target or (after and floor is None):
         return None
-    on_channel = (body.get("update_channel") == "development") is development
+    on_channel = body.get("update_channel") == ("development" if development else "stable")
     return moment if on_channel and (floor is None or moment > floor) else None
 
 

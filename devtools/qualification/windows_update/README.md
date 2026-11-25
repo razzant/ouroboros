@@ -30,6 +30,8 @@ with no reachable system Git on the host. QA only: never a merge or release gate
   checked anywhere on synthetic text.
 - `uia_reading.py`: stdlib-only, platform-free reading of a UIA tree (the visibility rule and the chat
   messages' screen witness), checked on synthetic trees by `tests/test_windows_update_chat_witness.py`.
+- `chat_reply_witness.py`: uses the ordinary row menu to bind a visible text leaf to Main when
+  ControlView omits the feed. `update_offer.py` reads offer facts and chooses the actual UI door.
 - `scenario.py`: unpacks the verified ZIP, creates synthetic fast-forward commit B (one doc file)
   on `ouroboros` in the local bare mirror, launches `Ouroboros.exe` on a fresh
   `%USERPROFILE%\Ouroboros` profile and drives its windows with candidate A's own
@@ -53,14 +55,20 @@ screen witness the run went on past (2. below); Git traces read after a failure 
    message or holds its run-unique marker, UIA `IsOffscreen` read `false`, a non-empty rect. A
    message on the page but off screen gets one `scroll_into_view`. A witness still missing after an
    answered, exactly durable turn fails its check with allowlisted counts (never text) and the run
-   goes on to the Update and Turn 2, `unconfirmed` at best; an omitted feed ancestor leaves visibility unconfirmed. Continuing requires a current successful
-   read and a still-owned Main window; a lost window or a failed final read stops the step. Turn 1 in the window after the restart is judged the same way.
-3. **Plain update check & Update A->B**: first waits until the passive `GET /api/update/status` shows
-   the boot's own Stable check of A (`checked_target_sha`, `checked_at`), then selects `Development`
-   in `Dashboard › Updates`. A pill already showing before the plain check is `unconfirmed`. Invokes the
-   sidebar `Check for updates` (never `Check and describe`, never a POST from QA), waits for the
-   Development check of B with a `checked_at` after that click, then the `#update-pill`, `Update to ...`
-   and one `Update now`; after `concluded_by == "boot"` and the second chat it requires B checked out and
+   goes on to the Update and Turn 2, `unconfirmed` at best. When the feed is absent from ControlView,
+   a distinct witness right-clicks the measured point of the unique visible marked leaf in the owned
+   foreground Main, chooses `Reply` inside the newly opened `Message actions`, and reads the new
+   `chat-input-reply` with the exact fixture text and author. It then clicks `Cancel reply` in that
+   group and verifies that the strip is gone, without sending anything. A menu or visible text alone
+   is not proof. An unconfirmed action sequence stops before any next send; an initial lack of a
+   suitable leaf is still a screen gap. Turn 1 after the restart is judged the same way.
+3. **Development Update A->B**: the passive startup Stable status is diagnostic, never a gate.
+   Selects `Development` in `Dashboard › Updates`; confirms that A is still checked out and running.
+   Uses the visible `#update-pill` if the Development offer is already verified as exactly B and
+   safe to apply. Otherwise, if the plain sidebar `Check for updates` is visible, activates it once
+   and requires the exact B offer with `checked_at` later than that activation. This never uses
+   `Check and describe` or a POST from QA. Both routes finish through `Update to ...` and one
+   `Update now`; after `concluded_by == "boot"` and the second chat it requires B checked out and
    running, the same `initialization_id`, and one attempt: `state.json` and `GET /api/update/status`
    both equal, on `SAME_ATTEMPT_KEYS`, the record as concluded before Turn 2.
 4. **Which Git ran (`GIT_TRACE` + `GIT_TRACE2_EVENT`, inherited only by the app)**. The pinned Git
@@ -75,8 +83,9 @@ screen witness the run went on past (2. below); Git traces read after a failure 
    or its sinks cannot be read, the run goes on and identity settles `unconfirmed`. A command counts
    in a window when its session starts there and every terminal event (`exit`, `atexit`) carries
    code 0 and its own time inside the same window. Windows: a successful `clone` from launch to the
-   Setup window; a successful `fetch` from the plain check's click to the `Update to` click (its
-   preflight comes later); and, within the carried attempt's own apply (`started_at`, after the
+   Setup window; a successful `fetch` from the plain check's click to the `Update to` click, or, for
+   an already offered B, a preflight `fetch` between `Update to` and `Update now` (not a manual check);
+   and, within the carried attempt's own apply (`started_at`, after the
    recorded `Update now` click, to the `stage_started_at` of `restart_requested`, recorded before
    the restart), exactly `checkout -B ouroboros <B>` and `reset --hard <B>` by the argv tail after
    argv[0] (the `apply_managed_merge_update` steps). A missing or zone-less bound leaves its window

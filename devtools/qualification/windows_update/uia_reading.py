@@ -98,7 +98,7 @@ class MessageWitness:
 
     def __init__(self, wants: dict[str, tuple[str, str]]) -> None:
         self.wants = wants
-        self.seen: dict[str, str] = {}               # key -> "exact" | "marker"
+        self.seen: dict[str, str] = {}               # key -> "exact" | "marker" | "reply_action"
         self.counts: dict[str, dict[str, int]] = {}  # the witnessing reading's counts, else the latest reading's
         self.reveal: dict[str, str] = {}             # key -> its one scroll's fixed word
         self.reads = self.unjudged = 0

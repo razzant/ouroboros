@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "devtools" / "qualification" / "windows_update"))
 
+import chat_reply_witness as cw  # noqa: E402
 import fixture_model as fm  # noqa: E402
 import scenario  # noqa: E402
 from uia_reading import MessageWitness, message_counts  # noqa: E402
@@ -246,3 +247,102 @@ def test_old_durable_hit_cannot_authorize_continuation(tmp_path):
     with pytest.raises(scenario.Failure, match="exchange_missing_from_durable_history"):
         run.send_chat_turn(1, **TURN_1)
     assert not run.result["reasons"]
+
+
+def native_control(role, name, x, y, **extra):
+    return {"role": role, "name": name, "state": {"offscreen": False, "enabled": True}, **extra,
+            "rect": {"left": x - 10, "top": y - 10, "right": x + 10, "bottom": y + 10,
+                     "width": 20, "height": 20, "center": {"x": x, "y": y}}}
+
+
+def control_view(*rows):
+    return {"role": "window", "children": [{"role": "document", "children": [
+        native_control("edit", "Message", 600, 508, automation_id="chat-input"), *rows]}]}
+
+
+def message_actions(*items, name="Message actions"):
+    return native_control("menu", name, 665, 255, children=list(items))
+
+
+def composer_quote(text=P1, author="You"):
+    return {"role": "group", "children": [
+        native_control("button", f"Replying to {author}, 05:01: {text}", 570, 464, automation_id="chat-input-reply"),
+        native_control("button", "Cancel reply", 830, 464),
+    ]}
+
+
+class NativeHost(Host):
+    def __init__(self):
+        self.clicks = []
+
+    @staticmethod
+    def window_rect(hwnd):
+        assert hwnd == Driver.main_hwnd
+        return 20, 20, 1100, 680
+
+    def click(self, x, y, hwnd, pid, *, foreground_only, right):
+        assert foreground_only and self.window_owned_by(hwnd, pid)
+        self.clicks.append((x, y, right))
+
+
+ACTION = native_control("menu_item", "Reply", 667, 254)
+ON_SCREEN = control_view(leaf(P1))
+
+
+def once(_timeout, read, **_):
+    return read()
+
+
+@pytest.mark.parametrize(("key", "text", "marker", "author"), [
+    ("prompt", P1, M_P1, "You"), ("reply", R1, M_R1, "Ouroboros"),
+])
+def test_omitted_feed_promotes_only_a_completed_reply_witness(tmp_path, monkeypatch, key, text, marker, author):
+    start = control_view(leaf(text))
+    run = Run(tmp_path, [start, start, control_view(message_actions(ACTION)),
+                          control_view(composer_quote(text, author)), start])
+    run.wh = NativeHost()
+    monkeypatch.setattr(scenario, "poll_until", once)
+    witness = run.message_witness(1)
+    run._observe_chat_state(run.driver.main_hwnd, witness=witness, state={}, **TURN_1)
+    assert witness.seen == {key: "reply_action"}
+    assert run.wh.clicks == [(600, 211, True), (667, 254, False), (830, 464, False)]
+    assert text not in repr(witness.detail()) and marker not in repr(witness.detail())
+
+
+@pytest.mark.parametrize("start", [
+    control_view(leaf(P1, offscreen=True)), control_view(leaf(P1), leaf(P1)),
+    control_view(leaf(P1, unread=["name"])), control_view(leaf(P1, rect={**RECT, "width": 1})),
+    control_view(leaf(P1, rect={**RECT, "center": {"x": 1200, "y": 211}})),
+])
+def test_unusable_leaf_never_supplies_a_click_point(start):
+    driver, host = Driver([start], {}), NativeHost()
+    assert not cw.reply_from_visible_leaf(driver, host, driver.main_hwnd, "turn_1", start, P1, M_P1, "You", once)
+    assert not host.clicks
+
+
+@pytest.mark.parametrize(("snapshots", "code", "clicks"), [
+    ([control_view(message_actions(ACTION, name="Work actions"), ACTION)], "chat_reply_menu_unconfirmed", 1),
+    ([control_view(message_actions()), control_view(ACTION)], "chat_reply_menu_unconfirmed", 1),
+    ([control_view(message_actions(ACTION)), control_view(composer_quote(R1, "Ouroboros"))], "chat_reply_quote_unconfirmed", 2),
+    ([control_view(message_actions(ACTION)), control_view(composer_quote(P1, "Ouroboros"))], "chat_reply_quote_unconfirmed", 2),
+    ([control_view(message_actions(ACTION)), control_view(composer_quote()), control_view(composer_quote())], "chat_reply_cancel_unconfirmed", 3),
+])
+def test_neighbor_action_wrong_quote_and_uncancelled_strip_are_not_witnesses(snapshots, code, clicks):
+    driver, host = Driver([ON_SCREEN, *snapshots], {}), NativeHost()
+    with pytest.raises(scenario.wh.Unread, match=code):
+        cw.reply_from_visible_leaf(driver, host, driver.main_hwnd, "turn_1", ON_SCREEN, P1, M_P1, "You", once)
+    assert len(host.clicks) == clicks
+
+
+def test_existing_quote_blocks_input_and_lost_foreground_stops_an_incomplete_sequence():
+    stale = control_view(leaf(P1), composer_quote())
+    driver, host = Driver([stale], {}), NativeHost()
+    with pytest.raises(scenario.wh.Unread, match="chat_reply_not_empty_before_action"):
+        cw.reply_from_visible_leaf(driver, host, driver.main_hwnd, "turn_1", stale, P1, M_P1, "You", once)
+    assert not host.clicks
+
+    driver, host = Driver([ON_SCREEN], {}), NativeHost()
+    host.foreground_window = lambda: 0 if host.clicks else driver.main_hwnd
+    with pytest.raises(scenario.wh.Unread, match="chat_reply_owned_foreground_lost"):
+        cw.reply_from_visible_leaf(driver, host, driver.main_hwnd, "turn_1", ON_SCREEN, P1, M_P1, "You", once)
+    assert host.clicks == [(600, 211, True)]

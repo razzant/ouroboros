@@ -569,8 +569,11 @@ def _key_vk(vk: int, up: bool = False) -> Any:
     return ev
 
 
-def _prepare_pointer(x: int, y: int, hwnd: int, root_pid: int) -> None:
-    if not ensure_foreground_owned(hwnd, root_pid):
+def _prepare_pointer(x: int, y: int, hwnd: int, root_pid: int, *, foreground_only: bool = False) -> None:
+    if foreground_only:
+        if not disposable_hosted_runner() or not window_owned_by(hwnd, root_pid) or foreground_window() != hwnd:
+            raise Unread("window_focus_or_ownership_unavailable")
+    elif not ensure_foreground_owned(hwnd, root_pid):
         raise Unread("window_focus_or_ownership_unavailable")
     if root_window_at(x, y) != hwnd:
         raise Unread("target_point_obscured_or_unowned")
@@ -581,8 +584,13 @@ def _prepare_pointer(x: int, y: int, hwnd: int, root_pid: int) -> None:
         raise Unread("window_changed_before_pointer_input")
 
 
-def click(x: int, y: int, hwnd: int, root_pid: int) -> None:
-    _prepare_pointer(x, y, hwnd, root_pid)
+def click(x: int, y: int, hwnd: int, root_pid: int, *, foreground_only: bool = False, right: bool = False) -> None:
+    _prepare_pointer(x, y, hwnd, root_pid, foreground_only=foreground_only)
+    if foreground_only or right:
+        down, up = (0x0008, 0x0010) if right else (0x0002, 0x0004)
+        _send_inputs(_mouse_event(down), _mouse_event(up))
+        time.sleep(0.22)
+        return
     _send_inputs(_mouse_event(0x0002))
     time.sleep(0.05)
     _send_inputs(_mouse_event(0x0004))
