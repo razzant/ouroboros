@@ -102,3 +102,16 @@ def test_startup_recovers_intent_only_after_worker_custody_proof(roots, monkeypa
     result = _get_task_result(SimpleNamespace(drive_root=root, budget_drive_root=root), "new")
     assert ("held for reconciliation" if claimed else "explicit retry is available: start_task(") in result
     assert queue.PENDING == [] and queue.RUNNING == {}
+
+
+def test_the_explicit_retry_keeps_a_declaration_of_own_work(tmp_path):
+    """A start declared the mind's own (``mine``) is retried as its own; an undeclared one names no ``mine``."""
+    from ouroboros.promotion_intent import promotion_intent_notice
+
+    for declared in (True, False):
+        evt = {**event(), "task_id": f"new-{declared}", **({"own_declared": True, "initiator": "consciousness"}
+                                                           if declared else {})}
+        prepare_promotion_intent(tmp_path, evt)
+        reconcile_promotion_intents(tmp_path, protected=set())
+        notice = promotion_intent_notice(evt["task_id"], load_task_result(tmp_path, evt["task_id"], strict=True))
+        assert ('"mine": true' in notice) is declared, notice

@@ -524,3 +524,25 @@ def test_auto_scheduled_work_keeps_its_children_runs_and_refusals_on_record(q, m
     published = swarm_receipt.publish(q.root, task["id"])
     assert {"task:child", "run:run-direct"} <= {actor["id"] for actor in published["actor_intervals"]}
     assert [row["invocation_id"] for row in published["refused_starts"]] == ["refused"]
+
+
+def test_a_declared_start_from_a_timed_run_keeps_the_rooms_off(q, monkeypatch):
+    """``mine`` from a time-born run changes the author, not the clock: the room's Off still binds the declared root,
+    and a declared schedule written from that run stores and fires no stale owner writer kind."""
+    from ouroboros.consciousness_authority import declared_own_origin
+    from supervisor.queue_schedules import _task_from_schedule
+
+    values = _settings(monkeypatch, "off")
+    timed_run = {"work_kind": "owner", "schedule_writer_kind": "owner", "task_id": "fired-1"}
+    root = {"id": "mine-1", "metadata": declared_own_origin(timed_run)}
+    assert root["metadata"]["schedule_writer_kind"] == "consciousness"
+    assert live_subagents_mode(task=root, drive_root=q.root, settings=values) == "off"
+    untimed = {"id": "mine-2", "metadata": declared_own_origin({"owner_ingress": True, "task_id": "turn-1"})}
+    assert "schedule_writer_kind" not in untimed["metadata"]
+    record = q.queue.upsert_scheduled_task(
+        {"id": "own", "name": "own", "enabled": True, "trigger": {"type": "once", "run_at": "2000-01-01T00:00:00+00:00"},
+         "task": {"text": "My work", "metadata": {"resource_intent": {"kind": "system_repo"}}}},
+        drive_root=q.root, writer_kind="owner", writer_metadata=timed_run, declare=True, actor="agent")
+    assert record["writer_kind"] == "consciousness"
+    assert record["writer_origin"].get("schedule_writer_kind") != "owner"
+    assert _task_from_schedule(record)["metadata"]["schedule_writer_kind"] == "consciousness"

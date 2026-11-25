@@ -159,6 +159,8 @@ def work_kind(metadata: Any) -> str:
 
 
 FOCUS_TRANSPORT_KEY = "focus_transport"
+# A run declared the work its own (``mine``); inherited with the consciousness stamp, never from a template.
+OWN_DECLARED = "own_declared"
 FOCUS_ROUTE_FIELDS = ("provider", "account_id", "conversation_id", "thread_id")
 
 
@@ -205,7 +207,33 @@ def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = 
         "initiator": CONSCIOUSNESS_INITIATOR,
         "usage_category": CONSCIOUSNESS_TASK_CATEGORY,
         "consciousness_autonomy": normalize_level(source.get("consciousness_autonomy")),
+        **({OWN_DECLARED: True} if source.get(OWN_DECLARED) is True else {}),
     }
+
+
+def declared_own_origin(caller_metadata: Any) -> Dict[str, Any]:
+    """The stamp of a root or schedule its caller declared its own (``mine: true``), from any caller.
+
+    The same stamp a consciousness-origin start carries: initiator, ``consciousness_task`` category,
+    ``started`` cause and a level (the caller's own inside a consciousness tree, else the installed one),
+    so the allowance, the own-task cap and the switch see it, plus ``own_declared`` (the scheduler keeps such
+    a schedule due while own time is off). A time-born caller's scheduling fact rides on with the new author
+    (``schedule_writer_kind``: the room's decision for timed work still binds); its old writer kind does not.
+    A typed argument, never a text reading.
+    """
+    source = dict(caller_metadata) if isinstance(caller_metadata, Mapping) else {}
+    if source.get("schedule_writer_kind"):
+        source["schedule_writer_kind"] = WORK_KIND_CONSCIOUSNESS
+    level = source.get("consciousness_autonomy") if is_consciousness_origin(source) else None
+    return consciousness_origin_metadata({**source, "work_kind": WORK_KIND_CONSCIOUSNESS, OWN_DECLARED: True,
+                                          "initiator": CONSCIOUSNESS_INITIATOR, "consciousness_autonomy": level},
+                                         started_root=True)
+
+
+def is_declared_own(metadata: Any) -> bool:
+    """Own work a run declared (``mine``): consciousness origin and kind with the ``own_declared`` mark."""
+    return (is_consciousness_origin(metadata) and work_kind(metadata) == WORK_KIND_CONSCIOUSNESS
+            and isinstance(metadata, Mapping) and metadata.get(OWN_DECLARED) is True)
 
 
 def schedule_owner_corpus(record: Mapping[str, Any]) -> list:
@@ -216,8 +244,17 @@ def schedule_owner_corpus(record: Mapping[str, Any]) -> list:
 
 
 def stamp_schedule_writer(record: Dict[str, Any], writer_kind: str, writer_metadata: Any,
-                          *, started_root: bool, same_work: bool = False) -> None:
-    """Persist the next occurrence's origin from host writer facts, never the template.
+                          *, started_root: bool, same_work: bool = False, agent: bool = False,
+                          declare: bool = False) -> None:
+    """Persist the next occurrence's origin from host writer facts, never the template: the one rule of who a
+    schedule row belongs to, which every writer calls (``record`` still holds the row's prior origin).
+
+    Declared own work (``own_declared``): only ``declare`` (``mine``, at creation or re-assignment) declares a row,
+    with the stamp ``declared_own_origin`` builds alone and no ``continuation_of`` (its runs take a task slot). An
+    editor's inherited mark is never copied onto a row. A declared row stays declared through every write of an
+    agent tool (``agent``) until my human re-authors it: a verified cite, or a new assignment an owner-kind writer
+    makes; the owner's own door (not ``agent``) re-authors it as every row. A same-assignment write keeps the
+    recorded origin; a new assignment the mind writes carries its current writer's. Undeclared rows: the rule below.
 
     Independent schedules use root-start semantics: a consciousness writer's schedule is its own work
     unless the writer passed the host-verified cite of my human's words (``owner_basis`` in its
@@ -227,7 +264,18 @@ def stamp_schedule_writer(record: Dict[str, Any], writer_kind: str, writer_metad
     takes only the cite passed with that write, else the writer's kind: the host carries no old
     declaration onto new work. A related continuation keeps its caller's kind and cause.
     """
-    source = writer_metadata if isinstance(writer_metadata, Mapping) else {}
+    source = {key: value for key, value in (writer_metadata.items() if isinstance(writer_metadata, Mapping) else ())
+              if key != OWN_DECLARED}  # an editor's inherited mark is never copied onto a row
+    if declare:
+        record.pop("continuation_of", None)
+        record.update(writer_kind=WORK_KIND_CONSCIOUSNESS, writer_origin=declared_own_origin(source))
+        return
+    recorded = record.get("writer_origin")
+    if agent and is_declared_own(recorded) and not source.get("owner_basis") and (
+            same_work or writer_kind != WORK_KIND_OWNER):  # the same assignment keeps its origin; the mind's new one
+        record.update(writer_kind=WORK_KIND_CONSCIOUSNESS,  # carries its current writer's (level, cap, tools)
+                      writer_origin=dict(recorded) if same_work else declared_own_origin(source))
+        return
     kind = WORK_KIND_OWNER if writer_kind == WORK_KIND_OWNER else WORK_KIND_CONSCIOUSNESS
     basis = source.get("owner_basis") if started_root else None
     if basis is None and same_work and started_root and record.get("writer_kind") == WORK_KIND_OWNER:
@@ -244,6 +292,7 @@ def stamp_scheduled_work(task: Dict[str, Any], record: Mapping[str, Any], raw_me
         legacy = {k: v for k, v in raw_metadata.items() if k not in RESERVED_TEMPLATE_FIELDS}
         writer_kind = work_kind({"owner_ingress": record.get("source") == "owner", **legacy})
     from copy import deepcopy
+    task["metadata"].pop(OWN_DECLARED, None)  # only the host writer's origin may declare the fired work
     if "writer_origin" in record:
         for key in ("initiator", "usage_category", "consciousness_autonomy", "consciousness_cause",
                     "origin_wake_task_id", "focus", FOCUS_TRANSPORT_KEY):
