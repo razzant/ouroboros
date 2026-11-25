@@ -438,6 +438,104 @@ def test_representative_checkpoint_io_is_measured_not_promised(tmp_path):
           f"parts={stats['parts_written']} encode_ms={stats['encode_ms']} write_ms={stats['write_ms']} total_s={elapsed:.3f}")
 
 
+@pytest.mark.parametrize("start", ["first", "restored", "emptied", "unfrozen", "unusable", "busy"])
+def test_a_retry_that_restores_nothing_starts_from_the_rows_its_own_record_holds(tmp_path, monkeypatch, start):
+    """#3555: attempt 2 that restores nothing builds its held rows and open relays from its own record before its first
+    send, so the checkpoint it saves parks them; a first start and a restore (an empty map too) read nothing. After
+    one unavailable read, the first saved checkpoint must still respect the record's closed address."""
+    from ouroboros import loop, owner_relay
+
+    task_id, kept, relay = "t-held", {"row:1@a": {"text": "Please keep the report short."}}, {"relay-1": {"note": "inert"}}
+    parked = ({"row:1@b": {"text": "Use the second draft."}}, {"relay-2": {"note": "inert too"}}) if start == "restored" else ({}, {})
+    write_task_result(tmp_path, task_id, "running")
+    previous = _registry(tmp_path, monkeypatch, task_id, 1)
+    previous._ctx._held_owner_messages, previous._ctx._open_relays = dict(kept), dict(relay)
+    if start == "busy":
+        previous._ctx._open_relays = {}  # attempt 1 closed the inherited relay's return address
+    owner_relay.persist_held_state(previous._ctx)  # the record keeps what attempt 1 retained
+    task = {"id": task_id}
+    if start not in {"first", "busy"}:
+        previous._ctx._held_owner_messages, previous._ctx._open_relays = map(dict, parked)  # its checkpoint parks another view
+        wc.save_ready(SimpleNamespace(tools=previous, messages=[{"role": "user", "content": "go"}], llm_trace={"tool_calls": []},
+                                     accumulated_usage={}, round_idx=1, tool_schemas=[], owner_msg_seen=set(), budget_tail="no_tool"))
+        if start == "unfrozen":
+            wc.checkpoint_path(tmp_path, task_id, 1).unlink()
+        assert wc.attach_recovery(tmp_path, task, source_task_id=task_id, from_attempt=1,
+                                  cause="worker_crash") is (start != "unfrozen")
+        if start == "unusable":
+            task["_working_recovery"]["from_attempt"] = 9  # identity mismatch
+    registry = _registry(tmp_path, monkeypatch, task_id, 1 if start == "first" else 2)
+    registry._ctx.working_recovery = task.get("_working_recovery")
+    inherited = {"row:1@b": {"text": "Use the second draft."}}
+    if start == "busy":
+        registry._ctx.task_metadata = dict(getattr(registry._ctx, "task_metadata", None) or {},
+                                           continuation={"owner_sources": {
+                                               "held_owner_messages": inherited, "open_relays": dict(relay)}})
+    reads, first = [], {}
+    own_state = owner_relay._own_held_state
+
+    def _read(ctx):
+        reads.append(1)
+        if start == "busy" and len(reads) == 1:
+            return None  # the first read is unavailable, not an empty record
+        return own_state(ctx)
+
+    monkeypatch.setattr(owner_relay, "_own_held_state", _read)
+    persists, real_persist = [], owner_relay.persist_held_state
+    monkeypatch.setattr(owner_relay, "persist_held_state",  # leave the writer real; witness its invocation
+                        lambda ctx: persists.append(ctx) or real_persist(ctx))
+    monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
+
+    def dispatch(call, disposition, *, candidate_predicate=None, **kwargs):
+        ctx = call.tools._ctx  # raw attributes: asking the seeder would build the very state under test
+        if not first:
+            snap = lambda value: None if value is None else dict(value)
+            first.update(maps=(snap(getattr(ctx, "_held_owner_messages", None)), snap(getattr(ctx, "_open_relays", None))),
+                         reads=len(reads))
+            assert not persists, "restoring the maps must not invoke the held-map writer before the first send"
+            # The real loop's pre-send save already ran. Read exactly what it parked.
+            first["parked"] = tuple(map(wc.read_working(tmp_path, task_id, ctx.task_attempt)[1].get, ("held_owner_messages", "open_relays")))
+        ctx._round_response_facts = {"finish_reason_present": True, "finish_reason": "stop"}
+        return {"role": "assistant", "content": "done"}, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    result, _usage, _trace = loop.run_llm_loop(
+        messages=[{"role": "user", "content": "go"}], tools=registry, llm=SimpleNamespace(default_model=lambda: "test-model"),
+        drive_logs=tmp_path, emit_progress=lambda text, **meta: None, incoming_messages=queue.Queue(), task_id=task_id,
+        drive_root=tmp_path, task_type="task", event_queue=queue.Queue())
+    assert result == "done"
+    held, relays = first["maps"]
+    if start in {"unfrozen", "unusable"}:
+        assert (held, relays) == first["parked"] == (kept, relay) and held is not kept and first["reads"]
+    elif start == "first":
+        assert held is None and relays is None and first["reads"] == 0  # a healthy first start builds and reads nothing
+    elif start == "busy":
+        assert (held, relays) == first["parked"] == ({**kept, **inherited}, {})
+        assert first["reads"] == 2  # the retry settled the inherited view against its own record
+    else:
+        assert (held, relays) == first["parked"] == parked and first["reads"] == 0  # the checkpoint's own maps, empty ones too
+
+
+def test_an_unreadable_record_keeps_a_retry_view_and_no_return_address(tmp_path, monkeypatch):
+    """The inherited view stays provisional until the task's own record can be read."""
+    from ouroboros import owner_relay, task_store
+    from ouroboros.store import StoreError
+
+    def unreadable(*args, **kwargs):
+        raise StoreError("reader convoy")
+
+    ctx = _registry(tmp_path, monkeypatch, "t-blind", 2)._ctx
+    ctx.task_metadata = {"continuation": {"owner_sources": {
+        "held_owner_messages": {"row:1@a": {"text": "the inherited row"}},
+        "open_relays": {"r1": {"relay_id": "r1", "source": {"chat_id": 1}}}}}}
+    monkeypatch.setattr(task_store, "read_document", unreadable)
+    held = owner_relay.held_owner_messages(ctx, defer_persist=True)
+    assert held == {"row:1@a": {"text": "the inherited row"}} and list(ctx._open_relays) == ["r1"]
+    assert ctx._held_state_seed == {"r1"} and ctx._held_state_dirty is True
+    assert owner_relay.select_return(ctx, "") == (
+        {}, "RELAY_RETURN_UNRESOLVED: this start's own record could not be read; no return address is confirmed")
+
+
 def test_a_held_question_wait_continues_through_its_own_reader_after_quit_and_resume(tmp_path, monkeypatch):
     """Parent 2026-10-08: a REAL question park → application stop → actual boot restore
     → Resume → the real loop. The wait's own continuation source is named as such

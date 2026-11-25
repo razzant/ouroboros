@@ -238,14 +238,12 @@ def _settle_seed(ctx) -> bool:
     if "open_relays" in own:
         mine, relays = own["open_relays"], ctx._open_relays
         keep = (mine.keys() & relays.keys()) | (mine.keys() - seed) | (relays.keys() - seed)
-        settled = {key: relays[key] if key in relays else copy.deepcopy(mine[key]) for key in keep}
-        relays.clear()
-        relays.update(settled)
+        ctx._open_relays = {key: relays[key] if key in relays else copy.deepcopy(mine[key]) for key in keep}
     ctx._held_state_seed = None
     return True
 
 
-def held_owner_messages(ctx) -> dict:
+def held_owner_messages(ctx, *, defer_persist=False) -> dict:
     held = getattr(ctx, "_held_owner_messages", None)
     if not isinstance(held, dict):
         held = {}
@@ -253,9 +251,6 @@ def held_owner_messages(ctx) -> dict:
         metadata = getattr(ctx, "task_metadata", None) or {}
         # Continue carries host-retained rows; it does not acquire arbitrary history.
         inherited = (metadata.get("continuation") or {}).get("owner_sources") or {}
-        # A new dispatch of the same work (cold resume, restart) starts from what it already holds, which the write
-        # below replaces: its own rows over the inherited ones, and its own open relays instead of them (an answered
-        # one stays closed). An unreadable record is not replaced from this partial view (``_settle_seed``).
         own = _own_held_state(ctx)
         if not hasattr(ctx, "_open_relays"):
             ctx._open_relays = copy.deepcopy(own["open_relays"] if own and "open_relays" in own
@@ -273,7 +268,11 @@ def held_owner_messages(ctx) -> dict:
                 held[owner_row_address(row)] = _held_copy(row, canonical_data_root(ctx))
         held.update(copy.deepcopy((own or {}).get("held_owner_messages") or {}))
         ctx._held_state_seed = set(ctx._open_relays) if own is None else None
-        persist_held_state(ctx)
+        if not defer_persist:
+            persist_held_state(ctx)
+        elif own is None or (held, ctx._open_relays) != (own.get("held_owner_messages", {}), own.get("open_relays", {})):
+            _settle_seed(ctx)
+            ctx._held_state_dirty = True
     return held
 
 
@@ -1102,6 +1101,8 @@ def quoted_inputs(root, refs: list) -> list:
 
 
 def select_return(ctx, relay_id: str) -> tuple[dict, str]:
+    if not _settle_seed(ctx):  # don't use an inherited address the unreadable record may have closed
+        return {}, "RELAY_RETURN_UNRESOLVED: this start's own record could not be read; no return address is confirmed"
     relays = getattr(ctx, "_open_relays", None) or {}
     if relay_id and relay_id in relays:
         return relays[relay_id], ""

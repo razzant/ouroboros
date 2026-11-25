@@ -296,7 +296,7 @@ def append_addressed_task_message(messages, ctx, entry, task_id, event_queue, *,
 
 
 def restore_acknowledged_task_mail(ctx, drive_root, messages, seen):
-    """Rebuild ordinary same-tree input once on a from-start retry, not a new delivery."""
+    """A from-start retry rebuilds its own held maps and ordinary same-tree input once, not as a new delivery."""
     from ouroboros.owner_mailbox import (
         KIND_TASK_MESSAGE, PROVENANCE_PEER_TASK, acknowledged_task_message_ids, drain_owner_entries,
     )
@@ -304,6 +304,8 @@ def restore_acknowledged_task_mail(ctx, drive_root, messages, seen):
     attempt = getattr(ctx, "task_attempt", None)
     if type(attempt) is not int or attempt <= 1:
         return
+    from ouroboros.owner_relay import held_owner_messages
+    held_owner_messages(ctx, defer_persist=True)  # own maps before any writer, without opening a write here; built maps stay
     acked = acknowledged_task_message_ids(drive_root, ctx.task_id, attempt_key=attempt)
     if not acked:
         return
