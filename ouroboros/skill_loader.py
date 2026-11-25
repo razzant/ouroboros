@@ -23,6 +23,7 @@ from ouroboros.skill_grant_follow import (
     GRANTS_FILENAME as GRANTS_FILENAME,
     REQUESTABLE_WHEN_ABSENT as REQUESTABLE_WHEN_ABSENT,
     SKILL_OWNER_STATE_SCHEMA_VERSION as SKILL_OWNER_STATE_SCHEMA_VERSION,
+    files_accepted,
     grant_view,
     held_use_permissions,
     load_skill_grants as load_skill_grants,
@@ -98,10 +99,10 @@ class SkillReviewState:
     def is_stale_for(self, current_hash: str) -> bool:
         return not current_hash or (self.reviewed_content_hash or self.content_hash) != current_hash
 
-    def gate_for(self, current_hash: str) -> Dict[str, Any]:
+    def gate_for(self, current_hash: str, *, ordinary_only: bool = False) -> Dict[str, Any]:
         return {**skill_review_gate(self.status, stale=self.is_stale_for(current_hash), findings=self.findings,
                                    author_disposition=self.author_disposition, current_hash=current_hash,
-                                   acceptance=self.acceptance),
+                                   acceptance=self.acceptance, ordinary_only=ordinary_only),
                 "reviewed_content_hash": self.reviewed_content_hash or self.content_hash}
 
     def to_dict(self) -> Dict[str, Any]:
@@ -636,11 +637,12 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
         list(skill.manifest.permissions or []),
         list(getattr(skill.manifest, "subscribe_events", []) or []),
     )
-    grants = load_skill_grants(drive_root, skill.name)
+    grants = load_skill_grants(drive_root, skill.name, skill=skill)  # the form's keys count for their installation
     # A grant for other bytes is only a fact for the reader. A pending key for accepted files stays separate from
     # blocking missing grants and is not passed; a permission a Repair receipt holds stays ungranted the same way.
     gate = skill.review.gate_for(skill.content_hash)
-    view = grant_view(skill.content_hash, grants, requested, requested_permissions, gate,
+    view = grant_view(skill.content_hash, grants, requested, requested_permissions,
+                      files_accepted(skill.review, skill.content_hash),
                       held_use_permissions(drive_root, skill, grants, requested_permissions))
     review_ready = gate["executable_review"]
     # Scripts receive core keys via _scrub_env; extensions via PluginAPI.

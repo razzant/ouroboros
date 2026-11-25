@@ -180,7 +180,7 @@ def _skill_status_fact(drive_root: pathlib.Path, skill: Any, peers: List[Any], *
         facts.append("not ready: " + _diagnostic_preview("; ".join(status["reasons"]), reader))
         if readiness.next_actions:
             facts.append("next actions: " + _diagnostic_preview(readiness.next_actions, reader, limit=480))
-    elif not files_accepted(readiness.review_gate):
+    elif not files_accepted(skill.review, skill.content_hash):
         facts.append("no recorded acceptance or clean/warnings review for the current files")
     if status["notes"]:
         facts.append(_diagnostic_preview("; ".join(status["notes"]), reader))

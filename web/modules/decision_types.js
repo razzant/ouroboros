@@ -88,7 +88,7 @@
  */
 
 /**
- * An installed skill that reads an asked key, and what its current grant covers (facts, never a grant).
+ * An installed skill requesting an asked key, with its switch and grant coverage at observation (facts, never a grant).
  * @typedef {Object} SecretConsumer
  * @property {string} name
  * @property {boolean} enabled
@@ -99,11 +99,62 @@
  */
 
 /**
+ * The request's own skill as the form's allow needs it, never a value: the files and known installation a
+ * "Save and allow" binds to ('' when the installation is unknown: no allow), whether those files are admitted
+ * (a recorded acceptance or passed review of exactly them, never runtime authority alone; else the allow waits),
+ * whether its type receives Settings keys, the asked keys its grant covers for these files or a consent already
+ * waits for, and its saved switch (unset: turning on may be offered; off: a choice that stands).
+ * available false offers no allow.
+ * @typedef {Object} SecretSkillFacts
+ * @property {string} name
+ * @property {boolean} available
+ * @property {string=} content_hash
+ * @property {string=} installation
+ * @property {boolean=} admitted
+ * @property {boolean=} supported
+ * @property {string[]=} granted
+ * @property {string[]=} waiting
+ * @property {("unset"|"on"|"off"|"unknown")=} switch
+ */
+
+/**
+ * A save's explicit allow: the files and installation the form showed, exactly the asked fields, and whether the
+ * pressed button named turning the skill on.
+ * @typedef {Object} SecretAllowRequest
+ * @property {string} content_hash
+ * @property {string} installation
+ * @property {string[]} fields
+ * @property {boolean} enable
+ */
+
+/**
+ * A save's allow and its result, separate facts: requested until its own step starts (running, started_at: a
+ * started step never runs again), then granted, deferred (the owner's consent waits for exactly these files'
+ * admission, then resolved_at), refused or unknown, with reason; enabled (null when unknown) and enable_reason
+ * only when enable named turning on.
+ * @typedef {Object} SecretAllow
+ * @property {string} skill
+ * @property {string[]} fields
+ * @property {string[]} keys
+ * @property {string} content_hash
+ * @property {string} installation
+ * @property {boolean} enable
+ * @property {"requested"|"running"|"granted"|"deferred"|"refused"|"unknown"} state
+ * @property {string} at
+ * @property {string=} started_at
+ * @property {string=} reason
+ * @property {string[]=} granted_keys
+ * @property {(boolean|null)=} enabled
+ * @property {string=} enable_reason
+ * @property {string=} settled_at
+ * @property {string=} resolved_at
+ */
+
+/**
  * The host's typed completion of a secret request: secret_filled or secret_replaced after Settings
- * kept the values (replaced_fields held a value just before), or secret_cancelled. consumers is what
- * the readers' grants covered after the save (saving grants nothing), or consumers_unknown when they
- * could not be read, never an empty list; late marks a save after the asking task ended, which
- * resumed nothing.
+ * kept the values (replaced_fields held a value just before), or secret_cancelled. consumers snapshots
+ * the readers after the save or its recorded allow result; consumers_unknown is unavailable, not an
+ * empty list. late marks a save after the asker ended, which resumed nothing.
  * @typedef {Object} SecretOutcome
  * @property {"secret_filled"|"secret_replaced"|"secret_cancelled"} event
  * @property {string} pluginName
@@ -115,6 +166,7 @@
  * @property {boolean=} consumers_unknown
  * @property {boolean=} late
  * @property {boolean=} interrupted_save
+ * @property {SecretAllow=} allow
  */
 
 /**
@@ -135,6 +187,7 @@
  * @property {("save"|"cancel"|"status")=} action
  * @property {Object<string, string>=} values
  * @property {Object<string, boolean>=} observed
+ * @property {SecretAllowRequest=} allow
  */
 
 /**
@@ -159,6 +212,8 @@
  * @property {boolean=} keys_unknown
  * @property {SecretConsumer[]=} consumers
  * @property {boolean=} consumers_unknown
+ * @property {SecretSkillFacts=} skill
+ * @property {string=} allow_job
  * @property {boolean=} save_unconfirmed
  * @property {boolean=} answered_after_terminal
  * @property {string=} closed_reason

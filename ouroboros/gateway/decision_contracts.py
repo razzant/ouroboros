@@ -147,9 +147,9 @@ class SecretKeyState(TypedDict):
 
 
 class SecretConsumer(TypedDict):
-    """An installed skill whose ``env_from_settings`` reads an asked key, and what its CURRENT
-    grant covers (``granted``); ``unsupported`` for a type that receives no keys, ``grant_unknown``
-    when the grant could not be read. Facts for the owner, never a grant."""
+    """An installed skill requesting an asked key, with its switch and grant coverage at the time
+    of the snapshot. ``unsupported`` means this skill type receives no Settings keys;
+    ``grant_unknown`` means coverage could not be read. These are facts, not authority."""
 
     name: str
     enabled: bool
@@ -159,13 +159,68 @@ class SecretConsumer(TypedDict):
     grant_unknown: NotRequired[bool]
 
 
+class SecretSkillFacts(TypedDict):
+    """The request's own skill as the form's allow needs it, never a value: ``content_hash`` and
+    ``installation`` (the files and the known installation a "Save and allow" binds to; ``""`` when the
+    installation is unknown, which offers no allow), whether those files are ``admitted`` (a recorded
+    acceptance or passed review of exactly them, never runtime authority alone; else the allow waits),
+    whether its type is ``supported`` (receives Settings keys), the asked keys its grant covers for these
+    files (``granted``) or a consent already waits for (``waiting``), and its saved ``switch``: ``unset``
+    (turning on may be offered), ``on``, ``off`` (a choice that stands) or ``unknown``. ``available`` false
+    (missing, broken or unreadable) offers no allow."""
+
+    name: str
+    available: bool
+    content_hash: NotRequired[str]
+    installation: NotRequired[str]
+    admitted: NotRequired[bool]
+    supported: NotRequired[bool]
+    granted: NotRequired[list[str]]
+    waiting: NotRequired[list[str]]
+    switch: NotRequired[Literal["unset", "on", "off", "unknown"]]
+
+
+class SecretAllowRequest(TypedDict):
+    """A save's explicit allow: the files and installation the form showed, exactly the asked fields, and
+    whether the pressed button named turning the skill on."""
+
+    content_hash: str
+    installation: str
+    fields: list[str]
+    enable: bool
+
+
+class SecretAllow(TypedDict):
+    """A save's allow and its result, separate facts: ``state`` ``requested`` until its own step starts
+    (``running``, ``started_at``: a started step never runs again), then ``granted``, ``deferred`` (files
+    not admitted: the owner's consent waits for exactly their admission, then ``resolved_at``),
+    ``refused`` or ``unknown``, with ``reason``; ``enabled`` (null when unknown) and ``enable_reason`` only
+    when ``enable`` named turning on."""
+
+    skill: str
+    fields: list[str]
+    keys: list[str]
+    content_hash: str
+    installation: str
+    enable: bool
+    state: Literal["requested", "running", "granted", "deferred", "refused", "unknown"]
+    at: str
+    started_at: NotRequired[str]
+    reason: NotRequired[str]
+    granted_keys: NotRequired[list[str]]
+    enabled: NotRequired[Optional[bool]]
+    enable_reason: NotRequired[str]
+    settled_at: NotRequired[str]
+    resolved_at: NotRequired[str]
+
+
 class SecretOutcome(TypedDict):
     """The host's typed completion of a secret request: ``secret_filled`` or ``secret_replaced``
     (``replaced_fields`` held a value just before the write) after Settings kept the values, or
-    ``secret_cancelled``. ``consumers`` is what the readers' grants covered after the save (saving
-    grants nothing), or ``consumers_unknown`` when they could not be read, never an empty list;
-    ``late`` marks a save after the asking task ended (nothing was resumed); ``interrupted_save``
-    marks a cancel after an earlier attempt of unknown result."""
+    ``secret_cancelled``. ``consumers`` is the reader snapshot after the save or its recorded
+    ``allow`` result; ``consumers_unknown`` marks an unavailable snapshot. An empty list is known
+    empty. ``late`` marks a save after the asking task ended (nothing was resumed);
+    ``interrupted_save`` marks a cancel after an earlier attempt of unknown result."""
 
     event: Literal["secret_filled", "secret_replaced", "secret_cancelled"]
     pluginName: str
@@ -177,6 +232,7 @@ class SecretOutcome(TypedDict):
     consumers_unknown: NotRequired[bool]
     late: NotRequired[bool]
     interrupted_save: NotRequired[bool]
+    allow: NotRequired[SecretAllow]
 
 
 class SecretEvent(TypedDict):
@@ -192,14 +248,16 @@ class SecretDecisionRequest(TypedDict):
     ``decision_id`` is the request's question identity ``quiz:{task_id}:{quiz_id}``. A ``save``
     (the default) carries ``values`` for EXACTLY the asked field ids and ``observed``: per field,
     whether the form showed its key as set (from ``status``); it writes only while Settings still
-    says exactly that, so Replace is explicit. ``status`` and ``cancel`` carry neither; ``status``
-    needs no ``request_id``. ``request_id`` is reused only for the same values."""
+    says exactly that, so Replace is explicit. ``allow`` (the form's separate "Save and allow") also
+    needs the skill's files to be the ones the form showed. ``status`` and ``cancel`` carry none of
+    these; ``status`` needs no ``request_id``. ``request_id`` is reused only for the same values."""
 
     request_id: NotRequired[str]
     decision_id: str
     action: NotRequired[Literal["save", "cancel", "status"]]
     values: NotRequired[Dict[str, str]]
     observed: NotRequired[Dict[str, bool]]
+    allow: NotRequired[SecretAllowRequest]
 
 
 class SecretDecisionResponse(TypedDict, total=False):
@@ -208,8 +266,12 @@ class SecretDecisionResponse(TypedDict, total=False):
 
     200 carries the recorded lifecycle: ``secret_filled``, ``secret_replaced`` or
     ``secret_cancelled`` (plugin and field ids), ``secret_outcome`` and the question delivery; a
-    ``status`` read and every refusal on a request that still takes a save add ``keys`` and
-    ``consumers`` (or ``keys_unknown``/``consumers_unknown``). A refusal says ``saved: false`` with
+    ``status`` read and every refusal on a request that still takes a save add ``keys``,
+    ``consumers`` (or ``keys_unknown``/``consumers_unknown``) and ``skill``. A save with ``allow``
+    answers after its grant step; after ``JOB_ANSWER_WAIT_SEC`` an early reply is possible only once
+    the job is bound: ``allow_job`` names it and the question's state brings its result
+    (``secret_allow_stale`` refuses a save whose skill files or installation changed since the form
+    read them). A refusal says ``saved: false`` with
     ``reason_code`` (``secret_key_state_changed`` when a key was set or cleared since the form read it,
     ``settings_unreadable`` when Settings exist but cannot be read) and the request's current facts,
     so a losing tab settles on the winner. ``saved: true`` with ``secret_save_unverified``,
@@ -232,6 +294,8 @@ class SecretDecisionResponse(TypedDict, total=False):
     keys_unknown: bool
     consumers: list[SecretConsumer]
     consumers_unknown: bool
+    skill: SecretSkillFacts
+    allow_job: str
     save_unconfirmed: bool
     answered_after_terminal: bool
     closed_reason: str

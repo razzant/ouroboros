@@ -44,7 +44,8 @@ from ouroboros.gateway.widgets import (
 )
 from ouroboros.gateway.decision_contracts import (  # noqa: F401 -- public re-exports
     DecisionRequest, DecisionResponse, SecretDecisionRequest, SecretDecisionResponse, SecretEvent, SecretOutcome,
-    SecretConsumer, SecretKeyState, SecretRequestField, SecretRequestMeta,
+    SecretAllow, SecretAllowRequest, SecretConsumer, SecretKeyState, SecretRequestField, SecretRequestMeta,
+    SecretSkillFacts,
 )
 from ouroboros.gateway.card_contracts import CardOutbound, CardStateOutbound  # noqa: F401 -- public re-exports
 from ouroboros.gateway.cost_breakdown import TaskCostBreakdown, TaskCostSlice  # noqa: F401 -- public re-exports
@@ -937,6 +938,7 @@ class SkillGrantResponse(TypedDict, total=False):
     granted_permissions: list[str]
     turn_on_when_ready: str
     setup_error: str  # grants succeeded; the requested setup did not
+    setup_code: str  # that setup's typed refusal code (as SkillActionRefusal.code), else "error"
     enabled: bool  # present with the owner's Enable, except a grants refusal over an unreadable enabled.json
     extension_action: Optional[str]  # null, as live_loaded, when no reconcile answered (an Enable refused first)
     extension_reason: Optional[str]
@@ -1496,8 +1498,8 @@ __all__ = [
     "QuizOption", "QuizOutbound", "QuizStateOutbound",
     "CardOutbound", "CardStateOutbound",
     "DecisionRequest", "DecisionResponse",
-    "SecretConsumer", "SecretDecisionRequest", "SecretDecisionResponse", "SecretEvent", "SecretKeyState",
-    "SecretOutcome", "SecretRequestField", "SecretRequestMeta",
+    "SecretAllow", "SecretAllowRequest", "SecretConsumer", "SecretDecisionRequest", "SecretDecisionResponse",
+    "SecretEvent", "SecretKeyState", "SecretOutcome", "SecretRequestField", "SecretRequestMeta", "SecretSkillFacts",
     "TypingOutbound", "LogOutbound", "HeartbeatOutbound", "ExtensionLifecycleOutbound",
     "ProjectsChangedOutbound", "UiPreferencesChangedOutbound", "MessageAnnotationOutbound",
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",

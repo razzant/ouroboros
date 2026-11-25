@@ -115,6 +115,30 @@ def test_main_receives_terminal_reference_then_finishes_without_second_panel(sub
     assert json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))["exit_code"] == 0
 
 
+def test_current_terminal_reference_wins_over_prior_verdict(subject):
+    from ouroboros import review_ledger
+
+    ctx, directory, binding = subject
+    review_ledger.write_record(ctx.drive_root, {
+        "record_id": "rl-prior-skill", "surface": "skill", "state": "settled",
+        "subject": {"skill": "demo", "tree_sha": compute_content_hash(directory)},
+        "verdict": {"aggregate": "FAIL"},
+    })
+    (directory / "scripts/hello.py").write_text("print('revised')\n", encoding="utf-8")
+    reference = _unavailable(subject)
+    save_review_state(ctx.drive_root, "demo", SkillReviewState(status="pending", content_hash=reference["content_hash"]))
+    result = skill_exec._handle_review_skill(ctx, skill="demo", _resolved_binding=binding,
+        author_disposition="accepted", author_rationale="Checked the revised script locally.",
+        review_reference=reference)
+    assert "Author finish recorded" in result
+    review = load_skill(directory, ctx.drive_root).review
+    basis = review.author_disposition["review_reference"]
+    assert (basis["basis"], basis["job_id"], basis["content_hash"]) == (
+        "unavailable", reference["job_id"], reference["content_hash"])
+    assert review.status == "pending" and review.gate_for(reference["content_hash"])["executable_review"]
+    assert review_ledger.load_record(ctx.drive_root, "rl-prior-skill")["verdict"]["aggregate"] == "FAIL"
+
+
 def test_exec_schema_states_the_author_path_its_gate_permits(subject):
     """skill_exec's description is the gate it obeys: outside Cyber Pro a qualified
     author acceptance runs the current bytes while the reviewer status is still

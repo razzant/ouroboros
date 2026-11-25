@@ -34,7 +34,7 @@ from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noq
 from ouroboros.gateway.history_paging import (
     HistoryCursorError, RegistryUnavailable, deferred_before, delivered_history_gaps, failed_read_facts, history_page_coverage, history_page_tokens, progress_quota_predicate,
     replay_evidence_rows, room_lens, room_view_fingerprint, select_history_page,
-    latest_arrival, notes_stamp, parse_around,
+    latest_arrival, notes_stamp, parse_around, QUESTION_EVIDENCE_KINDS, QUESTION_HISTORY_KINDS,
     chat_quota_predicate, IMPORTING, PROJECTION_FAILED, _PROBE_ROWS, _RECENT_WINDOW_BYTES, _RECENT_WINDOW_ROWS,
 )
 from ouroboros.gateway.history_deliveries import delivery_fields
@@ -641,7 +641,7 @@ def _make_thread_filter(
         return belongs(entry_chat, entry)
 
     def _question_project_chat(entry):
-        if thread_id != 1 or not isinstance(entry, dict) or entry.get("type") not in {"quiz", "quiz_answer", "quiz_closed"}:
+        if thread_id != 1 or not isinstance(entry, dict) or entry.get("type") not in QUESTION_HISTORY_KINDS:
             return 0
         quiz = entry.get("quiz")
         if not isinstance(quiz, dict):
@@ -679,6 +679,7 @@ def _collect_chat_rows(
     request's ``TaskReads``, which reads every asking task's questions in one batch."""
     from supervisor.message_ingress import delivery_facts
 
+    from ouroboros.secret_requests import quiz_history_view
     from ouroboros.task_reads import TaskReads
     reads = reads if reads is not None else TaskReads(chat_path.parent.parent)
     from ouroboros.chat_references import question_key, saved_decisions, shown_reply_fields
@@ -695,6 +696,9 @@ def _collect_chat_rows(
             "quizzes": data.get("owner_quiz") if isinstance(data.get("owner_quiz"), dict) else {},
             "wait": data.get("owner_wait") if isinstance(data.get("owner_wait"), dict) else {},
         }
+
+    current_quiz, quiz_answer_evidence = quiz_history_view(chat_path.parent.parent, _quiz_source)
+
     combined: list = []
     chat_quota_rows = 0
     stream_gaps: set[str] = set()
@@ -718,21 +722,17 @@ def _collect_chat_rows(
         answered = {**saved_decisions(chat_path.parent.parent, unsettled), **answered}
         def saved(card):  # a saved card (a published question, a decision's snapshot) without the delivery it froze
             return {key: value for key, value in card.items() if key not in ("delivery", "question_delivery")}
-        def settled(tid, qid):  # a question now: its block, delivery's one authority, else its saved decision's card
-            card = answered.get((tid, qid), {}).get("quiz")
-            return _quiz_source(tid)["quizzes"].get(qid) or (saved(card) if isinstance(card, dict) else None)
         def _replay_row(entry, fields, tail=None):
             replay_evidence.append({"text": "", "role": "system", "is_progress": False, **fields,
                                     "task_id": str(entry.get("task_id") or ""), "ts": str(entry.get("ts") or ""),
                                     **(tail or {}), **identity(entry)})
         for entry in _chat_entries:
-            if entry.get("type") in {"quiz_answer", "quiz_closed"}:
+            if entry.get("type") in QUESTION_EVIDENCE_KINDS:  # evidence, never a bubble
                 if (replay_evidence is not None and isinstance(entry.get("quiz"), dict)
-                        and row_matches_thread(_stored_chat_id(entry.get("chat_id"), 1), entry)):
-                    from ouroboros.owner_quiz import question_delivery_now  # as recorded; its delivery as it is now
-                    quiz, live = saved(entry["quiz"]), _quiz_source(str(entry.get("task_id") or ""))["quizzes"]
-                    quiz.update(question_delivery_now(live.get(str(quiz.get("quiz_id") or ""))))
-                    _replay_row(entry, {"system_type": entry["type"], "quiz": quiz})
+                        and row_matches_thread(_stored_chat_id(entry.get("chat_id"), 1), entry)
+                        and (quiz := quiz_answer_evidence(entry)) is not None):
+                    _replay_row(entry, {"system_type": "quiz_closed" if entry["type"] == "quiz_closed" else "quiz_answer",
+                                        "quiz": quiz})
                 continue
             # Keep the typed receipt before the Main conversation filter hides the synthetic row.
             if entry.get("type") == "task_summary" and historical_terminals is not None and (receipt := remember_terminal(historical_terminals, entry)):
@@ -750,8 +750,8 @@ def _collect_chat_rows(
                 from ouroboros.project_dialogue import project_question_pointer
 
                 tid, qid = str(entry.get("task_id") or ""), str(entry["quiz"].get("quiz_id") or "")
-                pointer = project_question_pointer(entry, settled(tid, qid), room_project(chat_path.parent.parent,
-                                                   pointer_chat, strict=True), _quiz_source(tid)["wait"])
+                pointer = project_question_pointer(entry, current_quiz(entry, answered.get((tid, qid))),
+                                                   room_project(chat_path.parent.parent, pointer_chat, strict=True), _quiz_source(tid)["wait"])
                 if pointer and (tid, qid) not in question_keys:
                     question_keys.add((tid, qid))
                     pointer.update(identity(entry))
@@ -834,7 +834,7 @@ def _collect_chat_rows(
                 _qtid = str(entry.get("task_id") or "")
                 if _qtid:
                     _qid = str(quiz.get("quiz_id") or "")
-                    _live = settled(_qtid, _qid)
+                    _live = current_quiz(entry, answered.get((_qtid, _qid)))
                     if isinstance(_live, dict):
                         from ouroboros.owner_quiz import CLOSURE_FIELDS, SECRET_FIELDS, question_delivery_now
                         quiz.update(question_delivery_now(_live))

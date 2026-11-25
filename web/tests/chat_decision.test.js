@@ -1566,3 +1566,46 @@ test('the owner\'s own press still hands focus to the question; a landing on the
         assert.equal(globalThis.document.activeElement, first, 'a repeated settlement does not move a landing');
     } finally { fx.restore(); }
 });
+
+test('a known secret allow and its reader snapshot outlive older replies, task-detail reads and history', async () => {
+    const ask = { task_id: 't-1', quiz_id: 'secret-race', project_id: 'p1', state: 'open',
+        question: 'Secret needed for demo', options: [], secret_request: { plugin_name: 'demo', fields: [
+            { id: 'primary', setting_key: 'SYNTH_PRIMARY' }, { id: 'other', setting_key: 'SYNTH_OTHER' },
+        ] } };
+    const old = { event: 'secret_filled', pluginName: 'demo', at: 'save-time', fields: ['primary', 'other'],
+        allow: { state: 'deferred', skill: 'demo', keys: ['SYNTH_PRIMARY', 'SYNTH_OTHER'], enable: true },
+        consumers: [{ name: 'mailer', enabled: true, reads: ['SYNTH_PRIMARY', 'SYNTH_OTHER'], granted: [] }] };
+    const final = { ...old, allow: { ...old.allow, state: 'granted', granted_keys: ['SYNTH_PRIMARY'],
+        resolved_at: 'resolution-time', enabled: false, enable_reason: 'owner_off' },
+        consumers: [{ ...old.consumers[0], granted: ['SYNTH_OTHER'] }] };
+    const update = (secret_outcome) => ({ ...ask, state: 'answered', secret_outcome });
+    let returnDetail;
+    const fx = fixture({ projectId: 'p1', chatId: 23, fetchDetail: () => new Promise((resolve) => { returnDetail = resolve; }) });
+    const rows = (card, selector) => card.querySelectorAll(selector).map((row) => row.textContent).join('\n');
+    try {
+        const card = fx.decision.buildQuizCard(ask);
+        fx.decision.applyQuizStateFrame(card, update(old));
+        const olderRead = fx.decision.readQuestion(ask.task_id, ask.quiz_id, ask.project_id);
+        await Promise.resolve();
+        fx.decision.applyQuizStateFrame(card, update(final));
+        // The detail readQuestion checks: its block and the room the question is shown in (question_rooms).
+        returnDetail({ task_id: ask.task_id, project_id: 'p1', owner_quiz: { [ask.quiz_id]: update(old) },
+            question_rooms: { [ask.quiz_id]: { state: 'known', project_id: 'p1', chat_id: 23 } } });
+        assert.deepEqual((await olderRead).secret_outcome, final);
+        for (const state of ['requested', 'running', 'deferred', 'unknown']) {
+            fx.decision.applyQuizStateFrame(card, update({ ...old, allow: { ...old.allow, state } }));
+            fx.decision.buildQuizCard(update(old));
+            assert.equal(card.dataset.state, 'answered');
+            assert.match(rows(card, '.chat-secret-outcome-line'), /Granted SYNTH_PRIMARY to demo/);
+            assert.match(rows(card, '.chat-secret-outcome-line'), /stayed off/);
+            assert.doesNotMatch(rows(card, '.chat-secret-outcome-line'), /waits|Granted SYNTH_OTHER/);
+            assert.match(rows(card, '.chat-secret-reader'), /was allowed to read SYNTH_OTHER, not SYNTH_PRIMARY/);
+            assert.equal(card.querySelector('.chat-secret-actions'), null);
+        }
+        fx.decision.releaseViews(card);
+        const reopened = fx.decision.buildQuizCard(update(old));
+        assert.match(rows(reopened, '.chat-secret-outcome-line'), /Granted SYNTH_PRIMARY to demo/);
+        assert.match(rows(reopened, '.chat-secret-reader'), /was allowed to read SYNTH_OTHER/);
+        assert.equal(reopened.querySelector('.chat-secret-actions'), null);
+    } finally { fx.restore(); }
+});

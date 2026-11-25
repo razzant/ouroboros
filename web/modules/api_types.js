@@ -1052,6 +1052,7 @@
  * @property {string[]=} granted_permissions
  * @property {string=} turn_on_when_ready
  * @property {string=} setup_error
+ * @property {string=} setup_code  // that setup's typed refusal code (as SkillActionRefusal.code), else "error"
  * @property {?string=} extension_action  // null, as live_loaded, when no reconcile answered (an Enable refused first)
  * @property {?string=} extension_reason
  * @property {?string=} load_error

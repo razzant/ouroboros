@@ -12032,6 +12032,7 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
     min-inline-size: 0;
 }
 .chat-secret-fields,
+.chat-secret-outcome,
 .chat-secret-readers,
 .secret-request-readers {
     margin: 0;
@@ -12041,8 +12042,10 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
     flex-direction: column;
     gap: 2px;
 }
+.chat-secret-outcome:empty,
 .chat-secret-readers:empty,
 .secret-request-readers:empty,
+.secret-request-allow-note:empty,
 .secret-request-readers-title:empty { display: none; }
 .secret-request-readers-title { margin: 0 0 calc(-1 * var(--space-2, 8px)); }
 .chat-secret-field {
@@ -12068,12 +12071,17 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
     overflow-wrap: anywhere;
 }
 .chat-secret-status,
+.chat-secret-outcome-line,
+.secret-request-allow-note,
 .secret-request-late,
 .secret-request-warning,
 .secret-request-error {
     margin: 0;
     overflow-wrap: anywhere;
 }
+/* "Save and allow <skill>": one line; a long name ellipsizes inside the capsule, the full words stay its name. */
+.secret-request-allow { min-inline-size: 0; max-inline-size: 100%; }
+.secret-request-allow-label { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-secret-actions {
     display: flex;
     flex-wrap: wrap;
@@ -12095,7 +12103,8 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
     flex-direction: column;
     gap: var(--space-3, 12px);
 }
-.secret-request-intro {
+.secret-request-intro,
+.secret-request-allow-note {
     margin: 0;
     color: var(--text-meta);
     font-size: var(--type-meta);

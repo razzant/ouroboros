@@ -12,7 +12,7 @@ import { ANSWERABLE_QUIZ_STATES, QUIZ_LIFECYCLE, questionMark, questionPresentat
 import { fmt, tr, tx } from './i18n.js';
 import { syncQuestionMaterials } from './result_files.js';
 import { memberDeadlineExpired, memberPaused } from './work_status.js';
-import { createSecretRequestForms } from './secret_hitl.js';
+import { createSecretRequestForms, mergeSecretOutcome } from './secret_hitl.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
 import { feedScale, readBand } from './project_read_state.js';
 import { foreignReceiptBubble, receiptBubble, statesNoRow } from './chat_history_replay.js';
@@ -129,8 +129,14 @@ export function createChatDecision({
         if (liveSince && Object.hasOwn(previous, 'question_delivery')) frame.question_delivery = previous.question_delivery;
         else if (liveSince) delete frame.question_delivery;
         const next = { ...previous };
-        for (const field of LIFECYCLE_FIELDS)
-            if (Object.hasOwn(frame, field)) next[field] = frame[field];
+        for (const field of LIFECYCLE_FIELDS) {
+            if (!Object.hasOwn(frame, field)) continue;
+            if (field !== 'secret_outcome') next[field] = frame[field];
+            else {  // a recorded allow only moves forward, with its own reader snapshot (secret_hitl)
+                const outcome = mergeSecretOutcome(previous?.secret_outcome, frame.secret_outcome);
+                if (outcome) next.secret_outcome = outcome;
+            }
+        }
         if (!live && previous?.live_wait && frame.state === 'open')
             for (const field of WAIT_FIELDS) {
                 if (Object.hasOwn(previous, field)) next[field] = previous[field]; else delete next[field];

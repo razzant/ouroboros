@@ -1,9 +1,14 @@
 """``POST /api/decisions/secret`` — the protected form of an integration-secret request.
 
-The browser's ``saveSecretToken`` sends ``{request_id, decision_id, values, observed}`` here and
+The browser's ``saveSecretToken`` sends ``{request_id, decision_id, values, observed, allow?}`` here and
 nowhere else; ``action: "status"`` reads what the form needs (whether each asked key is set, which
-skills read it and what their grants cover), ``action: "cancel"`` closes the request.
-``decision_id`` is the request's ordinary question identity ``quiz:{task_id}:{quiz_id}``.
+skills read it and what their grants cover, and the request's own skill: ``skill``), ``action: "cancel"``
+closes the request. ``decision_id`` is the request's ordinary question identity ``quiz:{task_id}:{quiz_id}``.
+A save with ``allow`` (the form's separate "Save and allow") also writes only while the skill's files and
+installation are the ones the form showed (``secret_allow_stale``); its grant step runs after the lock and the reply waits
+for it at most ``JOB_ANSWER_WAIT_SEC``; after that an early reply comes only once the job is bound (``allow_job``
+names it; its save receipt was taken before that, and the question's state brings the result), and the asker
+learns the save with the allow's result.
 
 A value is held in this request's memory only: validated against the request's declared fields,
 written by the owner Settings writer (``_owner_update_settings`` with ``fields_on_saved_document``)
@@ -43,9 +48,10 @@ from ouroboros.gateway._helpers import request_drive_root, request_json_or, run_
 log = logging.getLogger(__name__)
 
 _REQUEST_ID_MAX = 128
-_FIELDS = {"request_id", "decision_id", "action", "values", "observed"}
+_FIELDS = {"request_id", "decision_id", "action", "values", "observed", "allow"}
 _NO_STORE = {"Cache-Control": "no-store"}
 _KEY_STATE_CHANGED = "secret_key_state_changed"
+_ALLOW_STALE = "secret_allow_stale"
 
 
 def _refusal(status: int, code: str, message: str, decision_id: str, block: Any = None,
@@ -97,6 +103,11 @@ def _form_facts(root: Any, request: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as exc:
         log.warning("Secret request readers unreadable: %s", type(exc).__name__)
         facts["consumers_unknown"] = True
+    try:  # the request's own skill, for the form's allow: unknown never offers it
+        facts["skill"] = sr.skill_facts(root, request)
+    except Exception as exc:
+        log.warning("Secret request skill unreadable: %s", type(exc).__name__)
+        facts["skill"] = {"name": str(request.get("plugin_name") or ""), "available": False}
     return facts
 
 
@@ -114,7 +125,7 @@ def _parse(body: Any) -> Tuple[str, str, str, str, str]:
         raise sr.SecretRequestError("request_invalid", "request body must be a JSON object.")
     if set(body) - _FIELDS:
         raise sr.SecretRequestError("unexpected_fields", "a secret decision accepts only "
-                                    "{request_id, decision_id, action?, values?, observed?}.")
+                                    "{request_id, decision_id, action?, values?, observed?, allow?}.")
     action = body.get("action", "save")
     if action not in ("save", "cancel", "status"):
         raise sr.SecretRequestError("action_invalid", "action must be save, cancel or status.")
@@ -133,25 +144,14 @@ def _parse(body: Any) -> Tuple[str, str, str, str, str]:
         task_id = validate_task_id(parts[1])
     except ValueError:
         raise sr.SecretRequestError("malformed_decision_id", "decision_id names an invalid task id.") from None
-    if action != "save" and ("values" in body or "observed" in body):
+    if action != "save" and ("values" in body or "observed" in body or "allow" in body):
         raise sr.SecretRequestError(f"{action}_payload_invalid", f"a {action} carries no values.")
     return str(request_id or "").strip(), decision_id, task_id, parts[2], action
 
 
 def _send_state(block: Dict[str, Any], task_id: str) -> None:
     """Best-effort live update; the canonical block is the truth and history replays it."""
-    try:
-        from supervisor.message_bus import get_bridge
-
-        view = _lifecycle(block)
-        get_bridge().send_quiz_state(
-            str(block.get("quiz_id") or ""), task_id, view.pop("state"),
-            secret_outcome=block.get("secret_outcome"), question_delivery=view.get("question_delivery"),
-            closed_reason=view.get("closed_reason"), closed_at=view.get("closed_at"),
-            closed_actor=view.get("closed_actor"), closed_request_id=view.get("closed_request_id"),
-            chat_id=int(block.get("publication_chat_id") or 0))
-    except Exception:
-        log.debug("secret request state broadcast failed for %s", block.get("quiz_id"), exc_info=True)
+    sr.send_card_state(block, task_id)
 
 
 def deliver_secret_outcome(drive_root: pathlib.Path, task_id: str, quiz_id: str, *,
@@ -174,6 +174,29 @@ def deliver_secret_outcome(drive_root: pathlib.Path, task_id: str, quiz_id: str,
     block = quiz_states(drive_root, task_id).get(quiz_id) or {}
     if block.get("state") != "answered" or question_delivery_settled(block) or sr.secret_request_of(block) is None:
         return block
+    if sr.allow_pending(block):
+        if not sr.reserve_allow(task_id, quiz_id):  # its own step holds the reservation and delivers once settled
+            return block
+        try:
+            # Re-read under the reservation: a live step may have settled, advanced or removed the block meanwhile.
+            block = quiz_states(drive_root, task_id).get(quiz_id) or {}
+            if (block.get("state") != "answered" or question_delivery_settled(block)
+                    or sr.secret_request_of(block) is None):
+                return block
+            if sr.allow_pending(block):
+                from ouroboros.skill_grant_follow import orphan_facts
+
+                allow = (block.get("secret_outcome") or {}).get("allow") or {}
+                decision = {"decision_id": f"quiz:{task_id}:{quiz_id}", "request_id": str(block.get("request_id") or "")}
+                # No step of this process holds it (a restart cut it): never run now; record what its records say.
+                block = (sr.record_allow(drive_root, decision, orphan_facts(drive_root, decision, allow),
+                                         expect=(str(allow.get("state") or ""),))
+                         or quiz_states(drive_root, task_id).get(quiz_id) or {})
+        finally:
+            sr.release_allow(task_id, quiz_id)
+        if (block.get("state") != "answered" or question_delivery_settled(block)
+                or sr.secret_request_of(block) is None or sr.allow_pending(block)):
+            return block
     claimed = claim_quiz_delivery(drive_root, task_id, quiz_id, force=not recovery)
     if not claimed:
         return block
@@ -203,9 +226,10 @@ def deliver_secret_outcome(drive_root: pathlib.Path, task_id: str, quiz_id: str,
 
 
 def _save_locked(drive_root: pathlib.Path, decision_id: str, task_id: str, quiz_id: str, request_id: str,
-                 request: Dict[str, Any], changes: Dict[str, str],
-                 observed: Dict[str, bool]) -> Tuple[int, Dict[str, Any], bool]:
-    """Claim -> file-locked mapping and key-state check, write -> read-back -> completion."""
+                 request: Dict[str, Any], changes: Dict[str, str], observed: Dict[str, bool],
+                 allow: Any = None) -> Tuple[int, Dict[str, Any], Dict[str, Any]]:
+    """Claim -> file-locked mapping, key-state and allow check, write -> read-back -> completion. The third
+    value is what the recorded save still owes after the lock: ``{task_id, quiz_id, allow}`` or ``{}``."""
     from ouroboros.gateway.owner_settings import (
         CommitBoundary,
         SettingsDocumentUnreadable,
@@ -229,9 +253,10 @@ def _save_locked(drive_root: pathlib.Path, decision_id: str, task_id: str, quiz_
         return (*_refusal(404 if code == "secret_request_not_found" else 409, code,
                           messages.get(code, "The secret request was refused; nothing was saved."),
                           decision_id, claim.get("block"), root=drive_root,
-                          saved=None if code == "secret_save_unconfirmed" else False), False)
-    if claim.get("duplicate"):
-        return 200, _receipt(decision_id, claim["block"], duplicate=True), False
+                          saved=None if code == "secret_save_unconfirmed" else False), {})
+    if claim.get("duplicate"):  # never written again; an allow its first request left unsettled continues once
+        owed = {"task_id": task_id, "quiz_id": quiz_id, "allow": True} if sr.allow_pending(claim["block"]) else {}
+        return 200, _receipt(decision_id, claim["block"], duplicate=True), owed
     previous = dict(claim.get("previous_claim") or {})
     boundary = CommitBoundary()
 
@@ -240,7 +265,9 @@ def _save_locked(drive_root: pathlib.Path, decision_id: str, task_id: str, quiz_
         stale = sr.binding_refusal(drive_root, request)
         if stale:
             return f"secret_request_stale:{stale}"
-        return "" if sr.configured_fields(document, request) == observed else _KEY_STATE_CHANGED
+        if sr.configured_fields(document, request) != observed:
+            return _KEY_STATE_CHANGED
+        return _ALLOW_STALE if sr.allow_refusal(drive_root, request, allow) else ""
 
     try:
         _owner_update_settings(fields_on_saved_document(dict(changes), check), boundary=boundary)
@@ -252,19 +279,23 @@ def _save_locked(drive_root: pathlib.Path, decision_id: str, task_id: str, quiz_
             if isinstance(exc, SettingsDocumentUnreadable):
                 return (*_refusal(409, "settings_unreadable", "Settings exist but could not be read, so nothing was "
                                   "saved or overwritten. Repair the settings file, then check status.", decision_id,
-                                  sr_block(drive_root, task_id, quiz_id), root=drive_root), False)
+                                  sr_block(drive_root, task_id, quiz_id), root=drive_root), {})
             if isinstance(exc, SettingsPreconditionFailed) and str(exc) == _KEY_STATE_CHANGED:
                 block = sr_block(drive_root, task_id, quiz_id)
                 return (*_refusal(409, _KEY_STATE_CHANGED, "A key this form asks for was set or cleared in Settings "
                                   "after the form read it; nothing was saved. Review the form and save again.",
-                                  decision_id, block, root=drive_root), False)
+                                  decision_id, block, root=drive_root), {})
+            if isinstance(exc, SettingsPreconditionFailed) and str(exc) == _ALLOW_STALE:
+                return (*_refusal(409, _ALLOW_STALE, "The skill's files or installation changed after the form read "
+                                  "them; nothing was saved or allowed. Review the form and choose again.", decision_id,
+                                  sr_block(drive_root, task_id, quiz_id), root=drive_root), {})
             if isinstance(exc, SettingsPreconditionFailed):
                 return (*_refusal(409, "secret_request_stale", "The skill no longer maps these fields to the same "
-                                  "Settings keys; nothing was saved. Ask again.", decision_id), False)
+                                  "Settings keys; nothing was saved. Ask again.", decision_id), {})
             log.warning("Secret save refused before commit: %s", type(exc).__name__)
             code = "settings_locked" if isinstance(exc, SettingsLockUnavailable) else "secret_save_failed"
             return (*_refusal(503, code, f"Settings could not be written ({type(exc).__name__}); nothing was "
-                              "saved. Try again.", decision_id), False)
+                              "saved. Try again.", decision_id), {})
     if boundary.committed:
         # The credential changed even if later read-back or completion recording fails.
         from ouroboros.skill_mcp import lifecycle_settled
@@ -283,8 +314,9 @@ def _save_locked(drive_root: pathlib.Path, decision_id: str, task_id: str, quiz_
         return (*_refusal(500, code, "Settings were written, but reading the value back "
                           + ("failed" if retained is None else "did not match what was entered")
                           + ", so it is not reported saved and the task was not told. Check status before "
-                          "saving again.", decision_id, saved=True), False)
-    facts: Dict[str, Any] = {"replaced_fields": [field for field, was_set in observed.items() if was_set]}
+                          "saving again.", decision_id, saved=True), {})
+    facts: Dict[str, Any] = {"replaced_fields": [field for field, was_set in observed.items() if was_set],
+                             **({"allow": allow} if allow else {})}
     # Discovery stays here, inside the lock: a custom key joins a reader's grant request only once
     # saved, so only a read after the write is true, and a cancel in a gap before the completion
     # would record this landed write as an interrupted one. Absent facts are recorded as unknown.
@@ -292,16 +324,21 @@ def _save_locked(drive_root: pathlib.Path, decision_id: str, task_id: str, quiz_
         facts["consumers"] = sr.key_consumers(drive_root, sr.settings_keys(request))
     except Exception as exc:
         log.warning("Secret saved; its readers could not be read: %s", type(exc).__name__)
+    # Reserved before the completion: no owed-delivery pass reads the recorded allow as an orphan meanwhile.
+    reserved = bool(allow) and sr.reserve_allow(task_id, quiz_id)
     try:
         final = sr.finalize_save(drive_root, task_id, quiz_id, request_id, facts)
     except Exception as exc:
         log.warning("Secret saved; its completion could not be recorded: %s", type(exc).__name__)
         final = {}
     if not final.get("ok"):
+        if reserved:
+            sr.release_allow(task_id, quiz_id)
         return (*_refusal(500, "secret_completion_unrecorded", "The secret was saved to Settings, but the request "
                           "could not be marked complete and the task was not told. Check status before trying again.",
-                          decision_id, saved=True), False)
-    return 200, _receipt(decision_id, final["block"], duplicate=False), True
+                          decision_id, saved=True), {})
+    return 200, _receipt(decision_id, final["block"], duplicate=False), {
+        "task_id": task_id, "quiz_id": quiz_id, "allow": bool(allow), "reserved": reserved}
 
 
 def sr_block(drive_root: pathlib.Path, task_id: str, quiz_id: str) -> Dict[str, Any]:
@@ -336,37 +373,68 @@ def _request_block(drive_root: pathlib.Path, decision_id: str, task_id: str,
     return block, None
 
 
-def save_secret(drive_root: pathlib.Path, body: Any) -> Tuple[int, Dict[str, Any]]:
+def _save_secret(drive_root: pathlib.Path, body: Any) -> Tuple[int, Dict[str, Any], Dict[str, Any]]:
+    """The request under the settings lock, and what its recorded save owes afterwards (``_save_locked``)."""
     from ouroboros.gateway.owner_settings import SettingsDocumentBusy, settings_document_mutation
 
     try:
         request_id, decision_id, task_id, quiz_id, action = _parse(body)
     except sr.SecretRequestError as exc:
-        return _refusal(400, exc.code, str(exc), "")  # nothing the client sent is echoed before it parses
+        return (*_refusal(400, exc.code, str(exc), ""), {})  # nothing the client sent is echoed before it parses
     if action == "cancel":
-        return cancel_secret(drive_root, decision_id, task_id, quiz_id, request_id)
+        return (*cancel_secret(drive_root, decision_id, task_id, quiz_id, request_id), {})
     block, refused = _request_block(drive_root, decision_id, task_id, quiz_id)
     if refused:
-        return refused
-    if action == "status":
+        if action != "status" or block:
+            return (*refused, {})
+        block = sr.historical_secret_answer(drive_root, task_id, quiz_id)
+        if not block:
+            return (*refused, {})
         return 200, {"ok": True, "decision_id": decision_id, "secret_request": dict(block["secret_request"]),
-                     **_lifecycle(block, drive_root)}
+                     **_lifecycle(block)}, {}
+    if action == "status":
+        if sr.consent_result_pending(block):
+            from ouroboros.skill_grant_follow import publish_consent_outcomes, read_consent_outcomes
+
+            settlements = read_consent_outcomes(drive_root)
+            projected = sr.project_consent_result(block, task_id, settlements)
+            if projected is not block:
+                publish_consent_outcomes(drive_root, block["secret_outcome"]["allow"]["skill"], decision_id=decision_id)
+                current = sr_block(drive_root, task_id, quiz_id)
+                block = sr.project_consent_result(current, task_id, settlements) if current else projected
+        return 200, {"ok": True, "decision_id": decision_id, "secret_request": dict(block["secret_request"]),
+                     **_lifecycle(block, drive_root)}, {}
     request = sr.secret_request_of(block)
     try:
         changes = sr.validate_values(request, body.get("values"))
         observed = sr.validate_observed(request, body.get("observed"))
+        allow = sr.validate_allow(request, body.get("allow"))
     except sr.SecretRequestError as exc:
-        return _refusal(400, exc.code, str(exc), decision_id)
+        return (*_refusal(400, exc.code, str(exc), decision_id), {})
     _settle_finished_asker(drive_root, task_id)
     try:
         with settings_document_mutation():
-            status, payload, deliver = _save_locked(drive_root, decision_id, task_id, quiz_id, request_id, request,
-                                                    changes, observed)
+            return _save_locked(drive_root, decision_id, task_id, quiz_id, request_id, request, changes, observed,
+                                allow)
     except SettingsDocumentBusy as exc:
-        return _refusal(503, "settings_busy", str(exc), decision_id)
+        return (*_refusal(503, "settings_busy", str(exc), decision_id), {})
     finally:
         changes.clear()
-    if deliver:
+
+
+def _finish_save(drive_root: pathlib.Path, owed: Dict[str, Any], payload: Dict[str, Any],
+                 progress: Any = None) -> Dict[str, Any]:
+    """After the lock: the allow's own step (``sr.run_allow``), then the outcome's delivery, which waits for
+    it, so the asker learns the save and the allow together. Returns the reply."""
+    task_id, quiz_id = owed["task_id"], owed["quiz_id"]
+    block: Dict[str, Any] = {}
+    if owed.get("allow"):
+        try:
+            block = sr.run_allow(drive_root, task_id, quiz_id, progress=progress, reserved=bool(owed.get("reserved")))
+        except Exception as exc:  # its result stays unrecorded: the owed-delivery pass reads it as unknown
+            log.warning("Secret request allow step failed for %s: %s", quiz_id, type(exc).__name__)
+            sr.release_allow(task_id, quiz_id)
+    if not sr.allow_pending(block or sr_block(drive_root, task_id, quiz_id)):  # another request's step delivers
         try:
             block = deliver_secret_outcome(drive_root, task_id, quiz_id)
         except Exception as exc:
@@ -374,10 +442,16 @@ def save_secret(drive_root: pathlib.Path, body: Any) -> Tuple[int, Dict[str, Any
 
             log.warning("Secret request delivery remains owed for %s: %s", quiz_id, type(exc).__name__)
             record_quiz_delivery_failure(drive_root, task_id, quiz_id, "quiz_delivery_failed")
-            block = sr_block(drive_root, task_id, quiz_id)
-        payload = _receipt(decision_id, block, duplicate=False) if block else payload
-        _send_state(block, task_id)
-    return status, payload
+    block = sr_block(drive_root, task_id, quiz_id) or block
+    _send_state(block, task_id)
+    return _receipt(str(payload.get("decision_id") or ""), block, duplicate=bool(payload.get("duplicate"))) if block \
+        else payload
+
+
+def save_secret(drive_root: pathlib.Path, body: Any) -> Tuple[int, Dict[str, Any]]:
+    """The whole decision in the calling thread: the save, then its allow step and delivery."""
+    status, payload, owed = _save_secret(drive_root, body)
+    return status, (_finish_save(drive_root, owed, payload) if owed else payload)
 
 
 def cancel_secret(drive_root: pathlib.Path, decision_id: str, task_id: str, quiz_id: str,
@@ -423,10 +497,34 @@ def is_secret_question(drive_root: pathlib.Path, task_id: str, quiz_id: str) -> 
 async def api_secret_decision(request: Request) -> JSONResponse:
     """POST /api/decisions/secret — ``saveSecretToken``, its cancel and its status read."""
     from ouroboros.gateway.owner_settings import owner_audit
+    from ouroboros.skill_lifecycle_queue import answer_or_job
 
     body = await request_json_or(request, None)
     action = body.get("action", "save") if isinstance(body, dict) else "save"
-    status, payload = await run_sync_to_completion(save_secret, request_drive_root(request), body)
+    allowing = isinstance(body, dict) and "allow" in body
+    drive_root = request_drive_root(request)
+    if not allowing:
+        status, payload = await run_sync_to_completion(save_secret, drive_root, body)
+    else:
+        # One background work: save, lifecycle job and delivery. An early reply names an already
+        # bound job; its save receipt was captured before the bind and can predate a live result.
+        saved: Dict[str, Any] = {}
+
+        def work(handle: Any) -> Tuple[int, Dict[str, Any]]:
+            try:
+                status, receipt, owed = _save_secret(drive_root, body)
+            finally:
+                values = body.get("values") if isinstance(body, dict) else None
+                if isinstance(values, dict):
+                    values.clear()  # the values leave with the save, not with the grant
+            saved.update(status=status, payload=receipt)
+            return status, (_finish_save(drive_root, owed, receipt, handle) if owed else receipt)
+
+        result = await answer_or_job(work, log_label="secret form allow", allow_pending=True)
+        if isinstance(result, dict) and result.get("pending"):
+            status, payload = saved["status"], {**saved["payload"], "allow_job": result["job_id"]}
+        else:
+            status, payload = result
     body = None  # the values leave this frame with the request; the audit names only host facts
     if action in ("save", "cancel"):
         event = payload.get("secret_cancelled" if action == "cancel" else "secret_filled") or payload.get(
@@ -436,6 +534,8 @@ async def api_secret_decision(request: Request) -> JSONResponse:
             "fields": list(event.get("fields") or []),
             "outcome": "ok" if payload.get("ok") else str(payload.get("reason_code") or "refused"),
             "saved": payload.get("saved"),
+            **({"allow": str(((payload.get("secret_outcome") or {}).get("allow") or {}).get("state") or "not_recorded")}
+               if allowing else {}),
         })
     return JSONResponse(payload, status_code=status, headers=_NO_STORE)
 
