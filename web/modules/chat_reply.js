@@ -215,6 +215,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
 
     async function seek(address, position, wanted, prepared, focus = true, locate = null) {
         let target = !prepared && drawn(address);
+        const mounted = Boolean(target);
         if (!target) {
             const result = await history()?.reference(address, wanted, prepared);
             if (!wanted() || !result) return null;
@@ -225,6 +226,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             target = result.target;
         }
         if (!wanted()) return null;
+        if (mounted) history()?.pin?.(address, target);
         target = decks.surface(target) || target;  // a tucked note's deck opens, so the row it lands on shows
         const words = locate?.(target);  // first: what the search then says of the row may change its sheet's height
         fitSearch();
@@ -354,6 +356,17 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     function bubbleRef(bubble) {
         const address = bubble?.dataset?.rowAddress || '';
         if (!address) return null;
+        if (bubble.hasAttribute('data-work-reply-row')) {
+            const role = bubble.dataset.workReplyRow === 'assistant' ? 'assistant' : 'system';
+            const body = bubble.querySelector('.chat-live-line-body')?.textContent || '';
+            const title = bubble.querySelector('.chat-live-line-title')?.textContent || '';
+            const words = bubble.dataset.rowWords || (role === 'assistant' ? (body || title) : (title || body));
+            const rawTs = /^row:-?\d+@([^#]+)#/.exec(address)?.[1] || '';
+            return { address, chat_id: chatId, role, kind: role === 'system' ? 'system' : 'message',
+                author_label: authorOf(role), snippet: replySnippet(words),
+                ts: Number.isFinite(Date.parse(rawTs)) ? rawTs : '',
+                task_id: bubble.closest?.('.chat-live-card')?.dataset?.taskId || '' };
+        }
         const caption = bubble.matches('[data-reply-caption]') ? bubble : null;
         if (caption) bubble = bubble.closest('.chat-bubble');
         // A card display is still its sender's bubble: only its passages are off (`data-reply-excerpt-disabled`).
@@ -414,9 +427,10 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     }
 
     /**
-     * A root work card is answered from its row menu (docs/DESIGN.md "Replies"; owner 17.10, Q9 B): its action row
-     * holds only commands over the work, so it draws no Reply of its own. `wanted` is false for anything that is not
-     * a root work card. The card becomes a quote's jump target by the same address.
+     * A work card (root or nested child) is answered from its row menu (docs/DESIGN.md "Replies"; owner 17.10, Q9 B):
+     * its action row holds only commands over the work, so it draws no Reply of its own. `wanted` is false when the
+     * card is not a replyable work card (for example a root block with no work yet). The card becomes a quote's jump
+     * target by its `task:<id>` address.
      */
     function syncCard(record, wanted) {
         if (!record?.root) return;
@@ -511,7 +525,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         },
         /** What the row menu's Reply on this bubble quotes, or null. */
         bubbleRef,
-        /** What the row menu's Reply on this root work card quotes, or null. */
+        /** What the row menu's Reply on this work card quotes, or null. */
         cardRef,
         start,
         syncCard,

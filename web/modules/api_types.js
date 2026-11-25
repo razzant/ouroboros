@@ -297,6 +297,8 @@
  *   The incident's valence for the one-shot toast (warn/ok/error); absent = the alarm tone.
  * @property {boolean=} task_id_pending
  *   X3: a repair receipt whose managed task id does not exist yet (minted at promotion); typed truth, not an invented id.
+ * @property {string=} about_work_task_id
+ *   The confirmed work this final answer replies about (finish_task about_work): exactly the task this owner turn started or told, never a fresher id.
  * @property {Object=} lifecycle
  * @property {Object=} lifecycle_pointer
  *   C4 multi-chat dedupe: a duplicate initiator's typed pointer to the job that owns the routing ({job_id, kind, target, status, chat_id}).

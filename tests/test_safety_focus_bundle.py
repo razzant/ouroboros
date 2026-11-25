@@ -491,7 +491,7 @@ def test_a_rebuilt_card_answer_names_its_card_a_reference_in_every_record_it_rea
     tree = {"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "root"}
     helper = SimpleNamespace(task_id="helper", drive_root=tmp_path, current_chat_id=1, _held_owner_messages={},
                              _owner_directives=[], task_metadata={**tree, **governing_words_for_schedule(parent)})
-    quotes = [quote for _ids, _address, quote, _went, _before in _rows_to_carry(helper, tmp_path)]
+    quotes = [quote for _ids, _address, quote, *_rest in _rows_to_carry(helper, tmp_path)]
     write_relay(tmp_path, "receiver", relay_id="inks", note="The flyer inks.", chat_id=1, teller_task_id="helper",
                 quotes=quotes)
     receiver = SimpleNamespace(task_id="receiver", drive_root=tmp_path, budget_drive_root=tmp_path, current_chat_id=1,
@@ -585,7 +585,7 @@ def test_a_rebuilt_answer_keeps_its_earlier_form_and_address_for_a_card_with_no_
                "plain": {"address": blank["address"], "author": blank["author"], "text": body, "card_id": "c-blank"}}
     carried = _rows_to_carry(helper, tmp_path)
     assert len(carried) == len(answers)
-    for (_ids, address, quote, _went, _before), words in zip(carried, answers):
+    for (_ids, address, quote, *_rest), words in zip(carried, answers):
         answer = {"source": "owner_mailbox", "source_task_id": "designer",
                   **({"reply_to": rebuilt[words]} if rebuilt[words] else {})}
         earlier = {"direction": "in", "chat_id": 1, "ts": f"received {received[words]}", "text": words,
@@ -593,7 +593,7 @@ def test_a_rebuilt_answer_keeps_its_earlier_form_and_address_for_a_card_with_no_
         assert quote["owner_row"]["corpus_answer"] == answer, words
         assert address == format_address(row_address(earlier)), words
     write_relay(tmp_path, "receiver", relay_id="paper", note="The paper cards.", chat_id=1, teller_task_id="helper",
-                quotes=[quote for _ids, _address, quote, _went, _before in carried])
+                quotes=[quote for _ids, _address, quote, *_rest in carried])
     receiver = SimpleNamespace(task_id="receiver", drive_root=tmp_path, budget_drive_root=tmp_path, current_chat_id=1,
                                task_metadata={}, pending_events=[], event_queue=None, drive_logs=lambda: tmp_path / "logs",
                                _owner_directives=[])

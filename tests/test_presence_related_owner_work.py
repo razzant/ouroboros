@@ -58,10 +58,16 @@ def test_one_reading_tells_the_owners_related_work_from_work_acting_for_a_place(
     ]
     for malformed in ("bad", {"binding_id": 7}, {}, {"binding_id": ""}):
         cases.append(({"presence_binding_relation": malformed}, "", ""))  # it narrows to nothing, never widens
+    from ouroboros.room_reader import owner_visible_reader
+
     for metadata, acts_for, belongs_to in cases:
         assert presence_metadata_binding(metadata) == acts_for, metadata
         assert presence_metadata_relation(metadata) == belongs_to, metadata
         assert presence_related_work(BINDING, {**root, "metadata": metadata}) is (belongs_to == BINDING), metadata
+        # The room's reader of the owner's own work is the same reading: what acts for a binding (a malformed
+        # carrier too) is no owner's reader.
+        record = {**root, "id": "work", "chat_id": 1, "metadata": metadata}
+        assert owner_visible_reader(record) is (acts_for is None), metadata
     # A ceiling still narrows a run whose carrier relates it, as one whose carrier was lost.
     assert presence_caller_binding(types.SimpleNamespace(
         task_metadata=RELATION, task_contract={"capability_ceiling": {}})) == ""
@@ -79,6 +85,11 @@ def test_one_reading_tells_the_owners_related_work_from_work_acting_for_a_place(
                                   "metadata": AUTHORITY, **DOOR}) == BINDING
     assert presence_task_binding({"metadata": {}, "task_contract": {"capability_ceiling": {}}}) == ""
     assert presence_task_binding({"metadata": {}, **DOOR}) is None
+    # An old owner root keeps its door at top level beside its authority: the owner's reader, as its record reads;
+    # a lost carrier under a ceiling is not.
+    assert owner_visible_reader({**root, "metadata": AUTHORITY, **DOOR})
+    assert not owner_visible_reader({**root, "metadata": AUTHORITY})
+    assert not owner_visible_reader({"metadata": {}, "task_contract": {"capability_ceiling": {}}})
 
 
 def _old_root(root, task_id, *, door=True, chat_id=1, project_id=""):

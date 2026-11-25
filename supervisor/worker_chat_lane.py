@@ -436,13 +436,14 @@ def open_owner_intake(task: Dict[str, Any], root: Any) -> str:
         owner_conversation_key,
         retire_author_intake,
         task_attempt,
+        task_handoff,
     )
 
     key, attempt = owner_conversation_key(task), task_attempt(task)
     if not key:
         return ""
-    try:
-        if open_author_intake(root, str(task["id"]), key, attempt=attempt):
+    try:  # a carrier's copy names its handoff; the host's row before any put names none
+        if open_author_intake(root, str(task["id"]), key, attempt=attempt, handoff=task_handoff(task)):
             return key
     except Exception:
         log.warning("Owner turn %s reads no follow-up: its intake fact was not written", task.get("id"), exc_info=True)

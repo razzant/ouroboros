@@ -124,8 +124,14 @@ def test_a_live_answer_starts_the_owners_private_work_like_a_late_answer_and_lea
                        "late_answer": {"task_id": seen["tid"], "quiz_id": block["quiz_id"],
                                        "answer_snapshot": {"task_id": seen["tid"], "quiz": block}}})
     with monkeypatch.context() as scoped:
-        scoped.setattr("ouroboros.tools.control_routing._emit_and_wait_for_routing",
-                       lambda _ctx, evt: (seen.update(late=dict(evt)) or "live", {"status": "scheduled"}))
+        def _late_emit(_ctx, evt, *, about_work=""):
+            # The late owner turn is replyable: the start names its own task as the reply target
+            # (the kwarg the live emit now passes); the event shape itself stays the parity check below.
+            assert about_work == evt["task_id"]
+            seen.update(late=dict(evt))
+            return "live", {"status": "scheduled"}
+
+        scoped.setattr("ouroboros.tools.control_routing._emit_and_wait_for_routing", _late_emit)
         _start_task(late, PRIVATE_START["objective"], title=PRIVATE_START["title"], context_requires_self_body_docs=True)
     assert set(event) - {"destination", "owner_quote"} == set(seen["late"])
     assert {key: seen["late"][key] for key in ("presence_binding_relation", "work_kind", "chat_id", "source_text")} == {

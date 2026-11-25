@@ -311,6 +311,9 @@ def prepare_terminal_send_event(
         )
     usage["delegate_terminal_reconciliation"] = custody_audit
     origin = str(usage.get("terminal_origin") or "")
+    if (not presence and task.get("_is_direct_chat") and origin == TERMINAL_ORIGIN_MODEL_FINAL
+            and (work := usage.get("about_work_task_id"))):
+        send_event.setdefault("progress_meta", {})["about_work_task_id"] = work
     notice = str(usage.get("terminal_provider_notice") or "")
     # One voice: the host disclosure stays a typed field OF THE RESULT (CLI
     # stderr, --jsonl, parent handoff, reviewers, synthesis, the child-result
@@ -442,9 +445,9 @@ def deliver_final_message_live(
     tid = str(task_id or "")
     final = fallback = None
     for event in pending_events:
-        # A mid-task reply or Main notice is never the answer, even with no final after it.
+        # A mid-task reply, relay return or Main notice is never the answer, even with no final after it.
         if (isinstance(event, dict) and event.get("type") == "send_message"
-                and event.get("system_type") not in ("proactive_message", "main_notice")):
+                and event.get("system_type") not in ("proactive_message", "main_notice", "relay_reply")):
             fallback = event
             if str(event.get("task_id") or "") == tid:
                 final = event

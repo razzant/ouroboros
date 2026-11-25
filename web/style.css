@@ -2741,7 +2741,7 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
    the dimmed feed while its menu is open, and settles back. The dimming is the row's own shadow spread over the feed,
    so only the feed dims while the row and its menu stay bright; it fades in and out and never grows. A row swiped to
    reply (chat_row_swipe.js) follows the finger and settles back on the same curve. */
-:is(.chat-bubble, .chat-live-card)[data-row-press] {
+:is(.chat-bubble, .chat-live-card, [data-work-reply-row])[data-row-press] {
     position: relative;
     z-index: 3;
     box-shadow: var(--elev-rest), 0 0 0 100vmax transparent;
@@ -2751,19 +2751,34 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     user-select: none;
     -webkit-touch-callout: none;
 }
-:is(.chat-bubble, .chat-live-card)[data-row-press="hold"] { transform: scale(0.985); }
-:is(.chat-bubble, .chat-live-card)[data-row-press="lift"] {
+:is(.chat-bubble, .chat-live-card, [data-work-reply-row])[data-row-press="hold"] { transform: scale(0.985); }
+:is(.chat-bubble, .chat-live-card, [data-work-reply-row])[data-row-press="lift"] {
     transform: scale(1.012);
     box-shadow: var(--elev-float), 0 0 0 100vmax var(--scrim);
     transition: transform 0.24s var(--ease-sheet), box-shadow 0.24s ease-out;
 }
-:is(.chat-bubble, .chat-live-card)[data-row-swipe] {
+/* An addressed line inside a work card (`data-work-reply-row`) cannot lift: the card clips its shadow and its timeline
+   scrolls, so the dim would stop at the card's edge and the lift at the line's. Its press is colour alone (DESIGN
+   principle 6): the quiet step the card's own controls take, 4px beyond the words, held while its menu is open and
+   fading with it. Nothing sinks, casts a shadow or dims what lies beside it. Same specificity as the rules above and
+   before the swipe's, so a swipe still wins over a press on its way back. */
+[data-work-reply-row][data-row-press] {
+    transform: none;
+    border-radius: var(--radius-inner);
+    box-shadow: 0 0 0 var(--space-1) transparent, inset 0 0 0 100vmax transparent;
+    transition: var(--motion-tone);
+}
+[data-work-reply-row][data-row-press="hold"],
+[data-work-reply-row][data-row-press="lift"] {
+    box-shadow: 0 0 0 var(--space-1) var(--tone-quiet-hover), inset 0 0 0 100vmax var(--tone-quiet-hover);
+}
+:is(.chat-bubble, .chat-live-card, [data-work-reply-row])[data-row-swipe] {
     position: relative;
     transform: translateX(calc(-1 * var(--row-swipe, 0px)));
 }
 /* The swipe's own motion wins over a closed menu's lift still on its way back: 1:1 under the finger, its curve home. */
-:is(.chat-bubble, .chat-live-card)[data-row-swipe="drag"] { transition: none; }
-:is(.chat-bubble, .chat-live-card)[data-row-swipe="settle"] { transition: transform 0.22s var(--ease-sheet); }
+:is(.chat-bubble, .chat-live-card, [data-work-reply-row])[data-row-swipe="drag"] { transition: none; }
+:is(.chat-bubble, .chat-live-card, [data-work-reply-row])[data-row-swipe="settle"] { transition: transform 0.22s var(--ease-sheet); }
 /* The reply mark at the room's right side: it fills as the row nears the reply point and takes the accent there. */
 .chat-row-reply-mark {
     position: fixed;
@@ -2783,8 +2798,8 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 .chat-row-reply-mark[data-armed="true"] { color: var(--accent); }
 .chat-row-reply-mark[data-leaving="true"] { opacity: 0; transition: opacity 0.16s ease-out; }
 @media (prefers-reduced-motion: reduce) {
-    :is(.chat-bubble, .chat-live-card)[data-row-press]:not([data-row-swipe]) { transform: none; transition: box-shadow 0.24s ease-out; }
-    :is(.chat-bubble, .chat-live-card)[data-row-swipe="settle"] { transition: none; }
+    :is(.chat-bubble, .chat-live-card, [data-work-reply-row])[data-row-press]:not([data-row-swipe]) { transform: none; transition: box-shadow 0.24s ease-out; }
+    :is(.chat-bubble, .chat-live-card, [data-work-reply-row])[data-row-swipe="settle"] { transition: none; }
 }
 
 /* The portal (work_portal.js): the same card in Main, collapsed for good, while its work lives in a

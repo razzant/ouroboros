@@ -434,16 +434,40 @@ def author_intake_accepting(drive_root: Any, task_id: str, conversation_key: str
     return _writer_alive(row.get("pid"))
 
 
-def author_intake_closed(drive_root: Any, task_id: str, conversation_key: str, *, attempt: Any) -> bool:
-    """The positive opposite of ``author_intake_accepting``: this conversation's fact for this attempt says its loop
-    reads no more (its final drain closed it, ``follow_loop_admission``). No fact, an unreadable or foreign one, or
-    another attempt's proves nothing."""
+def _same_handoff(row: dict, handoff: str) -> bool:
+    """Whether a fact can speak for the physical handoff ``handoff`` (the dispatcher's ``phase_generation``, fresh at
+    every put): Resume, a sleep's wake and a preserved wait hand the SAME attempt out again, so a fact naming another
+    handoff of it says nothing about this one. Unnamed on either side, the attempt alone decides, as before."""
+    named = row.get("phase_generation")
+    return not handoff or not named or named == handoff
+
+
+def author_intake_closed(drive_root: Any, task_id: str, conversation_key: str, *, attempt: Any,
+                         handoff: str = "") -> bool:
+    """The positive opposite of ``author_intake_accepting``: this conversation's fact for this attempt (and handoff,
+    ``_same_handoff``) says its loop reads no more (its final drain closed it, ``follow_loop_admission``, or its loop
+    ended, ``close_root_intake``). No fact, an unreadable or foreign one, or another attempt's or handoff's proves
+    nothing. ``conversation_key`` "": the attempt's fact whatever conversation it names."""
     try:
         row = json.loads(_intake_path(drive_root, task_id).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return (isinstance(row, dict) and row.get("accepting") is False and row.get("conversation_key") == conversation_key
-            and row.get("attempt") == attempt)
+    return (isinstance(row, dict) and row.get("accepting") is False and row.get("attempt") == attempt
+            and (not conversation_key or row.get("conversation_key") == conversation_key)
+            and _same_handoff(row, handoff))
+
+
+def author_intake_stale(drive_root: Any, task_id: str, *, attempt: Any, handoff: str = "") -> bool:
+    """This attempt's fact stands open (``accepting``) but its writer is gone: a crash left it before any positive
+    close, so the loop reads no more yet ``author_intake_closed`` proves nothing. Distinct from no fact at all
+    (preparing) and from a closed fact; the writer's liveness is the same single-pid probe as ``author_intake_accepting``,
+    never a census. Another attempt's or handoff's fact proves nothing (a preserved wait's next handoff prepares)."""
+    try:
+        row = json.loads(_intake_path(drive_root, task_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (isinstance(row, dict) and row.get("accepting") is True and row.get("attempt") == attempt
+            and not _writer_alive(row.get("pid")) and _same_handoff(row, handoff))
 
 
 def _writer_alive(pid: Any) -> bool:
@@ -459,8 +483,11 @@ def _write_intake(drive_root: Any, task_id: str, row: dict) -> None:
     atomic_write_json(_intake_path(drive_root, task_id), row)
 
 
-def open_author_intake(drive_root: Any, task_id: str, conversation_key: str, *, attempt: Any = None) -> bool:
-    """The author's loop reads this conversation's mail from here on (under the mail lock).
+def open_author_intake(drive_root: Any, task_id: str, conversation_key: str, *, attempt: Any = None,
+                       handoff: str = "") -> bool:
+    """The author's loop reads this conversation's mail from here on (under the mail lock). ``handoff``: the
+    dispatcher's ``phase_generation`` of the copy this loop runs (``task_handoff``), recorded so a later handoff of the
+    same attempt does not read this loop's close as its own (``_same_handoff``).
 
     False when the lock could not be taken: nothing is opened, so no arrival is accepted that the lock
     could not order (the author still reads its own mailbox; a remote Host refuses, and the arrival
@@ -471,7 +498,8 @@ def open_author_intake(drive_root: Any, task_id: str, conversation_key: str, *, 
         if not locked:
             return False
         _write_intake(drive_root, task_id, {"accepting": True, "conversation_key": conversation_key, "pid": os.getpid(),
-                                            **({"attempt": attempt} if attempt is not None else {})})
+                                            **({"attempt": attempt} if attempt is not None else {}),
+                                            **({"phase_generation": handoff} if handoff else {})})
         return True
 
 
@@ -480,21 +508,37 @@ def _own_row(row: Any, attempt: Any) -> bool:
     return isinstance(row, dict) and row.get("pid") == os.getpid() and row.get("attempt") == attempt
 
 
-def close_author_intake(drive_root: Any, task_id: str, *, own: bool = False, attempt: Any = None) -> bool:
+def close_author_intake(drive_root: Any, task_id: str, *, own: bool = False, attempt: Any = None,
+                        leave_closed: bool = False) -> bool:
     """The author's loop stopped reading: an arrival offered from now on is refused (under the mail lock).
 
     The fact is removed even when the lock could not be taken (it must never outlive its reader); False
     then discloses that an arrival racing the close may have landed unread. A recipient-claim COMMIT
     delayed beyond this wait can finish after the last admission check; the following append may then
-    miss the final drain. ``own`` removes only this process/attempt's fact, never a successor's."""
+    miss the final drain. ``own`` removes only this process/attempt's fact, never a successor's.
+    ``leave_closed`` (a root's loop end) writes a positive closed fact (``accepting=False``) for its own
+    row instead of unlinking, so a Reply after the loop's last drain but before the stored result still
+    reads ``not_reading`` (``author_intake_closed``); a successor's open replaces it and settlement removes
+    it. Without the lock it unlinks as before: a closed fact is never written unordered."""
     from ouroboros.task_custody import task_mail_lock
 
     with task_mail_lock(drive_root, task_id) as locked:
         path = _intake_path(drive_root, task_id)
         try:
-            if not own or _own_row(json.loads(path.read_text(encoding="utf-8")), attempt):
-                path.unlink()
-        except (OSError, ValueError):
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            raw = ""
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            row = None
+        try:
+            if not own or _own_row(row, attempt):
+                if leave_closed and locked and isinstance(row, dict):
+                    _write_intake(drive_root, task_id, {**row, "accepting": False})
+                else:
+                    path.unlink()
+        except OSError:
             pass
         if not locked:
             log.warning("author intake of %s closed without its mail lock; a racing arrival may be unread", task_id)
@@ -589,6 +633,12 @@ def task_attempt(task: Any) -> int:
         return 1
 
 
+def task_handoff(task: Any) -> str:
+    """The physical handoff of this task copy: the ``_phase_generation`` the dispatcher stamps at every put (the
+    RUNNING row's ``phase_generation``); "" when the copy names none."""
+    return str(task.get("_phase_generation") or "") if isinstance(task, dict) else ""
+
+
 def open_root_intake(drive_root: Any, task: Any) -> bool:
     """A root's loop reads its conversation from here on, on its own drive beside its mailbox; never fails the loop."""
     key = root_conversation_key(task)
@@ -599,29 +649,62 @@ def open_root_intake(drive_root: Any, task: Any) -> bool:
         if not is_presence_task(task):
             key = LOCAL_RESULT_INTAKE
     try:
-        return bool(key) and open_author_intake(drive_root, str(task.get("id") or ""), key, attempt=task_attempt(task))
+        return bool(key) and open_author_intake(drive_root, str(task.get("id") or ""), key, attempt=task_attempt(task),
+                                                handoff=task_handoff(task))
     except Exception:
         log.debug("root intake fact not written", exc_info=True)
         return False
 
 
-def close_root_intake(drive_root: Any, task: Any) -> None:
+def _work_intake_key(task):
+    from ouroboros.room_reader import owner_visible_reader
+
+    if not task.get("id") or not task.get("chat_id") or not owner_visible_reader(task):
+        return ""
+    return f"work:{task['id']}"
+
+
+def close_root_intake(drive_root: Any, task: Any, *, final: bool = True) -> None:
+    """The root's loop ended. A ``final`` end leaves its own intake fact standing as a positive close (naming its
+    handoff), so a Reply after the last drain but before the stored result reaches the source room, not a mailbox no
+    loop drains again (``work_reply._state``); the task's mailbox settlement removes it (``task_custody.
+    settle_task_mailbox``). A park ends no reading: the fact goes, as an owner turn's carrier removes its own, so the
+    parked attempt prepares and the words wait for its next first drain."""
     try:
-        close_author_intake(drive_root, str(task.get("id") or ""), own=True, attempt=task_attempt(task))
+        close_author_intake(drive_root, str(task.get("id") or ""), own=True, attempt=task_attempt(task), leave_closed=final)
     except Exception:
         log.debug("root intake of %s not closed", task.get("id"), exc_info=True)
 
 
 @contextmanager
 def root_intake(drive_root: Any, task: Any):
-    """The scope of a root's loop: open before its first drain, removed as the loop ends however it ends;
-    the final drain moves this same fact in between (``follow_loop_admission``)."""
+    """The scope of a root's loop: open before its first drain, closed as the loop ends however it ends; the final
+    drain moves this same fact in between (``follow_loop_admission``). Only a park leaves the loop without a terminal
+    (``budget_pause.BudgetPauseRequested``: a cold sleep, a Pause, a detach, money), and the same attempt is handed out
+    again (``events_budget.install_exact_budget_pause``): it removes the fact. Every other end leaves a positive
+    ``accepting=False`` close naming this handoff (``task_handoff``), so a Reply after the last drain but before the
+    stored result reads ``not_reading`` and a later handoff of the attempt is not closed by it. An owner work's loop
+    that ``open_root_intake`` gave no fact holds a ``work:`` fact unless its attempt already reads under one (an
+    owner turn's carrier): a resumed attempt then still has a final close a Reply can see."""
     opened = open_root_intake(drive_root, task)
+    if (not opened and (key := _work_intake_key(task))
+            and not author_intake_accepting(drive_root, task["id"], attempt=task_attempt(task))):
+        try:
+            opened = open_author_intake(drive_root, task["id"], key, attempt=task_attempt(task),
+                                        handoff=task_handoff(task))
+        except (OSError, ValueError):
+            log.debug("work Reply intake fact not written", exc_info=True)
+    final = True
     try:
         yield
+    except BaseException as exc:
+        from ouroboros.budget_pause import BudgetPauseRequested
+
+        final = not isinstance(exc, BudgetPauseRequested)
+        raise
     finally:
         if opened:
-            close_root_intake(drive_root, task)
+            close_root_intake(drive_root, task, final=final)
 
 
 def follow_loop_admission(ctx: Any, accepting: bool) -> None:
@@ -645,7 +728,7 @@ def follow_loop_admission(ctx: Any, accepting: bool) -> None:
             row = json.loads(path.read_text(encoding="utf-8"))
             if not (isinstance(metadata.get("presence"), dict)
                     or str(row.get("conversation_key") or "").startswith(OWNER_CONVERSATION)
-                    or row.get("conversation_key") == LOCAL_RESULT_INTAKE):
+                    or row.get("conversation_key") in (LOCAL_RESULT_INTAKE, f"work:{task_id}")):
                 return
             attempt = task_attempt({"_attempt": getattr(ctx, "task_attempt", None)}) if "attempt" in row else None
             if not _own_row(row, attempt) or bool(row.get("accepting")) is bool(accepting):

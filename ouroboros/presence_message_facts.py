@@ -10,6 +10,8 @@ behind linked words.
 frame re-renders from that record. Staged files are the host attachment manifest's to show, never repeated
 here. Every value a sender or connector controls is quoted or escaped, so one fact stays one line. A cut
 names ``source``, the caller's exact reader of the whole record (``event_reader``; a row's address).
+A confirmed account's row in the owner corpus keeps the same message's facts beside its words
+(``place_row_facts``): what it replies to, its provider identity and its send time.
 """
 from __future__ import annotations
 
@@ -169,6 +171,22 @@ def reply_target(message: Any, *, source: str = "") -> dict[str, str] | None:
     if source and words:
         address += f"; the words as carried: {source}"
     return {"address": address, "author": author, "text": words if words is not None else ""}
+
+
+def place_row_facts(conversation_id: Any, message: Any, origin: Mapping[str, Any] | None = None, *,
+                    source: str = "") -> dict[str, Any]:
+    """A confirmed place event's corpus-row facts beside its words: the message it replies to (its provider address and
+    any words the connector carried, as context under its author; with ``source``, the exact reader of the event record
+    that carried its words), its provider identity (``own_sends.message_identity``), so a later reader tells my own post
+    through my human's account once that post's receipt is known, and its send time as ``ts`` (``message.sent_at`` no
+    later than the receipt ``origin`` names as ``received``, else none); ``origin``: the row's other typed ids."""
+    from ouroboros.own_sends import message_identity
+    from ouroboros.presence_history import source_order_block
+
+    found = message_identity(conversation_id, message)
+    identity = {"conversation_id": found[0], "message_id": found[1]} if found else {}
+    sent = (source_order_block(message, received=str((origin or {}).get("received") or "")) or {}).get("time")
+    return {"reply_to": reply_target(message, source=source), "origin": {**(origin or {}), **identity, **({"ts": sent} if sent else {})}}
 
 
 def _links(message: Mapping[str, Any], text: str) -> list[str]:

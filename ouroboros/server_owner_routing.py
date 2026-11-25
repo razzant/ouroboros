@@ -16,6 +16,7 @@ import threading
 import uuid
 from typing import Any, Dict, Optional
 
+from ouroboros.owner_mailbox import MailboxWriteUnconfirmed
 from ouroboros.server_process import log
 from ouroboros.server_routing_context import (
     RootSnapshot,
@@ -165,8 +166,7 @@ def _owner_turn_key(ctx: Any, row: Dict[str, Any], meta: Any, chat_id: int) -> s
     """``owner:<chat>`` when ROW's confirmed direct turn reads ordinary input of this chat.
 
     The lane's host facts (its admission barrier landed, no live call's reservation)
-    and the task's origin and carrier facts (``conversation_lease.owner_conversation_key``), with no Project binding
-    the turn took since; else ""."""
+    and the task's original carrier address identify it. Ordinary room intake excludes moved turns."""
     from ouroboros.conversation_lease import OWNER_CONVERSATION, owner_conversation_key
     from ouroboros.projects_registry import project_chat_for_task
     from supervisor.conversation_lane import conversation_row
@@ -226,8 +226,11 @@ def _route_main_followup(
         roots = roots if roots is not None else addressable_roots(ctx)
         if roots.gap:
             return ""
+        fallback = task_metadata.get("work_reply_fallback") if isinstance(task_metadata, dict) else None
+        excluded = str(fallback.get("target") or "") if isinstance(fallback, dict) else ""
         running = getattr(ctx, "RUNNING", {})
-        owner_turns = [(row, meta, key) for row in roots.rows(chat_id) if row.get("room_reader")
+        owner_turns = [(row, meta, key) for row in roots.rows(chat_id)
+                       if row.get("room_reader") and str(row.get("task_id") or "") != excluded
                        for meta in (running.get(str(row["task_id"])),)
                        for key in (_owner_turn_key(ctx, row, meta, chat_id),)
                        if key and not _owner_turn_closed(row, meta, key)]
@@ -236,6 +239,8 @@ def _route_main_followup(
         row, meta, key = owner_turns[0]
         return _deliver_to_reader(ctx, row, message, client_message_id, task_metadata=task_metadata,
                                   image_data=image_data, owner=(key, meta), note=note)
+    except MailboxWriteUnconfirmed:
+        raise
     except Exception:
         log.debug("Main follow-up routing failed; the message starts its own turn", exc_info=True)
     return ""
@@ -261,6 +266,9 @@ def _deliver_to_reader(
     mail, so it enters no owner corpus and moves no owner-message generation the delivery seal reads."""
     owner_key, owner_meta = owner
     owner_attempt = int((owner_meta or {}).get("attempt") or 1)
+    raise_on_unconfirmed = isinstance(task_metadata, dict) and bool(task_metadata.get("work_reply_fallback"))
+    message_written, unconfirmed_write = False, False
+    target_label, task_obj, staged_manifest, attachment_report = "", {}, [], ""
     try:
         tid = str(candidate["task_id"])
         direct_agent = None
@@ -278,7 +286,6 @@ def _deliver_to_reader(
             remote_author = direct_lock is None and bool(candidate.get("inline_presence"))
             if direct_lock is None and not remote_author:
                 return ""
-        task_obj: Dict[str, Any] = {}
         running = getattr(ctx, "RUNNING", {}).get(tid)
         if isinstance(running, dict):
             task_obj = running.get("task") if isinstance(running.get("task"), dict) else running
@@ -329,11 +336,8 @@ def _deliver_to_reader(
                 direct_lock_held = False
                 return ""
         task_drive = (pathlib.Path(ctx.DRIVE_ROOT) if direct_lock_held or remote_author
-                      else _task_drive_for_task(task_obj, tid))
+                      else _task_drive_for_task(task_obj, tid, canonical=ctx.DRIVE_ROOT))
         msg_id = f"{client_message_id}:{tid}" if client_message_id else None
-        staged_manifest: list = []
-        attachment_report = ""
-        message_written = False
         cancel_refused_in_txn = False
 
         def _drop_staged_inputs() -> None:
@@ -404,15 +408,17 @@ def _deliver_to_reader(
                     return ""  # including an explicit follow-up in this Project: the owner gets a normal turn
                 from ouroboros.room_reader import is_reading
                 if not is_reading(task_drive, tid, task_obj, running=live_meta is not None,
-                                  fences=getattr(ctx, "BUDGET_ROOT_FENCES", None)):
+                                  fences=getattr(ctx, "BUDGET_ROOT_FENCES", None), canonical=ctx.DRIVE_ROOT):
                     return ""
                 # A worker may remain RUNNING to finish paid post-work after its
                 # answer/result settled. Its solve loop no longer drains this
                 # mailbox; accepting an owner follow-up here would label it
                 # delivered, then terminal cleanup would erase it unread. One
-                # predicate with the quiz ingress (TZ-2 D15). A pooled root writes no
-                # intake fact, so words after its final drain and before its stored
-                # result still land here, kept unread on that result (PERSISTENCE).
+                # predicate with the quiz ingress (TZ-2 D15). A pooled root now writes a
+                # ``work:`` intake fact whose final close an addressed Reply reads
+                # (``work_reply._state``); this ordinary room door still keys on the settled
+                # result, so words after its final drain and before its stored result land
+                # here, kept unread on that result (PERSISTENCE).
                 if mailbox_drain_ended(task_drive, tid):
                     return ""
                 # Phase A: a task whose cancellation is PENDING must not accept a
@@ -449,34 +455,41 @@ def _deliver_to_reader(
                     return (author_intake_accepting(task_drive, tid) if remote_author else
                             owner_accepts_now() if owner_key else True)
 
-                if not write_task_message(task_drive, message, tid, source_task_id="", provenance=PROVENANCE_AGENT_NOTE,
-                                          msg_id=msg_id, agent_note=note, admit=note_is_current):
-                    return ""
-            elif not write_owner_message(
-                task_drive, f"{message}{attachment_note}", tid, msg_id=msg_id,
-                # This delivery IS the owner's message; the id is the caller's
-                # parameter, never parsed back out of ``msg_id``.
-                client_message_id=client_message_id,
-                origin_message_ref=task_metadata.get("origin_message_ref") if isinstance(task_metadata, dict) else None,
-                origin_suppressed=isinstance(task_metadata, dict) and task_metadata.get("origin_suppressed") is True,
-                client_surface=(
-                    dict(task_metadata["client_surface"])
-                    if isinstance(task_metadata, dict) and isinstance(task_metadata.get("client_surface"), dict)
-                    else None
-                ),
-                attachment_manifest=staged_manifest if staged_manifest else None,
-                late_answer=(
-                    task_metadata.get("late_answer") if isinstance(task_metadata, dict) else None
-                ),
-                card_press=task_metadata.get("card_press") if isinstance(task_metadata, dict) else None,
-                reply_reference=task_metadata.get("reply_reference") if isinstance(task_metadata, dict) else None,
-                # Only while that author's loop still reads mail, checked under the mail lock its final drain closes
-                # the intake under (``conversation_lease.accept_author_mail``): else the words start their own turn.
-                # An owner turn's row must still be the one judged, its fact name the attempt judged, its result not
-                # settled and no Stop pending since: a forced rail closes the fact alone, its flag stays its Stop door.
-                admit=((lambda: author_intake_accepting(task_drive, tid)) if remote_author else
-                       owner_accepts_now if owner_key else None),
-            ):
+                wrote = write_task_message(task_drive, message, tid, source_task_id="", provenance=PROVENANCE_AGENT_NOTE,
+                                           msg_id=msg_id, agent_note=note, admit=note_is_current)
+            else:
+                try:
+                    wrote = write_owner_message(
+                        task_drive, f"{message}{attachment_note}", tid, msg_id=msg_id,
+                        # This delivery IS the owner's message; the id is the caller's
+                        # parameter, never parsed back out of ``msg_id``.
+                        client_message_id=client_message_id,
+                        origin_message_ref=task_metadata.get("origin_message_ref") if isinstance(task_metadata, dict) else None,
+                        origin_suppressed=isinstance(task_metadata, dict) and task_metadata.get("origin_suppressed") is True,
+                        client_surface=(
+                            dict(task_metadata["client_surface"])
+                            if isinstance(task_metadata, dict) and isinstance(task_metadata.get("client_surface"), dict)
+                            else None
+                        ),
+                        attachment_manifest=staged_manifest if staged_manifest else None,
+                        late_answer=(
+                            task_metadata.get("late_answer") if isinstance(task_metadata, dict) else None
+                        ),
+                        card_press=task_metadata.get("card_press") if isinstance(task_metadata, dict) else None,
+                        reply_reference=task_metadata.get("reply_reference") if isinstance(task_metadata, dict) else None,
+                        work_reply_fallback=task_metadata.get("work_reply_fallback") if isinstance(task_metadata, dict) else None,
+                        raise_on_unconfirmed=raise_on_unconfirmed,
+                        # Only while that author's loop still reads mail, checked under the mail lock its final drain closes
+                        # the intake under (``conversation_lease.accept_author_mail``): else the words start their own turn.
+                        # An owner turn's row must still be the one judged, its fact name the attempt judged, its result not
+                        # settled and no Stop pending since: a forced rail closes the fact alone, its flag stays its Stop door.
+                        admit=((lambda: author_intake_accepting(task_drive, tid)) if remote_author else
+                               owner_accepts_now if owner_key else None),
+                    )
+                except MailboxWriteUnconfirmed:
+                    unconfirmed_write = True
+                    raise
+            if not wrote:
                 return ""
             message_written = True
             if not note and direct_lock_held:
@@ -487,11 +500,8 @@ def _deliver_to_reader(
                 if owner_key and isinstance(active_fence, dict):  # after the mail lock, never inside it (Q→mail)
                     _queue_lock.acquire()
                     queue_lock_held = True
-                if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "active":
-                    active_fence["owner_message_generation"] = int(
-                        active_fence.get("owner_message_generation") or 0
-                    ) + 1
-                    fence_generation_changed = True
+                from ouroboros.work_reply import owner_message_landed
+                fence_generation_changed = owner_message_landed(active_fence)
         finally:
             if queue_lock_held:
                 _queue_lock.release()
@@ -501,7 +511,7 @@ def _deliver_to_reader(
                 # After the lock release: unlinking staged files is file I/O the
                 # global queue lock should not wait on.
                 _drop_staged_inputs()
-            elif staged_manifest and not message_written:
+            elif staged_manifest and not (message_written or unconfirmed_write):
                 _drop_staged_inputs()
         if fence_generation_changed:
             persist_queue_snapshot(reason="acceptance_fence_owner_message")
@@ -516,8 +526,20 @@ def _deliver_to_reader(
         # A landed delivery publishes no row: the receipt the caller records
         # from this stash carries the manifest; the task's mailbox carries the block.
         return tid
+    except MailboxWriteUnconfirmed:
+        if isinstance(task_metadata, dict):
+            task_metadata["_routing_target_label"] = target_label
+            task_metadata["_routing_target"] = task_obj or candidate
+            if staged_manifest:
+                task_metadata["_attachment_manifest"] = [
+                    dict(item) for item in staged_manifest if isinstance(item, dict)
+                ]
+                task_metadata["_attachment_report"] = attachment_report
+        raise
     except Exception:
-        log.debug("Mailbox follow-up routing failed; falling back to direct lane", exc_info=True)
+        log.debug("Mailbox follow-up routing raised", exc_info=True)
+        if message_written:
+            return tid  # bookkeeping cannot unsend a committed mailbox entry
     return ""
 
 
@@ -693,15 +715,17 @@ def _settle_refused(ctx: Any, chat_id: int, client_message_id: str, reason: str)
 
 def _agent_note(incoming: Dict[str, Any], origin_ref: Any) -> Dict[str, Any]:
     """An agent's note (its accepted row's recorded author, ``server`` reads it before any command): ``{author,
-    row_address}``, else ``{}``. Such a message is routed as any Main message, but under an agent's name: it carries
+    row_address}`` and any ``reply_reference`` named ingress already resolved (never supplied to the mailbox as
+    authority), else ``{}``. Such a message is routed as any Main message, but under an agent's name: it carries
     no owner-door stamp, invented or real (its own turn is an ordinary conversation turn whose host-only
     ``admission_author`` says what opened it), reaches a running reader as an agent's note, and is never carried down
     a tree as my human's words."""
     from ouroboros.chat_chain import format_address
 
     author = incoming.get("declared_author") or {}
-    return {"author": author, "row_address": format_address(origin_ref) if (origin_ref or {}).get("row_sha256") else ""} \
-        if author else {}
+    reply = (incoming.get("task_metadata") or {}).get("reply_reference")
+    return {"author": author, "row_address": format_address(origin_ref) if (origin_ref or {}).get("row_sha256") else "",
+            **({"reply_reference": reply} if reply else {})} if author else {}
 
 
 def _deliver_late_live(ctx: Any, root: pathlib.Path, binding: dict, tid: str, text: str, ref: str,
@@ -822,6 +846,17 @@ def _route_late_result(ctx: Any, chat_id: int, ref: str, text: str, note: dict, 
         log.warning("Late result %s could not record its handoff outcome", ref, exc_info=True)
 
 
+def _transport_client_surface(metadata, incoming, chat_id, source):
+    """Stamp the channel for a real non-web owner message without replacing its surface. A synthetic A2A chat
+    (negative id) is machine traffic: no owner sent it, so it never wears an owner client fact."""
+    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+
+    if source == "web" or is_a2a_chat_id(chat_id) or isinstance(metadata.get("client_surface"), dict):
+        return metadata
+    received = {"received_at": str(incoming["received_at"])} if incoming.get("received_at") else {}
+    return {**metadata, "client_surface": {"channel": source, **received}}
+
+
 def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> None:
     """Route one non-command owner message through the canonical decision lane."""
     chat_id = int(incoming["chat_id"])
@@ -830,21 +865,18 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     client_message_id = str(incoming.get("client_message_id") or "")
     origin_ref = incoming.get("origin_message_ref") or None
     origin_suppressed = origin_ref is None
+    task_metadata = dict(incoming.get("task_metadata") or {})
     note = _agent_note(incoming, origin_ref)
-    if note and (reply := (incoming.get("task_metadata") or {}).get("reply_reference")):
-        note["reply_reference"] = reply  # already resolved by named ingress, not supplied to the mailbox as authority
     if note and (incoming.get("accepted_source_row") or {}).get("late_report_sha256"):
         _route_late_result(ctx, chat_id, client_message_id, text, note,
-                           claim=str((incoming.get("task_metadata") or {}).get("_late_dispatch_claim") or ""))
+                           claim=str(task_metadata.get("_late_dispatch_claim") or ""))
         return
     unkept = incoming.get("origin_unkept") is True  # the ingress's own fact: no row was kept for these words
     source_snapshot = incoming.get("origin_message_snapshot") or {}
     image_data = incoming.get("image_data")
     task_constraint = incoming.get("task_constraint")
-    task_metadata = incoming.get("task_metadata")
     # A process-local value minted by the authenticated call door, after
     # canonical message acceptance. JSON/API metadata cannot construct it.
-    task_metadata = dict(task_metadata or {})
     realtime_turn = task_metadata.pop("_realtime_turn", None)
     if realtime_turn is not None:
         from ouroboros.live_conversation import LiveConversationTurn
@@ -860,6 +892,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     from ouroboros.chat_references import TURN_ADDRESS, decided_reply_address, telegram_chat_row
 
     physical = not telegram_room and telegram_chat_row(incoming.get("source"), chat_id, client_message_id)
+    task_metadata.pop("work_reply_fallback", None)  # host-only; never supplied by ingress metadata
     if not telegram_room:  # only an exact Reply's own turn carries the address its acceptance gave it
         task_metadata.pop(TURN_ADDRESS, None)
     decided_project = {}
@@ -1011,32 +1044,41 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     if isinstance(task_metadata.get("ui_control"), dict):
         # A press composed these words: the act stamped the turn, the words stay the host's (never initial_user).
         task_metadata["objective_author"] = {"kind": "ui_control", "control": str(task_metadata["ui_control"].get("name") or "")}
-    # Owner Surface Fact channel fallback: a non-web ingress (telegram/skill
-    # transports) carries no browser observables, but its channel IS the
-    # surface fact, with the common ingress receipt stamp (``received_at``,
-    # ``enqueue_local_message``). Host-stamped here, never overwriting a real descriptor;
-    # source=="web" stays an honest absence (an old SPA sends no fact), and a
-    # synthetic A2A chat (negative id) is machine traffic — no owner sent it,
-    # so it must never wear an owner_client fact.
     from ouroboros.contracts.chat_id_policy import is_a2a_chat_id as _is_a2a
 
     _ingress_source = str(incoming.get("source") or "web")
-    if (
-        _ingress_source != "web"
-        and not _is_a2a(chat_id)
-        and not isinstance(task_metadata.get("client_surface"), dict)
-    ):
-        received = {"received_at": str(incoming["received_at"])} if incoming.get("received_at") else {}
-        task_metadata = {**task_metadata, "client_surface": {"channel": _ingress_source, **received}}
+    task_metadata = _transport_client_surface(task_metadata, incoming, chat_id, _ingress_source)
     from ouroboros.card_store import late_press_ref
     from ouroboros.owner_quiz import late_answer_ref
 
     late, press = task_metadata.get("late_answer"), task_metadata.get("card_press")
     thread_of = (late_answer_ref(late) or late_press_ref(press) or {}).get("task_id", "")
-    # ONE read of the addressable roots for this message: the room's reader, Main's
-    # manifest and the decision metadata all see the same projection.
+    reply = raw_reply if isinstance(raw_reply := task_metadata.get("reply_reference"), dict) else {}
+    addressed = (_ingress_source == "web" and realtime_turn is None and (chat_id == 1 or bool(project_id))
+                 and not (note or late or press or task_constraint or _is_a2a(chat_id))  # owner words only
+                 and isinstance(origin_ref, dict) and bool(origin_ref.get("row_sha256")) and "work_task_id" in reply)
+    routed_to_task, unnamed_label, delivery_status = "", "Task", "delivered"
     roots = addressable_roots(ctx)
-    routed_to_task, unnamed_label = "", "Task"
+    delivery, work_fallback = None, False
+    if addressed:
+        from ouroboros.work_reply import (
+            carry_reply_context,
+            carry_reply_to_members,
+            route_work_reply,
+            work_reply_fallback,
+        )
+
+        delivery = route_work_reply(ctx, reply, origin_ref, incoming.get("accepted_source_row"))
+        work_fallback = delivery.outcome == "fallback"
+        if delivery.outcome == "delivered":
+            # The addressed work's own running helpers hear it now as passive context (its drain's catch-up writes
+            # the same bytes); a physical retry's helpers live under the logical root. No other work is woken.
+            carry_reply_to_members(ctx.DRIVE_ROOT, delivery)
+        if work_fallback:
+            task_metadata["work_reply_fallback"] = work_reply_fallback(delivery)
+        else:
+            routed_to_task, delivery_status = delivery.target, delivery.outcome
+            task_metadata["_routing_target"] = delivery.task
     # A live call's admitted turn keeps the room it was opened in; it never re-routes. The owner bot's exact
     # Reply is answered by its own turn: no running work, here or in his chat, reads it as its input. The Project's
     # other live roots hear it as context, as any word of that room, read from the chat he wrote it in; none of them
@@ -1045,51 +1087,48 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         if project_id and not press and not origin_suppressed:
             _carry_project_room_context(ctx, chat_id, project_id, ingress_chat, client_message_id, roots, "",
                                         reply=task_metadata.get("reply_reference"), source_ref=origin_ref)
-    elif realtime_turn is None and ((project_id and not late) or thread_of):
+    elif not addressed and realtime_turn is None and ((project_id and not late) or thread_of):
         routed_to_task = _route_project_chat_to_running_task(
-            ctx,
-            chat_id,
-            text or image_caption,
-            client_message_id,
-            task_metadata=task_metadata,
-            image_data=image_data,
-            thread_of=thread_of,
-            roots=roots,
-        )
+            ctx, chat_id, text or image_caption, client_message_id,
+            task_metadata=task_metadata, image_data=image_data, thread_of=thread_of, roots=roots)
         # The room's other live roots hear my human's words as context, whichever return routed them, a late answer
         # included; a press is a typed act on a card, not words: it reaches its author's thread and no other reader.
         if project_id and not press and not origin_suppressed:
             _carry_project_room_context(ctx, chat_id, project_id, chat_id, client_message_id, roots,
                                         routed_to_task, reply=task_metadata.get("reply_reference"), source_ref=origin_ref)
-    elif realtime_turn is None and not (project_id or late or press or task_constraint):
+    elif (not addressed or work_fallback) and realtime_turn is None and not (project_id or late or press or task_constraint):
         # Main: my human's next words reach the one turn already answering them in this chat, else their own turn.
-        routed_to_task = _route_main_followup(ctx, chat_id, text or image_caption, client_message_id,
-                                              task_metadata=task_metadata, image_data=image_data, roots=roots, note=note)
+        try:
+            routed_to_task = _route_main_followup(
+                ctx, chat_id, text or image_caption, client_message_id,
+                task_metadata=task_metadata, image_data=image_data, roots=roots, note=note)
+        except MailboxWriteUnconfirmed as exc:
+            routed_to_task, delivery_status = exc.task_id, "unconfirmed"
         unnamed_label = ""  # its turn named nothing yet: the receipt says saved, never a placeholder name
+    # An unconfirmed fallback write leaves it unproven that a turn took the Reply: nobody is told the room handles it.
+    if delivery is not None and not (work_fallback and delivery_status == "unconfirmed"):
+        carry_reply_context(ctx, roots, ingress_chat, delivery,
+                            exclude=(routed_to_task,) if work_fallback and routed_to_task else ())
     if routed_to_task:
-        if not origin_suppressed and not note:  # the tree carriage is my human's words' (inv. 26)
+        # A direct Reply has one recipient: the addressed work answers it. Its tree hears it as passive context carried
+        # at receipt (``work_reply.carry_reply_to_members``) and reconciled by its own drain
+        # (``owner_mailbox.member_carriage``), so no member is woken here; an ordinary room delivery still carries its
+        # accepted row at receipt below: my human's words alone, never an agent's note (inv. 26).
+        if (not origin_suppressed and not note and delivery_status == "delivered"
+                and (not addressed or work_fallback)):
             from ouroboros.owner_relay import carry_row_at_receipt
 
             carry_row_at_receipt(ctx.DRIVE_ROOT, routed_to_task, chat_id, client_message_id,
                                  reply=task_metadata.get("reply_reference"), source_ref=origin_ref)
         _record_routing_receipt(
-            bridge,
-            ctx,
-            chat_id=chat_id,
-            client_message_id=client_message_id,
-            action="mailbox_delivery",
-            target=routed_to_task,
-            # The delivery's facts, stashed on this message's metadata (always a mapping here) by ``_deliver_to_reader``.
-            target_label=str(task_metadata.get("_routing_target_label") or ""),
-            status="delivered",
+            bridge, ctx, chat_id=chat_id, client_message_id=client_message_id, action="mailbox_delivery",
+            target=routed_to_task, target_label=str(task_metadata.get("_routing_target_label") or ""),
+            status=delivery_status, reason="mailbox_write_unconfirmed" if delivery_status == "unconfirmed" else "",
             detail=str(task_metadata.get("_attachment_report") or ""),
             attachment_manifest=list(task_metadata.get("_attachment_manifest") or []),
-            task=task_metadata.get("_routing_target"),
-            unnamed_label=unnamed_label,
-            source_ref=origin_ref,
-            source_snapshot=source_snapshot,
-            origin_suppressed=origin_suppressed, ingress_unkept=unkept,
-        )
+            task=task_metadata.get("_routing_target"), unnamed_label=unnamed_label,
+            source_ref=origin_ref, source_snapshot=source_snapshot,
+            origin_suppressed=origin_suppressed, ingress_unkept=unkept)
         return
 
     try:
@@ -1101,7 +1140,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         has_projects = True
     # Unknown roots, like unknown Projects, go to the decision lane, which is told so. So does any
     # root's record: Main without Projects reads a stop and its open Continue as Main with them does.
-    needs_decision_lane = (bool(project_id) or has_projects or bool(roots.rows()) or bool(roots.gap)
+    needs_decision_lane = (addressed or bool(project_id) or has_projects or bool(roots.rows()) or bool(roots.gap)
                            or _root_results_exist(ctx))
     if needs_decision_lane:
         task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots,
@@ -1115,10 +1154,6 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         return
     # The conversation lane's admission: the RUNNING row and the start receipt here, the
     # turn's body in a carrier process (owner decision 1A). No thread per owner turn.
-    ctx.handle_chat_direct(
-        chat_id,
-        text or image_caption,
-        image_data,
-        task_constraint=task_constraint, task_metadata=task_metadata,
-        **({"admission_author": note} if note else {}),
-    )
+    ctx.handle_chat_direct(chat_id, text or image_caption, image_data,
+                           task_constraint=task_constraint, task_metadata=task_metadata,
+                           **({"admission_author": note} if note else {}))

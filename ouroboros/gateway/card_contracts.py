@@ -45,7 +45,6 @@ class CardOutbound(ChatReferenceFields):
     ts: str
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
-    project_thread: NotRequired[bool]
 
 
 class CardStateOutbound(TypedDict):

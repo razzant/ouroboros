@@ -1117,7 +1117,8 @@ def test_selected_reply_preserves_source_author_citation_and_replay_identity(tmp
     bridge.handle_web_message("Trace this path.", client_message_id="selected", task_metadata=meta)
     stored = dialogue_test.chat_rows(tmp_path)[-1]
     ref = stored["reply_to"]
-    assert ref == {**reference_from_row(original), "excerpt": excerpt}
+    # An accepted ordinary Reply carries the host's verdict beside the source's reference; a client claim never does.
+    assert ref == {**reference_from_row(original), "excerpt": excerpt, "ordinary": True}
     delivered = bridge._inbox.get_nowait()["task_metadata"]["reply_reference"]
     assert ref == echoes[-1]["reply_to"] == stored_reply(delivered), "the row and its echo keep the compact reference"
     assert delivered["text"] == source, "delivery carries the source whole, captured before the owner row was saved"

@@ -2008,8 +2008,10 @@ def test_a_returned_turn_on_its_carrier_reads_my_humans_next_words_under_a_fresh
     intake = tmp_path / "memory" / "owner_mailbox" / f"{turn.id}.intake.json"
     assert json.loads(intake.read_text())["attempt"] == 1, "the dead attempt's fact, until a carrier takes the turn"
     carrier = worker_chat_lane.CarrierTurn(sent, tmp_path, stdqueue.Queue())
+    handoff = system.workers.RUNNING[turn.id]["phase_generation"]  # the put that handed this carrier the turn
+    assert handoff and sent["_phase_generation"] == handoff
     assert carrier.intake == "owner:1" and json.loads(intake.read_text()) == {
-        "accepting": True, "conversation_key": "owner:1", "pid": os.getpid(), "attempt": 2}
+        "accepting": True, "conversation_key": "owner:1", "pid": os.getpid(), "attempt": 2, "phase_generation": handoff}
     bridge, before = _Bridge(), set(system.workers.RUNNING)
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=system.workers.RUNNING, PENDING=system.workers.PENDING,
                           BUDGET_ROOT_FENCES={}, load_state=lambda: {"owner_id": 1, "owner_chat_id": 1},

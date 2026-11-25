@@ -730,7 +730,7 @@ def test_a_follow_up_waits_for_the_turns_mail_lock_outside_q_and_refuses_what_mo
                 elif meanwhile == "acceptance":
                     queue.ACCEPTANCE_FENCES[turn] = {"status": "sealed"}
                 else:
-                    field = {"owner_hold": "_owner_hold", "project_hold": "_project_admission_hold",
+                    field = {"owner_hold": "_owner_hold", "project_hold": "_project_admission_restore_hold",
                              "task_budget": "_budget_pause"}[meanwhile]
                     reader["task"][field] = {"reason": "test control while mail waits"}
         assert carrier.send("release", "drained" if closing else "released") in ("[]", "")

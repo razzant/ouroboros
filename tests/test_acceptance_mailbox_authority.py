@@ -103,3 +103,23 @@ def test_direct_incoming_owner_input_still_prevents_final_seal(case):
     assert _end_task_acceptance_fence(tool_ctx, outcome="terminal")
     assert calls[-1]["outcome"] == "revision"
     assert not ctx.incoming_messages.empty()
+
+
+@pytest.mark.parametrize("carriage", [{"went_to": "other-root", "context_only": True},
+                                      {"went_to": "routed:head", "handled_by_source_room": True}, None],
+                         ids=["context_only", "handled_by_source_room", "direct_work_reply"])
+def test_passive_carriage_never_holds_acceptance_but_a_direct_reply_does(case, carriage):
+    """A row another work (or the source room) answers is passive: it neither refuses the source acknowledgement nor
+    reopens the seal. My human's direct Reply to this work is its input and keeps finalization open."""
+    from ouroboros.owner_relay import write_relay
+
+    tool_ctx, _tools, ctx, trace, _candidate = case
+    calls = _fence(tool_ctx)
+    observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)
+    write_relay(tool_ctx.drive_root, "root", relay_id="mail", note="", quotes=[], chat_id=1, teller_task_id="",
+                host_carried=carriage, work_reply=carriage is None)
+    passive = carriage is not None
+    assert bool(acknowledge_acceptance_observation(tool_ctx, observed["owner_source_sha256"])) is passive
+    assert _end_task_acceptance_fence(tool_ctx, outcome="terminal")
+    assert calls[-1]["outcome"] == ("terminal" if passive else "revision")
+    assert tool_ctx._loop_mailbox_seen_ids == set()

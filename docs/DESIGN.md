@@ -1906,8 +1906,8 @@ Unavailable canonical refresh retains text, references and drafts but disables a
 **Work portal.** Work keeps its Main card at the request’s place after a Project move
 (Turn into project, the mind's move, a binding); start/transfer rows name the destination, no second entry. Its portal: status chip and quiet fact, title,
 latest line (two lines, cut on a word), the meta line (tool calls · money ·
-updated), one action row: the Project reference, then `[Reply] [Resume] [Stop…]`
-with one primary (owner 26.10, B). Timeline, Reviews and children live
+updated), one action row: the Project reference, then `[Resume] [Stop…]`
+with one primary (owner 26.10, B); Reply is the row menu’s. Timeline, Reviews and children live
 in the room; the summary is reading content, not a disclosure. The room’s census supplies
 last line, tool calls and `in background` for detached work; missing facts change nothing.
 At the end, show the closing sentence unless it repeats the title; a held cause
@@ -2043,9 +2043,25 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 ### Replies
 
 Reply quotes a row for Ouroboros to interpret. In the owner’s bundled Telegram chat, a confirmed Project Reply
-opens a turn there; other ordinary Replies stay in the physical conversation (`skills/telegram/SKILL.md`).
-A Main reply to a Project row appears there at its time without waking work. Answers stay in Main
-(owner 28.10, A). Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
+opens a turn there; other ordinary Replies stay in the physical conversation (`skills/telegram/SKILL.md`). The bridge
+owns that turn; the browser Reply below never opens one.
+A browser Reply to a row the host links to a work goes to that work’s root, which alone answers: one Reply, one
+answerer, no picker. The host decides the link from the row: its card (a child’s card goes to its root), its System
+rows and child lines, its summary and relay notes, an ordinary line of any work but an undetached direct turn in Main,
+the message that confirmed it started or told it, and his earlier Reply to a work. A private contact, a place row and
+a host refusal are never linked. An ordinary quote keeps its routing and appearances; a linked row that lost its
+addressee is answered by its source room. The quote stays the exact row he pressed, with its own author; a row inside
+a card has its own Reply, and Resume, Pause and Stop… stay the card’s own.
+The host hands his words over at once, with no separate Main turn. A reading work takes them at its next step, a
+long step delays the answer; a queued work at its first drain; a sleeping work wakes unless a hold keeps it asleep.
+Other work reading now in the source or the work’s room hears them as context only: no second answer, no wake. A work
+not reading now (last drain closed, result settled, or a Stop, Pause, money pause or other hold keeps it) or unable
+to answer keeps that state, the room answers from what the work saved, and a Reply lifts none of them; a paused work
+finds the words as context later. If a write began but its outcome is not confirmed, his message says it may not have
+arrived, no other turn answers in its place, and the work may still read and answer. A late quiz answer is not such
+a Reply. Answers stay in the room where he wrote, one row under his words, which also show in the work’s room.
+Neither is a copy, and neither folds away.
+Saved bubbles offer Reply beside Copy and in the row menu; work cards and the rows inside them use the
 menu, questions their own field. Select words in one message for **Reply to quote** beside them or
 in the native Mac menu alongside Copy and Look Up. On touch, **Select text** opens native handles.
 Selection alone leaves the draft intact. Reply stages a row or passage in the composer; × or Esc cancels and keeps typed words. Send fixes
@@ -2115,7 +2131,9 @@ Resume, Pause and Stop… exactly when the card does. Esc/outside press closes i
 and returns focus. Links, selected words and fields keep their native content menu;
 the desktop shell removes only commands that cannot work there (navigation away, stalls or no-ops).
 On touch the row sinks a little while held and lifts over the dimmed feed while its
-menu is open.
+menu is open; inside a card, which would clip a lift, a line with its own Reply takes the
+quiet tone instead, and a line with no address presses its nearest card: that card's menu,
+without a Reply since nothing quotes the line, and no swipe.
 
 Reading, setup and dialogs support familiar host actions to copy links and selected text and edit fields
 (owner, 2 Nov 2026); a disabled native menu is insufficient. Text buttons share one clipboard path,
@@ -2508,10 +2526,10 @@ roots and direct turns the same card: a coined name or narration headline
 host-attested Stop, and `Turn into project` in Main unless bound. A naming refusal
 explains why and leaves the card and button for explicit retry. Bound turns route
 later rows like `move_to_project`. The foot
-holds metadata and one action row: [Reply], Turn into project, Resume, Stop…,
-one primary; on a root they share one band, the row right, wrapping whole
-(owner 30.10, B). Nested children stay inside their root, carry no root control,
-and convert with it. Attention-only blocks and workless non-Done endings have
+holds metadata and one action row: Turn into project, Resume, Stop…, one
+primary (Reply is the row menu’s); on a root they share one band, the row right,
+wrapping whole (owner 30.10, B). Nested children stay inside their root, carry
+no root control, and convert with it. Attention-only blocks and workless non-Done endings have
 status and wait controls but no title or conversion until the first work row
 adds one.
 
