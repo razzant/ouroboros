@@ -80,14 +80,12 @@ def test_websocket_reply_keeps_the_host_preview_on_echo_and_queue(bridge, extra)
     assert echo["row_address"] == format_address(row_address(row))
 
 
-def test_http_command_example_and_javascript_mirror_share_the_request_schema():
+def test_the_http_command_example_shares_the_published_request_schema():
     import re
-    import typing
     from pathlib import Path
 
     from ouroboros.gateway.management_contracts import CommandRequest
     from ouroboros.gateway.schema import validate_ingress
-    from tests.test_gateway_parity import _js_typedef_fields
 
     repo = Path(__file__).resolve().parents[1]
     section = (repo / "docs/CLIENT_CONTRACT.md").read_text(encoding="utf-8").split("**Commands, restart and Panic.**", 1)[1]
@@ -95,8 +93,6 @@ def test_http_command_example_and_javascript_mirror_share_the_request_schema():
                    if code.startswith('{"cmd"') and '"reply_excerpt"' in code)
     assert not validate_ingress(example, CommandRequest)
     assert validate_ingress({**example, "reply_excerpt": {"text": 7}}, CommandRequest)
-    mirror = (repo / "web/modules/management_contract_types.js").read_text(encoding="utf-8")
-    assert _js_typedef_fields(mirror, "CommandRequest") == set(typing.get_type_hints(CommandRequest))
 
 
 @pytest.mark.parametrize("kind", ["photo", "video", "document"])

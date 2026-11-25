@@ -1,6 +1,6 @@
 """Model-route Settings previews and the maximum-response acknowledgement: their own module beside ``contracts.py``.
 
-Descriptive TypedDicts, the twin of ``web/modules/model_route_types.js``. The producers are
+Descriptive TypedDicts. The producers are
 ``ouroboros/search_routes.py`` (the built-in ``web_search`` Source/Model) and
 ``ouroboros/response_limits.py`` (an exact route's maximum response), served by ``GET /api/settings``
 with ``websearch_preview=1`` / ``response_limit_preview=1`` and ``POST /api/owner/capability-ack``."""
@@ -74,7 +74,7 @@ class ResponseLimitPreview(TypedDict):
     response_limit: ResponseLimit
     window: Dict[str, Any]  # context_view_facts.window_projection
     window_route: Dict[str, Any]  # the window acknowledgement's independent fingerprint
-    window_ack: bool
+    window_ack: bool  # Whether a confirmation can be cleared.
 
 
 class ResponseLimitAckResponse(TypedDict):

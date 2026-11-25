@@ -1102,11 +1102,9 @@ def test_a_press_waiting_when_the_generation_closes_starts_nothing(tmp_path, mon
 WEB = REPO / "web" / "modules"
 
 
-def test_storage_envelopes_have_a_field_identical_browser_twin():
-    """The gateway re-exports the domain-owned envelopes; storage_types.js is their twin."""
-    from tests.test_gateway_parity import _js_typedef_fields
-
-    text = (WEB / "storage_types.js").read_text(encoding="utf-8")
+def test_storage_envelopes_stay_domain_owned_and_out_of_the_browser_js():
+    """The gateway re-exports the domain-owned envelopes; ``api_types.js``
+    does not redeclare them as JSDoc types."""
     from ouroboros import storage_deleted, storage_free
 
     names = [name for name in contracts.__all__ if name.startswith("Storage")]
@@ -1118,11 +1116,8 @@ def test_storage_envelopes_have_a_field_identical_browser_twin():
     for name in names:
         home = storage_deleted if name in deleted else storage_free if name.startswith("StorageFree") else storage
         assert getattr(contracts, name) is getattr(home, name)
-        assert _js_typedef_fields(text, name) == set(getattr(contracts, name).__annotations__), name
-    assert "storage_types.js" in (WEB / "api_types.js").read_text(encoding="utf-8").splitlines()[0]
     assert not re.search(r"@typedef \{Object\} Storage", (WEB / "api_types.js").read_text(encoding="utf-8"))
     client = (WEB / "api_client.js").read_text(encoding="utf-8")
-    assert "import('./storage_types.js').StorageResponse" in client
     assert "/api/storage/measure/cancel" in client
 
 

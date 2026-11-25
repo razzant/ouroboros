@@ -177,6 +177,7 @@ class CallSocketContract(TypedDict):
     max_audio_payload_bytes: int
     max_video_payload_bytes: int
     max_control_bytes: int
+    # both maps: message type -> its schema name in GET /api/contract `schemas`
     peer_messages: Dict[str, str]
     server_messages: Dict[str, str]
 

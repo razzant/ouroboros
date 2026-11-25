@@ -235,8 +235,8 @@ export function cancelHarnessMaintenance(operationId) {
  * Domain states, including repairable findings, remain successful JSON
  * responses; only transport/admission refusals reject through fetchJson.
  * @param {string} skill
- * @param {import('./skill_source_contract_types.js').SkillPublishDestinationChoice|null} [destination]
- * @returns {Promise<import('./api_types.js').SkillPublishPreflightResponse>}
+ * @param {Object|null} [destination] — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillPublishDestinationChoice`.
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::SkillPublishPreflightResponse`.
  */
 export function skillPublishPreflight(skill, destination = null) {
     return jsonPost(`/api/skills/${encodeURIComponent(skill)}/publish-preflight`, destination ? { destination } : {});
@@ -244,8 +244,8 @@ export function skillPublishPreflight(skill, destination = null) {
 
 /**
  * Create one ordinary managed task through the shared task gateway.
- * @param {import('./api_types.js').TaskCreateRequest} payload
- * @returns {Promise<import('./api_types.js').TaskCreateResponse>}
+ * @param {Object} payload — Python contract: `ouroboros/gateway/contracts.py::TaskCreateRequest`.
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::TaskCreateResponse`.
  */
 export function createTask(payload) {
     return jsonPost('/api/tasks', payload);
@@ -264,12 +264,12 @@ export function createTask(payload) {
  * Shared by the Chat live-card stop control and the Activity tab.
  * @param {string} taskId
  * @param {{cascade?: boolean, stopPolicy?: string, stopActionId?: string}} [options]
- * @returns {Promise<import('./api_types.js').TaskCancelResponse>}
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::TaskCancelResponse`.
  */
 export function cancelTask(taskId, { cascade = false, stopPolicy = '', stopActionId = '' } = {}) {
     const url = `/api/tasks/${encodeURIComponent(taskId)}/cancel`;
     const policy = String(stopPolicy || '');
-    /** @type {import('./api_types.js').TaskCancelRequest} */
+    /** @type {Object} — Python contract: `ouroboros/gateway/work_contracts.py::TaskCancelRequest`. */
     const body = {
         ...(cascade ? { cascade: true } : {}),
         ...(policy && policy !== 'immediate' ? { stop_policy: policy } : {}),
@@ -281,9 +281,9 @@ export function cancelTask(taskId, { cascade = false, stopPolicy = '', stopActio
 /** Exact parked Close; old bodies reject the policy instead of treating it as a Stop.
  * @param {string} taskId
  * @param {string} closeExpired
- * @returns {Promise<import('./api_types.js').TaskCancelResponse>} */
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::TaskCancelResponse`. */
 export function closeExpiredTask(taskId, closeExpired) {
-    /** @type {import('./api_types.js').TaskCancelRequest} */
+    /** @type {Object} — Python contract: `ouroboros/gateway/work_contracts.py::TaskCancelRequest`. */
     const body = { stop_policy: 'close_expired', close_expired: closeExpired };
     return jsonPost(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, body);
 }
@@ -362,7 +362,7 @@ export function taskSourceDownloadUrl(taskId, ref) {
  * names only the stop it chose (`expected_panic_hold_id`) and passes its lifetime's `signal`
  * (`withinRequestLifetime`), which cancels the request, never an effect it may already have had.
  * @param {string} taskId
- * @param {import('./client_contract_types.js').TaskResumeRequest|null} [body]
+ * @param {Object|null} [body] — Python contract: `ouroboros/gateway/client_contracts.py::TaskResumeRequest`.
  * @param {{signal?: AbortSignal|null}} [options]
  */
 export async function resumeTask(taskId, body = null, { signal = null } = {}) {
@@ -380,7 +380,7 @@ export async function resumeTask(taskId, body = null, { signal = null } = {}) {
  * and the owner_hurry task-result projection.
  * @param {string} taskId
  * @param {string} requestId
- * @returns {Promise<import('./api_types.js').TaskHurryResponse>}
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::TaskHurryResponse`.
  */
 export function hurryTask(taskId, requestId) {
     return jsonPost(
@@ -396,8 +396,8 @@ export function hurryTask(taskId, requestId) {
  * the server's `reason_code` and status on the error (card_model.js says it in the owner's words).
  * @param {string} taskId
  * @param {string} requestId  // a retry of the same act carries the same id
- * @param {Omit<import('./work_types.js').TaskModelRequest, 'request_id'>} act
- * @returns {Promise<import('./work_types.js').TaskModelResponse>}
+ * @param {Omit<Object, 'request_id'>} act — Python contract: `ouroboros/gateway/work_contracts.py::TaskModelRequest`.
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/work_contracts.py::TaskModelResponse`.
  */
 export function taskModel(taskId, requestId, act) {
     return jsonPost(
@@ -448,7 +448,7 @@ export function continueTask(taskId, actionNonce) {
  * Fetch one task's durable detail record, or null when unreachable — the
  * shared reconcile read used by the cancel/stop card flows.
  * @param {string} taskId
- * @returns {Promise<import('./api_types.js').TaskDetailResponse|null>}
+ * @returns {Promise<Object|null>} — Python contract: `ouroboros/gateway/contracts.py::TaskDetailResponse`.
  */
 export async function fetchTaskDetail(taskId) {
     const resp = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`);
@@ -461,7 +461,7 @@ export async function fetchTaskDetail(taskId) {
  * fetchTaskDetail above keeps its every-failure→null contract for reconcile
  * flows that treat all misses alike.
  * @param {string} taskId
- * @returns {Promise<import('./api_types.js').TaskDetailResponse|null>}
+ * @returns {Promise<Object|null>} — Python contract: `ouroboros/gateway/contracts.py::TaskDetailResponse`.
  */
 export async function fetchTaskDetailStrict(taskId, { signal } = {}) {
     const resp = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`, signal ? { signal } : {});
@@ -499,23 +499,23 @@ export function extensionRoutePath(skill, route, params = null) {
  * Skill sources and their catalogs (one lifecycle for every source kind). The
  * catalog is served from the host's per-source cache and never waits for the
  * network; `refresh` asks the host to re-read its sources in the background.
- * Shapes: skill_source_contract_types.js (fixtures: web/tests/fixtures/skills_v4/).
+ * Shapes: ouroboros/gateway/skill_source_contracts.py (fixtures: web/tests/fixtures/skills_v4/).
  */
 const sourcePath = (id) => `/api/skill-sources/${encodeURIComponent(id)}`;
 // Writes answer {ok:false, code, error} on refusal; the callers read that as a thrown error
 // whose `body` keeps the typed refusal.
 const STRICT = { rejectOkFalse: true };
-/** @typedef {import('./skill_source_contract_types.js').SkillSourceChangeResponse} SkillSourceChangeResponse */
+/** @typedef {Object} SkillSourceChangeResponse — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillSourceChangeResponse`. */
 export const skillSourcesApi = {
-    /** @returns {Promise<import('./skill_source_contract_types.js').SkillSourcesResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillSourcesResponse`. */
     list: () => fetchJson('/api/skill-sources', { cache: 'no-store' }),
     /**
-     * @param {import('./skill_source_contract_types.js').SkillSourceProbeRequest} target
-     * @returns {Promise<import('./skill_source_contract_types.js').SkillSourceProbeResponse>}
+     * @param {Object} target — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillSourceProbeRequest`.
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillSourceProbeResponse`.
      */
     probe: (target) => jsonPost('/api/skill-sources/probe', target),
     /**
-     * @param {import('./skill_source_contract_types.js').SkillSourceAddRequest} source
+     * @param {Object} source — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillSourceAddRequest`.
      * @returns {Promise<SkillSourceChangeResponse>}
      */
     add: (source) => jsonPost('/api/skill-sources', source, STRICT),
@@ -523,7 +523,7 @@ export const skillSourcesApi = {
     mySkills: () => jsonPost('/api/skill-sources/my-skills', {}, STRICT),
     /**
      * @param {string} id
-     * @param {import('./skill_source_contract_types.js').SkillSourceChangeRequest} changes
+     * @param {Object} changes — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillSourceChangeRequest`.
      * @returns {Promise<SkillSourceChangeResponse>}
      */
     update: (id, changes) => jsonPost(sourcePath(id), changes, STRICT),
@@ -531,15 +531,15 @@ export const skillSourcesApi = {
     remove: (id) => jsonPost(`${sourcePath(id)}/remove`, {}, STRICT),
     /** @returns {Promise<SkillSourceChangeResponse>} */
     refresh: (id) => jsonPost(`${sourcePath(id)}/refresh`, {}, STRICT),
-    /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillCatalogResponse`. */
     catalog: ({ refresh = false } = {}) => fetchJson(`/api/skill-catalog${refresh ? '?refresh=1' : ''}`, { cache: 'no-store' }),
-    /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogSearchResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillCatalogSearchResponse`. */
     search: ({ q = '', source = '', sort = '', cursor = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}), ...(sort ? { sort } : {}), ...(cursor ? { cursor } : {}) })}`, { cache: 'no-store', ...init }),
-    /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogItemDetailResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillCatalogItemDetailResponse`. */
     item: (sourceId, name, init = {}) => fetchJson(`/api/skill-catalog/item/${encodeURIComponent(sourceId)}/${encodeURIComponent(name)}`, { cache: 'no-store', ...init }),
     /**
      * `replace` confirms replacing the other skill of the same name.
-     * @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogInstallResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillCatalogInstallResponse`.
      */
     install: (id, { turnOnWhenReady = true, replace = false } = {}) => jsonPost('/api/skill-catalog/install',
         { id, turn_on_when_ready: turnOnWhenReady, ...(replace ? { replace: true } : {}) }, STRICT),
@@ -547,13 +547,13 @@ export const skillSourcesApi = {
      * The exact candidate the owner saw (`digest`) against the local revision it was shown with
      * (`localDigest`): either one changing makes the host refuse instead of acting on a stale dialog.
      * @param {'replace'|'keep'|'merge'} mode
-     * @returns {Promise<import('./skill_source_contract_types.js').SkillUpdateResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillUpdateResponse`.
      */
     updateSkill: (name, mode, digest, localDigest = '', { skipReview = false } = {}) => jsonPost(`/api/skills/${encodeURIComponent(name)}/update`,
         { mode, digest, ...(localDigest ? { local_digest: localDigest } : {}), ...(skipReview ? { skip_review: true } : {}) }, STRICT),
-    /** @returns {Promise<import('./skill_source_contract_types.js').SkillUninstallResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillUninstallResponse`. */
     uninstallSkill: (name) => jsonPost(`/api/skills/${encodeURIComponent(name)}/uninstall`, {}, STRICT),
-    /** @returns {Promise<import('./skill_source_contract_types.js').StarterSkillsResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::StarterSkillsResponse`. */
     starterSkills: () => fetchJson('/api/onboarding/starter-skills', { cache: 'no-store' }),
 };
 
@@ -621,34 +621,34 @@ export const apiClient = {
     },
     /** While Main's history refuses for the Project registry: one read-only page of a saved room (`room_archive.py`),
      * oldest first; `before` is a page's `next_cursor`. Reads only: it acknowledges nothing.
-     * @returns {Promise<import('./client_contract_types.js').ChatArchiveResponse>} */
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/history_contracts.py::ChatArchiveResponse`. */
     chatArchive: ({ room = 'main', before = null, signal } = {}) => {
         const params = new URLSearchParams({ room: String(room) });
         if (before) params.set('before', before);
         return fetchJson(`/api/chat/archive?${params}`, { cache: 'no-store', signal });
     },
     /** One bounded read of a room's saved messages as candidates for the words `q`, newest first; `cursor` continues older.
-     * @returns {Promise<import('./client_contract_types.js').ChatSearchResponse>} */
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/history_contracts.py::ChatSearchResponse`. */
     chatSearch: ({ chatId = 1, q = '', cursor = null, signal } = {}) => {
         const params = new URLSearchParams({ chat_id: String(chatId), q: String(q) });
         if (cursor) params.set('cursor', cursor);
         return fetchJson(`/api/chat/search?${params}`, { cache: 'no-store', signal });
     },
-    /** @returns {Promise<import('./api_types.js').HealthResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/health_contracts.py::HealthResponse`. */
     health: () => fetchJson('/api/health', { cache: 'no-store' }),
-    /** @returns {Promise<import('./api_types.js').StateResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::StateResponse`. */
     state: () => readStateJson(),
-    /** One composer file into the upload store. @returns {Promise<import('./api_types.js').UploadResponse>} */
+    /** One composer file into the upload store. @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::UploadResponse`. */
     uploadChatAttachment: (file) => {
         const body = new FormData();
         body.append('file', file);
         return fetchJson('/api/chat/upload', { method: 'POST', body }, { rejectOkFalse: true });
     },
     settings: () => fetchJson('/api/settings', { cache: 'no-store' }),
-    /** @returns {Promise<import('./model_route_types.js').WebSearchRoute>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/model_route_contracts.py::WebSearchRoute`. */
     webSearchPreview: (selection = {}) => fetchJson(
         `/api/settings?${new URLSearchParams({ websearch_preview: '1', ...selection })}`, { cache: 'no-store' }),
-    /** @returns {Promise<import('./model_route_types.js').ResponseLimitPreview>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/model_route_contracts.py::ResponseLimitPreview`. */
     responseLimitPreview: ({ model, local = false, account = '', role = 'main', window }) => fetchJson(
         `/api/settings?${new URLSearchParams({ response_limit_preview: '1', model, local: String(Boolean(local)), account, role, ...(window === undefined ? {} : { window: String(window) }) })}`,
         { cache: 'no-store' }),
@@ -658,8 +658,8 @@ export const apiClient = {
      * The integration-secret form's save (showSecretHitl's form): the owner's values go in this one
      * body to Settings and nowhere else, with `observed` (whether the form showed each key as set).
      * Reuse `request_id` only for unchanged values; an OK reply it cannot read is an unknown outcome.
-     * @param {import('./decision_types.js').SecretDecisionRequest} payload
-     * @returns {Promise<import('./decision_types.js').SecretDecisionResponse>}
+     * @param {Object} payload — Python contract: `ouroboros/gateway/decision_contracts.py::SecretDecisionRequest`.
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/decision_contracts.py::SecretDecisionResponse`.
      */
     saveSecretToken: (payload, options = {}) => jsonPost('/api/decisions/secret', payload, { requireBody: true, ...options }),
     /** Cancel the request: this request saves nothing and the waiting task learns secret_cancelled. */
@@ -668,31 +668,31 @@ export const apiClient = {
     /** What the form shows: whether each asked key is set (never a value), its readers and the request's state. */
     secretRequestStatus: ({ decision_id }, options = {}) => jsonPost('/api/decisions/secret',
         { decision_id, action: 'status' }, options),
-    /** @returns {Promise<import('./api_types.js').UiPreferencesResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contributions.py::UiPreferencesResponse`. */
     uiPreferences: (init = {}) => fetchJson('/api/ui/preferences', { cache: 'no-store', ...init }),
     saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload),
-    /** Live skill contributions (CLIENT_CONTRACT §11). @returns {Promise<import('./api_types.js').UiContributionsResponse>} */
+    /** Live skill contributions (CLIENT_CONTRACT §11). @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contributions.py::UiContributionsResponse`. */
     uiContributions: (init = {}) => fetchJson('/api/ui/contributions', { cache: 'no-store', ...init }),
-    /** @returns {Promise<import('./ui_i18n_types.js').UiI18nResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/ui_i18n_contracts.py::UiI18nResponse`. */
     uiI18n: () => fetchJson('/api/ui/i18n', { cache: 'no-store' }),
-    /** @param {string|import('./ui_i18n_types.js').UiI18nLanguageRequest} payload */
+    /** @param {string|Object} payload — Python contract: `ouroboros/gateway/ui_i18n_contracts.py::UiI18nLanguageRequest`. */
     saveUiLanguage: (payload) => jsonPost('/api/ui/i18n/language', typeof payload === 'string' ? { language: payload } : payload),
-    /** @param {import('./ui_i18n_types.js').UiI18nMissingRequest} payload */
+    /** @param {Object} payload — Python contract: `ouroboros/gateway/ui_i18n_contracts.py::UiI18nMissingRequest`. */
     reportI18nMissing: (payload) => jsonPost('/api/ui/i18n/missing', payload),
-    /** The holds this page found (holds.js). @param {import('./client_contract_types.js').UiHoldsRequest} payload */
+    /** The holds this page found (holds.js). @param {Object} payload — Python contract: `ouroboros/gateway/card_contracts.py::UiHoldsRequest`. */
     reportUiHolds: (payload) => jsonPost('/api/ui/holds', payload),
-    /** A running module widget's fault (widget_module.js). @param {import('./client_contract_types.js').WidgetFaultRequest} payload */
+    /** A running module widget's fault (widget_module.js). @param {Object} payload — Python contract: `ouroboros/gateway/widgets.py::WidgetFaultRequest`. */
     reportWidgetFault: (payload) => jsonPost('/api/widgets/fault', payload),
     importI18n: (memoryDocument) => jsonPost('/api/ui/i18n/import', memoryDocument),
     exportI18nUrl: (language = '') => `/api/ui/i18n/export${language ? `?language=${encodeURIComponent(language)}` : ''}`,
     regenerateI18n: (payload = {}) => jsonPost('/api/ui/i18n/regenerate', payload),
-    /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::DesktopAutostartResponse`. */
     desktopAutostart: (init = {}) => fetchJson('/api/desktop/autostart', { cache: 'no-store', ...init }),
-    /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::DesktopAutostartResponse`. */
     setDesktopAutostart: (enabled) => jsonPost('/api/desktop/autostart', { enabled: Boolean(enabled) }),
-    /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::DesktopAutostartResponse`. */
     desktopBackground: () => fetchJson('/api/desktop/background', { cache: 'no-store' }),
-    /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::DesktopAutostartResponse`. */
     setDesktopBackground: (enabled) => jsonPost('/api/desktop/background', { enabled: Boolean(enabled) }),
     /** `headers`: the caller's declared origin (`APP_SETTINGS_ORIGIN` from the app's own pages). */
     saveSettings: (payload, { headers = {} } = {}) => fetchJson('/api/settings', {
@@ -712,41 +712,41 @@ export const apiClient = {
      * ride the same write only when the response says `preset.applied` —
      * `not_requested`, `skipped_by_owner` and `not_install_time` are ordinary
      * successes that persist no preset.
-     * @param {import('./api_types.js').OnboardingCompleteRequest} payload
-     * @returns {Promise<import('./api_types.js').OnboardingCompleteResponse>}
+     * @param {Object} payload — Python contract: `ouroboros/gateway/contracts.py::OnboardingCompleteRequest`.
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::OnboardingCompleteResponse`.
      */
     completeOnboarding: (payload) => jsonPost('/api/onboarding/complete', payload),
     /**
-     * @param {import('./api_types.js').OnboardingSubagentsPreviewRequest} payload
-     * @returns {Promise<import('./api_types.js').OnboardingSubagentsPreviewResponse>}
+     * @param {Object} payload — Python contract: `ouroboros/gateway/contracts.py::OnboardingCompleteRequest`.
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::OnboardingSubagentsPreviewResponse`.
      */
     previewOnboardingSubagents: (payload) => jsonPost('/api/onboarding/subagents/preview', payload),
     ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
     ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
     ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }, { headers: APP_SETTINGS_ORIGIN }),
-    /** Save room primary effort and ordered helper bounds. @param {import('./client_contract_types.js').OwnerEffortRangeRequest} range */
+    /** Save room primary effort and ordered helper bounds. @param {Object} range — Python contract: `ouroboros/gateway/client_contracts.py::OwnerEffortRangeRequest`. */
     ownerEffortRange: (range) => jsonPost('/api/owner/effort-range', range),
-    /** @param {import('./client_contract_types.js').OwnerSubagentsModeRequest} choice
-     * @returns {Promise<import('./api_types.js').OwnerSubagentsModeResponse>} */
+    /** @param {Object} choice — Python contract: `ouroboros/gateway/client_contracts.py::OwnerSubagentsModeRequest`.
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::OwnerSubagentsModeResponse`. */
     ownerSubagentsMode: (choice) => jsonPost('/api/owner/subagents-mode', choice),
-    /** The room's model for new owner work. @param {import('./client_contract_types.js').OwnerChatModelRequest} choice
-     * @returns {Promise<import('./client_contract_types.js').OwnerChatModelResponse>} */
+    /** The room's model for new owner work. @param {Object} choice — Python contract: `ouroboros/gateway/work_contracts.py::OwnerChatModelRequest`.
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/work_contracts.py::OwnerChatModelResponse`. */
     ownerChatModel: (choice) => jsonPost('/api/owner/chat-model', choice, { headers: APP_SETTINGS_ORIGIN }),
     /** Save the room's tier, or Main's own. Forward Main Ultrafast's confirmation-time read tokens with the tier.
-     * @param {import('./client_contract_types.js').OwnerChatProcessingRequest} choice
-     * @returns {Promise<import('./client_contract_types.js').OwnerChatProcessingResponse>} */
+     * @param {Object} choice — Python contract: `ouroboros/gateway/work_contracts.py::OwnerChatProcessingRequest`.
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/work_contracts.py::OwnerChatProcessingResponse`. */
     ownerChatProcessing: (choice) => jsonPost('/api/owner/chat-processing', choice, { headers: APP_SETTINGS_ORIGIN }),
-    /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::OwnerSafetyModeResponse`. */
     ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
     /** A log's newest rows; `view` 'compact' bounds each row and keeps its `ts` and `type` (ouroboros/gateway/logs.py). */
     logsTail: (name, limit = 2000, view = '') => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}${view ? `&view=${encodeURIComponent(view)}` : ''}`, { cache: 'no-store' }),
-    /** @returns {Promise<import('./model_route_types.js').ResponseLimitAckResponse|Object>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/model_route_contracts.py::ResponseLimitAckResponse`. */
     ownerCapabilityAck: (payload) => jsonPost('/api/owner/capability-ack', payload),
-    /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::OpenAICompatibleModelsResponse`. */
     openAICompatibleModels: (payload) => jsonPost('/api/openai-compatible/models', payload),
     /**
-     * @param {import('./api_types.js').ProviderTestRequest} payload
-     * @returns {Promise<import('./api_types.js').ProviderTestResponse>}
+     * @param {Object} payload — Python contract: `ouroboros/gateway/contracts.py::ProviderTestRequest`.
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::ProviderTestResponse`.
      */
     providerTest: (payload) => jsonPost('/api/providers/test', payload),
     extensions: (init = {}) => fetchJson('/api/extensions', { cache: 'no-store', ...init }),
@@ -754,24 +754,24 @@ export const apiClient = {
      * Widgets page cards: live extension UI tabs projected from the loader
      * snapshot (no skill discovery), each stamped with the owning skill's
      * payload `revision`.
-     * @returns {Promise<import('./api_types.js').WidgetsResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/widgets.py::WidgetsResponse`.
      */
     widgets: (init = {}) => fetchJson('/api/widgets', { cache: 'no-store', ...init }),
     skillPublishPreflight,
     createTask,
     skillLifecycleQueue: ({ signal } = {}) => withinRequestLifetime(
         (transport) => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store', signal: transport }), { signal }),
-    /** @returns {Promise<import('./api_types.js').SkillDeleteResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::SkillDeleteResponse`. */
     deleteSkill: (skill, payloadRoot, expectedContentHash = '') => jsonPost(`/api/skills/${encodeURIComponent(skill)}/delete`, {
         payload_root: payloadRoot,
         ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
     }, { headers: { Prefer: 'respond-async' } }),
-    /** @returns {Promise<import('./skill_mcp_types.js').SkillMcpConnectPreviewResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_mcp_contracts.py::SkillMcpConnectPreviewResponse`. */
     skillMcpConnectPreview: (skill) => fetchJson(`/api/skills/${encodeURIComponent(skill)}/mcp-connect`, { cache: 'no-store' }),
     /**
      * @param {string} skill
-     * @param {import('./skill_mcp_types.js').SkillMcpConnectRequest} body
-     * @returns {Promise<import('./skill_mcp_types.js').SkillMcpConnectResponse|import('./skill_mcp_types.js').SkillMcpConnectPending>}
+     * @param {Object} body — Python contract: `ouroboros/gateway/skill_mcp_contracts.py::SkillMcpConnectRequest`.
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_mcp_contracts.py::SkillMcpConnectResponse` or `ouroboros/gateway/skill_mcp_contracts.py::SkillMcpConnectPending`.
      */
     skillMcpConnect: (skill, body) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/mcp-connect`, body,
         { headers: { Prefer: 'respond-async' } }),
@@ -780,69 +780,69 @@ export const apiClient = {
         ...(enableAfterGrant ? { enable_after_grant: true } : {}),
     }, { headers: { Prefer: 'respond-async' } }),
     /** Every active and deleting Project, uncapped (the sidebar reads it only when asked to look beyond its feed).
-     *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
+     *  @returns {Promise<Object>} — Python contract: `ouroboros/gateway/client_contracts.py::ProjectListResponse`. */
     projectList: ({ signal } = {}) => fetchJson('/api/projects?all=1', { cache: 'no-store', signal }),
     /** One room's spend on each day of the last `days` (7 or 30): `selector` is `project:<id>`, `main` or `unassigned`. The
      *  breakdown's `view=project_days` answers that view alone (its rows and span total, or a typed refusal), never
      *  reading the page's totals again for it.
-     *  @returns {Promise<import('./management_contract_types.js').CostProjectDaysResponse>} */
+     *  @returns {Promise<Object>} — Python contract: `ouroboros/gateway/management_contracts.py::CostProjectDaysResponse`. */
     costProjectDays: (selector, days, { signal } = {}) => fetchJson(`/api/cost-breakdown?${new URLSearchParams({
         view: 'project_days', project_days: selector, days: String(days) })}`, { cache: 'no-store', signal }),
     /** One Project by its id while active or deleting; an empty list when it is neither.
-     *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
+     *  @returns {Promise<Object>} — Python contract: `ouroboros/gateway/client_contracts.py::ProjectListResponse`. */
     projectById: (projectId) => fetchJson(`/api/projects?id=${encodeURIComponent(projectId)}`, { cache: 'no-store' }),
     /** `id` and `name` are optional; the server owns the default destination (leave `id` out for it).
      *  @param {string} taskId @param {string=} id @param {string=} name */
     projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task',
         { task_id: taskId, ...(id ? { id } : {}), ...(name ? { name } : {}) }),
-    /** @param {import('./api_types.js').ProjectCreateRequest} payload */
+    /** @param {Object} payload — Python contract: `ouroboros/gateway/contracts.py::ProjectCreateRequest`. */
     projectCreate: (payload) => jsonPost('/api/projects', payload),
     projectUpdate: (projectId, update) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`,
         typeof update === 'string' ? { name: update } : update),
-    /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::ProjectDeleteResponse`. */
     projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
     /** One Project's working folder as one look finds it (the only read that inspects a folder).
-     *  @returns {Promise<import('./project_folder_types.js').ProjectFolderResponse>} */
+     *  @returns {Promise<Object>} — Python contract: `ouroboros/gateway/project_folder_contracts.py::ProjectFolderResponse`. */
     projectFolder: (projectId) => fetchJson(`/api/projects/${encodeURIComponent(projectId)}/folder`, { cache: 'no-store' }),
-    /** @param {import('./project_folder_types.js').ProjectFolderRequest} change
-     *  @returns {Promise<import('./project_folder_types.js').ProjectFolderResponse>} */
+    /** @param {Object} change — Python contract: `ouroboros/gateway/project_folder_contracts.py::ProjectFolderRequest`.
+     *  @returns {Promise<Object>} — Python contract: `ouroboros/gateway/project_folder_contracts.py::ProjectFolderResponse`. */
     projectFolderChange: (projectId, change) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/folder`, change),
-    /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/project_folder_contracts.py::FsDirsResponse`. */
     fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
     /**
      * Dashboard storage: the saved count, the running count's progress and fresh free space, read
      * passively (no walk, no write); `count` names the finished count this client already holds.
-     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/storage.py::StorageResponse`.
      */
     storage: ({ count = '', ...init } = {}) => fetchJson(
         `/api/storage${count ? `?count=${encodeURIComponent(count)}` : ''}`, { cache: 'no-store', ...init }, STORAGE_READ,
     ),
     /**
      * Start one complete count in the server's child, or join the running one (202 either way).
-     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/storage.py::StorageResponse`.
      */
     measureStorage: () => jsonPost('/api/storage/measure', {}, STORAGE_READ),
     /**
      * Stop the running count; the saved count stays.
-     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/storage.py::StorageResponse`.
      */
     cancelStorageMeasure: () => jsonPost('/api/storage/measure/cancel', {}, STORAGE_READ),
     /**
      * List, without side effects, the finished work the app's own retirers would remove now (202; a second
      * preview joins the running one).
-     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/storage.py::StorageResponse`.
      */
     previewStorageFree: () => jsonPost('/api/storage/free/preview', {}, STORAGE_READ),
     /**
      * Free exactly the previewed items of the chosen whole groups under the named plan (202; `started` and
      * `reason` say whether it ran).
-     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/storage.py::StorageResponse`.
      */
     freeStorage: (plan, groups) => jsonPost('/api/storage/free', { plan, groups }, STORAGE_READ),
     /**
      * Free exactly these items of the plan's ordinary pool, by their ids (202; `started` and `reason` say whether
      * it ran; one bad id refuses the whole request). Never resent after a dropped connection.
-     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/storage.py::StorageResponse`.
      */
     freeStorageItems: (plan, items) => jsonPost('/api/storage/free', { plan, items }, STORAGE_READ),
     /**
@@ -850,13 +850,13 @@ export const apiClient = {
      * `started` and `reason` say whether it ran). The form is its own: it carries no `items` or `groups`. `acceptLoss`
      * is `true` only after the owner was told the whole copy goes with whatever is not proven saved in it; the server
      * refuses anything else as `loss_not_accepted`. Never resent after a dropped connection.
-     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/storage.py::StorageResponse`.
      */
     freeStorageManual: (plan, manual, acceptLoss) => jsonPost('/api/storage/free', { plan, manual, accept_loss: acceptLoss === true }, STORAGE_READ),
     /**
      * One page of a plan's list: the pool, what it leaves out, the finished copies discarded by hand, or the outcomes of its run. `version` comes from
      * the first page and goes on every next one; a 409 `view_changed` means start again from `cursor=0`.
-     * @returns {Promise<import('./storage_types.js').StorageFreeItemsResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/storage_free_view.py::StorageFreeItemsResponse`.
      */
     storageFreeItems: ({ plan, view, cursor = 0, limit = 100, version = '', ...init }) => {
         const query = new URLSearchParams({ plan, view, cursor: String(cursor), limit: String(limit) });
@@ -865,10 +865,10 @@ export const apiClient = {
     },
     /**
      * Stop the listing or the run; what was freed stays freed.
-     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/storage.py::StorageResponse`.
      */
     cancelStorageFree: () => jsonPost('/api/storage/free/cancel', {}, STORAGE_READ),
-    /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/management_contracts.py::UpdateStatusResponse`. */
     updateStatus: (init = {}) => fetchJson('/api/update/status', { cache: 'no-store', ...init }, { requireBody: true }).then(readUpdateStatus),
     /**
      * One fetching check for every surface (Dashboard → Updates, the sidebar's version), coalesced per declared
@@ -876,7 +876,7 @@ export const apiClient = {
      * runs for the same selection shares its answer instead of fetching again; one for another selection fetches its
      * own, so an answer for an old selection is never attributed to the new one.
      * @param {string} [selection]
-     * @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/management_contracts.py::UpdateStatusResponse`.
      */
     updateCheck: (selection = '') => {
         const key = String(selection || '');
@@ -888,7 +888,7 @@ export const apiClient = {
         }
         return pending;
     },
-    /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/update_contracts.py::UpdatePreflightResponse`. */
     updatePreflight: () => jsonPost('/api/update/preflight', {}),
     /**
      * The owner's Write/Rewrite: one ordinary Main task describes this exact range.
@@ -896,7 +896,7 @@ export const apiClient = {
      * already have admitted that writer, so the press says the outcome is unknown instead of returning in
      * silence.
      * @param {'write'|'rewrite'} mode
-     * @returns {Promise<import('./api_types.js').UpdateDescriptionResponse>}
+     * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/update_contracts.py::UpdateDescriptionResponse`.
      */
     updateDescription: (mode, key = {}) => jsonPost('/api/update/description', {
         mode, base_sha: String(key.base_sha || ''), target_sha: String(key.target_sha || ''),
@@ -905,11 +905,11 @@ export const apiClient = {
      * Check and describe: the server checks the channel, then asks for the range that check found at most once.
      * An answer that arrives unreadable is an unknown outcome (no HTTP status), never a reply.
      * A usable task receipt survives an unreadable update snapshot; only its update field becomes null.
-     * @returns {Promise<Omit<import('./api_types.js').UpdateDescriptionLatestResponse, 'update'> & {update: Object|null}>}
+     * @returns {Promise<Omit<Object, 'update'> & {update: Object|null}>} — Python contract: `ouroboros/gateway/update_contracts.py::UpdateDescriptionLatestResponse`.
      */
     updateDescribeLatest: () => jsonPost('/api/update/description', { mode: 'latest' }, { requireBody: true })
         .then(body => descriptionReply(body, true)),
-    /** @returns {Promise<import('./api_types.js').UpdateApplySuccessResponse>} */
+    /** @returns {Promise<Object>} — Python contract: `ouroboros/gateway/update_contracts.py::UpdateApplySuccessResponse`. */
     updateApply: (strategy, plan = {}, { confirmRecovery = false } = {}) => jsonPost('/api/update/apply', {
         strategy,
         expected_base_sha: String(plan.base_sha || ''),
@@ -919,9 +919,9 @@ export const apiClient = {
 };
 
 /** Read-only import preview. Values return only to this Settings draft; this never saves or connects.
- * @param {import('./mcp_import_types.js').MCPImportPreviewRequest} payload
+ * @param {Object} payload — Python contract: `ouroboros/gateway/mcp_import_contracts.py::MCPImportPreviewRequest`.
  * @param {AbortSignal=} signal
- * @returns {Promise<import('./mcp_import_types.js').MCPImportPreviewResponse>}
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/mcp_import_contracts.py::MCPImportPreviewResponse`.
  */
 export function previewMcpImport(payload, signal) {
     return fetchJson('/api/mcp/import/preview', {

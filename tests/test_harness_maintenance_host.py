@@ -71,6 +71,24 @@ def test_owner_aliases_are_exact_engine_envelopes_and_passive_reads_never_ensure
     assert owned.opened.count("ensure") == 1
 
 
+def test_the_published_selection_contract_matches_the_program_the_engine_answers(http, owned):
+    """The published ``ClaudexorSelectedProgram`` stays the selection the engine answers: the
+    owner API serves the engine's answer untouched, every published property is one the engine
+    returns and all stay required. ``realPath`` is load-bearing (the maintenance card shows the
+    resolved path when it differs); dropping it from the published form must fail here."""
+    from ouroboros.gateway.management_contracts import ClaudexorSelectedProgram
+    from ouroboros.gateway.schema import json_schema_for, validate_ingress
+
+    served = http.get("/api/claudexor/maintenance/harnesses").json()["harnesses"][0]["selection"]
+    published = json_schema_for(ClaudexorSelectedProgram)
+
+    assert served == PROGRAM, "the host must pass the engine's selection through unchanged"
+    assert set(served) == set(published["properties"]), "the published selection drifted from the engine's answer"
+    assert published["required"] == sorted(served), "every selection field stays required"
+    assert validate_ingress(served, ClaudexorSelectedProgram) == []
+    assert "realPath" in served and "realPath" in published["properties"]
+
+
 def test_owner_and_tool_reads_feed_the_same_local_fact_without_changing_the_reply(http, owned, tmp_path, monkeypatch):
     from ouroboros import config, harness_program_facts
 

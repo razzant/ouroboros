@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import re
 from types import SimpleNamespace
 
 import pytest
@@ -641,9 +640,7 @@ def test_a_scheduled_promote_publishes_the_facts_its_row_was_written_with(tmp_pa
 
 def test_every_receipt_field_is_one_store_bus_contract_and_replay_field():
     """The one list the readers keep is exactly what the store takes, the bus sends and the
-    frozen frame contract (and its JS twin) declares."""
-    from pathlib import Path
-
+    frozen frame contract declares."""
     from ouroboros.gateway.contracts import MessageAnnotationOutbound
     from ouroboros.gateway.history import _user_annotation
     from ouroboros.project_dialogue import ROUTING_RECEIPT_FIELDS, append_chat_annotation
@@ -653,9 +650,6 @@ def test_every_receipt_field_is_one_store_bus_contract_and_replay_field():
     for writer in (append_chat_annotation, LocalChatBridge.send_routing_ack):
         assert set(SHOWN) <= set(inspect.signature(writer).parameters), writer
     assert set(SHOWN) <= set(MessageAnnotationOutbound.__annotations__)
-    twin = (Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    block = twin.split("@typedef {Object} MessageAnnotationOutbound", 1)[1].split("*/", 1)[0]
-    assert [key for key in SHOWN if not re.search(rf"@property \{{[^}}]+\}} {key}\b", block)] == []
     row = {key: f"<{key}>" for key in (*SHOWN, "detail", "reason", "ts", "type", "client_message_id")}
     assert set(_user_annotation("user", "cm", {"cm": row})) == {*SHOWN, "detail"}
 

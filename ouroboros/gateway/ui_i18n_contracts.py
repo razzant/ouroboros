@@ -1,6 +1,6 @@
 """Interface-language gateway envelopes (``/api/ui/i18n*``): their own module beside ``contracts.py``.
 
-Descriptive TypedDicts, the twin of ``web/modules/ui_i18n_types.js``; the memory file they
+Descriptive TypedDicts; the memory file they
 describe is ``ouroboros/i18n_memory.py``'s schema 1."""
 
 from __future__ import annotations

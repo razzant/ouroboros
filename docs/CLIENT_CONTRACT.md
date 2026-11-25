@@ -361,8 +361,7 @@ Failure returns `{ok:false, code, error}` with its HTTP status.
 
 The separate `/ws/call/{call_id}` socket carries JSON controls and
 binary PCM16 media. `GET /api/contract` publishes its header, payload limits
-and control-schema names as `call_socket` (`gateway/call_contracts.py`; browser twin
-`web/modules/call_contract_types.js`);
+and control-schema names as `call_socket` (`gateway/call_contracts.py`);
 `call_protocol.py` owns the codec. A peer first sends
 `{type:"hello", protocol:1, role:"owner", mic, speaker, rate, video?}`.
 Directions may narrow its admitted rights. `mute`, `played`, `context`,
@@ -726,20 +725,19 @@ own-wake text read the first valid identity among the place's newest 50 captured
 call's account, when it names one). Brief views
 for status/launch remain unchanged.
 
-The browser's Place identity twins live in `web/modules/place_contract_types.js`, re-exported by
-`client_contract_types.js`: `PlaceIdentity` has optional `sends_as` and `reads_as` accounts (`id`, `label`, `kind`,
-with `owner` derived by the client only for confirmed user accounts). `PlaceSummary` keeps optional `safety_mode`
-and manifest `labels`, without `identity` or `can_confirm`. `PlaceStatusPayload` declares `text`, `tone`, optional
+Browser views of connector identity and status are described in `web/modules/place_contract_types.js`:
+`PlaceIdentity` has optional `sends_as` and `reads_as` accounts (`id`, `label`, `kind`,
+with `owner` derived by the client only for confirmed user accounts). Current `PlaceSummary` (`gateway/client_contracts.py`) requires `safety_mode`
+and manifest `labels`; older cores may omit them. The summary has no `identity` or `can_confirm`. `PlaceStatusPayload` declares `text`, `tone`, optional
 `identity` and `labels` from the existing status GET. The sheet validates identity, derives its confirm action,
 and overlays status labels on manifest labels; absent fields preserve older rendering. `RecentWake.as` declares
 the optional `{label, owner}` account stamp.
-`PlaceHistoryFacts`, alongside `PlaceHistoryAttention` in the Place twins, declares optional heard `facts`,
+`PlaceHistoryFacts`, alongside `PlaceHistoryAttention` in `gateway/history_contracts.py`, declares optional heard `facts`,
 captured `identity`, outgoing `sends_as` / `sends_as_owner`, held `held_text` / `held` / `checked`, and
 `reaction` (`{summary}`, host English for a row's typed reaction, never speech; words it sent stay `text`). An incoming
 `actor_origin: "machine"` is the connector's recorded program origin; show it beside the literal sender label, not as
 the owner or as Ouroboros. Presence replies' own authors are unchanged. These are
-retained room facts, not guesses from current settings. Every consumed wire key stays pinned by
-`tests/test_client_contract_bindings.py`.
+retained room facts, not guesses from current settings. `tests/test_client_contract_bindings.py` exercises these route bindings.
 
 `revision` belongs to the record and increases across disconnect/reconnect. `POST /api/places/{place_id}` (`PlaceUpdateRequest`) and `DELETE /api/places/{place_id}` (optional `PlaceDisconnectRequest` JSON body) accept `expected_revision`; clients send the revision each edit/disconnect was made on (a draft: its first key's). `circle_id` ("" none) and `description` ("" clears) move the place's revision. A stale write returns 409 `place_revision_conflict` with current `place: PlaceSummary | null` (null if disconnected). `POST /api/circles` takes `CircleCreateRequest: {name, text?, model?}`; `POST /api/circles/{circle_id}` takes `CircleUpdateRequest: {name?, text?, model?, expected_revision?}`. Both model fields are strings; blank inherits. Those writes and `DELETE /api/circles/{circle_id}` (`expected_revision`; 409 `circle_revision_conflict` with current `circle`) answer `{ok, circle}`; delete adds `detached: [{place_id, label}]`, its places keeping notes, descriptions and states. Repaint current facts, preserve drafts and require a deliberate next save; do not replay a stale draft automatically. A lost response leaves the outcome unknown: re-read before retrying. Disconnect retains room history. Display accounting failures keep spend unknown and do not turn a committed write into a refusal. `GET /api/places/{place_id}/rooms` (`PlaceRoomsResponse`) returns arrival-indexed rooms: safe integer `room_chat_id`, `address`, nullable `label` (latest arrival's title/name), `conversation_id`, `thread_id`, `last_at` (latest arrival by its time, imported history included) and nullable `unanswered_count` (open focus turns); `coverage` names `discovery: arrivals` and store-wide chat `importing`/`gaps`; legacy/outgoing-only rooms may be absent and no provider completeness is promised; unavailable reads answer 503, an unknown place 404; GET starts no focus. Existing `/api/chat/history?chat_id=...` cursors carry optional `place_history`: `kind` message/notice/delivery; recorded `delivery_state` authored/accepted/delivered/failed/uncertain; `attention` heard with its reason or an exact task-backed focus_started; current `owner_confirmed` only when the captured `transport.actor.authenticated` is not false (absent preserves legacy behavior); imported rows instead carry `historical_import` (`authorship`: `participant` or `platform_account`, `received_at`), without attention or owner confirmation; `sent_at` is the provider send time a row's arrival recorded (absent when none was); `non_text` lists an arrival's or receipt's own connector `{kind, description}` beside its words (`state_change`: a change, not new words), never speech. Missing facts stay unknown; no exact wake match is inferred. Records and authenticated ingress: CREATING_SKILLS, “Places and focus transport ingress”. Authorship follows role, including v0 sender metadata. Page truncation differs from importing/unavailable spans; partial ranges retry via `page_cursor`, failures retain the requested cursor.
 

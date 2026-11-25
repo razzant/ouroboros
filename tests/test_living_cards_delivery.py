@@ -25,7 +25,6 @@ from supervisor.card_delivery import INTERACTIVE_NOTE
 from supervisor.events_chat_delivery import _handle_send_card
 from tests._dialogue import chat_rows
 from tests.test_contracts import _assert_envelope_parity
-from tests.test_gateway_parity import _js_typedef_fields
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 ACTION = {"type": "action", "label": "Book it", "submit": {"id": "book"}}
@@ -155,15 +154,6 @@ def test_card_frames_match_their_published_envelopes():
         _assert_envelope_parity(REPO / "supervisor" / "card_delivery.py", discriminator=discriminator,
                                 declared_keys=set(typing.get_type_hints(cls)), required_keys=frozenset(required),
                                 envelope_name=cls.__name__)
-
-
-def test_every_card_envelope_has_a_field_identical_browser_twin():
-    text = (REPO / "web" / "modules" / "client_contract_types.js").read_text(encoding="utf-8")
-    assert {"CardOutbound", "CardStateOutbound", "CardResponse", "CardPinResponse"} <= set(card_contracts.__all__)
-    for name in card_contracts.__all__:
-        cls = getattr(card_contracts, name)
-        assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"client_contract_types.js lacks {name}"
-        assert _js_typedef_fields(text, name) == set(typing.get_type_hints(cls, include_extras=True)), name
 
 
 def test_the_card_frames_are_indexed_and_the_event_has_a_handler():
