@@ -1,0 +1,4 @@
+{
+  "candidate_sha": "026243662af9fc01ef7541a386216bb50d0f693c",
+  "note": "Set candidate_sha to the exact 40-character SHA of the packageable candidate A once it is assembled, commit this file with the QA files only on qualification/windows-update-bundled-git and push that branch. An empty SHA stops the run before any build. A must be fetchable by its SHA from this repository (a branch or pull-request ref of it holds it) and its VERSION must be a packageable release: a development-cycle VERSION is refused by name, never patched."
+}

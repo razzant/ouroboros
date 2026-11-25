@@ -1,0 +1,185 @@
+# QA only, never a merge or release gate, kept apart from ci.yml and the release chain:
+# exercises the packaged Windows desktop app (Ouroboros.exe) with no reachable system Git
+# from first-run Setup wizard -> first chat -> plain Check for updates -> Update now (A->B)
+# -> restart into B on the same profile/history -> second chat, on one disposable runner.
+name: Windows update without system Git (QA)
+
+on:
+  push:
+    branches: ['qualification/windows-update-bundled-git']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-update-qualification
+  cancel-in-progress: false
+
+env:
+  QA_DIR: devtools/qualification/windows_update
+  QA_MIRROR_URL: C:/ouroboros-qa/mirror.git
+
+jobs:
+  qualify:
+    name: Package A, remove Git, wizard, chat, Update now, chat (one runner)
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/qualification/windows-update-bundled-git' && !github.event.deleted }}
+    runs-on: windows-2025
+    timeout-minutes: 180
+    steps:
+      - name: Check out the QA harness only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: qa-src
+          persist-credentials: false
+          sparse-checkout: devtools/qualification/windows_update
+
+      - name: Base Python for pre-venv qualification gates and summary
+        id: py
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve candidate pointer, stage the harness and move its checkout out of the workspace
+        id: pointer
+        shell: pwsh
+        run: |
+          & "${{ steps.py.outputs.python-path }}" -I -B "qa-src/$env:QA_DIR/prepare_build.py" pointer `
+            --pointer-file "qa-src/$env:QA_DIR/candidate.json" `
+            --stage-from "qa-src/$env:QA_DIR" `
+            --stage-to "$env:RUNNER_TEMP/qa-harness" `
+            --park-checkout qa-src `
+            --park-to "$env:RUNNER_TEMP/qa-src" `
+            --evidence "$env:RUNNER_TEMP/qa-evidence"
+          exit $LASTEXITCODE
+
+      - name: Isolated build checkout of candidate A
+        shell: pwsh
+        run: |
+          & "${{ steps.py.outputs.python-path }}" -I -B "$env:RUNNER_TEMP/qa-harness/prepare_build.py" checkout `
+            --candidate "${{ steps.pointer.outputs.candidate_sha }}" `
+            --evidence "$env:RUNNER_TEMP/qa-evidence"
+          exit $LASTEXITCODE
+
+      - name: Set up locked PyInstaller build environment
+        id: build_env
+        uses: ./.github/actions/setup-python-env
+        with:
+          profile: build
+
+      - name: Bind the build to A (candidate version guard, local QA test tag, mirror remote)
+        id: binding
+        shell: pwsh
+        run: |
+          & "${{ steps.py.outputs.python-path }}" -I -B "$env:RUNNER_TEMP/qa-harness/prepare_build.py" bind `
+            --candidate "${{ steps.pointer.outputs.candidate_sha }}" `
+            --mirror-url "$env:QA_MIRROR_URL" `
+            --evidence "$env:RUNNER_TEMP/qa-evidence"
+          exit $LASTEXITCODE
+
+      - name: Download python-standalone
+        id: dl_py
+        shell: pwsh
+        run: .\scripts\download_python_standalone.ps1
+
+      - name: Build the ZIP with the candidate's build_windows.ps1
+        id: build_zip
+        shell: pwsh
+        env:
+          OUROBOROS_RELEASE_TAG: ${{ steps.binding.outputs.release_tag }}
+          OUROBOROS_MANAGED_SOURCE_BRANCH: ouroboros
+        run: .\build_windows.ps1
+
+      - name: Check that the package names A, the mirror, and carries bundled Git
+        id: package
+        shell: pwsh
+        run: |
+          & "${{ steps.py.outputs.python-path }}" -I -B "$env:RUNNER_TEMP/qa-harness/prepare_build.py" verify-package `
+            --candidate "${{ steps.pointer.outputs.candidate_sha }}" `
+            --mirror-url "$env:QA_MIRROR_URL" `
+            --evidence "$env:RUNNER_TEMP/qa-evidence"
+          exit $LASTEXITCODE
+
+      - name: Create isolated QA UIA venv (comtypes==1.4.17 only)
+        id: qa_venv
+        shell: pwsh
+        run: |
+          & "${{ steps.py.outputs.python-path }}" -m venv "$env:RUNNER_TEMP\qa-venv"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP\qa-venv\Scripts\python.exe" -m pip install --disable-pip-version-check --no-cache-dir comtypes==1.4.17
+          exit $LASTEXITCODE
+
+      # A stopped environment or build (downloads, network, packages) is not a product verdict: unconfirmed.
+      - name: Record structured pre-scenario failure if environment or build stopped
+        if: ${{ failure() && (steps.build_env.outcome == 'failure' || steps.dl_py.outcome == 'failure' || steps.build_zip.outcome == 'failure' || steps.qa_venv.outcome == 'failure') }}
+        shell: pwsh
+        run: |
+          $phase = if ("${{ steps.build_env.outcome }}" -eq "failure") { "setup_python_env" }
+                   elseif ("${{ steps.dl_py.outcome }}" -eq "failure") { "download_python_standalone" }
+                   elseif ("${{ steps.build_zip.outcome }}" -eq "failure") { "build_windows_zip" }
+                   else { "setup_qa_venv" }
+          & "${{ steps.py.outputs.python-path }}" -I -B "$env:RUNNER_TEMP/qa-harness/prepare_build.py" record-failure `
+            --verdict unconfirmed `
+            --phase $phase `
+            --code "${phase}_failed" `
+            --candidate "${{ steps.pointer.outputs.candidate_sha }}" `
+            --if-missing `
+            --evidence "$env:RUNNER_TEMP/qa-evidence"
+
+      - name: Set the display to 1366x768 (kept if refused)
+        shell: pwsh
+        run: |
+          try { Set-DisplayResolution -Width 1366 -Height 768 -Force } catch { Write-Host "display size kept: $($_.Exception.GetType().Name)" }
+
+      - name: Run the packaged desktop scenario (UIA + native input + Git traces)
+        shell: pwsh
+        env:
+          PYTHONUTF8: '1'
+        run: |
+          & "$env:RUNNER_TEMP\qa-venv\Scripts\python.exe" -I -B -X utf8 "$env:RUNNER_TEMP\qa-harness\scenario.py" run `
+            --candidate "${{ steps.pointer.outputs.candidate_sha }}" `
+            --archive "${{ steps.package.outputs.archive_path }}" `
+            --archive-sha256 "${{ steps.package.outputs.archive_sha256 }}" `
+            --candidate-src "$env:GITHUB_WORKSPACE" `
+            --evidence "$env:RUNNER_TEMP\qa-evidence" `
+            --mirror-url "$env:QA_MIRROR_URL" `
+            --tag "${{ github.run_id }}-${{ github.run_attempt }}"
+          exit $LASTEXITCODE
+
+      - name: Summary
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $helper = if (Test-Path "$env:RUNNER_TEMP\qa-harness\prepare_build.py") { "$env:RUNNER_TEMP\qa-harness\prepare_build.py" }
+                    elseif (Test-Path "qa-src\$env:QA_DIR\prepare_build.py") { "qa-src\$env:QA_DIR\prepare_build.py" }
+                    else { "" }
+          $pyExe = "${{ steps.py.outputs.python-path }}"
+          if ($helper -and $pyExe -and (Test-Path $pyExe)) {
+            & $pyExe -I -B $helper summary --evidence "$env:RUNNER_TEMP\qa-evidence" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            @(
+              "### Windows update qualification: **unconfirmed**",
+              "",
+              "- **Phase**: ``setup_python``",
+              "- **Code**: ``base_python_unavailable_for_summary``"
+            ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+      - name: Select allowlisted synthetic evidence (zero screenshots, zero UI dumps, zero host paths)
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $from = "$env:RUNNER_TEMP\qa-evidence"
+          $to = "$env:RUNNER_TEMP\qa-publish"
+          New-Item -ItemType Directory -Force -Path $to | Out-Null
+          foreach ($name in 'result.json', 'build-binding.json', 'package.json', 'host-git.json', 'git-traces.json', 'fixture-model.json') {
+            if (Test-Path "$from\$name") { Copy-Item "$from\$name" "$to\$name" }
+          }
+
+      - name: Upload allowlisted synthetic evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-update-qa-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qa-publish
+          if-no-files-found: warn
+          retention-days: 14
