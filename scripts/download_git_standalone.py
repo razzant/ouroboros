@@ -225,11 +225,14 @@ def prove(root: Path, expected_version: str) -> str:
         run("-C", "copy", "commit", "-q", "--allow-empty", "-m", "back")
         run("-C", "copy", "push", "-q", "origin", "HEAD:refs/heads/back")  # and git-receive-pack
         run("-C", "origin", "rev-parse", "--verify", "back")
-        # The HTTPS helper starts with its libcurl and answers the remote-helper handshake: no network, no proxy.
-        https = subprocess.run([git, "remote-https", "proof", "https://127.0.0.1:1/proof"], input="capabilities\n",
-                               cwd=scratch, env=env, capture_output=True, text=True, errors="replace", timeout=120)
-        if not {"fetch", "push"} <= set(https.stdout.split()):
-            raise SystemExit(f"The staged Git's HTTPS helper does not answer: {https.stderr.strip()}")
+        # The HTTPS helper starts with its libcurl and answers the handshake without network or proxy.
+        # Git's remote-helper protocol uses LF; a final blank line disconnects the helper cleanly.
+        https = subprocess.run([git, "remote-https", "proof", "https://127.0.0.1:1/proof"], input=b"capabilities\n\n",
+                               cwd=scratch, env=env, capture_output=True, timeout=120)
+        advertised, terminator, trailing = https.stdout.replace(b"\r\n", b"\n").partition(b"\n\n")
+        if https.returncode or not terminator or trailing or not {b"fetch", b"push"} <= set(advertised.split(b"\n")):
+            stderr = https.stderr.decode("utf-8", errors="replace").strip()
+            raise SystemExit(f"The staged Git's HTTPS helper does not answer ({https.returncode}): {stderr}")
     return version
 
 

@@ -268,7 +268,8 @@ def test_the_collected_proof_takes_the_build_scripts_relative_paths_and_needs_li
 
     expected_git = absolute / git_rel
     seen: list[tuple[list[str], dict]] = []
-    state = {"version": "git version 2.56.1\n", "write_template": True, "https_stdout": "fetch\npush\n"}
+    state = {"version": "git version 2.56.1\n", "write_template": True,
+             "https_stdout": b"fetch\noption\npush\n\n", "https_returncode": 0}
 
     def fake_which(cmd, path=None):
         assert cmd == "git"
@@ -296,8 +297,11 @@ def test_the_collected_proof_takes_the_build_scripts_relative_paths_and_needs_li
                 exclude.write_text("# template\n", encoding="utf-8")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:1] == ["remote-https"]:
-            assert args[2] == "https://127.0.0.1:1/proof" and kwargs.get("input") == "capabilities\n"
-            return SimpleNamespace(returncode=0, stdout=state["https_stdout"], stderr="helper error")
+            assert args == ["remote-https", "proof", "https://127.0.0.1:1/proof"]
+            assert kwargs["input"] == b"capabilities\n\n" and kwargs["capture_output"] is True
+            assert not any(kwargs.get(key) for key in ("text", "encoding", "errors", "universal_newlines"))
+            return SimpleNamespace(returncode=state["https_returncode"], stdout=state["https_stdout"],
+                                   stderr=b"helper error")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("GIT_DIR", "/inherited/must-be-scrubbed")
@@ -353,9 +357,19 @@ def test_the_collected_proof_takes_the_build_scripts_relative_paths_and_needs_li
         module.prove(relative, "git version 2.56.1")
     state["write_template"] = True
 
-    state["https_stdout"] = "connect\n"
-    with pytest.raises(SystemExit, match="HTTPS helper does not answer"):
-        module.prove(relative, "git version 2.56.1")
+    state["https_stdout"] = b"fetch\r\noption\r\npush\r\n\r\n"
+    assert module.prove(relative, "git version 2.56.1") == "git version 2.56.1"
+
+    for stdout, returncode in (
+        (b"connect\n\n", 0),
+        (b"fetch push\n\n", 0),
+        (b"fetch\npush\n", 0),
+        (b"fetch\npush\n\nunexpected output\n", 0),
+        (b"fetch\npush\n\n", 1),
+    ):
+        state.update(https_stdout=stdout, https_returncode=returncode)
+        with pytest.raises(SystemExit, match=rf"HTTPS helper does not answer \({returncode}\): helper error"):
+            module.prove(relative, "git version 2.56.1")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="a POSIX link stands in for the collected tree's links")
