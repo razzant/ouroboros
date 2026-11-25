@@ -311,6 +311,7 @@ answer through §7.
 - **Core to client, stored as history rows:** `chat` (a message or a progress line), `photo`, `video`, `document`, `links`, `quiz` and `card` (a living card, §5 "Living cards").
 - **Core to client, signals only:**
   - `panic_accepted` confirms the emergency latch, not process exit (§15).
+  - `connection_profile` is sent once directly on accept, before broadcasts, only when the serving generation proves a data-profile scope (omitted otherwise); it identifies only this connection's data profile for comparison with the page, and neither confirms a room nor grants send or routing authority.
   - `conversation_finished` says the room's live call ended; it carries the chat, call and task ids
     and the reason (§5, the call socket).
   - `quiz_state` updates a question card; history shows the merged state.
