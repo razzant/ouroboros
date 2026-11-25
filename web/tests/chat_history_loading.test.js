@@ -73,9 +73,17 @@ const assertLoading = (f, why) => {
 };
 
 for (const room of ['Main', 'Project']) test(`${room} migration retries until history publishes without a click`, async t => {
+    const priorError = console.error;
     const f = fixture(t, room === 'Main' ? { chatId: 1, asPanel: false } : {});
-    await t.waitFor(() => assert.equal(f.reads.length, 1, 'opening the room starts its first read'));
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const captureError = console.error;
+    console.error = priorError;
+    try {
+        await t.waitFor(() => assert.equal(f.reads.length, 1, 'opening the room starts its first read'));
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        await new Promise(setImmediate); // Let Node report its timer warning before observing the first response.
+    } finally {
+        console.error = captureError;
+    }
     const advance = async ms => {
         t.mock.timers.tick(ms);
         await new Promise(setImmediate);
