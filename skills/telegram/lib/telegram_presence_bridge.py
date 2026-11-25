@@ -181,6 +181,10 @@ async def handle_non_owner_update(
     """Route groups, channels, other private chats, membership changes and owner edits/reactions into Presence."""
     if update.get("callback_query"):
         return
+    for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+        payload = update.get(key)
+        if isinstance(payload, dict) and is_pairing_command(api, payload):
+            return  # Credential-bearing pairing commands never enter Presence custody or turns.
     runtime = runtime_getter(api)
     if runtime is None:
         raise InjectNotAccepted("Presence runtime unavailable")
@@ -189,8 +193,6 @@ async def handle_non_owner_update(
     for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
         payload = update.get(key)
         if isinstance(payload, dict):
-            if is_pairing_command(api, payload):
-                return  # Credential-bearing pairing commands never enter Presence custody or turns.
             chat = payload.get("chat") or {}
             chat_id = int(chat.get("id") or 0)
             secret_ref = classify_secret_exposure(

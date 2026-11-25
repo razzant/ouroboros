@@ -234,7 +234,7 @@ def telegram_wake_facts(message: Dict[str, Any], bot_id: str, username: str, wor
     if str((reply.get("from") or {}).get("id") or "") == bot_id:
         facts.append("reply_to_me")
     for text_key, entities_key in (("text", "entities"), ("caption", "caption_entities")):
-        wire = str(message.get(text_key) or "").encode("utf-16-le")
+        wire = str(message.get(text_key) or "").encode("utf-16-le", "surrogatepass")
         for entity in message.get(entities_key) or []:
             if entity.get("type") == "text_mention" and str((entity.get("user") or {}).get("id") or "") == bot_id:
                 if "mention" not in facts:

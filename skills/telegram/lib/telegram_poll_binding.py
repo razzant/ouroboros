@@ -118,7 +118,7 @@ def update_key(update: dict) -> str:
         if cid and mid:
             if field.startswith("edited_"):
                 digest = hashlib.sha256(
-                    json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                    json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
                 ).hexdigest()[:16]
                 return f"{prefix}:{cid}:{mid}:{digest}"
             return f"{prefix}:{cid}:{mid}"
@@ -126,20 +126,20 @@ def update_key(update: dict) -> str:
     if (reaction.get("chat") or {}).get("id") and reaction.get("message_id"):
         actor = (reaction.get("user") or reaction.get("actor_chat") or {}).get("id") or ""
         digest = hashlib.sha256(
-            json.dumps(reaction, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            json.dumps(reaction, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
         ).hexdigest()[:16]
         return f"mr:{reaction['chat']['id']}:{reaction['message_id']}:{reaction.get('date') or 0}:{actor}:{digest}"
     rcount = update.get("message_reaction_count") or {}
     if (rcount.get("chat") or {}).get("id") and rcount.get("message_id"):
         digest = hashlib.sha256(
-            json.dumps(rcount, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            json.dumps(rcount, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
         ).hexdigest()[:16]
         return f"mrc:{rcount['chat']['id']}:{rcount['message_id']}:{rcount.get('date') or 0}:{digest}"
     member = update.get("my_chat_member") or {}
     if (member.get("chat") or {}).get("id"):
         status = (member.get("new_chat_member") or {}).get("status") or ""
         digest = hashlib.sha256(
-            json.dumps(member, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            json.dumps(member, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
         ).hexdigest()[:16]
         return f"mcm:{member['chat']['id']}:{member.get('date') or 0}:{status}:{digest}"
     return ""
@@ -264,8 +264,8 @@ async def handle_poll_batch(api, client, updates, cursor, binding, generation, p
             early = deferred or index >= max_updates
             replay = cursor.is_replay(update)
             key = update_key(update)
-            presence_only_defer = deferred and not owner_deferred
-            if early and not is_panic(update) and not (presence_only_defer and owner_handled < max_updates):
+            presence_only_defer = bool(pinned_chat) and deferred and not owner_deferred
+            if early and not (bool(pinned_chat) and (is_panic(update) or (presence_only_defer and owner_handled < max_updates))):
                 if replay:
                     handled.append(key)
                 continue

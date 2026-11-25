@@ -12,6 +12,7 @@ import re
 import secrets
 import threading
 import time
+import urllib.parse
 from collections import deque
 from typing import Any, Dict, Optional
 
@@ -97,11 +98,15 @@ def _write_private_json(path: pathlib.Path, payload: Dict[str, Any]) -> None:
 
 
 def _read_pairing_record(path: pathlib.Path) -> Optional[Dict[str, Any]]:
-    if not path.is_file():
-        return None
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise TelegramSettingsError("Could not read owner pairing challenge.") from exc
+    try:
+        record = json.loads(raw)
+    except ValueError:
         return None
     return record if isinstance(record, dict) else None
 
@@ -243,24 +248,39 @@ def is_pairing_command(state_dir: Any, message: Any) -> bool:
         return False
     raw, _entities = _message_text_and_entities(message)
     cleaned = raw.strip()
-    if not cleaned:
+    entity_urls = []
+    for ent in list(message.get("entities") or []) + list(message.get("caption_entities") or []):
+        if isinstance(ent, dict):
+            raw_url = str(ent.get("url") or "").strip()
+            if raw_url:
+                entity_urls.append(raw_url)
+                unquoted = urllib.parse.unquote(raw_url)
+                if unquoted != raw_url:
+                    entity_urls.append(unquoted)
+    haystacks = ([cleaned] if cleaned else []) + entity_urls
+    if not haystacks:
         return False
     root = _resolve_state_dir(state_dir)
     chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
     is_private = str(chat.get("type") or "") == "private"
-    pair_any = _PAIR_ANY_RE.match(cleaned)
-    start_match = _START_ARG_RE.match(cleaned)
+    pair_any = _PAIR_ANY_RE.match(cleaned) if cleaned else None
+    start_match = _START_ARG_RE.match(cleaned) if cleaned else None
     pairing_file = _pairing_path(root)
-    record = _read_pairing_record(pairing_file) if pairing_file.is_file() else None
+    record = _read_pairing_record(pairing_file)
     active_code = str((record or {}).get("code") or "")
-    if active_code and (not is_private or pair_any or start_match):
-        matched = any(_const_eq(active_code, tok) for tok in _CODE_TOKEN_RE.findall(cleaned)) or (
-            not is_private and active_code in cleaned
+    if active_code:
+        matched = any(
+            any(_const_eq(active_code, tok) for tok in _CODE_TOKEN_RE.findall(h))
+            or (not is_private and active_code in h)
+            for h in haystacks
         )
         if matched:
             # Burn exposed active code atomically under settings_lock (propagates TelegramSettingsError
-            # on lock/unlink failure so the poller rewinds offset and halts the batch before redemption).
-            _burn_active_code_if_matches(root, active_code)
+            # on lock/read/unlink failure so the poller rewinds offset and halts the batch before redemption).
+            # In an unbound private DM with a bare paste (no /pair or /start), suppress without burning
+            # so the code never enters Presence custody while the user can still send `/pair <code>`.
+            if not is_private or pair_any or start_match or live_owner_chat_id(root) > 0:
+                _burn_active_code_if_matches(root, active_code)
             return True
     if not pair_any and not start_match:
         return False
@@ -313,7 +333,7 @@ def api_base_matches_live(state_dir: Any, expected_origin: str) -> bool:
 
 
 def _utf16_offset_for_pos(raw: str, pos: int) -> int:
-    return len(raw[:pos].encode("utf-16-le")) // 2
+    return len(raw[:pos].encode("utf-16-le", "surrogatepass")) // 2
 
 
 def _entity_marks_literal_at(raw: str, entities: Any, char_pos: int) -> bool:

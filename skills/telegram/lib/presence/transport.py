@@ -483,6 +483,9 @@ class PresenceBotClient:
             try:
                 for key, (raw_fd, raw_size) in verified_fds.items():
                     owned_vfds[key] = (os.dup(int(raw_fd)), int(raw_size))
+            except OSError as exc:
+                close_verified(owned_vfds)
+                raise TelegramRequestNotSent("upload", type(exc).__name__) from None
             except BaseException:
                 close_verified(owned_vfds)
                 raise
@@ -553,7 +556,6 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
             + sum(len(h) + sz + 2 for h, _fd, sz in file_parts)
             + len(tail)
         )
-        self._closed = False
         self._io_lock = threading.Lock()
         self._in_flight = 0
         self._close_requested = False
@@ -669,7 +671,6 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
 
     def close_sync(self) -> None:
         with self._io_lock:
-            self._closed = True
             self._close_requested = True
             if self._in_flight > 0 or self._fds_closed:
                 return
