@@ -13,6 +13,7 @@ import pytest
 
 from ouroboros.marketplace.provenance import read_publication_record, write_publication_record, merge_state_record
 from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_review_state, save_enabled
+from tests.settings_section_helpers import open_extensions
 from tests.test_ui_smoke_playwright import direct_server_with_data as _direct_server_with_data
 
 pytestmark = pytest.mark.ui_browser
@@ -61,7 +62,7 @@ def test_skills_card_geometry_tracks_card_width_and_keeps_grant_on_card(direct_s
             # Docked, like the first measured width: below 720 the sidebar is an off-screen drawer.
             page = browser.new_page(viewport={'width': 720, 'height': 900})
             page.goto(url, wait_until='domcontentloaded')
-            page.click('[data-nav-page="skills"]')
+            open_extensions(page)
             # At 720 Extensions' box holds one column: its list first; the Skills row opens the installed skills.
             page.locator('#page-skills [data-extensions-open="installed"]').click()
             page.wait_for_selector(f'.skills-card[data-skill="{names[1]}"]')
@@ -78,9 +79,18 @@ def test_skills_card_geometry_tracks_card_width_and_keeps_grant_on_card(direct_s
                         const actions = [...card.querySelectorAll('.ui-switch, .skills-card-menu-trigger, .skills-tray-actions button')]
                             .map(control => ({text:control.textContent.trim(), x:control.getBoundingClientRect().x,
                                 right:control.getBoundingClientRect().right}));
+                        const side = document.getElementById('primary-sidebar');
+                        const sideStyle = getComputedStyle(side);
+                        const rail = side.querySelector('.nav-rail');
+                        const padStart = parseFloat(sideStyle.paddingInlineStart);
+                        const padEnd = parseFloat(sideStyle.paddingInlineEnd);
+                        const start = Number.isFinite(padStart) ? padStart : (parseFloat(sideStyle.paddingLeft) || 0);
+                        const end = Number.isFinite(padEnd) ? padEnd : (parseFloat(sideStyle.paddingRight) || 0);
+                        const railExtra = rail ? Math.max(0, rail.getBoundingClientRect().width + start - end) : 0;
+                        const sidebarBox = side.getBoundingClientRect().width;
                         return {card:rect.width, title:title.width, x:rect.x, right:rect.right, actions,
                             direction:getComputedStyle(card.querySelector('.skills-card-head')).flexDirection,
-                            sidebar:document.getElementById('primary-sidebar').getBoundingClientRect().width};
+                            sidebar:sidebarBox - railExtra, sidebarBox, railExtra};
                     }''')
                     assert abs(facts['sidebar'] - sidebar) <= 2, facts
                     assert facts['title'] >= 180, facts
@@ -128,7 +138,7 @@ def test_forget_publication_record_clears_only_the_record_shown(direct_server_wi
             external = []
             page.route('https://github.com/**', lambda route: (external.append(route.request.url), route.abort()))
             page.goto(url, wait_until='domcontentloaded')
-            page.click('[data-nav-page="skills"]')
+            open_extensions(page)
             own = page.locator(f'.skills-card[data-skill="{name}"]')
             own.locator('.skills-details > summary').click()
             # The row labelled exactly «Publication» (a folder path may contain the word).

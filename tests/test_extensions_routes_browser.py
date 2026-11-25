@@ -129,6 +129,7 @@ def test_settings_and_extensions_lead_to_each_other_and_back(subscription_ui, wi
         header_back(page).click()
 
     # Inside Extensions: a server's head opens its page over MCP servers, and Back returns to that head.
+    search_settings(page, "")
     _nav(page, "skills")
     row = page.locator(f'{EXTENSIONS} [data-extensions-open="tools"]')
     if not row.is_visible():  # one column: a page is open over the list
@@ -837,4 +838,237 @@ def test_map_choice_releases_clean_mcp_origin_and_keeps_existing_unsaved_draft(s
     same = page.evaluate("""() => document.querySelector('[data-settings-page="tools/docs"]') === window.__retainedS""")
     assert same is draft, "the map releases a clean held origin, while the editor's unsaved policy retains a draft"
     assert reopened.locator('[data-mcp-field="url"]').input_value() == ("https://draft.example.test/mcp" if draft else SERVER["url"])
+    page.close()
+
+
+@pytest.mark.parametrize("width,height", SIZES, ids=["desk", "phone"])
+def test_settings_door_revisit_resumes_retained_editor_and_returns_to_calling_row(subscription_ui, width, height):
+    ui = subscription_ui
+    page, _reveals = _page(ui, width, height)
+    page.route("**/api/skill-sources", lambda route: route.fulfill(json={"sources": []}))
+    page.route("**/api/skill-catalog**", lambda route: route.fulfill(json={"items": [], "sources": []}))
+    page.goto(ui["url"] + "/#settings")
+    page.locator(HOME).wait_for(state="visible")
+
+    server = open_settings(page, "tools/docs")
+    name = server.locator('[data-mcp-field="name"]')
+    name.fill("Kept across door revisit")
+    card = server.locator("[data-mcp-card]")
+    card.locator("[data-mcp-more] > summary").click()
+    card.locator("[data-mcp-header-toggle]").first.click()
+    revealed = card.locator(".settings-secret-value").first
+    revealed.wait_for(state="visible")
+    server.evaluate(
+        """el => {
+            const spacer = document.createElement('div');
+            spacer.style.height = '1200px';
+            el.appendChild(spacer);
+            el.scrollTop = 420;
+            el.dispatchEvent(new Event('scroll'));
+        }"""
+    )
+    assert server.evaluate("el => el.scrollTop") == 420
+
+    _nav(page, "settings")
+    door = page.locator(f'{HOME} [data-settings-open="page:skills"]')
+    door.wait_for(state="visible")
+    door.focus()
+    door.click()
+
+    server.wait_for(state="visible")
+    assert name.input_value() == "Kept across door revisit"
+    assert server.evaluate("el => el.scrollTop") == 420
+    assert revealed.is_hidden()
+    assert SECRET not in page.locator(EXTENSIONS).evaluate("el => el.textContent")
+    setup_browser.capture(page, f"extensions-door-revisit-{width}x{height}")
+    assert header_back(page).get_attribute("aria-label") == "Back to MCP servers"
+
+    header_back(page).click()
+    settings_page(page, "tools").wait_for(state="visible")
+    rail = page.locator(f"{EXTENSIONS} [data-extensions-rail]")
+    if width < 720:
+        assert header_back(page).get_attribute("aria-label") == "Back to Extensions"
+        header_back(page).click()
+        rail.wait_for(state="visible")
+        assert rail.locator('[data-extensions-open="browse"]').is_visible()
+        assert rail.locator('[data-extensions-open="sources"]').is_visible()
+        rail.locator('[data-extensions-open="browse"]').click()
+        page.locator("#skills-pane-browse").wait_for(state="visible")
+        assert header_back(page).get_attribute("aria-label") == "Back to Extensions"
+        header_back(page).click()
+        rail.wait_for(state="visible")
+    else:
+        assert rail.is_visible()
+        assert rail.locator('[data-extensions-open="browse"]').is_visible()
+        assert rail.locator('[data-extensions-open="sources"]').is_visible()
+    assert header_back(page).get_attribute("aria-label") == "Back to Settings"
+
+    header_back(page).click()
+    door.wait_for(state="visible")
+    assert page.locator("#page-settings.active").count() == 1
+    page.wait_for_function("() => document.activeElement?.matches?.('#page-settings [data-settings-open=\"page:skills\"]')")
+    assert page.evaluate("() => window.__ouroLayers.returnPage() === null")
+    page.close()
+
+
+@pytest.mark.parametrize("width,height", SIZES, ids=["desk", "phone"])
+def test_settings_door_revisit_via_enter_focuses_active_back_and_targeted_routes_reset_scroll(subscription_ui, width, height):
+    ui = subscription_ui
+    page, _reveals = _page(ui, width, height)
+    page.route("**/api/skill-sources", lambda route: route.fulfill(json={"sources": []}))
+    page.route("**/api/skill-catalog**", lambda route: route.fulfill(json={"items": [], "sources": []}))
+    page.goto(ui["url"] + "/#settings")
+    page.locator(HOME).wait_for(state="visible")
+
+    server = open_settings(page, "tools/docs")
+    name = server.locator('[data-mcp-field="name"]')
+    name.fill("Keyboard revisit draft")
+    card = server.locator("[data-mcp-card]")
+    card.locator("[data-mcp-more] > summary").click()
+    card.locator("[data-mcp-header-toggle]").first.click()
+    revealed = card.locator(".settings-secret-value").first
+    revealed.wait_for(state="visible")
+    server.evaluate(
+        """el => {
+            const spacer = document.createElement('div');
+            spacer.style.height = '1200px';
+            el.appendChild(spacer);
+            el.scrollTop = 420;
+            el.dispatchEvent(new Event('scroll'));
+        }"""
+    )
+    assert server.evaluate("el => el.scrollTop") == 420
+
+    _nav(page, "settings")
+    door = page.locator(f'{HOME} [data-settings-open="page:skills"]')
+    door.wait_for(state="visible")
+    door.focus()
+    page.keyboard.press("Enter")
+
+    server.wait_for(state="visible")
+    assert name.input_value() == "Keyboard revisit draft"
+    assert server.evaluate("el => el.scrollTop") == 420
+    assert revealed.is_hidden()
+    assert SECRET not in page.locator(EXTENSIONS).evaluate("el => el.textContent")
+    assert header_back(page).get_attribute("aria-label") == "Back to MCP servers"
+    page.wait_for_function("() => document.activeElement === document.querySelector('#page-skills > .app-page-header [data-shell-back]')")
+
+    page.keyboard.press("Enter")
+    settings_page(page, "tools").wait_for(state="visible")
+    rail = page.locator(f"{EXTENSIONS} [data-extensions-rail]")
+    if width < 720:
+        _nav(page, "settings")
+        door.wait_for(state="visible")
+        door.focus()
+        page.keyboard.press("Enter")
+        settings_page(page, "tools").wait_for(state="visible")
+        assert header_back(page).get_attribute("aria-label") == "Back to Extensions"
+        page.wait_for_function("() => document.activeElement === document.querySelector('#page-skills > .app-page-header [data-shell-back]')")
+        page.keyboard.press("Enter")
+        rail.wait_for(state="visible")
+    else:
+        assert rail.is_visible()
+    assert header_back(page).get_attribute("aria-label") == "Back to Settings"
+    header_back(page).click()
+    door.wait_for(state="visible")
+    page.wait_for_function("() => document.activeElement?.matches?.('#page-settings [data-settings-open=\"page:skills\"]')")
+
+    # Targeted deep link and Settings search home:skills keep explicit non-resume landing/scroll reset.
+    server = open_settings(page, "tools/docs")
+    server.evaluate(
+        """el => {
+            if (!el.querySelector('[data-test-spacer]')) {
+                const spacer = document.createElement('div');
+                spacer.dataset.testSpacer = '1';
+                spacer.style.height = '1200px';
+                el.appendChild(spacer);
+            }
+            el.scrollTop = 420;
+            el.dispatchEvent(new Event('scroll'));
+        }"""
+    )
+    assert server.evaluate("el => el.scrollTop") == 420
+    _nav(page, "settings")
+    assert page.evaluate("() => window.__ouroSettings.open('tools/docs')") is not False
+    settings_page(page, "tools/docs").wait_for(state="visible")
+    assert settings_page(page, "tools/docs").evaluate("el => el.scrollTop") == 0
+    assert header_back(page).get_attribute("aria-label") == ("Back to Settings › Models" if width >= 720 else "Back to Settings")
+
+    _nav(page, "settings")
+    search_settings(page, "Extensions")
+    page.locator(f'{HOME} [data-settings-result="home:skills"]').click()
+    if width < 720:
+        rail.wait_for(state="visible")
+    else:
+        settings_page(page, "tools").wait_for(state="visible")
+        page.locator(f'{EXTENSIONS} [data-extensions-open="tools"][aria-current="page"]').wait_for()
+    settings_page(page, "tools/docs").wait_for(state="detached")
+    assert header_back(page).get_attribute("aria-label") == "Back to Settings"
+    page.close()
+
+
+@pytest.mark.parametrize("method", ["button", "escape", "browser-back"])
+def test_resumed_editor_back_order_survives_desktop_narrowing(subscription_ui, method):
+    ui = subscription_ui
+    page, _ = _page(ui, 1360, 900)
+    page.goto(ui["url"] + "/#settings")
+    page.locator(HOME).wait_for(state="visible")
+    settings_page(page, "models").wait_for(state="visible")
+
+    door = page.locator(f'{HOME} [data-settings-open="page:skills"]')
+    door.click()
+    page.locator(EXTENSIONS).wait_for(state="visible")
+    page.locator(f'{EXTENSIONS} [data-extensions-open="tools"]').click()
+    settings_page(page, "tools").locator('[data-entry-id="docs"] [data-entry-open]').click()
+    server = settings_page(page, "tools/docs")
+    server.locator("[data-mcp-card]").wait_for(state="visible")
+
+    _nav(page, "settings")
+    door.wait_for(state="visible")
+    door.click()
+    server.wait_for(state="visible")
+    before_width = page.locator(EXTENSIONS).evaluate("el => el.getBoundingClientRect().width")
+    assert before_width >= 640
+    outer_return = page.evaluate("() => window.__ouroLayers.returnPage()?.id")
+    editor_layer = page.evaluate("() => window.__ouroLayers.top()")
+    assert outer_return and editor_layer and editor_layer != outer_return
+    assert header_back(page).get_attribute("aria-label") == "Back to MCP servers"
+
+    # Narrow the section below 40rem while staying in the docked desktop shell.
+    page.set_viewport_size({"width": round(1360 - before_width + 590), "height": 900})
+    page.locator(f"{EXTENSIONS} [data-extensions-rail]").wait_for(state="hidden")
+    page.wait_for_function(
+        "() => window.__ouroLayers.ids().filter(id => id.startsWith('skills-level-')).length === 2"
+    )
+    assert page.locator("html").get_attribute("data-layout") == "docked"
+    narrowed_width = page.locator(EXTENSIONS).evaluate("el => el.getBoundingClientRect().width")
+    assert 585 <= narrowed_width <= 595
+    assert page.evaluate("() => window.__ouroLayers.top()") == editor_layer
+    assert header_back(page).get_attribute("aria-label") == "Back to MCP servers"
+
+    # First Back closes the editor to MCP servers without consuming the Settings return.
+    _return(page, method)
+    server.wait_for(state="detached")
+    settings_page(page, "tools").wait_for(state="visible")
+    assert page.evaluate("() => window.__ouroLayers.returnPage()?.id") == outer_return
+    assert header_back(page).get_attribute("aria-label") == "Back to Extensions"
+
+    # Second Back returns to the Extensions list; Settings return still waits underneath.
+    if method == "browser-back":
+        page.wait_for_function("() => window.__ouroLayers.historyArmed()")
+    _return(page, method)
+    settings_page(page, "tools").wait_for(state="detached")
+    page.locator(f"{EXTENSIONS} [data-extensions-rail]").wait_for(state="visible")
+    assert page.evaluate("() => window.__ouroLayers.returnPage()?.id") == outer_return
+    assert header_back(page).get_attribute("aria-label") == "Back to Settings"
+
+    # Third Back consumes the outer return back to Settings.
+    if method == "browser-back":
+        page.wait_for_function("() => window.__ouroLayers.historyArmed()")
+    _return(page, method)
+    page.locator("#page-settings.active").wait_for(state="visible")
+    settings_page(page, "models").wait_for(state="visible")
+    assert top_path(page) == "models"
+    assert page.evaluate("() => window.__ouroLayers.returnPage()") is None
+    assert page.url.startswith(ui["url"])
     page.close()

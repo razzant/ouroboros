@@ -720,7 +720,7 @@ door): one `supervisor_failure` Main row, then the startup notice. `Online` mean
 ready and idle; known queued, active or finalizing work keeps its label.
 Acceptance proves neither task start nor model receipt.
 
-The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. Above the description, in the panel for the update on offer and at the top of that confirmation, one host line counts what the range brings over a review FAIL or no verdict (`Went in over a review FAIL or no verdict: 2 merges, 3 commits Ouroboros made on this computer.`): merges whose receipt observed one and this install's own commits it recorded so, shown with or without a description and only from that range's check facts; the items are named in Details, a PASS on earlier code and a commit without a receipt are not counted, a range whose older receipts were not read says how many (`The review receipts of 41 older commits were not read.`), and when nothing is named there is no line (unknown, never clean). The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
+The Update indicator, a neutral capsule above the version, distinguishes an offer, the real stage, a needed restart and a stopped resolution (a neutral bell with no close). A failed or unconfirmed outcome stays till the owner closes it (this browser, that attempt; the record is untouched). Glyph and tone distinguish states: amber for local changes, error triple if failed, refused or rolled back, else neutral. Its words are its name, its detail a tooltip. A press or tap opens the Updates panel, which says it all, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. Above the description, in the panel for the update on offer and at the top of that confirmation, one host line counts what the range brings over a review FAIL or no verdict (`Went in over a review FAIL or no verdict: 2 merges, 3 commits Ouroboros made on this computer.`): merges whose receipt observed one and this install's own commits it recorded so, shown with or without a description and only from that range's check facts; the items are named in Details, a PASS on earlier code and a commit without a receipt are not counted, a range whose older receipts were not read says how many (`The review receipts of 41 older commits were not read.`), and when nothing is named there is no line (unknown, never clean). The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
 
 Status, owner action, and urgent notification are separate product concepts:
 
@@ -3457,7 +3457,7 @@ window jump, a layout switch) is laid out at once.
 
 ### One spine of depth
 
-The sidebar lists destinations: rooms (Main and the Projects) and its six sections. A section's pages are the
+The sidebar lists destinations: rooms (Main and the Projects) and its rail's sections. A section's pages are the
 second level and a level inside a page the third; a wide window keeps the sidebar and a section's list beside the
 open page, a phone shows one level at a time with one leading control (Ouroboros's picture at a room or a
 section's list, Back on a page) and no second header row. In the shell's words a place is Presence's (§5 "Circles
@@ -3471,19 +3471,20 @@ The column reads from the top: Ouroboros's card, which is Main (its picture, wit
 while Main or a Project in the list waits for the owner, the card's words for readers saying so, its name with a quiet `Main Chat`,
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
 while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
-with + (New project) at the end of its row; then the Projects, the column's only scroller, in the free room (no
-heading, collapse or unread total); then two cards on the bottom edge above the safe area: Circles, Files, Extensions and
-Widgets two to a line, Dashboard and Settings a line each over a hairline and the version; each card one line from a
-475 px sidebar (where four fit), edges shared. A row is its glyph and word, whole on one line (a name wider than the
-card wraps at a space), chosen in the strong crimson. The version is the update check (no Check button; its glyph
-turns while checking), still one beside Up to date or Check failed; the Update capsule, an update under way or an
-install without the check leave it plain. A Project row is two lines: the name and its time, then one line with
-the row's mark (a name with no such line may take both): the opening words of the
-question that waits for the owner, or the sentence that says what waits where it has no words of its own (an action
-only the owner can take, an answer whose delivery is unknown), else what its work is doing; the row's name for
-readers ends with the same words. The list stands beside the room and is never louder than the room's own text: a
-name is the meta ink at the regular weight, its line the secondary ink, or the primary ink of the room's own text
-while it says what waits for the owner, and only the chosen row is strong. Its menu opens
+with + (New project) at the end of its row; then the Projects, the column's only scroller, down to the bottom edge
+(no heading, collapse or unread total). Outside the column, at its start, the rail (the room or the drawer's column
+gives its width): Circles, Files and Widgets at its top, Dashboard, Settings and the version at its foot, each a glyph
+whose word is its accessible name, chosen in the strong crimson. Where its controls do not fit, the rail scrolls with
+the sidebar so keyboard focus can reach its foot. Extensions opens through Settings › Extensions (the Connections
+group), Settings chosen meanwhile. The version is the update check (no Check button; its glyph turns as it checks), its
+answer a tick or a warning in that glyph's place under the whole number, a failure's reason its tooltip and description,
+on touch Updates' check. The Update indicator (§4) or an install with no check leaves it plain. A Project row is two
+lines: the name and its time, then one line with the row's mark (a name with no such line may take both): the
+opening words of the question that waits for the owner, or the sentence that says what waits where it has no words
+of its own (an action only the owner can take, an answer whose delivery is unknown), else what its work is doing;
+the row's name for readers ends with the same words. The list stands beside the room and is never louder than the
+room's own text: a name is the meta ink at the regular weight, its line the secondary ink, or the primary ink of
+the room's own text while it says what waits for the owner, and only the chosen row is strong. Its menu opens
 from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it first says the row's state as its mark
 and words, then offers Pin or Unpin; pinning neither opens nor reads it. Its Working folder… shows and repairs
 missing, unusable or unset bindings. No folder stays until a folder is chosen. It names work keeping
@@ -3501,8 +3502,8 @@ read answers, nothing is called missing. Neither reads a room's history or marks
 rows, sorting on: off the top the first row in view that kept its place holds the reading place, focus its row; a
 find's rows stand while it has words. A Project outside the list opens by its own id; a missing or deleting one
 leaves the room on screen and says so. A short window first compacts rows (fine pointer only), then scrolls the whole
-column, Ouroboros's card at the top and the cards on the bottom edge, or, too short to show a Project between them,
-at its two ends. One destination is chosen at a
+column, Ouroboros's card at the top and the rail in view, or, too short to show a Project under the card, with the card
+at its top and the rail's foot at its end. One destination is chosen at a
 time, its fill alone with no stripe, rule or mark at its edge, and pressing it opens it, never closes it.
 
 ### A navigation row
@@ -3540,7 +3541,7 @@ closed the picture carries one 7 px dot for Main and the Projects, the room on s
 included: amber while one of them waits for the owner, else crimson while one has
 unread messages; its accessible name says which. The picture on his card carries the amber
 dot by the same rule in both layouts, never the crimson one. The
-drawer's × sits in its head, where the picture was. The room's quarter,
+drawer's × caps its rail, on a page header's leading line. The room's quarter,
 ×, Escape, Back and choosing a place close it. A drag only speeds this up: a
 sideways finger anywhere on the room, from the screen's very edge and over its
 buttons, links, header and composer, pulls the drawer with the finger, and holds
@@ -3637,8 +3638,8 @@ glyphs (`web/modules/page_icons.js`).
 The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is a round
 Back with the arrow, its destination in its name: the top layer's, peeled one by one (“Back to
 Extensions › Skills”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
-(Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
-band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or
+(Consciousness model), distinct from its return. Docked, the sidebar identifies a section without pages by its glyph and accessible name.
+Tabs or Files' location lead its band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or
 18px below a browser's top. Rails use the shared fade;
 location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
@@ -3805,6 +3806,6 @@ scroll by touch); `tests/test_shell_layout_static.py`,
 `tests/test_design_system_css_static.py` keep the one switch, the registry, the
 glyph set, the breakpoint ratchet and sentence case; `web/tests/layers.test.js`,
 `web/tests/drawer_drag.test.js` and `web/tests/host_telegram.test.js` pin the
-behaviour, and `tests/test_sidebar_short_window_browser.py` the short window's pinned foot;
+behaviour, and `tests/test_sidebar_short_window_browser.py` the rail and the short window's pinned head;
 `web/tests/page_places.test.js` and `tests/test_repaint_keeps_place_browser.py` hold the reading place through a repaint
 on every registered page, tab and Settings page.

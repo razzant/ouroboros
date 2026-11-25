@@ -236,7 +236,7 @@ def test_failed_status_read_keeps_last_attempt_and_recovery_check(updates_ui):
 
     # Even a letter-only failure delivers fresh transaction facts on the owner's plain Check.
     smoke = {**recovery, "letter": None, "letter_unavailable": True,
-             "update_tx": {"active": True, "phase": "pending_boot_smoke"}}
+             "update_tx": {"active": True, "phase": "pending_boot_smoke", "pre_restart_smoke": "passed"}}
     page.route("**/api/update/check", lambda route: route.fulfill(json=smoke))
     with page.expect_request(lambda req: req.url.endswith("/api/update/check") and req.method == "POST"):
         primary.click()

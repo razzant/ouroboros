@@ -1,7 +1,9 @@
 """Which places of Ouroboros's own interface a change of its web/ files touches, read from the files themselves.
 
-A place is one [data-nav-page] of the shell (web/modules/pages.js). The shell and its tokens touch every place. A module
-touches the pages whose own module imports it, and the screens that show a class only it draws. A stylesheet touches
+A place is one row of the registry in web/modules/pages.js (its id and the module app.js imports its init from); a row
+whose zone is `door` has no row of its own and opens through the door of the place it names. The shell and its tokens
+touch every place. A module touches the pages whose own module imports it, and the screens that show a class only it
+draws. A stylesheet touches
 the screens that show a class of a rule it changed (a rule with the conditions around it, so a moved breakpoint
 changes it), and every place when the rules it keeps change their order. Classes are looked for on the screens
 themselves, so a part an app-level module draws (a Dashboard panel) is found where it stands. No browser: the ui_design
