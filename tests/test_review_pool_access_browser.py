@@ -327,8 +327,14 @@ def test_catalogue_access_saves_reloads_restarts_and_reaches_the_pool(direct_ser
             _open(fresh, url)
             assert _shown(fresh) == edited
             _assert_labels(fresh, 1360)
-            _evidence(f"{engine}-02-saved-row-1-full-to-readonly", target=_agent(fresh, 0))
-            _evidence(f"{engine}-02-saved-row-3-readonly-to-full", target=_agent(fresh, 2))
+            # The saved settings reread can replace the form after it is visible. Capture the
+            # page, as above, without pinning the screenshot to that transient DOM node.
+            for index, change in ((0, "full-to-readonly"), (2, "readonly-to-full")):
+                _agent(fresh, index)
+                access = settings_page(fresh, f"agents/{IDS[index]}").locator('[data-subagent-field="access"]')
+                expect(access).to_be_visible()
+                expect(access).to_have_value(edited[index][1])
+                _evidence(f"{engine}-02-saved-row-{index + 1}-{change}", target=fresh)
             fresh.close()
 
             # Workspace write chosen on the page; the unmarked row returns to the pool unchanged.

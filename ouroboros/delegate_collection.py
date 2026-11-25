@@ -246,6 +246,14 @@ def _retain_output(root, entry, detail, gateway, staging_task_id="", output_auth
             "retry": retry if published else "transient"}
 
 
+def directory_discard_owed(entry) -> bool:
+    """An evidence-only engine directory copy whose discard receipt has not yet landed."""
+    from ouroboros.delegate_directory import is_directory_run
+    from ouroboros.delegate_registration_policy import evidence_only
+
+    return bool(entry is not None and capture_required(entry) and is_directory_run(entry) and evidence_only(entry))
+
+
 def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = None,
                      allow_review: bool = False, staging_task_id: str = "", stopped=None, failures=None,
                      output_authority=None, recapture=False, generation=GENERATION, background=False,
@@ -291,7 +299,11 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
         if entry.named_evidence:
             saved_named_evidence(root, entry)  # addressed validation; never called by tick
         prepared = delegate_capture_job.ready_result_owed(entry)
-        due = allow_review or (output_retry and prepared) or collection_due(entry, generation=generation, recapture=recapture)
+        discard_owed = directory_discard_owed(entry)
+        due = (allow_review or (output_retry and prepared)
+               or (discard_owed and entry.patch_captured
+                   and (gateway is not None or (output_retry and gateway_factory is not None)))
+               or collection_due(entry, generation=generation, recapture=recapture))
         if not due and not (output_retry and (output_owed(entry) or not entry.settled)):
             return {"status": "pending" if collection_pending(entry) else "collected",
                     "workspace_capture": capture_projection(root, entry, reader_task_id=staging_task_id), "errors": []}
@@ -300,7 +312,8 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
             or output_attempt.get("terminal_sha") != entry.terminal_source.get("sha256")
             or (output_attempt.get("retry") == "transient" and output_attempt.get("generation") != generation))
         if (gateway is None and gateway_factory is not None
-                and (retry_output or (not background and not prepared and capture_required(entry)))):
+                and (retry_output or (due and discard_owed)
+                     or (not background and not prepared and capture_required(entry)))):
             try:  # the run's own engine (``execution_domain``), else the caller's discovery
                 owned_gateway = gateway = run_gateway(entry, gateway_factory)
             except Exception:
@@ -347,7 +360,10 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
         if (due and entry is not None and not (stopped is not None and stopped())
                 and not disposition_refusal(root, entry)):
             try:
-                if (background or prepared) and (entry.execution_root or entry.resource_ref.get("workspace_kind") == "directory") \
+                if discard_owed and entry.patch_captured and not prepared:
+                    capture = (capture_terminal_patch_for_drive(root, entry, gateway=gateway, retain_investigation=False)
+                               if gateway is not None else capture_projection(root, entry, reader_task_id=staging_task_id))
+                elif (background or prepared) and (entry.execution_root or entry.resource_ref.get("workspace_kind") == "directory") \
                         and not is_in_place_run(entry):  # an in-place run's capture is its fixed projection
                     capture = delegate_capture_job.request_or_result(root, entry, generation=generation, recapture=retry_capture)
                     if capture.get("status") != "pending":
@@ -376,6 +392,7 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
                 try:
                     capture = retain_run_evidence(root, entry, capture, gateway, recapture=retry_capture,
                                                   named=(capture.get("named_evidence") or {}) if background else None)
+                    transient |= isinstance(capture, dict) and capture.get("retry") == "transient"
                 except Exception as exc:
                     errors.append(f"named_evidence:{type(exc).__name__}")
                     transient |= failure_retry(exc) == "transient"

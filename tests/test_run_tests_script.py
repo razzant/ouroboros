@@ -541,6 +541,58 @@ def test_the_node_option_runs_only_the_owned_node_lane(run_tests, monkeypatch):
             run_tests.main(combined)
 
 
+@pytest.mark.parametrize("node_exit, cleanup, expected", [
+    (0, "", 0), (1, "", 1),  # a test pass and a test failure each leave their record
+    (0, "reap incomplete", 2), (1, "reap incomplete", 2),  # an unconfirmed cleanup is the launcher's, never a test result
+    (None, "", 2),  # no Node: NOT_RUN, nothing ran
+    (2, "", 2), (137, "", 137),  # any other exit of a Node that ran is no test result either
+])
+def test_node_evidence_requires_the_test_process_and_its_cleanup(
+        run_tests, monkeypatch, tmp_path, standalone_budget, node_exit, cleanup, expected):
+    from ouroboros import preflight_node, process_containment
+
+    monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda root: ["tests/one.test.js"])
+    monkeypatch.setattr(preflight_node, "resolve_node", lambda: "inert-node" if node_exit is not None else None)
+    monkeypatch.setattr(preflight_node, "probe_node_version", lambda node: "24.0.0")
+    proc = types.SimpleNamespace(wait=lambda **kwargs: node_exit)
+    monkeypatch.setattr(process_containment, "ProcessContainer", lambda **options: types.SimpleNamespace(
+        spawn=lambda *args, **kw: proc, reap=lambda: cleanup, close=lambda: None))
+    receipt = tmp_path / "node" / "node.json"
+    assert run_tests.main(["--node", "--evidence-dir", str(receipt.parent)]) == expected
+    if expected in (0, 1):
+        assert json.loads(receipt.read_text(encoding="utf-8")) == {"exit": expected}
+    else:
+        assert not receipt.exists()
+
+
+def test_node_receipt_is_written_after_the_lane_and_never_inherited(run_tests, monkeypatch, tmp_path):
+    receipt = tmp_path / "node" / "node.json"
+    receipt.parent.mkdir()
+    receipt.write_text('{"exit": 0}', encoding="utf-8")  # an earlier run's
+    during = []
+    monkeypatch.setattr(run_tests, "_node_lane", lambda: during.append(receipt.exists()) or (1, "/lane/node"))
+    assert run_tests.main(["--node", "--evidence-dir", str(receipt.parent)]) == 1
+    assert during == [False] and json.loads(receipt.read_text(encoding="utf-8")) == {"exit": 1}
+    monkeypatch.setattr(run_tests, "_node_lane", lambda: (1, ""))  # a run that leaves no result
+    assert run_tests.main(["--node", "--evidence-dir", str(receipt.parent)]) == 2 and not receipt.exists()
+
+
+def test_node_receipt_needs_the_explicit_evidence_dir_and_a_place_to_keep_it(run_tests, monkeypatch, tmp_path):
+    from tests import ci_verdicts
+
+    lanes = []
+    monkeypatch.setattr(run_tests, "_node_lane", lambda: lanes.append("lane") or (0, "/lane/node"))
+    monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(tmp_path / "root"))
+    assert run_tests.main(["--node"]) == 0
+    assert not list(tmp_path.rglob("node.json"))  # the environment's evidence root asks for no receipt
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the evidence directory should be", encoding="utf-8")
+    assert run_tests.main(["--node", "--evidence-dir", str(blocker / "node")]) == 2
+    assert lanes == ["lane"]  # refused before Node started
+    monkeypatch.setattr(ci_verdicts, "write_json", lambda path, value: (_ for _ in ()).throw(OSError("disk full")))
+    assert run_tests.main(["--node", "--evidence-dir", str(tmp_path / "full")]) == 2 and lanes == ["lane", "lane"]
+
+
 def test_a_lane_pass_is_the_batterys_pass_over_the_callers_paths(run_tests, monkeypatch, tmp_path):
     """CI's form: the lane brings the gate's -m and flags, the caller its paths (or a retry's argument file) and
     output options; a caller that sets what the lane sets, or mixes the lane with another mode, is refused."""

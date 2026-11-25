@@ -617,3 +617,89 @@ test('an app\'s script error shows on its card, once per message', async () => {
         dom.restore();
     }
 });
+
+test('viewport-driven face switches wait until the feed stops scrolling, coalesce, and clean up on destroy', async () => {
+    const dom = installCardDom();
+    const server = serve({ 'GET /api/cards/card_s2': appBody('card_s2'), 'GET /api/cards/card_s2/app': page('<p>cats</p>') });
+    const priorIO = Object.getOwnPropertyDescriptor(globalThis, 'IntersectionObserver');
+    const priorRaf = Object.getOwnPropertyDescriptor(globalThis, 'requestAnimationFrame');
+    const priorCancel = Object.getOwnPropertyDescriptor(globalThis, 'cancelAnimationFrame');
+    let ioCallback = null;
+    const rafQueue = new Map();
+    let nextRaf = 1;
+    const stepFrame = () => {
+        const batch = [...rafQueue.entries()];
+        rafQueue.clear();
+        for (const [, fn] of batch) fn();
+    };
+    Object.defineProperty(globalThis, 'IntersectionObserver', { configurable: true, writable: true, value: class {
+        constructor(cb) { ioCallback = cb; }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+    } });
+    Object.defineProperty(globalThis, 'requestAnimationFrame', { configurable: true, writable: true, value: (fn) => {
+        const id = nextRaf++; rafQueue.set(id, fn); return id;
+    } });
+    Object.defineProperty(globalThis, 'cancelAnimationFrame', { configurable: true, writable: true, value: (id) => {
+        rafQueue.delete(id);
+    } });
+    try {
+        const feedEl = document.createElement('div');
+        feedEl.scrollTop = 900;
+        const cards = createChatCards({
+            frameNode: (_msg, node) => { const b = document.createElement('div'); b.className = 'chat-bubble assistant'; b.append(node); return b; },
+            holds: ledgerOn(ledgerStore()), settleMs: 5,
+        });
+        const bubble = cards.buildCard(appIdentity('card_s2'));
+        feedEl.append(bubble);
+        await flush();
+        assert.ok(bubble.querySelector('.chat-card-face'), 'starts as face before viewport entry');
+
+        // Active upward scroll: IO crossing into view defers until scroll rests, and scrolling back out coalesces.
+        feedEl.dispatch('wheel');
+        feedEl.scrollTop = 700;
+        feedEl.dispatch('scroll');
+        ioCallback([{ target: bubble, isIntersecting: true }]);
+        await flush();
+        assert.equal(bubble.querySelector('iframe'), null, 'mid-scroll entry does not mutate card height');
+        feedEl.scrollTop = 900;
+        feedEl.dispatch('scroll');
+        ioCallback([{ target: bubble, isIntersecting: false }]);
+        for (let i = 0; i < 6; i += 1) stepFrame();
+        await flush();
+        assert.equal(bubble.querySelector('iframe'), null, 'scroll-past coalesced to offscreen without mounting');
+
+        // Scroll into view and stop: stays face while frames move, mounts once rested.
+        feedEl.scrollTop = 600;
+        feedEl.dispatch('scroll');
+        ioCallback([{ target: bubble, isIntersecting: true }]);
+        stepFrame();
+        feedEl.scrollTop = 500;
+        feedEl.dispatch('scroll');
+        stepFrame();
+        assert.equal(bubble.querySelector('iframe'), null, 'still scrolling: frame still deferred');
+        for (let i = 0; i < 3; i += 1) stepFrame();
+        assert.equal(bubble.querySelector('iframe'), null, 'waits full rest window before mutating');
+        stepFrame();
+        await flush();
+        assert.ok(bubble.querySelector('iframe'), 'mounts once the feed rests');
+
+        // Explicit Close acts immediately even during an active scroll.
+        feedEl.dispatch('wheel');
+        bubble.querySelector('[data-card-close]').click();
+        await flush();
+        assert.equal(bubble.querySelector('iframe'), null, 'Close acts immediately');
+        assert.ok(bubble.querySelector('.chat-card-face'));
+
+        cards.destroy();
+        assert.equal(feedEl.listenerCount(), 0, 'destroy removes all feed scroll listeners');
+        assert.equal(rafQueue.size, 0, 'destroy cancels pending rest frame');
+    } finally {
+        for (const [key, desc] of [['IntersectionObserver', priorIO], ['requestAnimationFrame', priorRaf], ['cancelAnimationFrame', priorCancel]]) {
+            if (desc) Object.defineProperty(globalThis, key, desc); else delete globalThis[key];
+        }
+        server.restore();
+        dom.restore();
+    }
+});

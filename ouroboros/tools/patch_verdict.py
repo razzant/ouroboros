@@ -153,7 +153,8 @@ def write_patch_verdict(
     result that was cancelled adds ``cancelled`` as ``child_cancelled`` (artifact only): the
     cancellation and the retained capture this decision judged, as that result recorded them.
     ``observation`` keeps what the check or apply saw beside the decision (``observed_outcome``,
-    ``path_findings``, ``path_findings_note``, ``unindexed``); only ``observed_outcome`` also rides the
+    ``path_findings``, ``path_findings_note``, ``unindexed``, ``git_apply_completion``); only ``observed_outcome``
+    and the staging proof ``git_apply_completion`` (read back by the function of that name) also ride the
     custody row. An earlier verdict on the same child stays readable beside this one.
     ``failures`` receives this write's own failure facts, the names its records use
     (``verdict_artifact_write_failed``, ``custody_row_write_failed``), for the caller to report."""

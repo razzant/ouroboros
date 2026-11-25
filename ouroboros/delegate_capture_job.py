@@ -1,9 +1,10 @@
-"""Addressed capture in the existing maintenance child; decisions remain with the server.
+"""Addressed capture in the existing maintenance child; decisions remain with the disposition-lock holder.
 
-The server requests an immutable binding under the snapshot disposition lock. The child
-holds that same cross-process lock while walking/copying/hashing, then publishes only an
-artifact reference. The server reacquires the lock and rechecks the current binding and
-continuation before accepting it. Neither a child exit nor a stopped observer is a receipt.
+``collect_terminal`` requests an immutable binding under the snapshot disposition lock. The
+child holds that same cross-process lock while walking/copying/hashing, then publishes only an
+artifact reference. A later holder of the lock, ``collect_terminal`` or an explicit Git
+disposition (``accept_ready_patch``), rechecks the current binding and continuation before
+accepting it. Neither a child exit nor a stopped observer is a receipt.
 """
 from __future__ import annotations
 
@@ -62,7 +63,7 @@ def _record(root, entry, outcome):
 
 
 def request_or_result(root, entry, *, generation, recapture=False):
-    """Server-only, under its disposition lock. Return prepared bytes or owe one child job."""
+    """Called by ``collect_terminal`` under the run's disposition lock. Return prepared bytes or owe one child job."""
     from ouroboros.delegate_collection import _read_source
 
     job, binding = entry.capture_job, identity(entry)
@@ -103,7 +104,8 @@ def accept_ready_patch(root, entry, *, custody_held=None):
 
 
 def accept_result(root, entry, result, *, custody_held=None):
-    """Server-only, after its fresh continuation check, still under the disposition lock."""
+    """The disposition-lock holder's acceptance (``collect_terminal``, or an explicit Git disposition through
+    ``accept_ready_patch``), after its fresh continuation check, still under that lock."""
     from ouroboros.delegate_named_evidence import publish_saved, said_released, saved_named_evidence
     from ouroboros.delegate_continuation import disposition_refusal
 
@@ -203,7 +205,7 @@ def _capture(root, entry, should_stop):
 
     path = custody.disposition_lock_path(root, entry)
     # Only the child may wait: reclaiming a dead owner's name needs another acquisition,
-    # and the server that just requested capture may still be publishing its attempt.
+    # and the collector that just requested capture may still be publishing its attempt.
     fd = acquire_exclusive_file_lock(path, owner_aware_stale=True)
     if fd is None:
         return False
