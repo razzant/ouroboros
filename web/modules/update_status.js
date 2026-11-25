@@ -645,7 +645,7 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
     let closeButton = null;
     let hideable = '';  // the terminal attempt the close button hides now; '' while it is not offered
     // The capsule and its close button: one notice whose end sits where the notice does (a hide on another page is
-    // no ending). The close stands under the capsule, as the rail has no room beside it (style.css).
+    // no ending). Both stand on the version's line, the close beside the capsule (style.css).
     function ensurePill() {
         let pill = document.getElementById('update-pill');
         if (!pill) {
@@ -679,8 +679,8 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
                 if (held) landFocus(pill, checker);
             });
             ownedNotice.append(pill, closeButton);
-            // The row the page gives the version (pages.js renderNavRail); an older page without it (v7.7.0's
-            // sidebar) keeps the capsule beside the version itself, where it always stood.
+            // The row the page gives the version (the column's foot: index.html, or pages.js mountNavRail); an older
+            // page without it (v7.7.0's sidebar) keeps the capsule beside the version itself, where it always stood.
             if (row) row.appendChild(ownedNotice);
             else if (version?.parentElement) version.parentElement.insertBefore(ownedNotice, version.nextSibling);
             else document.body.appendChild(ownedNotice);
@@ -703,19 +703,20 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
         pill.replaceChildren(glyph, said);
     }
 
-    // The version row (pages.js renderNavRail): the version in its check, the check's answer and its words for readers.
+    // The version row (the column's foot): the version in its check, the check's answer and its words for readers.
     const version = document.getElementById('nav-version');
     const row = version?.closest?.('.sidebar-foot-meta') || null;
 
     // Where a keyboard reader lands when the update control it held goes away, and only then: the first of `kept` that
-    // still shows (what is left of the notice or the row, in the order each caller names), else the rail's destination
-    // beside the version row — its last, Settings, as pages.js renderNavRail puts the row under the system rows. Never
-    // Main's row, which follows the rail in document order (owner 24.11, «Рельс снаружи»), and never the page. Every
-    // page this module mounts in holds the row in the rail: mountNavRail composes it for a retained v7.7.0 to v7.12
-    // document as well (tests/test_ui_shell_legacy_browser.py), so no wider fallback is reachable, and a page with no
-    // version row, which none ships, gets no landing of ours.
+    // still shows (what is left of the notice or the row, in the order each caller names), else the rail's last
+    // destination, Settings: the version row is the column's foot after the Projects (owner 25.11), the rail its
+    // sibling. Never Main's row, which follows the rail in document order (owner 24.11, «Рельс снаружи»), and never the
+    // page. Every page this module mounts in holds the row in that foot: mountNavRail composes it for a retained
+    // v7.7.0 to v7.12 document as well (tests/test_ui_shell_legacy_browser.py), so no wider fallback is reachable,
+    // and a page with no version row, which none ships, gets no landing of ours.
     function landFocus(...kept) {
-        const rail = row?.closest?.('.nav-rail');
+        const rail = row?.closest?.('.nav-rail')
+            || row?.parentElement?.querySelector?.('.nav-rail') || null;
         const beside = [...(rail?.querySelectorAll?.('[data-nav-page]') || [])].pop();
         const landing = [...kept, beside].find((node) => node?.isConnected && !node.hidden);
         landing?.focus?.({ preventScroll: true });
@@ -749,7 +750,7 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
         const glyph = Object.assign(document.createElement('span'), { className: 'nav-version-glyph' });
         glyph.innerHTML = fluentIcon('arrow-clockwise', 14, 'regular');
         // The check's answer is a glyph (its words read, not drawn), never the dotted status sentence. It and the
-        // check's glyph share the one place under the complete version, however many lines the version takes.
+        // check's glyph share the one place after the version, on its line.
         note = Object.assign(document.createElement('span'), { className: 'nav-check-note', hidden: true });
         slot = Object.assign(document.createElement('span'), { className: 'nav-version-slot' });
         slot.append(note, glyph);
@@ -809,8 +810,8 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
         if (!shown) return;
         if (failed) note.dataset.tone = 'error';
         else delete note.dataset.tone;
-        // Its glyph and its words: the tick or the warning stands in the version's glyph's place (the rail has no room
-        // for the words, which stay the version's description and the live region's, style.css).
+        // Its glyph and its words: the tick or the warning stands in the version's glyph's place (the one line has no
+        // room for the words, which stay the version's description and the live region's, style.css).
         note.textContent = '';
         note.insertAdjacentHTML?.('afterbegin', failed ? fluentIcon('warning', 14) : fluentIcon('checkmark', 14, 'regular'));
         const words = Object.assign(document.createElement('span'), { className: 'nav-check-words' });
