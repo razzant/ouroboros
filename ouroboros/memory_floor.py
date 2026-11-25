@@ -467,8 +467,10 @@ def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], 
 
 
 def fit_required_book(shown, *, book, fixed, ratio, reserve, output_reserve, window, window_record, mode, work, lowered,
-                      note_window, admit, optional_map, opening_address):
+                      note_window, admit, optional_map, opening_address, cold_return=False):
     """Render the selected room as system and program data; price the book and note beside both.
+
+    A cold return preserves the read view for rebind; refuse early only if the book itself exceeds its admitted room.
 
     Each retry takes the next yield from ``optional_map`` (optional attachments, then an unread integrating Low
     start's book maps) until none remains or the fixed price stops shrinking. The book does not set the reply
@@ -494,10 +496,11 @@ def fit_required_book(shown, *, book, fixed, ratio, reserve, output_reserve, win
             window_tokens=window, window_record=window_record)
         memory = story_tokens + tokens_of(mv.json_chars(presented) + data_chars)
         held = max(reserve, reply)
-        input_room = window_record.input_room(reply) if window_record else None
-        if math.ceil((fixed + book + memory) * ratio) <= (window - held if input_room is None else input_room):
+        input_room = (window_record.admitted if cold_return else window_record.input_room(reply)) if window_record else None
+        if math.ceil((book if cold_return else fixed + book + memory) * ratio) <= (
+                window - held if input_room is None else input_room):
             return presented, room_data, note_tokens, None
-        smaller = optional_map()
+        smaller = None if cold_return else optional_map()
         if smaller is None or smaller >= fixed:
             return presented, room_data, note_tokens, {"fixed_tokens": fixed + book, "memory_tokens": memory, "reserve_tokens": held}
         fixed = smaller

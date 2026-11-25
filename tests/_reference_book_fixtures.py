@@ -66,7 +66,7 @@ def booked(core, root: pathlib.Path, *, headings: int = 150, body: str = "", dev
             "docs/development/change.md": f"# {development_title}\n\nHow changes stay coherent.\n\n" + "".join(
                 f"## Rule {i}\n\nIts practice. {body}\n\n" for i in range(headings))}.items():
         (repo / path).parent.mkdir(parents=True, exist_ok=True)
-        (repo / path).write_text(text, encoding="utf-8")
+        (repo / path).write_text(text, encoding="utf-8", newline="\n")  # LF on every OS, as .gitattributes keeps books
     books = tuple(load_reference_book(repo, book_id) for book_id in ("architecture", "development"))
     return replace(core, reference_books=books, architecture_md=compose_book(books[0]), development_md=compose_book(books[1]))
 
