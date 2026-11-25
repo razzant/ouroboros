@@ -1,0 +1,71 @@
+name: Telegram follow-up (focused)
+
+on:
+  push:
+    branches: ['qa/tg-4255-narrow']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-tg-4255-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CANDIDATE_SHA: 'c596605d0e0686a1befd244472bab63bb4030274'
+  PYTHONUTF8: '1'
+
+jobs:
+  qa:
+    name: qa · ${{ matrix.os }} · Telegram and Continue
+    if: ${{ github.ref == 'refs/heads/qa/tg-4255-narrow' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: The candidate is a full commit id
+        run: |
+          printf '%s' "$CANDIDATE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: The checkout is exactly the named candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - uses: ./.github/actions/setup-python-env
+      - name: Exercise the eight reported IDs and neighboring ordinary cases
+        timeout-minutes: 20
+        run: |
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          status=0
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" --evidence-dir "$RUNNER_TEMP/qa-tg-4255" --timeout 900 \
+            -- "$py" -m pytest -o addopts= -q -p no:cacheprovider --tb=short -rA \
+            'tests/test_continue_quiz_origin.py::test_a_start_card_that_does_not_resolve_refuses_by_name[card_missing]' \
+            tests/test_continue_quiz_origin.py::test_a_wake_started_root_continues_with_the_cards_it_started_from \
+            tests/test_continue_quiz_origin.py::test_a_card_rerouted_after_the_drafter_read_it_still_resolves \
+            tests/test_domain_manifest.py::test_checker_cli_is_green_on_this_tree \
+            tests/test_domain_manifest.py::test_lazy_and_dynamic_classification_matches_the_pin \
+            tests/test_domain_manifest.py::test_strict_direction_matrix_matches_the_pinned_baseline \
+            'tests/test_module_handle_extraction.py::test_the_declared_set_is_exactly_what_the_leaf_reads_through_the_handle[ouroboros/loop_round_limits.py]' \
+            'tests/test_telegram_quiz_state.py::test_lifecycle_edit_is_a_pure_forward_only_decision[expired_terminal-event5-expected5]' \
+            tests/test_telegram_quiz_state.py::test_web_answer_in_the_owners_own_words_settles_the_card_verbatim \
+            tests/test_telegram_quiz_state.py::test_a_plain_preview_keeps_its_whole_budget_and_says_the_cut \
+            tests/test_telegram_quiz_state.py::test_a_translated_receipt_never_pushes_the_answered_edit_past_one_message \
+            tests/test_telegram_quiz_answers.py::test_settled_card_near_limit_reserves_room_for_file_fact_over_long_caption \
+            tests/test_question_answer_routing.py::test_continue_then_recovery_hands_unread_answer_once_to_successor \
+            tests/test_question_answer_routing.py::test_read_answer_survives_settlement_in_continue_opening_without_resend \
+            tests/test_question_answer_routing.py::test_protected_secret_outcome_keeps_pre_change_delivery_and_settlement_behavior \
+            tests/test_continue_answer_files.py \
+            tests/test_builtin_skill_source.py::test_reseed_replaces_payload_keeps_state_and_owner_choice || status=$?
+          echo "safe_test exit status: $status"
+          echo "safe_test exit status on $RUNNER_OS: $status" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
