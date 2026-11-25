@@ -500,9 +500,9 @@ function focusAfterProjectClosed(closedId, focused) {
 }
 
 // Docked, the panel comes in from the window's edge with its room in it (owner 20.10, Q2 A): it starts once the room
-// has painted, or at a slow read's bound, when it comes in with its loading row (a read seen to take seconds).
-// Its promise is the panel's arrival (its motion's end, at once when it was already in): a room that covers Main makes
-// it inert only then.
+// has painted (its saved text too, chat_preview.js), or at a slow read's bound, when it comes in with its loading row
+// (a read seen to take seconds). Its promise is the panel's arrival (its motion's end, at once when it was already in):
+// a room that covers Main makes it inert only then.
 const PANEL_ARRIVAL_BOUND_MS = 300;
 let panelArrival = Promise.resolve();  // the running arrival's end: a sync again mid-slide waits for the same one
 function arrivePanel(pid, since) {
@@ -510,7 +510,7 @@ function arrivePanel(pid, since) {
         const step = () => requestAnimationFrame(() => {
             if (navState.activeProjectId !== pid) { resolve(); return; }
             if (projectPanel.classList.contains('open')) { panelArrival.then(() => resolve()); return; }
-            const waits = !isStackLayout() && !reducedMotion() && !projectInstances.get(pid)?.hasPaintedHistory?.();
+            const waits = !isStackLayout() && !reducedMotion() && !projectInstances.get(pid)?.hasPaintedWords?.();
             if (waits && performance.now() - since < PANEL_ARRIVAL_BOUND_MS) { step(); return; }
             projectPanel.classList.add('open');
             const property = reducedMotion() ? 'opacity' : 'transform';

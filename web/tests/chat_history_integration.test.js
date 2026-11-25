@@ -54,6 +54,8 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShow
         emitQuizState: (message) => handlers.get('quiz_state')(message),
         reconnect: (flags = {}) => handlers.get('open')({ previouslyConnected: true, ...flags }),
         disconnect: () => handlers.get('close')(),
+        // The current socket's first frame names its serving profile (ws.js `connection_profile`).
+        proveProfile: () => handlers.get('connection_profile')({ type: 'connection_profile', profile_scope: PREVIEW_SCOPE }),
         respond: next => { response = next; },
         async refresh(next = response) {
             response = next;
@@ -1088,6 +1090,7 @@ test('a warm opening paints the saved text before its first read, grants it noth
         assert.equal(shown.querySelectorAll(selector).length, 0, `no ${selector}: no action, link or history identity`);
     }
     assert.equal(f.instance.hasPaintedHistory(), false);
+    assert.equal(f.instance.hasPaintedWords(), true, 'the docked panel comes in with the saved text (app.js)');
     assert.equal(f.messages.dataset.historyHydrated, undefined);
     // The reader never moved: whatever the painted text did to the layout, the first canonical read opens at the newest
     // message.
@@ -1113,6 +1116,52 @@ test('matching history paints even while the room cannot show saved text', async
     await settle(() => f.instance.hasPaintedHistory());
     assert.equal(f.instance.hasPaintedHistory(), true);
     assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:10']);
+});
+
+// Opus F4 (#4211): after a disconnect only the current socket proves the profile (ws.js canShowSavedProfile), and an
+// opening shows its saved text once. A room opened in that gap paints it when the proof arrives, once, unless a
+// canonical read landed first.
+test('an opening held back by the socket\'s missing proof paints its saved text when the proof arrives', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    assert.equal(previewNode(f), undefined, 'this socket has not proven the profile yet');
+    assert.equal(f.instance.hasPaintedWords(), false);
+    proven = true;
+    f.proveProfile();
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · updating', 'painted while the read is out');
+    assert.equal(f.instance.hasPaintedWords(), true);
+    assert.equal(f.instance.hasPaintedHistory(), false);
+    read.release(page([row('chat:6', 'Canonical answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    assert.equal(previewNode(f), undefined, 'the canonical page replaces it');
+    f.proveProfile();  // a later socket's proof
+    assert.equal(previewNode(f), undefined, 'once, and never over canonical history');
+});
+
+test('a proof after the canonical read paints no saved text over it', async (t) => {
+    let proven = false;
+    const f = fixture(t, page([row('chat:6', 'Canonical answer')]), null,
+        { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    proven = true;
+    f.proveProfile();
+    assert.equal(previewNode(f), undefined, 'the canonical page stands alone');
+    assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:6']);
+});
+
+test('the opening\'s one retry is spent on the first proof, even one that still refused', async (t) => {
+    const read = held();
+    let permits = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => permits });
+    await settle(() => f.calls.length === 1);
+    f.proveProfile();  // a proof that still does not permit it (another profile's, say)
+    permits = true;
+    f.proveProfile();
+    assert.equal(previewNode(f), undefined, 'once');
+    read.release(page([]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
 });
 
 test('a confirmed different history profile retires painted text without erasing the saved room', async (t) => {

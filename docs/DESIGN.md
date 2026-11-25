@@ -3592,7 +3592,7 @@ past the page only the saved preview (History edges) keeps words. Main is quiet 
 nothing of it shows: beside a docked Project it stays live; covered by a Project (the
 phone's card, a finger's docked column), behind another page or in a hidden window it is away. Docked,
 moving between destinations stays instant, and a section's page arrives beside its list on `--motion-fade`; the Project panel comes in from the window's right edge
-once its room has painted (or after a read's 300 ms bound, with its loading row)
+once its room or its saved text (History edges) has painted (or after a read's 300 ms bound, with its loading row)
 and goes back there whole, only its scrim fading (owner 20.10, Q2 A). A dismissed
 toast fades where it stood while the ones that stay glide into its place. Moving
 status marks share one document phase while keeping their three-dot delay

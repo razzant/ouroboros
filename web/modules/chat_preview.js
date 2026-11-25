@@ -13,7 +13,8 @@
  * bound keeps the rows that placement puts last. Live echoes, controls, attachments and session metadata never enter
  * it; another origin, a document proving no data profile, or refused storage opens cold.
  *
- * The first canonical replay retires the painted copy. A passage the owner holds selected stays, labelled, until the selection is released: the live selection, or the copy room_retire.js keeps on
+ * The first canonical replay retires the painted copy, and no later show paints one. A passage the owner holds
+ * selected stays, labelled, until the selection is released: the live selection, or the copy room_retire.js keeps on
  * the room (`kept`) while an inert layer covers it or it is away, where WebKit drops the live range. A history read
  * refused for authentication, current and not aborted (the room's fetchHistory below, app.js's link preparation, a
  * Place's in place_history.js), removes every entry and every copy painted in this document at once, selection or not
@@ -153,7 +154,8 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     const doc = feed.ownerDocument;
     const profile = provenScope(scope);
     const entry = previewEntryKey(profile, room);
-    let root = null, retiring = false, disposed = false;
+    // `landed`: a canonical replay drew the room.
+    let root = null, retiring = false, disposed = false, landed = false;
     // This room's rows; null when it has no entry (never read here, or it gave way to rooms read since).
     const saved = () => {
         try {
@@ -220,6 +222,7 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
         return [...live, ...(kept() || [])].some(covers);
     };
     const retire = () => {
+        landed = true;
         if (!root) return;
         retiring = true;
         if (held()) note('retained until selection is released');
@@ -236,7 +239,7 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     return {
         /** Paints the saved rows once, before any canonical read; false when there is nothing valid to show. */
         show() {
-            const rows = disposed || !profile || root || !canShow() ? null : saved();
+            const rows = disposed || landed || !profile || root || !canShow() ? null : saved();
             if (!rows?.length) return false;
             root = doc.createElement('div');
             root.className = 'chat-saved-preview';
@@ -259,6 +262,8 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             feed.prepend(root);
             return true;
         },
+        /** A painted copy stands in the feed: the room has words to come in with (app.js's docked panel). */
+        shown: () => Boolean(root),
         /** The room's newest window, admitted (chat.js): its rows replace this room's. A window that could not read
          * the conversation stream, or a refusal, keeps its entry; a bounded `complete: false` window is a window. */
         save(messages, { window: frame = null, reason_code: refused = '' } = {}) {
@@ -362,6 +367,10 @@ export function createRoomProfileLifecycle({
     }
     // `room`: the room the word names, which a Send again standing on it names to the core (`ChatInbound.ordinary_room`).
     const word = { room: chatId, holds: () => canonical || (proof !== null && proof === servingSocket()), confirm: confirmNow };
+    // The opening's saved text waits for this socket's proof (ws.js canShowSavedProfile: after a disconnect only the
+    // current socket proves the profile): `profileConfirmed` paints it then, once, unless a canonical read landed first.
+    let previewOwed = false;
+    const showPreview = () => { if (getPreview().show()) onPreviewShown(); };
 
     // Hydration triggers share one sticky request; reconnect/resync read again.
     const awaitInitialHydration = () => isLeaving() ? Promise.resolve(false) : (initialHydrationPromise ||= syncHistory({ reason: 'open' }));
@@ -394,7 +403,10 @@ export function createRoomProfileLifecycle({
     async function startOpening() {
         // The owners below exist first: no read stands between opening and saved text.
         await null;
-        if (!isDestroyed() && getPreview().show()) onPreviewShown();
+        if (!isDestroyed()) {
+            showPreview();
+            previewOwed = !getPreview().shown() && !foreignProfile() && ws?.canShowSavedProfile?.() !== true;
+        }
         await loadUiPreferences();
         // Main waits for hydration; Projects pass through. History reads share one flight.
         await waitForHydrationWindow();
@@ -433,6 +445,10 @@ export function createRoomProfileLifecycle({
         profileConfirmed() {
             kept()?.withdraw();
             if (failure && !canonical) void syncHistory();
+            // An opening this proof held back paints its saved text now, once; a room away paints nothing.
+            const owed = previewOwed;
+            previewOwed = false;
+            if (owed && !isDestroyed() && !isLeaving()) showPreview();
         },
         /** The registry's `projects_changed` naming this Project room, or no room: the core's word on it lapses, asked again. */
         roomChanged(frame) {

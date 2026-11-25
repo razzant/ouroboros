@@ -401,6 +401,21 @@ test('every eraser takes the record and every room\'s entry, and nothing else th
     }
 });
 
+test('a canonical replay ends the opening: a later show paints nothing', t => {
+    const f = fixture(t);
+    f.make().save([row('chat:1', 'Saved words')]);
+    const preview = f.make();
+    assert.equal(preview.shown(), false);
+    preview.retire();  // the room's first canonical replay, before any copy was shown
+    assert.equal(preview.show(), false);
+    assert.equal(f.painted(), undefined);
+    const shown = f.make();
+    assert.equal(shown.show(), true);
+    assert.equal(shown.shown(), true, 'a painted copy stands');
+    shown.retire();
+    assert.equal(shown.shown(), false);
+});
+
 // A document whose selection the test sets: `select(node)` holds a range over that node, `select()` releases it, and
 // `changed()` fires selectionchange as an engine would.
 function selectionWorld(f) {

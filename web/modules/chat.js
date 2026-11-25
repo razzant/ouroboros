@@ -3373,7 +3373,7 @@ export function createChatInstance({
         showOutage();
     });
     onWs(SERVER_ANSWERS_EVENT, () => syncChatStatus());
-    onWs('connection_profile', roomProfile.profileConfirmed);  // this socket's proof decides a failed read's kept sends
+    onWs('connection_profile', roomProfile.profileConfirmed);  // this socket's proof: a failed read's kept sends, an owed saved text
     onWs('projects_changed', roomProfile.roomChanged);  // the registry's word on a Project room lapses what it showed
     function showOutage(doubted) {
         unconfirmed.unsettle(doubted);
@@ -3436,6 +3436,8 @@ export function createChatInstance({
         // True once a history snapshot has actually been fetched and painted;
         // app.js uses it to decide whether a reopen needs a forced repaint.
         hasPaintedHistory: () => historyLoaded && lastHistorySyncSucceeded,
+        // That, or this browser's saved text of the room (chat_preview.js): the docked panel comes in with either.
+        hasPaintedWords: () => (historyLoaded && lastHistorySyncSucceeded) || preview.shown(),
         archiveOpen: () => archive?.active,
         // Unsendable state (staged Files, an upload in flight, an unsaved send and its Send again): room_retire.js keeps
         // such a room even when its project goes away.
