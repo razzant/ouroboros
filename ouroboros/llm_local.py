@@ -20,6 +20,7 @@ from ouroboros.model_concurrency import limit_physical_send, measurement_slot
 
 from ouroboros.context_budget import LocalContextTooLargeError  # the typed overflow lives with the overflow vocabulary
 from ouroboros.llm_messages import DISPLAY_KEY
+from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
 from ouroboros.llm_attempt import (
     _attempt_request,
     _candidate_before_dispatch,
@@ -344,7 +345,9 @@ class _LocalLaneMixin:
             raise
 
         resp_dict = resp.model_dump()
-        usage = resp_dict.get("usage") or {}
+        usage = dict(resp_dict.get("usage") or {})
+        for host_key in ("stream_receipt", "response_finish_reason", LATER_OUTPUT_LIMIT_USAGE_KEY):
+            usage.pop(host_key, None)  # host-owned facts (the choice's own finish below), never a usage extension
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
 

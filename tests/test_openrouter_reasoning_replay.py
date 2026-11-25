@@ -177,3 +177,49 @@ def test_sync_async_physical_send_preserves_details_and_seals_deduplicated_paylo
     assert send["payload"]["messages"][2]["reasoning_details"] == details
     assert send["payload_sha256"] == attempt["candidate_raw_sha256"]
     assert observed["returned"]["usage"]["request_wire"]["candidate_sha256"] == send["payload_sha256"]
+
+
+@pytest.mark.parametrize(("details", "kept"), [
+    pytest.param([_text("first", index=0, signature="opaque==", format="provider-v1"), _text("second", index=1)],
+                 True, id="ordered-text"),
+    pytest.param([{"type": "reasoning.summary", "summary": "brief"}], True, id="summary"),
+    pytest.param([{"type": "reasoning.encrypted", "data": "opaque=="}], True, id="encrypted"),
+    pytest.param([], False, id="empty-list"),
+    pytest.param([_text(" \n\t")], False, id="blank-entries"),
+    pytest.param(_text("alpha"), False, id="object-details"),
+    pytest.param([_text("alpha"), None], False, id="non-object-entry"),
+])
+@pytest.mark.parametrize("carry", ["stateless", "native_custody", "turn_envelope"])
+def test_a_wordless_cut_keeps_ordered_details_for_its_own_route(details, kept, carry):
+    """A reply cut at its output limit, its calls fragments alone and no words, keeps a stateless route's supported,
+    non-empty ``reasoning_details`` in that field, exactly and in order, beside empty content, as it keeps flat
+    reasoning: never as visible text and never as another carrier. The same route's send replays them, a route
+    switch drops them, and no source view, salvage or prose shows them. Empty or unsupported details, native custody
+    (its own exact carry) and an active turn envelope keep no row (#4028)."""
+    from types import SimpleNamespace
+
+    from ouroboros import context_compaction as cc, loop_output_exhaustion as recovery
+    from ouroboros.loop_transport import last_assistant_text
+
+    fragments = [{"id": "frag-1", "type": "function", "function": None}]
+    msg = {"role": "assistant", "content": "", "tool_calls": fragments, "reasoning_details": copy.deepcopy(details),
+           **({"nativeContinuation": {"state": "opaque"}} if carry == "native_custody" else {})}
+    ctx = SimpleNamespace(messages=[{"role": "user", "content": "Review this change."}], accumulated_usage={},
+                          budget_tail="tool", tools=SimpleNamespace(_ctx=SimpleNamespace(
+                              _round_response_facts={"finish_reason_present": True, "finish_reason": "length"},
+                              model_turn_state=SimpleNamespace(envelope={"token": "x"}) if carry == "turn_envelope"
+                              else None, _owner_directives=[], _current_llm_call_meta={})))
+    assert recovery.unfinished_reply(ctx, msg) is None
+    rows = [row for row in ctx.messages if row.get("role") == "assistant"]
+    if not (kept and carry == "stateless"):
+        assert rows == []
+        return
+    assert rows == [{"role": "assistant", "content": "", "reasoning_details": details}]
+    assert "it carried no text" in ctx.messages[-1]["content"] and "reasoning" not in rows[0]
+    assert last_assistant_text(ctx.messages) == "" and not cc._is_dialogue_prose_row(rows[0])
+    assert cc._visible_row(rows[0]) == {"role": "assistant", "content": ""}
+    history = [{"role": "system", "content": "Read the complete source."}, *ctx.messages]
+    sent = [row for row in _build(history)["messages"] if row.get("role") == "assistant"]
+    assert sent == rows and json.dumps(sent[0]["reasoning_details"]) == json.dumps(details)
+    switched = LLMClient.sanitize_reasoning_on_model_switch(history, MODEL, "other-family/model")
+    assert [row for row in switched if row.get("role") == "assistant"] == [{"role": "assistant", "content": ""}]

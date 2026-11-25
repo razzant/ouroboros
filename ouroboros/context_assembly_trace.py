@@ -569,10 +569,13 @@ def _row_contributions(row, image_forms):
         out.append({'family': family, 'form': 'typed_row'})
     if row.get('role') == 'tool':
         record = read_tool_result_record(row)
-        proved = record['state'] == 'recorded'
-        out.append({'family': 'tool_result', 'form': 'result_view' if proved else 'unrecorded',
-                    **({'invocation_sha256': digest(str(record['invocation']['invocation_id'])),
-                        'view': 'retained_source' if record.get('source_ref') else 'extent_unknown'} if proved else {})})
+        state = record['state']
+        if state == 'recorded':
+            out.append({'family': 'tool_result', 'form': 'result_view',
+                        'invocation_sha256': digest(str(record['invocation']['invocation_id'])),
+                        'view': 'retained_source' if record.get('source_ref') else 'extent_unknown'})
+        else:
+            out.append({'family': 'tool_result', 'form': 'not_started' if state == 'not_started' else 'unrecorded'})
     content = row.get('content')
     if isinstance(content, list):
         for part in content[:_CONTRIBUTION_PARTS]:

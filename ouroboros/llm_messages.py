@@ -652,3 +652,23 @@ class _MessageShapingMixin:
         if cls._model_family(from_model) == cls._model_family(to_model):
             return prepared
         return cls._strip_openrouter_roundtrip_metadata(prepared)
+
+
+def shown_content(message: Dict[str, Any]) -> Any:
+    """A row's content as a reader outside its own route sees it (a source view, a renewed view's prose). An
+    assistant's history bytes that also hold its lane's reasoning show the lane's display text (``DISPLAY_KEY``, even
+    empty); its blocks show without those a route switch drops (``_strip_openrouter_roundtrip_metadata``: reasoning
+    blocks, a stray signature) and without a thought part (``thought`` true: display reasoning, as
+    ``extract_display_reasoning`` reads it), the others, an untyped part included, in their order. Any other content
+    stands as it is. The row, the exact source its replay and restore read, is never changed."""
+    content = message.get("content")
+    if message.get("role") != "assistant":
+        return content
+    display = message.get(DISPLAY_KEY)
+    if isinstance(display, dict):
+        return display["text"] if isinstance(display.get("text"), str) else ""
+    if not isinstance(content, list):
+        return content
+    projected = _MessageShapingMixin._strip_openrouter_roundtrip_metadata([{"role": "assistant", "content": content}])
+    blocks = projected[0]["content"]
+    return [block for block in blocks if not (isinstance(block, dict) and block.get("thought") is True)]

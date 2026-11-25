@@ -139,7 +139,7 @@ ouroboros/ — agent core and shared runtime (§6)
   loop_llm_call.py — single-round call, live event, usage accounting
   transcript_prefix.py — prefix digests, origin breaks, signed-reasoning retirement (facts cross boundary at call time) (§6 Task lifecycle)
   loop_transport.py — transport-outage waits, provider-failure text (§6 Context fitting)
-  loop_output_exhaustion.py — typed reply recovery (§6)
+  loop_output_exhaustion.py — reply recovery and call admission (§6)
   loop_delivery.py, delivery_facts.py, loop_budget.py, loop_completion_schema.py, loop_forced_finalization.py, loop_messages.py, loop_model_call.py, primary_route_observation.py, loop_nudges.py, loop_round_limits.py, loop_routes.py — `loop.py` rails; `loop_forced_finalization` owns the forced call (§6 Task lifecycle)
   late_review_marks.py — reviews settled after author left, kept in room view until released (§6 Review stack)
   result_material.py — exact copies of task products (§6 Result review)
