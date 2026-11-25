@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { cardRowView, createRoomWork, latestRepresentedRoot, workCard } from '../modules/room_work.js';
+import { cardRowView, createRoomWork, latestRepresentedRoot, rowDetailLines, workCard } from '../modules/room_work.js';
+import { createTimelineAnchors } from '../modules/chat_render_batch.js';
 import { markView } from '../modules/status_mark.js';
 import { desiredLiveCardPhase } from '../modules/task_phase_chip.js';
 import { emptyWorkState, reconcileWorkState, roomStatusView } from '../modules/work_status.js';
@@ -107,6 +108,7 @@ test('the mounted list holds its order while open, settles ended work and only n
         const anchor = header.children.find((child) => child.classList.contains('rw-shade-anchor'));
         const surface = anchor.children.find((child) => child.classList.contains('rw-surface'));
         assert.ok(surface.classList.contains('rw-shade'));
+        assert.ok(surface.classList.contains('scroll-fade-y'));
         const list = surface.querySelector('.rw-list');
         const ids = () => list.children.map((row) => row.dataset.id);
         assert.ok(trigger.contains(badge), 'the real status badge is the control’s word');
@@ -1064,4 +1066,239 @@ for (const asPanel of [false, true]) for (const [words, expected] of [
         assert.equal(list.children[0].querySelector('.rw-focus').textContent, expected);
         assert.equal(list.children[0].querySelector('.rw-focus').hidden, !expected);
     } finally { shade?.destroy(); restoreDom(prior); }
+});
+
+test('Back to reading and bookmark serialization keep a straddling top card when a temporary neighbour below it disappears', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade;
+    try {
+        const node = (cls, parent) => { const el = document.createElement('div'); el.className = cls; parent.appendChild(el); return el; };
+        const page = node('page', mount);
+        const header = node('chat-page-header', page);
+        const titleRow = node('app-page-title-row', node('app-page-title-block', header));
+        const badge = node('status-badge thinking', node('app-page-actions ui-chrome-group', header));
+        const messages = node('chat-messages', page);
+        messages.offsetHeight = 750;
+        messages.clientHeight = 750;
+        let scrollTop = 2000;
+        Object.defineProperty(messages, 'scrollTop', {
+            get: () => scrollTop,
+            set: (value) => { scrollTop = Math.max(0, Math.min(4250, value)); },
+        });
+        messages.getBoundingClientRect = () => ({ top: 0, bottom: 750, left: 0, right: 600, width: 600, height: 750 });
+
+        const placeRow = (el, y, height) => {
+            el.getBoundingClientRect = () => ({ top: y - scrollTop, bottom: y - scrollTop + height, left: 0, right: 600, width: 600, height });
+            el.getClientRects = () => [el.getBoundingClientRect()];
+            el.closest = (selector) => {
+                if (selector === '[data-history-id]' && el.dataset.historyId) return el;
+                if (selector === '.chat-live-card' && el.classList.contains('chat-live-card')) return el;
+                return null;
+            };
+            return el;
+        };
+
+        const topCard = placeRow(node('chat-bubble chat-card-bubble', messages), 1700, 380);
+        topCard.dataset.historyId = 'card:top';
+        const tempQuestion = placeRow(node('chat-bubble project-question', messages), 2094, 140);
+        const targetCard = placeRow(node('chat-live-card', messages), 3800, 200);
+        targetCard.dataset.taskId = 't-jump';
+        messages.scrollHeight = 5000;
+
+        const records = new Map([['t-jump', { root: targetCard, groupId: 't-jump', phase: 'working' }]]);
+        const anchors = createTimelineAnchors({ messagesDiv: messages, liveCardRecords: records });
+        const pageLookups = [];
+        const historyPager = {
+            pageOf: (id) => { pageLookups.push(id); return id === 'card:top' ? 'replay:top-card' : null; },
+            revisit: async () => ({ status: 'applied' }),
+            around: async () => ({ status: 'applied' }),
+        };
+        const reading = { stick: false, nearBottom: () => false, cancel() {}, scroll() {}, claim: () => () => true };
+        shade = createRoomWork({
+            page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true }, reading, historyPager,
+            captureVisibleTimelineAnchor: anchors.captureVisibleTimelineAnchor,
+            restoreVisibleTimelineAnchor: anchors.restoreVisibleTimelineAnchor,
+            works: () => workState([running('t-jump', { name: 'Target work' })], room('working')),
+            liveCardRecords: records, pendingSubmissions: new Map(),
+        });
+
+        assert.equal(anchors.captureVisibleTimelineAnchor().node, tempQuestion, 'in-place capture still steps to the visible neighbour');
+        const serialized = anchors.serializeTimelineAnchor();
+        assert.equal(serialized.historyId, 'card:top');
+        assert.equal(serialized.offset, -300);
+
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const back = page.children.find((el) => el.classList.contains('rw-back'));
+        const live = page.children.find((el) => el.getAttribute('role') === 'status');
+
+        trigger.click();
+        list.children[0].querySelector('.rw-main').click();
+        assert.equal(scrollTop, 3780);
+        assert.equal(back.hidden, false);
+        assert.deepEqual(pageLookups, ['card:top']);
+
+        tempQuestion.remove();
+        back.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.equal(back.hidden, true);
+        assert.equal(live.textContent, 'Returned to where you were reading.');
+        assert.equal(scrollTop, 2000);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
+test('Back to reading restores the +74 px neighbour message when a straddling temporary card above it disappears', async () => {
+    for (const viaQuestion of [false, true]) {
+        const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+        let shade;
+        try {
+            const node = (cls, parent) => { const el = document.createElement('div'); el.className = cls; parent.appendChild(el); return el; };
+            const page = node('page', mount);
+            const header = node('chat-page-header', page);
+            const titleRow = node('app-page-title-row', node('app-page-title-block', header));
+            const badge = node('status-badge thinking', node('app-page-actions ui-chrome-group', header));
+            const messages = node('chat-messages', page);
+            messages.offsetHeight = 750;
+            messages.clientHeight = 750;
+            let scrollTop = 2000;
+            Object.defineProperty(messages, 'scrollTop', {
+                get: () => scrollTop,
+                set: (value) => { scrollTop = Math.max(0, Math.min(4250, value)); },
+            });
+            messages.getBoundingClientRect = () => ({ top: 0, bottom: 750, left: 0, right: 600, width: 600, height: 750 });
+
+            const placeRow = (el, state) => {
+                el.getBoundingClientRect = () => ({ top: state.y - scrollTop, bottom: state.y - scrollTop + state.h, left: 0, right: 600, width: 600, height: state.h });
+                el.getClientRects = () => [el.getBoundingClientRect()];
+                el.closest = (selector) => {
+                    if (selector === '[data-history-id]' && el.dataset.historyId) return el;
+                    if (selector === '.chat-live-card' && el.classList.contains('chat-live-card')) return el;
+                    return null;
+                };
+                return el;
+            };
+
+            const tempPos = { y: 1760, h: 300 }; // [-240..+60], tail visible at top
+            const msgPos = { y: 2074, h: 120 }; // +74 px
+            const targetPos = { y: 3800, h: 200 };
+            const tempCard = placeRow(node('chat-live-card', messages), tempPos);
+            tempCard.dataset.taskId = 't-temp';
+            const message = placeRow(node('chat-bubble', messages), msgPos);
+            message.dataset.historyId = 'chat:42';
+            const targetCard = placeRow(node('chat-live-card', messages), targetPos);
+            targetCard.dataset.taskId = 't-jump';
+            messages.scrollHeight = 5000;
+
+            const records = new Map([
+                ['t-temp', { root: tempCard, groupId: 't-temp', phase: 'working', items: [] }],
+                ['t-jump', { root: targetCard, groupId: 't-jump', phase: 'working', items: [] }],
+            ]);
+            const anchors = createTimelineAnchors({ messagesDiv: messages, liveCardRecords: records });
+            const reading = { stick: false, nearBottom: () => false, cancel() {}, scroll() {}, claim: () => () => true };
+            shade = createRoomWork({
+                page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true }, reading,
+                revealQuestion: async () => { scrollTop = 3600; return true; },
+                captureVisibleTimelineAnchor: anchors.captureVisibleTimelineAnchor,
+                restoreVisibleTimelineAnchor: anchors.restoreVisibleTimelineAnchor,
+                works: () => workState([viaQuestion ? asking('t-jump', 'q-1') : running('t-jump', { name: 'Target work' })], room('working')),
+                liveCardRecords: records, pendingSubmissions: new Map(),
+            });
+
+            const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+            const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+            const back = page.children.find((el) => el.classList.contains('rw-back'));
+
+            trigger.click();
+            if (viaQuestion) list.children[0].querySelector('.rw-verb').children[0].click();
+            else list.children[0].querySelector('.rw-main').click();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            assert.equal(back.hidden, false);
+
+            // Temporary card vanishes while away; message shifts up in flow, still loaded in the feed.
+            tempCard.remove();
+            records.delete('t-temp');
+            msgPos.y = 1760;
+
+            back.click();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            assert.equal(back.hidden, true, `Back succeeds (${viaQuestion ? 'View question' : 'work'}) instead of reporting unloaded`);
+            assert.equal(message.getBoundingClientRect().top, 74, 'neighbour message is restored to its original +74 px');
+        } finally { shade?.destroy(); restoreDom(prior); }
+    }
+});
+
+test('navigating from the bottom edge through View question and Back keeps auto-follow for the next 160 px reply', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade;
+    try {
+        const node = (cls, parent) => { const el = document.createElement('div'); el.className = cls; parent.appendChild(el); return el; };
+        const page = node('page', mount);
+        const header = node('chat-page-header', page);
+        const titleRow = node('app-page-title-row', node('app-page-title-block', header));
+        const badge = node('status-badge', node('app-page-actions ui-chrome-group', header));
+        const messages = node('chat-messages', page);
+        messages.offsetHeight = 400;
+        let scrollHeight = 2000, scrollTop = 1600;
+        Object.defineProperty(messages, 'clientHeight', { get: () => 400 });
+        Object.defineProperty(messages, 'scrollHeight', { get: () => scrollHeight, set: (v) => { scrollHeight = v; } });
+        Object.defineProperty(messages, 'scrollTop', {
+            get: () => scrollTop,
+            set: (value) => { scrollTop = Math.max(0, Math.min(scrollHeight - 400, value)); },
+        });
+        messages.getBoundingClientRect = () => ({ top: 0, bottom: 400, left: 0, right: 600, width: 600, height: 400 });
+        const bottomRow = node('chat-bubble', messages);
+        bottomRow.dataset.historyId = 'chat:99';
+        bottomRow.getBoundingClientRect = () => ({ top: 1900 - scrollTop, bottom: 2000 - scrollTop, left: 0, right: 600, width: 600, height: 100 });
+        bottomRow.getClientRects = () => [bottomRow.getBoundingClientRect()];
+        scrollHeight = 2000;
+
+        const anchors = createTimelineAnchors({ messagesDiv: messages, liveCardRecords: new Map() });
+        const reading = {
+            stick: true,
+            nearBottom: () => messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 48,
+            cancel() {},
+            scroll() {},
+            claim: () => () => true,
+        };
+        shade = createRoomWork({
+            page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true }, reading,
+            historyPager: { pageOf: () => 'replay:present', revisit: async () => ({ status: 'applied' }), around: async () => ({ status: 'applied' }) },
+            showLatest: async () => { messages.scrollTop = messages.scrollHeight; reading.stick = true; },
+            revealQuestion: async () => { reading.stick = false; messages.scrollTop = 400; return true; },
+            captureVisibleTimelineAnchor: anchors.captureVisibleTimelineAnchor,
+            restoreVisibleTimelineAnchor: anchors.restoreVisibleTimelineAnchor,
+            works: () => workState([asking('t-ask', 'q-present')], room('waiting')),
+            liveCardRecords: new Map(), pendingSubmissions: new Map(),
+        });
+
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const back = page.children.find((el) => el.classList.contains('rw-back'));
+
+        trigger.click();
+        list.children[0].querySelector('.rw-verb').children[0].click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(reading.stick, false);
+        assert.equal(messages.scrollTop, 400);
+
+        back.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(reading.stick, true, 'Back from View question restores present auto-follow');
+        // Next 160 px reply arrives while following.
+        messages.scrollHeight += 160;
+        if (reading.stick) messages.scrollTop = messages.scrollHeight;
+        assert.equal(messages.scrollHeight - messages.scrollTop - messages.clientHeight, 0, 'zero gap after 160 px reply');
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
+test('a queued row\'s details say behind which work it stands only while it is listed; an ended row never does', () => {
+    // Review round 1 (B2): a row that left the list keeps its place and old facts; its details must not still claim
+    // that it stands behind another work.
+    const queued = SERVER_CASES.queued_behind_folder.works[1];
+    const row = { kind: 'task', confirmed: true, settled: false, view: {}, work: queued };
+    const behind = (lines) => lines.filter(([label]) => label === 'Behind').map(([, words]) => words);
+    assert.deepEqual(behind(rowDetailLines(row)), ['qh keeps the folder /work/shared']);
+    assert.deepEqual(behind(rowDetailLines({ ...row, settled: true })), [], 'an ended row');
+    assert.deepEqual(behind(rowDetailLines({ ...row, confirmed: false })), [], 'an unconfirmed row');
 });

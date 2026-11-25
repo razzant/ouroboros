@@ -3,6 +3,10 @@ declared deliverable). Flag-only: status stays pass; the structural fact reaches
 the verification summary a result review reads."""
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.verify import _probe_artifact_lifecycle
 
@@ -13,6 +17,208 @@ def _ctx(tmp_path):
     drive = tmp_path / "drive"
     drive.mkdir()
     return ToolContext(repo_dir=work, drive_root=drive, task_id="t"), work
+
+
+def test_observation_reconciles_on_all_paths_before_the_review_display_limit(tmp_path):
+    from ouroboros.outcomes import read_verification_receipts
+    from ouroboros.review_evidence import _accept_verification_summary
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, work = _ctx(tmp_path)
+    prefix = [f"part-{index:02}.txt" for index in range(20)]
+    paths = [*prefix, "tail.txt"]
+    for name in [*prefix, "sibling.txt"]:
+        (work / name).touch()
+
+    def observe(names):
+        return _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=names)
+
+    assert "FAIL" in observe(paths)
+    assert "OBSERVED" in observe(prefix)
+    assert "OBSERVED" in observe([*prefix, "sibling.txt"])
+    receipts = read_verification_receipts(ctx.drive_root, ctx.task_id)
+    assert receipts[0]["paths"] == paths
+    summary = _accept_verification_summary(receipts)
+    assert summary["unreconciled_red_count"] == 1
+    red, sibling = summary["unreconciled_red_identity"], summary["latest_identity"]
+    assert red["paths"] == sibling["paths"] == prefix
+    assert red["paths_omitted"] == sibling["paths_omitted"] == 1
+    assert red["paths_identity_sha256"] != sibling["paths_identity_sha256"]
+
+    (work / "tail.txt").touch()
+    assert "OBSERVED" in observe([*reversed(paths), prefix[0]])
+    summary = _accept_verification_summary(read_verification_receipts(ctx.drive_root, ctx.task_id))
+    assert summary["unreconciled_red_count"] == 0
+    assert summary["latest_identity"]["paths_identity_sha256"] == red["paths_identity_sha256"]
+
+
+def test_observation_prose_delivers_byte_names_and_the_receipt_keeps_them_exact(tmp_path):
+    """An artifact name whose POSIX bytes are not UTF-8 enters this call's result text as an exact JSON string
+    literal, so the text survives every UTF-8 boundary, while the receipt keeps the declared name itself."""
+    from ouroboros.outcomes import read_verification_receipts
+    from ouroboros.tools.verify import _observe_artifacts, _verify_and_record
+
+    ctx, work = _ctx(tmp_path)
+    byte_name = "report_\udcff.txt"  # POSIX `surrogateescape` of the name byte FF, spelled out for every platform
+    created = sys.platform == "linux"  # the one platform relied on to store such a name; elsewhere it is missing
+    if created:
+        (work / byte_name).touch()
+
+    text = _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=[byte_name])
+    text.encode("utf-8")
+    assert ("OBSERVED" if created else "FAIL") in text and '"report_\\udcff.txt"' in text
+    [receipt] = read_verification_receipts(ctx.drive_root, ctx.task_id)
+    assert receipt["paths"] == [byte_name] and receipt["status"] == ("observed" if created else "fail")
+
+    # Ordinary Unicode and a typed backslash keep their own spelling, unquoted.
+    for name in ("отчёт λ.md", "literal \\udcff.md"):
+        assert f"missing: {name} (resolved as " in _observe_artifacts(ctx, [name])[1]
+    # A policy refusal is prose too; this control-plane path is absolute on every platform.
+    status, detail = _observe_artifacts(ctx, [str(ctx.drive_root / "state" / byte_name)])
+    detail.encode("utf-8")
+    assert status == "refused_out_of_scope" and "report_\\udcff.txt" in detail
+
+
+@pytest.mark.parametrize("spaced", [
+    " report-雪.txt",
+    pytest.param("report-雪.txt ", marks=pytest.mark.skipif(sys.platform == "win32", reason="no trailing-space names")),
+], ids=["leading-space", "trailing-space"])
+def test_observation_looks_up_and_records_the_exact_spelling(tmp_path, spaced):
+    """An edge space is a filename byte: lookup, prose and the persisted receipt all attest the exact
+    declared spelling, whitespace included. No trimmed sibling ever stands in for the name asked for."""
+    from ouroboros.outcomes import read_verification_receipts
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, work = _ctx(tmp_path)
+    plain = spaced.strip()
+
+    def observe(name):
+        text = _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=[name])
+        receipt = read_verification_receipts(ctx.drive_root, ctx.task_id)[-1]
+        return text, receipt["status"], receipt["paths"]
+
+    # Neither spelling exists: the missing path is the one that was asked for.
+    assert observe(spaced)[1:] == ("fail", [spaced])
+
+    # Only the trimmed sibling exists: it satisfies nothing. The receipt keeps naming the requested
+    # spelling — the attestation is exactly what was asked for, edge whitespace included.
+    (work / plain).touch()
+    text, status, paths = observe(spaced)
+    assert (status, paths) == ("fail", [spaced]) and f"missing: {spaced} (resolved as " in text
+    assert observe(plain)[1:] == ("observed", [plain])
+
+    # Both siblings exist: each request selects its own file, never the other's.
+    (work / spaced).touch()
+    assert observe(spaced)[1:] == ("observed", [spaced])
+    assert observe(plain)[1:] == ("observed", [plain])
+    (work / plain).unlink()  # only the padded name remains: the plain request fails, it does not fall back
+    assert observe(spaced)[1:] == ("observed", [spaced])
+    text, status, paths = observe(plain)
+    assert (status, paths) == ("fail", [plain]) and f"missing: {plain} (resolved as " in text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no spaces-only names")
+def test_observation_keeps_a_spaces_only_name_as_one_exact_name(tmp_path):
+    """Spaces are filename bytes: a file named by them is observed and recorded exactly beside an ordinary file, in the
+    receipt and its reviewer identity. Absent, that exact name is the missing one; the empty string alone names nothing."""
+    from ouroboros.outcomes import read_verification_receipts
+    from ouroboros.review_evidence import _accept_verification_summary
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, work = _ctx(tmp_path)
+    blank = "   "
+    (work / blank).touch()
+    (work / "plain.txt").touch()
+
+    def observe(names):
+        text = _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=names)
+        return text, read_verification_receipts(ctx.drive_root, ctx.task_id)
+
+    text, receipts = observe([blank, "plain.txt", ""])
+    assert (receipts[-1]["status"], receipts[-1]["paths"]) == ("observed", [blank, "plain.txt"])
+    assert "observed 2 artifact(s)" in text
+    assert _accept_verification_summary(receipts)["latest_identity"]["paths"] == [blank, "plain.txt"]
+
+    (work / blank).unlink()
+    text, receipts = observe([blank, "plain.txt"])
+    assert (receipts[-1]["status"], receipts[-1]["paths"]) == ("fail", [blank, "plain.txt"])
+    assert f"missing: {blank} (resolved as " in text
+
+    assert observe([""])[1][-1]["paths"] == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a leading space before a drive letter is no absolute path")
+def test_padded_spelling_never_reaches_a_file_outside_the_observable_roots(tmp_path):
+    """The leading space belongs to the name: the padded spelling resolves as its own in-workspace path
+    and nothing else stands in for it — no existence oracle through a leading space."""
+    from ouroboros.outcomes import read_verification_receipts
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, _work = _ctx(tmp_path)
+    secret = ctx.drive_root / "state" / "state.json"
+    secret.parent.mkdir(parents=True)
+    padded = f" {secret}"
+
+    for present in (False, True):  # the same answer whether or not the refused file exists
+        if present:
+            secret.write_text("{}", encoding="utf-8")
+        assert "OBSERVED" not in _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=[padded])
+        receipt = read_verification_receipts(ctx.drive_root, ctx.task_id)[-1]
+        assert (receipt["status"], receipt["paths"]) == ("fail", [padded])
+
+
+def test_bytes_equal_operands_are_the_exact_declared_names(tmp_path, monkeypatch):
+    """bytes_equal gets the two declared operands exactly, on both surfaces: a name's leading space is
+    part of it, so a trimmed sibling is never the file that gets compared (the receipt attests the name
+    that was asked for)."""
+    import ouroboros.workspace_executor as workspace_executor
+    from ouroboros.tools.verify import _compare_files_bytes_equal
+
+    ctx, work = _ctx(tmp_path)
+    a_name, b_name = " golden.bin", " mirror.bin"
+    (work / a_name).write_bytes(b"payload")
+    (work / b_name).write_bytes(b"payload")
+
+    equal, detail = _compare_files_bytes_equal(ctx, [a_name, b_name], work, use_executor=False)
+    assert equal is True and a_name in detail and b_name in detail
+
+    seen: list = []
+
+    class _Res:
+        def __init__(self, rc):
+            self.returncode = rc
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_execute(_ctx, cmd, _cwd, _timeout, **_kwargs):
+        seen.append(cmd)
+        return _Res(0 if cmd[-2:] == [a_name, b_name] else 2)
+
+    monkeypatch.setattr(workspace_executor, "execute", fake_execute)
+    equal2, detail2 = _compare_files_bytes_equal(ctx, [a_name, b_name], work, use_executor=True)
+    assert seen == [["cmp", "--", a_name, b_name]] and equal2 is True and "(executor cmp)" in detail2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no spaces-only names")
+def test_bytes_equal_receipt_uses_both_exact_names(tmp_path):
+    from ouroboros.outcomes import read_verification_receipts
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, work = _ctx(tmp_path)
+    names = ["   ", " mirror-雪.bin "]
+    for name in names:
+        (work / name).write_bytes(b"payload")
+
+    text = _verify_and_record(ctx, contract_kind="explicit_command",
+                              check=[sys.executable, "-c", "print('ready')"],
+                              expected_match="bytes_equal", artifact_paths=[*names, ""])
+    assert "PASS" in text and f"{names[0]} == {names[1]} (7 bytes)" in text
+    text.encode("utf-8")
+    [receipt] = read_verification_receipts(ctx.drive_root, ctx.task_id)
+    assert (receipt["status"], receipt["matched"]) == ("pass", True)
+    assert receipt["artifact_lifecycle"] == [
+        {"path": name, "exists_after": True, "check_surface": "host"} for name in names]
+    assert "artifacts_missing_after" not in receipt
 
 
 def test_probe_flags_deleted_artifact_host(tmp_path):

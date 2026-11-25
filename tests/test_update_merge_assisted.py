@@ -1597,3 +1597,50 @@ def test_boot_rematerialize_rescues_dirty_work_and_points_resolver_at_it(tmp_pat
     assert update_merge.read_update_tx()["progress_rescue"]["path"] == str(rescue_dirs[0])
     assert str(rescue_dirs[0]) in captured[-1]["text"]
     assert "was rescued to" in captured[-1]["text"]
+
+
+def test_staged_marker_batch_keeps_binary_and_unusual_filename_bytes(tmp_path, monkeypatch):
+    import os
+    import stat
+    import sys
+    from ouroboros.tools import shell_process
+
+    repo, head = _init_repo(tmp_path)
+    _point_at(monkeypatch, tmp_path, repo, head)
+    paths = ["space name.txt", "café.txt"]
+    if os.name != "nt":
+        paths += ["tab\tname.txt", "line\nname.txt"]
+    if os.name != "nt" and sys.platform != "darwin":  # APFS refuses a name that is not UTF-8
+        paths.append(os.fsdecode(b"raw-\xff.txt"))
+    for name in paths:
+        (repo / name).write_bytes(b"<<<<<<< ours\n=======\n>>>>>>> theirs\n")
+    (repo / "binary.bin").write_bytes(b"\0<<<<<<< ours\n")
+    _git(repo, "add", "-A")
+    real_start, sources = shell_process.contained_popen, []
+
+    def start(factory, cmd, **kwargs):
+        if cmd[-2:] == ["cat-file", "--batch"]:
+            source = kwargs["stdin"]
+            sources.append(source)
+            assert stat.S_ISREG(os.fstat(source.fileno()).st_mode) and source.tell() == 0
+            request = source.read()
+            for name in paths:
+                if "\n" not in name:
+                    assert b":" + os.fsencode(name) + b"\n" in request
+            source.seek(0)
+        return real_start(factory, cmd, **kwargs)
+
+    monkeypatch.setattr(shell_process, "contained_popen", start)
+    ok, message = update_merge.managed_assisted_marker_check()
+    assert not ok and "conflict markers" in message
+    for name in paths:
+        assert name in message
+        (repo / name).write_bytes(b"resolved\n")
+    _git(repo, "add", "-A")
+    assert update_merge.managed_assisted_marker_check()[0]
+    assert len(sources) == 2 and all(source.closed for source in sources)
+
+    monkeypatch.setattr(git_ops.tempfile, "TemporaryFile",
+                        lambda **kw: (_ for _ in ()).throw(OSError("no input storage")))
+    ok, message = update_merge.managed_assisted_marker_check()
+    assert not ok and "could not inspect staged file" in message

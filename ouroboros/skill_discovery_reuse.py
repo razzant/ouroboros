@@ -33,6 +33,7 @@ written, and no process shares another's answers.
 """
 from __future__ import annotations
 
+import contextvars
 import copy
 import os
 import pathlib
@@ -114,11 +115,51 @@ def _kept(memo: "OrderedDict[Tuple[Any, ...], Any]", key: Tuple[Any, ...], held:
         memo.popitem(last=False)
 
 
+_WALK_GAPS: "contextvars.ContextVar[Optional[Dict[str, str]]]" = contextvars.ContextVar("skill_walk_gaps", default=None)
+
+
+class Walked(tuple):
+    """A walk's location inventory, and ``gaps``: each folder it could not read (a listing or a manifest check),
+    as walked, with the error's name. Only complete inventories are cached."""
+
+    gaps: Tuple[str, ...] = ()
+
+
+class WalkedSkills(list):
+    """The skills discovered from one walk, with that walk's ``gaps``."""
+
+    def __init__(self, skills: Iterable[Any] = (), gaps: Iterable[str] = ()) -> None:
+        super().__init__(skills)
+        self.gaps: Tuple[str, ...] = tuple(gaps)
+
+
+def note_unreadable(path: Any, error: BaseException) -> bool:
+    """For the walk in progress, a folder it could not read: True when noted. Outside such a walk (a strict
+    reader's own scan) nothing is noted and the caller's error stands."""
+    sink = _WALK_GAPS.get()
+    if sink is None:
+        return False
+    sink.setdefault(str(path), type(error).__name__)
+    return True
+
+
+def _walked(walk: Callable[[], Any]) -> Walked:
+    sink: Dict[str, str] = {}
+    token = _WALK_GAPS.set(sink)
+    try:
+        found = Walked(walk())
+    finally:
+        _WALK_GAPS.reset(token)
+    found.gaps = tuple(f"{path} ({error})" for path, error in sorted(sink.items()))
+    return found
+
+
 def reused_inventory(key: Tuple[Any, ...], roots: Iterable[Any], walk: Callable[[], Any]) -> Any:
-    """``walk()``, the location inventory of ``roots``, or the last one of ``key`` while its directories hold."""
+    """``walk()``, the location inventory of ``roots``, or the last one of ``key`` while its directories hold; either
+    way a ``Walked`` with that walk's gaps."""
     roots = [pathlib.Path(root) for root in roots]
     if not all(keeps(root) for root in roots):  # Windows or a filesystem not called local: read, keep nothing
-        return walk()
+        return _walked(walk)
 
     def identity() -> Dict[str, Any]:
         keys: Dict[str, Any] = {}
@@ -130,9 +171,9 @@ def reused_inventory(key: Tuple[Any, ...], roots: Iterable[Any], walk: Callable[
     if held is not None and identity() == held[0]:
         return held[1]  # a tuple of frozen candidates: shared as it is
     started = time.time_ns()
-    inventory = walk()
+    inventory = _walked(walk)
     keys = identity()
-    if _trusted(keys, started):
+    if _trusted(keys, started) and not inventory.gaps:  # a walk that met an unreadable folder is read again next time
         _kept(_INVENTORIES, key, (keys, inventory))
     return inventory
 

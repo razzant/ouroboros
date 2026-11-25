@@ -21,7 +21,7 @@ import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
 import { DOTS, durationLabel, formatBytes, isSize, largestPartsHtml, number, plural, signedBytes as signed, whenLabel } from './storage_format.js';
 import { DELETED_ROWS, deletedProjectsHtml } from './storage_deleted.js';
 import { mountTabSettings } from './dashboard.js';
-import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, holdsPhrase, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
+import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, holdsPhrase, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, payloadConfirmCopy, payloadFacts, payloadOf, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
 
 export { durationLabel, formatBytes, whenLabel };
 
@@ -48,7 +48,7 @@ export const STORAGE_GROUPS = [
 const PLACE_WORDS = {
     model_calls: { label: 'Model call records', why: 'The exact prompts and answers behind every decision. Kept; this screen cannot delete them.', parts: true },
     engine: { label: 'Agent engine', why: 'Kept by the engine. Not a cache.', split: true },
-    task_results: { label: 'Task results and files', why: 'Kept with each task.' },
+    task_results: { label: 'Task results and files', why: 'Kept with each task. The states a work saved to continue from are removed {days} days after the work finishes or moves on to a newer one, unless you asked Ouroboros to keep that work.' },
     archives: { label: 'Archives', why: 'Kept. Rotated logs and backups.' },
     memory_skills: { label: 'Memory, notes and skills', why: 'Kept until you delete that project or skill.' },
     project_folders: { label: 'Project folders', why: 'Your project files. Not deleted here.' },
@@ -71,6 +71,7 @@ const words = (place) => PLACE_WORDS[place?.id] || { label: String(place?.id || 
 // on every answer): one plain line; unknown, unavailable and unsupported are said as such, never as zero.
 const JOB_WORDS = {
     runtime_retirement: 'Retirement',
+    saved_states: 'Saved states for exact return',
     custody_trash: 'Deleting moved folders',
     evidence_packing: 'Evidence packing',
     record_compression: 'Compression',
@@ -477,10 +478,11 @@ export function initStorage({ state, mount } = {}) {
     // is never sent again; `confirming`
     // while no read has answered since. `outdated`: 'refused' or 'read' when the server no longer holds this plan.
     // `notice`: what happened to the owner's attempt under a plan the server has since replaced (attemptSentences).
-    // `manualOpen`: the copies-by-hand screen; `manualChosen`: the copy ids the owner chose there, none to begin with.
+    // `manualOpen`: a by-hand screen (`manualKind` 'copies', or 'payload': proposals of stored files, `payloadChosen`);
+    // `manualChosen`: the copy ids the owner chose there, none to begin with.
     const freshFlow = (plan = null) => ({ plan, chosen: new Set(), checked: new Set(), dismissed: false, saved: false, sending: false, outdated: '',
         postUnknown: false, confirming: false, notice: '', poolShown: LIST_PAGE, pool: EMPTY_LIST(), excluded: EMPTY_LIST(), outcomes: EMPTY_LIST(),
-        manual: EMPTY_LIST(), manualOpen: false, manualChosen: new Set(), manualShown: MANUAL_ROWS });
+        manual: EMPTY_LIST(), manualOpen: false, manualKind: 'copies', manualChosen: new Set(), payloadChosen: new Set(), manualShown: MANUAL_ROWS });
     let ui = freshFlow();
     // The measure node is never replaced, and a running count marks it aria-disabled rather than disabled,
     // so keyboard focus stays on it through a count and every repaint.
@@ -650,7 +652,7 @@ export function initStorage({ state, mount } = {}) {
         paint();
         const restart = () => {
             Object.assign(list, { items: [], ids: new Set(), total: null, version: '', next: 0, complete: false, restarts: list.restarts + 1 });
-            if (view === 'manual') ui.manualChosen = new Set();  // a list read again is chosen from again
+            if (view === 'manual') Object.assign(ui, { manualChosen: new Set(), payloadChosen: new Set() });  // read again, chosen again
         };
         try {
             while (!list.complete && list.items.length < list.want) {
@@ -737,7 +739,7 @@ export function initStorage({ state, mount } = {}) {
         // A failed request resumes where it stopped; an answer that could not be trusted starts the list over.
         const untrusted = ['incomplete', 'moved', 'changing'].includes(ui[view].error);
         Object.assign(ui[view], { error: '', restarts: 0 }, untrusted ? { items: [], ids: new Set(), total: null, version: '', next: 0, complete: false } : {});
-        if (view === 'manual' && untrusted) ui.manualChosen = new Set();
+        if (view === 'manual' && untrusted) Object.assign(ui, { manualChosen: new Set(), payloadChosen: new Set() });
         paint();
         syncLists();
     }
@@ -843,14 +845,14 @@ export function initStorage({ state, mount } = {}) {
     /** The copies chosen by hand: the shared confirm dialog states the whole copy's loss, and only its confirmation sends
      *  one POST of the chosen ids with the acknowledgement. Nothing is sent from a list not read whole, for an id not
      *  chosen, or from a refused plan; the acknowledgement alone never stands in for a choice. */
-    async function discardChosen() {
+    async function discardChosen(payload = false) {  // proposals of stored files go the same way, from their own choice
         const free = freeOf(response);
         const sendable = () => trayState(freeOf(response), ui.dismissed) === 'ready' && !pending && !ui.outdated && !ui.postUnknown
             && ui.manualOpen && ui.manual.complete && !ui.manual.error;
-        const facts = manualFacts(ui.manual, ui.manualChosen);
-        const ids = facts.rows.map((item) => item.id);
+        const chosen = payload ? ui.payloadChosen : ui.manualChosen;
+        const ids = (payload ? payloadFacts : manualFacts)(ui.manual, chosen).rows.map((item) => item.id);
         if (!sendable() || free.plan !== ui.plan || !ids.length) return;
-        const confirmed = await openConfirmDialog(manualConfirmCopy(ui.manual, ui.manualChosen));
+        const confirmed = await openConfirmDialog((payload ? payloadConfirmCopy : manualConfirmCopy)(ui.manual, chosen));
         // The dialog was open while the server could answer: the plan must still be this one and still sendable.
         if (!confirmed || disposed || freeOf(response).plan !== free.plan || !sendable()) return;
         await postRemoval(() => apiClient.freeStorageManual(free.plan, ids, true), 'Nothing was removed.', 'Discard');
@@ -883,7 +885,7 @@ export function initStorage({ state, mount } = {}) {
         else if (has('data-free-go')) void removeChosen();
         else if (has('data-free-stop')) void stopFree();
         else if (has('data-free-saved-go')) void freeSavedGroups();
-        else if (has('data-free-manual-go')) void discardChosen();
+        else if (has('data-free-manual-go') || has('data-free-payload-go')) void discardChosen(has('data-free-payload-go'));
         else if (has('data-free-retry-pool')) retryList('pool');
         else if (has('data-free-retry-excluded')) retryList('excluded');
         else if (has('data-free-retry-manual')) retryList('manual');
@@ -894,17 +896,18 @@ export function initStorage({ state, mount } = {}) {
             if (held() && !has('data-free-more-picks') && !has('data-free-more-manual')) return;
             if (has('data-free-saved')) ui.saved = true;
             else if (has('data-free-saved-back')) ui.saved = false;
-            else if (has('data-free-manual-open')) ui.manualOpen = true;
+            else if (has('data-free-manual-open') || has('data-free-payload-open')) Object.assign(ui, { manualOpen: true, manualKind: has('data-free-payload-open') ? 'payload' : 'copies' });
             else if (has('data-free-manual-back')) ui.manualOpen = false;
-            else if (has('data-free-manual-none')) ui.manualChosen = new Set();
+            else if (has('data-free-manual-none')) ui[ui.manualKind === 'payload' ? 'payloadChosen' : 'manualChosen'] = new Set();
             else if (has('data-free-more-manual')) ui.manualShown += MANUAL_ROWS;
             else if (has('data-free-all')) ui.chosen = new Set(ui.pool.items.map((item) => item.id));
             else if (has('data-free-none')) ui.chosen = new Set();
             else if (has('data-free-more-picks')) ui.poolShown += LIST_PAGE;
             else return;
             paint();
-            if (has('data-free-manual-open')) syncLists();  // its list starts being read, whole
-            if (has('data-free-saved') || has('data-free-saved-back') || has('data-free-manual-open') || has('data-free-manual-back')) {
+            const opened = has('data-free-manual-open') || has('data-free-payload-open');
+            if (opened) syncLists();  // its list starts being read, whole
+            if (has('data-free-saved') || has('data-free-saved-back') || opened || has('data-free-manual-back')) {
                 refocusTray();
                 revealFlow();
             }
@@ -927,8 +930,9 @@ export function initStorage({ state, mount } = {}) {
                 paint();
                 return;
             }
-            if (box.checked) ui.manualChosen.add(copy.id);
-            else ui.manualChosen.delete(copy.id);
+            const chosen = payloadOf(copy) ? ui.payloadChosen : ui.manualChosen;  // a proposal is never a copy's choice
+            if (box.checked) chosen.add(copy.id);
+            else chosen.delete(copy.id);
         } else {
             const item = ui.pool.items[Number(box.dataset.freePick)];
             if (!item) return;

@@ -1,42 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { afterUpdateRows, bindPreflightDescription, preflightDescription, preflightEvidenceRows, updateOverReview } from '../modules/update_status.js';
-import { factValueHtml, initUpdates, updateLetterView } from '../modules/updates.js';
+import { afterUpdateRows, applyTitle, preflightDescription, preflightEvidenceRows, updateOverReview, updateTarget } from '../modules/update_status.js';
+import { factValueHtml, initUpdates } from '../modules/updates.js';
 import { setup } from './dashboard_dom_fixture.js';
 
 const plan = { base_sha: 'aaaa', target_sha: 'bbbb' };
 const letter = { key: plan, text: '## Exact range\n\n- one change', description_current: true, state: 'ready', relation: 'pending' };
 
-test('a new preflight removes the older description and preserves the exact one', () => {
-    const status = { available: true, managed: true, check_ok: true, letter };
-    const matching = bindPreflightDescription(status, { merge_plan: plan, letter });
-    assert.match(updateLetterView(matching).markdown, /Exact range/);
-    const moved = bindPreflightDescription(status, { merge_plan: { ...plan, target_sha: 'cccc' }, letter });
-    assert.equal(moved.letter, null);
-    assert.equal(updateLetterView(moved).markdown, '');
-    assert.equal(preflightDescription({ merge_plan: moved.preflight_range, letter }), '');
-    // The exact range's text reaches the dialog as Markdown to render, never flattened into the body.
+test('the confirmation reads only prose saved for both exact preflight pins', () => {
     assert.equal(preflightDescription({ merge_plan: plan, letter }), letter.text);
+    for (const other of [{ ...plan, base_sha: 'cccc' }, { ...plan, target_sha: 'cccc' }, {}]) {
+        assert.equal(preflightDescription({ merge_plan: other, letter }), '');
+    }
     assert.equal(preflightDescription({ merge_plan: plan, letter: { ...letter, description_current: false } }), '');
-});
-
-test('the preflight pins the prose only: the live request keeps its task followed', () => {
-    // Write was pressed, then Apply opened before anything was saved: the plan has no text to show,
-    // yet the request's task is still the one whose save and end the panel must hear.
-    const request = { task_id: 'd3adb33f', mode: 'write', key: plan, status: 'running', saved: false };
-    const writing = { available: true, managed: true, check_ok: true, running_sha: 'aaaa',
-        letter: { state: 'none', text: '', checked_key: plan, request } };
-    const pinned = bindPreflightDescription(writing, { merge_plan: plan, letter: { ...letter, key: {}, text: '' } });
-    assert.equal(pinned.letter.request.task_id, 'd3adb33f');
-    assert.equal(updateLetterView(pinned, 'preflighting').note, 'Ouroboros is writing the description (task d3adb33f).');
-    // A refresh while the dialog is open binds the fresh status: its request, never the old pin's.
-    const saved = { ...writing, letter: { ...letter, request: { ...request, status: 'completed', saved: true } } };
-    const refreshed = bindPreflightDescription(saved, { merge_plan: plan, letter: pinned.letter });
-    assert.deepEqual(refreshed.letter.request, saved.letter.request);
-    assert.equal(updateLetterView(refreshed, 'preflighting').markdown, '', 'the dialog\'s pin still decides the prose');
-    // A matching pin carries the live request beside its own text; no request, no letter.
-    assert.equal(bindPreflightDescription(saved, { merge_plan: plan, letter }).letter.request.saved, true);
-    assert.equal(bindPreflightDescription({}, { merge_plan: { ...plan, target_sha: 'cccc' }, letter }).letter, null);
+    assert.equal(preflightDescription({ letter: { ...letter, key: {} } }), '');
 });
 
 const rowsText = (rows) => rows.map((row) => `${row.label}: ${row.value}`).join('\n');
@@ -63,8 +40,9 @@ test('confirmation details name failed, absent and green evidence without conver
     qualification.landed_over_review = [{ sha: 'cccc1111dddd', subject: 'own change', reason: 'critical_findings', outcome },
         { sha: 'bbbb', subject: '#123', reason: 'review_quorum', outcome: 'no review verdict: review quorum' }];
     const own = preflightEvidenceRows({ merge_plan: plan, letter, qualification });
-    assert.deepEqual(own[0], { label: 'cccc1111', value: `own change\nOuroboros made it on this computer; ${outcome}` });
-    assert.equal(own[1].value, '#123\nOuroboros made it on this computer; no review verdict: review quorum.');
+    assert.deepEqual(own[0], { label: 'Commits', value: 'aaaa → bbbb' }, 'the exact range leads its Details');
+    assert.deepEqual(own[1], { label: 'cccc1111', value: `own change\nOuroboros made it on this computer; ${outcome}` });
+    assert.equal(own[2].value, '#123\nOuroboros made it on this computer; no review verdict: review quorum.');
     assert.doesNotMatch(rowsText(own), /Not read for this range/);
     const over = updateOverReview(qualification);
     assert.equal(over.line, 'Went in over a review FAIL or no verdict: 2 commits Ouroboros made on this computer.');
@@ -96,9 +74,23 @@ test('confirmation details name failed, absent and green evidence without conver
     assert.doesNotMatch(green, /also covers/);
     qualification.github.runs[0].covered_shas = ['earlier-merge'];
     assert.match(rowsText(preflightEvidenceRows({ merge_plan: plan, letter, qualification })), /This run also covers: earlier-/);
-    // Facts of another range are unknown for this one, never borrowed.
+    // Facts of another range are unknown for this one, never borrowed; its commits still lead the Details.
     assert.deepEqual(preflightEvidenceRows({ merge_plan: { ...plan, target_sha: 'cccc' }, letter, qualification }),
-        [{ label: 'Checks', value: 'Qualification for this range is unknown.' }]);
+        [{ label: 'Commits', value: 'aaaa → cccc' }, { label: 'Checks', value: 'Qualification for this range is unknown.' }]);
+});
+
+test('an update is named by its versions, else by its count of changes, never by its commits', () => {
+    // The Apply dialog's title and the Updates headline (DESIGN principle 7): hashes are the record's, in Details.
+    assert.equal(updateTarget({ current_version: '7.12.0', latest_version: '7.13.0', current_sha: 'aaaa', latest_sha: 'bbbb' }),
+        '7.12.0 → 7.13.0');
+    assert.equal(updateTarget({ current_version: '7.12.0', latest_version: '7.12.0', behind: 3 }), '3 new changes');
+    assert.equal(updateTarget({ current_version: '7.12.0', latest_version: '7.12.0', behind: 1 }), '1 new change');
+    assert.equal(updateTarget({}), 'unknown');
+    const source = (url) => import('node:fs').then((fs) => fs.readFileSync(new URL(url, import.meta.url), 'utf8'));
+    return source('../modules/updates.js').then((text) => {
+        assert.match(text, /title: applyTitle\(latestStatus \|\| \{\}, plan\)/, 'the dialog says the versions');
+        assert.doesNotMatch(text, /title: `Update \$\{String\(plan\.base_sha\)/, 'no commit pair in the title');
+    });
 });
 
 test('each commit keeps its own verdict, record state and request-time relation; a legacy receipt invents neither', () => {
@@ -212,4 +204,17 @@ test('the Updates renderer puts a midpoint break in the served SHA and leaves or
     assert.ok(source, 'the actual status read reached the rendered facts');
     assert.deepEqual(source.children.map(node => node.tagName), ['wbr']);
     assert.ok(values.some(value => value.textContent !== sha && !value.children.length), 'ordinary facts need no break');
+});
+
+test('the Apply dialog names versions only for the very range preflight pinned (RV4 5)', () => {
+    const status = { current_version: '1.0', latest_version: '1.1', running_sha: 'a'.repeat(40), latest_sha: 'b'.repeat(40) };
+    assert.equal(applyTitle(status, { base_sha: 'a'.repeat(40), target_sha: 'b'.repeat(40) }), 'Update: 1.0 → 1.1');
+    assert.equal(applyTitle(status, { base_sha: 'a'.repeat(40), target_sha: 'c'.repeat(40) }), 'Update',
+        'a newer release pinned since the cached read: no cached version names the dialog');
+    assert.equal(applyTitle({}, {}), 'Update');
+    // RVD4 5: an unreadable version of the pinned range never puts "unknown" in the title.
+    const pinned = { base_sha: 'a'.repeat(40), target_sha: 'b'.repeat(40) };
+    assert.equal(applyTitle({ ...status, latest_version: '' }, pinned), 'Update');
+    assert.equal(applyTitle({ ...status, current_version: '' }, pinned), 'Update');
+    assert.equal(applyTitle({ ...status, latest_version: '1.0', behind: 2 }, pinned), 'Update: 2 new changes');
 });

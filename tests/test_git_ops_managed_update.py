@@ -162,7 +162,7 @@ def test_managed_update_target_uses_manifest_remote_name(monkeypatch):
 def test_prepare_managed_update_preserves_dev_branch_not_current_head(monkeypatch, tmp_path):
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
     monkeypatch.setattr(git_ops, "_read_managed_repo_meta", lambda: {"managed_remote_name": "managed"})
-    monkeypatch.setattr(git_ops, "_managed_update_target", lambda: ("managed", "main", "managed/main"))
+    monkeypatch.setattr(git_ops, "_managed_update_target", lambda _channel: ("managed", "main", "managed/main"))
     monkeypatch.setattr(
         git_ops,
         "_resolve_managed_update_target",
@@ -217,7 +217,7 @@ def test_prepare_managed_update_preserves_dev_branch_not_current_head(monkeypatc
 def test_prepare_managed_update_blocks_when_ahead_check_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
     monkeypatch.setattr(git_ops, "_read_managed_repo_meta", lambda: {"managed_remote_name": "managed"})
-    monkeypatch.setattr(git_ops, "_managed_update_target", lambda: ("managed", "main", "managed/main"))
+    monkeypatch.setattr(git_ops, "_managed_update_target", lambda _channel: ("managed", "main", "managed/main"))
     monkeypatch.setattr(
         git_ops,
         "_resolve_managed_update_target",

@@ -10,7 +10,12 @@ callers retain the original (``retain_original``) and show that note beside the 
 - A strictly decodable PNG, JPEG (an MPO gain-map JPEG included), GIF or WebP within
   the byte budget keeps its bytes and dimensions.
 - BMP and other formats the installed decoder reads become PNG with the same pixels
-  and alpha.
+  and alpha, except wide grayscale: 16- or 32-bit integer and 32-bit float images
+  (scientific and depth TIFFs) are shown as 8-bit grayscale stretched linearly from
+  their actual [min, max], and the note names the kind and the range. A model sees
+  8-bit pixels and receivers reduce 16-bit data differently (white or black), so the
+  preview is made here; the exact values stay in the original. A native 16-bit PNG
+  within the bounds still passes unchanged.
 - A successful tolerant decode is re-encoded with a "partially recovered" note: the
   image may be incomplete or contain decoder fill, so recovered detail is uncertain;
   uniform pixels cannot prove loss, and missing details are not restored.
@@ -30,14 +35,18 @@ helper could still observe the tolerant window.
 """
 from __future__ import annotations
 
+from array import array
 from hashlib import sha256
 import io
+import math
 import pathlib
 import threading
 from dataclasses import dataclass
 
 _DECODE_LOCK = threading.RLock()
 _NATIVE_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+# Wide grayscale modes decoders produce. Not I;16N: Pillow 12.3 clips it to 255 on convert("I").
+_WIDE_GRAY = frozenset({"I", "I;16", "I;16L", "I;16B", "F"})
 
 
 class ImagePayloadTooLarge(ValueError):
@@ -98,6 +107,52 @@ def _decode(Image, ImageFile, raw: bytes, *, tolerant: bool):
         ImageFile.LOAD_TRUNCATED_IMAGES = previous
 
 
+def _eight_bit_gray(Image, decoded):
+    """Wide grayscale as 8-bit ``L`` stretched from its actual [min, max], plus the note saying so.
+
+    Pillow 13 refuses mode ``I`` as PNG and 12.3 clamps it; a 16-bit image turns white or black depending on
+    how a receiver reduces it, and a float image would be clamped to 0..255. Integer pixels map by Pillow's
+    linear point transform on ``I`` (no float step), so close values near the int32 limits stay apart; float
+    endpoints are named with nine significant digits, enough to tell any two binary32 values apart. Mode
+    ``I`` names no width: Pillow decodes 16-bit PGM and signed 16-bit TIFF to it too. A constant image is
+    black with its value named. NaN or infinity (the no-data pixels of a depth map or DEM) are shown black
+    and counted while the finite values set the range. A 16-bit transparent value has no 8-bit counterpart,
+    so the view drops it and says so. Same pixels on Pillow 12.3 and 13."""
+    if decoded.mode not in _WIDE_GRAY:
+        return decoded, ""
+    kept = "The original keeps the exact values."
+    if "transparency" in decoded.info:
+        kept = f"Its transparent value is not kept in this view. {kept}"
+    values, every = decoded, "Every pixel"
+    if decoded.mode == "F":
+        kind, shown_value = "32-bit float", lambda value: f"{value:.9g}"
+        floats = array("f", decoded.tobytes())
+        if not all(map(math.isfinite, floats)):  # no-data pixels of a depth map or DEM: the finite range is the image
+            floor = min(filter(math.isfinite, floats), default=None)
+            if floor is None:
+                return Image.new("L", decoded.size, 0), (
+                    f"Every pixel is NaN or infinity; shown as uniform black. {kept}")
+            missing = sum(1 for value in floats if not math.isfinite(value))
+            values = Image.frombytes("F", decoded.size, array(
+                "f", (value if math.isfinite(value) else floor for value in floats)).tobytes())
+            every = "Every finite pixel"
+            kept = f"NaN or infinity in {missing} of {len(floats)} pixels, shown black. {kept}"
+    else:
+        values = decoded if decoded.mode == "I" else decoded.convert("I")
+        kind, shown_value = ("integer" if decoded.mode == "I" else "16-bit integer"), lambda value: str(int(value))
+    low, high = values.getextrema()
+    if low == high:
+        shown = Image.new("L", decoded.size, 0)
+        note = f"{every} has the {kind} value {shown_value(low)}; shown as uniform black. {kept}"
+    else:
+        scale = 255 / (high - low)
+        shown = values.point(lambda value: value * scale + (0.5 - low * scale)).convert("L")
+        note = (f"{kind.capitalize()} grayscale values {shown_value(low)}..{shown_value(high)} are shown as "
+                f"8-bit: {shown_value(low)} is black, {shown_value(high)} is white, linear in between. {kept}")
+    shown.info.pop("transparency", None)
+    return shown, note
+
+
 def prepare_image_bytes(raw: bytes, *, max_bytes: int, max_side: int | None = None,
                         reason: str = "host image payload budget") -> PreparedImage:
     """Validate, convert available codecs, and fit only explicitly supplied bounds.
@@ -152,16 +207,20 @@ def prepare_image_bytes(raw: bytes, *, max_bytes: int, max_side: int | None = No
     exceeds_side = max_side is not None and max(decoded.size) > max_side
     if not notes and mime in _NATIVE_MIMES and len(raw) <= max_bytes and not exceeds_side:
         return PreparedImage(raw, mime)
-    if mime not in _NATIVE_MIMES:
+    converted = len(notes) if mime not in _NATIVE_MIMES else None
+    if converted is not None:
         notes.append(f"Converted {mime or 'decoded image'} to PNG with the available decoder.")
     if animated:
         notes.append("Only the first frame is represented; the original animation remains available.")
+    decoded, gray_note = _eight_bit_gray(Image, decoded)  # before any resize: Pillow cannot reduce I;16
+    if gray_note:
+        notes.append(gray_note)
     original_size = decoded.size
     if exceeds_side:
         decoded.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
         notes.append(f"Reduced dimensions for {reason} (maximum side {max_side} pixels).")
     # Lossless conversion first, preserving alpha and the decoded pixels.
-    if decoded.mode not in {"1", "L", "LA", "P", "RGB", "RGBA", "I", "I;16"}:
+    if decoded.mode not in {"1", "L", "LA", "P", "RGB", "RGBA"}:
         decoded = decoded.convert("RGBA" if "A" in decoded.getbands() else "RGB")
     output = io.BytesIO()
     decoded.save(output, format="PNG")
@@ -191,4 +250,6 @@ def prepare_image_bytes(raw: bytes, *, max_bytes: int, max_side: int | None = No
         decoded.thumbnail(tuple(max(1, int(side * .75)) for side in decoded.size), Image.Resampling.LANCZOS)
     if decoded.size != original_size:
         notes.append(f"Dimensions: {original_size[0]}×{original_size[1]} → {decoded.width}×{decoded.height}.")
+    if converted is not None and out_mime == "image/jpeg":  # the conversion ended as JPEG, not PNG
+        notes[converted] = f"Converted {mime or 'decoded image'} to JPEG with the available decoder."
     return PreparedImage(data, out_mime, " ".join(notes))

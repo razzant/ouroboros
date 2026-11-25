@@ -515,6 +515,23 @@ def test_original_preference_survives_native_mapping_in_usage_and_ledger(evidenc
     assert rows[-1]["effort"] == usage["effort"]
 
 
+@pytest.mark.parametrize(("model", "requested", "thinking", "output_effort"), [
+    ("claude-sonnet-5-5", "none", {"type": "between_tools"}, None),  # 400s on "disabled"
+    ("claude-sonnet-5-5", "high", {"type": "adaptive"}, "high"),  # a thinking tier is never projected
+    ("claude-sonnet-5", "none", {"type": "disabled"}, None),
+    ("claude-sonnet-5-5-next", "none", {"type": "disabled"}, None),  # an exact id, never a prefix
+    ("claude-opus-5-5", "none", {"type": "disabled"}, None),  # its own refusal keeps the existing repair
+])
+def test_requested_none_takes_only_the_exact_anthropic_models_own_off_state(model, requested, thinking, output_effort):
+    target = _target("anthropic", model)
+    payload = LLMClient(api_key="unused")._build_remote_candidate(
+        target, [{"role": "user", "content": "hello"}], requested, 32, "auto", None, None)
+    assert payload["thinking"] == thinking
+    assert (payload.get("output_config") or {}).get("effort") == output_effort
+    # Requested and sent read as the same tier: the disclosure says none/none, not a clamp.
+    assert payload_effort(payload) == requested == target["requested_reasoning_effort"]
+
+
 def test_switch_model_next_round_keeps_preference_after_native_projection(tmp_path, monkeypatch):
     from ouroboros.loop import _apply_runtime_overrides
     from ouroboros.tools.control_runtime import _switch_model
@@ -565,7 +582,7 @@ def test_local_driver_retains_known_intent_with_omitted_effort(tmp_path, monkeyp
     client = LLMClient(api_key="unused")
     manager = SimpleNamespace(serving_context_evidence=lambda: {})
     monkeypatch.setattr(local_model, "get_manager", lambda: manager)
-    monkeypatch.setattr(llm_local, "local_context_limits", lambda maximum: (0, maximum))
+    monkeypatch.setattr(llm_local, "local_context_limits", lambda maximum, evidence=None: (0, maximum))
     monkeypatch.setattr(client, "_get_local_client", lambda: SimpleNamespace(chat=SimpleNamespace(
         completions=SimpleNamespace(create=lambda **payload: sent.append(payload) or _Response()))))
     with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="local-intent")):

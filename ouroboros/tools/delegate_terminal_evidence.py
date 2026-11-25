@@ -48,7 +48,7 @@ def retry_terminal_result(ctx: ToolContext, run_id: str, *, gateway: Any = None)
     from ouroboros import delegate_custody as custody
     from ouroboros.claudexor_daemon import read_owned_gateway
     from ouroboros.deadline_utils import window_within_deadline
-    from ouroboros.delegate_shared import _fail, _owned_run, delegate_result, retry_result_status
+    from ouroboros.delegate_shared import _fail, _owned_run, retry_result_status
     from ouroboros.gateways.claudexor import ClaudexorUnavailable, _READ_TIMEOUT_SEC
 
     drive = custody.custody_root(ctx)
@@ -58,8 +58,7 @@ def retry_terminal_result(ctx: ToolContext, run_id: str, *, gateway: Any = None)
         return refusal or _fail("delegate_wait", "run_not_owned", "No retry result authority.")
     retained = retained_terminal_result(ctx, run_id, retry_money=True)
     if retained is not None:
-        return delegate_result({**retained, "owner_task_id": predecessor,
-            "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""), "terminal_result_only": True})
+        return _retry_answer(ctx, entry, retained, predecessor)
     borrowed = gateway is not None
     try:  # the run's own engine (``execution_domain``) unless a caller lends its transport
         from ouroboros.execution_domain import run_gateway
@@ -80,18 +79,26 @@ def retry_terminal_result(ctx: ToolContext, run_id: str, *, gateway: Any = None)
         from ouroboros.delegate_containment import granted_shape
 
         payload = collect_and_deliver_terminal(ctx, run_id, detail, granted_shape(entry), entry, gateway)
-        return delegate_result({**payload, "owner_task_id": predecessor,
-                                "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""),
-                                "terminal_result_only": True})
+        return _retry_answer(ctx, entry, payload, predecessor)
     except ClaudexorUnavailable as exc:
         retained = retained_terminal_after_gap(ctx, run_id, str(exc.code))
         if retained is not None:
-            return delegate_result({**retained, "owner_task_id": predecessor,
-                "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""), "terminal_result_only": True})
+            return _retry_answer(ctx, entry, retained, predecessor)
         return _fail("delegate_wait", exc.code, str(exc), run_id=run_id)
     finally:
         if gateway is not None and not borrowed:
             gateway.close()
+
+
+def _retry_answer(ctx: ToolContext, entry: Any, payload: Dict[str, Any], predecessor: str) -> ToolResult:
+    """A retry successor's read of its predecessor's finished run, with the same receipt line ``delegate_wait``
+    gives its starter (``helper_receipt.run_result_line``)."""
+    from ouroboros.delegate_shared import delegate_result
+    from ouroboros.helper_receipt import run_result_line
+
+    receipt = run_result_line(ctx, entry, payload.get("access_evidence")) if payload.get("status") == "terminal" else None
+    return delegate_result({**payload, **({"receipt": receipt} if receipt else {}), "owner_task_id": predecessor,
+                            "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""), "terminal_result_only": True})
 
 
 def _containment_breach(detail: Dict[str, Any], authority: "DelegatedRunShape") -> Optional[_Breach]:
@@ -551,7 +558,9 @@ def _delivered_terminal_payload(ctx: ToolContext, run_id: str, detail: Dict[str,
 def collect_and_deliver_terminal(ctx, rid, detail, authority, entry, gateway):
     """Join the body collection; deliver retained output independently of other duties."""
     from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_collection import collect_terminal, observe_run, retained_payload, capture_projection, body_runtime
+    from ouroboros.delegate_capture_job import ready_result_owed
+    from ouroboros.delegate_collection import (collect_terminal, observe_run, retained_payload,
+                                               capture_projection, capture_readers, body_runtime)
     from ouroboros.delegate_custody_current import run
 
     root = custody.custody_root(ctx)
@@ -582,7 +591,7 @@ def collect_and_deliver_terminal(ctx, rid, detail, authority, entry, gateway):
         _record_containment(ctx, entry, payload)
         return payload
     fresh = run(root, rid) or entry
-    if not fresh.settled or retained_payload(root, fresh) is None:
+    if not fresh.settled or ready_result_owed(fresh) or retained_payload(root, fresh) is None:
         from ouroboros.delegate_capture_attempt import GENERATION
         runtime = body_runtime(root)
         collection = collect_terminal(root, rid, gateway=gateway,
@@ -626,13 +635,13 @@ def collect_and_deliver_terminal(ctx, rid, detail, authority, entry, gateway):
                 "answered": True, "last_seq": int(detail.get("lastSeq") or 0)}
     payload = _delivered_terminal_payload(ctx, rid, detail, authority, entry, gateway)
     payload["settlement"] = _settlement_projection(entry, collection.get("settlement"))
-    payload["collection"] = {key: value for key, value in collection.items() if key != "output_retention"}
-    capture = collection.get("workspace_capture") or capture_projection(
-        root, entry, reader_task_id=str(getattr(ctx, "task_id", "") or ""))
-    if capture and entry.patch_captured and str(getattr(ctx, "task_id", "") or "") != entry.task_id:
-        capture = capture_projection(root, entry, reader_task_id=str(ctx.task_id))
+    reader = str(getattr(ctx, "task_id", "") or "")
+    # Both copies of the capture this delivery shows address the same files for this reader.
+    payload["collection"] = {key: capture_readers(value, entry, reader) if key == "workspace_capture" else value
+                             for key, value in collection.items() if key != "output_retention"}
+    capture = collection.get("workspace_capture") or capture_projection(root, entry, reader_task_id=reader)
     if capture is not None:
-        payload["workspace_capture"] = capture
+        payload["workspace_capture"] = capture_readers(capture, entry, reader)
     _record_terminal_delivery(ctx, entry, payload)
     return payload
 
@@ -664,8 +673,10 @@ def _record_terminal_delivery(ctx, entry, payload):
 
 def retained_terminal_result(ctx, run_id, *, complete_only=True, retry_money=False):
     """Read exact owned bytes before transport; pending collection is a separate fact."""
+    from ouroboros.delegate_capture_job import ready_result_owed
     from ouroboros.delegate_custody_current import run
-    from ouroboros.delegate_collection import capture_projection, retained_payload, collection_pending, collect_terminal, body_runtime
+    from ouroboros.delegate_collection import (capture_projection, retained_payload, collection_pending,
+                                               collect_terminal, body_runtime, directory_discard_owed)
     from ouroboros.delegate_shared import retry_result_status
     root = _delegate().custody.custody_root(ctx)
     entry = run(root, run_id)
@@ -677,11 +688,17 @@ def retained_terminal_result(ctx, run_id, *, complete_only=True, retry_money=Fal
     full = retained_payload(root, entry, require_complete=complete_only)
     if (full is None or full.get("run_id") != run_id or full.get("state") != entry.terminal_state):
         return None
-    if retry_money and not entry.settled:
+    discard_retry = directory_discard_owed(entry) and (entry.patch_captured or ready_result_owed(entry))
+    if retry_money and (not entry.settled or ready_result_owed(entry) or discard_retry):
         from ouroboros.delegate_capture_attempt import GENERATION
         runtime = body_runtime(root)
+        factory = None
+        if discard_retry:
+            from ouroboros import claudexor_daemon
+            factory = claudexor_daemon.read_owned_gateway
         collect_terminal(root, run_id, output_retry=True, background=runtime is not None,
-                         generation=runtime.runtime_id if runtime is not None else GENERATION)
+                         generation=runtime.runtime_id if runtime is not None else GENERATION,
+                         gateway_factory=factory)
         entry = run(root, run_id) or entry
     payload = _retained_terminal_payload(ctx, entry, full=full)
     if payload is not None:

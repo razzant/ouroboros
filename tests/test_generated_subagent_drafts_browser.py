@@ -9,6 +9,7 @@ import pytest
 from tests.settings_browser_helpers import open_entry, open_settings, press_editor_save
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 from tests.test_subscription_setup_browser import capture
+from tests._wizard_walk import QUICK_STEPS, step_order, walk
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -78,7 +79,7 @@ def test_wizard_same_preview_keeps_live_row_handler_and_finish_payload(subscript
     assert page.evaluate("() => window.__rowBefore === document.querySelector('#onboarding-available-subagents [data-subagent-row]')")
     page.click("#next-btn")
     page.wait_for_selector("[data-reviewers-note]", state="attached")
-    page.click("#next-btn")
+    walk(page, "review_mode", "budget")  # through Consciousness where it is offered
     page.wait_for_selector('[data-collapse="api-budget"]')
     page.click("#next-btn")
     page.wait_for_selector(".summary-card")
@@ -123,7 +124,8 @@ def test_session_access_is_visible_and_preserved_by_the_real_editor(subscription
         assert page.locator('[data-subagent-field="access"]').first.input_value() == "workspace_write"
         path = "/api/owner/safety-model"
     else:
-        for selector in ("[data-reviewers-note]", '[data-collapse="api-budget"]', ".summary-card"):
+        offered = [selector for step, selector in QUICK_STEPS.items() if step in step_order(page)]
+        for selector in ("[data-reviewers-note]", *offered, '[data-collapse="api-budget"]', ".summary-card"):
             page.click("#next-btn")
             page.wait_for_selector(selector, state="attached")
         with page.expect_response("**/api/onboarding/complete"):

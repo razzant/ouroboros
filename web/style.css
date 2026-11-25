@@ -98,10 +98,12 @@ html[data-layout="stack"] .shell-icon-control {
     width: 44px;
     height: 44px;
 }
-/* Back (page_header.js renderBackControl; DESIGN "Page header"): the app's one Back, a shell icon control holding the
-   chevron-left, named for where it leads. It stands first in a header's lead, before the place's name or its tabs,
-   and never shrinks. */
+/* Back (page_header.js renderBackControl; DESIGN "Page header"): the app's one Back, the shell's round icon control
+   holding the chevron-left alone, its stroke centred in the circle (the glyph sits 0.75px left on its canvas); where
+   it leads is its tooltip and accessible name. It stands first in a header's row, 8px before the place's name, tabs
+   or capsules, and never shrinks. */
 .shell-back { flex: none; }
+.shell-back > svg { translate: 0.75px 0; }
 
 /* A desk has a docked sidebar: no ☰ in the headers and no drawer head (the stack layout shows both). */
 .mobile-nav-toggle,
@@ -119,11 +121,11 @@ html[data-layout="stack"] .shell-icon-control {
 
 /* The sidebar's zones (docs/DESIGN.md "Shell"; owner 12.11, the fifth round "Карточка и тихие разделы"): a pinned
    head (this Ouroboros's card, the Main Chat place), the Projects list as the ONE scroller, then at the bottom edge
-   the sections, three to a line on a desk, and the foot (the version and the update); free room, when the list is
-   short, lies between the list and the sections. Row
+   the foot's two cards (the sections; the system rows with the version and the update); free room, when the list is
+   short, lies between the list and the cards. Row
    heights follow the pointer: a finger gets the touch minimum, a mouse a quieter row, and a short window with a
    mouse compacts the rows first. A window too short even for that falls back to the whole column scrolling with
-   the head sticky and the foot still on the bottom edge. */
+   the head sticky and the foot still on the bottom edge; where those two would hide every row, they are its ends. */
 #primary-sidebar {
     --nav-row-h: 44px;       /* a place: Main Chat, Files … */
     --nav-item-h: 32px;      /* a Project row */
@@ -144,7 +146,7 @@ html[data-layout="stack"] .shell-icon-control {
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-width: thin;
-    container-type: inline-size;  /* a narrow column stands the tools two to a line */
+    container-type: inline-size;  /* a wide column turns the foot's cards to one line each */
 }
 /* One maximum for a drag, a restored width and a narrowing window; the adjacent room keeps its composer. */
 html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw - var(--room-min-width))); }
@@ -156,9 +158,10 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
 }
 /* A window too short for the zones (the head, three list rows and the foot no longer fit): the whole column is
    the ONE scroller with the head sticky, and the list shows every row in flow, so a finger or a wheel moves one
-   thing (the gate counts the sidebar's scrollers). Finger rows are 44px, so a touch column runs out of room
-   sooner (measured: 586px of zones with 30 Projects). The foot, the six sections with the version and the update
-   under them, stays on the bottom edge there too (owner 23.10; DESIGN "Navigation"): it sticks to the column and
+   thing (the gate counts the sidebar's scrollers). Measured with 30 Projects and the two foot cards (owner 21.11):
+   a mouse's zones need 496px, so a 1280 × 540 window keeps them; finger rows are 44px, so a touch column runs out of
+   room sooner (the phone drawer's zones need 631px). The foot, both cards with the version and the update, stays on
+   the bottom edge there too (owner 23.10; DESIGN "Navigation"): it sticks to the column and
    the Project rows pass between it and the head, so Settings and the chosen section stay in view however long the
    list. Its offset and negative margin reach through the column's bottom padding, which it takes as its own, so its
    text sits where a tall window puts it; with few Projects it still stands on the bottom edge (margin-top: auto).
@@ -166,16 +169,17 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
    them, so a row reached with Tab is never left under either bar, while a bar's own control (Main, a section, the
    update) leaves the column where it is (a scroll padding on the column would count the bars as covered and move
    it). A column too short even for the card, one Project row and the foot (layout.js sets data-bars-crowd; by the
-   bars' heights and the rows' clearance at both edges) lets
-   the card scroll away with the list instead: the sections and the version stay on the edge, the card is the
-   list's top, one scroll up, and the rows keep the room between; two pinned bars there would cover every row. */
-@media (max-height: 540px), (pointer: coarse) and (max-height: 600px) {
+   bars' heights and the rows' clearance at both edges) lets both go with the list instead: the card is its top, one
+   scroll up, and the cards its end, past the last row (a finger's two cards are about 300px: pinned, they covered
+   every row of a 500px drawer, and Find in a phone held sideways). Only their pinning, the rows' margin and the fade
+   leave there, never a box, so the heights that set the attribute read the same and it holds still at the edge. */
+@media (max-height: 499px), (pointer: coarse) and (max-height: 640px) {
     #primary-sidebar .nav-projects * {
         scroll-margin-block: calc(var(--sidebar-head-h, 0px) + var(--space-4))
             calc(var(--sidebar-foot-h, 0px) + var(--space-4));
     }
-    #primary-sidebar[data-bars-crowd] .nav-projects * { scroll-margin-block-start: 0px; }
-    #primary-sidebar[data-bars-crowd] .sidebar-head { position: static; }
+    #primary-sidebar[data-bars-crowd] .nav-projects * { scroll-margin-block: 0px; }
+    #primary-sidebar[data-bars-crowd] :is(.sidebar-head, .sidebar-foot) { position: static; }
     #primary-sidebar .nav-projects { flex: 0 0 auto; min-height: 0; }
     #primary-sidebar .nav-projects-list { flex: 0 0 auto; overflow-y: visible; }
     #primary-sidebar .sidebar-foot {
@@ -191,7 +195,7 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
        window's list fades at its edges: a row going on under the foot never reads as a broken one. A row brought
        into view keeps clear of the fade too (its scroll margin above). */
     #primary-sidebar[data-scroll-above]:not([data-bars-crowd]) .sidebar-head::after,
-    #primary-sidebar[data-scroll-below] .sidebar-foot::before {
+    #primary-sidebar[data-scroll-below]:not([data-bars-crowd]) .sidebar-foot::before {
         content: '';
         position: absolute;
         left: 0;
@@ -203,7 +207,7 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
         top: 100%;
         background: linear-gradient(var(--surface-side), transparent);
     }
-    #primary-sidebar[data-scroll-below] .sidebar-foot::before {
+    #primary-sidebar[data-scroll-below]:not([data-bars-crowd]) .sidebar-foot::before {
         bottom: 100%;
         background: linear-gradient(transparent, var(--surface-side));
     }
@@ -221,68 +225,166 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
     background: var(--surface-side);
 }
 
-/* The tools and the foot stand at the bottom edge whatever the list's length (owner 12.11): the Projects take the
-   free room above them. A window too short for the zones scrolls the whole column instead, and the foot sticks to
-   the bottom edge (the fallback above). */
+/* The foot stands at the bottom edge whatever the list's length (owner 12.11): the Projects take the free room above
+   it. It is two cards (owner 21.11): the sections (Circles, Files, Extensions, Widgets), then the system rows (Dashboard,
+   Settings) with the version row under a hairline. A window too short for the zones scrolls the whole column instead,
+   the foot on its bottom edge or, where it would hide every row, at its end (the fallback above). */
 .sidebar-foot {
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-}
-
-/* The sections, quiet items three to a line on a desk in three columns, each as wide as its widest item: the first
-   column starts where the Project names start, the last ends where the column ends, and within a column the items start
-   on one line, so the glyphs of the two rows stand under each other. The column's existing steps keep three at 328 px,
-   two at 226 px (and in the drawer), otherwise one. Longer names wrap within those columns: Navigation keeps their
-   names whole, never clipped or reduced to an unlabelled icon. The chosen one is the crimson capsule. */
-.nav-tools {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    justify-content: space-between;
-    gap: var(--space-1) 0;
+    gap: var(--space-2);
     padding-top: var(--space-3);
 }
-.nav-tools > .nav-row {
+.nav-card {
+    padding: var(--space-2) var(--space-1);
+    border-radius: var(--radius-object);
+    background: var(--surface-object);
+    box-shadow: var(--elev-rest);
+}
+/* Compact: the sections two to a line, the first of each line in a cell half the card wide and the second taking
+   the rest, so the glyphs of the two lines stand under each other; Dashboard and Settings a line each. A row is as
+   wide as its words and keeps them whole on one line: no syllable hyphenation, no clipping, no unlabelled icon. A
+   cell is as wide as its name (pages.js gives each section one), so a longer name takes the room it needs and the
+   next section moves to the next line, whole; no cell is wider than the card, so a name longer than the whole card,
+   like a longer translation of a system row, wraps at a space as the last resort, its lines inside the row's own
+   air. The row keeps its 8 px start, the glyph line the version's check sits on, and takes a 4 px end; with the
+   card's own 4 px sides that holds the longest Russian pair, «Расширения» and «Виджеты», two to a line at the
+   270 px sidebar floor with room to spare for wider fonts of other systems. The chosen one is the crimson
+   capsule. */
+.nav-sections {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1) 0;
+}
+.nav-sections > .nav-cell { display: flex; width: max-content; max-width: 100%; }
+.nav-sections > .nav-cell:nth-child(odd) { flex: 0 0 auto; min-width: 50%; }
+.nav-sections > .nav-cell:nth-child(even) { flex: 1 0 auto; }
+.nav-system-rows {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1) 0;
+}
+.nav-card .nav-row {
+    justify-self: start;
     width: auto;
     min-width: 0;
-    max-width: 100%;  /* bound an unhyphenatable word so its last-resort break can fit the cell */
+    max-width: 100%;
     min-height: 32px;
-    gap: 6px;
-    padding: 0 var(--space-3);
+    gap: var(--space-1);
+    padding: var(--space-1);
+    padding-inline-start: var(--space-2);
     border-radius: var(--pill-radius);
     color: var(--text-primary);
     font-size: var(--type-body);
     font-weight: 400;
+    text-align: start;
 }
-.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; white-space: normal; hyphens: auto; overflow-wrap: break-word; }
-.nav-tools > .nav-row:not(.active) > svg { color: var(--text-meta); }
-.nav-tools > .nav-row { justify-self: start; }
-@container (min-width: 226px) {
-    .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@container (min-width: 328px) {
-    html:not([data-layout="stack"]) .nav-tools { grid-template-columns: repeat(3, minmax(0, max-content)); }
+.nav-card .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: break-word; }
+.nav-card .nav-row:not(.active) > svg { color: var(--text-meta); }
+/* Wide, from 475 px of sidebar (the column's content box less its 12 px insets and its hairline: 450 px), where the
+   four sections hold one line (measured with the Russian names and «Расширения» for Extensions, the longest translation
+   so far; the rows' kept 8 px start and 4 px end and their 8 px minimum gaps leave about 13 px to spare on the widest
+   fonts measured, and the half-wide cells keep it two to a line from the 270 px floor too,
+   tests/test_sidebar_short_window_browser.py): both cards turn to one line each at once, their first rows' left edges
+   on one line with the version, their last rows' right edges on another with the update capsule's, the room between
+   them shared evenly. */
+@container (min-width: 450px) {
+    .nav-sections,
+    .nav-system-rows { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-1) var(--space-2); }
+    .nav-sections > .nav-cell:nth-child(n) { flex: 0 0 auto; min-width: 0; }
+    .nav-card { padding-inline: var(--space-2); }
 }
 /* A finger's target in the docked layout too (a tablet, a touch laptop): the row is the touch minimum tall; a mouse
    keeps the quieter row. */
 @media (pointer: coarse) {
-    .nav-tools > .nav-row { min-height: var(--touch-target-min); }
+    .nav-card .nav-row { min-height: var(--touch-target-min); }
 }
-html[data-layout="stack"] .nav-tools > .nav-row { min-height: 44px; }
+html[data-layout="stack"] .nav-card .nav-row { min-height: 44px; }
 
-/* The foot: the version and the update capsule on one line where both fit; a capsule too long for the line beside the
-   version (a long outcome, a translation, a narrow column) takes a line of its own, and grows a line rather than
-   clipping its words. It keeps its height with no update, so nothing above it moves when one arrives. */
+/* The version row: the version on the rows' glyph line and the update capsule's right edge on the card's, one height in
+   every state (rest, a check, its answer, a capsule that fits), so nothing above it moves: under the hairline's pixel
+   its content box (39 px) holds the tallest of them, a small control or an answer wrapped to two meta lines (32.4 px),
+   and the row's own padding never eats into that. A capsule too long for the line beside the version (a long outcome,
+   a translation) takes a line of its own and grows a line rather than clipping its words; the plain version's line is
+   then a small control tall, so its words keep their air under the hairline. With no capsule the version itself is the check (owner 21.11, update_status.js): a quiet
+   control whose glyph appears at its end on hover and turns while it checks, its box always kept so the words never
+   move; the answer stands in the capsule's place. */
 .sidebar-foot-meta {
+    position: relative;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
+    justify-content: space-between;
     gap: var(--space-1) var(--space-2);
     min-height: 40px;
-    margin: var(--space-3) 0 var(--space-2);
-    padding: 0 var(--space-2) 0 calc(var(--space-3) + 1px);
+    margin-top: var(--space-1);
+    padding-top: 1px;  /* the hairline's pixel */
+    color: var(--text-meta);
 }
-.sidebar-foot-meta .update-notice { margin: 0; }
+.sidebar-foot-meta::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    inset-inline: var(--space-2);
+    height: 1px;
+    background: var(--divider);
+}
+html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; }
+@media (pointer: coarse) {
+    .sidebar-foot-meta { min-height: var(--touch-target-min); }
+}
+.sidebar-foot-meta > #nav-version {
+    display: flex;
+    align-items: center;
+    min-height: var(--control-h-sm);
+    padding-inline-start: calc(var(--space-2) + 1px);
+}
+.nav-version-check {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+    min-height: var(--control-h-sm);
+    padding-block: 0;
+    padding-inline: calc(var(--space-2) + 1px) var(--space-2);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: transparent;
+    color: var(--text-meta);
+    font: inherit;
+    cursor: pointer;
+}
+.nav-version-check[hidden] { display: none; }
+.nav-version-check > .nav-version-glyph { display: inline-flex; flex: none; opacity: 0; transition: opacity var(--motion-fade) ease; }
+.nav-version-check > .nav-version-glyph > svg { width: 14px; height: 14px; }
+.nav-version-check[aria-busy="true"] > .nav-version-glyph { opacity: 1; }
+.nav-version-check[aria-busy="true"] > .nav-version-glyph > svg { animation: nav-version-turn 0.9s linear infinite; }
+@keyframes nav-version-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .nav-version-check[aria-busy="true"] > .nav-version-glyph > svg { animation: none; }
+}
+@media (hover: hover) {
+    .nav-version-check:hover { background: var(--tone-quiet-hover); color: var(--text-primary); }
+    .nav-version-check:hover > .nav-version-glyph { opacity: 1; }
+}
+.nav-version-check:active { filter: var(--press); }
+.nav-version-check:focus { outline: none; }
+.nav-version-check:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* A check's answer in the capsule's place, its end on the capsule's: Up to date in the meta ink with its tick, for a
+   few seconds; a failure as the error status sentence, its reason the version's description and the note's tooltip,
+   until a check succeeds. It takes the room the version leaves and a longer translation wraps inside it at a space
+   (two meta lines fit the row's content box), never moving the row. */
+.nav-check-note {
+    flex: 1 1 0;
+    min-width: min-content;
+    text-align: end;
+}
+.nav-check-note[hidden] { display: none; }
+.nav-check-note:not([data-tone]) { color: var(--text-meta); }
+.nav-check-note > svg { width: 14px; height: 14px; margin-inline-end: var(--space-1); vertical-align: -3px; }
+.nav-check-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.sidebar-foot-meta .update-notice { margin: 0; margin-inline-start: auto; }  /* its end on the card's in either direction */
 .sidebar-foot-meta .update-notice > .update-pill {
     --control-h: auto;
     --control-pad-y: 5px;
@@ -292,7 +394,6 @@ html[data-layout="stack"] .nav-tools > .nav-row { min-height: 44px; }
     line-height: 16px;
     text-align: start;
 }
-html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--space-2) 0 0; }
 
 /* An older desktop page can also survive a source update with the pre-three-zone .sidebar-scroll wrapping the
    column's rows. As a box it left the list as tall as its rows: a scroller with nothing to scroll whose containment
@@ -309,6 +410,7 @@ html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--s
     --window-chrome-top: 0px;
     --window-chrome-start: 0px;
     --window-chrome-clearance: calc(var(--window-chrome-start) + var(--space-3));
+    --page-header-row-h: max(var(--control-h-float), var(--window-chrome-top));
 }
 /* The card stands right under the traffic lights (owner 12.11, the fifth round frames): a step of air under them, so
    its top reaches into the band's lower part. The stack layout's drawer has its × there, which clears the band itself
@@ -375,12 +477,13 @@ body.resizing-panels { -webkit-user-select: none; user-select: none; }
 }
 html[data-layout="stack"] .resize-handle { display: none; }
 
-/* The version is a readable fact in the meta ink (owner Q6=A), beside the update capsule. */
+/* The version is a readable fact in the meta ink (owner Q6=A), beside the update capsule; its check's hover takes it
+   to the primary ink (the version row above). */
 #nav-version {
     display: block;
     font-size: var(--type-meta);
     line-height: var(--line-meta);
-    color: var(--text-meta);
+    color: inherit;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
@@ -606,6 +709,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
    outer ring (docs/DESIGN.md "Focus"). */
 .nav-row:focus-visible,
 .app-tab:focus-visible,
+.chat-budget-pill:focus-visible,
 .chat-header-btn:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: -2px;
@@ -812,9 +916,19 @@ html[data-layout="stack"] .resize-handle { display: none; }
     mask-image: linear-gradient(180deg, black 60%, transparent 100%);
 }
 .chat-bubble.project-answer > :is(.system-message-actions, .msg-time) { position: relative; z-index: 1; }
+/* Reply, actions and Copy stand above both, so a finger's whole reach around each stays the control's. */
+.chat-bubble:is(.project-answer, .system) > .chat-message-actions { z-index: 2; }
 .chat-bubble.project-answer > .message > :first-child { margin-top: 0; }
 .chat-bubble.project-answer > .system-message-actions,
 .chat-bubble.assistant > .system-message-actions { padding-block: var(--space-2) var(--space-1); }
+/* Keep the Project capsule full-width when it needs the space. Under a finger, the clearance below it
+   pays for both hit extensions: the wider reach of the 24px action icons also covers the capsule's overshoot. Every
+   Project row above a copy control (the answer's and the System rows') takes the same clearance. */
+@media (pointer: coarse) {
+    .chat-bubble:is(.project-answer, .system).has-copy > .system-message-actions {
+        padding-block-end: calc(var(--space-1) + var(--touch-target-min) - var(--space-5));
+    }
+}
 .project-answer-limitation { color: var(--text-meta); white-space: normal; overflow-wrap: anywhere; }
 /* A Project ending with no authored answer (project_answer.js paintEnding): the work's name and true outcome, then its
    cause, recorded details and labelled preserved output, in the System voice at reading size; the Project's name is the
@@ -953,10 +1067,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .chat-messages,
 #log-entries,
 .log-entry,
-.log-main,
-.log-body,
-.log-headline,
-.log-task-summary,
+.log-line,
 .log-task-timeline,
 .chat-bubble,
 .chat-bubble .message,
@@ -967,9 +1078,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     min-width: 0;
 }
 
-.log-body,
-.log-headline,
-.log-pill,
 .log-raw,
 .chat-bubble .message,
 .skills-card,
@@ -982,7 +1090,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
    only pushes that pane's header, location and actions out past the column that holds them (DESIGN "Page header":
    folder names fit and actions wrap). */
 .files-layout {
-    position: relative;
+    position: absolute;
+    inset: 0;
     display: grid;
     grid-template-columns: minmax(min(280px, 100%), 360px) minmax(0, 1fr);
     grid-template-areas: "sidebar preview";
@@ -1013,16 +1122,22 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    overflow: hidden;
-    border-right: 1px solid var(--divider);
-    background: rgba(var(--neutral-rgb), 0.02);
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
+
+#page-files > :is(.app-page-header, .files-band) { position: relative; z-index: 2; pointer-events: none; }
+#page-files > :is(.app-page-header, .files-band) :is(button, input) { pointer-events: auto; }
+/* A location that scrolls takes the pointer whole, so a sideways wheel on a separator moves it as on a name; the band's
+   other empty parts stay the list's. */
+#page-files > :is(.app-page-header, .files-band) .files-breadcrumb:is([data-scroll-start], [data-scroll-end]) { pointer-events: auto; }
+.files-layout .files-sidebar[data-scroll-above] { --scroll-fade-top-clear: var(--files-band-h); --scroll-fade-top: calc(var(--files-band-h) + var(--scroll-fade-edge)); }
+.files-preview { padding-top: var(--files-band-h); }
 
 .files-toolbar {
     display: flex;
     gap: 8px;
-    padding: 12px 16px 10px;
-    border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
+    padding: calc(var(--files-band-h, 0px) + 12px) var(--page-header-padding-x) 10px;
     flex-shrink: 0;
 }
 
@@ -1035,7 +1150,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex-wrap: wrap;
     gap: 10px;
     padding: 12px 16px;
-    border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
     flex-shrink: 0;
 }
 
@@ -1055,6 +1169,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     margin-left: auto;
 }
 
+/* In its band (a phone's row under the header) the location stands at the band's one inset, not a second one. */
+.files-band > .files-browser-header { padding-inline: 0; }
 .files-browser-header > .files-browser-actions { flex-wrap: wrap; flex-shrink: 1; min-width: 0; }
 /* On a phone (the stack layout) the location shares its row with its actions: its folders wrap beside them. */
 html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis: 0; }
@@ -1088,9 +1204,9 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 }
 
 .files-list {
-    flex: 1;
+    flex: none;
     min-height: 0;
-    overflow: auto;
+    overflow: visible;
     overscroll-behavior: contain;
     padding: 8px;
 }
@@ -1152,6 +1268,7 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 
 .files-preview {
     grid-area: preview;
+    border-left: 1px solid var(--divider);
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -1162,7 +1279,6 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 .files-preview-header {
     flex-wrap: wrap;
     padding: 16px 20px 12px;
-    border-bottom: 1px solid var(--divider);
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -1274,13 +1390,11 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 
 /* The folder's list and the chosen file side by side while the page has room for the list's widest column and a
    working file beside it (360 + 340); a narrower page (a phone, a narrow window) shows the list first and the file
-   once one is chosen, with Back to folder above it (files.js). Only there does a row say its edits are unsaved and
+   once one is chosen, with a round Back to its folder in the band (files.js). Only there does a row say its edits are unsaved and
    a new file's draft keep a row of its own, the two ways back to a draft. */
 .files-layout { container: files / inline-size; }
-.files-preview-back,
 .files-entry.is-draft,
 .files-entry-unsaved { display: none; }
-.files-back svg { display: block; width: 16px; height: 16px; }
 .files-entry-untitled {
     min-width: 0;
     overflow: hidden;
@@ -1292,10 +1406,9 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 @container files (max-width: 700px) {
     .files-sidebar,
     .files-preview { grid-column: 1 / -1; }
-    .files-sidebar { border-right: 0; }
+    .files-preview { border-left: 0; }
     .files-layout:not([data-files-view="file"]) .files-preview,
     .files-layout[data-files-view="file"] .files-sidebar { display: none; }
-    .files-preview-back { display: flex; padding: var(--space-3) 20px 0; }
     .files-entry.is-draft { display: grid; }
     .files-entry:is(.is-draft, [data-unsaved]) .files-entry-unsaved { display: inline; color: var(--status-warn-fg); }
     .files-entry[data-unsaved] .files-entry-size { display: none; }
@@ -1366,28 +1479,38 @@ html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title 
     clip-path: inset(50%);
     white-space: nowrap;
 }
-html[data-layout="docked"] .app-page-header[data-empty] {
-    display: none;
+html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
 }
 /* In the macOS desktop window the band under the transparent title bar is the window's handle
    (launcher_window_chrome.py: a plain press there moves the window, a press on a control stays the page's). The band
    is the window's, not a row of the page: a header with nothing to show lies over the top of its page as that handle
    (clear of the scrollbar, as a room's strip is), the page's first row starts below the band, and scrolled content
    passes under it with crisp edges, as a room's feed does. */
-:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty] {
+:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     display: block;
     position: absolute;
     inset: 0 6px auto 0;
     z-index: 2;
     height: var(--window-chrome-top);
+    width: auto;
+    margin: 0;
+    overflow: visible;
+    clip-path: none;
     padding: 0;
 }
-:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty] ~ .widgets-scroll {
+:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty]:not([data-return]) ~ .widgets-scroll {
     padding-top: calc(var(--space-4) + var(--window-chrome-top));
 }
 /* While a card is dragged the band lets the pointer through to the board, whose top edge is where the engine scrolls
    a drag upward; at rest the band is the window's handle. */
-:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:has(~ .widgets-scroll .widgets-card[data-widget-lifted]) {
+:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:not([data-return]):has(~ .widgets-scroll .widgets-card[data-widget-lifted]) {
     pointer-events: none;
 }
 
@@ -1405,6 +1528,12 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 
 .app-page-toolbar {
     max-width: 100%;
+}
+
+.app-page-header .btn, .app-page-tabs .btn {
+    --control-h: var(--control-h-float);
+    --button-font-size: var(--type-meta);
+    --control-pad-x: var(--space-3);
 }
 
 .app-page-trailing {
@@ -1438,95 +1567,75 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 .app-page-lead > * { min-width: 0; }
 .app-page-lead:empty,
 .app-page-tabs:not(:has(> *)) { display: none; }
-/* The Back slot (page_header.js placePageBack): one control, never part of a lead that scrolls. On a desk it stands
-   before the lead in the bar's start; in the stack layout it starts the row under ☰: the page's tab strip when it
-   has one, else a row of the header's own. Each `:has()` asks for the control itself (`> *`): WebKit does not
-   re-match `:empty` there when Back comes after the header was painted (14.11: Back alone at the window's top edge). */
-.app-page-back { display: flex; flex: none; align-items: center; }
-.app-page-back:empty { display: none; }
-html[data-layout="docked"] .app-page-title-block:has(> .app-page-back > *) {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-}
-html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) ~ .app-page-lead { flex: 1 1 auto; }
-/* Back takes the header's start inset (a step from the column's edge) and the hidden title takes no place in the row,
-   so the tabs or the location after it keep the room they have without Back. */
-html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-block > .app-page-title-row:has(~ .app-page-back > *) {
-    position: absolute;
-}
-html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
-    margin-inline-start: calc(var(--space-2) - var(--page-header-padding-x));
-}
-/* A phone page that leads back (Circles or Skills opened from Settings): Back stands where the places control stood,
-   in the header's one row, as on a Settings page (DESIGN "Page header": one leading control, no second header row). */
-html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back > *) {
-    grid-template-areas: "back title toolbar";
-}
-html[data-layout="stack"] .app-page-header[data-back] > .app-page-leading:has(~ .app-page-title-block > .app-page-back > *) {
-    display: none;
-}
-html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back > *) { display: contents; }
-html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
-html[data-layout="stack"] .app-page-header[data-back] .app-page-back { grid-area: back; }
-.app-page-tabs[data-back] { display: flex; align-items: center; gap: var(--space-1); }
-.app-page-tabs[data-back] > :not(.app-page-back) { flex: 1 1 auto; min-width: 0; }
-/* Back starts the tabs' row at ☰'s inset and is centred on the tabs, not on the strip, which lends its tabs their
-   shadow room below them (.app-tab-strip: var(--space-2) above, var(--space-5) below). */
-.app-page-tabs[data-back] { padding-inline-start: var(--space-3); }
-.app-page-tabs[data-back] > .app-page-back { margin-bottom: calc(var(--space-5) - var(--space-2)); }
-/* A narrow content column gives the existing toolbar its own wrapping row; navigation lives below it. */
-html[data-layout="docked"] .app-page-header[data-narrow] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "toolbar"; }
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-leading { display: none; }
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-title-block { position: absolute; }
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar { flex-wrap: wrap; }
-/* A narrow header's actions wrap a long label instead of leaving the column (a translation, or a wider platform font:
-   "Update 2 trusted" in a 160 px column on Linux); like the Evolution verbs, the box comes from the tokens; a fixed
-   16 px line keeps one line at the small capsule's 28 px (1 + 5 + 16 + 5 + 1) on every platform font. */
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar > button { flex: none; max-width: 100%;
-    white-space: normal; overflow-wrap: anywhere; line-height: 16px; --control-h: auto; --control-pad-y: 5px; }
+/* Levels and returns share the one round Back. The writer supplies presence and placement. */
+.app-page-return { display: flex; align-items: center; flex: none; order: -1; }
+.app-page-return:empty { display: none; }
+html[data-telegram-back="back"] .app-page-return { display: none; }
+.app-page-header[data-return] > .app-page-title-block { display: flex; align-items: center; gap: var(--space-2); }
+.app-page-header[data-return="column"] > .app-page-title-block { display: block; }
+.app-page-header[data-return] .app-page-lead { flex: 1; }
+html[data-layout="stack"] .app-page-header[data-return] { grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto; grid-template-areas: "back title toolbar"; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-leading { display: none; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block { display: contents; }
+html[data-layout="stack"] .app-page-header[data-return] .app-page-title-row { grid-area: title; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block > .app-page-return { grid-area: back; }
 html[data-layout="docked"] .app-page-header[data-lead] {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(8rem, 1fr) auto;
     grid-template-areas: "title toolbar";
-    min-height: 50px;
+    min-height: var(--page-header-row-h);
     padding-block: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    --band-fade-start: 0px;
+    --band-fade-end: 0px;
+    --scroll-fade-edge: var(--space-4);
+    -webkit-mask-image: linear-gradient(to right, transparent, black var(--band-fade-start), black calc(100% - var(--band-fade-end)), transparent);
+    mask-image: linear-gradient(to right, transparent, black var(--band-fade-start), black calc(100% - var(--band-fade-end)), transparent);
 }
+/* With a return the folder rail keeps 14rem, or 40% of a narrow band (a tablet's column keeps Refresh in it); at the
+   residual room floor the same row scrolls, so Paste cannot squeeze the rail to zero. */
+html[data-layout="docked"] .app-page-header[data-lead][data-return] { grid-template-columns: minmax(min(14rem, 40%), 1fr) auto; }
+/* A section place's band holds no actions (its page's controls stand in the page column's lead), so it keeps no end
+   column: Settings' search and Logs' Clear end where the cards end, with or without a return. */
+html[data-layout="docked"] .section-place > .app-page-header[data-lead] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
+html[data-layout="docked"] .app-page-header[data-lead]::-webkit-scrollbar { display: none; }
+html[data-layout="docked"] .app-page-header[data-scroll-start] { --band-fade-start: var(--space-4); }
+html[data-layout="docked"] .app-page-header[data-scroll-end] { --band-fade-end: var(--space-4); }
 /* In the macOS window the row is the window's band, so its tabs and actions sit level with the traffic lights at every
    Interface size: a larger size shrinks the band in CSS px, and the strip's insets shrink with it, the bottom one
    keeping the tabs' 16px of shadow room (at 100 % they are the 10px and 26px above; once the band is shorter than a
    control the row grows below the band). */
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-lead] {
     --lead-inset: min(10px, max(0px, calc((var(--window-chrome-top) - var(--control-h-float)) / 2)));
-    min-height: var(--window-chrome-top);
+    min-height: var(--page-header-row-h);
 }
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-lead .app-tab-strip {
     padding-top: var(--lead-inset);
     padding-bottom: calc(16px + var(--lead-inset));
 }
 html[data-layout="docked"] .app-page-header[data-lead] > .app-page-leading { display: none; }
-html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar { --control-h: var(--control-h-float); }
+html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar {
+    --control-h: var(--control-h-float);
+    min-width: max-content;
+    max-width: none;
+}
 html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar button {
     height: var(--control-h-float);
     min-height: var(--control-h-float);
     padding-block: 0;
 }
-/* In the bar the tabs wrap and never scroll (DESIGN "Page header"): a strip longer than the bar's start takes a second
-   line of tabs, which grows the bar, instead of hiding tabs behind a fade. */
+/* The band keeps one sideways rail. Its existing strip reveals the chosen control. */
 html[data-layout="docked"] .app-page-lead .app-tab-strip {
     flex: 1 1 auto;
-    flex-wrap: wrap;
-    row-gap: var(--space-1);
-    overflow-x: visible;
-    padding: 10px var(--space-1) 26px;
-    margin: 0 0 -16px calc(-1 * var(--space-1));
-    scroll-padding-inline: var(--space-1);
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 10px 0 26px;
+    margin: 0 0 -16px;
+    scroll-padding-inline: var(--space-4);
     pointer-events: none;
 }
 html[data-layout="docked"] .app-page-lead { --control-h: var(--control-h-float); }
-html[data-layout="docked"] .app-page-lead .app-tab { pointer-events: auto; }
-/* A pane too narrow for the bar keeps the strip under the row (page_header.js bindPageHeader): there too it wraps and
-   never scrolls; only the phone's strip, at the top of its page, scrolls. */
-html[data-layout="docked"] .app-page-tabs > .app-tab-strip { flex-wrap: wrap; row-gap: var(--space-1); overflow-x: visible; }
+html[data-layout="docked"] .app-page-lead .app-tab-strip > button { pointer-events: auto; flex: none; }
 /* Files: the folder's location starts the bar at reading size, each folder by its name, the one you are in in primary
    ink. A location longer than the bar's start scrolls inside it as a tab strip does, fading where folders hide: it
    rests at its end (files.js), so the folders above give way first, and no folder is wider than the strip less one
@@ -1602,10 +1711,11 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .scroll-fade-y {
     --scroll-fade-edge: 32px;
     --scroll-fade-top: 0px;
+    --scroll-fade-top-clear: 0px;
     --scroll-fade-bottom: 0px;
-    -webkit-mask-image: linear-gradient(180deg, transparent 0,
+    -webkit-mask-image: linear-gradient(180deg, transparent var(--scroll-fade-top-clear),
         black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent 100%);
-    mask-image: linear-gradient(180deg, transparent 0,
+    mask-image: linear-gradient(180deg, transparent var(--scroll-fade-top-clear),
         black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent 100%);
 }
 .scroll-fade-y[data-scroll-above] { --scroll-fade-top: var(--scroll-fade-edge); }
@@ -1726,7 +1836,7 @@ html[data-layout="stack"] .chat-find {
     background: var(--surface-tray);
     transition: var(--motion-tone);
 }
-.chat-find-bar:has(> .chat-find-input:focus) {
+.chat-find-bar[data-focused] {
     box-shadow: inset 0 0 0 1px var(--focus-accent-border), 0 0 0 3px var(--focus-accent-ring);
 }
 .chat-find-glyph { display: inline-flex; flex: 0 0 18px; color: var(--text-secondary); pointer-events: none; }
@@ -2119,12 +2229,13 @@ html[data-layout="stack"] .chat-find {
     overflow-y: auto;
     overflow-x: hidden;
     padding: 20px;
-    /* The room's bar and note, and while its search is open what the sheet covers below them (chat_reply.js). */
-    padding-top: calc(var(--chat-header-reserve, 56px) + var(--chat-find-reserve, 0px));
+    /* The room's bar, its edge and its note, and while its search is open what the sheet covers below them (chat_reply.js). */
+    padding-top: calc(var(--chat-top-reserve, var(--chat-header-reserve, 56px)) + var(--chat-find-reserve, 0px));
     padding-bottom: 0;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    --chat-feed-gap: 14px;
+    gap: var(--chat-feed-gap);
     /* Container for the late live-card width override. A narrow project panel
        must respond to this column's width, not to the outer viewport. */
     container-type: inline-size;
@@ -2225,6 +2336,11 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 .chat-scroll-bottom-btn:hover { color: var(--text-primary); }
 .chat-scroll-bottom-btn:not(:disabled):hover { background: var(--surface-capsule-hover); }
 .chat-scroll-bottom-btn:not(:disabled):active { filter: var(--press); }
+/* ↓ still reading the present it goes to: its press's own colour holds and only the arrow carries the history
+   loader's pulse, begun at its dim half so the press reads as taken in its first frame; the new-activity dot keeps
+   its meaning and stands still. */
+.chat-scroll-bottom-btn[aria-busy="true"] { filter: var(--press); cursor: progress; }
+.chat-scroll-bottom-btn[aria-busy="true"] svg { animation: thinking-pulse 1.5s ease-in-out -0.75s infinite; }
 .chat-scroll-bottom-btn:disabled { box-shadow: none; }
 .chat-scroll-bottom-btn:focus-visible {
     outline: 2px solid var(--focus-accent-border);
@@ -2896,29 +3012,6 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     background: var(--status-error-bg);
 }
 
-/* Logs phase pills name the status triples by class (DESIGN "The tone primitive"); the
-   saturated --green/--amber/--red are dot-and-indicator hues, not small-text hues. A Logs task headline that settled
-   is its task's outcome and takes the cards' tone (logs.js writes data-chip-tone): Done with warnings green, Stopped
-   neutral. A warn-level log event stays amber: a warning worth reading. */
-.log-entry .log-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
-.log-entry .log-phase[data-chip-tone="ok"] {
-    color: var(--status-ok-fg);
-    border-color: var(--status-ok-border);
-    background: var(--status-ok-bg);
-}
-
-.log-entry .log-phase:is(.warn, .empty):not([data-chip-tone]) {
-    color: var(--status-warn-fg);
-    border-color: var(--status-warn-border);
-    background: var(--status-warn-bg);
-}
-
-.log-entry .log-phase:is(.error, .timeout, .lifecycle_error) {
-    color: var(--status-error-fg);
-    border-color: var(--status-error-border);
-    background: var(--status-error-bg);
-}
-
 .chat-live-title {
     font-size: var(--type-body);
     font-weight: 500;
@@ -2959,6 +3052,22 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     display: none;
     min-height: 0;
 }
+
+/* Where the work came from (task_origin.js): one meta line under a root card's or a portal's name, the place that
+   called it, what called it and who. Its parts wrap as the card's meta line's do: each moves to the next line whole
+   with its own separator, and the gap is the one space after it. Details keep the facts in full. */
+.chat-live-origin {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--space-1);
+    flex: 1 1 100%;
+    min-width: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.chat-live-origin[hidden] { display: none; }
+.chat-live-origin > span { min-width: 0; overflow-wrap: anywhere; }
 
 /* Activity grows with useful content. Details retain the complete source. */
 .chat-live-activity {
@@ -3640,7 +3749,6 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 .chat-live-card[data-expanded="1"] > .chat-live-timeline,
 .chat-episode-history[open] > .chat-live-timeline {
     display: flex;
-    border-top: 1px solid rgba(var(--neutral-rgb), 0.05);
     max-height: 420px;
     overflow-y: auto;
 }
@@ -4736,6 +4844,7 @@ html[data-layout="stack"] #content {
         border-radius var(--drawer-settle, var(--motion-close)) var(--ease-sheet),
         box-shadow var(--drawer-settle, var(--motion-close)) ease;
 }
+html[data-layout="stack"] { --page-header-padding-x: var(--space-3); }
 html[data-layout="stack"] #content > .page:not(#page-chat) {
     padding-bottom: var(--inset-bottom);
 }
@@ -4748,6 +4857,12 @@ html[data-layout="stack"] .app-page-header {
     padding: var(--chrome-inset) var(--space-3);
     padding-top: calc(var(--chrome-inset) + var(--inset-top));
     column-gap: var(--space-2);
+}
+/* A page's row, and the drawer's head whose × replaces its ☰, stand at the bands' one inset, as on a desk (DESIGN "Page
+   header"): 18px below a browser's top, or just under the system's band where the screen has one. A room keeps its
+   own top, Telegram its row, a macOS window the traffic lights' line. */
+:where(html[data-layout="stack"]:not([data-window-chrome="integrated"])) :is(#content > .page:not(#page-chat) > .app-page-header, .drawer-head) {
+    padding-top: max(calc((var(--page-header-row-h) - var(--control-h-float)) / 2), calc(var(--chrome-inset) + var(--inset-top)));
 }
 html[data-layout="stack"] .chat-page-header {
     flex-wrap: nowrap;
@@ -5944,7 +6059,9 @@ body.keyboard-open .model-sheet[data-sheet="bottom"] {
 /* The tier strip at the sheet's foot (processing_choice.js): the shared strip, Default beside it while there is a
    choice to leave, then what the choice applies to and what the tier under the mouse or focus means on this route,
    in a box as tall as its tallest explanation (hidden copies stacked in its one cell), so nothing jumps while a
-   pointer moves. A tier taken without a choice of its own wears a ring; one this route does not list is quieter. */
+   pointer moves. The strip holds only the tiers its route does not prove absent, and none where only Standard is
+   left. A tier taken without a choice of its own wears a ring; one not confirmed here, or listed by some accounts
+   only, is dotted under its word; a chosen or inherited one this route does not list is quieter. */
 .model-tier {
     flex: 0 0 auto;
     margin-top: var(--space-2);
@@ -5954,7 +6071,9 @@ body.keyboard-open .model-sheet[data-sheet="bottom"] {
 .model-tier-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .model-tier-seg[data-resolved="true"] { box-shadow: inset 0 0 0 1px rgba(var(--neutral-rgb), 0.28); color: var(--text-primary); }
 .model-tier-seg[data-support="unlisted"]:not([aria-checked="true"]) { color: var(--text-disabled); }
-.model-tier :is(.model-tier-seg, .model-tier-default)[aria-disabled="true"] { cursor: progress; opacity: var(--control-disabled-opacity); }
+.model-tier-seg:is([data-support="unknown"], [data-support="some"]) { text-decoration: underline dotted; text-underline-offset: 3px; }
+.model-tier :is(.model-tier-seg, .model-tier-default)[aria-disabled="true"] { cursor: default; opacity: var(--control-disabled-opacity); }
+.model-tier[aria-busy="true"] [data-tier] { cursor: progress; }
 .model-tier-scope, .model-tier-means, .model-tier-sizer { margin: 0; overflow-wrap: anywhere; }
 .model-tier-scope { margin-top: var(--space-2); color: var(--text-secondary); font-size: var(--type-meta); }
 .model-tier-meansbox { display: grid; margin-top: 2px; }
@@ -6145,34 +6264,6 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
 }
 
 
-/* Every layer over the room lies over one veil, the theme's --scrim (ui.css; U020): the dialogs here, the Project
-   panel's, the file dialog's and the document reader's, and the feed under a long-pressed row. */
-.ui-modal-backdrop,
-:where(.marketplace-modal-backdrop) {
-    position: fixed;
-    inset: 0;
-    z-index: 90;
-    display: flex;
-    justify-content: center;
-    overflow-y: auto;
-    background: var(--scrim);
-}
-
-/* A dialog stands in the middle of the window, clear of the bars (U024); one taller than the window starts at its top
-   and scrolls (the auto margins centre only while there is room). While a phone's keyboard is up the window keeps its
-   height under it, so a dialog stands at the top instead, its foot above the keyboard (M12). */
-.ui-modal,
-:where(.marketplace-modal) {
-    width: 100%;
-    margin-block: auto;
-    display: flex;
-    flex-direction: column;
-    border: 1px solid transparent;
-    background: var(--ui-modal-bg);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-}
-body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
-
 .section-title {
     font-size: 14px;
     font-weight: 600;
@@ -6238,52 +6329,36 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     padding: 0;
 }
 
-/* Logs (U026-U035, U140): the tab body scrolls; its filters stay at its top on the room's colour (the stream lives
-   at its newest end, the filters must stay in reach) while the list, one card whose events are trays, scrolls under
-   them. A task's event is the same tray with its kind and its timeline. The system face reads the sentences;
-   monospace keeps only the time and the raw record. */
-/* The body's top inset rides on the bar, so the bar sticks flush at the scroller's edge (a sticky box keeps clear of
-   its scroller's padding, which let rows show above it). */
-#page-logs {
-    padding-top: 0;
-    overflow-anchor: none; /* logs.js owns the entry anchor while chunks are inserted or moved */
-}
-.logs-filters {
-    --control-h: var(--control-h-sm);
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    align-items: center;
-    padding: var(--space-4) 0 var(--space-2);
-    background: var(--bg-primary);
-}
-
-/* The filter chips wrap on a phone: under a finger they take the touch minimum as their own height. */
-@media (pointer: coarse) {
-    .logs-filters { --control-h: var(--touch-target-min); }
-}
-
-.logs-inline-clear {
-    margin-left: auto;
-}
-/* A pane narrower than the six chips and Clear at their usual spacing draws them closer, so they still keep to one
-   line beside a section's list (owner's window: a 455 px tab body); where even that line does not fit, they stand
-   in two even rows of three, Clear at the end of the first, never one chip alone on a row of its own. */
-@container dashboard (max-width: 34rem) {
-    .logs-filters { gap: var(--space-1); }
-    .logs-filters > .filter-chip { --control-pad-x: var(--space-2); }
-}
-@container dashboard (max-width: 27.75rem) {
-    .logs-filters { display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr); justify-items: start; }
-    .logs-filters > .logs-inline-clear { grid-column: 4; grid-row: 1; justify-self: end; }
-    /* Consciousness can use the space below Clear; its wider system-font word must not widen column three. */
-    .logs-filters > .filter-chip:nth-child(6) { grid-column: 3 / -1; }
+/* Logs keeps its one list scroller plain. The shared filter rail and Clear stand in the page column's band. */
+#page-logs { overflow-anchor: none; }
+.logs-filters { display: flex; align-items: center; flex: 1; min-width: 0; gap: var(--space-2); }
+.logs-filters[hidden] { display: none; }
+.logs-kinds { flex: 1; }
+.logs-kinds[data-scroll-end] { --tab-fade-end: var(--space-4); }
+.logs-kinds[data-scroll-start] { --tab-fade-start: var(--space-4); }
+.logs-clear-list { flex: none; color: var(--text-secondary); }
+/* A two-pane stack window holds the rail in the header's one row: the strip lends its chips' shadow room outside it, so
+   the row keeps the controls' height. */
+html[data-layout="stack"] #page-dashboard .logs-kinds { margin-block: calc(-1 * var(--space-2)) calc(-1 * var(--space-5)); }
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-layout="stack"] #page-dashboard .app-page-header[data-controls] .section-lead-page {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        column-gap: var(--space-2);
+    }
+    html[data-layout="stack"] #page-dashboard .section-lead-page > .app-page-return { grid-area: 1 / 1; }
+    html[data-layout="stack"] #page-dashboard .section-lead-page > [data-dashboard-lead-name] { grid-area: 1 / 2; }
+    html[data-layout="stack"] #page-dashboard .logs-filters:not([hidden]) { display: contents; }
+    /* The rail runs to the page's edges and keeps the column's inset inside, so a chip it hides fades at the edge. */
+    html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1; padding: var(--space-2) var(--page-header-padding-x);
+        margin: 0 calc(-1 * var(--page-header-padding-x)); max-width: none; scroll-padding-inline: var(--page-header-padding-x); }
+    html[data-layout="stack"] #page-dashboard .logs-clear-list { grid-area: 1 / 3; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
 }
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
+html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow: none; border-radius: 0; }
 .logs-empty { margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
 .logs-empty[hidden] { display: none; }
 
@@ -6291,104 +6366,70 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     display: grid;
     gap: var(--space-2);
     min-width: 0;
+}
+
+/* An event is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline; its head fills the
+   tray, so it opens from anywhere on it. Inside a task's tray its timeline rows part by space alone: a tray inside a
+   tray drops its fill. */
+.log-entry {
+    min-width: 0;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+}
+.log-entry > .log-head { padding: var(--space-3); }
+.log-entry[open] > .log-head { padding-bottom: 0; }
+.log-entry > :not(summary) { margin-inline: var(--space-3); }
+.log-entry[open] { padding-bottom: var(--space-3); }
+.log-task-timeline { display: flex; flex-direction: column; gap: var(--space-2); }
+
+/* The head is the shared summary laid out as a grid (it outranks the summary's own flex row). */
+.log-fold > .log-head {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: baseline;
+    align-content: center;
+    gap: 2px var(--space-2);
+}
+.log-head [hidden] { display: none; }
+.log-title { grid-area: 1 / 2; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); min-width: 0; }
+.log-name {
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-title);
+    overflow-wrap: anywhere;
+}
+:is(.log-task, .log-count, .log-ts) { color: var(--text-meta); font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.log-ts { grid-area: 1 / 3; }
+
+/* The words' line reads: body size, regular weight, primary ink, three lines at most while closed, a failure's chip first. */
+.log-line {
+    grid-area: 2 / 2 / 3 / -1;
+    color: var(--text-primary);
     font-size: var(--type-body);
     line-height: var(--line-body);
+    font-weight: 400;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
 }
+.log-line > .log-failure { margin-inline-end: var(--space-2); }
+.log-title[hidden] ~ .log-line { grid-area: 1 / 2; }  /* a head without a name: its line stands in the name's place */
+.log-fold[open] > .log-head > .log-line { display: block; overflow: visible; }
 
-/* A log row is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline. */
-.log-entry {
-    padding: 10px 12px;
-    border-radius: var(--radius-inner);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    border: 1px solid transparent;
-    background: var(--surface-tray);
-    min-width: 0;
-}
-
-.log-main {
-    display: flex;
-    gap: 8px;
-    align-items: baseline;
-    flex-wrap: wrap;
-}
-
-.log-entry .log-ts {
-    color: var(--text-muted);
-    flex-shrink: 0;
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+/* The fold's sections: facts and notes in the meta ink, then the raw record. */
+:is(.log-facts, .log-note) {
+    color: var(--text-meta);
     font-size: var(--type-meta);
-    font-variant-numeric: tabular-nums;
+    line-height: var(--line-meta);
+    overflow-wrap: anywhere;
 }
-
-.log-entry .log-type {
-    font-weight: 700;
-    flex-shrink: 0;
-    font-size: var(--type-meta);
-}
-
-/* A level chip lies flat; the default `info` level says nothing and is not drawn (U028). */
-.log-entry .log-phase {
-    padding: 1px 8px;
-    border-radius: 999px;
-    font-size: var(--type-meta);
-    border: 1px solid transparent;
-    color: var(--text-secondary);
-    background: rgba(var(--neutral-rgb), 0.04);
-}
-.log-entry .log-phase.info { display: none; }
-
-.log-entry .log-phase:is(.start, .calling, .context, .progress, .thought, .boot, .working, .thinking) {
-    color: var(--accent-light);
-    background: var(--accent-10);
-}
-
-.log-entry .log-headline {
-    color: var(--text-primary);
-    font-weight: 600;
-    word-break: break-word;
-    flex: 1 1 auto;
-    min-width: 0;
-}
-/* The headline, its count and Raw are one lead (logs.js logMainHtml): it shares the time's line where it fits whole,
-   else it takes the next line, and the headline wraps inside it only when it is longer than a line. Raw stays at the
-   end of the headline's own line instead of dropping to a line of its own. */
-.log-main > .log-lead { display: flex; flex: 1 1 auto; align-items: baseline; gap: 8px; min-width: 0; }
-
-.log-entry .log-repeat {
-    margin-left: auto;
-    color: var(--text-muted);
-    font-size: var(--type-meta);
-}
-
-/* Raw is the line's last, quiet control (.btn.btn-ghost.btn-sm); after a count it follows it, else it takes the end.
-   Its word stands on the headline's baseline, as the line's other words do. */
-.log-raw-toggle { flex: none; }
-.log-lead > .log-repeat[hidden] + .log-raw-toggle { margin-left: auto; }
-
-.log-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.log-pill {
-    display: inline-flex;
-    align-items: center;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: rgba(var(--neutral-rgb), 0.05);
-    color: var(--text-secondary);
-    border: 1px solid transparent;
-    font-size: var(--type-meta);
-}
-
-.log-body {
-    color: var(--text-secondary);
-    word-break: break-word;
-    white-space: pre-wrap;
-}
+.log-note { white-space: pre-wrap; }
+.log-facts > .log-executor-chip { margin-right: var(--space-2); }
 
 .log-raw {
     margin: 0;
@@ -6404,37 +6445,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     overflow-y: auto;
 }
 
-.log-raw-tools { margin-top: var(--space-2); }
 .log-raw-status { overflow-wrap: anywhere; }
-.log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-
-.log-type.tools { color: var(--status-info-fg); }
-.log-type.llm { color: var(--accent); }
-.log-type.errors { color: var(--status-error-fg); }
-.log-type.tasks { color: var(--status-warn-fg); }
-.log-type.system { color: var(--text-muted); }
-.log-type.consciousness { color: var(--project); }
-
-.log-task-summary {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.log-task-review { margin-top: var(--space-2); }
-
-/* Inside the task's tray its timeline rows part by space alone: a tray inside a tray drops its fill. */
-.log-task-timeline {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-}
-
-.log-task-event {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
+.log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
+/* Download is a link (the browser streams the file) in the capsule's look: the shared .btn leaves a link's underline. */
+.log-raw-download { text-decoration: none; }
 
 /* `width` is the vertical bar, `height` the horizontal one: without the height
    a horizontal bar falls back to the 16-17px UA default and paints thick. */
@@ -6513,24 +6527,25 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* How Ouroboros changed: the head, one measure at a time (the shared segments, wrapping on a narrow card so none
    hides past its edge), the chart, how it is measured behind a disclosure, and the chosen version. */
 .evo-story { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.evo-story-head { container: evostoryhead / inline-size; display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
+.evo-story-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
 .evo-story-words { display: grid; gap: 2px; min-width: 0; }
 .evo-story-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .evo-story-status { display: flex; align-items: center; gap: 2px var(--space-2); flex-wrap: wrap; margin: 0; min-height: calc(var(--type-meta) * var(--line-meta)); }
 .evo-story-status .ui-status { margin: 0; }
 .evo-progress { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.evo-measures { --control-h: var(--control-h-sm); display: flex; flex-wrap: wrap; gap: 6px; }
+.evo-measures { --control-h: var(--control-h-sm);
+    --measure-gap: 6px;
+    display: flex; flex-wrap: wrap;
+    gap: var(--measure-gap) calc(2 * var(--measure-gap) + 1px); max-inline-size: 100%; }
+.evo-measure-set { display: flex; flex-wrap: wrap; gap: var(--measure-gap); min-inline-size: 0; }
+.evo-measures-install { position: relative; flex-wrap: nowrap; }
 /* The measures wrap on a narrow card: under a finger they take the touch minimum as their own height. */
 @media (pointer: coarse) {
     .evo-measures { --control-h: var(--touch-target-min); }
 }
-.evo-measures-sep { width: 1px; align-self: stretch; margin: 0; background: rgba(var(--neutral-rgb), 0.12); }
-/* The divider parts the release's measures from the installation's own (Identity, Scratchpad) on one line. A head too
-   narrow for the five on one line (about 32rem) wraps them, and the divider would hang at the end of a row with nothing
-   after it, so there it becomes the break: the installation's two take the next line together. */
-@container evostoryhead (max-width: 33rem) {
-    .evo-measures-sep { flex-basis: 100%; height: 0; background: none; }
-}
+/* The hairline occupies the space between adjacent groups. Hiding it on a wrap cannot move either group. */
+.evo-measures-sep { position: absolute; inset-block: 0; inset-inline-start: calc(-1px - var(--measure-gap));
+    width: 1px; background: rgba(var(--neutral-rgb), 0.12); }
 .evo-quiet { --control-pad-x: var(--space-2); }
 .evo-quiet svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .evo-link { padding: 0; border: 0; background: none; color: var(--text-primary); font-family: inherit; font-size: var(--type-meta);
@@ -6934,6 +6949,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .storage-free-group > .storage-free-paths { grid-column: 2 / -1; margin-top: var(--space-1); }
 .storage-free-paths .storage-largest-list { gap: 2px; }
 .storage-free-paths :is(.storage-largest-name.storage-free-path, .storage-largest-size) { font-size: var(--type-meta); line-height: var(--line-meta); }
+.storage-largest-item > .storage-free-why { grid-column: 1 / -1; }  /* a proposed file's role and loss, under its path */
 .storage-free-paths .storage-largest-size { color: var(--text-meta); }
 .storage-free-sub { margin: var(--space-3) 0 0; color: var(--text-primary); font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 650; }
 .storage-free-picks { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin-top: var(--space-2); }
@@ -7015,22 +7031,121 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* The Dashboard's shell is the section shell (ui.css), which bounds its columns. A page that borrows this class
    without a section's list (Circles) keeps the bounded column of its own, so its body is the page's scroller. */
 .dashboard-shell:not(.section-shell) { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.dashboard-lead-back { display: flex; flex: none; align-items: center; }
-.dashboard-lead-back:empty { display: none; }
 .dashboard-row-mark[hidden] { display: none; }
 @container sectionplace (min-width: 40rem) {
     .dashboard-shell .dashboard-body { padding-inline-start: var(--space-4); }
+    /* An automatic page beside the list is shown by ui.css's shared rule, which draws a pane as a grid: the Dashboard's
+       pane stays the flex column its panels fill (below), as on a chosen page. */
+    .dashboard-shell[data-section-view="auto"] > .dashboard-panels { display: flex; }
+    /* The chosen list row names its pane; the heading remains available to readers. */
+    .section-lead-page > [data-dashboard-lead-name],
+    #page-settings[data-settings-depth="1"] .section-lead-page > [data-settings-lead-name],
+    #page-skills[data-extensions-depth="1"] .section-lead-page > [data-extensions-lead-name] {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+    }
+    /* Two panes whose band holds nothing (the open page has no controls, no return is owed; dashboard.js writes
+       data-controls): on a desk the header lies over the page as the band, the macOS window's handle where it has one,
+       and the rail and the page start below it, where they start under Logs' controls, so neither moves between pages
+       or when a return is spent, in any window (as Settings', settings.css). A touch window keeps ☰ alone in its row. */
+    html[data-layout="docked"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) {
+        position: absolute;
+        inset: 0 6px auto 0;
+        z-index: 2;
+        height: var(--page-header-row-h);
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+    }
+    html[data-layout="docked"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) ~ .section-shell :is(.section-rail, .dashboard-body) {
+        padding-top: calc(var(--page-header-row-h) + var(--space-4));
+    }
+    html[data-layout="docked"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) ~ .section-shell > .section-rail {
+        padding-top: calc(var(--page-header-row-h) + var(--space-3));
+    }
+    html[data-layout="stack"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) { grid-template-areas: "leading title toolbar"; }
+    html[data-layout="stack"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) .app-page-lead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        min-height: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+    }
 }
 /* A phone: the list's screen keeps `☰ Dashboard`, with nothing under it; a page's screen is one row, Back (to the
    list, or to Settings) and the page's name in the header's title style, where ☰ and the place's name stood. Only a
    page that REPLACED the list gives ☰ up: a drawer-width window that still holds the list beside its page (40rem up
    to the shell's switch) has no Back, so there ☰ stays the way to every other destination. */
+html[data-layout="stack"] #page-settings > .app-page-header:not([data-return]) .app-page-lead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    min-height: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+}
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
     html[data-layout="stack"] #page-dashboard[data-section-view="auto"] > .app-page-header .app-page-lead { display: none; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
-    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title toolbar"; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
 }
+
+/* Extensions is a place with pages (extensions.js), drawn as the Dashboard is: the section list (Skills, MCP servers,
+   then the skill catalog's Browse and Sources) beside the open page from a 40rem box, the list or the page alone below
+   it. MCP servers, a server's page and a skill's own form are pages of the page registry (settings.css); the three
+   skill views are one block in the page's column, each view's search row over their one scroller. The band ends with
+   the open skill view's actions (Update all, Refresh); a page without them hides that end. */
+.extensions-mark[hidden] { display: none; }
+.extensions-toolbar { margin-inline-start: auto; }
+.extensions-toolbar[hidden] { display: none; }
+html[data-layout="stack"] #page-skills > .app-page-header .app-page-title-block { display: contents; }
+html[data-layout="stack"] #page-skills > .app-page-header .app-page-lead { grid-area: lead; min-height: var(--touch-target-min); }
+/* A return lives in the page column even when the list still fits beside it. */
+html[data-layout="stack"] #page-skills > .app-page-header[data-return] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-layout="stack"] #page-skills[data-section-view="home"] > .app-page-header:not([data-return]) .app-page-lead { display: none; }
+    #page-skills[data-section-view="home"] > .app-page-header[data-return] .section-lead-page { display: flex; }
+    #page-skills[data-section-view="home"] > .app-page-header[data-return] .section-lead-rail { display: none; }
+    html[data-layout="stack"] #page-skills > .app-page-header[data-return] .app-page-title-row,
+    html[data-layout="stack"] #page-skills[data-section-view="page"] > .app-page-header > .app-page-leading,
+    html[data-layout="stack"] #page-skills[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
+    html[data-layout="stack"] #page-skills[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+}
+.extensions-shell > .settings-levels > .extensions-views {
+    grid-area: 1 / 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+.extensions-shell > .settings-levels > .extensions-views[hidden] { display: none; }
+.extensions-views:focus { outline: none; }
+.extensions-views > .skills-search-chrome { margin-top: var(--space-2); }
+@container sectionplace (min-width: 40rem) {
+    /* With Places hidden, the lead spans the whole header and accounts for the full rail. */
+    html[data-layout="stack"] #page-skills > .app-page-header[data-return] .section-lead {
+        grid-template-columns: calc(var(--section-rail-w) - var(--page-header-padding-x) - var(--section-rail-end)) minmax(0, 1fr);
+    }
+    .extensions-shell[data-section-view="page"] .extensions-views > :is(.skills-search-chrome, .skills-scroll) { padding-inline-start: var(--space-4); }
+}
+/* A view arrives as a registry page does (settings.css): opacity and 8 px on --motion-fade. */
+.extensions-views[data-settings-arrive="wait"] { opacity: 0; }
+.extensions-views[data-settings-arrive="in"] { animation: settings-page-in var(--motion-fade) var(--ease-sheet); }
+@media (prefers-reduced-motion: reduce) {
+    .extensions-views[data-settings-arrive="in"] { animation-name: settings-page-fade; }
+}
+/* The Sources page is named by the band over it; its card keeps its status and Add source, its heading for readers. */
+.extensions-views .skills-sources-id > h3 { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 .dashboard-panels,
 .dashboard-panel {
@@ -7143,11 +7258,6 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .dashboard-settings[data-solo] .ui-row-meta { font-size: var(--type-body); line-height: var(--line-body); }
 .dashboard-settings[data-solo] .ui-row-actions { margin-top: var(--space-2); justify-content: flex-start; }
 .dashboard-settings[data-solo] > .settings-row > .ui-row-actions > .ui-control { width: 100%; }
-/* A place opened from Settings leads back there with the app's one Back (dashboard.js settingsReturn): first in its
-   header's lead, before the tabs or the location; a page whose header has no lead keeps it as a first row at its own
-   gutter. */
-.dashboard-back { flex: none; display: flex; margin: var(--space-2) 0 var(--space-1); padding: 0 20px; }
-html[data-layout="stack"] .dashboard-back { padding-inline: var(--space-3); }
 /* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
    screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
 html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
@@ -7250,9 +7360,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 }
 
 /* P2: main-screen Update pill — a pointer to Dashboard -> Updates. */
-/* "An update is available" is a classification, not an alarm and not a
-   success: it is a pointer to Dashboard -> Updates, the shared neutral capsule
-   (.btn.btn-default.btn-sm, docs/DESIGN.md "Status and chips"). Uncommitted
+/* An update on offer is the word Update on the crimson primary capsule (.btn.btn-primary.btn-sm, the concept the
+   owner chose 21.11): a pointer to Dashboard -> Updates, never an apply; an attempt's words stand on the shared
+   neutral capsule (.btn.btn-default.btn-sm, docs/DESIGN.md "Status and chips"). Uncommitted
    local changes ARE a caveat about what an update would do, the owner's turn
    in the amber tone; a failed attempt takes the red tone and an unknown one
    stays neutral; a confirmed success has no capsule (owner 1B). A tone outranks
@@ -7294,13 +7404,16 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     overflow: hidden;
 }
 
-/* Skills page. */
+/* Extensions (the skill views' place) and Widgets. */
 #page-skills,
 #page-widgets {
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
 }
+
+.widgets-context-tools, .widgets-context-report:not([hidden]) { margin-block-start: var(--space-4); }
+.widgets-context-report iframe { display: block; width: 100%; height: clamp(20rem, 78vh, 60rem); border: 0; }
 
 .skills-scroll,
 .widgets-scroll {
@@ -7310,10 +7423,16 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     padding: var(--space-4) var(--space-5) var(--space-5);
 }
 
+/* Extensions keeps the sectionplace container; its skill views own only their search and scrolling content.
+   The chrome row keeps the page's inline inset as the scroller does, so on a phone the filter strip's
+   edge-to-edge bleed cancels exactly that inset: it runs to the page's edges without leaving the pane. */
+#page-skills .skills-scroll { padding-top: 0; }
+#page-skills :is(.skills-scroll, .skills-search-chrome) { padding-inline: var(--page-header-padding-x); }
+
 .skills-search-chrome {
     flex: 0 0 auto;
     margin: 2px 0 12px;
-    padding: 0 var(--space-5);
+    padding: 0;
     container: skillschrome / inline-size;
 }
 
@@ -7525,7 +7644,6 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     padding: 0;
     border: 0;
     background: none;
-    cursor: pointer;
     text-align: left;
     color: var(--text-primary);
     font: inherit;
@@ -7534,6 +7652,7 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     line-height: var(--line-title);
     overflow-wrap: anywhere;
 }
+button.skills-card-name { cursor: pointer; }
 .skills-card-name:focus-visible,
 .skills-read-more:focus-visible,
 .skills-mark:focus-visible,
@@ -7670,12 +7789,15 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-filter-strip,
 .skills-category-strip { display: flex; flex-wrap: wrap; gap: 2px var(--space-1); min-width: 0; }
 /* On a phone the filters and the categories are one line that scrolls sideways ([data-scroll-x]: the drawer's swipe
-   leaves it to the strip), never a lone chip wrapped onto a second row. Like a tab strip it fades on each side that
-   still hides chips (scroll_fade.js sets the edges), and under a finger its chips take the touch minimum as their own
-   height, since the strip clips a reach. */
+   leaves it to the strip), never a lone chip wrapped onto a second row. As Logs' rail, it runs to the page's edges with
+   the column's inset inside and fades on each side that still hides chips (scroll_fade.js sets the edges); under a
+   finger its chips take the touch minimum as their own height, since the strip clips a reach. */
 html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) {
     flex-wrap: nowrap;
     overflow-x: auto;
+    margin-inline: calc(-1 * var(--page-header-padding-x));
+    padding-inline: var(--page-header-padding-x);
+    scroll-padding-inline: var(--page-header-padding-x);
     overscroll-behavior-x: contain;
     scrollbar-width: none;
     --strip-fade-start: 0px;
@@ -7691,8 +7813,9 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 @media (pointer: coarse) {
     html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) { --control-h: var(--touch-target-min); }
 }
-.skills-filter-strip { flex-basis: 100%; margin-left: calc(-1 * var(--space-2)); }
-.skills-category-strip { margin: 0 0 var(--space-3) calc(-1 * var(--space-2)); }
+.skills-filter-strip { flex-basis: 100%; }
+html[data-layout="stack"] .skills-filter-strip { flex-basis: calc(100% + 2 * var(--page-header-padding-x)); }
+.skills-category-strip { margin-bottom: var(--space-3); }
 .skills-category-strip[hidden] { display: none; }
 .filter-chip.skills-category {
     --control-pad-x: var(--space-2);
@@ -7755,6 +7878,9 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 .skills-head-card { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; overflow-wrap: anywhere; }
 .skills-card-action-row { margin-top: auto; padding-top: var(--space-1); }
 .skills-card-actions-end { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+/* The row's sentence is sized by its own words, so a row too narrow for both wraps the action under it and
+   the sentence keeps the row's whole line (DESIGN "a row too narrow for both gives it its own line"). */
+.settings-action-row.skills-card-action-row > :first-child { flex-basis: max-content; }
 
 /* Sources: rows on the Accounts anatomy (DESIGN §6); the trust value is a setting, the health a status sentence. */
 .skills-sources-card { gap: var(--space-3); }
@@ -7865,28 +7991,8 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 .skills-sheet-facts dd { margin: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
 
 
-/* Detail modal. */
-
-.marketplace-modal-backdrop {
-    align-items: flex-start;
-    padding: calc(4vh + var(--inset-top)) 16px 4vh;
-}
-
-.marketplace-modal {
-    max-height: calc(var(--vvh) - 8vh - var(--inset-top));
-    min-height: 0;
-    border-color: transparent;
-    border-radius: var(--radius-object);
-    background: var(--popup-float);
-    box-shadow: var(--elev-float);
-    -webkit-backdrop-filter: var(--glass);
-    backdrop-filter: var(--glass);
-    padding: 16px;
-    max-width: 900px;
-    gap: 12px;
-}
-
-/* Confirm/input/alert dialogs must stay usable over EVERY overlay (the Panic
+/* The confirm dialog (confirm_dialog.js), composed on the shared dialog (ui.css .ui-modal).
+   Confirm/input/alert dialogs must stay usable over EVERY overlay (the Panic
    confirm is the canonical case: it must be clickable while the socket is
    down; no veil covers the app then, owner 20.10 Q4). Overlay scale:
    modals 90 · toasts/menus 120 · dialogs 1100. */
@@ -7898,7 +8004,7 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     max-width: 520px;
 }
 
-.confirm-dialog .marketplace-modal-body p {
+.confirm-dialog .ui-modal-body p {
     margin: 0;
     white-space: pre-line;
 }
@@ -7931,7 +8037,7 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 .confirm-dialog .confirm-dialog-content p:last-child { margin-block-end: 0; }
 /* Beside rendered prose, the dialog's consequences and its Details summary read at the prose's
    size and ink, so the plain facts never outweigh what changes. Ordinary dialogs keep theirs. */
-.confirm-dialog.has-content .marketplace-modal-body > p,
+.confirm-dialog.has-content .ui-modal-body > p,
 .confirm-dialog.has-content .confirm-dialog-details > summary {
     font-size: var(--type-body);
     line-height: var(--line-body);
@@ -7961,35 +8067,6 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     margin: 0;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
-}
-
-.marketplace-modal-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-}
-
-/* A long unbroken title (a skill name) wraps; Close never leaves the dialog. */
-.marketplace-modal-head > h3 { min-width: 0; overflow-wrap: anywhere; }
-.marketplace-modal-head > button { flex: 0 0 auto; }
-
-.marketplace-modal-head, .marketplace-modal-actions { flex-shrink: 0; }
-.marketplace-modal-body > * { flex-shrink: 0; }
-.marketplace-modal-body {
-    min-height: 0;
-    flex: 1 1 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    overflow-y: auto;
-}
-
-.marketplace-modal-actions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 8px;
 }
 
 /* Widgets page. Masonry (web/modules/masonry.js) measures and packs the cards
@@ -8902,12 +8979,10 @@ figure.widget-media {
     .widget-table th[scope="row"] { display: block; padding: 6px 0; }
 
     .dashboard-body { padding: var(--space-3); }
-    .logs-filters { padding-top: var(--space-3); }
 
 }
 
-/* The stack layout's composer (Main; the Project panel keeps its own rules below) and the keyboard-in-flow layout
-   app.js enters only there (`keyboard-open`, from the same switch: layout.js). */
+/* Main's stack composer. The Project panel sets its own reading insets below. */
 html[data-layout="stack"] #chat-input-area {
     /* iOS safe-area inset. */
     padding-bottom: max(16px, var(--inset-bottom));
@@ -8985,7 +9060,7 @@ html[data-layout="stack"] .chat-send-inline {
 
 /* Main's transcript clears the taller phone header and the absolute composer. */
 html[data-layout="stack"] #chat-messages {
-    padding-top: calc(var(--chat-header-reserve, 80px) + var(--chat-find-reserve, 0px));
+    padding-top: calc(var(--chat-top-reserve, var(--chat-header-reserve, 80px)) + var(--chat-find-reserve, 0px));
     padding-bottom: 0;
     overflow-x: hidden;
 }
@@ -8994,23 +9069,17 @@ html[data-layout="stack"] #chat-messages::after {
     flex-basis: calc(var(--chat-input-reserve, 108px) + var(--inset-bottom) - 8px);
 }
 
-/* Keyboard-open layout: the room is one column within the visual viewport (app.js --vvh): its bar (with Main's note or a
-   Project's status bar), #chat-messages, the only part that scrolls, and the composer. The message field takes what the
+/* The keyboard room fits the measured viewport (keyboard_viewport.js --vvh). Telegram retains the reading overlays;
+   other hosts put the bar, feed and composer in a column. The message field takes what the
    room leaves after its measured chrome (chat.js --chat-keyboard-chrome; until it is read, the quarter alone) and
-   60px of feed (a message's last line and its foot), at most a quarter of the viewport (app.js), never under one line
-   (1.45em + 10px: its line-height and padding). A room whose height under the top inset cannot hold its bar, the
-   composer with that line and those 60px at their usual air (220px; Telegram's fullscreen band takes 93px of it on a
-   phone) is short: its bar and composer drop their air, the capsule row folds (composer_fold.js reads the step; owner
-   9.11), the field keeps one line and the feed takes the rest. --keyboard-short is that step, a registered length:
-   0px, or 1px in a short room (×1000 crosses it within a pixel), so each air below reads
-   `max(short, usual - short × 1000)`. */
-@property --keyboard-short { syntax: '<length>'; inherits: true; initial-value: 0px; }
-body.keyboard-open {
-    --keyboard-short: clamp(0px, calc((220px + var(--inset-top) - var(--vvh)) * 1000), 1px);
-}
+   60px of feed (a message's last line and its foot), at most a quarter of the viewport, never under one line
+   (1.45em + 10px: its line-height and padding). A room whose measured height below its bar cannot hold the unfolded
+   composer and those 60px (composer_fold.js shortRoom; chat.js data-short-room) folds the capsule row (owner 9.11),
+   drops its composer air, keeps one field line and leaves the rest to the feed. */
 body.keyboard-open :is(#chat-input-area, .chat-input-area) {
+    --composer-typing-pad: var(--space-2);
     --message-field-max-height: clamp(calc(1.45em + 10px),
-        calc(var(--vvh) - var(--chat-keyboard-chrome, 0px) - 60px - var(--keyboard-short) * 100000),
+        calc(var(--vvh) - var(--chat-keyboard-chrome, 0px) - 60px),
         var(--chat-viewport-input-cap, 140px));
 }
 
@@ -9050,61 +9119,57 @@ body.keyboard-open #page-chat.active {
     overscroll-behavior: none;
 }
 
-body.keyboard-open #page-chat.active .chat-page-header,
-body.keyboard-open #page-chat.active .chat-page-note,
-body.keyboard-open .project-panel .project-panel-bar {
+/* Outside Telegram, keyboard chrome takes its place in the column and the feed scrolls between it. */
+html:not([data-telegram-fullscreen]) body.keyboard-open #page-chat.active :is(.chat-page-header, .chat-page-note),
+html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .project-panel-bar {
     flex-shrink: 0;
     position: relative;
     top: auto;
 }
-/* A short room's bar stands right under the top inset (Telegram's band keeps its own air around its controls). Every
-   keyboard room's bar stands a step above the composer (both --z-page-header) on its room's own ground: an open
-   capsule's hint rising to it passes under it, so Panic and a Project's × stay in reach. */
-body.keyboard-open #page-chat.active .chat-page-header,
-body.keyboard-open .project-panel .project-panel-bar {
-    padding-top: calc(max(0px, var(--chrome-inset) - var(--keyboard-short) * 1000) + var(--inset-top));
-    padding-bottom: max(0px, var(--chrome-inset) - var(--keyboard-short) * 1000);
-    z-index: calc(var(--z-page-header) + 1);
-    background: var(--bg-primary);
+/* The in-flow Project bar already moves the sheet's containing block below it. Main's bar is inside that block. */
+html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .chat-find { top: var(--space-1); }
+html:not([data-telegram-fullscreen]) body.keyboard-open :is(.chat-page-header, .project-panel-bar) {
+    padding-top: calc(var(--chrome-inset) + var(--inset-top));
+    padding-bottom: var(--chrome-inset);
 }
-body.keyboard-open .project-panel .project-panel-bar { background: rgb(var(--shell-rgb)); }
-
-body.keyboard-open #page-chat.active #chat-messages,
-body.keyboard-open .chat-instance-panel .chat-messages {
-    flex: 1;
-    min-height: 0;
+html:not([data-telegram-fullscreen]) body.keyboard-open :is(#chat-messages, .chat-messages) {
     position: relative;
-    height: auto;
-    max-height: none;
     padding-top: var(--chat-find-reserve, 0px);
-    padding-bottom: 0;
-    overflow-y: auto;
+}
+body.keyboard-open :is(#chat-messages, .chat-messages) {
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
 }
-
-/* The composer is in flow: remove the item, including its column gap. */
-body.keyboard-open #page-chat.active #chat-messages::after,
-body.keyboard-open .chat-instance-panel .chat-messages::after {
-    content: none;
-}
-
-body.keyboard-open #page-chat.active #chat-input-area,
-body.keyboard-open .chat-instance-panel .chat-input-area {
+html:not([data-telegram-fullscreen]) body.keyboard-open :is(#chat-messages, .chat-messages)::after { content: none; }
+html:not([data-telegram-fullscreen]) body.keyboard-open :is(#chat-input-area, .chat-input-area) {
     flex-shrink: 0;
     position: relative;
     bottom: auto;
-    padding-top: max(var(--space-1), 8px - var(--keyboard-short) * 1000);
-    padding-bottom: max(var(--space-1), 8px - var(--keyboard-short) * 1000);
+    padding-block: var(--composer-typing-pad, var(--space-2));
+}
+/* Capsule hints pass below Panic. The note and search sheet still float over the bar's material. */
+body.keyboard-open :is(.chat-page-header, .project-panel-bar),
+html[data-telegram-fullscreen] body.keyboard-open :is(.chat-page-note, .chat-find) {
+    z-index: calc(var(--z-page-header) + 1);
 }
 /* A short room's composer keeps --space-1 between its rows (a folded row takes it along) and inside the field (one
    line there: its corner stays a capsule's, the sheet radius clamped to half its height). */
 body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-input-wrap {
-    --composer-wrap-gap: max(var(--space-1), var(--space-2) - var(--keyboard-short) * 1000);
+    --composer-wrap-gap: var(--space-2);
     gap: var(--composer-wrap-gap);
 }
 body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
-    padding-block: max(var(--space-1), var(--space-2) - var(--keyboard-short) * 1000);
+    padding-block: var(--space-2);
+}
+body.keyboard-open :is(#page-chat, .chat-instance-panel, .project-panel)[data-short-room] :is(#chat-input-area, .chat-input-area) {
+    --composer-typing-pad: var(--space-1);
+    --message-field-max-height: calc(1.45em + 10px);
+}
+body.keyboard-open :is(#page-chat, .chat-instance-panel, .project-panel)[data-short-room] .chat-input-wrap {
+    --composer-wrap-gap: var(--space-1);
+}
+body.keyboard-open :is(#page-chat, .chat-instance-panel, .project-panel)[data-short-room] .chat-text-row {
+    padding-block: var(--space-1);
 }
 
 /* ===========================================================================
@@ -9164,7 +9229,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     transition: var(--motion-tone);
 }
 .nav-projects-find[hidden] { display: none; }
-.nav-projects-find:has(> .nav-find-input:focus) {
+.nav-projects-find[data-focused] {
     outline-width: 2px;
     outline-offset: -2px;
     box-shadow: inset 0 0 0 1px var(--focus-accent-border), 0 0 0 3px var(--focus-accent-ring), var(--elev-rest);
@@ -9176,7 +9241,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     align-items: center;
     justify-content: center;
     height: 18px;
-    margin-left: calc(var(--space-3) + 1px);  /* the rows' icons: their 1px border, then --space-3 */
+    margin-left: calc(var(--space-3) + 1px);  /* the Project names' line: a row's 1px border, then --space-3 */
     color: var(--text-secondary);
     pointer-events: none;
 }
@@ -9569,7 +9634,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 }
 @media (pointer: coarse) {
     /* The row asks of the ⋯ after it (:has() stays in its own compound) and its end reads the answer. */
-    .nav-project-row:has(~ .nav-project-kebab:is(:focus, [aria-expanded="true"])) {
+    .nav-project-row:has(~ .nav-project-kebab:is([data-focused], [aria-expanded="true"])) {
         --nav-row-end: hidden;
     }
     .nav-project-row :is(.nav-mark-slot, .nav-project-time) { visibility: var(--nav-row-end, visible); }
@@ -9831,7 +9896,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 }
 
 .project-panel .chat-panel-statusbar {
-    padding-top: var(--chat-header-reserve, 56px);
+    padding-top: var(--chat-top-reserve, var(--chat-header-reserve, 56px));
 }
 
 .chat-instance-panel .chat-messages {
@@ -9842,7 +9907,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     padding-bottom: 0;
 }
 .project-panel .chat-instance-panel .chat-messages {
-    padding-top: calc(var(--chat-feed-reserve, var(--chat-header-reserve, 56px)) + var(--chat-find-reserve, 0px));
+    padding-top: calc(var(--chat-feed-reserve, var(--chat-top-reserve, var(--chat-header-reserve, 56px))) + var(--chat-find-reserve, 0px));
     /* Reserve the real scrollbar lane from the first layout: WebKit's auto-overflow transition can leave rows
        wider than the content box until a resize, covering the focus corners. Overlay scrollbars take no space. */
     overflow-y: scroll;
@@ -9878,10 +9943,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 .project-panel .chat-panel-statusbar:not(:empty) ~ .chat-messages {
     --chat-feed-reserve: 8px;
 }
-body.keyboard-open .project-panel .chat-panel-statusbar { padding-top: 8px; }
-body.keyboard-open .project-panel .chat-instance-panel .chat-messages {
-    padding-top: var(--chat-find-reserve, 0px);
-}
+html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .chat-panel-statusbar { padding-top: 8px; }
 
 /* The Project composer already includes its safe-area inset in the measured
    reserve; preserve the panel's own reserve on narrow screens as well. */
@@ -9985,9 +10047,11 @@ html[data-layout="stack"] .project-panel {
         transition: opacity var(--motion-fade) ease;
     }
     html[data-layout="docked"] .project-panel.open { opacity: 1; }
-    .chat-load-older[aria-busy="true"] .chat-load-older-btn {
+    .chat-load-older[aria-busy="true"] .chat-load-older-btn,
+    .chat-scroll-bottom-btn[aria-busy="true"] svg {
         animation: none;
     }
+    .chat-scroll-bottom-btn[aria-busy="true"] svg { opacity: 0.5; }  /* the pulse's dim half, held still */
 }
 
 /* Agent accounts (D30).
@@ -10164,6 +10228,8 @@ html[data-layout="stack"] .project-panel {
 .harness-maintenance-details dd { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-1); color: var(--text-primary); }
 .harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .harness-model-program { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
+/* A press's failure reason on the program line, in the chooser footer and on a setup family row alike (as the Accounts notice). */
+.harness-model-program [data-tone="warn"] { color: var(--status-warn-fg); }
 .harness-model-latest { white-space: nowrap; }
 .ui-model-options[data-model-popup] { display: flex; flex-direction: column; overflow: hidden; }
 .ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }
@@ -10456,8 +10522,8 @@ html[data-layout="stack"] .project-panel {
 /* The update description: Ouroboros's own account of the update this panel
    offers, kept after it lands as "What changed in this version". A fact block,
    so it is separated from the headline the way Recovery is — a rule, not a
-   card, with two small actions: Check (facts only) and Write/Rewrite (an
-   ordinary task that authors it). */
+   card, with one small action (Check and describe, Write for the update just
+   applied, or Check while a description is written); Rewrite waits in Details. */
 .updates-letter {
     display: flex;
     flex-direction: column;
@@ -10488,8 +10554,7 @@ html[data-layout="stack"] .project-panel {
     gap: var(--space-1);
     margin-left: auto;
 }
-.updates-letter-refresh,
-.updates-letter-write {
+.updates-letter-action {
     white-space: nowrap;
 }
 .updates-letter-label {
@@ -10526,7 +10591,8 @@ html[data-layout="stack"] .project-panel {
     color: var(--text-meta);
     overflow-wrap: anywhere;
 }
-.updates-letter-details p {
+.updates-letter-details p,
+.updates-letter-rewrite {
     margin: var(--space-2) 0 0;
 }
 /* The panel's letter opens at its first part (about eight lines); "Read all" opens the rest in place. The Apply
@@ -10782,6 +10848,8 @@ html[data-layout="stack"] .project-panel {
 /* A button that carries a paragraph is a card (DESIGN.md principle 4): its own height and inset, the inner radius, the
    bubble's text size — chosen through the control tokens, never by writing the box. */
 .chat-file-card { --control-h: auto; --control-pad-y: 9px; --control-pad-x: 9px; --control-radius: var(--radius-inner); --button-font-size: 1em; font-weight: inherit; }
+/* Its wrapper wears the same radius, so the quote-target ring and the keyboard outline (both drawn on the wrapper) follow the card. */
+.chat-file-item { border-radius: var(--radius-inner); }
 
 .chat-file-thumb,
 .chat-file-glyph {
@@ -10905,7 +10973,6 @@ html[data-layout="stack"] .project-panel {
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4) var(--space-3) var(--space-5);
-    border-bottom: 1px solid var(--divider);
 }
 
 /* Name, type and size are selectable text like the document: declared, so the macOS window's
@@ -11577,13 +11644,14 @@ html[data-layout="stack"] .project-panel {
     cursor: pointer;
     transition: var(--motion-tone);
 }
-.chat-quiz-option:hover:not(:disabled) { background: var(--surface-capsule-hover); }
-.chat-quiz-option:active:not(:disabled) { filter: var(--press); }
+.chat-quiz-option:hover:not(:disabled, :where(.chosen[aria-disabled="true"])) { background: var(--surface-capsule-hover); }
+.chat-quiz-option:active:not(:disabled, :where(.chosen[aria-disabled="true"])) { filter: var(--press); }
 .chat-quiz-option:disabled { color: var(--text-disabled); cursor: default; background: var(--surface-tray); box-shadow: none; }
 .chat-quiz-option.chosen { color: var(--tone-chosen-answer-ink); background: var(--tone-chosen-answer); }
-/* A settled answer is a record: its chosen card keeps the lift the theme gives it. A chosen card that still takes a
-   press (a choice dialog's radio card) stands like every capsule. */
-.chat-quiz-option.chosen:disabled { box-shadow: var(--tone-chosen-answer-shadow); }
+/* A settled answer is a record: its chosen card keeps the lift the theme gives it and takes no press, inert by
+   aria-disabled so a Reply can still land on it. A chosen card that still takes a press (a choice dialog's radio card)
+   stands like every capsule. */
+.chat-quiz-option.chosen:is(:disabled, [aria-disabled="true"]) { box-shadow: var(--tone-chosen-answer-shadow); cursor: default; }
 .chat-quiz-option.pending-choice {
     transition: none;
     box-shadow: var(--elev-rest), inset 0 0 0 1px var(--focus-accent-border);
@@ -11591,8 +11659,8 @@ html[data-layout="stack"] .project-panel {
     color: var(--text-primary);
 }
 .chat-quiz-card [aria-disabled="true"] { cursor: default; }
-.chat-quiz-card [aria-disabled="true"]:not(.pending-choice) { opacity: var(--quiz-held-opacity); }
-.chat-quiz-card [aria-disabled="true"]:hover:not(.pending-choice) {
+.chat-quiz-card [aria-disabled="true"]:not(.pending-choice, .chosen) { opacity: var(--quiz-held-opacity); }
+.chat-quiz-card [aria-disabled="true"]:hover:not(.pending-choice, .chosen) {
     background: var(--surface-tray);
 }
 .chat-quiz-feedback {
@@ -11786,7 +11854,7 @@ html[data-layout="stack"] .project-panel {
     max-width: 480px;
 }
 /* Keep this reading surface opaque even under the theme's shared floating-sheet rule. */
-.marketplace-modal.secret-request-dialog {
+.ui-modal.secret-request-dialog {
     background-color: var(--bg-secondary);
 }
 .secret-request-body,
@@ -11839,14 +11907,17 @@ html[data-layout="stack"] .project-panel {
     bottom: var(--space-2);
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--chat-message-actions-gap);
 }
 /* In the row the copy control is a flex item: the corner offsets above must not move it (relative keeps its hit area). */
 .chat-message-actions > .chat-message-copy { position: relative; inset: auto; }
 /* Under a finger the 24px Reply and Copy keep their look and gain the shared hit area (ui.css .ui-hit-area); the pair
-   parts by the hit area's overshoot so the two targets never overlap. */
+   parts by the hit area's overshoot so the two targets never overlap. The time's gutter below reads the same gap. */
+.chat-bubble {
+    --chat-message-actions-gap: var(--space-2);
+}
 @media (pointer: coarse) {
-    .chat-message-actions { gap: calc(var(--touch-target-min) - var(--space-5)); }
+    .chat-bubble { --chat-message-actions-gap: calc(var(--touch-target-min) - var(--space-5)); }
 }
 
 .chat-message-action:hover,
@@ -11870,10 +11941,11 @@ html[data-layout="stack"] .project-panel {
 
 /* Reserve a gutter so the timestamp never sits under the always-visible controls (Copy ends 32px from the
    bubble's edge, Reply and Copy 64px, each registered action one more square and gap; the bubble's own inset is
-   --space-4, the gap to the time --space-2). */
+   --space-4, the gap to the time --space-2); the squares part by the row's own gap, wider under a finger. */
 .chat-bubble.has-copy .msg-time { margin-right: var(--space-5); }
 .chat-bubble.has-reply .msg-time {
-    margin-right: calc((var(--space-5) + var(--space-2)) * (2 + var(--chat-message-extra-actions, 0)) - var(--space-2));
+    margin-right: calc((var(--space-5) + var(--chat-message-actions-gap)) * (2 + var(--chat-message-extra-actions, 0))
+        - var(--chat-message-actions-gap));
 }
 
 /* The message a quote points at: a calm ring for a moment, a keyboard ring while it holds focus. */
@@ -11881,12 +11953,21 @@ html[data-layout="stack"] .project-panel {
     from { box-shadow: 0 0 0 3px var(--accent-25); }
     to { box-shadow: 0 0 0 3px transparent; }
 }
-:is(.chat-bubble, .chat-live-card, .chat-live-line).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
+/* An answer to a card is shown on it (DESIGN "Replies"): its recorded choice, else the owner's words. A choice with
+   words beside it is one answer: the card lends its words line the same moment (the :has() stays on the card). */
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
+.chat-quiz-card:has(> .chat-quiz-options > .chat-quiz-option.is-quote-target) {
+    --quiz-answer-lit: chat-quote-target;
+    --quiz-answer-ring: 0 0 0 3px var(--accent-25);
+}
+.chat-quiz-answer { animation: var(--quiz-answer-lit, none) 1.4s ease-out; }
 /* A row that takes focus only to be returned to (a quote's target, a closed row menu) shows the one keyboard ring. */
-:is(.chat-bubble, .chat-live-card, .chat-live-line)[tabindex="-1"]:focus { outline: none; }
-:is(.chat-bubble, .chat-live-card, .chat-live-line)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer)[tabindex="-1"]:focus { outline: none; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
-    :is(.chat-bubble, .chat-live-card, .chat-live-line).is-quote-target { animation: none; box-shadow: 0 0 0 3px var(--accent-25); }
+    :is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer).is-quote-target { animation: none; transition: none; box-shadow: 0 0 0 3px var(--accent-25); }
+    .chat-quiz-option.chosen.is-quote-target { box-shadow: var(--tone-chosen-answer-shadow), 0 0 0 3px var(--accent-25); }
+    .chat-quiz-answer { animation: none; box-shadow: var(--quiz-answer-ring, none); }
 }
 
 /* === The quote panel (docs/DESIGN.md "Replies"): one component (chat_reply_quote.js) inside a bubble and
@@ -11929,6 +12010,28 @@ html[data-layout="stack"] .project-panel {
     font: inherit;
     text-align: start;
     cursor: pointer;
+}
+.chat-reply-selection-action {
+    position: fixed;
+    z-index: var(--z-popover);
+    top: var(--quote-top);
+    left: var(--quote-left);
+}
+.chat-bubble[data-select-text] :is([data-reply-body], [data-reply-caption]) {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+}
+::highlight(reply-excerpt) { background-color: var(--tone-crimson-word); color: var(--bg-primary); }
+.chat-quote[data-excerpt] { display: flex; align-items: center; gap: var(--space-2); padding-inline-end: var(--space-2); }
+.chat-quote[data-excerpt] .chat-quote-main { flex: 1; }
+.chat-quote[data-excerpt] .chat-quote-head { flex-wrap: wrap; row-gap: 0; }
+.chat-quote[data-excerpt] .chat-quote-text { display: block; white-space: pre; }
+.chat-quote[data-excerpt] .chat-quote-text[data-expanded="1"] {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-block-size: 32vh;
+    overflow-y: auto;
 }
 .chat-quote-main:hover { background: var(--menu-item-hover); }
 /* A quoted photo leads the panel with its thumbnail (the head and the line stand to its right). */
@@ -12304,7 +12407,6 @@ html[data-layout="stack"] .project-panel {
 }
 
 /* Light surfaces keep geometry and domain state semantics unchanged. */
-:root[data-theme="light"] #nav-version { opacity: 1; color: var(--text-meta); }
 :root[data-theme="light"] .files-preview-content { color: var(--text-primary); }
 :root[data-theme="light"] .files-preview-frame { background: var(--bg-secondary); }
 :root[data-theme="light"] .skill-review-summary-main { color: var(--system-text); }
@@ -12366,3 +12468,241 @@ html[data-telegram-fullscreen][data-layout="docked"] .app-page-header {
 html[data-telegram-fullscreen][data-layout="docked"] .app-page-header[data-lead] { padding-top: var(--inset-top); }
 html[data-telegram-fullscreen][data-layout="docked"] .project-panel-bar { padding-top: calc(10px + var(--inset-top)); }
 html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top: calc(var(--space-4) + var(--inset-top)); }
+
+@property --edge-reach { syntax: '<length>'; inherits: true; initial-value: 0px; }
+@property --chat-input-reserve { syntax: '<length>'; inherits: true; initial-value: 108px; }
+
+/* ---- A room's edges and Telegram's shared row (DESIGN: A room's edges) ----
+   Keep scrolling card actions from reading as header controls. Only the edge material is masked; the transcript
+   stays sharp outside it. Layout and read tracking use the same reach. Both layers taper gently to transparent. */
+:is(#page-chat, .project-panel) {
+    --edge-reach: 32px;
+    --edge-fade: 32px;
+    --edge-mask: #000 calc(100% - var(--edge-fade)),
+        rgba(0, 0, 0, 0.5) calc(100% - var(--edge-fade) * 0.52),
+        rgba(0, 0, 0, 0.14) calc(100% - var(--edge-fade) * 0.22), transparent 100%;
+}
+/* What floats right under the bar lies over its edge, as its capsules do: Main's history note and a room's search sheet
+   come after the bar at its own level, so they paint over it, never blurred. A Project's status note stands in its flow
+   below the edge (its top reserve counts the edge, --chat-top-reserve below). Outside Telegram the keyboard puts both bars in flow. */
+:where(html:not([data-telegram-fullscreen])) body.keyboard-open :is(#page-chat.active, .project-panel) {
+    --edge-reach: 0px;
+}
+/* A low typing viewport gives the reading band priority over the extension. */
+html[data-telegram-fullscreen] body.keyboard-open :is(#page-chat.active, .project-panel) {
+    --edge-reach: clamp(0px, var(--vvh) - var(--inset-top) - 250px, 32px);
+}
+/* The transcript's first row and a Project's status note stand below the bar and its edge, and below Main's note, which
+   floats over that edge: the room's measured reserve (the bar and the note, chat.js) or the bar and its edge, whichever
+   ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row clears the edge of a
+   bar that tall from the first frame (Telegram's taller row is reserved once measured); a room mounted without a bar has
+   no edge (room_work.js), and its measured reserve stands alone. */
+:is(#page-chat, .chat-instance-panel) {
+    --chat-input-reserve: max(92px, var(--chat-composer-height, 92px) + 16px);
+    --chat-top-reserve: max(var(--chat-header-reserve, 56px), var(--chat-header-bar, 56px) + var(--edge-reach, 0px));
+}
+/* The bar's ::after remains available to the native title-band hit target. */
+:is(.chat-page-header, .project-panel-bar)::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: calc(100% + var(--edge-reach));
+    z-index: -1;
+    pointer-events: none;
+    background: linear-gradient(
+        180deg,
+        rgba(var(--shell-rgb), 0.72) 0,
+        rgba(var(--shell-rgb), 0.36) 48%,
+        rgba(var(--shell-rgb), 0.10) 78%,
+        rgba(var(--shell-rgb), 0.00) 100%
+    );
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    -webkit-mask-image: linear-gradient(180deg, var(--edge-mask));
+    mask-image: linear-gradient(180deg, var(--edge-mask));
+}
+/* Both reading and typing in Telegram use the same composer glass. */
+html[data-telegram-fullscreen] :is(#chat-input-area, .chat-input-area)::before,
+body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    -webkit-mask-image: linear-gradient(0deg, var(--edge-mask));
+    mask-image: linear-gradient(0deg, var(--edge-mask));
+}
+/* A room bar's capsules are the composer chips' glass in the dark theme (the capsule's veil over a blur of what passes
+   under it), on the desk as on a phone; light keeps white capsules at the top as at the bottom. Panic keeps its ink
+   readable on the glass over the reddest card (about 5:1 measured): a lighter ink over the glass with a light veil
+   under it, still glass beside its neighbours. */
+:root:not([data-theme="light"]) :is(.chat-page-header, .project-panel-bar) {
+    --chip-float: var(--surface-capsule);
+    --chip-float-hover: var(--surface-capsule-hover);
+    --panic-ink: #ff9aa2;
+    --panic-fill: linear-gradient(var(--surface-capsule), var(--surface-capsule)), rgba(var(--shell-rgb), 0.4);
+    --panic-fill-hover: linear-gradient(var(--surface-capsule-hover), var(--surface-capsule-hover)), rgba(var(--shell-rgb), 0.4);
+}
+
+/* Telegram's shared row. In fullscreen Telegram draws its own controls over the top of the page: its Back (or Close) at
+   the start and its ⌄ ··· at the end, in a row under the status bar (its content safe area). As on the Mac, where a
+   room's bar stands in the window's title band beside the traffic lights, the room's bar is that row: it starts under
+   the status bar, is the row's height, keeps clear of Telegram's two controls and centres its capsules on theirs.
+   Telegram reports only the row's height, never its controls' widths, so the bar keeps a reserve for each
+   (host_telegram.js says whether Telegram draws its Back or its Close). The name's capsule follows the start control and
+   yields; Panic keeps its width at the end, a finger's gap from ⌄ ···; the consciousness chip becomes a row of the work
+   list (room_work.js placeChip). The capsules take the composer's height, near Telegram's own, with the touch minimum
+   as their reach. */
+html[data-telegram-fullscreen="active"][data-layout="stack"] {
+    --tg-row-top: max(env(safe-area-inset-top, 0px), var(--tg-safe-area-inset-top));
+    --tg-row-h: var(--tg-content-safe-area-inset-top);
+    --tg-row-start: 104px;
+    --tg-row-end: 102px;
+}
+html[data-telegram-fullscreen="active"][data-layout="stack"][data-telegram-back="close"] { --tg-row-start: 124px; }
+html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) {
+    --control-h-float: 30px;
+    box-sizing: border-box;
+    min-height: calc(var(--tg-row-top) + var(--tg-row-h));
+    padding: var(--tg-row-top) var(--tg-row-end) 0 var(--tg-row-start);
+    column-gap: var(--space-2);
+}
+html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) :is(.chat-header-btn, .cx-chip, .rw-trigger, .shell-icon-control) {
+    position: relative;
+}
+html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) :is(.chat-header-btn, .cx-chip, .rw-trigger, .shell-icon-control)::after {
+    content: "";
+    position: absolute;
+    inset: var(--ui-hit-inset);
+}
+html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) > .app-page-leading:empty { display: none; }
+/* The name's capsule is the door to the work list without a caret here: Telegram's own ⌄ (minimise) stands in the same
+   row, and two ⌄ of two meanings side by side read as one. The status keeps its mark. */
+html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger {
+    min-width: 0; padding-inline: 4px 6px; margin-inline-start: 0;
+}
+html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger > .rw-caret { display: none; }
+html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) .app-page-title-row { padding-inline: 11px 2px; }
+html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) .chat-header-btn { padding-inline: 12px; }
+/* Main's title goes whole or not at all here (room_work.js fitWord). */
+html[data-telegram-fullscreen="active"][data-layout="stack"] .chat-page-header .app-page-title-row[data-title="off"] > .app-page-title { display: none; }
+/* Telegram's Back closes the open room and the open drawer (both layers.js layers, so Telegram shows its Back whenever
+   either is open), so their own × is not drawn in the shared row; the drawer's head keeps only the top inset, its card
+   right under Telegram's row. Keyed on the row itself, not on Back's flag, so nothing jumps while a layer closes. */
+html[data-telegram-fullscreen="active"][data-layout="stack"] .project-panel-close { display: none; }
+html[data-telegram-fullscreen="active"][data-layout="stack"] .drawer-head {
+    min-height: 0;
+    padding: var(--inset-top) 0 var(--space-2);
+}
+html[data-telegram-fullscreen="active"][data-layout="stack"] .nav-drawer-close { display: none; }
+/* While typing in Telegram the composer drops its reading air and the feed's end clears the measured composer. */
+html[data-telegram-fullscreen][data-layout="stack"] body.keyboard-open :is(#chat-input-area, .chat-input-area) {
+    padding-top: var(--composer-typing-pad, var(--space-2));
+    padding-bottom: var(--composer-typing-pad, var(--space-2));
+}
+html[data-telegram-fullscreen][data-layout="stack"] body.keyboard-open :is(#chat-messages, .chat-messages)::after {
+    flex-basis: calc(var(--chat-composer-height, 92px) - var(--chat-feed-gap));
+}
+/* The work list and the consciousness sheet opened from its row hang under Telegram's row at the page's width, as the
+   list hangs under the page's own bar on a phone (consciousness.css would end the sheet under Panic). */
+html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) .rw-shade-anchor > .rw-surface {
+    position: fixed;
+    top: calc(var(--tg-row-top) + var(--tg-row-h) + var(--space-1));
+    left: var(--space-3); right: var(--space-3);
+    width: auto;
+}
+/* Main's sheets stand in the viewport, so they keep the room's side insets; a Project panel's transform makes it their
+   box, already inside them. */
+html[data-telegram-fullscreen="active"][data-layout="stack"] .chat-page-header .rw-shade-anchor > .rw-surface {
+    left: calc(var(--space-3) + var(--inset-left));
+    right: calc(var(--space-3) + var(--inset-right));
+}
+
+/* A section shares Telegram's row: one drawer control and one title inside the host's safe gap.
+   One action ends that row; rails and further actions keep their nodes below. Rooms keep their placement. */
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header {
+    position: relative;
+    container: tgrow / inline-size;
+    --telegram-header-start: 108px;
+    --telegram-header-end: 100px;
+    --touch-target-min: 44px;
+    --control-h-float: var(--touch-target-min);
+    --telegram-row-top: calc(var(--inset-top) - var(--tg-content-safe-area-inset-top));
+    padding: calc(var(--telegram-row-top) + var(--touch-target-min) + var(--space-2)) var(--space-3) var(--space-2);
+    min-height: calc(var(--telegram-row-top) + var(--touch-target-min));
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "title toolbar";
+    gap: 0 var(--space-2);
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-leading {
+    display: flex;
+    position: absolute;
+    top: var(--telegram-row-top);
+    left: var(--telegram-header-start);
+    grid-area: auto;
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-title, .app-page-lead-title) {
+    position: absolute;
+    top: var(--telegram-row-top);
+    left: calc(var(--telegram-header-start) + var(--touch-target-min) + var(--space-1));
+    right: var(--telegram-title-end, var(--telegram-header-end));
+    width: auto;
+    height: var(--touch-target-min);
+    margin: 0;
+    /* A block whose line is the row's height: centred, and a long name ends in an ellipsis (a flex box cut it). */
+    display: block;
+    line-height: var(--touch-target-min);
+    clip-path: none;
+    grid-area: auto;
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header:is(:has(> .app-page-toolbar), [data-controls]) {
+    --telegram-title-end: calc(var(--telegram-header-end) + 96px);
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-toolbar > button:last-child, .logs-clear-list) {
+    position: absolute; top: var(--telegram-row-top); right: var(--telegram-header-end); grid-area: auto;
+}
+/* The row keeps the name at least 4rem beside that action: 156px before it (the host's 108px, ☰ and its gap), 196px
+   after (the host's 100px and the action's 96px), less the row's 24px of padding. Narrower, the action keeps its node
+   below with the others and the name takes the row up to the host's buttons, ellipsizing there. The action stays the
+   box its finger's reach is measured from (ui.css .ui-hit-area): unpositioned, that reach spread over the header and
+   took the presses of the tabs beside it. */
+@container tgrow (max-width: calc(328px + 4rem - 0.02px)) {
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-toolbar > button:last-child, .logs-clear-list) { position: relative; inset: auto; }
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-title, .app-page-lead-title) { right: var(--telegram-header-end); }
+}
+/* Below the host's row a rail and the actions that left the row share lines in flow: an action that does not fit
+   beside the tabs starts the next line, so no action, the last or another (Skills' Update), stands over a tab. */
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header:has(> .app-page-toolbar):has(> .app-page-title-block .app-tab-strip) {
+    display: flex; flex-wrap: wrap; align-items: center; row-gap: var(--space-2);
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-title-block { flex: 1 1 auto; min-width: 0; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-toolbar { margin-inline-start: auto; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="page"] > .app-page-header .app-page-title { display: none; }
+/* Two panes of an automatic view hold a page too: its name, not the place's, stands in the host's row. One column of
+   it is the list alone: the page's name and controls are not shown over it (the row shows the place). */
+@container sectionplace (min-width: 40rem) {
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="auto"] > .app-page-header .app-page-title { display: none; }
+    /* Two panes hold the action in the row at any width, so their header is no size container: the lead over the
+       rail reads the place's box there (ui.css --section-rail-w), as the shell's columns do. */
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place > .app-page-header { container-type: normal; }
+}
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="auto"] > .app-page-header .app-page-lead { display: none; }
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="auto"] > .app-page-header { --telegram-title-end: var(--telegram-header-end); }
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-title-block { display: block; grid-area: title; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-title-row { display: contents; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-lead {
+    display: flex; position: static; width: auto; height: auto; min-height: 0; margin: 0; overflow: visible; clip-path: none;
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-tab-strip { padding: 0; margin: 0; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-tab { --control-pad-x: var(--space-2); --button-font-size: var(--type-meta); }
+html[data-telegram-fullscreen="active"][data-layout="stack"] #page-dashboard .app-page-header[data-controls] .section-lead-page { display: flex; }
+html[data-telegram-fullscreen="active"] #page-dashboard .logs-filters:not([hidden]) { display: flex; }
+html[data-telegram-fullscreen="active"] #page-dashboard .logs-kinds { margin: 0; padding: 0; max-width: 100%; }
+
+/* A return always restores focus. Its input determines whether that cursor is visible. */
+:root [data-return-focus="keyboard"]:focus { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+:root [data-return-focus="pointer"]:focus { outline: none; }

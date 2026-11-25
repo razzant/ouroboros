@@ -22,9 +22,14 @@ def ready_plan(p):
 
 def test_starter_implements_frozen_plan_with_authorization_before_send(plan_setup):
     p = plan_setup
-    prior = ready_plan(p)
+    p.engine.questions = {"parse": "found", "questions": []}
+    plan = p.start(mode="plan")
+    prior = p.finish(plan["run_id"])[0]
     result = p.start("Implement it", continue_from=prior.run_id, mode="agent")
     assert result["status"] == "started", result
+    # Only the writing turn names a write root; the read-only plan turn keeps its snapshot for this continuation.
+    assert "write root: private snapshot" in result["note"] and "write root" not in plan["note"], plan["note"]
+    assert "evidence-only investigation" not in plan["note"], "a plan keeps a snapshot, yet it is no investigation"
     path, request, key = p.engine.calls[-1]
     assert path == f"/v2/threads/{prior.thread_id}/turns"
     assert request["mode"] == "agent" and request["access"] == "workspace_write"
@@ -111,7 +116,7 @@ def test_implementation_contract_and_thread_binding_refuse_before_new_intent(pla
 
 
 @pytest.mark.parametrize("recover", ["explicit", "background"])
-def test_ambiguous_promotion_replays_one_authorized_turn(plan_setup, recover):
+def test_ambiguous_promotion_replays_one_authorized_turn(plan_setup, recover, monkeypatch):
     p = plan_setup
     prior = ready_plan(p)
     p.engine.fail_next = True
@@ -129,7 +134,15 @@ def test_ambiguous_promotion_replays_one_authorized_turn(plan_setup, recover):
     else:
         from ouroboros.delegate_custody_reconcile import _recover_pending_invocation
         pending = next(r for r in custody.pending_invocations(p.root) if r["invocation_id"] == key)
-        recovered = _recover_pending_invocation(p.root, p.engine, pending)
+        monkeypatch.setattr(p.engine, "operations", lambda: [
+            {"method": "POST", "path": "/v2/threads/:id/turns/lookup"}], raising=False)
+        def lookup(thread_id, body, *, idempotency_key):
+            assert thread_id == prior.thread_id and (body, idempotency_key) == (original[1], original[2])
+            return {"status": "found", "storeId": "store-plan", "handle": {
+                "jobId": "accepted-turn", "runId": p.engine.accepted[key]["runId"], "state": "running",
+                "threadId": thread_id}}
+        monkeypatch.setattr(p.engine, "lookup_thread_turn", lookup, raising=False)
+        recovered = _recover_pending_invocation(p.root, p.engine, pending, may_read=True)
         assert recovered["action"] == "left_live", recovered
         rid = recovered["run_id"]
     assert p.engine.calls[-1] == original

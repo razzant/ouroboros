@@ -409,6 +409,10 @@ def test_a_routing_act_recorded_during_the_turn_rides_the_next_real_request(main
     from tests.test_llm_claudexor import ledger
 
     ctx, gateway, _controller, _events, _decide, _observations = main_call
+    from ouroboros import dialogue_store
+
+    dialogue_store.append(ctx.drive_root, "chat", {"direction": "in", "chat_id": 1, "client_message_id": "cm-7",
+                                                   "ts": "2024-01-02T12:00:00Z", "text": "Check the build"})
     ctx.tools._ctx.task_metadata = {"client_message_id": "cm-7", "routing_contract": {"llm_first": True}}
     append_chat_annotation(ctx.drive_root, "cm-7", action="steer_task", target="root-b", target_label="Build",
                            status="delivered", routing_token="tok-1")
@@ -800,3 +804,17 @@ def test_clock_refresh_preserves_composed_tool_dialect_and_effort_recovery(
     assert usage["request_wire"]["applied_effort"] == ("medium" if dialect_first else "high")
     assert usage["request_wire"]["candidate_sha256"] == _digest(sent[-1])
     assert [_sealed(row) for row in _ledger(tmp_path) if row.get("candidate_manifest_ref")] == [_digest(p) for p in sent]
+
+
+def test_a_responses_body_carries_the_same_line_as_its_last_input_message(ticking):
+    """A connection on Responses keeps its conversation in ``input``: the line is a user message there, replaced
+    rather than stacked, and the clock-free identity is the body without it."""
+    payload = {"model": "m", "input": [{"role": "user", "content": "x"}], "max_output_tokens": 5}
+    with sc.MainSendClock(MOSCOW).bound() as clock:
+        stamped = sc.stamp_clock_note(payload)
+        again = sc.stamp_clock_note(stamped)
+        request = _attempt_request({"provider": "openai", "usage_model": "m"}, again)
+    assert "messages" not in stamped and stamped["input"][-1] == {"role": "user", "content": clock.notes[0]}
+    assert len(_clock_rows(again["input"])) == 1 and again["input"][-1]["content"] == clock.notes[1]
+    assert request.candidate_clock_free_sha256 == _digest(payload)
+    assert request.max_completion_tokens == 5  # the Responses output cap is the attempt's sent cap

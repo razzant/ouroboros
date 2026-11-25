@@ -300,9 +300,11 @@ def presence_finish_not_accepted_note(ctx: Any, completion: Mapping[str, Any]) -
                                    metadata.get("presence") if isinstance(metadata, Mapping) else None)
     except Exception:
         sent = "unknown (receipts unreadable)"
-    if reply_carrier(metadata or {}):
+    door = "presence_finish" if getattr(ctx, "_schedule_door", None) else ""  # an older schedule's run: a record
+    if door or reply_carrier(metadata or {}):
         return ("[FINISH_NOT_ACCEPTED] The completion has not passed finalization. "
-                f"Confirmed sends so far: {sent}. Finish again with finish_task when ready; silence is valid.")
+                f"Confirmed sends so far: {sent}. Finish again with {door or 'finish_task'} when ready; "
+                + ("its report stays this run's record and nothing is sent." if door else "silence is valid."))
     return (
         f"[PRESENCE_FINISH_NOT_ACCEPTED]\npresence_finish({completion.get('outcome')}) was not accepted: "
         "finalization asked for the work above first, so it no longer decides what the conversation "
@@ -682,7 +684,20 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
     return frozenset(identity for identity, state in latest.items() if state in {"delivered", "accepted"})
 
 
-PLACEHOLDERS = ("who", "place", "when", "facts_line", "event", "speak_line", "place_state", "notes",
+def keep_first_receipts(rows: list) -> None:
+    """A send confirmed while several calls of one group ran, so inside each of their windows, rides only the first
+    of their rows by request index, as one confirmation rides one row when calls run one at a time; no store read."""
+    seen: set = set()
+    for meta in (row.get("result_meta") or {} for row in rows):
+        kept = [identity for identity in meta.get("presence_delivery_confirmed", ()) if identity not in seen]
+        seen.update(kept)
+        if kept:
+            meta["presence_delivery_confirmed"] = kept
+        else:
+            meta.pop("presence_delivery_confirmed", None)
+
+
+PLACEHOLDERS = ("who", "act", "place", "when", "facts_line", "what", "event", "speak_line", "place_state", "notes",
                 "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line", "reported")
 
 # The connector's observed provider facts (CREATING_SKILLS ``event.facts``) in plain words. Each is what the
@@ -828,7 +843,9 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     its connector account confirms (``places.place_owner_accounts``), and readers that decide later read it again
     (``focus_owner_now``)."""
     from copy import deepcopy
+    from ouroboros.consciousness_authority import FOCUS_ROUTE_FIELDS, FOCUS_TRANSPORT_KEY
     from ouroboros.config import get_consciousness_autonomy, runtime_setting
+    from ouroboros.knowledge import speaker_pages
     from ouroboros.presence_runner import presence_event_identity
     from ouroboros.places import (PlaceError, is_owner_account, observed_facts, owner_author, place_owner_accounts,
                                   place_model_route, wake_matches, writes_as_owner)
@@ -840,6 +857,8 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     if place.place_id not in accounts:  # the places cannot be read now: the admitted row's own accounts
         accounts = {place.place_id: place.owner_accounts}
     facts = observed_facts(event)
+    matched, words = [w.fact for w in wake_matches(place, facts)], getattr(admission, "fact_labels", None) or {}
+    named = {fact: words[fact] for fact in matched if fact in words}  # what the connector's declaration calls a kind
     actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "")
     owner_address = is_owner_account(place, actor, event.account_id, accounts[place.place_id])
     identity = deepcopy(event.identity)
@@ -858,8 +877,14 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
                             "owner_confirmed": owner_author(accounts, place.place_id, event.actor, event.account_id,
                                                             event.conversation_id, event.message),
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
-                            "is_bot": "from_bot" in facts},
-                  "matched_wakes": [w.fact for w in wake_matches(place, facts)]},
+                            "is_bot": "from_bot" in facts,
+                            **speaker_pages(drive_root, event.provider, event.account_id, actor,
+                                            unverified=event.actor.get("authenticated") is False)},
+                  "matched_wakes": matched, **({"matched_labels": named} if named else {}),
+                  # Display provenance every inheritor of this focus keeps, never the allowance or any authority: the
+                  # words of its matched kinds, and that the Host routed it (several works read its conversation).
+                  **({"routed": True} if allowance.get("route") is True else {})},
+        FOCUS_TRANSPORT_KEY: {key: getattr(event, key) for key in FOCUS_ROUTE_FIELDS},
         "focus_allowance": allowance,
     }
     remaining = allowance.get("remaining_usd")
@@ -952,13 +977,17 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
         work = _previous_turn_line(previous) + ("\n" + work if work else "")
     voice = _voice_line(focus, event)
     snapshot = _thread_snapshot(focus, event)
-    who = actor.get("display_name") or actor.get("platform_actor_id") or "A person"
+    who = actor.get("display_name") or actor.get("platform_actor_id") or "An author the connector did not name"
+    from ouroboros.place_intake import observed_change  # a change by the connector's typed facts, never the words
+    changed, worded = observed_change(event.get("message")), bool(str(presence.get("observed_text") or "").strip())
     from ouroboros.presence_message_facts import connector_facts, event_reader  # the event record: the frame re-renders
     reported = connector_facts(event.get("message"), text=str(presence.get("observed_text") or ""), sender=who,
                                source=event_reader(task.get("id"), "message.non_text"))
     fields = {
         "voice_line": voice + "\n" if voice else "",
         "who": who,
+        "act": "changed something" if changed else "wrote",
+        "what": ("The text as it now stands" if worded else "The change") if changed else "Their message",
         "place": place.get("label") or place.get("provider") or place.get("place_id"),
         "when": _when(event.get("message") or {}),
         "facts_line": _facts_line(focus, event),

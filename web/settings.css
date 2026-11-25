@@ -3,7 +3,7 @@
    (`.section-rail`), the levels the page's column (`.section-pane`), and the home's rows are `.section-row`s; the
    class names of Settings stay beside them for what is Settings' own (its card, search, overview row, pages). Each
    column scrolls by itself, keeps its place and fades at an edge where content waits (.scroll-fade-y); the header
-   above is never empty, so the shared header rules give the band. */
+   floats over a first-level page's empty band; named levels keep their header row. */
 .settings-page {
     min-width: 0;
     min-height: 0;
@@ -36,27 +36,36 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
 }
 
 /* The header's lead (settings.js, ui.css .section-lead): never the word `Settings` on a desk. Over the list, and
-   over the home alone, stands its search field; over a page, `(‹) <page>` in the header's one title style. */
+   over the home alone, stands its search field; over a page, `(‹) <page>` in the header's one title style. The band
+   holds no actions (style.css, a section place's band), so the field ends where the cards end. */
 .settings-lead .settings-search { flex: 1 1 auto; min-width: 0; }
 
 /* Two panes: the home is the rail beside the page, and a page is always open (settings.js: the last one opened, Models
    the first time; the list's Ouroboros row opens Ouroboros's card in the page's pane). */
 @container sectionplace (min-width: 40rem) {
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) { position: absolute; inset: 0 0 auto; z-index: 2; }
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell > .settings-home { margin-top: var(--page-header-row-h); }
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell .settings-page { padding-top: calc(var(--page-header-row-h) + var(--space-2)); }
     .settings-shell[data-section-view="page"] .settings-page { padding-inline-start: var(--space-4); }
     .settings-shell[data-section-view="page"] > .settings-home .settings-overview { margin-block-end: var(--space-3); }
     .settings-shell[data-section-view="page"] .settings-door-glyph.settings-overview-glyph { width: 20px; height: 20px; margin-inline-end: var(--space-2); }
 }
 
-/* Two panes share the section's single band (ui.css). In one column the home puts Search in its scrolling list,
-   and a page replaces the section's name with Back and its own name. */
+/* A phone keeps Search in the list, including when it holds two panes. Its one header row shows the place,
+   or the round Back and its level; an empty page column adds no caption row. */
+html[data-layout="stack"] #page-settings > .app-page-header {
+    grid-template-areas: "leading title toolbar";
+}
+html[data-layout="stack"] #page-settings > .app-page-header > .app-page-title-block { display: contents; }
+html[data-layout="stack"] #page-settings > .app-page-header .app-page-title-row { grid-area: title; }
+html[data-layout="stack"] #page-settings > .app-page-header .app-page-lead { display: flex; grid-area: lead; min-height: var(--touch-target-min); }
+html[data-layout="stack"] #page-settings > .app-page-header[data-return] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+html[data-layout="stack"] #page-settings > .app-page-header[data-return] .app-page-title-row { display: none; }
 html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2); }
 /* A page's or a level's screen is one row: Back and the name, where the places control and "Settings" stood (one
    leading control on a screen). Only a page that replaced the list gives the places control up: with the list beside
    its page (40rem up to the shell's switch) the first-level page has no Back, so the control stays. */
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
-    html[data-layout="stack"] #page-settings > .app-page-header > .app-page-title-block { display: contents; }
-    html[data-layout="stack"] #page-settings > .app-page-header .app-page-title-row { grid-area: title; }
-    html[data-layout="stack"] #page-settings > .app-page-header .app-page-lead { grid-area: lead; min-height: var(--touch-target-min); }
     /* Collapse the empty lead after Search moves, never hide a focused field while its resize frame waits. */
     html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] { grid-template-areas: "leading title toolbar"; }
     html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] .app-page-lead { display: none; }
@@ -64,7 +73,7 @@ html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2
     html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] + .settings-shell > .settings-home { padding-top: 2px; }
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
-    html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead lead lead"; }
+    html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead"; }
 }
 
 /* The landing (settings.js): from 40rem Settings always shows two panes.
@@ -527,8 +536,8 @@ html[data-layout="stack"] .settings-search { height: 44px; }
     }
 }
 
-/* One reader left, outside Settings: the Skills › Browse cards (skill_browse.js). Settings and Dashboard › Updates
-   compose ui.css .ui-action-row; this goes with its last reader, once Skills composes the shared row too. */
+/* The Browse cards in Extensions (skill_browse.js) still use this row.
+   Settings and Dashboard › Updates use the shared .ui-action-row in ui.css. */
 .settings-action-row {
     display: flex;
     flex-wrap: wrap;
@@ -953,12 +962,12 @@ html[data-layout="stack"] .settings-search { height: 44px; }
     }
 
     /* A narrow field row: the input on its own line, the buttons under it from the left. */
-    :where(#page-settings) .secret-input-row {
+    :where(#page-settings, #page-skills) .secret-input-row {
         display: flex;
         flex-wrap: wrap;
     }
-    :where(#page-settings) .secret-input-row > input,
-    :where(#page-settings) .secret-input-row > .settings-secret-value { flex: 1 1 100%; }
+    :where(#page-settings, #page-skills) .secret-input-row > input,
+    :where(#page-settings, #page-skills) .secret-input-row > .settings-secret-value { flex: 1 1 100%; }
 
     :where(#page-settings) .available-subagents-toolbar .btn-default {
         margin-left: 0;
@@ -979,12 +988,12 @@ html[data-layout="stack"] .settings-search { height: 44px; }
     }
 
     /* A narrow field row: the input on its own line, the buttons under it from the left. */
-    .secret-input-row:where(:not(#page-settings *)) {
+    .secret-input-row:where(:not(#page-settings *, #page-skills *)) {
         display: flex;
         flex-wrap: wrap;
     }
-    .secret-input-row > input:where(:not(#page-settings *)),
-    .secret-input-row > .settings-secret-value:where(:not(#page-settings *)) { flex: 1 1 100%; }
+    .secret-input-row > input:where(:not(#page-settings *, #page-skills *)),
+    .secret-input-row > .settings-secret-value:where(:not(#page-settings *, #page-skills *)) { flex: 1 1 100%; }
 
     .available-subagents-toolbar .btn-default:where(:not(#page-settings *)) {
         margin-left: 0;
@@ -1239,12 +1248,12 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 .mcp-import-entry-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .mcp-import-choice { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 @container (max-width: 26rem) {
-    :where(#page-settings) .mcp-header-row { grid-template-columns: minmax(0, 1fr); }
+    :where(#page-settings, #page-skills) .mcp-header-row { grid-template-columns: minmax(0, 1fr); }
 }
-/* Outside Settings these classes keep their window rule (the first-run wizard, a place's sheet, Costs, a secret
-   request): there no pane measures them. */
+/* Outside Settings and Extensions these classes keep their window rule (the first-run wizard, a place's sheet, Costs,
+   a secret request): there no pane measures them. */
 @media (max-width: 600px) {
-    .mcp-header-row:where(:not(#page-settings *)) { grid-template-columns: minmax(0, 1fr); }
+    .mcp-header-row:where(:not(#page-settings *, #page-skills *)) { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* About (This computer › About): a centred block in its card, its name at the page size and the versions as one meta line. */
@@ -1300,7 +1309,8 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 .settings-row > .ui-row-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); text-wrap: pretty; }
 /* Main, a fallback or a role whose key cannot send: its line says so in the warning colour (these rows have no tinted
    body, so the light theme's unset warning word would leave it unmarked). */
-#page-settings :is(.ui-row-meta, .models-main-meta, [data-setting-meta])[data-tone="warn"] { color: var(--status-warn-fg); }
+#page-settings :is(.ui-row-meta, .models-main-meta, [data-setting-meta])[data-tone="warn"],
+#page-skills :is(.ui-row-meta, [data-setting-meta])[data-tone="warn"] { color: var(--status-warn-fg); }
 .settings-row-result { min-height: 0; }
 /* A row's result stands on a line of its own under the row's words and control, the full width of the row (the rows
    draw it after their control). It never lies over the title, the words or the control, and the control does not move
@@ -1527,7 +1537,8 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 
 /* ---- What one page adds -------------------------------------------------------------------------------------------- */
 
-/* Agents (subagents_settings.js): the list's filters, a head's line of what the agent is for (two lines at most), and
+/* Agents (subagents_settings.js): the list's filters, a head's source and rate (wrapped whole, never cut) over what
+   the agent is for (two lines at most), and
    an agent's page, whose form keeps the card recipe of setup (.available-subagent-*), each part in its own card;
    the page is the container their columns read, as a card is in setup. */
 .agents-filters { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-inline: calc(-1 * var(--space-1)); }
@@ -1535,7 +1546,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 /* Under a finger the small capsules reach 8px past their look: in a narrow card Add agent wraps to stand right above
    the filters, so the two rows part by both reaches and neither covers the other (DESIGN "Touch and containment"). */
 @media (pointer: coarse) { .agents-filters { margin-top: var(--space-1); } }
-.agents-root .settings-head-open > .ui-row-meta { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.agents-root .settings-head-open > .agents-head-use { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .agent-page { container: subagentcard / inline-size; }
 .agent-page .available-subagent-purpose textarea { min-height: 84px; max-height: none; }
 .agent-status { margin: 0; }
@@ -1615,6 +1626,12 @@ textarea.ui-control.settings-rules-text {
 .accounts-service > .agents-service { flex: 1 1 16rem; align-items: center; }
 .accounts-service .agents-service-banner { padding: 0; }
 .accounts-service .agents-service-diagnostics { margin: var(--space-2) 0 0; }
+#harness-accounts-groups {
+    --account-start-room: 0px;
+    --account-end-room: 0px;
+    overflow-anchor: none;
+    padding-block: var(--account-start-room) var(--account-end-room);
+}
 .agent-family-list > .agent-family-card { gap: var(--space-4); padding: 0; border: 0; background: none; }
 .agent-family-program:empty,
 .agent-family-accounts[hidden] { display: none; }

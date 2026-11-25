@@ -1,7 +1,7 @@
 import { formatLimitUsd, formatUsd, number } from './storage_format.js';
-import { apiFetch } from './api_client.js';
+import { apiFetch, withinRequestLifetime } from './api_client.js';
 import { escapeHtmlAttr } from './ui_primitives.js';
-import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
+import { bindSettingRows, paintWithRow, readSettings, settingsRow, settingsSnapshot } from './settings_controls.js';
 import { rowsOf } from './settings_rows.js';
 import { statusMarkHtml } from './status_mark.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
@@ -9,7 +9,7 @@ import { readConsciousness, readConsciousnessFromState } from './consciousness_a
 import { allowanceHold, allowanceText, modelRouteWords } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountCostPeriod } from './cost_period.js';
-import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
+import { READ_OK, STATUS_READ_LIFETIME_MS, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon, fluentIcon } from './page_icons.js';
 import { spendGapsWords } from './route_editor_primitives.js';
@@ -279,7 +279,7 @@ const tableCardHtml = ([id, title, column, , note]) => `<section class="ui-card 
         <button type="button" class="btn btn-ghost btn-sm ui-list-more" data-costs-more hidden></button>
     </section>`;
 
-export function initCosts({ state, mount, openDashboardTab = null, openSettings = null }) {
+export function initCosts({ state, mount, openDashboardTab = null, openSettings = null, ws = null }) {
     // The tab's one root and scroller (style.css "The Dashboard tab body"): the known spend of the limit leads, the
     // budget it is set against follows as the tab's action row, then where the money went.
     const page = document.createElement('div');
@@ -351,9 +351,21 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     const limits = bindSettingRows(budgetCard);
     const expanded = new Set();
     let lastBreakdown = null;
-    let allowanceRead = 0;
     let allowanceExpiry = null;
-    let subscriptionsRead = 0;
+    // The sheets decide whether the page is drawn: one column's list holds it undrawn, also while its arrow keys select the
+    // row, until a press opens the page. Every read of the page starts here, at its ingress, and only while it is drawn.
+    const pageDrawn = () => page.getClientRects().length > 0;
+    // What the page has out, one read of each kind. A newer read of its kind and the page's leaving end it: its transport is
+    // aborted and its answer dropped.
+    const reads = new Map();
+    function startRead(kind) {
+        if (!pageDrawn()) return null;
+        reads.get(kind)?.abort();
+        const control = new AbortController();
+        reads.set(kind, control);
+        return { signal: control.signal, current: () => reads.get(kind) === control,
+            end() { if (reads.get(kind) === control) reads.delete(kind); } };
+    }
 
     function renderBreakdownTable(tableId, data, emptyLabel = 'No data') {
         const table = page.querySelector('#' + tableId);
@@ -422,7 +434,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         clearTimeout(allowanceExpiry);
         const wait = Date.parse(String(snapshot?.allowanceRoomAfter || '')) - Date.now();
         if (wait > 0 && wait < 2 ** 31 - 1000) {
-            allowanceExpiry = setTimeout(() => { if (page.isConnected !== false) loadAllowance(); }, wait + 1000);
+            allowanceExpiry = setTimeout(loadAllowance, wait + 1000);
             allowanceExpiry?.unref?.();  // a test runner's clock is never kept alive by it
         }
         const view = allowancePresentation(snapshot);
@@ -447,75 +459,114 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     }
 
     async function loadAllowance() {
-        const read = ++allowanceRead;
+        const read = startRead('allowance');
+        if (!read) return;
         let snapshot = null;
-        try { snapshot = await readConsciousness(); } catch {
-            try { snapshot = await readConsciousnessFromState(); } catch { snapshot = null; }
+        try { snapshot = await readConsciousness({ signal: read.signal }); } catch {
+            try { snapshot = await readConsciousnessFromState({ signal: read.signal }); } catch { snapshot = null; }
         }
-        if (read === allowanceRead) renderAllowance(snapshot);
+        if (read.current()) renderAllowance(snapshot);
+        read.end();
     }
 
     async function loadCosts() {
-        renderLead({ state: 'loading' });
+        const read = startRead('totals');
+        if (!read) return;
+        if (!lastBreakdown) renderLead({ state: 'loading' });
         try {
-            const resp = await apiFetch('/api/cost-breakdown');
+            const resp = await apiFetch('/api/cost-breakdown', { signal: read.signal });
             const d = await resp.json();
             const presentation = costDashboardPresentation(d);
             if (!resp.ok || presentation.state !== 'available') throw new Error('accounting unavailable');
+            if (!read.current()) return;  // a later read or the page's leaving owns the card
             lastBreakdown = d;
             renderLead(presentation);
             renderTables(d);
         } catch {
+            if (!read.current()) return;
             lastBreakdown = null;
             renderLead({ state: 'unavailable' });
             renderTables(null, 'Unavailable');
-        }
+        } finally { read.end(); }
     }
 
-    // Read when the tab is shown and on Refresh, never on a save elsewhere: no answer of it changes with a setting.
+    // Read on show and Refresh, never on a settings save. A read and its body expire together. Refresh or leaving
+    // Costs cancels quietly; an expiry of the current read is a read failure, never an engine that stopped.
     async function loadSubscriptions() {
-        const read = ++subscriptionsRead;
+        const read = startRead('subscriptions');
+        if (!read) return;
         let payload = null;
         let transportError = '';
         try {
-            const resp = await apiFetch('/api/claudexor/status?view=quota', { cache: 'no-store' });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            payload = await resp.json();
+            payload = await withinRequestLifetime(async (signal) => {
+                const resp = await apiFetch('/api/claudexor/status?view=quota', { cache: 'no-store', signal });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return resp.json();
+            }, { signal: read.signal, lifetimeMs: STATUS_READ_LIFETIME_MS });
         } catch (error) { transportError = String(error?.message || error || 'unreachable'); }
-        if (read !== subscriptionsRead) return;
-        page.querySelector('[data-costs-subscriptions]').innerHTML = subscriptionDoors(payload, { transportError }).map(subscriptionDoorHtml).join('');
+        if (!read.current()) return;
+        read.end();
+        const host = page.querySelector('[data-costs-subscriptions]');
+        const focused = host.contains(document.activeElement) ? document.activeElement : null;
+        const kept = new Map([...host.children].map((row) => [row.dataset.costsAccount, row]));
+        const desired = document.createElement('div');
+        desired.innerHTML = subscriptionDoors(payload, { transportError }).map(subscriptionDoorHtml).join('');
+        for (const [index, next] of [...desired.children].entries()) {
+            const row = kept.get(next.dataset.costsAccount) || next;
+            kept.delete(next.dataset.costsAccount);
+            if (row !== next && row.innerHTML !== next.innerHTML) row.replaceChildren(...next.children);
+            if (host.children[index] !== row) host.insertBefore(row, host.children[index] || null);
+        }
+        for (const row of kept.values()) row.remove();
+        if (focused) (host.contains(focused) ? focused : host.querySelector('[data-costs-account="accounts"]'))?.focus({ preventScroll: true });
     }
 
-    // What the limits cannot count, one line under them (pricing.spend_coverage). The words are composed
-    // (spendGapsWords), so the overlay leaves them alone and a language change says them again.
-    let spendGaps = [], partlyCounted = [];
+    // What the limits cannot count, one line under them (pricing.spend_coverage), and the note of how the limits count are
+    // words of the settings document the rows hold (`settingsSnapshot`: the newest accepted read or a landed write), painted
+    // whenever the rows are (`paintWithRow`, which must not throw), never from a read of this page's own that another
+    // overtook: rows and notes cannot stand on two documents, and nothing is asked for them. The gap words are composed
+    // (spendGapsWords), so the overlay leaves them alone and a language change says them again; the note is plain text the
+    // overlay translates, written when it changes.
+    let paintedNote = '';
     function paintGaps() {
         const line = page.querySelector('#costs-gaps');
         if (!line) return;
-        line.textContent = spendGapsWords(spendGaps, partlyCounted);
+        const settings = settingsSnapshot();
+        const gaps = Array.isArray(settings?._meta?.known_spend_gaps) ? settings._meta.known_spend_gaps.map(String) : [];
+        const partly = Array.isArray(settings?._meta?.partly_counted_spend) ? settings._meta.partly_counted_spend : [];
+        line.textContent = spendGapsWords(gaps, partly);
         line.hidden = !line.textContent;
         if (line.textContent) line.dataset.i18nFmt = 'spend gaps'; else delete line.dataset.i18nFmt;
     }
+    function paintLimitNotes() {
+        paintGaps();
+        const settings = settingsSnapshot();
+        const fields = settings?._meta?.setup_contract?.budgetFields;
+        const note = (Array.isArray(fields) ? fields : []).map((field) => String(field?.note || '').trim()).find(Boolean) || '';
+        const noteEl = page.querySelector('#costs-budget-help');
+        if (noteEl && note && note !== paintedNote) { noteEl.textContent = note; paintedNote = note; }
+    }
+    // The budget limits' own row is where the notes stand (LIMIT_NOTES): they follow it.
+    const offNotes = paintWithRow('TOTAL_BUDGET', paintLimitNotes);
+    paintLimitNotes();  // a document another page read before this one was drawn
 
     async function loadLimits() {
+        const read = startRead('limits');
+        if (!read) return;
         try {
-            const settings = await readSettings();
-            const fields = settings?._meta?.setup_contract?.budgetFields || [];
-            const note = fields.map((field) => String(field.note || '').trim()).find(Boolean) || '';
-            const noteEl = page.querySelector('#costs-budget-help');
-            if (noteEl && note) noteEl.textContent = note;
-            spendGaps = Array.isArray(settings?._meta?.known_spend_gaps) ? settings._meta.known_spend_gaps.map(String) : [];
-            partlyCounted = Array.isArray(settings?._meta?.partly_counted_spend) ? settings._meta.partly_counted_spend : [];
-            paintGaps();
+            await readSettings({ signal: read.signal });  // an accepted read paints the rows and the notes; an ended or overtaken read rejects
         } catch { /* the rows keep the last values they read */ }
-        limits.paint();
+        if (read.current()) limits.paint();
+        read.end();
     }
 
-    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); loadSubscriptions(); periodCard.reload(); });
+    // The period card reads through the same gate; `ifIdle` leaves a read it has out alone.
+    const loadPeriod = (options) => { if (pageDrawn()) periodCard.reload(options); };
+    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); loadSubscriptions(); loadPeriod(); });
     // Each door opens its Settings page, which leads back here.
     page.querySelector('.costs-subscriptions').addEventListener('click', (event) => {
         const path = event.target.closest?.('[data-costs-account]')?.dataset.costsAccount;
-        if (path !== undefined) void openSettings?.(path, { back: { label: 'Costs', go: () => openDashboardTab?.('costs') } });
+        if (path !== undefined) void openSettings?.(path);
     });
     // The allowance's doors: a held wake's card in Main, and the Consciousness tab.
     page.querySelector('.costs-meters').addEventListener('click', (event) => {
@@ -537,18 +588,58 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         loadAllowance();
     }
 
-    // A result the owner saw ends when the tab or the Dashboard is left.
-    window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
-        if (event.detail?.tab !== 'costs') limits.leave();
-        else if (state.activePage === 'dashboard') { refreshCostsPanel(); loadSubscriptions(); periodCard.reload(); }  // the period is read when the tab is looked at
+    // A return to the Dashboard is told twice in one transition (commitPage: its page, then the tab its `enter` restores, as
+    // a deep link or "Back to Dashboard › Costs" does): the second tells the visit that began with the first nothing new,
+    // and only until that transition ends.
+    let returned = false;
+    // A result the owner saw ends when the tab or the Dashboard is left, or when its page is hidden under the Dashboard's
+    // list (one column's Back): what the page has out ends, quietly, and what it painted stays.
+    const leaveCosts = () => {
+        limits.leave();
+        const out = [...reads.values()];
+        reads.clear();
+        out.forEach((control) => control.abort());
+        periodCard.leave();
+        returned = false;
+    };
+    // A showing: the page is drawn anew (opened, its tab chosen, the window widened, the Dashboard returned to), so it reads
+    // each of its facts, none of which is out already. What the last showing painted stays until the new answers come. The
+    // period is read when the tab is looked at.
+    function showing(byPage = false) {
+        if (!byPage && returned) { returned = false; return; }
+        returned = byPage && pageDrawn();
+        if (returned) queueMicrotask(() => { returned = false; });
+        for (const [kind, load] of [['totals', loadCosts], ['limits', loadLimits], ['allowance', loadAllowance], ['subscriptions', loadSubscriptions]]) {
+            if (!reads.has(kind)) load();
+        }
+        loadPeriod({ ifIdle: true });
+    }
+    const listeners = [];
+    const listen = (type, handler) => { window.addEventListener(type, handler); listeners.push([type, handler]); };
+    listen('ouro:dashboard-subtab-hidden', (event) => { if (event.detail?.tab === 'costs') leaveCosts(); });
+    listen('ouro:dashboard-subtab-shown', (event) => {
+        if (event.detail?.tab !== 'costs') leaveCosts();
+        else if (state.activePage === 'dashboard') showing();
     });
-    window.addEventListener('ouro:page-shown', (event) => { if (event.detail?.page !== 'dashboard') limits.leave(); });
-    window.addEventListener('ouro:language-changed', paintGaps);
-    window.addEventListener('ouro:settings-updated', (event) => {
+    listen('ouro:page-shown', (event) => {
+        if (event.detail?.page !== 'dashboard') { leaveCosts(); return; }
+        // A two-pane return has no subtab event, and is a new visit all the same (the Dashboard's own page event, which
+        // runs first, has chosen list or page): one column's list holds Costs undrawn, and reads nothing.
+        if (state.dashboardActiveSubtab === 'costs') showing(true);
+    });
+    // A reconnect reads the limits again, as the page's own read and only while it is drawn (`startRead`): the Dashboard asks
+    // nothing for Costs. A read still out was asked on the connection that dropped and may never answer or answer for the
+    // time before it; the new one replaces it (`startRead` ends it), so the visible limits are read once after every reconnect.
+    const offReconnect = ws?.on?.('open', (event) => {
+        if (event?.previouslyConnected && state.activePage === 'dashboard' && !document.hidden) loadLimits();
+    });
+    listen('ouro:language-changed', paintGaps);
+    listen('ouro:settings-updated', (event) => {
         const { source, page: home, row } = event.detail || {};
         if (source !== 'settings-row' || home !== LIMITS_PAGE) { refreshCostsPanel(); return; }
         // One of this card's own rows was saved: read again only what that limit moves.
         if (row === 'TOTAL_BUDGET') loadCosts();
         if (row === ALLOWANCE_KEY) loadAllowance();
     });
+    return { destroy() { offReconnect?.(); offNotes(); listeners.forEach(([type, handler]) => window.removeEventListener(type, handler)); clearTimeout(allowanceExpiry); leaveCosts(); } };
 }

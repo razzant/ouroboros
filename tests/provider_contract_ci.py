@@ -15,6 +15,7 @@ import pytest
 from ouroboros.llm_stream import ProviderStreamError
 from ouroboros.provider_models import (
     OPENAI_DIRECT_DEFAULTS,
+    OPENAI_RESPONSES_DIRECT_DEFAULTS,
     normalize_deepseek_reasoning_effort,
     normalize_model_identity,
 )
@@ -23,6 +24,9 @@ from ouroboros.utils import sanitize_tool_result_for_log
 CANARY_TIMEOUT_SEC = 120.0
 CANARY_MAX_TOKENS = 1024
 CANARY_CONTINUATION_MAX_TOKENS = 2048
+# A row whose model reasons before an unforced call (tool_choice "auto"): 1024 may end in
+# thinking before the call. A ceiling, not a spend; only rows that name it get it.
+CANARY_REASONING_MAX_TOKENS = 16_384
 CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS = 2
 CANARY_EMPTY_RESPONSE_BACKOFF_SEC = 1.0
 CANARY_TOOL_NAME = "delegate_start"
@@ -41,6 +45,9 @@ class ProviderCanary:
     reasoning_effort: str
     named_tool_choice: bool = True
     continue_to_final: bool = False
+    max_tokens: int = CANARY_MAX_TOKENS
+    # A direct OpenAI row's API (``OPENAI_API_SURFACE``, bound for its check only); '' for every other route.
+    api_surface: str = ""
 
 
 # The CI's shared OpenRouter key is refused by Google, Anthropic and OpenAI models (HTTP 403, provider terms),
@@ -50,8 +57,9 @@ OPENROUTER_ROUTES_KEY_ENV = "OPENROUTER_PROVIDER_ROUTES_API_KEY"
 
 _OPENROUTER_CANARIES = (
     ProviderCanary(
-        "openrouter_gemini", "google/gemini-3.8-flash", "openrouter",
-        OPENROUTER_ROUTES_KEY_ENV, True, "medium",
+        # The continuation proves the replay of its tool turn, which every Main round after a call depends on.
+        "openrouter_gemini", "google/gemini-4-hydrogen", "openrouter",
+        OPENROUTER_ROUTES_KEY_ENV, True, "medium", continue_to_final=True,
     ),
     ProviderCanary(
         "openrouter_opus", "anthropic/claude-opus-5", "openrouter",
@@ -62,7 +70,7 @@ _OPENROUTER_CANARIES = (
         OPENROUTER_ROUTES_KEY_ENV, True, "medium", named_tool_choice=False,
     ),
     ProviderCanary(
-        "openrouter_gpt", "openai/gpt-5.6-luna", "openrouter",
+        "openrouter_gpt", "openai/gpt-6.1-terra", "openrouter",
         OPENROUTER_ROUTES_KEY_ENV, True, "medium",
     ),
     ProviderCanary(
@@ -76,8 +84,12 @@ _OPENROUTER_CANARIES = (
 )
 
 _DIRECT_ANTHROPIC_CANARY = ProviderCanary(
-    "anthropic_direct", "anthropic::claude-sonnet-5", "anthropic",
-    "ANTHROPIC_API_KEY", True, "medium",
+    # Sonnet 5.5 refuses tool_choice "any"/"tool" on every request (tool-use docs and a live
+    # 400, 2026-11-16), so its row calls through "auto" as Main does; the model then reasons first.
+    # The continuation replays that signed reasoning, the contract every Main round after a call needs.
+    "anthropic_direct", "anthropic::claude-sonnet-5-5", "anthropic",
+    "ANTHROPIC_API_KEY", True, "medium", named_tool_choice=False, continue_to_final=True,
+    max_tokens=CANARY_REASONING_MAX_TOKENS,
 )
 
 _OPTIONAL_DIRECT_CANARIES = (
@@ -90,7 +102,7 @@ _OPTIONAL_DIRECT_CANARIES = (
         # CARRIES reasoning_effort, and the canary pins that carriage. The
         # continuation is mandatory too: DeepSeek's tool contract is defined by
         # replaying reasoning_content on the second request.
-        "deepseek_direct", "deepseek::deepseek-v4-flash", "deepseek",
+        "deepseek_direct", "deepseek::deepseek-flash", "deepseek",
         "DEEPSEEK_API_KEY", False, "medium", continue_to_final=True,
     ),
     ProviderCanary(
@@ -110,23 +122,31 @@ def unique_openai_direct_defaults():
     return tuple(dict.fromkeys(model for model in OPENAI_DIRECT_DEFAULTS.values() if model))
 
 
+# Each OpenAI API with the shipped profile its connections propose (provider_connections.direct_provider_defaults):
+# a never-chosen connection keeps Chat Completions and its table; a new one is seeded on Responses and its own.
+_OPENAI_SURFACE_PROFILES = (("chat_completions", "openai_direct", OPENAI_DIRECT_DEFAULTS),
+                            ("responses", "openai_responses", OPENAI_RESPONSES_DIRECT_DEFAULTS))
+
+
 def _openai_direct_canaries():
-    seen = set()
     rows = []
-    main_model = OPENAI_DIRECT_DEFAULTS.get("main")
-    for role, model in OPENAI_DIRECT_DEFAULTS.items():
-        if not model or model in seen:
-            continue
-        seen.add(model)
-        rows.append(ProviderCanary(
-            canary_id=f"openai_direct_{role}",
-            model=model,
-            expected_provider="openai",
-            credential_env="OPENAI_API_KEY",
-            credential_required=True,
-            reasoning_effort="medium",
-            continue_to_final=model == main_model,
-        ))
+    for surface, prefix, defaults in _OPENAI_SURFACE_PROFILES:
+        seen = set()
+        main_model = defaults.get("main")
+        for role, model in defaults.items():
+            if not model or model in seen:
+                continue
+            seen.add(model)
+            rows.append(ProviderCanary(
+                canary_id=f"{prefix}_{role}",
+                model=model,
+                expected_provider="openai",
+                credential_env="OPENAI_API_KEY",
+                credential_required=True,
+                reasoning_effort="medium",
+                continue_to_final=model == main_model,
+                api_surface=surface,
+            ))
     return tuple(rows)
 
 
@@ -302,16 +322,18 @@ def require_provider_canary_credential(canary: ProviderCanary):
 
 
 def bind_provider_canary_credential(canary: ProviderCanary, monkeypatch) -> None:
-    """Hand a route its own secret for this check only, before its client exists.
+    """Hand a route its own secret, and a direct OpenAI row its API, for this check only, before its client exists.
 
-    The client reads OpenRouter's key from that kind's one setting (provider_models.PROVIDER_KINDS) on
-    every request, so a route whose secret has another name puts it there for the check's duration.
+    The client reads OpenRouter's key and OpenAI's API from their kinds' settings (provider_models.PROVIDER_KINDS)
+    on every request, so a route whose secret has another name puts it there for the check's duration.
     """
     from ouroboros.provider_models import PROVIDER_KINDS
 
     setting = PROVIDER_KINDS["openrouter"].flat_key("api_key")
     if canary.expected_provider == "openrouter" and canary.credential_env != setting:
         monkeypatch.setenv(setting, os.environ[canary.credential_env])
+    if canary.api_surface:  # the API the row qualifies, never whatever the environment happens to choose
+        monkeypatch.setenv(PROVIDER_KINDS["openai"].flat_key("api_surface"), canary.api_surface)
 
 
 def full_registry_canary_tools():
@@ -495,9 +517,11 @@ def _canary_failure(canary_or_model, message, usage, violation, **kwargs):
     ))
 
 
-def assert_openai_canary_usage(usage, model):
+def assert_openai_canary_usage(usage, model, api_surface="chat_completions"):
     def failure(code):
         return _canary_failure_payload(model, None, usage, code)
+    # Chat sends tools in its runtime's custom form; Responses carries them as functions (recorded live 17.11.2026).
+    dialect = "function" if api_surface == "responses" else "openai_chat_custom"
     assert isinstance(usage, dict), failure("usage_not_mapping")
     assert usage.get("provider") == "openai", failure("unexpected_accounting_provider")
     assert usage.get("resolved_model") == normalize_model_identity(model), failure("unexpected_accounting_model")
@@ -508,7 +532,7 @@ def assert_openai_canary_usage(usage, model):
     disclosure = usage.get("request_wire")
     assert isinstance(disclosure, dict), failure("missing_request_wire_disclosure")
     for key, expected in (("requested_effort", "medium"), ("applied_effort", "medium"),
-                          ("requested_tool_dialect", "function"), ("applied_tool_dialect", "openai_chat_custom"),
+                          ("requested_tool_dialect", "function"), ("applied_tool_dialect", dialect),
                           ("reason_code", "requested_wire_form"), ("ladder_ordinal", 1)):
         assert disclosure.get(key) == expected, failure(f"request_wire_{key}")
     assert disclosure.get("task_local") is False, failure("request_wire_task_local")
@@ -582,7 +606,7 @@ def assert_canary_usage(usage, canary: ProviderCanary, *, forced_tool_choice: bo
         assert disclosure.get("requested_effort") == expected_effort, failure("request_wire_requested_effort")
         assert disclosure.get("applied_effort") == expected_effort, failure("request_wire_applied_effort")
     if canary.expected_provider == "openai":
-        return assert_openai_canary_usage(usage, canary.model)
+        return assert_openai_canary_usage(usage, canary.model, canary.api_surface)
     return usage.get("request_wire")
 
 
@@ -842,7 +866,7 @@ def run_provider_contract_canary(
             "tools": copy.deepcopy(sent_tools),
             "tool_choice": tool_choice,
             "reasoning_effort": canary.reasoning_effort,
-            "max_tokens": CANARY_MAX_TOKENS,
+            "max_tokens": canary.max_tokens,
             # Main sets stream=True on every remote completion, so the canary's
             # first turn must exercise that transport rather than one Main never
             # uses. Rows that continue to a final answer keep their second turn
@@ -896,10 +920,13 @@ def run_provider_contract_canary(
         chat_kwargs={
             "messages": continuation,
             "model": canary.model,
-            "tools": [copy.deepcopy(_delegate_start_tool(tools))],
+            # The first turn's registry, as Main keeps it: replayed signed reasoning is bound to
+            # system, tools and earlier messages, never to tool_choice or max_tokens (Anthropic
+            # "Prefix checks on thinking blocks", read 2026-11-16), so only "none" changes here.
+            "tools": copy.deepcopy(sent_tools),
             "tool_choice": "none",
             "reasoning_effort": canary.reasoning_effort,
-            "max_tokens": CANARY_CONTINUATION_MAX_TOKENS,
+            "max_tokens": max(canary.max_tokens, CANARY_CONTINUATION_MAX_TOKENS),
             "no_proxy": True,
             "timeout": CANARY_TIMEOUT_SEC,
         },

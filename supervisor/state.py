@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import json
 import logging
+import math
 import os
 import pathlib
 import threading
@@ -498,14 +499,14 @@ def update_state(mutator, *, confirm: Tuple[str, ...] = (), lock_timeout_sec: fl
 def _set_aside_copies_older_than_a_reset(witness: Any) -> None:
     """An owner Reset's ``pending`` witness is the owner's explicit fresh start: a state
     copy of another identity (a writer that raced the Reset's delete) is moved aside
-    under a new name — never adopted as current, never deleted. Caller holds STATE_LOCK."""
-    w_status, record = witness.read_witness(DRIVE_ROOT)
-    if not (w_status == "ok" and record.get("phase") == "pending" and record.get("origin") == "owner_reset"):
+    under a new name — never adopted as current, never deleted. Caller holds STATE_LOCK.
+    Which copies is the witness module's decision, so setup's ``first_state_pending`` reads the same one."""
+    identity, stamp = witness.pending_reset_identity(DRIVE_ROOT), time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    if identity is None:
         return
-    identity, stamp = str(record.get("initialization_id") or ""), time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     for path in (STATE_PATH, STATE_LAST_GOOD_PATH):
         status, obj, _raw, detail = _read_json_file(path)
-        if status == "missing" or (status == "ok" and obj.get("initialization_id") == identity):
+        if not witness.reset_sets_aside(status, obj, identity):
             continue
         if status == "unreadable":
             raise StateUnavailable("primary_unreadable", detail)
@@ -558,7 +559,7 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
                     raise StateUnavailable(str(decision.get("reason") or "refused"),
                                            str(decision.get("detail") or ""))
                 created = str(decision["initialization_id"])
-                st = ensure_state_defaults({"initialization_id": created})
+                st = ensure_state_defaults(witness.first_state(DRIVE_ROOT, created))
             if not created:
                 try:
                     st["initialization_id"] = witness.prepare_adoption(DRIVE_ROOT, st)
@@ -886,6 +887,24 @@ class _OpenRouterDiagnostic:
 
 
 _OPENROUTER_DIAGNOSTIC = _OpenRouterDiagnostic()
+
+
+def openrouter_spend_deltas(st: Dict[str, Any], *, legacy_ledger: bool = False) -> Optional[Tuple[float, float]]:
+    """Local and key deltas from one comparable diagnostic. Only /status reads a legacy unpaired ledger."""
+    if st.get("budget_drift_pct") is None:
+        return None  # the writer withheld comparison or established a new baseline
+    local = st.get("openrouter_checked_ledger_settled_usd", st.get("openrouter_ledger_settled_usd") if legacy_ledger else None)
+    local_base = st.get("session_openrouter_settled_snapshot")
+    key, key_base = st.get("openrouter_total_usd"), st.get("session_total_snapshot")
+    try:
+        if legacy_ledger:  # status_text also accepted numeric strings for the ledger side
+            local, local_base = float(local), float(local_base)
+        if any(type(n) not in (int, float) for n in (local, local_base, key, key_base)):
+            return None
+        pair = (float(local) - float(local_base), float(key) - float(key_base))
+        return pair if all(map(math.isfinite, pair)) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _apply_openrouter_ground_truth(st: Dict[str, Any], snapshot: Dict[str, Any],
@@ -1282,6 +1301,8 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
     lines.append(f"pending: {len(pending_list)}")
     from supervisor.pool_admission import status_words  # why queued work may wait for a new process
     lines.extend(filter(None, [status_words()]))
+    from ouroboros.command_memory import status_note  # one line while commands run without their own memory group (Linux)
+    lines.extend(filter(None, [status_note()]))
     lines.append(f"running: {len(running_dict)}")
     if pending_list:
         preview = []
@@ -1369,29 +1390,12 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
         if breakdown_parts:
             lines.append(f"budget_breakdown: {', '.join(breakdown_parts)}")
 
-    drift_pct = st.get("budget_drift_pct")
-    if accounting_available and drift_pct is not None:
-        # The ledger side captured with this diagnostic, not newer spend that
-        # arrived while HTTP was pending. Older snapshots predate this field.
-        session_total_snap = st.get("session_total_snapshot")
-        session_or_settled_snap = st.get("session_openrouter_settled_snapshot")
-        or_ledger_settled = st.get("openrouter_checked_ledger_settled_usd", st.get("openrouter_ledger_settled_usd"))
-        or_total = st.get("openrouter_total_usd")
-
-        if (
-            session_total_snap is not None
-            and session_or_settled_snap is not None
-            and or_ledger_settled is not None
-            and or_total is not None
-        ):
-            or_delta = or_total - session_total_snap
-            our_delta = float(or_ledger_settled) - float(session_or_settled_snap)
-
-            drift_icon = " ⚠️" if st.get("budget_drift_alert") else ""
-            lines.append(
-                f"budget_drift: {drift_pct:.1f}%{drift_icon} "
-                f"(openrouter tracked: ${our_delta:.2f} vs OpenRouter key: ${or_delta:.2f})"
-            )
+    deltas = openrouter_spend_deltas(st, legacy_ledger=True) if accounting_available else None
+    if deltas is not None:
+        our_delta, or_delta = deltas
+        drift_icon = " ⚠️" if st.get("budget_drift_alert") else ""
+        lines.append(f"budget_drift: {st['budget_drift_pct']:.1f}%{drift_icon} "
+                     f"(openrouter tracked: ${our_delta:.2f} vs OpenRouter key: ${or_delta:.2f})")
 
     models = model_breakdown(st)
     if models:

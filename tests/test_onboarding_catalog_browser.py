@@ -5,11 +5,118 @@ import copy
 import json
 
 import pytest
+from tests._wizard_walk import step_order
 
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
+
+
+def test_old_core_subscription_only_setup_can_retry_without_implicitly_reading_providers(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    del ui["bootstrap"]["contract"]["scopedModelCatalogs"]
+    page.goto(ui["url"] + "/onboarding", wait_until="networkidle")
+    retry = page.locator("#onboarding-access-retry")
+    expect(retry).to_be_enabled()
+    expect(page.locator("#next-btn")).to_be_disabled()
+    assert not any("/model-catalog" in url for url in ui["reads"])
+    with page.expect_response("**/api/onboarding/model-catalog"):
+        retry.click()
+    expect(page.locator("#next-btn")).to_be_enabled()
+    assert not any("/api/model-catalog?view=" in url or "provider_id=" in url for url in ui["reads"])
+
+
+def test_wizard_uses_the_current_subscription_list_when_an_earlier_full_read_arrives(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    pending = []
+    full = copy.deepcopy(ui["fixture"]["catalog"])
+    page.route("**/api/onboarding/model-catalog", lambda route: pending.append(route))
+    page.goto(ui["url"] + "/onboarding", wait_until="networkidle")
+    next_step = page.locator("#next-btn")
+    expect(next_step).to_be_enabled()
+    with page.expect_request("**/api/onboarding/model-catalog"):
+        page.locator("#onboarding-access-retry").click()
+    ui["fixture"]["catalog"]["model_sources"] = []
+    ui["fixture"]["status"]["profiles"]["profiles"].pop()
+    with page.expect_response("**/api/model-catalog?view=sources"):
+        page.evaluate("async () => (await import('/onboarding/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+    expect(next_step).to_be_disabled()
+    with page.expect_response("**/api/onboarding/model-catalog"):
+        pending[0].fulfill(json=full)
+    expect(page.locator("#onboarding-access-note")).not_to_contain_text("Checking model sources")
+    expect(next_step).to_be_disabled()
+
+
+def test_wizard_waiting_on_a_pin_only_suggests_models_from_that_account(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    ui["bootstrap"]["initialState"].update(mainModel="claudexor::codex=saved", automaticModels=[])
+    ui["fixture"]["preview"]["model_settings"] = {}
+    catalog = ui["fixture"]["catalog"]
+    for item in catalog["items"]:
+        model = item["credential_profile_id"] + "-exclusive"
+        item.update(id=model, value="claudexor::codex=" + model, name=model, label=model)
+    pending = []
+    page.route("**/api/model-catalog?source_id=codex&credential_profile_id=work", lambda r: pending.append(r))
+    page.goto(ui["url"] + "/onboarding")
+    with page.expect_response("**/api/onboarding/model-catalog"):
+        page.locator("#onboarding-access-retry").click()
+    page.click("#next-btn")
+    main = page.locator('[data-model-role="main"]')
+    model = main.locator("[data-model-role-model]")
+    model.fill("exclusive")
+    choices = page.locator('#' + model.get_attribute("aria-controls"))
+    expect(choices.locator('[data-model-value="personal-exclusive"]')).to_be_visible()
+    expect(choices.locator('[data-model-value="work-exclusive"]')).to_be_visible()
+    model.press("Escape")
+    with page.expect_request("**/api/model-catalog?source_id=codex&credential_profile_id=work"):
+        main.locator("[data-model-role-account]").select_option("work")
+    model.fill("exclusive")
+    expect(choices.locator('[data-model-value="personal-exclusive"]')).to_have_count(0)
+    for route in pending:
+        route.fulfill(json={**catalog, "items": [row for row in catalog["items"] if row["credential_profile_id"] == "work"]})
+    expect(choices.locator('[data-model-value="work-exclusive"]')).to_be_visible()
+    expect(model).to_have_value("exclusive")
+
+
+def test_wizard_lists_a_subscription_while_the_selected_draft_provider_is_slow(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    ui["bootstrap"]["initialState"].update(
+        mainModel="openai::saved", automaticModels=[], lightModel="", fallbackModel="",
+        visionModel="", safetyModel="", consciousnessModel="")
+    ui["fixture"]["preview"]["model_settings"] = {}
+    pending = []
+    page.route("**/api/onboarding/model-catalog?provider_id=openai", lambda route: pending.append(route))
+    page.goto(ui["url"] + "/onboarding")
+    page.locator('[data-collapse="api-access"] > summary').click()
+    page.locator("#openai-key").fill("openai-draft-test-credential")
+    page.locator("#openrouter-key").fill("openrouter-unselected-test-credential")
+    with page.expect_request("**/api/onboarding/model-catalog?provider_id=openai"):
+        page.click("#next-btn")
+    main = page.locator('[data-model-role="main"]')
+    expect(main.locator("[data-model-role-model]")).to_have_value("saved")
+    main.locator("[data-source-picker]").click()
+    page.get_by_role("option", name="Codex (model)", exact=True).click()
+    model = main.locator("[data-model-role-model]")
+    model.fill("gpt")
+    page.locator(f'#{model.get_attribute("aria-controls")} [data-model-value="gpt-test"]').click()
+    assert pending and pending[0].request.method == "POST"
+    assert pending[0].request.post_data_json["OPENAI_API_KEY"] == "openai-draft-test-credential"
+    for route in pending:
+        route.fulfill(json={"items": [{"value": "openai::a-late-model"}], "errors": [], "model_sources": []})
+    expect(model).to_have_value("gpt-test")
+    expect(main.locator("[data-model-role-source]")).to_have_value("subscription:codex")
+    assert not any(url.endswith(("/api/onboarding/model-catalog", "/api/model-catalog",
+                                 "provider_id=openrouter")) for url in ui["reads"])
+    assert not any("/api/model-catalog?provider_id=" in url for url in ui["reads"]), "draft keys read only the setup endpoint"
 
 
 @pytest.mark.parametrize("viewport", [(980, 780), (900, 900), (390, 844), (1360, 900)])
@@ -96,6 +203,14 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
         expect(meanings.nth(index)).to_be_visible()
     expect(page.locator('#next-btn')).to_be_in_viewport()
     page.click("#next-btn")
+    if "consciousness" in step_order(page):  # its own step before limits on a root with no state yet
+        expect(page.locator('[data-consciousness-choice]')).to_have_count(2)
+        expect(page.locator('#next-btn')).to_be_in_viewport()
+        page.click("#next-btn")
+    if "skills" in step_order(page):  # then Skills, while this root's starter list never ran
+        expect(page.locator('[data-starter-skills="step"]')).to_have_count(1)
+        expect(page.locator('#next-btn')).to_be_in_viewport()
+        page.click("#next-btn")
     budget = page.locator('[data-collapse="api-budget"]')
     if not budget.evaluate("el => el.open"):
         budget.locator("summary").click()

@@ -142,7 +142,16 @@ class LiveConversationTurn(RealtimeTurn):
             work = _LoopWork()
             work.task = asyncio.current_task()
             with extension_work_scope(self.feature, work):
-                children = ()
+                children = []
+                completed = False
+
+                async def settle():
+                    try:
+                        # Drain both children without letting a losing child replace the call's outcome.
+                        await asyncio.gather(*children, return_exceptions=True)
+                    finally:
+                        await host.finish()
+
                 try:
                     # The host is now registered: catch a disable during ordinary
                     # preparation, while the hook covers any subsequent write.
@@ -154,12 +163,15 @@ class LiveConversationTurn(RealtimeTurn):
                         raise RealtimeSetupError("calls_disabled", "Calls (beta) are off.")
                     await host.check()
                     runner = asyncio.create_task(self.feature["handler"](host))
+                    children.append(runner)
                     controls = asyncio.create_task(host.watch_controls())
-                    children = (runner, controls)
+                    children.append(controls)
                     done, _ = await asyncio.wait((runner, controls), return_when=asyncio.FIRST_COMPLETED)
                     if controls in done:
                         await controls
-                    return await runner
+                    result = await runner
+                    completed = True
+                    return result
                 finally:
                     # No new mail once the receive loop ends, including while
                     # tool custody and terminal-result post-work still run.
@@ -167,14 +179,13 @@ class LiveConversationTurn(RealtimeTurn):
                     for child in children:
                         if not child.done():
                             child.cancel()
-                    for child in children:
-                        try:
-                            await joined(child)
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    # join any already-started tool invocation; cancellation of
-                    # its await cannot make an executing effect disappear.
-                    await host.finish()
+                    try:
+                        # A late cancellation of this waiter cannot abandon owned tool work.
+                        await joined(settle())
+                    except asyncio.CancelledError:
+                        if completed:
+                            raise  # do not turn cancellation during teardown into a normal close
+                        # A typed stop or failure already unwinding remains the primary reason.
 
         reason, status, detail = "finished", "ok", ""
         failure = None
@@ -364,7 +375,8 @@ class ConversationHost:
         self.plan = ctx.context_fit_plan
         if self.plan.model != turn.model or self.plan.provider != turn.route.accounting_provider:
             raise RealtimeSetupError("route", "call input must use the selected realtime route")
-        self.schemas = initial_tool_schemas(tools, context_mode=self.plan.initial_mode,
+        ctx._nano_standing = False  # a call keeps its own Nano base: the selectors and its feature's tools
+        self.schemas = initial_tool_schemas(tools, context_mode=self.plan.initial_mode, standing=False,
                                            schema_names=turn.feature.get("initial_tools", ()))
         self._schemas_mode = self.plan.initial_mode
         _reset_turn_state(ctx)
@@ -392,6 +404,8 @@ class ConversationHost:
         self.executed, self.captioned, self.requested = {}, {}, {}
         self.wire_path = task_artifact_dir_path(ctx.drive_root, ctx.task_id, create=True) / "conversation-wire.jsonl"
         self.wire = WireJournal(self.wire_path)
+        from ouroboros.live_usage import ConnectionLedger
+        self._connection_ledger = ConnectionLedger()  # shared with every connection view (``copy.copy``)
         self.connection_number = 0
         self._connection_sequence = 0
         self._connection_tasks = []
@@ -431,7 +445,7 @@ class ConversationHost:
         from ouroboros.tools.tool_discovery import update_resident_notice
 
         enabled = set(self.ctx._actor_loaded_tool_names)
-        selected = initial_tool_schemas(self.tools, context_mode=mode,
+        selected = initial_tool_schemas(self.tools, context_mode=mode, standing=False,
                                         schema_names=self.turn.feature.get("initial_tools", ()))
         names = {schema["function"]["name"] for schema in selected}
         selected.extend(schema for schema in self.schemas
@@ -517,12 +531,11 @@ class ConversationHost:
         return counts
 
     def _settle_connection_sample(self, counts, raw_usage):
-        from ouroboros.live_usage import settle_connection_usage
         if counts.get("connected_seconds") == 0:
             return
         args = self._response_args("")
         args.pop("response_key")
-        settle_connection_usage(**args, connection_key=str(self.connection_number),
+        self._connection_ledger.add(**args, connection_key=str(self.connection_number),
             usage={"connected_seconds": counts["connected_seconds"]}, raw_usage=raw_usage,
             watermark=self._meter_watermark)
 
@@ -556,6 +569,8 @@ class ConversationHost:
         while True:
             if self._end_reason is not None:
                 raise RealtimeSetupError(*self._end_reason)
+            if self._connection_ledger.failure is not None:  # connected time that could not be recorded ends the call
+                raise self._connection_ledger.failure
             reading = asyncio.create_task(asyncio.to_thread(probe))
             try:
                 await asyncio.shield(reading)
@@ -953,6 +968,10 @@ class ConversationHost:
                     self._response_text_estimates.clear()
                     self._density_input = 0
                     await joined(asyncio.to_thread(self.executor.shutdown, wait=True))
+                    await joined(asyncio.to_thread(self._connection_ledger.close))  # every closing tail is written
+                    if self._connection_ledger.failure is not None:
+                        log.warning("call %s: connected time not recorded", self.turn.spec.call_id,
+                                    exc_info=self._connection_ledger.failure)
         finally:
             # Evidence last, after every custody step above has run (a cancellation at any of their
             # awaits included): a failed wire-log write never skips custody and never replaces the

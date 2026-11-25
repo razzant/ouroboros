@@ -3,6 +3,8 @@
 import hashlib
 import pathlib
 
+import pytest
+
 
 def test_packet_path_fields_are_posix_under_their_placeholders_on_every_os(monkeypatch):
     """A Windows run writes the packet a POSIX run writes: a path field under a
@@ -167,3 +169,49 @@ def test_shared_project_receipts_bind_final_retirement_after_all_slots_settle(tm
         == "panel_complete_custody_replay"
         for row in receipts
     )
+
+
+@pytest.mark.parametrize("catalog", ["free", "held"])
+def test_a_packed_reviews_receipts_are_read_from_its_own_packs(tmp_path, catalog):
+    """A finished review's seat receipts may lie only in its own evidence pack. Binding names the review's task, so
+    its own sidecars answer them whether or not the shared packs catalog can: no receipt reads as unreadable."""
+    import threading
+
+    from ouroboros import evidence_packs, store
+    from ouroboros.observability import persist_call
+    from scripts.contributor_review_evidence import bind_execution_receipts
+
+    config = {"pool_slots": [{"slot_id": "slot_1", "route": {"kind": "api_chat", "target_id": "model-a"}}]}
+    prompt_ref = persist_call(tmp_path, task_id="review", call_id="prompt-1", call_type="prompt",
+                              payload={"slot": {"slot_id": "slot_1", "model": "model-a", "route": "api_chat"}})
+    response_ref = persist_call(tmp_path, task_id="review", call_id="response-1", call_type="response",
+                                payload={"message": {"content": "verdict"},
+                                         "usage": {"provider": "openrouter", "resolved_model": "model-a"}})
+    actors = [("pool", {"slot_id": "slot_1", "status": "responded",
+                        "prompt_ref": prompt_ref, "response_ref": response_ref})]
+    members = evidence_packs.loose_members(tmp_path, "review")
+    pack, sidecar = evidence_packs.write_pack(tmp_path, "review", 1, members)
+    evidence_packs.index_upsert(tmp_path, pack, sidecar)
+    for member in members:
+        member["source"].unlink()
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(tmp_path, evidence_packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    if catalog == "held":
+        holder.start()
+        assert held.wait(5)
+    try:
+        with store.acquisition_budget(0):
+            receipts, mismatches, _ = bind_execution_receipts(
+                actors=actors, resolved_config=config, drive_root=tmp_path, task_id="review")
+    finally:
+        release.set()
+        if catalog == "held":
+            holder.join(10)
+    assert not [item for item in mismatches if item.startswith("unreadable_")], mismatches
+    assert receipts[0]["dispatched"]["model"] == "model-a" and receipts[0]["observed"]["model"] == "model-a"

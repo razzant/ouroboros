@@ -971,13 +971,17 @@ def test_global_money_is_rechecked_after_prestart_contention(lane, remaining):
     assert state.budget_remaining({}, strict=True) == pytest.approx(remaining)
     assert lane.replies == [], "a lane turn's body reports nothing from the server"
     if remaining == 0:
+        from ouroboros.host_notice import STEPS
         from ouroboros.task_results import load_task_result
 
         [error] = lane.errors
         assert error.before_task_start is True and error.control_reason == "budget_exhausted"
         stored = load_task_result(lane.root, "S")  # the carrier's typed terminal is the turn's conclusion
         assert stored["status"] == "failed" and stored["reason_code"] == "budget_exhausted"
-        assert stored["result"].startswith("🚫 Budget exhausted."), stored["result"]
+        step = STEPS["raise_total_budget"]
+        assert step.strip()
+        # The record keeps the phrase and the owner's step (DESIGN principle 7), not the old pictograph line.
+        assert stored["result"] == f"The total budget is spent, so this turn did not start. {step}", stored["result"]
     else:
         assert lane.errors == []
 

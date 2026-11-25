@@ -204,6 +204,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/onboarding/bootstrap",
     "POST /api/onboarding/subagents/preview",
     "POST /api/onboarding/model-catalog",
+    "POST /api/onboarding/connection/identity",
     "POST /api/onboarding/complete",
     "GET /api/onboarding/complete",
     "GET /api/files/list",
@@ -259,7 +260,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/health": Shape("200:HealthResponse"),
     "GET /api/contract": Shape("200:GatewayContractResponse"),
     "GET /api/state": Shape("200:StateResponse 500:ErrorResponse", query="bindings_since"),
-    "GET /api/consciousness": Shape("200:json 503:json", note="status/detail, appointment_at, live_wake_held, live_wake_hold, allowance_status/open_rows/room_after, model_route, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
+    "GET /api/consciousness": Shape("200:json 503:json", query="switch", note="?switch=on|off: SwitchPreview {to, lines, places[{place_id, label, state, people, people_capped?}] | places null when unread} read at the press; else status/detail, position/gloss, appointment_at, live_wake_held, live_wake_hold, allowance_status/open_rows/room_after, model_route, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
     "GET /onboarding": Shape("200:html", query="builtin", note="selected setup or builtin wizard; builtin=1 forces builtin"),
     "GET /api/onboarding": Shape("200:html 204:empty", note="204: a ready provider exists, no setup needed"),
     "GET /api/onboarding/bootstrap": Shape("200:OnboardingBootstrapResponse", note="read-only; writes nothing"),
@@ -267,8 +268,11 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200:OnboardingSubagentsPreviewResponse 400,503:SettingsWriteRefusal", "OnboardingCompleteRequest",
         note="read-only actor draft for the same payload completion would save"),
     "POST /api/onboarding/model-catalog": Shape(
-        "200:ModelCatalogResponse 400:SettingsWriteRefusal", "OnboardingCompleteRequest",
+        "200:ModelCatalogResponse 400:SettingsWriteRefusal", "OnboardingCompleteRequest", query="provider_id",
         note="read-only; the model catalog of the access an unsaved setup draft names (its access fields alone)"),
+    "POST /api/onboarding/connection/identity": Shape(
+        "200:ConnectionIdentityResponse 400,404,500,503:ConnectionIdentityResponse", "ConnectionIdentityRequest",
+        note="writes nothing; the declared function of a built-in skill's connection card names the token's account"),
     "POST /api/onboarding/complete": Shape(
         "200:OnboardingCompleteResponse 400,403,409,500,503:SettingsWriteRefusal|OnboardingPresetFailureResponse",
         "OnboardingCompleteRequest", note="the one atomic setup writer; a 503 with can_skip offers completion without agent presets"),
@@ -313,10 +317,10 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/owner/effort-range": Shape(f"200:OwnerEffortRangeResponse {_SETTINGS_REFUSAL} 404:SettingsWriteRefusal", "OwnerEffortRangeRequest",
                                           note="helper min <= max; primary independent; optional project_id, otherwise Main"),
     "POST /api/owner/chat-model": Shape(f"200:OwnerChatModelResponse {_SETTINGS_REFUSAL} 404:SettingsWriteRefusal", "OwnerChatModelRequest",
-                                        note="the room's model for new owner work; optional project_id, otherwise Main"),
+                                        note="the room's model for new owner work; optional project_id, otherwise Main, whose if_unchanged binds the read"),
     "POST /api/owner/chat-processing": Shape(f"200:OwnerChatProcessingResponse {_SETTINGS_REFUSAL} 404:SettingsWriteRefusal",
                                              "OwnerChatProcessingRequest",
-                                             note="the room's processing tier for new owner work, '' = Default; optional project_id, otherwise Main's own"),
+                                             note="An empty tier means Default. Omit project_id for Main. Enabling Main Ultrafast requires its four read tokens, confirmed destination and any API connection revision in if_unchanged."),
     "POST /api/owner/safety-rules": Shape(f"200:OwnerSafetyRulesResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyRulesRequest"),
     "POST /api/owner/safety-model": Shape(f"200:OwnerSafetyModelResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModelRequest"),
     "POST /api/owner/safety-mode": Shape(f"200:OwnerSafetyModeResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModeRequest"),
@@ -326,7 +330,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/owner/skills/{skill}/attest-review": Shape(
         "200,409:SkillReviewResponse 400:ErrorResponse", "SkillRevisionRequest",
         note=f"the owner's review verdict; 409 when refused (ok false); {_IN_LANE}"),
-    "GET /api/places": Shape("200:json", note="Places, CircleSummary circles once and installed connector declarations; §12 Places"),
+    "GET /api/places": Shape("200:json", note="Places (each with its quiet cause when one holds), CircleSummary circles once, installed connector declarations and connect_note; §12 Places"),
     "GET /api/places/{place_id}/rooms": Shape("200:PlaceRoomsResponse 404,503:ErrorResponse", note="lazy indexed captured-room discovery; history uses /api/chat/history"),
     "POST /api/places": Shape("200:json 400,409:json", "PlaceConnectRequest", note="connect from a declared connector; an Add's words land with a new place, 409 place_exists names a connected one"),
     "POST /api/places/{place_id}": Shape("200:json 400,409:json", "PlaceUpdateRequest", note="atomic owner-authored place choices, its circle and description included"),
@@ -338,8 +342,10 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200,400,404,409,503:SkillPublishPreflightResponse", "SkillPublishPreflightRequest",
         note="read-only; every status carries the same shape; state hard_block is a refusal; destination "
              "{source_id, mode} picks where it would go (default: the skill's origin, else the hub)"),
-    "GET /api/model-catalog": Shape("200:ModelCatalogResponse 400:ErrorResponse", query="source_id credential_profile_id",
-                                    note="read-only; a provider that failed is an errors row, not a failed read"),
+    "GET /api/model-catalog": Shape("200:ModelCatalogResponse|ModelProcessingResponse 400:ErrorResponse",
+                                    query="view provider_id source_id harness_id credential_profile_id processing_model",
+                                    note="read-only; a provider that failed is an errors row, not a failed read; "
+                                         "processing_model answers ModelProcessingResponse for that one route"),
     "POST /api/providers/test": Shape("200:ProviderTestResponse 400:ErrorResponse", "ProviderTestRequest",
                                       note="a failed probe is 200 with ok false; nothing is saved"),
     "POST /api/tasks": Shape(
@@ -348,7 +354,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/tasks": Shape("200:TaskListResponse 503:ErrorResponse", query="status limit queue_only"),
     "GET /api/tasks/{task_id}": Shape("200:TaskDetailResponse 400,404,503:ErrorResponse"),
     "GET /api/tasks/{task_id}/artifacts/{name}": Shape(
-        "200,206:file 400,404,409,500,503:ErrorResponse", query="relpath archive source", headers="Range",
+        "200,206:file 400,404,409,410,500,503:ErrorResponse", query="relpath archive source", headers="Range",
         note="Range supported; x-ouroboros-artifact-sha256 when the bytes are verified"),
     "GET /api/tasks/{task_id}/events": Shape(
         "200:sse/TaskEvent 400,404:sse", query="cursor wait",
@@ -529,9 +535,10 @@ HTTP_SHAPES: dict[str, Shape] = {
                                     note="reads no body; fetches and records range facts, never prose; broadcasts update_progress_changed"),
     "POST /api/update/preflight": Shape("200:UpdatePreflightResponse 500:ErrorResponse", "UpdatePreflightRequest"),
     "POST /api/update/description": Shape(
-        "200:UpdateDescriptionResponse 400,409,503:UpdateDescriptionErrorResponse 500:ErrorResponse",
-        "UpdateDescriptionRequest",
-        note="admits one ordinary Main task that writes the description; 409 while a requested one runs; never repeats on its own"),
+        "200:UpdateDescriptionResponse|UpdateDescriptionLatestResponse 400,409,503:UpdateDescriptionErrorResponse "
+        "500:ErrorResponse", "UpdateDescriptionRequest",
+        note="admits at most one ordinary Main task that writes the description; write/rewrite answer 409 while a "
+             "requested one runs, latest checks first and answers for the range found; never repeats on its own"),
     "POST /api/update/apply": Shape(
         "200:UpdateApplySuccessResponse 400,403:ErrorResponse 409,500:UpdateApplyErrorResponse", "UpdateApplyRequest",
         note="200: inspect status (manual, assisted_started, restart_required, or ok with restarting); adoption requires the landed transaction/merge identity and running_sha after startup"),
@@ -557,7 +564,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/evolution-data": Shape("200:EvolutionDataResponse", query="force",
                                      note="answers from the saved copy at once; new tags or force start one background re-measurement"),
     "POST /api/openai-compatible/models": Shape("200:OpenAICompatibleModelsResponse 400,502:ErrorResponse",
-                                                "OpenAICompatibleModelsRequest", note="lists {baseUrl}/models once; saves nothing"),
+                                                "OpenAICompatibleModelsRequest", note="reads the connection's model catalog once; saves nothing"),
     "GET /api/local-model/status": Shape("200:LocalModelStatusResponse"),
     "POST /api/local-model/start": Shape(
         "200:LocalModelStartResponse 400,403,409:ErrorResponse 412:LocalModelRuntimeMissingResponse", "LocalModelStartRequest",
@@ -671,6 +678,7 @@ WS_SHAPES: dict[str, tuple[str, str]] = {
     "log": ("", "LogOutbound"),
     "heartbeat": ("", "HeartbeatOutbound"),
     "extension_lifecycle": ("", "ExtensionLifecycleOutbound"),
+    "extension_health_changed": ("", "ExtensionHealthChangedOutbound"),
     "message_annotation": ("", "MessageAnnotationOutbound"),
     "projects_changed": ("", "ProjectsChangedOutbound"),
     "ui_preferences_changed": ("", "UiPreferencesChangedOutbound"),

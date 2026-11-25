@@ -273,18 +273,123 @@ def test_missing_pending_body_keeps_snapshot_and_orphan_recovery_without_a_post(
     assert custody.pending_invocations(tmp_path) == [] and custody.open_snapshot_ids(tmp_path) == set()
 
 
-@pytest.mark.parametrize("prior", ["absent", "refused", "corrupt"])
-def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(tmp_path, fake_route, prior):
+
+def test_a_pending_body_whose_place_cannot_be_learned_now_is_retained_never_unrecorded(tmp_path, monkeypatch):
+    """A stored request body whose bytes cannot be located now (``EvidenceUnavailable``: the packs catalog
+    cannot answer) is neither missing nor unrecorded: recovery keeps the invocation pending with its address,
+    posts nothing and records no ``invocation_request_unrecorded`` reconciliation; once readable the same
+    address gives the exact body. The read names the invocation's task."""
+    from types import SimpleNamespace
+
+    from ouroboros import evidence_packs
+    from ouroboros.delegate_custody_reconcile import _recover_pending_invocation
+
+    assert custody.record_start_requested(
+        tmp_path, invocation_id="pending", task_id="owner", snapshot_id="snapshot",
+        request={"prompt": "Preserve this pending invocation"})
+    ref = _start_rows(tmp_path)[0]["request_ref"]
+    real, tasks = evidence_packs.blob_bytes, []
+
+    def unlocatable(root, blob, **kwargs):
+        tasks.append(kwargs.get("task_id"))
+        if blob.get("sha256") == ref["sha256"]:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, blob, **kwargs)
+
+    gateway = SimpleNamespace(start_run=lambda *args, **kwargs: pytest.fail("an unread body must not POST"))
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        pending = custody.pending_invocations(tmp_path)
+        assert len(pending) == 1 and pending[0]["request"] is None and pending[0]["request_ref"] == ref
+        result = _recover_pending_invocation(tmp_path, gateway, pending[0])
+    assert result["action"] == "invocation_retained" and result["reason"] == "evidence_unavailable", result
+    assert "owner" in tasks, tasks
+    reconciled = [row for row in custody._iter_rows(custody.event_log_path(tmp_path))
+                  if row["type"] == custody.RECONCILED and row.get("invocation_id") == "pending"]
+    assert reconciled == [], reconciled
+    assert custody.invocation_record(tmp_path, "pending")["state"] == "pending"
+    assert request_body(tmp_path, pending[0]) == {"prompt": "Preserve this pending invocation"}
+
+
+def test_a_legacy_request_whose_body_cannot_be_located_now_keeps_its_shape_owed(tmp_path):
+    """The one-time shape backfill reads an older open request's body for its access and mode. While that body,
+    held only by another task's pack, cannot be located (the packs catalog is held), the request keeps no shape and
+    the job stays pending, never an empty shape recorded as done; the next run records the real one."""
+    import threading
+
+    from ouroboros import delegate_pending, evidence_packs, maintenance_jobs, store
+
+    body = {"prompt": "keep", "mode": "ask", "access": "readonly"}
+    assert custody.record_start_requested(tmp_path, invocation_id="legacy", task_id="owner", snapshot_id="snapshot",
+                                          source="review_substrate", request=body)
+    key = "invocation:legacy"
+    with store.open_store(tmp_path, write=True) as txn:  # the shape a row written before request shapes has
+        row = txn.get_row("custody_open", key)
+        row.pop("pending", None)
+        row["request"].pop("request_shape", None)
+        txn.put_row("custody_open", key, row)
+    ref = row["request"]["request_ref"]
+    evidence_packs.write_pack(tmp_path, "other", 1, [ref])
+    evidence_packs.ensure_index(tmp_path)
+    Path(ref["path"]).unlink()
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(tmp_path, evidence_packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    def state():
+        job = maintenance_jobs.job(tmp_path, delegate_pending.JOB) or {}
+        with store.open_store(tmp_path, write=False) as txn:
+            return job, txn.get_row("custody_open", key)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    holder.start()
+    try:
+        assert held.wait(5)
+        with store.acquisition_budget(0):
+            assert delegate_pending.backfill(tmp_path, lambda: False) == {"state": "pending", "items": 0}
+    finally:
+        release.set()
+        holder.join(10)
+    job, facts = state()
+    assert "pending" not in facts and delegate_pending.backfill_due(tmp_path, job, {}, True), (job, facts)
+    assert delegate_pending.backfill(tmp_path, lambda: False) == {"state": "done", "items": 1}
+    job, facts = state()
+    assert facts["pending"][0]["request_shape"] == {"access": "readonly", "mode": "ask", "execution": False}
+    assert not delegate_pending.backfill_due(tmp_path, job, {}, True)
+
+
+@pytest.mark.parametrize("prior", ["absent", "refused", "fenced", "corrupt"])
+def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(tmp_path, fake_route, prior,
+                                                                              monkeypatch):
+    """``refused`` is an engine 400 answering the POST: as unknown as a lost reply (#3138), so the retry replays
+    its recorded start under the same key. Only a start fenced before its POST (``fenced``) is definitely refused,
+    and its retry starts anew, like an ``absent`` token."""
+    from ouroboros import review_execution
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.owner_pause import OwnerPauseRefused
     from ouroboros.review_execution import ReviewRouteUnavailable
     from tests._review_session_route_shared import _run_session_directly
 
     state = {"pending_invocation_id": "absent-token"} if prior == "absent" else {}
-    if prior != "absent":
+    if prior == "fenced":
+        real, fences = review_execution.run_operation, []
+
+        def fence_once(*args, **kwargs):
+            if not fences:
+                fences.append(1)
+                raise OwnerPauseRefused("owner_pause_fenced")
+            return real(*args, **kwargs)
+        monkeypatch.setattr(review_execution, "run_operation", fence_once)
+    elif prior != "absent":
         fake_route.start_error = ClaudexorUnavailable(
             "fixture_refused" if prior == "refused" else "daemon_unreachable",
             "fixture initial transport outcome", status_code=400 if prior == "refused" else 0)
-        with pytest.raises(ClaudexorUnavailable):
+    if prior != "absent":
+        with pytest.raises((ClaudexorUnavailable, ReviewRouteUnavailable)):
             _run_session_directly(tmp_path, surface="skill_review", slot_id="skill-slot", retry_state=state)
         row = _start_rows(tmp_path)[0]
         token = row["invocation_id"]
@@ -304,10 +409,10 @@ def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(t
     else:
         _run_session_directly(tmp_path, surface="skill_review", slot_id="skill-slot", retry_state=state)
         keys = [key for gateway in fake_route.instances for key in gateway.start_keys]
-        if prior == "intact":
+        if prior in ("intact", "refused"):
             assert keys == [token, token]
-        else:
-            assert keys[-1] != token and len(keys) == (1 if prior == "absent" else 2)
+        else:  # absent: no record; fenced: definitely refused before any POST, so only the new start was sent
+            assert keys[-1] != token and len(keys) == 1
 
 
 def test_pending_scan_only_reads_blobs_for_surviving_invocations(tmp_path, monkeypatch):
@@ -421,7 +526,8 @@ def test_pending_recovery_keeps_row_tier_separate_from_execution(tmp_path, monke
     engine = Engine()
     assert custody.record_start_requested(tmp_path, invocation_id='pending-tier', task_id='owner',
         selected_subagent_id='fixture-row', route='some-route', project_id='prj-existing', project_owned=False,
-        handshake_store_id=engine.store_identity, idempotency_key='pending-tier',
+        handshake_store_id=engine.store_identity, daemon_store_id=engine.store_identity,
+        idempotency_key='pending-tier',  # receipt-bound replay; this fixture varies only the row's tier
         request={'prompt': 'Fixture inspection', 'model': 'fixture-model', 'access': 'readonly',
                  'mode': 'ask', 'processingPreference': 'fast'}, processing={'requested': 'fast'},
         **({'row_processing': configured} if configured is not None else {}))
@@ -443,10 +549,10 @@ def test_pending_recovery_keeps_row_tier_separate_from_execution(tmp_path, monke
         txn.put_row('custody_open', 'invocation:pending-tier', cached)
     pending = custody.pending_invocations(tmp_path)[0]
     result = _recover_pending_invocation(tmp_path, engine, pending)
-    if refused:
-        assert result['action'] == 'invocation_retired'
+    if refused:  # an answered replay retires nothing (#3138); its row keeps the attempt's facts
+        assert (result['action'], result['reason']) == ('invocation_retained', 'start_refusal_unproven')
         event = next(row for row in custody.custody_rows(tmp_path) if row['type'] == custody.START_FAILED)
-        assert event.get('row_processing') == configured
+        assert event.get('row_processing') == configured and event['definite'] is False
         assert event['processing_preference'] == 'fast'
     else:
         recovered = custody.replay(tmp_path)[engine.run_id]
@@ -463,12 +569,12 @@ def test_pending_recovery_keeps_row_tier_separate_from_execution(tmp_path, monke
 
 
 @pytest.mark.parametrize("own", ["economy", ""])  # a row's own tier; a row without one ('' = its decided default)
-@pytest.mark.parametrize("recovery", ["retry", "reconcile", "reconcile_refused"])
+@pytest.mark.parametrize("recovery", ["retry", "reconcile", "reconcile_retained"])
 def test_a_session_start_carries_its_rows_own_tier_from_the_real_producer_through_a_lost_ack(
         tmp_path, monkeypatch, own, recovery):
     """``_delegate_start`` writes the row's own tier on START_REQUESTED beside the run's (a work's Fast), never into
-    the engine request; a lost acknowledgement recovered by ``retry_of`` or the reconcile sweep keeps it on STARTED or
-    START_FAILED, so the history files the run under its row, not under the work's tier."""
+    the engine request; an explicit retry or positive noncreating sweep lookup keeps it on STARTED.
+    A sweep with no accepting-store proof retains the original UNKNOWN attempt and its row's tier."""
     import tests._delegated_transport_shared as shared
     from ouroboros.delegate_custody_reconcile import _recover_pending_invocation
     from ouroboros.gateways import claudexor as gateway
@@ -489,8 +595,8 @@ def test_a_session_start_carries_its_rows_own_tier_from_the_real_producer_throug
             keys.append((copy.deepcopy(body), idempotency_key))
             if len(keys) == 1:
                 raise gateway.ClaudexorUnavailable("daemon_unreachable", "fixture accepted start then lost reply")
-            if recovery == "reconcile_refused":
-                raise gateway.ClaudexorUnavailable("fixture_refused", "not started", status_code=400)
+            if recovery != "retry":
+                pytest.fail("a lost identity-less start cannot be replayed automatically")
             return {"runId": self.run_id}
 
     real = shared._transport_snapshot
@@ -514,14 +620,23 @@ def test_a_session_start_carries_its_rows_own_tier_from_the_real_producer_throug
         assert retried["status"] == "started" and keys[1] == (body, token), "byte-identical replay"
         assert all(row.get("row_processing") == own for row in _start_rows(tmp_path))
     else:
-        result = _recover_pending_invocation(tmp_path, stub, custody.pending_invocations(tmp_path)[0])
-        assert keys[1] == (body, token)
-        if recovery == "reconcile_refused":
-            assert result["action"] == "invocation_retired"
+        if recovery == "reconcile":
+            stub.operations = lambda: [{"method": "POST", "path": "/v2/runs/lookup"}]
+            def lookup(sent, *, idempotency_key):
+                assert (sent, idempotency_key) == (body, token)
+                return {"status": "found", "storeId": "fixture-store", "handle": {
+                    "jobId": "accepted-job", "runId": stub.run_id, "state": "running"}}
+            stub.lookup_run = lookup
+        result = _recover_pending_invocation(tmp_path, stub, custody.pending_invocations(tmp_path)[0],
+                                             may_read=recovery == "reconcile")
+        assert len(keys) == 1, "an unknown identity-less start is read, never automatically re-POSTed"
+        if recovery == "reconcile_retained":
+            assert (result["action"], result["reason"]) == ("invocation_retained", "invocation_store_unproven")
             failed = next(row for row in custody.custody_rows(tmp_path) if row["type"] == custody.START_FAILED
                           and row.get("invocation_id") == token)
             assert failed["row_processing"] == own and failed["processing_preference"] == "fast"
-    if recovery != "reconcile_refused":
+            assert failed["definite"] is False and custody.invocation_record(tmp_path, token)["state"] == "pending"
+    if recovery != "reconcile_retained":
         entry = custody.replay(tmp_path)[stub.run_id]
         assert (entry.row_processing, entry.processing_preference) == (own, "fast")
         record_session_execution(tmp_path, entry, {"summary": {"state": "succeeded"}}, {})

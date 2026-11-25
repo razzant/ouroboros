@@ -98,7 +98,7 @@ def test_marks_under_q_write_no_bytes_and_the_tick_publishes_the_last_state(publ
     assert writes == [] and encodings == [] and queue_publication.queue_revision() == revision + 5
     assert not (root / "state/queue_snapshot.json").exists()
     assert queue_publication.publish_queue_changes() is True
-    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue_dispatch.json", "queue.alive"]
+    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue.alive", "queue_dispatch.json"]
     assert not any(held for _, held in writes), "the tick writes outside Q"
     assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == [f"t{i}" for i in range(5)]
     writes.clear()
@@ -329,6 +329,29 @@ def test_an_unknown_document_keeps_its_unknown_counts_under_a_certificate_that_c
     assert queue_observation.load_queue_document(tmp_path)["worker_total"] is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX read permission")
+def test_a_document_that_became_unreadable_is_unknown_never_its_cached_reading(tmp_path):
+    """An unchanged file answers from the cache; a withdrawn read permission (same mtime, size and inode) is
+    read again and is invalid, not the earlier counts; readable again, it is read again."""
+    path = tmp_path / "state/queue_snapshot.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"running_count": 0, "pending_count": 0, "running": [],
+                                "pending": [{"id": "p", "task": {"id": "p", "metadata": {"k": "v"}}}]}), encoding="utf-8")
+    first = queue_observation.load_queue_document(tmp_path)
+    again = queue_observation.load_queue_document(tmp_path)
+    assert again["pending"][0]["task"]["metadata"] is first["pending"][0]["task"]["metadata"], "a cache hit"
+    mode = path.stat().st_mode & 0o777
+    path.chmod(0)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("this user reads a file without permission")
+        unread = queue_observation.load_queue_document(tmp_path)
+    finally:
+        path.chmod(mode)
+    assert unread == {"_snapshot_invalid": True}
+    assert queue_observation.load_queue_document(tmp_path)["pending_count"] == 0
+
+
 def test_publications_follow_changes_not_ticks(published, monkeypatch):
     root, _now = published
     writes, _fsyncs = _writes(monkeypatch)
@@ -383,7 +406,7 @@ def test_a_dead_loop_hands_publication_back_to_the_caller(published, monkeypatch
     assert not queue_publication.tick_publisher_alive()
     queue.PENDING.append(_task("t"))
     assert queue.persist_queue_snapshot("admit") is True
-    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue_dispatch.json", "queue.alive"]
+    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue.alive", "queue_dispatch.json"]
 
 
 def test_a_failed_tick_publication_answers_false_for_the_loop_to_count(published, monkeypatch):
@@ -437,17 +460,12 @@ def test_kill_after_each_step_keeps_order_and_custody(published, monkeypatch, ki
         patch.setattr(Path, "unlink", dying_unlink)
         with pytest.raises(Killed):
             queue.publish_queue_snapshot("change")
-    # The next generation: a reader finds no certificate, so every document is unknown, never a
-    # torn mix; the dispatch probe refuses; the saved queue is not in the new process's custody
-    # until a restore read it, so its own empty publication keeps the saved documents as they are.
     assert not (root / "state/queue.alive").exists()
-    for name in ("queue_snapshot.json", "queue_dispatch.json"):
-        seen = task_status.queue_snapshot_observation(queue_observation.load_queue_document(root, name))
-        assert seen["freshness"] == "unknown"
-    with pytest.raises(queue_observation.DispatchPublicationPending):
-        queue_observation.dispatch_probe(root)
+    seen = task_status.queue_snapshot_observation(queue_observation.load_queue_document(root))
+    assert seen["freshness"] == "unknown"
+    assert bool(queue_observation.dispatch_probe(root)["budget_root_fences"]) == (killed_after != "revoke")
     written = {name: (root / "state" / name).read_bytes() for name in before}
-    order = ["queue_snapshot.json", "queue_dispatch.json"]
+    order = ["queue_dispatch.json", "queue_snapshot.json"]
     landed = order[:order.index(killed_after) + 1] if killed_after != "revoke" else []
     assert all((written[name] != before[name]) == (name in landed) for name in before), "documents land in order"
     queue_publication.reset()
@@ -459,14 +477,11 @@ def test_kill_after_each_step_keeps_order_and_custody(published, monkeypatch, ki
     assert not (root / "state/queue.alive").exists()
     saved = queue_observation.load_queue_document(root, fresh=True)
     assert saved["pending"][0]["task"]["origin_message_text"] == OWNER_TEXT  # whichever generation landed is whole
-    assert saved["generation"] != generation or killed_after == "revoke"
+    assert (saved["generation"] != generation) == (killed_after == "queue_snapshot.json")
 
 
 def test_an_unchanged_dispatch_document_keeps_its_generation_and_stays_certified(published, monkeypatch):
-    """The money paths' fence authority is rewritten only when its bytes change: a row admitted without a fence
-    changes the snapshot alone, so the dispatch document keeps the generation it was written under, the
-    certificate names that generation for it (``documents``), and a send's probe certifies it as before. A
-    fence changes both documents: both are rewritten under one generation and the certificate names one."""
+    """Rows outside a fenced tree only change the snapshot and its pulse."""
     root, _now = published
     writes, _fsyncs = _writes(monkeypatch)
     queue.PENDING.append(_task("a"))
@@ -479,20 +494,12 @@ def test_an_unchanged_dispatch_document_keeps_its_generation_and_stays_certified
     assert [name for name, _ in writes] == ["queue_snapshot.json", "queue.alive"], "the unchanged dispatch document is not rewritten"
     alive, snapshot = _read(root, "queue.alive"), _read(root, "queue_snapshot.json")
     assert alive["generation"] == snapshot["generation"] != first
-    assert alive["documents"] == {"queue_dispatch.json": first} and _read(root, "queue_dispatch.json")["generation"] == first
-    dispatch = queue_observation.load_queue_document(root, "queue_dispatch.json")
-    assert queue_observation.queue_stamp(dispatch)["generation"] == first, "certified by its own generation"
-    assert queue_observation.dispatch_probe(root)["generation"] == first
-    assert task_status.queue_snapshot_observation(dispatch)["fresh"]
+    assert "documents" not in alive and queue_observation.dispatch_probe(root)["generation"] == first
     assert task_status.queue_snapshot_observation(queue_observation.load_queue_document(root))["fresh"]
-    # An older certificate shape (no ``documents``) certifies a document only by the snapshot's generation.
-    (root / "state/queue.alive").write_text(json.dumps({"generation": alive["generation"], "ts": alive["ts"], "heartbeats": {}}))
-    assert not queue_observation.queue_stamp(queue_observation.load_queue_document(root, "queue_dispatch.json"))
-    (root / "state/queue.alive").write_text(json.dumps(alive))
     writes.clear()
     queue.BUDGET_ROOT_FENCES["root"] = {"root_task_id": "root", "fence_id": "fence", "status": "active"}
     assert queue.persist_queue_snapshot("fence") is True
-    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue_dispatch.json", "queue.alive"]
+    assert [name for name, _ in writes] == ["queue_dispatch.json", "queue_snapshot.json", "queue.alive"]
     alive = _read(root, "queue.alive")
     assert "documents" not in alive and _read(root, "queue_dispatch.json")["generation"] == alive["generation"] != first
     assert queue_observation.dispatch_probe(root)["budget_root_fences"][0]["fence_id"] == "fence"

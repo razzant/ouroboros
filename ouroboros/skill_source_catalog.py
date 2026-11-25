@@ -14,6 +14,9 @@ an immutable ``checkout_at_commit`` of the snapshot's commit, fetched locally fr
 later refresh cannot change a folder already handed to a reader.
 The built-in source is the bundled ``skills/`` folder with ``skills/builtin.json``; a local folder is
 scanned in place; a registry (ClawHub) has no list here: it answers a search, or one page when named alone.
+A hub entry or a ``builtin.json`` row may carry the catalog's own words for people (``title``, a one-line
+``pitch``, and ``needs``, the prerequisite in words): display data, kept out of the payload manifests whose
+digests grants and endorsements name; an entry's ``title`` wins over its manifest's.
 
 The release digest of a tree is ``skill_identity.payload_digest`` (``tree_release_digest`` reads the
 manifest once for it); an installed skill's digest is the loader's own content hash. Installed state,
@@ -222,6 +225,18 @@ def _hub_entry(raw: Any, stem: str, clone: pathlib.Path) -> Dict[str, Any]:
         entry["connects"] = connect_services(entry["connects"], raw["connects"])
     if not entry["icon"] and "icon" in raw:
         entry["icon"] = _catalog_icon(raw["icon"])
+    return _with_catalog_words(entry, raw)
+
+
+_CATALOG_WORDS = ("title", "pitch", "needs", "mark")
+
+
+def _with_catalog_words(entry: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
+    """``entry`` with the catalog's own optional words for people from ``raw`` (a hub entry, a ``builtin.json`` row):
+    ``mark`` is ``needs`` in a few words («Gemini key»). A blank ``needs`` is kept: the catalog says the skill needs
+    nothing, where an absent one says nothing at all."""
+    entry.update({key: raw[key].strip() for key in _CATALOG_WORDS
+                  if isinstance(raw.get(key), str) and (raw[key].strip() or key == "needs")})
     return entry
 
 
@@ -380,6 +395,7 @@ def builtin_snapshot(repo_dir: pathlib.Path) -> Dict[str, Any]:
                            if applies_here(root / entry["source"]["path"])]
     for entry in snapshot["entries"]:
         mark = marks.get(entry["name"], {})
+        _with_catalog_words(entry, mark)
         entry["category"] = [str(item) for item in mark.get("category") or []][:2]
         entry["recommended"] = mark.get("recommended") is True
         if entry.get("digest"):
@@ -476,6 +492,7 @@ def items_for(row: Dict[str, Any], snapshot: Optional[Dict[str, Any]]) -> List[D
         item = {
             "id": f"{row['id']}/{entry['name']}", "source_id": row["id"], "source_name": row["name"],
             "trust": row["trust"], "name": entry["name"], "title": entry.get("title", ""), "description": entry.get("description", ""),
+            "pitch": entry.get("pitch", ""), "needs": entry.get("needs"), "mark": entry.get("mark", ""),
             "category": list(entry.get("category") or []), "version": entry.get("version", ""),
             "digest": entry.get("digest", ""), "official": is_official,
             "recommended": is_official and endorsed.get("recommended") is True,

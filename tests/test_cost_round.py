@@ -55,6 +55,7 @@ def engine(tmp_path, monkeypatch):
     logical request, its physical candidate and its engine request through production code."""
     root = tmp_path / "data"
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    monkeypatch.setattr(transport.config, "DATA_DIR", root)
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
     monkeypatch.setenv("TOTAL_BUDGET", "100")
     monkeypatch.delenv(MODEL_ACCOUNTS_KEY, raising=False)
@@ -175,7 +176,7 @@ RECORDS = ("llm_request", "physical_llm_candidate", "llm_claudexor_request")
 
 def test_the_round_receipt_names_each_preparation_step_and_what_the_request_records_spent(engine):
     """``host_steps`` (S11): wall and thread CPU of each step from the call's start to the engine's operation, the
-    request records' own sections (secret scanning, blobs, the publication lock's wait, the manifest's write), the
+    request records' own sections (secret scanning, blobs, the manifest's write), the
     engine calls and event-bus puts, and the process's context switches, faults and block writes over the window.
     Only facts: a call outside any window carries none of it."""
     _first, second = _rounds(engine, "task-steps", _history(2))
@@ -185,7 +186,7 @@ def test_the_round_receipt_names_each_preparation_step_and_what_the_request_reco
     assert steps["steps"]["create_operation"][1] is None, "the engine's create runs on the sender's thread"
     assert all(cpu is not None for name, (_wall, cpu) in steps["steps"].items() if name != "create_operation")
     sections = set(steps["sections_ms"])
-    assert {f"{record}.{part}" for record in RECORDS for part in ("redact", "blobs", "lock_wait", "manifest_write")} <= sections
+    assert {f"{record}.{part}" for record in RECORDS for part in ("redact", "blobs", "manifest_write")} <= sections
     assert {"daemon.gateway", "daemon.operations", "daemon.upload", "daemon.create", "event_put", "total"} <= sections
     assert all(isinstance(value, int) and value >= 0 for value in steps["sections_ms"].values())
     assert len(json.dumps(steps)) < 2048, "a round's line lands in an archive kept for good"

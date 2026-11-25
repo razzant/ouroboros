@@ -167,7 +167,6 @@ def test_registry_core_extraction_preserves_only_proven_facades():
 
 
 def test_registry_core_uses_canonical_managed_update_resolver(tmp_path, monkeypatch):
-    import ouroboros.config as config
     import ouroboros.safety as safety
     from ouroboros.tools import registry, registry_guards
 
@@ -183,7 +182,7 @@ def test_registry_core_uses_canonical_managed_update_resolver(tmp_path, monkeypa
 
     tools.override_handler("write_file", handler)
 
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     monkeypatch.setattr(safety, "check_safety", lambda *_args, **_kwargs: (True, ""))
     monkeypatch.setattr(
         registry_guards,
@@ -401,7 +400,6 @@ def test_stable_host_predispatch_denials_are_native_and_keep_legacy_projection(
 ):
     import json
 
-    import ouroboros.config as config
     import ouroboros.safety as safety
     import ouroboros.tools.registry_core as registry_core
     from ouroboros.contracts.task_constraint import TaskConstraint
@@ -453,11 +451,7 @@ def test_stable_host_predispatch_denials_are_native_and_keep_legacy_projection(
             else (lambda _ctx: "")
         ),
     )
-    monkeypatch.setattr(
-        config,
-        "get_runtime_mode",
-        lambda: "light" if scenario.startswith("light_") else "advanced",
-    )
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light" if scenario.startswith("light_") else "advanced")
     if scenario == "light_repo_mutation":
         monkeypatch.setattr(
             registry_core,
@@ -521,7 +515,6 @@ def test_binding_failures_cut_over_only_the_exact_native_families(
 ):
     import json
 
-    import ouroboros.config as config
     import ouroboros.tools.registry_core as registry_core
     import ouroboros.tools.tool_resolution as tool_resolution
     from ouroboros.loop_tool_execution import _execute_single_tool
@@ -539,7 +532,7 @@ def test_binding_failures_cut_over_only_the_exact_native_families(
         tool_name,
         lambda *_args, **_kwargs: downstream.append("handler") or "unreachable",
     )
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setattr(
         "ouroboros.safety.check_safety",
         lambda *_args, **_kwargs: downstream.append("safety") or (True, ""),
@@ -603,7 +596,6 @@ def test_light_binding_root_redirect_is_native_without_invented_metadata(
 ):
     import json
 
-    import ouroboros.config as config
     import ouroboros.tools.registry_core as registry_core
     import ouroboros.tools.tool_resolution as tool_resolution
     from ouroboros.loop_tool_execution import _execute_single_tool
@@ -623,7 +615,7 @@ def test_light_binding_root_redirect_is_native_without_invented_metadata(
         "write_file",
         lambda *_args, **_kwargs: calls.append("handler") or "unreachable",
     )
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setattr(
         registry_core,
@@ -824,3 +816,97 @@ def test_light_actionable_redirects_keep_legacy_mapping_without_light_remap(
     expected_adapter_calls = 0 if isinstance(failure_route, ToolResult) else 3
     assert len(adapter_calls) == expected_adapter_calls
     assert downstream_calls == []
+
+
+def test_is_builtin_answers_registration_not_visibility(tmp_path):
+    """The public question a one-name loader asks: is this a registered built-in, shown or hidden?"""
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="child",
+                                     task_constraint=TaskConstraint(mode="local_readonly_subagent")))
+    # Registered and hidden from this child: a built-in all the same.
+    assert registry.is_builtin("write_file") and registry.policy_hidden_reason("write_file")
+    # A compat alias is registered, callable and never advertised.
+    assert registry.is_builtin(" advisory_review ") and registry.get_schema_by_name("advisory_review") is None
+    assert registry.is_builtin("read_file") and registry.get_schema_by_name("read_file") is not None
+    for name in ("calendar", "mcp_srv__lookup", "ext_7_weather_forecast", ""):
+        assert not registry.is_builtin(name), name
+
+
+def test_a_presence_ceiling_hides_tools_not_names_that_are_no_tool(tmp_path):
+    """Under a Presence ceiling a registered built-in outside it, and an MCP or extension name, are hidden by the
+    ceiling; a built-in-shaped name no catalog holds (a skill's name, a typo) is no tool, not a hidden one."""
+    from ouroboros import extension_loader
+    from ouroboros.presence_authority import PresenceCapabilityCeiling, PresenceToolGrant, presence_ceiling_payload
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    ceiling = PresenceCapabilityCeiling(
+        skill_name="behavior", skill_content_hash="a" * 64, profile_fingerprint="b" * 64,
+        state_fingerprint="c" * 64, selection_fingerprint="d" * 64, model_slot="main", inline_max_rounds=3,
+        tool_grants=(PresenceToolGrant("read_file"),), resource_grants=(), digest="0" * 64)
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="presence",
+                                     task_contract={"capability_ceiling": presence_ceiling_payload(ceiling)}))
+    outside = "outside this presence task's positive capability ceiling"
+    for name in ("write_file", "mcp_srv__lookup", extension_loader.extension_surface_name("weather", "forecast")):
+        assert registry.policy_hidden_reason(name) == outside, name
+    assert registry.policy_hidden_reason("read_file") is None
+    for name in ("calendar", "definitely_not_a_tool"):
+        assert not registry.is_builtin(name) and registry.policy_hidden_reason(name) is None, name
+
+
+def test_named_discovery_reads_availability_only_when_it_decides(tmp_path, monkeypatch):
+    """A closed network answers a named look-up of a network built-in before any credential is read (the GitHub
+    CLI's settings are a file read); with the network open the missing credential is the reason, read then."""
+    from ouroboros.tools import github
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    reads = []
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(github, "github_cli_configured", lambda: reads.append("read") is None and False)
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="named",
+                                     task_contract={"allowed_resources": {"network": False}}))
+    assert registry.policy_hidden_reason("github_read") == "resource_blocked (network=false)"
+    assert registry.get_schema_by_name("github_read") is None
+    assert reads == []
+    registry._ctx.task_contract = {"allowed_resources": {"network": True}}
+    assert registry.policy_hidden_reason("github_read") == "unavailable (missing_credential)"
+    assert registry.get_schema_by_name("github_read") is None
+    assert reads == ["read", "read"]
+    assert any(row.get("reason") == "missing_credential" and row.get("tools") == ["github_read"]
+               for row in registry.capability_omissions())
+
+
+def test_every_built_in_reader_answers_by_the_one_rule(tmp_path, monkeypatch):
+    """The five readers decide a built-in by ``_builtin_verdict`` alone: under a Presence ceiling without list_files
+    all of them hide it, and when the rule is made to admit it, all of them show it, named discovery included."""
+    from ouroboros.presence_authority import PresenceCapabilityCeiling, PresenceToolGrant, presence_ceiling_payload
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    ceiling = PresenceCapabilityCeiling(
+        skill_name="behavior", skill_content_hash="a" * 64, profile_fingerprint="b" * 64,
+        state_fingerprint="c" * 64, selection_fingerprint="d" * 64, model_slot="main", inline_max_rounds=3,
+        tool_grants=(PresenceToolGrant("read_file"),), resource_grants=(), digest="0" * 64)
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="presence",
+                                     task_contract={"capability_ceiling": presence_ceiling_payload(ceiling)}))
+
+    def answers():
+        return (
+            "list_files" in {schema["function"]["name"] for schema in registry.schemas()},
+            "list_files" in registry.available_tools(),
+            registry.policy_hidden_reason("list_files") is None,
+            registry.get_schema_by_name("list_files") is not None,
+            "list_files" in {row["name"] for row in registry.callable_rows("builtin")},
+        )
+
+    assert answers() == (False,) * 5
+    monkeypatch.setattr(ToolRegistry, "_builtin_verdict", lambda self, entry, view, availability=None: (None, availability))
+    assert answers() == (True,) * 5

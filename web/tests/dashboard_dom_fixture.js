@@ -23,6 +23,7 @@ export class NodeStub {
                 return enabled;
             },
             add: (name) => this.classList.toggle(name, true),
+            remove: (...names) => names.forEach((name) => this.classList.toggle(name, false)),
         };
     }
     get id() { return this.attrs.id || ''; }
@@ -41,6 +42,11 @@ export class NodeStub {
     }
     getAttribute(key) { return this.attrs[key] ?? null; }
     hasAttribute(key) { return key in this.attrs; }
+    toggleAttribute(key, force) {
+        const on = force ?? !this.hasAttribute(key);
+        if (on) this.setAttribute(key, ''); else this.removeAttribute(key);
+        return on;
+    }
     removeAttribute(key) { delete this.attrs[key]; }
     toggleAttribute(key, force = !this.hasAttribute(key)) {
         if (force) this.setAttribute(key, this.getAttribute(key) ?? ''); else this.removeAttribute(key);
@@ -70,7 +76,10 @@ export class NodeStub {
                 node.setAttribute(attr[1], value);
             }
             stack.at(-1).appendChild(node);
-            if (!['input', 'br', 'hr', 'img', 'meta', 'link', 'wbr'].includes(tag)) stack.push(node);
+            // SVG icon elements honor `/>`; ordinary non-void HTML elements ignore the slash.
+            const closesSvg = token.endsWith('/>') && (tag === 'svg' ||
+                stack.at(-1).closest('svg, foreignObject, desc, title')?.tagName === 'svg');
+            if (!closesSvg && !['input', 'br', 'hr', 'img', 'meta', 'link', 'wbr'].includes(tag)) stack.push(node);
         }
     }
     appendChild(node) { node.remove(); node.parentElement = this; this.children.push(node); return node; }
@@ -81,6 +90,7 @@ export class NodeStub {
         return node;
     }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
+    prepend(...nodes) { nodes.forEach((node, at) => this.insertBefore(node, this.children[at] || null)); }
     replaceChildren(...nodes) {
         this.children.forEach((child) => { child.parentElement = null; });
         this.children = [];

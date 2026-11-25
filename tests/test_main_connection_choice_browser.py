@@ -45,7 +45,6 @@ def real_settings(role_ui, tmp_path, monkeypatch):
     data_dir.mkdir()
     monkeypatch.setattr(cfg, "DATA_DIR", data_dir)
     monkeypatch.setattr(cfg, "SETTINGS_PATH", data_dir / "settings.json")
-    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "advanced")
     monkeypatch.setattr(gw, "_apply_settings_save_side_effects", lambda *a, **kw: None)
     monkeypatch.setattr(gw, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     for key in (*cfg.SETTINGS_DEFAULTS, CONNECTIONS_KEY, "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
@@ -73,6 +72,7 @@ def real_settings(role_ui, tmp_path, monkeypatch):
 
     cfg.reset_runtime_mode_baseline_for_tests()
     try:
+        cfg.initialize_runtime_mode_baseline("advanced")
         with TestClient(app) as client:
             role_ui["page"].route("**/api/settings", forward)
             role_ui["page"].route("**/api/owner/safety-model", forward)
@@ -244,8 +244,8 @@ def test_an_unrelated_save_authors_no_model_lane(real_settings, connections):
     ui = real_settings
     _seed(ui, {CONNECTIONS_KEY: connections})
     shown = {key: _read(ui)[key] for key in SLOTS}
-    page = _open(ui, "tools")
-    open_settings(page, 'tools', 'OUROBOROS_TOOL_TIMEOUT_SEC')
+    page = _open(ui, "computer/advanced")
+    open_settings(page, 'computer/advanced', 'OUROBOROS_TOOL_TIMEOUT_SEC')
     before = len(ui['exchanges'])
     assert commit_row(page, 'OUROBOROS_TOOL_TIMEOUT_SEC', 601).startswith('Saved')
     posts = [exchange for exchange in ui['exchanges'][before:] if exchange[0] == 'POST']

@@ -163,6 +163,60 @@ def test_code_queries_keep_unsettled_work_distinct_from_missing_source(env, monk
     assert error.result is observed
 
 
+def test_a_work_domain_deadline_without_a_confirmed_end_reaches_query_code_with_what_arrived(env, monkeypatch):
+    """The real deadline path of ``run_in_work`` (fake container, real processes): when the container does not
+    confirm the group ended, the error carries the same ``CompletedProcess`` shape every other writer gives, with
+    the bytes that arrived before the kill and an unknown exit (never the host's kill code, never zero), and
+    query_code publishes it as an unsettled error instead of crashing on a ``TimeoutExpired``."""
+    from ouroboros import execution_domain
+
+    _managed(env, monkeypatch)
+    repo = _work_repo(env.work / "app", {"leaf.py": "def ping(): return 1\n"})
+    registry = _registry(env, repo)
+    real_settle, unconfirmed, pending, raised = execution_domain.AttachedLaunch.settle, [False], [], []
+
+    def settle(launch):
+        if not unconfirmed[0]:
+            return real_settle(launch)
+        pending.append(launch)
+        return False
+
+    original_run = work_domain.run
+
+    def run(cmd, **kwargs):
+        if list(cmd[:2]) != ["git", "rev-parse"]:
+            return original_run(cmd, **kwargs)
+        unconfirmed[0] = True
+        try:
+            return original_run(["sh", "-c", "printf 'PARTIAL SOURCE'; printf 'PARTIAL DIAGNOSTIC' >&2; exec sleep 30"],
+                                cwd=kwargs.get("cwd") or str(repo), capture_output=True, timeout=1)
+        except work_domain.WorkDomainUnsettled as exc:
+            raised.append(exc)
+            raise
+        finally:
+            unconfirmed[0] = False
+
+    monkeypatch.setattr(execution_domain.AttachedLaunch, "settle", settle)
+    monkeypatch.setattr(work_domain, "run", run)
+    try:
+        result = registry.execute_result("query_code", {"op": "symbols", "path": "leaf.py"})
+        assert raised, "the deadline path must actually run"
+        observed = raised[0].result
+        assert isinstance(observed, subprocess.CompletedProcess) and observed.returncode is None
+        assert observed.backend_settled is False and observed.timed_out is True
+        assert observed.stdout == b"PARTIAL SOURCE" and observed.stderr == b"PARTIAL DIAGNOSTIC"
+        assert isinstance(raised[0].__cause__, subprocess.TimeoutExpired)
+        answer = result.text
+        assert "timed out without the container confirming" in answer, answer
+        assert "exit_code=unknown" in answer and "PARTIAL SOURCE" in answer and "PARTIAL DIAGNOSTIC" in answer, answer
+        assert result.status == "error" and result.meta.get("backend_settled") is False, result
+        # The registry's invocation drive owns these records, not fake_docker's standalone data root.
+        assert pending and all(launch.record is not None and launch.record.is_file() for launch in pending)
+    finally:
+        for launch in pending:
+            assert real_settle(launch), "restore the bounded cleanup after the simulated unconfirmed read"
+
+
 def test_a_workspace_at_the_mapping_root_lists_reads_searches_and_captures(env, monkeypatch):
     """The active workspace is the mapping's own root: its metadata comes from the root the descent holds, so
     listing (flat and tree), reading, search, Git status and capture work there as below it, and the service
@@ -335,12 +389,16 @@ def test_staged_inputs_are_held_by_their_task_and_retired_with_it(env, monkeypat
             registry._ctx, invocation, [{"root": "active_workspace", "path": name}])
         folder = pathlib.Path(inputs.selected[0]["local"]).parents[3]
         record = json.loads((drive / "session_scratch_owners" / f"inputs-{invocation}" / "scratch.json").read_text())
-        assert folder.parent == staging / "scratch" and record["path"] == str(folder), (folder, record)
+        assert folder.name == "w" and folder.parent.parent == staging / "scratch" and record["path"] == str(folder.parent), (folder, record)
         folders.append(folder)
     (folders[1] / RETENTION_MARKER).write_text("the producer kept these inputs\n", encoding="utf-8")
     retained = session_scratch.release_session_scratch(drive)
     assert not folders[0].exists() and folders[1].exists()
-    assert [row["path"] for row in retained] == [str(folders[1])] and "kept these inputs" in retained[0]["example"]
+    assert [row["path"] for row in retained] == [str(folders[1].parent)] and "kept these inputs" in retained[0]["example"]
+    from tests._shared import retire_synthetic_retention
+
+    assert retire_synthetic_retention(folders[1], "the producer kept these inputs")
+    assert session_scratch.release_session_scratch(drive) == [] and not folders[1].parent.exists()
 
 
 @pytest.mark.parametrize("administered", [False, True])
@@ -349,13 +407,14 @@ def test_a_native_payload_run_drafts_in_its_work_copy_and_returns_for_the_servic
         env, monkeypatch, administered, edit_executable):
     """The actual start builds the snapshot in W, where the session drafts. Capture returns data; applying to an
     administered live package refuses without losing the draft. An unpinned payload still applies normally."""
-    from ouroboros import delegate_custody as custody, execution_domain
-    from ouroboros.tools.delegate_integration import payload_content_hash
+    from ouroboros import delegate_custody as custody
+    from ouroboros import execution_domain
     from ouroboros.subagent_worktrees import find_execution_snapshot
     from ouroboros.tools.delegate import _capture_terminal_patch
+    from ouroboros.tools.delegate_integration import payload_content_hash
     from ouroboros.tools.subagent_integration import _integrate_delegated_patch
-    from tests.test_delegated_skill_payload import _payload_ctx, _seed_skill, _exact_payload_start, _StartStub
-    from tests.test_execution_domain import section, work_ref, STORE
+    from tests.test_delegated_skill_payload import _exact_payload_start, _payload_ctx, _seed_skill, _StartStub
+    from tests.test_execution_domain import STORE, section, work_ref
 
     staging = env.work / "staging"
     _managed(env, monkeypatch, staging_root=str(staging))

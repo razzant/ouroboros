@@ -163,3 +163,109 @@ def test_legacy_missing_binding_is_a_gap_and_other_tasks_are_not_swept_in(tmp_pa
     assert history["status"] == "source_unavailable"
     assert "review-record binding" in text and "Available legacy argument" in text
     assert "UNRELATED_DO_NOT_INCLUDE" not in text
+
+
+def _two_waves_one_retry_key(tmp_path):
+    """Wave A prepared and bound its input; wave B, the same retry key, a new physical attempt, kept none (its bind
+    write failed): the state the issue describes."""
+    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, make_repo_key, save_state
+
+    root = tmp_path / "subject"
+    root.mkdir()
+    earlier = {"previous_records": ["older-history"], "rebuttal": {"text": "only wave A saw this"}, "gaps": []}
+    state = AdvisoryReviewState()
+    state.attempts = [
+        CommitAttemptRecord(ts=f"2026-10-09T00:0{number}:00Z", commit_message="same intent", status="reviewed",
+                            task_id=TASK, repo_key=make_repo_key(root), attempt=number, paid=True,
+                            tool_name="commit_reviewed", review_retry_key="same-retry", review_record_id=rid,
+                            review_input=inputs)
+        for number, rid, inputs in ((1, "wave-a", earlier), (2, "wave-b", {}))]
+    save_state(tmp_path, state)
+    return root, earlier
+
+
+def test_new_physical_attempt_never_borrows_an_older_waves_input(tmp_path):
+    from ouroboros.review_history import wave_history_input
+
+    root, earlier = _two_waves_one_retry_key(tmp_path)
+    facts = {"retry_key": "same-retry", "task_id": TASK, "tool_name": "commit_reviewed"}
+    # B's own record, and a record no row names yet (its row not stamped): neither carries A's input; each names the gap.
+    for rid, number in (("wave-b", 2), ("new-unbound-wave", 2)):
+        missing = wave_history_input(tmp_path, {**facts, "attempt": number}, {"root": str(root)}, rid)
+        assert [gap["reason"] for gap in missing["gaps"]] == ["wave preparation has no exact dispute-input binding"]
+        assert "rebuttal" not in missing and "older-history" not in missing["previous_records"]
+    # A record no row can name, with no attempt number either: the same gap, never the newest row carrying the key.
+    unnamed = wave_history_input(tmp_path, facts, {"root": str(root)}, "somebody-else")
+    assert unnamed["gaps"] and "rebuttal" not in unnamed
+
+
+def test_a_free_rejoin_still_reads_the_earlier_waves_own_input(tmp_path):
+    from ouroboros.review_history import wave_history_input
+
+    root, earlier = _two_waves_one_retry_key(tmp_path)
+    facts = {"retry_key": "same-retry", "task_id": TASK, "tool_name": "commit_reviewed"}
+    # The record is wave A's: whichever physical row later collects it, its input is the one A prepared.
+    for number in (None, 1, 2):
+        assert wave_history_input(tmp_path, {**facts, "attempt": number}, {"root": str(root)}, "wave-a") == earlier
+
+
+def test_a_second_attempts_failed_bind_records_its_own_prepared_input_and_a_rejoin_keeps_the_first(
+        staged_body, tmp_path, monkeypatch):
+    """The real ``prepare_history`` and ``settle_commit_review_ledger``: wave A prepared and bound an input; wave B, the
+    same retry key, prepared its own but its attempt-row bind write failed. B's record carries B's prepared input with the
+    bind gap, never A's and never heads rebuilt after dispatch; a free rejoin of A reads A's input and leaves both."""
+    from ouroboros import capability_evidence, reviewer_window
+    from ouroboros import review_state as state_mod
+    from ouroboros.review_history import prepare_history
+    from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, update_state
+    from ouroboros.tools import commit_gate
+    from ouroboros.tools import git as git_mod
+
+    monkeypatch.setattr(capability_evidence, "probe", lambda *a, **k: None)
+    monkeypatch.setattr(reviewer_window, "reviewer_context_window", lambda *a, **k: 1_000_000)
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "6")
+    root, drive = Path(staged_body["repo"]), tmp_path / "data"
+    ctx_a = ToolContext(repo_dir=root, drive_root=drive, task_id=TASK)
+    monkeypatch.setattr(review_substrate, "run_review_request", _dispatch([], ORIGINAL))
+    rid_a = _run(ctx_a, "commit", "Wave A rebuttal only")
+    row_a = next(a for a in load_state(drive).attempts if a.review_record_id == rid_a)
+    retry, a_input = row_a.review_retry_key, review_ledger.load_record(drive, rid_a)["brief"]["dispute_input"]
+    assert retry and a_input["rebuttal"] and row_a.review_input == a_input
+
+    def fresh_ctx(**state):
+        ctx = ToolContext(repo_dir=root, drive_root=drive, task_id=TASK)
+        git_mod._reset_commit_review_state(ctx)
+        ctx._current_review_retry_key, ctx._last_review_structured = retry, {"retry_key": retry}
+        for name, value in state.items():
+            setattr(ctx, name, value)
+        return ctx
+
+    def settle(ctx):
+        facts = {"fingerprint": row_a.pre_review_fingerprint, "binding": {"tree_sha": "t" * 40, "parents": ["p" * 40],
+                                                                       "diff_sha256": "d" * 64}}
+        return commit_gate.settle_commit_review_ledger(ctx, "same intent", goal="g", scope="s", pre_fingerprint=facts)
+
+    # B: a new physical attempt under A's retry key whose own bind write is the only thing that fails.
+    update_state(drive, lambda state: state.record_attempt(CommitAttemptRecord(
+        ts="2026-11-18T00:00:00Z", commit_message="same intent", status="reviewing", task_id=TASK,
+        repo_key=make_repo_key(root), tool_name="commit_reviewed", attempt=2, paid=True, review_retry_key=retry)))
+    ctx_b = fresh_ctx(_current_review_attempt_number=2)
+    monkeypatch.setattr(state_mod, "update_state", lambda *a, **k: (_ for _ in ()).throw(OSError("lock held")))
+    prepare_history(ctx_b, None, "Wave B rebuttal only")
+    monkeypatch.undo()  # the failure belongs to the bind alone; the record write below is ordinary
+    prepared = ctx_b._review_dispute_input
+    assert [g["reason"] for g in prepared["gaps"]] == ["attempt input binding failed (OSError)"]
+    assert prepared["rebuttal"] != a_input["rebuttal"] and prepared["previous_records"] == [rid_a]
+    rid_b = settle(ctx_b)
+    assert rid_b and rid_b != rid_a
+    assert next(a for a in load_state(drive).attempts if a.attempt == 2).review_input == {}  # nothing was bound to B
+    assert review_ledger.load_record(drive, rid_b)["brief"]["dispute_input"] == prepared
+
+    # A free rejoin of A: its record, its input; neither record changes.
+    ctx_c = fresh_ctx(_review_reconcile_only=True, _current_review_record_id=rid_a, _current_review_attempt_number=1,
+                      _pending_review_attempt=row_a)
+    prepare_history(ctx_c, None, "")
+    assert ctx_c._review_dispute_input == a_input
+    assert settle(ctx_c) == rid_a
+    assert review_ledger.load_record(drive, rid_a)["brief"]["dispute_input"] == a_input
+    assert review_ledger.load_record(drive, rid_b)["brief"]["dispute_input"] == prepared

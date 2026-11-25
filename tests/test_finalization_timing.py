@@ -135,6 +135,126 @@ def test_finalization_keeps_delivery_and_step_order(completed_turn):
         assert "post_task" not in order
 
 
+@pytest.mark.parametrize("carrier,outcome", [
+    ("warm_restart", "retained"), ("cold_repause", "retained"),
+    ("cold_repause", "owner_revision"), ("warm_restart", "stop"),
+])
+def test_selected_answer_crosses_pause_and_restart_without_a_replacement_round(tmp_path, monkeypatch, carrier, outcome):
+    from ouroboros import budget_pause, owner_wait, task_pacing
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+    from ouroboros.task_results import write_task_result
+    from supervisor.events_budget import install_exact_budget_pause
+    from supervisor.owner_pause_control import request_owner_pause
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+    from supervisor.restart_retention import park_saved_pause
+    from tests._budget_pause_exact_helpers import _install_queue, _supervisor_ctx
+    from tests._delivery_candidate_shared import _run_loop
+    from tests._owner_pause_ended_helpers import _resume, _tick
+    from tests.worker_pool_support import affirm_ready
+
+    class WorkerExited(BaseException):
+        pass
+
+    tid, answer, replacement = "parent1", "Preselected answer.\nExact second line.", "New answer."
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 5.0)
+    task = {"id": tid, "root_task_id": tid, "type": "task", "chat_id": 2}
+    write_task_result(tmp_path, tid, "running", root_task_id=tid)
+    workers.RUNNING[tid] = {"task": task, "worker_id": 0, "attempt": 1}
+
+    def pause_after_answer(*_args):
+        assert request_owner_pause(tid, request_id="pause-after-answer")["ok"]
+        return ""
+
+    def exit_after_warm_save(_ctx, checkpoint):
+        owner_wait.set_owner_wait(tmp_path, tid, {**checkpoint, "state": "waiting"})
+        raise WorkerExited()
+
+    def configure(ctx):
+        ctx.task_attempt, ctx.task_id, ctx.budget_drive_root = 1, tid, tmp_path
+        ctx.owner_wait_callback = exit_after_warm_save if carrier == "warm_restart" else lambda *a: "owner_input"
+
+    def install(pause):
+        budget_pause.end_dispatch_fence(tid)
+        supervisor = _supervisor_ctx(tmp_path, workers, queue, [], [])
+        install_exact_budget_pause(supervisor, tid, budget_pause.exact_pause_marker(pause)["checkpoint"])
+
+    with monkeypatch.context() as boot:
+        boot.setattr("ouroboros.place_reply.routeless_note", pause_after_answer)
+        if carrier == "warm_restart":
+            boot.setattr("ouroboros.review_pause.live_detached_operations", lambda _: [{"operation_id": "critic"}])
+            with pytest.raises(WorkerExited):
+                _run_loop(tmp_path, boot, [answer], setup_context=configure)
+            parked = park_saved_pause(task, 1, tmp_path, pause_source="restart")
+            assert parked and parked.get("_budget_pause")
+            workers.RUNNING.pop(tid)
+            workers.PENDING.append(parked)
+        else:
+            with pytest.raises(budget_pause.BudgetPauseRequested) as first:
+                _run_loop(tmp_path, boot, [answer], setup_context=configure)
+            install(first.value.pause)
+
+    def grant():
+        _tick(queue)
+        resumed = _resume("owner", selected=tid)
+        assert resumed["ok"], resumed
+        sent = []
+        workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, reaping=False,
+                                                           in_q=SimpleNamespace(put=sent.append)))
+        workers.assign_tasks()
+        dispatched, = sent
+        return dispatched
+
+    def restore(ctx):
+        ctx.task_attempt, ctx.task_id, ctx.budget_drive_root = 1, tid, tmp_path
+        ctx.owner_wait_callback = lambda *a: "owner_input"
+        ctx.budget_pause_resume = admitted["_budget_pause_resume"]
+        if outcome == "retained":
+            from datetime import datetime, timedelta, timezone
+            ctx.task_metadata["deadline_at"] = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+
+    monkeypatch.setattr(owner_wait, "rebind_restored_route", lambda *a, **kw: (None, "max"))
+    admitted = grant()
+    if carrier == "cold_repause":
+        ordinary_control_boundary = loop._maybe_early_finalize
+
+        def pause_at_round_top(*args, **kwargs):
+            assert request_owner_pause(tid, request_id="second-pause")["ok"]
+            return ordinary_control_boundary(*args, **kwargs)
+
+        with monkeypatch.context() as second:
+            second.setattr(loop, "_maybe_early_finalize", pause_at_round_top)
+            with pytest.raises(budget_pause.BudgetPauseRequested) as reparking:
+                _run_loop(tmp_path, second, [], setup_context=restore)
+        install(reparking.value.pause)
+        admitted = grant()
+
+    row = budget_pause.budget_pause_row(tmp_path, tid)
+    stored = json.loads(read_actor_source_bytes(tmp_path, tid, row["source_ref"]))
+    assert stored["delivery_candidate"]["full_text"] == answer
+    assert stored["resume_point"] == row["resume_point"]
+    assert row["resume_point"]["phase"] == "candidate"
+    if outcome == "owner_revision":
+        assert write_owner_message(tmp_path, "Change the answer to say New answer.", tid, msg_id="owner-edit")
+    if outcome == "stop":
+        assert write_owner_message(tmp_path, REASON_OWNER_STOPPED_DIRECT_TURN, tid, msg_id="stop",
+                                   kind=KIND_FINALIZE_NOW)
+    monkeypatch.setattr(task_pacing, "effective_finalization_reserve_sec", lambda *_a, **_kw: 120.0)
+    if outcome == "retained":
+        monkeypatch.setattr(loop, "_resolve_loop_max_rounds", lambda *_a: 1)
+    result, usage, _, calls = _run_loop(tmp_path, monkeypatch, [replacement], setup_context=restore)
+    if outcome == "owner_revision":
+        assert (result, len(calls)) == (replacement, 1)
+        assert "Change the answer" in str(calls[0])
+    elif outcome == "stop":
+        assert (usage["execution_status"], usage["reason_code"], len(calls)) == (
+            "failed", REASON_OWNER_REQUESTED_FINALIZATION, 0)
+    else:
+        assert (result, len(calls)) == (answer, 0)
+
+
 def timing_rows(root, basis=None):
     path = root / "logs" / "events.jsonl"
     rows = [row for line in path.read_text(encoding="utf-8").splitlines()
@@ -320,6 +440,46 @@ def test_last_answer_replaces_prior_rounds_without_cross_thread_leaks(tmp_path):
         first, second = list(executor.map(run, ["one", "two"]))
     assert first is not second and first["phases"] is not second["phases"]
     assert obs.task_timing() is None
+
+
+def test_log_scope_does_not_read_or_fill_the_finalization_children_cache(tmp_path):
+    from unittest.mock import patch
+
+    from ouroboros import task_status
+    from ouroboros.finalization_timing import finalization_child_scope
+    from ouroboros.gateway.logs import _scope
+    from ouroboros.task_results import write_task_result
+    from ouroboros.task_status import find_child_tasks
+    from ouroboros.utils import utc_now_iso
+    from tests._shared import write_queue_document
+
+    def add(child, status="completed"):
+        write_task_result(tmp_path, child, status, parent_task_id="boss", root_task_id="boss",
+                          delegation_role="subagent")
+
+    def finalizing():
+        return {row["task_id"] for row in find_child_tasks(
+            tmp_path, parent_task_id="boss", root_task_id="boss", materialize_artifacts=False)}
+
+    def log_children():
+        # Membership discovery and the running child's reconciliation share one physical
+        # queue-document read. A fresh Logs request gets its own observation.
+        with patch.object(task_status, "load_queue_document", wraps=task_status.load_queue_document) as load:
+            children = _scope(tmp_path, "boss")[1]
+        load.assert_called_once_with(tmp_path.resolve())
+        return children
+
+    add("first", "running")
+    write_queue_document(tmp_path / "state/queue_snapshot.json", {"ts": utc_now_iso(), "pending": [], "running": []})
+    with finalization_child_scope():
+        assert finalizing() == {"first"}
+        add("second")
+        assert log_children() == {"boss", "first", "second"}
+        assert finalizing() == {"first"}
+    with finalization_child_scope():
+        assert log_children() == {"boss", "first", "second"}
+        add("third")
+        assert finalizing() == {"first", "second", "third"}
 
 
 def test_phase_seconds_ignore_wall_clock_reversal_and_preserve_exceptions(monkeypatch):

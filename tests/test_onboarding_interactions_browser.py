@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from tests._wizard_walk import past_quick_steps, rail_shows_its_steps, walk
 from tests.test_subscription_setup_browser import (
     capture,
     subscription_ui as subscription_ui,
@@ -21,7 +22,7 @@ def _open_wizard(ui):
     page = ui["page"]
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_selector("#quick-start-btn:not([hidden])")
-    assert page.locator(".wizard-step").count() == 5
+    assert rail_shows_its_steps(page)
     return page
 
 
@@ -77,6 +78,7 @@ def test_wizard_summary_refresh_keeps_focused_action_and_position(subscription_u
     page = _open_wizard(ui)
     page.set_viewport_size({"width": 390, "height": 600})
     page.click("#quick-start-btn")
+    past_quick_steps(page)  # Review & start passes Consciousness and Skills where offered, then Summary
     page.wait_for_selector(".summary-card")
     assert page.evaluate("document.activeElement.matches('.step-title') && window.scrollY === 0")
     page.locator("#next-btn").focus()
@@ -107,7 +109,7 @@ def test_wizard_unchanged_preview_preserves_pristine_model_focus(subscription_ui
         window.heldPosition = window.scrollY;
     }""")
     ui["fixture"]["status"]["harnesses"][0]["models"].append({"id": "another-discovered-model"})
-    with page.expect_response("**/api/onboarding/model-catalog") as catalog:
+    with page.expect_response("**/api/model-catalog?view=sources") as catalog:
         page.evaluate("""async () => {
             const {claudexorStatus} = await import('/onboarding/static/modules/claudexor_status_store.js');
             await claudexorStatus.refresh({includeModels: true});
@@ -207,11 +209,59 @@ def test_wizard_saved_server_rows_bind_their_secret_controls_once(subscription_u
 
 
 def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_ui):
+    expect = pytest.importorskip("playwright.sync_api").expect
     page = _open_wizard(subscription_ui)
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator('[data-collapse="local-model"] > summary').click()
     page.locator('[data-collapse="more-providers"] > summary').click()
-    for field in page.locator(".wizard-content input, .wizard-content select").all():
+    # A choice strip's value travels in a hidden input that no reader reaches (it has no `labels`); the strip's
+    # button group, tied to that input by its help (`<id>-note`), is what the owner reads and presses, so that group
+    # must be shown, named, hold its named choices with the carried one pressed, and point to its help. A hidden
+    # input that belongs to no strip is reported, never skipped. The OpenAI key's API strip stands only under a key
+    # (settings_provider_cards.js `createFlatKeyChoices`), so a key is typed for the check and cleared after it.
+    key = page.locator("#openai-key")
+    strip_shown = "() => !document.querySelector('[data-flat-key-choice=\"OPENAI_API_SURFACE\"]').hidden"
+    assert not page.evaluate(strip_shown)
+    key.fill("sk-test-wizard-names")
+    assert page.evaluate(strip_shown)
+    carriers = page.locator(".wizard-content input[type=hidden]")
+    assert carriers.count() > 0
+    for carrier in carriers.all():
+        strip = carrier.evaluate("""el => {
+            const holder = el.closest('[data-connection-choice]');
+            if (!holder) return {stray: el.outerHTML};
+            const group = holder.querySelector(`[role=group][aria-describedby="${CSS.escape(el.id + '-note')}"]`);
+            const help = el.id && document.getElementById(el.id + '-note');
+            const choices = group ? [...group.querySelectorAll('button[aria-pressed]')] : [];
+            const box = group?.getBoundingClientRect();
+            return {
+                id: el.id, name: group?.getAttribute('aria-label')?.trim() || '',
+                shown: Boolean(group?.checkVisibility?.() ?? true) && box?.width > 0 && box?.height > 0,
+                labels: choices.map((button) => button.textContent.trim()),
+                pressed: choices.filter((button) => button.getAttribute('aria-pressed') === 'true')
+                    .map((button) => button.dataset.connectionChoiceValue),
+                value: el.value, help: help?.textContent.trim() || '',
+            };
+        }""")
+        assert 'stray' not in strip, f"a hidden input outside a choice strip: {strip.get('stray')}"
+        assert strip['name'] and strip['shown'], strip
+        assert len(strip['labels']) >= 2 and all(strip['labels']), strip
+        assert strip['pressed'] == [strip['value']], strip
+        assert strip['help'], strip
+        # The same group as a reader meets it: found through the accessibility tree (role lookups skip aria-hidden
+        # and visibility:hidden nodes), visible, not faded out, with each named choice reachable and one pressed.
+        holder = page.locator(f'[data-connection-choice]:has([id="{strip["id"]}"])')
+        group = holder.get_by_role("group", name=strip['name'], exact=True)
+        expect(group).to_have_count(1)
+        expect(group).to_be_visible()
+        assert group.evaluate("el => { for (let n = el; n; n = n.parentElement) "
+                              "if (Number(getComputedStyle(n).opacity) === 0) return false; return true; }"), strip
+        for label in strip['labels']:
+            expect(group.get_by_role("button", name=label, exact=True)).to_be_visible()
+        expect(group.get_by_role("button", pressed=True)).to_have_count(1)
+    key.fill("")
+    assert not page.evaluate(strip_shown)
+    for field in page.locator(".wizard-content input:not([type=hidden]), .wizard-content select").all():
         assert field.evaluate("el => el.labels.length > 0 || Boolean(el.getAttribute('aria-label'))")
         assert field.evaluate("el => el.classList.contains('ui-control')")
         hint = field.get_attribute("aria-describedby")
@@ -222,8 +272,7 @@ def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_u
     assert routing.locator('[aria-pressed="true"]').count() == 1
     routing.locator('[data-local-mode="fallback"]').click()
     assert routing.locator('[data-local-mode="fallback"]').get_attribute("aria-pressed") == "true"
-    for _ in range(3):
-        page.click("#next-btn")
+    walk(page, "accounts", "budget")
     page.locator('[data-collapse="api-budget"] > summary').click()
     for name in ("Total Budget (USD)", "Per-task Cost Cap (USD)"):
         field = page.get_by_label(name, exact=True)

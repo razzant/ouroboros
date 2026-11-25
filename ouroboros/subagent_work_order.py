@@ -13,6 +13,9 @@ log = logging.getLogger(__name__)
 # (BIBLE P1). A declared task scheduled before this fact existed keeps the selection it started with,
 # and with it the work-order bytes and fingerprint its recovery and source-range reads check.
 DECLARED_WORDS_FACT = "declared_inputs_carry_owner_words"
+# An immutable scheduling fact, not a migration: records without it must
+# reconstruct the original canonical bytes for source reads and handoff recovery.
+ORIGINAL_INPUTS_FACT = "work_order_input_files_original_only"
 
 
 def declared_words_fact(contract: Mapping[str, Any]) -> dict[str, bool]:
@@ -121,11 +124,19 @@ def _selected_input_files(task: Mapping[str, Any]) -> str:
     rows = task.get("prepared_input_files")
     if not isinstance(rows, list) or not rows:
         return ""
-    return ("The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
-            "this task. The first start of this work order verifies those copies against these digests and its "
-            "instructions name where this run reads them; a later start copies only what its own request selects.\n"
-            + "\n".join(f"- {row.get('root')}:{row.get('path')} (sha256 {row.get('sha256')}, {row.get('size')} bytes)"
-                        for row in rows if isinstance(row, dict)))
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    if task.get(ORIGINAL_INPUTS_FACT, metadata.get(ORIGINAL_INPUTS_FACT)) is not True:
+        return ("The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
+                "this task. The first start of this work order verifies those copies against these digests and its "
+                "instructions name where this run reads them; a later start copies only what its own request selects.\n"
+                + "\n".join(f"- {row.get('root')}:{row.get('path')} (sha256 {row.get('sha256')}, {row.get('size')} bytes)"
+                            for row in rows if isinstance(row, dict)))
+    from ouroboros.delegate_readonly_inputs import selection_label
+
+    return ("Original schedule-time selection (input_files). Follow this start's SELECTED INPUT FILES instructions "
+            "for effective copies. Without them there are no explicit copies for this run. A replacement, including [], "
+            "supersedes these rows.\n"
+            + "\n".join(f"- {selection_label(row)} (sha256 {row['sha256']}, {row['size']} bytes)" for row in rows))
 
 
 def _text(value: Any) -> str:
@@ -178,6 +189,22 @@ def assignment_instructions(ctx: Any) -> str:
     )
 
 
+def work_order_owner_rows(task: Mapping[str, Any]) -> tuple | None:
+    """``(rows, absence marker, current)``: my human's rows a session work order carries, one per identity (the
+    field's, then the bound room's), the same set ``_owner_words_section`` renders and the receipt counts; ``None``
+    for a declared task scheduled before ``DECLARED_WORDS_FACT``, whose order holds none."""
+    from ouroboros.contracts.task_contract import task_input_sources
+    from ouroboros.owner_words import FIELD, _deduped, task_governing_words
+
+    if task_input_sources(task) == "declared" and not declared_inputs_carry_owner_words(task):
+        return None
+    rows, absent = task_governing_words(task)
+    room = work_order_room_words(task)
+    if room is not None:
+        rows = _deduped(rows + task_governing_words({FIELD: room})[0])
+    return rows, absent, room is not None
+
+
 def work_order_room_words(task: Mapping[str, Any]) -> list | None:
     """The bound room's rows a session task was scheduled with (``owner_words.ROOM_FIELD``, by value, at the top
     level or under ``metadata``); ``None`` for a task scheduled before the key existed, whose work order keeps the
@@ -203,18 +230,14 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     The schedule text it was scheduled with (``owner_words.SCHEDULE_FIELD``) follows them
     in its own section; a record without that field renders as it always did.
     """
-    from ouroboros.contracts.task_contract import task_input_sources
-    from ouroboros.owner_words import (FIELD, _deduped, render_owner_words, render_schedule_text,
-                                       task_governing_words, task_schedule_items)
+    from ouroboros.owner_words import render_owner_words, render_schedule_text, task_schedule_items
 
-    if task_input_sources(task) == "declared" and not declared_inputs_carry_owner_words(task):
+    carried = work_order_owner_rows(task)
+    if carried is None:
         return ""
-    rows, absent = task_governing_words(task)
-    room = work_order_room_words(task)
-    if room is not None:
-        rows = _deduped(rows + task_governing_words({FIELD: room})[0])
+    rows, absent, current = carried
     words = render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""),
-                               current=room is not None)
+                               current=current)
     schedule = render_schedule_text(task_schedule_items(task), audience="session")
     return "\n\n".join(part for part in (words, schedule) if part)
 
@@ -558,20 +581,30 @@ def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
 
 
 def session_memory_references(ctx: Any) -> str:
-    """The marks in force for the session task's room (this room's and the global ones) and the knowledge outline
-    (the global shelf's and its room's: every note by address and title, people's summaries kept) as text in a
-    session's start request: what a native helper's view holds, pinned outside the canonical work order and its
-    fingerprint, so a session task scheduled before the update starts with them too. The stores are read once as
-    they stand, through the memory view's own capture and render (``memory_view._capture_marks``, ``render_room``
-    over a marks-only snapshot) and the helper's outline (``context_sections.helper_navigation_sections``); nothing
-    is written or activated here. A retry replays the recorded bytes."""
+    """The marks in force for the session task's room (this room's and the global ones), the knowledge outline
+    (the global shelf's and its room's: every note by address and title, people's summaries kept) and the heads of
+    the notes that claim the situation names a helper of this work carries and of the notes their heads link
+    (``held_notes``, each whole, its reader named unavailable; a declared task names their omission instead), as text
+    in a session's start request: what a native helper's view holds, pinned outside the canonical work order and its
+    fingerprint, so a session task scheduled before the update starts with the marks and the outline too (it carries
+    no situation names, so no heads). The marks follow the room the heads come from: a Presence starter's own once the install records a claim
+    (the gate of its helpers' carried names, ``held_notes.carried_situation``); with none, Main's outside a Project.
+    The stores are read once as they stand, through the memory
+    view's own capture and render (``memory_view._capture_marks``, ``render_room`` over a marks-only snapshot), the
+    helper's outline (``context_sections.helper_navigation_sections``) and the heads resolved now, never the
+    launcher's own capture. ``ctx._session_held_heads`` keeps the heads sent, by address and revision, for the start's
+    custody; nothing else is written or activated here. A retry replays the recorded bytes."""
     import dataclasses
+    from types import SimpleNamespace
 
+    from ouroboros import held_notes, knowledge
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.context_sections import helper_navigation_sections
+    from ouroboros.contracts.task_contract import task_input_sources
     from ouroboros.memory_inventory import membership_facts
     from ouroboros.memory_view import (MemoryViewSnapshot, ROLE_DEFAULTS, _capture_marks, render_room, room_labeler,
-                                       view_room_id)
+                                       view_role, view_room_id)
+    from ouroboros.memory_view_events import helper_names
     from ouroboros.tool_access_paths import canonical_data_root
 
     head = ("\n\nMEMORY DELIVERY (host instructions, separate from canonical work order)\n"
@@ -580,19 +613,35 @@ def session_memory_references(ctx: Any) -> str:
             "address and title). The calls named beside them are the host's own readers, not yours.\n\n")
     meta = getattr(ctx, "task_metadata", None)
     task = {**(meta if isinstance(meta, Mapping) else {}), "id": str(getattr(ctx, "task_id", "") or "")}
+    task["task_contract"] = getattr(ctx, "task_contract", None) or task.get("task_contract")
+    ctx._session_held_heads = held = None
     try:
         root = canonical_data_root(ctx)
-        room = view_room_id(task, ctx, root, project_chat_ids=membership_facts(root).project_chat_ids)
+        navigation = {"bodies": {}, "names": helper_names(ctx, root)}
+        outline = "\n\n".join(helper_navigation_sections(root, str(getattr(ctx, "project_id", "") or ""),
+                                                         global_capture=navigation))
+        # The heads' inventory decides the gate; view_role reads Presence under metadata, as helper_names passes it.
+        presence = (bool(knowledge.active_claims(root, inventory=navigation.get("inventory", ())))
+                    and view_role({"metadata": task}) == "presence")
+        room = view_room_id(task, ctx, root, project_chat_ids=membership_facts(root).project_chat_ids,
+                            presence=presence)
         spec = dataclasses.replace(ROLE_DEFAULTS["child"], room_id=room)
         store = ChronicleStore(root)  # a chronicle never activated holds no mark; nothing activates it here
         marks = tuple(_capture_marks(store, spec, room_labeler(root))) if store.log_path.exists() else ()
         marks_text = render_room(MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={}, marks=marks))
-        outline = "\n\n".join(helper_navigation_sections(root, str(getattr(ctx, "project_id", "") or "")))
+        if task_input_sources(task) == "declared":
+            if topics := held_notes.claimed_topics(root, navigation["names"], navigation.get("inventory", ())):
+                held = ("[Host: the heads of the knowledge notes that claim this work's room, and of the notes their "
+                        "heads link, are not in this start, because its input is declared: " + ", ".join(topics) + ".]")
+        elif entries := held_notes.turn_sections(root, task, spec, navigation, ctx=SimpleNamespace(
+                held_reader_unavailable=held_notes.EXTERNAL_READER)):  # a fresh namespace, never the launcher's capture
+            held = "\n\n".join([*(part.full_text for part in entries), held_notes.HELPER_NOTE])
+            ctx._session_held_heads = held_notes.sent_heads(entries) or None
     except Exception as exc:  # an unreadable store is a named gap in the start, never a withheld start
         log.warning("session references: my memory could not be read at this start", exc_info=True)
         return head + f"My memory could not be read here ({type(exc).__name__}); this start carries no marks and no outline."
     return head + "\n\n".join(part for part in (
-        marks_text or "No marks are in force for this work's room or globally.", outline) if part)
+        marks_text or "No marks are in force for this work's room or globally.", outline, held) if part)
 
 
 def session_host_references(ctx: Any, *, target_root: str, source_root: str,
@@ -601,8 +650,8 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
     """Host references pinned in a session's start request, computed once at first start.
 
     Own-body DESIGN navigation and BIBLE path, the owner's standing rules for every session (declared
-    inputs included: they govern the work, as BIBLE does), the marks in force and the knowledge outline as text
-    (``session_memory_references``: outside the work order's fingerprint, at every start of the line), and the
+    inputs included: they govern the work, as BIBLE does), the marks in force, the knowledge outline and the held heads
+    as text (``session_memory_references``: outside the work order's fingerprint, at every start of the line), and the
     installed instruction-skill index for any workspace;
     a skill-payload builder also gets the serving host's skill contract, whatever its input
     selection, and any other private copy its environment facts: dependency files read at the

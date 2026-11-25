@@ -180,6 +180,35 @@ def test_private_opaque_and_foreign_elements_stay_inline(tmp_path):
     assert wc.read_working(tmp_path, "pause-task", 1)[1]["messages"][-1] == {"role": "user", "content": "again"}
 
 
+def test_the_whole_length_is_its_segments_without_hashing_the_state(tmp_path, monkeypatch):
+    """``last_whole_bytes`` sums the segments: a part the observation's copies repeat counts at each place, a private
+    or opaque element inside the skeleton; it equals the old whole digest's length and the expanded bytes, also
+    for a state written whole, and no save hashes the whole state."""
+    from ouroboros import shared_values
+
+    produced, real_tokenize, real_digest = [], shared_values.tokenize, shared_values.Tokenized.whole_digest
+
+    def tokenize(*args, **kwargs):
+        produced.append(real_tokenize(*args, **kwargs))
+        return produced[-1]
+
+    monkeypatch.setattr(shared_values, "tokenize", tokenize)
+    monkeypatch.setattr(shared_values.Tokenized, "whole_digest", lambda _self: pytest.fail("a save hashed the whole state"))
+    ctx, limit_ctx = _state_fixture(tmp_path)
+    stats = limit_ctx.accumulated_usage.setdefault("working_checkpoint", {"saves": 0, "max_bytes": 0, "encode_ms": 0.0,
+                                                                          "write_ms": 0.0, "parts_written": 0})
+    private = [{"role": "tool", "tool_call_id": "call_s", "content": f"api_key={SECRET}"},
+               {"role": "tool", "tool_call_id": "call_o", "content": "x", "handle": object()}]
+    for change in (lambda: None, lambda: limit_ctx.messages.extend(private),
+                   lambda: limit_ctx.accumulated_usage.update(odd={"$shared": "b" * 64})):  # the last is written whole
+        change()
+        assert wc.save_round(limit_ctx, "post_batch") is True
+        assert stats["last_whole_bytes"] == len(wc.read_working(tmp_path, "pause-task", 1)[0])
+        assert stats["last_whole_bytes"] == (real_digest(produced[-1])[1] if produced[-1] else stats["last_bytes"])
+    assert len(produced[0].parts) < produced[0].shared, "the observation's copies repeat parts"
+    assert produced[-1] is None and json.loads(_file(tmp_path).read_bytes()).get("format") is None
+
+
 def test_the_checkpoint_and_the_request_records_share_each_parts_redaction_fact(tmp_path):
     """A part the round's request records already worked out is not scanned again by the checkpoint (and the other
     way round): one fact per bytes per task (``observability.task_parts``). What the checkpoint skips is exactly
@@ -287,6 +316,32 @@ def test_an_older_body_refuses_the_shared_form_typed_and_a_missing_part_is_typed
         {"task_id": "pause-task", "task_attempt": 1, "working": {"boundary": "ready", "seq": 1}, "messages": []}).encode())
     assert wc.read_working(tmp_path, "pause-task", 1)[1]["messages"] == []
 
+
+
+def test_a_part_that_cannot_be_located_now_is_never_missing_and_each_read_names_the_task(tmp_path, monkeypatch):
+    """Each part read names the checkpoint's task, the packs reader's cost hint. A part whose bytes cannot be
+    located now (``EvidenceUnavailable``: the packs catalog cannot answer) is no missing part: the read raises
+    it, never ``SharedValueMissing`` (kept for a part nothing holds, the test above), the rolling file stays,
+    and the same state reads once the part can be located."""
+    _ctx, limit_ctx = _state_fixture(tmp_path, rounds=2)
+    write_task_result(tmp_path, "pause-task", "running")
+    assert wc.save_round(limit_ctx, "candidate") is True
+    data, part = _file(tmp_path).read_bytes(), _manifest(tmp_path)["shared_parts"][0]
+    real, tasks = packs.blob_bytes, []
+
+    def unlocatable(root, ref, **kwargs):
+        tasks.append(kwargs.get("task_id"))
+        if ref.get("sha256") == part["sha256"]:
+            raise packs.EvidenceUnavailable("evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(packs, "blob_bytes", unlocatable)
+        with pytest.raises(packs.EvidenceUnavailable):
+            wc.read_working(tmp_path, "pause-task", 1)
+    assert tasks and set(tasks) == {"pause-task"}, tasks
+    assert _file(tmp_path).read_bytes() == data
+    assert wc.read_working(tmp_path, "pause-task", 1)[1]["task_id"] == "pause-task"
 
 def test_a_pausing_seed_and_a_park_source_are_completed_from_the_expanded_state(tmp_path):
     from ouroboros.artifacts import read_actor_source_bytes

@@ -373,9 +373,14 @@ def test_budget_rejection_before_any_work_is_a_host_notice(monkeypatch):
     result = L._check_budget_limits(ctx, 0.0)
     assert result is not None
     text, usage, _trace = result
-    assert text.startswith("🚫 Task rejected")
+    assert text.startswith("The total budget is spent") and "TOTAL_BUDGET" not in text, "words, not the setting's key"
     assert usage["terminal_origin"] == L.TERMINAL_ORIGIN_HOST_NOTICE
     assert usage["reason_code"] == "budget_exhausted"
+    # Its row says the phrase and names the owner's step beside it, the setting's key as its detail (DESIGN principle 7).
+    row = usage["host_notice_row"]
+    assert row["record"] == text and row["notice"] == {"code": "budget_exhausted", "step": "raise_total_budget",
+                                                       "details": "setting: TOTAL_BUDGET"}
+    assert row["text"] == "The total budget is spent, so this task stopped before its next paid call."
 
 
 def test_the_round_one_budget_rejection_still_makes_no_call_and_gains_no_facts_block(monkeypatch):
@@ -391,7 +396,7 @@ def test_the_round_one_budget_rejection_still_makes_no_call_and_gains_no_facts_b
     result = L._check_budget_limits(ctx, 0.0)
     assert result is not None
     text, usage, _trace = result
-    assert text.startswith("🚫 Task rejected") and "[TASK_STATE_FACTS]" not in text
+    assert text.startswith("The total budget is spent") and "[TASK_STATE_FACTS]" not in text
     assert usage["terminal_origin"] == L.TERMINAL_ORIGIN_HOST_NOTICE
     assert usage["reason_code"] == "budget_exhausted"
 

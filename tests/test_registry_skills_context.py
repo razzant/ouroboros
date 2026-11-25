@@ -247,11 +247,12 @@ def test_an_owner_scale_start_outlines_registry_and_index_only_where_its_folded_
     roomy = _owner_scale_plan(tmp_path, monkeypatch, 400_000)
     rows, text = _host_facts(roomy), _text(roomy)
     index = next(part for part in roomy.core.dynamic_head_sections if part.section_id == "knowledge_index")
-    # Max needs my memory's ordinary forms beside the whole books (B6, decision 2A); here they do not fit, so this
-    # start runs Low. The request it sends holds both whole beside its whole one-eighth room: any host step it takes
-    # is the start room's, and nothing calls them physical.
+    # Max keeps the whole books while my memory at its tellings fits beside them (owner 15.11.2026, 4A): its ordinary
+    # forms do not fit here, its tellings do, so this start holds Max with my memory told. The request it sends holds
+    # both sections whole beside its whole one-eighth room: any host step it takes is the start room's, and nothing
+    # calls them physical.
     room = roomy.projection(roomy.initial_mode).memory_facts["max_room"]
-    assert roomy.initial_mode == "low" and room["cause"] == "crowded" and room["need"] > room["window"]
+    assert roomy.initial_mode == "max" and room["cause"] == "held" and room["need"] > room["window"]
     assert _registry(40) in text and index.full_text in text and all(row.get("start_room") for row in rows)
     # Whether this start moves host sections at all turns on its surroundings (in this test none; under the rev_fable
     # witness three). A start 100K tighter folds its memory and does move them, only for its start room, with the
@@ -261,7 +262,8 @@ def test_an_owner_scale_start_outlines_registry_and_index_only_where_its_folded_
     folded_index = next(part for part in folded.core.dynamic_head_sections if part.section_id == "knowledge_index")
     assert folded_rows and all(row.get("start_room") for row in folded_rows)
     assert _registry(40) in folded_text and folded_index.full_text in folded_text
-    # A start my memory lowered names what holds the room (S2); one that holds Max has nothing to name (rev_fable F2).
+    # A start whose memory folded names what holds the room (S2); one that holds Max whole has nothing to name
+    # (rev_fable F2).
     assert "Holding the room (tokens):" in text and "Holding the room (tokens):" in folded_text
     held = _owner_scale_plan(tmp_path, monkeypatch, 1_000_000)
     assert held.initial_mode == "max" and "Holding the room (tokens):" not in _text(held)
@@ -392,8 +394,10 @@ def test_every_admitted_skill_keeps_purpose_and_trigger_in_each_catalogue_form(t
         assert "OMISSION NOTE: truncated at 260 chars; original length" in text
         assert f"Instructions: {reader}" in text
         assert "- cipher (instruction, v1, pass): No description.\n  Trigger: Not specified." in text
-        assert "  Live (worker): no (not_loaded)" in text
-        assert "list_skills" not in text and "unadmitted" not in text
+        assert "Live (" not in text  # process liveness is the start-of-work notice's, never block C's (C07)
+        # An enabled skill no review admits is one line after the cards, never a card (п.57: once per install).
+        assert text.count("unadmitted") == 1 and "\n- unadmitted " not in text.split("Enabled, not ready")[0]
+        assert "list_skills" not in text
     assert "desk_tool_0" in part.full_text and "Model experience" in part.full_text
     assert "desk_tool_0" not in part.operative_view and "Model experience" not in part.operative_view
 

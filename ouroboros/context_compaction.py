@@ -12,6 +12,7 @@ summarizer exists: a request without ``working_note`` is ``authored_note_require
 from __future__ import annotations
 
 import copy
+import datetime
 import hashlib
 import json
 import logging
@@ -33,6 +34,7 @@ from ouroboros.context_budget import (
     _UnsafeVisual,
 )
 from ouroboros.anthropic_native_custody import anthropic_tool_unit_active, custody_private_key
+from ouroboros.openai_responses_custody import RESPONSES_PRIVATE_KEYS, responses_tool_unit_active
 from ouroboros.tool_result_record import read_tool_result_record
 from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY
 
@@ -48,9 +50,15 @@ _CAPSULE_CONTRACT_DIGEST = "98d43b93d717fc52dbc84e872923b2469de2b54ead0527189160
 _LEGACY_CAPSULE_CONTRACT_DIGEST = "6bd892aa2479a9c8b65036b0c18e53ccc076cb5bf5a0d87e351ea38182fa3402"
 _MIN_CAPSULE_BYTES = 512
 _SHA256_HEX = frozenset("0123456789abcdef")
-_ACTOR_NOTE_LABEL = "Actor-authored working view; exact source retained by checkpoint"
+# A note's one label, written once with it and dated by ``written_at`` in its metadata: when the mind wrote the note,
+# the ``compact_context`` call its queued request records, not the later boundary that applies it (a caller without that
+# time dates the note when it writes it). A note written before notes carried their time keeps its old bytes
+# (``visible_sha256``); readers that list it say "not recorded" (``note_written``).
+_ACTOR_NOTE_LABEL = "Actor-authored working view, written {written}; exact source retained by checkpoint"
 # A receipt names a replaced note by the head of its first line; the whole note stays in the checkpoint.
 _REPLACED_NOTE_LINE_CHARS = 240
+# A fold receipt names a removed tool unit by each call's name and the head of its arguments; the body is at its address.
+_BODY_ARGUMENT_CHARS = 120
 
 
 def _canonical_json(value: Any) -> str:
@@ -80,6 +88,29 @@ def _context_tokens_for_messages(
 def _sha256(value: Any) -> str:
     raw = value if isinstance(value, bytes) else str(value).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _utc(value: Any) -> Optional[datetime.datetime]:
+    """An ISO-8601 instant as UTC; ``None`` for anything else (a naive stamp is not assumed to be UTC)."""
+    text = str(value or "")
+    try:
+        moment = datetime.datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    return moment.astimezone(datetime.timezone.utc) if moment.tzinfo else None
+
+
+def _written_at(value: Optional[str]) -> str:
+    """The UTC ISO time a new note records as ``written_at``: the given write time, else the host's clock now."""
+    moment = _utc(value) or datetime.datetime.now(datetime.timezone.utc)
+    return moment.isoformat(timespec="seconds")
+
+
+def note_written(meta: Optional[Mapping[str, Any]]) -> str:
+    """When a note was written, as its label, its fold receipt and an arrival line name it: ``YYYY-MM-DD HH:MM UTC``
+    from ``written_at`` in its metadata, else ``not recorded``."""
+    moment = _utc((meta or {}).get("written_at"))
+    return moment.strftime("%Y-%m-%d %H:%M UTC") if moment else "not recorded"
 
 
 def context_reclaim_transcript_sha256(messages: Sequence[Mapping[str, Any]]) -> str:
@@ -315,7 +346,7 @@ def _atomic_units(
             and len(result_ids) == len(set(result_ids))
             and set(result_ids) == set(call_ids)
         )
-        if complete and not anthropic_tool_unit_active(messages, idx, end):
+        if complete and not anthropic_tool_unit_active(messages, idx, end) and not responses_tool_unit_active(messages, idx, end):
             unit = _unit_from_slice(
                 messages, idx, end,
                 trace_refs_by_tool_call_id=trace_refs,
@@ -331,7 +362,9 @@ def _atomic_units(
 # key marks a host-typed row (acceptance observation, review feedback, native
 # continuation, custody) that stays raw: typed meaning never gets flattened to prose.
 _PLAIN_ROW_KEYS = frozenset({"role", "content", "name", "cache_control", HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY})
-_ASSISTANT_PROSE_KEYS = _PLAIN_ROW_KEYS | {"reasoning_content", "reasoning_details", "refusal", "annotations"}
+# A Responses reply's receipt rides every assistant row; folding the row retires its native replay with it.
+_ASSISTANT_PROSE_KEYS = _PLAIN_ROW_KEYS | {"reasoning_content", "reasoning_details", "refusal", "annotations",
+                                          *RESPONSES_PRIVATE_KEYS}
 UnitScope = Literal["tool", "dialogue"]
 UnitKind = Literal["capsule", "tool", "assistant", "user"]
 
@@ -428,10 +461,19 @@ def owner_protected_unit_ids(messages: Sequence[Mapping[str, Any]], units: Seque
 
 # Counted by ``_source_atoms`` for a part it cannot encode; never a sha256 digest and never evidence.
 UNENCODABLE_SOURCE_ATOM = "unencodable-source-atom"
+WIRE_TEXT_TYPES = frozenset({"text", "input_text", "output_text"})
+
+
+def physical_message_rows(payload: Any) -> list | None:
+    """The accepted candidate's own rows, in Chat/native or Responses layout, never a union."""
+    if not isinstance(payload, Mapping):
+        return None
+    rows = payload.get("messages", payload.get("input"))
+    return rows if isinstance(rows, list) else None
 
 
 def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
-    """Content identities across function/custom and native tool-result syntax.
+    """Content identities across function/custom, native and Responses tool-result syntax.
 
     The transport may change JSON syntax and coalesce text blocks, but a call's
     name/arguments and its whole result still have to be present. IDs alone are
@@ -457,7 +499,7 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
         return value
 
     def content(value: Any) -> Any:
-        if isinstance(value, list) and all(isinstance(p, Mapping) and p.get("type") == "text" for p in value):
+        if isinstance(value, list) and all(isinstance(p, Mapping) and p.get("type") in WIRE_TEXT_TYPES for p in value):
             return "".join(str(p.get("text") or "") for p in value)
         return value
 
@@ -472,6 +514,16 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
 
     for message in messages:
         role, body = message.get("role"), message.get("content")
+        if not role and message.get("type") == "function_call":
+            if call_id := message.get("call_id"):
+                call = (str(message.get("name") or ""), arguments(message.get("arguments")))
+                calls_by_id[str(call_id)] = call
+                add("call", *call)
+            continue
+        if not role and message.get("type") == "function_call_output":
+            if call := calls_by_id.get(str(message.get("call_id") or "")):
+                add("result", *call, result_content(message.get("output")))
+            continue
         if role in {"tool", "function"}:
             call = calls_by_id.get(str(message.get("tool_call_id") or "")) or calls_by_name.get(str(message.get("name") or "")) or last_call
             add("result", *call, result_content(body))
@@ -483,7 +535,7 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
         for block in blocks:
             if not isinstance(block, Mapping):
                 continue
-            if role == "user" and block.get("type") == "text" and block.get("text"):
+            if role == "user" and block.get("type") in WIRE_TEXT_TYPES and block.get("text"):
                 add("host_text", str(block["text"]))
             if block.get("type") == "tool_use":
                 last_call = (str(block.get("name") or ""), arguments(block.get("input")))
@@ -591,11 +643,11 @@ def _capsule_message(
     checkpoint_ref: Mapping[str, Any],
     request: ContextReclaimRequest,
     *, retention: str = "summarized", label: Optional[str] = None,
-    address: Optional[Mapping[str, Any]] = None,
+    address: Optional[Mapping[str, Any]] = None, written_at: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """One capsule row standing for ``unit``: the mind's own account (``summarized``, authored by
-    the actor) or a host source view (``source_view``, nothing retold); every original stays
-    restorable through ``checkpoint_ref``."""
+    the actor, dated by ``written_at``: when the mind wrote it, else now) or a host source view
+    (``source_view``, nothing retold); every original stays restorable through ``checkpoint_ref``."""
     generation = unit.generation + 1
     if retention == "source_view":
         label = label or ("Historical source: read-only projection, not live assistant/tool turns; "
@@ -604,7 +656,8 @@ def _capsule_message(
             "checkpoint_ref": dict(checkpoint_ref), "unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}
         text = f"[{label}]\nSource reference: {_canonical_json(address)}\n" + str(body or "").strip()
     else:
-        label = label or _ACTOR_NOTE_LABEL
+        written_at = _written_at(written_at)
+        label = label or _ACTOR_NOTE_LABEL.format(written=note_written({"written_at": written_at}))
         text = f"[{label}]\n" + str(body or "").strip()
     source_hashes = _unique_strings([
         *unit.lineage_hashes, unit.raw_sha256, unit.source_sha256,
@@ -633,6 +686,7 @@ def _capsule_message(
         "summary_contract_digest": _CAPSULE_CONTRACT_DIGEST,
         "visible_sha256": _sha256(text),
         "authorship": "host" if retention == "source_view" else "actor",
+        **({} if retention == "source_view" else {"written_at": written_at}),
     }
     message = {"role": "user", "content": [{
         "type": "text", "text": text, "_context_capsule": metadata,
@@ -747,13 +801,14 @@ def _authored_view(
     observed_tool_schemas: Optional[Sequence[Mapping[str, Any]]],
     tool_schemas: Sequence[Mapping[str, Any]], fit_candidate: Optional[Callable[[list, list], Mapping[str, Any]]],
     drive_root: pathlib.Path, task_id: str, trace_refs: Mapping[str, Any],
-    exposed_units: Optional[Sequence[Mapping[str, Any]]] = None,
+    exposed_units: Optional[Sequence[Mapping[str, Any]]] = None, written_at: Optional[str] = None,
 ) -> Tuple[list, ContextReclaimReceipt]:
     """Materialize one actor's selection through the existing unit/checkpoint/capsule engine
     over the dialogue scope (tool units, capsules, the actor's own completed replies, host
     prose). Rows typed as people's words (``owner_protected_unit_ids``) stay whole; earlier
     notes stay unless ``replace_note_ids`` names them. Host exact-source views (restores
-    and emergency records, stamped ``retention=source_view``) follow the keep selection."""
+    and emergency records, stamped ``retention=source_view``) follow the keep selection.
+    The new note is dated ``written_at``: when the mind wrote it."""
     restore_refs = []
     for ref in request.restore_unit_refs:
         checkpoint = ref.get("checkpoint_ref") if isinstance(ref, Mapping) else None
@@ -848,18 +903,19 @@ def _authored_view(
             combined = replace(combined, unit_id=f"view:{fingerprint}", generation=max((u.generation for u in removed), default=0),
                                lineage_hashes=_unique_strings([h for u in removed for h in u.lineage_hashes]),
                                source_refs=source_refs)
-            replaced, label = [u for u in removed if u.unit_id in named], None
+            replaced, label, written_at = [u for u in removed if u.unit_id in named], None, _written_at(written_at)
             if replaced:
                 # The new note itself keeps the restorable addresses of the notes it replaces, since a later fold may
                 # take this receipt; the receipt also names their first lines. Both point into this fold's checkpoint.
                 address = {"checkpoint_ref": {key: checkpoint_ref[key] for key in ("kind", "root", "path", "size", "sha256")
                                               if key in checkpoint_ref},
                            "notes": [{"unit_id": u.unit_id, "raw_sha256": u.raw_sha256} for u in replaced]}
-                label = f"{_ACTOR_NOTE_LABEL}; replaced notes: {_canonical_json(address)}"
+                label = (_ACTOR_NOTE_LABEL.format(written=note_written({"written_at": written_at}))
+                         + f"; replaced notes: {_canonical_json(address)}")
                 replaced_notes = {**address, "notes": [{**entry, "first_line": _first_line(observed[u.start])}
                                                        for entry, u in zip(address["notes"], replaced)]}
             note, note_ref = _capsule_message(combined, request.working_note, [_part(combined.unit_id, combined.source_text)],
-                                             checkpoint_ref, request, label=label)
+                                             checkpoint_ref, request, label=label, written_at=written_at)
             note["role"] = "assistant"
             replacements = {u.start: (u.end, [], []) for u in removed}
             at = removed[0].start if removed else len(observed)
@@ -900,6 +956,7 @@ def compact_tool_history_llm(
     tool_schemas: Sequence[Mapping[str, Any]] = (),
     fit_candidate: Optional[Callable[[list, list], Mapping[str, Any]]] = None,
     exposed_units: Optional[Sequence[Mapping[str, Any]]] = None,
+    written_at: Optional[str] = None,
 ) -> Tuple[list, ContextReclaimReceipt]:
     """Materialize the mind's authored view: the candidate and its receipt; the caller owns
     atomic publication.
@@ -910,7 +967,8 @@ def compact_tool_history_llm(
     tools)`` must accept the complete candidate, and missing fit evidence leaves current
     messages intact. Supply observed schemas to prove a whole-view no-op when selecting
     schemas. Rows typed as people's words stay whole, and so do earlier notes the request
-    does not name for replacement.
+    does not name for replacement. ``written_at`` (UTC ISO) dates the new note: when the
+    mind wrote it, which the queued request records (``tools/compact_context``); else now.
     """
     before_sha = context_reclaim_transcript_sha256(messages)
     if str(request.transcript_sha256 or "") != before_sha:
@@ -923,4 +981,4 @@ def compact_tool_history_llm(
                           observed_tool_schemas=observed_tool_schemas,
                           tool_schemas=tool_schemas, fit_candidate=fit_candidate, drive_root=root,
                           task_id=str(task_id or "context_compaction"), trace_refs=trace_refs_by_tool_call_id or {},
-                          exposed_units=exposed_units)
+                          exposed_units=exposed_units, written_at=written_at)

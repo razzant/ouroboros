@@ -5,7 +5,7 @@
 
 import { accountRows, accountName, accountModelUnsupported } from './claudexor_status_store.js';
 import { formatRelativeAge } from './ui_helpers.js';
-import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
+import { API_PROVIDER_LABELS, META_PART_SEPARATOR, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { fmt, tr, translateString, tx } from './i18n.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
@@ -20,7 +20,10 @@ export const DEFAULT_API_PROVIDER = 'openrouter';
 export const EFFORT_CHOICES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const PROCESSING_PREFERENCE_KEY = 'OUROBOROS_PROCESSING_PREFERENCE';
 export const MODEL_PROCESSING_PREFERENCES_KEY = 'OUROBOROS_MODEL_PROCESSING_PREFERENCES';
-export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];  // Settings never hold Ultrafast (an older reader refuses it)
+export const MODEL_ACCOUNTS_KEY = 'OUROBOROS_MODEL_ACCOUNTS';
+// The tiers a role or the global setting may hold. Main alone may also hold Ultrafast, asked first (an older version
+// cannot read it): its page and its sheet offer it where its route lists it (processing_choice.js).
+export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];
 /** Fast, Ultrafast and Flex (`economy`) send another processing tier, which its own endpoint prices: a catalog's row is not that call's price. */
 export const tierPriced = (preference) => preference === 'fast' || preference === 'economy' || preference === 'ultrafast';
 
@@ -36,10 +39,12 @@ export function processingIntentLabel(value, inherited = '', { helper = false } 
     return helper ? `The work's tier, else ${global}` : global;
 }
 
-export function processingSelectHtml(attrs, selected, { global = false, helper = false } = {}) {
+/** `choices`: the tiers to offer as `{ value, label }` (a role's own route decides them, processing_choice.js `tierChoices`). */
+export function processingSelectHtml(attrs, selected, { global = false, helper = false,
+    choices = PROCESSING_CHOICES.map((value) => ({ value, label: processingLabel(value) })) } = {}) {
     return selectHtml(attrs, [{ options: [
         { value: '', label: global ? 'Keep route defaults' : helper ? 'The work\'s tier, else the global setting' : 'Use global setting' },
-        ...PROCESSING_CHOICES.map((value) => ({ value, label: processingLabel(value) })),
+        ...choices,
     ] }], selected || '');
 }
 
@@ -49,12 +54,6 @@ export function processingDetailsHtml(attrs, selected, inherited = '', { helper 
         <label class="ui-field">Processing ${processingSelectHtml(attrs, selected, { helper })}</label>
         <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.${helper
             ? ' Without one of its own, a new subagent takes the tier of the work that starts it; a review seat takes the global setting.' : ''}</div></details>`;
-}
-
-export function processingCapabilityNote(preference, capability, transportPreferences) {
-    if (preference && Array.isArray(transportPreferences) && !transportPreferences.includes(preference)) return `${processingLabel(preference)} processing is not advertised by this transport. Ordinary service remains available.`;
-    return preference && Array.isArray(capability?.modes) && !capability.modes.includes(preference)
-        ? `${processingLabel(preference)} is not advertised for this route. Ordinary service may be used; the model and effort stay the same.` : '';
 }
 
 /** Display only an existing execution receipt, keeping requested and observed separate. */
@@ -77,12 +76,35 @@ export function parseModelSource(value) {
             model: split < 0 ? '' : target.slice(split + 1) };
     }
     const split = raw.indexOf('::');
-    if (split < 0) return { source: 'openrouter', model: raw };
+    if (split < 0) return { source: DEFAULT_API_PROVIDER, model: raw };
     // A source is a provider kind, or `kind@name` for a key added under Accounts; `kind@default`
     // is the built-in key's long spelling (provider_models.parse_model_route canonicalizes it too).
-    const source = raw.slice(0, split);
-    return { source: source.endsWith('@default') ? source.slice(0, -'@default'.length) : source,
-        model: raw.slice(split + 2) };
+    const head = raw.slice(0, split);
+    const at = head.indexOf('@');
+    const kind = at < 0 ? head : head.slice(0, at);
+    // A head that names no known kind is NOT a connection: the runtime reads the whole spelling as one opaque
+    // OpenRouter id (provider_models.parse_model_route), so `vendor::family/model` is OpenRouter's model and
+    // never a `vendor` key. A known kind stays its own lane.
+    if (!API_PROVIDER_ORDER.includes(kind)) return { source: DEFAULT_API_PROVIDER, model: raw };
+    const name = at < 0 ? '' : head.slice(at + 1);
+    return { source: !name || name === 'default' ? kind : `${kind}@${name}`, model: raw.slice(split + 2) };
+}
+
+/**
+ * A catalog entry's exact identity: the `provider_id` and opaque `id` the catalog states (the wire shape of
+ * `gateway/models._build_model_catalog_entry`), else the legacy value read by the route grammar. The explicit pair
+ * is authoritative: an OpenRouter model whose id holds `::` is listed bare, and reparsing that value would name
+ * another connection's model. A subscription's entry names its source, not the engine; the local lane's entry
+ * names the local lane, never a provider.
+ */
+export function catalogEntryIdentity(entry) {
+    const provider = String(entry?.provider_id || '').trim();
+    const id = String(entry?.id || '').trim();
+    if (provider && id) {
+        if (provider === 'claudexor') return { source: `subscription:${String(entry?.source_id || '').trim()}`, model: id };
+        return { source: provider.endsWith('@default') ? provider.slice(0, -'@default'.length) : provider, model: id };
+    }
+    return parseModelSource(typeof entry === 'string' ? entry : String(entry?.value || entry?.id || ''));
 }
 
 export function composeModelSource(source, model) {
@@ -204,9 +226,11 @@ export function configuredApiProviders(settings = {}, providerProfiles = {}) {
  * draft `settings`, by the server's rule (provider_models.proposal_connection, server_runtime._proposal_connection;
  * #2969): the built-in key when it serves or no key of that provider does, else the only named one, else the named
  * key `main` already runs on. Before that choice they keep the shipped spelling, and `choice` lists the keys a Main
- * still on it waits for (Settings' `main_connection_choice`).
+ * still on it waits for (Settings' `main_connection_choice`). The defaults are those of the key a proposal lands on:
+ * `profileOf(kind, name)` names the profile its own choice selects (an OpenAI key on Responses), as
+ * provider_connections.direct_provider_defaults does on the server; '' keeps the kind's own.
  */
-export function connectionDefaults(modelDefaults, profile, settings = {}, providerProfiles = {}, main = '') {
+export function connectionDefaults(modelDefaults, profile, settings = {}, providerProfiles = {}, main = '', profileOf = () => '') {
     const keys = configuredApiProviders(settings, providerProfiles).map(({ id }) => id)
         .filter((id) => connectionParts(id).kind === profile);
     const names = keys.map((id) => connectionParts(id).name);
@@ -218,7 +242,8 @@ export function connectionDefaults(modelDefaults, profile, settings = {}, provid
         const { source, model } = parseModelSource(entry);
         return name && source === profile ? `${profile}@${name}::${model}` : entry;
     }).join(', ');
-    const defaults = modelDefaults[profile] || modelDefaults.openrouter || {};
+    const keyProfile = name === null ? '' : profileOf(profile, name);
+    const defaults = (keyProfile && modelDefaults[keyProfile]) || modelDefaults[profile] || modelDefaults.openrouter || {};
     return { defaults: Object.fromEntries(Object.entries(defaults).map(([slot, value]) => [slot, onKey(value)])),
         choice: name === null && own === profile ? keys : [] };
 }
@@ -304,6 +329,9 @@ export function routeModelFields(route, modelSources = [], { providerProfiles = 
     const provider = subscription ? '' : (parsed.source || DEFAULT_API_PROVIDER);
     return { source, sourceLabel: descriptor?.label || source, subscription,
         model: parsed.model,
+        // A local route's model carries the ` (local)` suffix (provider_models.parse_model_route); it is never an
+        // OpenRouter tariff or catalog request, whatever its bare spelling would otherwise parse to.
+        local: / \(local\)$/.test(parsed.model),
         provider, providerLabel: provider ? apiProviderLabel(provider, providerProfiles, connections) : '',
         harness: subscription ? String(descriptor?.credentialHarness || '') : '' };
 }
@@ -338,7 +366,10 @@ function routeCatalogItems(route, items = []) {
     const fields = routeModelFields(route);
     const pin = route?.credential_profile_id || route?.profile_id || '';
     const wanted = fields.subscription ? `subscription:${fields.source}` : fields.provider;
-    return items.filter((item) => (!wanted || parseModelSource(item?.value || item?.id || item).source === wanted)
+    // The Local row is a model with no route: `use_local` reaches it, never a spelling a route could store, so a
+    // route's chooser never offers it — whatever its value happens to parse to.
+    return items.filter((item) => !item?.use_local
+        && (!wanted || parseModelSource(item?.value || item?.id || item).source === wanted)
         && (!pin || !item?.credential_profile_id || item.credential_profile_id === pin));
 }
 
@@ -583,18 +614,29 @@ export function decodeRouteChoice(value, { apiKind = ROUTE_KIND_API_MODEL } = {}
         && raw.slice(API_CHOICE_PREFIX.length)) || DEFAULT_API_PROVIDER };
 }
 
-/** The chip text for a route's source: who serves it, in the owner's words. */
-export function sourceIdentityLabel(route, {
+/** The chip's parts, each named for the interface's i18n: the owner's name (`authored`) is the
+ *  only part a translation must never touch, and interface words (`static`) stay translatable.
+ *  The list head renders each part in its own element, so no separator fuses into a name. */
+export function sourceIdentityParts(route, {
     modelSources = [], providerProfiles = {}, harnesses = [], connections = [],
 } = {}) {
     if (route?.kind === ROUTE_KIND_AGENT_SESSION) {
         const { harness } = splitSessionTarget(route?.target_id);
         const descriptor = (harnesses || []).find((entry) => entry?.id === harness);
-        return `${descriptor?.display_name || harness} · agent`;
+        return [{ kind: 'authored', text: descriptor?.display_name || harness }, { kind: 'static', text: 'agent' }];
     }
     const fields = routeModelFields(route, modelSources, { providerProfiles, connections });
-    return fields.subscription ? `${fields.sourceLabel || fields.source} · model`
-        : `API · ${fields.providerLabel}`;
+    // A ` (local)` route is the local lane whatever head it was written with (provider_models.parse_model_route), so
+    // its chip names no API provider whose catalog or tariff it never touches.
+    if (fields.local) return [{ kind: 'static', text: 'Local' }, { kind: 'static', text: 'model' }];
+    return fields.subscription
+        ? [{ kind: 'authored', text: fields.sourceLabel || fields.source }, { kind: 'static', text: 'model' }]
+        : [{ kind: 'static', text: 'API' }, { kind: 'authored', text: fields.providerLabel }];
+}
+
+/** The chip text for a route's source: who serves it, in the owner's words. */
+export function sourceIdentityLabel(route, options = {}) {
+    return sourceIdentityParts(route, options).map(({ text }) => text).join(META_PART_SEPARATOR);
 }
 
 export function normalizeRouteSpec(route, {
@@ -651,7 +693,7 @@ function undiscoveredLabel(value, known) {
  */
 export function routeChoiceGroups({
     harnesses = [], modelSources = [], providers = [], connections = [], currentChoice = '',
-    catalogKnown = true, accountsKnown = true, includeSessions = true,
+    catalogKnown = true, sourcesKnown = catalogKnown, accountsKnown = true, includeSessions = true,
     includeSubscriptions = true, providerProfiles = {}, hasConfiguredAccounts = false,
 } = {}) {
     const sessionValues = (harnesses || [])
@@ -692,11 +734,11 @@ export function routeChoiceGroups({
     return [
         ...(includeSubscriptions ? [{ label: 'Subscriptions · models', options: modelValues.length
             ? modelValues
-            : [{ value: '', disabled: true, label: catalogKnown && accountsKnown
+            : [{ value: '', disabled: true, label: sourcesKnown && accountsKnown
                 ? (hasConfiguredAccounts
                     ? 'No model sources listed: press Read again in Models'
                     : 'No model sources listed: connect one in Accounts')
-                : catalogKnown ? 'No model sources listed; accounts have not been checked'
+                : sourcesKnown ? 'No model sources listed; accounts have not been checked'
                     : 'Model sources not read yet: press Read again in Models' }] }] : []),
         { label: 'API keys', options: apiValues },
         ...(includeSessions ? [sessionValues.length
@@ -748,7 +790,7 @@ export function accountScopedModelCatalog(harness, pin = '') {
     const error = gaps.map((account) => account.problem?.message || 'Account model list could not be read').join('; ')
         || ((!pin || !accounts.length) && envelope.partial ? 'Some account model lists could not be read' : '');
     return { ...harness, models: (harness.models || []).filter((item) => !pin || item.credential_profile_id === pin),
-        models_error: error };
+        models_error: harness.models_error || error };
 }
 
 export function harnessModelsKnown(harness, catalogKnown = true) {

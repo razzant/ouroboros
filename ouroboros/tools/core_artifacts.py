@@ -17,6 +17,7 @@ from ouroboros.delegate_reply import REPLY_TO_SCHEMA, validate_reply_target, rep
 from ouroboros.tools.arg_feedback import argument_refusal
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.utils import path_for_prose
 
 
 _MAX_PHOTO_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -38,8 +39,9 @@ def _delivery_path(ctx: ToolContext, file_path: str) -> tuple[Optional[pathlib.P
 
 def _file_not_found(ctx: ToolContext, file_path: str, fp: pathlib.Path) -> str:
     """A delivery miss; a relative request also names the workspace file it looked for."""
-    where = "" if pathlib.Path(file_path).expanduser().is_absolute() else f" (resolved: {fp})"
-    return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}{where}"))
+    where = "" if pathlib.Path(file_path).expanduser().is_absolute() else f" (resolved: {path_for_prose(str(fp))})"
+    text = f"⚠️ File not found: {path_for_prose(file_path)}{where}"
+    return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=text))
 
 
 def _detect_image_mime(data: bytes) -> str:
@@ -62,8 +64,7 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     if _photo_chat_id is None or _photo_chat_id == "":  # 0 is a real hidden session
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text="⚠️ No active chat — cannot send photo."))
 
-    actual_b64 = ""
-    mime = "image/png"
+    actual_b64, mime, name = "", "image/png", "image"  # name: what the receipt's show line calls it
 
     if file_path:
         fp, refusal = _delivery_path(ctx, file_path)
@@ -75,7 +76,7 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
             return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File too large ({fp.stat().st_size} bytes). Max: {_MAX_PHOTO_FILE_BYTES} bytes."))
         try:
             raw = fp.read_bytes()
-            mime = _detect_image_mime(raw)
+            mime, name = _detect_image_mime(raw), fp.name
             actual_b64 = base64.b64encode(raw).decode()
         except Exception as e:
             return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to read image file: {e}"))
@@ -83,7 +84,7 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
         if image_base64 == "__last_screenshot__":
             if not ctx.browser_state.last_screenshot_b64:
                 return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ No screenshot stored. Take one first with browse_page(output='screenshot')."))
-            actual_b64 = ctx.browser_state.last_screenshot_b64
+            actual_b64, name = ctx.browser_state.last_screenshot_b64, "last browser screenshot"
         else:
             actual_b64 = image_base64
     else:
@@ -92,7 +93,7 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     if not actual_b64 or len(actual_b64) < 100:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ Image data is empty or too short."))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, shown_material
     event = {
         "type": "send_photo",
         "chat_id": _photo_chat_id,
@@ -100,7 +101,8 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
         "mime": mime,
         "caption": caption or "",
     }
-    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "photo")
+    shown = [shown_material(name, b64=actual_b64)]
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "photo", shown)
 
 
 _MAX_VIDEO_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -141,7 +143,7 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     except Exception as e:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to read video file: {e}"))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, shown_material
     event = {
         "type": "send_video",
         "chat_id": chat_id,
@@ -149,7 +151,7 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
         "mime": mime,
         "caption": caption or "",
     }
-    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "video")
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "video", [shown_material(fp.name, raw)])
 
 
 _MAX_DOCUMENT_FILE_BYTES = 50 * 1024 * 1024  # 50 MB (Telegram bot sendDocument limit)
@@ -222,7 +224,9 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to capture file: {exc}"))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, shown_material
+    shown = [{"name": fp.name, "sha256": file_ref["sha256"], "size": file_ref["size"]} if file_ref
+             else shown_material(fp.name, b64=actual_b64)]  # captured bytes, else the inline copy the frame carries
     event = {
         "type": "send_document",
         "chat_id": chat_id,
@@ -234,7 +238,7 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
         "download_url_compat": compat_url,
         "file_ref": file_ref,
     }
-    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), f"file '{fp.name}'")
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), f"file '{path_for_prose(fp.name)}'", shown)
 
 
 _MAX_LINK_ACTIONS = 12
@@ -416,40 +420,35 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
     "description": (
         "Escalate one decision outside your authority, or one your human asked you to ask, to the nearest "
         "mind that holds it; within your authority, decide. A root task asks its human through a quiz card; a "
-        "subagent asks its parent through a typed mailbox frame, which the parent answers with forward_to_worker "
-        "or escalates higher verbatim. From Presence work answering a place conversation, the card goes privately to Main. "
-        "In a private place conversation with your human, briefly tell them through its connector what you asked and where "
-        "before any requested wait, so they can find the question. In a shared conversation, judge what is appropriate for that audience.\n\n"
-        "The card may be the only thing your human sees. It may be read later, outside "
-        "this room, by someone who remembers the purpose of the work without remembering "
-        "its mechanisms or your earlier discussion. Issue, specification and question "
-        "numbers, function names and reviewer names belong to your working context; they "
-        "are not shared context by themselves. The card carries the explanation needed to "
-        "understand this decision and its consequences.\n\n"
-        "The source of the fork belongs in that explanation, in ordinary prose: the human's "
-        "words, a document they supplied, your idea, or a helper's or reviewer's proposal. Human words "
-        "the fork rests on are quoted exactly when available; missing wording is disclosed, "
-        "and your paraphrase is identified as your interpretation. Your own proposal is a "
-        "distinct option, not an assumed premise of every option.\n\n"
-        "Offer 0-6 real alternatives for this decision: none for an open question the human "
-        "answers in their own words; with options, mark your recommendation with "
-        "recommended=true. A substantive position you or a helper set aside is one of them, "
-        "stated at its strongest with its cost and why you set it aside. "
-        "By default, state the assumption you continue under and keep "
-        "working; the card stays answerable and a late answer still arrives. Set "
-        "wait_for_answer=true on a live root, including an ordinary conversation, when the "
-        "next step is irreversible or costly to redo, or the work cannot go on without the answer; "
-        "your judgment decides. A requested wait begins after the current tool batch, without model "
-        "calls. Waiting questions in one batch share one wait, ending on the first incoming "
-        "message, not necessarily an owner answer. A plain-text clarification ends this "
-        "turn; a waited question keeps it alive. How many decisions to raise and when "
-        "remains your judgment. Unanswered questions remain available from Main after the "
-        "task ends. To explicitly retire a question, use action=close, quiz_id and a "
-        "non-empty reason; question_task_id may identify a recorded Continue or retry predecessor, "
-        "or another task that has already finished. Before you finish, close each of your own "
-        "unanswered questions whose answer would no longer change anything, saying why; leave the "
-        "rest open. Closing is your decision, never the human's approval. "
-        "Materials may name existing task artifacts needed for the decision."
+        "subagent asks its parent through a typed mailbox frame, answered with forward_to_worker or escalated "
+        "higher verbatim. From Presence work in a place conversation, the card goes privately to Main: in a "
+        "private one with your human, briefly tell them through its connector what you asked and where before any "
+        "requested wait, so they can find it; in a shared one, judge what suits that audience.\n\n"
+        "The card may be the only thing your human sees, possibly read later outside this room by someone who "
+        "remembers the work's purpose but not its mechanisms or your earlier discussion. Issue, specification and "
+        "question numbers, function and reviewer names are your working context, not shared context by "
+        "themselves. The card carries the explanation needed to understand this decision and its consequences.\n\n"
+        "That explanation names the fork's source in ordinary prose: the human's words, a document they "
+        "supplied, your idea, or a helper's or reviewer's proposal. Human words the fork rests on are quoted "
+        "exactly if available; missing wording is disclosed, and your paraphrase is marked as your "
+        "interpretation. Your own proposal is a distinct option, not a premise of every option.\n\n"
+        "Offer 0-6 real alternatives: none for an open question the human answers in their own words; with "
+        "options, mark your recommendation with recommended=true. A substantive position you or a helper set "
+        "aside is one of them, at its strongest, with its cost and why you set it aside. By default, state the "
+        "assumption you continue under and keep working. A card stays answerable, from Main after the task ends "
+        "too, and a late answer still arrives. Set wait_for_answer=true on a live root, including an ordinary "
+        "conversation, when the next step is irreversible or costly to redo, or the work cannot go on without the "
+        "answer; your judgment decides. A requested wait starts after this tool batch, without model calls; one "
+        "batch's waiting questions share it, ending on the first incoming message, not necessarily an owner "
+        "answer. A plain-text clarification ends this turn; a waited question keeps it alive. How many "
+        "decisions to raise and when remains your judgment. A decision whose cause other works share is framed at "
+        "that reach, naming whom it concerns. An applicable answer your human already gave, in view, needs no new "
+        "card; keep your open cards consistent with it. Another work's open card may already ask the same decision. "
+        "To retire a question, use action=close, quiz_id and a non-empty reason; question_task_id may name a "
+        "recorded Continue or retry predecessor, or another finished task. Before you finish, close each of your "
+        "own unanswered questions whose answer would no longer change anything, saying why; leave the rest open. "
+        "Closing is your decision, never the human's approval. Materials may name existing task artifacts the "
+        "decision needs."
     ),
     "parameters": {"type": "object", "properties": {
         "reply_to": REPLY_TO_SCHEMA,
@@ -864,7 +863,7 @@ def _escalate(
         return ("⚠️ ESCALATE_UNAVAILABLE: this task already has the maximum "
                 "number of unanswered owner questions open; proceed under your "
                 f"stated assumption: {payload['assumption']}")
-    from ouroboros.tools.owner_delivery import deliver_owner_event
+    from ouroboros.tools.owner_delivery import deliver_owner_event, show_record
 
     if asked.get("state") != "open":
         return f"OK: quiz {quiz_id} already {asked.get('state')}; no new question or wait was selected."
@@ -885,6 +884,8 @@ def _escalate(
         **({"wait_for_answer": True} if wait_for_answer else {}),
     })
     delivered = "accepted for delivery" if mode == "live" else "queued for delivery"
+    show = show_record(ctx, mode, [{**item, "name": item["label"]} for item in material_refs])  # as a send of them
+    show = f"\n{show}" if show else ""
     if wait_for_answer:
         bound = payload.get("max_wait_minutes")
         ctx._owner_wait_requested = quiz_id
@@ -905,11 +906,11 @@ def _escalate(
         return (f"OK: quiz {quiz_id} {delivered}; {limit}, "
                 "preserving its live browser and releasing active execution capacity. "
                 "Any incoming mail or an owner hurry request ends the wait; only an owner answer "
-                "answers the question. Other mail leaves the card open. Stop and task deadlines still apply.")
+                "answers the question. Other mail leaves the card open. Stop and task deadlines still apply." + show)
     return (f"OK: quiz {quiz_id} {delivered}; continuing under assumption: "
             f"{payload['assumption']}. The answer (if any) arrives as an owner "
             "quiz answer in a later round; the card stays answerable after this "
-            f"task ends — a later answer reaches this chat as an ordinary owner message.{ignored_bound}")
+            f"task ends — a later answer reaches this chat as an ordinary owner message.{ignored_bound}{show}")
 
 
 def _close_owner_question(ctx: ToolContext, quiz_id: str, reason: str, question_task_id: str) -> str:
@@ -942,7 +943,7 @@ def _close_owner_question(ctx: ToolContext, quiz_id: str, reason: str, question_
 
 
 def _question_materials(ctx: ToolContext, root: pathlib.Path, task_id: str, materials: Any) -> list:
-    """Retain explicitly named existing artifacts under this question author's custody."""
+    """Retain explicitly named existing artifacts under this question author's custody. ``label`` is display text: a POSIX name byte shows as its unquoted ``path_for_prose`` escape (distinct, since a backslash name is refused above); valid names, quote-leading included, stay as they are. Identity: the retained name, size and sha256."""
     if materials in (None, []):
         return []
     from types import SimpleNamespace
@@ -987,12 +988,12 @@ def _question_materials(ctx: ToolContext, root: pathlib.Path, task_id: str, mate
                        and pathlib.Path(str(item["path"])).name == name and any(
             pathlib.Path(str(item["path"])).resolve().parent == store for store in stores)), None)
         if not record or record.get("status") not in (None, "", "ready") or record.get("errors"):
-            raise ValueError(f"material {source_id}/{name} is not an available registered task artifact")
+            raise ValueError(f"material {source_id}/{path_for_prose(name)} is not an available registered task artifact")
         retained = copy_file_to_task_artifacts(SimpleNamespace(drive_root=root, task_id=task_id),
                                               record["path"], immutable=True, expected={key: record[key] for key in ("size", "sha256", "immutable") if key in record})
         if not retained:
-            raise ValueError(f"material {source_id}/{name} could not be retained")
-        selected.append({"task_id": task_id, "name": retained["name"], "label": name,
+            raise ValueError(f"material {source_id}/{path_for_prose(name)} could not be retained")
+        selected.append({"task_id": task_id, "name": retained["name"], "label": name.encode("utf-8", "backslashreplace").decode("utf-8"),
                          "size": retained["size"], "sha256": retained["sha256"],
                          "download_url": f"/api/tasks/{quote(task_id, safe='')}/artifacts/{quote(retained['name'], safe='')}"})
     return selected

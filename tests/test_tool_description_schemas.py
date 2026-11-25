@@ -56,15 +56,13 @@ def test_finish_gist_rule_reaches_every_real_tool_projection(tmp_path, dialect):
 # wording that now reaches that consumer.
 _SCHEDULE_TAIL = (
     "no child commits, grants itself tools or writes identity/scratchpad",
-    "Cyber-effective children inherit selected review/skill/runtime tools within explicit task restrictions",
-    "Nesting obeys configured depth/cap limits",
+    "Cyber-effective children inherit review/skill/runtime tools within task restrictions; nesting is capped",
     "Children scheduled in one round run concurrently",
     "each sibling started before the first responds pays a full prefix write",
     "Native children can address you, siblings or any task in their tree",
-    "need objective/constraints stating what is interim, whom to address and what ends participation",
-    "delegate_start(subagent_id=id, continue_from=run_id, prompt=''): new run, "
-    "same session if possible, else a new one with retained evidence",
-    "Retrieve the handoff with get_task_result, wait_task or wait_tasks before relying on it",
+    "state what is interim, whom to address and when to stop",
+    "Continue: delegate_start(subagent_id=id, continue_from=run_id, prompt=''); work may repeat",
+    "Read the handoff before relying on it",
 )
 
 
@@ -85,7 +83,7 @@ def test_schedule_readonly_choice_survives_custom_projection(tmp_path, constrain
     catalog = project_function_tools_to_openai_custom([schema])
     description = catalog.wire_tools()[0]["custom"]["description"]
     assert description.startswith(" ".join(function["description"].split()) + "\n")
-    assert "access='readonly' selects read-only session execution" in description
+    assert "access='readonly' selects read-only execution" in description
     assert "evidence-only private checking copy" in description
     for condition in _SCHEDULE_TAIL:
         assert condition in description, condition
@@ -137,13 +135,17 @@ _SQL_ONLY = "db, query, max_rows, snapshot and timeout_sec are op=sql only"
 # window stays distinguishable, PR1696 native task wait); before it c806a86311a0a965.
 # schedule_subagent: + memory_view (the fields a parent may widen a child's view by), #2924; its lead pays the
 # custom-tool budget again; before it 3d5b8e7b8e317503 / 2e04edea50ceb1b6.
+# delegate_wait: + sleep_mode (optional, in_slot|warm|cold: the task waits' choice), every profile; before it
+# 60ab2c0f421da812.
+# delegate_start and schedule_subagent: input_files also accepts git_range with nonempty base/head, its two
+# disjoint item shapes under anyOf.
 _STRUCTURE = {
     "query_data": {"full": "d7100565e686c951", "readonly": "d7100565e686c951", "acting": "d7100565e686c951"},
-    "delegate_start": {"full": "a2f6fdb7a8bf6822", "readonly": "e7dcf92431326bc5", "acting": "e7dcf92431326bc5"},
-    "delegate_wait": {"full": "60ab2c0f421da812", "readonly": "60ab2c0f421da812", "acting": "60ab2c0f421da812"},
+    "delegate_start": {"full": "c2326654b1c27628", "readonly": "3b1fa4fdb26740ea", "acting": "3b1fa4fdb26740ea"},
+    "delegate_wait": {"full": "a5b3b83441b79479", "readonly": "a5b3b83441b79479", "acting": "a5b3b83441b79479"},
     "wait_tasks": {"full": "50667317e4bef21f", "readonly": "50667317e4bef21f", "acting": "50667317e4bef21f"},
     # readonly prunes write_surface, write_root, protected_paths_grant and external_tool_grants.
-    "schedule_subagent": {"full": "f04afa9698352e6a", "readonly": "69f811a4b8ca2ba2", "acting": "f04afa9698352e6a"},
+    "schedule_subagent": {"full": "46fb645e7633c47e", "readonly": "423db7ac0f9ac81f", "acting": "46fb645e7633c47e"},
 }
 
 
@@ -247,20 +249,21 @@ def test_nano_selected_schedule_lead_stands_without_other_delegation_leads(subte
         with subtests.test(profile=profile):
             from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
             from ouroboros.tool_connections import connection_views
-            from ouroboros.tool_policy import NANO_SCHEMA_META_NAMES, initial_tool_schemas
+            from ouroboros.tool_policy import NANO_RESIDENT_SCHEMA_NAMES, initial_tool_schemas
 
             registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
             registry._ctx.task_constraint = _PROFILES[profile]
             schemas = initial_tool_schemas(registry, context_mode="nano", schema_names=["schedule_subagent"])
             names = {schema["function"]["name"] for schema in schemas}
-            assert "schedule_subagent" in names and names <= {"schedule_subagent", *NANO_SCHEMA_META_NAMES}, names
+            assert "schedule_subagent" in names and names <= {"schedule_subagent", *NANO_RESIDENT_SCHEMA_NAMES}, names
             function = next(schema["function"] for schema in schemas if schema["function"]["name"] == "schedule_subagent")
             custom = next(tool["custom"]["description"] for tool in project_function_tools_to_openai_custom(schemas).wire_tools()
                           if tool["custom"]["name"] == "schedule_subagent")
             assert custom.startswith(" ".join(function["description"].split()) + "\n")
-            for condition in (*_SCHEDULE_TAIL, "write_root, else the selected/inherited workspace_root, else one new Git tree",
-                              "Runtime data (installed skill payloads too) is never a write_surface",
-                              "access='readonly' selects read-only session execution", "evidence-only private checking copy"):
+            for condition in (*_SCHEDULE_TAIL, "write_root, else workspace_root, else one new Git tree",
+                              "Default native READ-ONLY children inspect", "write_surface makes a child ACTING: self_worktree",
+                              "Runtime data is never a write_surface",
+                              "access='readonly' selects read-only execution", "evidence-only private checking copy"):
                 assert condition in custom, condition
             system = " ".join((pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md")
                               .read_text(encoding="utf-8").split())

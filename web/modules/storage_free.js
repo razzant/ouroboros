@@ -12,6 +12,9 @@
 import { fmt } from './i18n.js';
 import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
 import { DOTS, formatBytes, isSize, number, plural, whenLabel } from './storage_format.js';
+import { payloadConfirmCopy, payloadFacts, payloadHtml, payloadKnown, payloadOf } from './storage_payloads.js';
+
+export { payloadConfirmCopy, payloadFacts, payloadOf };
 
 const text = escapeHtmlText;
 const attr = escapeHtmlAttr;
@@ -65,6 +68,12 @@ export const FREE_GROUPS = {
         stays: 'Subagent results nobody has applied or rejected yet.',
         saved: true,
     },
+    stored_payloads: {  // never a whole group: each proposal is chosen by hand (`storage_payloads.js`)
+        label: 'Heavy files of finished work',
+        loss: 'Exact files a finished task kept, proposed by the mind; reports, methods, results and history stay.',
+        unit: ['{n} proposal', '{count} proposals'],
+        saved: true,
+    },
 };
 
 /** The server's typed kept reasons in the owner's words. */
@@ -81,6 +90,7 @@ export const KEPT_REASONS = {
     owner_keep: 'you asked to keep it',
     changed: 'changed after the check',
     advanced_group: 'saved work: only its saved group can remove it',
+    payload_offer: 'heavy files proposed for your release',
     other: 'for another reason',
 };
 const ADVANCED = 'advanced_group';  // left out of the pool only because a saved group offers it
@@ -91,6 +101,7 @@ const KINDS = {
     working_copy: { label: 'Worktree', unit: ['{n} worktree', '{count} worktrees'] },
     environment: { label: 'Temporary environment', unit: ['{n} temporary environment', '{count} temporary environments'] },
     scratch: { label: 'Session scratch', unit: ['{n} session scratch folder', '{count} session scratch folders'] },
+    payload: { label: 'Stored files of finished work', unit: ['{n} proposal of stored files', '{count} proposals of stored files'] },
     other: { label: 'Other item', unit: ['{n} other item', '{count} other items'] },
 };
 const kindOf = (item) => KINDS[item?.kind] || KINDS.other;
@@ -143,6 +154,9 @@ export const CAUSES = {
     undeclared_environment: 'the environment has no recorded owner',
     task_result_unreadable: 'the task record could not be read', unread_mailbox_unreadable: 'the mailbox could not be read',
     parent_not_terminal: 'the parent task is not finished', owner_not_terminal: 'the owner task is not finished',
+    parent_decision_pending: 'its parent task has not decided on this result yet',
+    parent_unreadable: 'whether its parent task still needs it could not be established',
+    owner_unproven: 'its owning task could not be established',
     not_proven_over: 'the task is not proven over (running, paused or with a live process)',
     run_open: 'a run of the task has not finished', seat_open: 'a reviewer seat still holds it', seat_busy: 'the reviewer seat is busy',
     copy_registered: 'the copy is still registered', copy_present: 'the copy still exists',
@@ -155,6 +169,14 @@ export const CAUSES = {
     nothing_unsaved: 'nothing in it is unsaved any more', nested_repository: 'a repository inside it cannot be saved as a patch',
     commits_unprotected: 'its commits are not held by a branch', generation_closed: 'stopped by a restart',
     removal_failed: 'its removal failed', younger_than_retention: 'it is still inside the retention days',
+    lent_to_receiver: 'a queued or running work may still load it, or the queue could not be read', no_call_records: 'the work’s model-call records are missing',
+    finish_time_unknown: 'when the work ended is not recorded', packs_unknown: 'an evidence pack that may hold its bytes could not be read',
+    payload_changed: 'a proposed file changed after it was proposed', payload_missing: 'a proposed file is gone',
+    payload_shared: 'a proposed file has another name', payload_linked: 'a proposed file is reached through a link',
+    payload_not_regular: 'a proposed path is not a plain file', retained_changed: 'a file that was to stay changed or is gone',
+    release_partial: 'only part was released; the rest stays until a new choice', release_pending: 'released files are handed to deletion at the next maintenance pass',
+    retained_by_other_offer: 'another release keeps this file as its report, method or result', payload_protected: 'a proposed file is a protected record',
+    payload_unreadable: 'a proposed file could not be read', release_unexplained: 'its release found bytes it cannot explain: they are kept',
     source_recovery_pending: 'startup recovery is not confirmed complete: old task folders and service logs are kept',
     closed_set_unrecorded: 'closed log files waiting for the next app restart (no earlier run of the app saw them closed)',
     prior_workers_unconfirmed: 'closed log files waiting for the next app restart (the previous run’s background processes are not confirmed stopped)',
@@ -250,9 +272,9 @@ const blockedRows = (pool) => (Array.isArray(pool?.excluded) ? pool.excluded : [
 export const MANUAL_ROWS = 25;
 /** A row of `view=manual` the owner may choose: the server offers it by hand and says what would be lost. Anything
  *  else is shown but never chosen, so no id the server did not offer is ever sent. */
-export const manualKnown = (item) => item?.availability === 'manual_discard' && (item.manual?.producer_retained
+export const manualKnown = (item) => (payloadOf(item) ? payloadKnown(item) : item?.availability === 'manual_discard' && (item.manual?.producer_retained
     ? typeof item.manual.loss === 'string' && item.manual.loss.length > 0
-    : Number.isInteger(item.manual?.not_proven_saved_count) && isSize(item.manual.not_proven_saved_bytes));
+    : Number.isInteger(item.manual?.not_proven_saved_count) && isSize(item.manual.not_proven_saved_bytes)));
 
 /** What the by-hand form holds: finished copies not verified saved, session scratch its run marked to keep
  *  (`manual.producer_retained`), or both; each reads its own nouns, never a scratch called a copy. */
@@ -444,11 +466,16 @@ function excludedHtml(free, ui) {
         const qualified = !isSize(entry?.bytes) || entry.bytes_complete === false;
         return `<li class="storage-decision-row"><span class="storage-decision-label" data-i18n-fmt="storage.free.decision">${text(label)}<span class="storage-meta">${text(note)}</span></span><span class="storage-decision-size${qualified ? ' is-qualified' : ''}" data-i18n-fmt="storage.size">${text(sizeWords(entry))}</span>${action}</li>`;
     };
-    const copiesEntry = manual && { bytes: manual.bytes, bytes_complete: manual.bytes_complete };
-    const scratch = manual ? Math.min(manual.retained > 0 ? manual.retained : 0, manual.count) : 0;
-    const said = BY_HAND[holdsOf(manual ? manual.count - scratch : 0, scratch)];
-    const label = manual ? [manual.count > scratch ? copiesLine(manual.count - scratch) : '', scratch ? scratchLine(scratch) : ''].filter(Boolean).join(' · ') : '';
-    const copies = manual ? decisionRow(label, copiesEntry, button(said.choose, 'data-free-manual-open', 'btn-default', '', inert(heldFlow(ui))), fmt(said.note)) : '';
+    const proposals = manual ? Math.min(manual.payloads > 0 ? manual.payloads : 0, manual.count) : 0;  // their own row
+    const byHand = manual ? manual.count - proposals : 0;
+    const copiesEntry = byHand && { bytes: proposals ? null : manual.bytes, bytes_complete: !proposals && manual.bytes_complete };
+    const scratch = manual ? Math.min(manual.retained > 0 ? manual.retained : 0, byHand) : 0;
+    const said = BY_HAND[holdsOf(byHand - scratch, scratch)];
+    const label = byHand ? [byHand > scratch ? copiesLine(byHand - scratch) : '', scratch ? scratchLine(scratch) : ''].filter(Boolean).join(' · ') : '';
+    const copies = (byHand ? decisionRow(label, copiesEntry, button(said.choose, 'data-free-manual-open', 'btn-default', '', inert(heldFlow(ui))), fmt(said.note)) : '')
+        + (proposals ? decisionRow(plural(proposals, '{n} proposal to release heavy files of finished work', '{count} proposals to release heavy files of finished work'),
+            { bytes: byHand ? null : manual.bytes, bytes_complete: !byHand && manual.bytes_complete },
+            button('Choose files…', 'data-free-payload-open', 'btn-default', '', inert(heldFlow(ui))), fmt('Only if you choose; exactly the listed files go.')) : '');
     const groupsEntry = saved.length && { bytes: freeSum(free, new Set(saved.map((g) => g.id))), bytes_complete: sumComplete(free, new Set(saved.map((g) => g.id))) };
     const groups = saved.length ? decisionRow(fmt('Saved work in {groups}', { groups: plural(saved.length, '{n} group', '{count} groups') }), groupsEntry, button('Choose groups…', 'data-free-saved', 'btn-default', '', inert(heldFlow(ui))), fmt('Only if you choose; a whole group is deleted permanently.')) : '';
     const each = reasons.length ? `<h4 class="storage-free-sub">Each item left out</h4>
@@ -618,7 +645,7 @@ function manualRow(item, index, picked, held) {
 /** What is chosen by hand, over the whole list once it is read (rows not drawn count too): copies, folder size and the
  *  files not verified saved inside them. */
 export function manualFacts(list, picked) {
-    const rows = (list?.complete ? list.items : []).filter((item) => picked?.has(item.id) && manualKnown(item));
+    const rows = (list?.complete ? list.items : []).filter((item) => picked?.has(item.id) && !payloadOf(item) && manualKnown(item));
     const sized = rows.filter((row) => isSize(row.bytes));
     return {
         rows,
@@ -641,9 +668,10 @@ function manualHtml(free, ui) {
     const total = free.pool?.manual?.count || 0;
     const facts = manualFacts(list, picked);
     const held = heldFlow(ui);
-    const shown = list.items.slice(0, ui.manualShown || MANUAL_ROWS);
-    const more = list.items.length - shown.length;
-    const hiddenChosen = list.items.slice(shown.length).filter((item) => picked.has(item.id) && manualKnown(item)).length;
+    const entries = list.items.map((item, index) => [item, index]).filter(([item]) => !payloadOf(item));  // indices stay the list's
+    const shown = entries.slice(0, ui.manualShown || MANUAL_ROWS);
+    const more = entries.length - shown.length;
+    const hiddenChosen = entries.slice(shown.length).filter(([item]) => picked.has(item.id) && manualKnown(item)).length;
     const sum = facts.count ? `${plural(facts.count, '{n} chosen', '{count} chosen')} · ${countedWords(facts.bytes, facts.whole)}` : '';
     const status = listStatus(list, {
         reading: fmt('Reading the list · {done} of {total}', { done: number(list.items.length), total: number(total) }),
@@ -652,24 +680,29 @@ function manualHtml(free, ui) {
     });
     // The list is offered whole: a choice is made only on a list read to its last copy, never on a part of it.
     const body = list.complete ? `<div class="storage-free-picks">
-            <p class="storage-meta" data-i18n-fmt="storage.free.picked">${text(fmt('{chosen} of {total} chosen', { chosen: number(facts.count), total: number(list.items.length) }))}</p>
+            <p class="storage-meta" data-i18n-fmt="storage.free.picked">${text(fmt('{chosen} of {total} chosen', { chosen: number(facts.count), total: number(entries.length) }))}</p>
             ${facts.count ? button('Choose none', 'data-free-manual-none', 'btn-ghost', '', inert(held)) : ''}
         </div>
-        <ul class="storage-free-groups storage-free-list">${shown.map((item, index) => manualRow(item, index, picked, held)).join('')}</ul>
+        <ul class="storage-free-groups storage-free-list">${shown.map(([item, index]) => manualRow(item, index, picked, held)).join('')}</ul>
         ${more > 0 ? `<p class="storage-meta" data-i18n-fmt="storage.free.shown">${text(hiddenChosen
-        ? fmt('Showing {shown} of {total}. The {hidden} not shown keep their choice: {chosen} chosen, and Discard takes those too.', { shown: number(shown.length), total: number(list.items.length), hidden: number(more), chosen: number(hiddenChosen) })
-        : fmt('Showing {shown} of {total}. The {hidden} not shown keep their choice: none chosen.', { shown: number(shown.length), total: number(list.items.length), hidden: number(more) }))}</p>
+        ? fmt('Showing {shown} of {total}. The {hidden} not shown keep their choice: {chosen} chosen, and Discard takes those too.', { shown: number(shown.length), total: number(entries.length), hidden: number(more), chosen: number(hiddenChosen) })
+        : fmt('Showing {shown} of {total}. The {hidden} not shown keep their choice: none chosen.', { shown: number(shown.length), total: number(entries.length), hidden: number(more) }))}</p>
             ${button(fmt('Show {n} more', { n: number(Math.min(more, MANUAL_ROWS)) }), 'data-free-more-manual', 'btn-ghost', 'storage.free.more.manual')}` : ''}` : '';
-    const go = ui.postUnknown ? (ui.confirming ? '<span class="storage-meta">Checking what happened…</span>' : button('Check again', 'data-free-preview'))
+    // One flow for both by-hand screens: a lost or refused answer, the send in flight, the list still read, then the choice.
+    const goWith = (send) => (ui.postUnknown ? (ui.confirming ? '<span class="storage-meta">Checking what happened…</span>' : button('Check again', 'data-free-preview'))
         : ui.outdated ? button('Check again', 'data-free-preview')
             : ui.sending ? button('Sending…', 'data-free-manual-go', 'btn-danger', '', inert(true))
                 : list.error ? ''
                     : !list.complete ? button('Reading the list…', 'data-free-manual-go', 'btn-default', '', ' aria-disabled="true"')
-                        : facts.count ? button(discardLabel(facts), 'data-free-manual-go', 'btn-danger', 'storage.free.manual.go')
-                            : '<span class="storage-meta">Nothing selected</span>';
+                        : send || '<span class="storage-meta">Nothing selected</span>');
+    const go = goWith(facts.count ? button(discardLabel(facts), 'data-free-manual-go', 'btn-danger', 'storage.free.manual.go') : '');
     const back = ui.postUnknown ? '' : button('Back', 'data-free-manual-back', 'btn-default', '', inert(ui.sending));
+    if (ui.manualKind === 'payload') {  // the proposals' own screen, built from this form's pieces
+        return payloadHtml(free, { ...ui, manual: list }, { held, button, inert, sizeCell, head: headHtml, attempt: attemptHtml(ui), back,
+            status: ui.outdated || ui.postUnknown ? '' : status, go: goWith });
+    }
     const scratch = list.complete ? list.items.filter(retainedOf).length : Math.min(free.pool?.manual?.retained || 0, total);
-    const holds = holdsOf((list.complete ? list.items.length : total) - scratch, scratch);
+    const holds = holdsOf((list.complete ? entries.length : total - (free.pool?.manual?.payloads || 0)) - scratch, scratch);
     const copyText = holds === 'scratch' ? '' : `<p class="storage-tray-text">Finished work copies the app’s own cleanup leaves alone, because some files in them are not verified saved. Nothing here starts chosen.</p>
         <p class="ui-status storage-status" data-tone="warn">Discarding a copy deletes its whole folder, not only the files listed. What is not verified saved can be lost for good. Task results, history and commits on a branch that stays are kept.</p>`;
     const scratchText = holds === 'copies' ? '' : `<p class="storage-tray-text">Session scratch its run marked as evidence to keep; the app keeps it until you discard it. Nothing here starts chosen.</p>

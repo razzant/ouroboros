@@ -38,13 +38,14 @@ install = install_fixture
 from ouroboros import config as cfg
 from ouroboros import review_pool_migration as m
 from ouroboros.provider_models import ANTHROPIC_DIRECT_DEFAULTS, OPENAI_DIRECT_DEFAULTS
-from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS, SETTINGS_DEFAULTS
+from ouroboros.settings_defaults import OPENROUTER_HELPER_DEFAULTS, OPENROUTER_REVIEW_DEFAULTS, SETTINGS_DEFAULTS
 
 SUBAGENTS = "OUROBOROS_SUBAGENTS"
 SLOTS = ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS")
 ANTHROPIC = (ANTHROPIC_DIRECT_DEFAULTS["main"], ANTHROPIC_DIRECT_DEFAULTS["light"], ANTHROPIC_DIRECT_DEFAULTS["fallback"])
 OPENAI = (OPENAI_DIRECT_DEFAULTS["main"], OPENAI_DIRECT_DEFAULTS["light"], OPENAI_DIRECT_DEFAULTS["fallback"])
 SHIPPED = tuple(SETTINGS_DEFAULTS[key] for key in SLOTS)
+ROUTER_HELPERS = [model for _row_id, model, _use in OPENROUTER_HELPER_DEFAULTS]  # beside a reachable OpenRouter
 
 
 def _write(path, document):
@@ -471,6 +472,7 @@ def test_a_never_configured_install_gets_the_wizards_auto_helpers_beside_unchang
 ], ids=["explicit-empty", "delegation-off", "saved-former-three-main-rows"])
 def test_an_owner_catalog_is_never_repopulated(install, monkeypatch, stored):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")  # nor do the router's helpers join a saved catalog
     _write(install, {SUBAGENTS: json.dumps(stored)})
     assert json.loads(cfg.load_settings()[SUBAGENTS]) == stored
 
@@ -593,6 +595,24 @@ def test_a_missing_preferred_generation_is_a_typed_refusal_never_the_previous_on
     assert preset.refusal.code == "model_not_in_discovery" and preset.refusal.candidates == ("claude-opus-5-5",)
 
 
+def test_the_zero_key_preset_replaces_only_todays_shipped_main_never_a_saved_former_one():
+    """The session catalog's default stands in only for a Main equal to the CURRENT shipped id without its key
+    (``compile_model_settings``). A Main saved under an earlier release (Gemini 3.8 Flash, before Hydrogen) is
+    the owner's value like any other: kept, honestly without access, never reset from a table of former defaults."""
+    from ouroboros.subscription_install_presets import HarnessDiscovery, compile_install_preset
+
+    catalog = [{"value": "claudexor::codex=gpt-5.6-sol", "is_default": True, "input_modalities": ["text"]}]
+    discovery = [HarnessDiscovery("codex", INSTALLED_CODEX)]
+    former = {**SETTINGS_DEFAULTS, "OUROBOROS_MODEL": "google/gemini-3.8-flash"}
+    assert former["OUROBOROS_MODEL"] != SETTINGS_DEFAULTS["OUROBOROS_MODEL"]
+    kept = compile_install_preset(discovery, settings=former, model_catalog=catalog)
+    assert kept.ok, kept.refusal
+    assert kept.model_settings == {}
+    fresh = compile_install_preset(discovery, settings=dict(SETTINGS_DEFAULTS), model_catalog=catalog)
+    assert fresh.ok, fresh.refusal
+    assert fresh.model_settings["OUROBOROS_MODEL"] == "claudexor::codex=gpt-5.6-sol"
+
+
 # --- 4A: the wizard and the Colab bootstrap ----------------------------------------------
 
 
@@ -637,8 +657,8 @@ def _catalog_fetch(settings, monkeypatch):
         return []
 
     monkeypatch.setattr(gw_models, "_fetch_openai_compatible_model_catalog", fetch)
-    for name, spec in gw_models._provider_specs(dict(settings)):
-        if name == "openai-compatible":
+    for source, spec in gw_models._provider_specs(dict(settings)):
+        if source["id"] == "openai-compatible":
             asyncio.run(spec(None))
     return [(key, base) for provider, key, base in sent if provider == "openai-compatible"]
 
@@ -799,7 +819,7 @@ def test_a_session_keeps_its_light_companion_and_a_reachable_main_its_helpers():
     blank = {**SETTINGS_DEFAULTS, "OPENROUTER_API_KEY": "sk-or-present-key", "OUROBOROS_MODEL": "",
              "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_SUBAGENT_HARNESS": "codex=gpt-5.6-sol"}
     resolution, _diagnostics = resolve_settings_subagent_candidate(blank)
-    assert [row.route.target_id for row in resolution.config.items] == ["codex=gpt-5.6-sol", SHIPPED[0]]
+    assert [row.route.target_id for row in resolution.config.items] == ["codex=gpt-5.6-sol", SHIPPED[0], *ROUTER_HELPERS]
 
 
 # 2A: a saved blank Main is the owner's value — kept by GET, unrelated saves and reloads.
@@ -946,6 +966,7 @@ def test_the_wizards_scout_keeps_its_own_lights_binding(install, monkeypatch):
 # and the wizard's preview builds the very helpers the headless catalog does.
 
 MANAGED = "claudexor::codex=gpt-5.6-sol"
+ON_ROUTER = {row_id: {"route": {"kind": "api_model", "target_id": model}} for row_id, model, _use in OPENROUTER_HELPER_DEFAULTS}
 
 
 def _helpers(items):
@@ -963,11 +984,11 @@ def _on(pin="", processing=""):
 
 @pytest.mark.parametrize("difference, expected", [
     ({"OUROBOROS_MODEL_ACCOUNTS": {"main": "account-a", "light": "account-b"}},
-     {"primary-builder": _on("account-a"), "fast-scout": _on("account-b")}),
+     {"primary-builder": _on("account-a"), "fast-scout": _on("account-b"), **ON_ROUTER}),
     ({"OUROBOROS_MODEL_PROCESSING_PREFERENCES": {"light": "fast"}},
-     {"primary-builder": _on(), "fast-scout": _on(processing="fast")}),
+     {"primary-builder": _on(), "fast-scout": _on(processing="fast"), **ON_ROUTER}),
     ({"OUROBOROS_MODEL_ACCOUNTS": {"main": "account-a", "light": "account-a"}},
-     {"primary-builder": _on("account-a")}),
+     {"primary-builder": _on("account-a"), **ON_ROUTER}),
 ], ids=["other-account", "other-processing", "same-binding"])
 def test_a_light_on_mains_model_is_a_second_helper_only_when_its_binding_differs(install, difference, expected):
     from ouroboros.gateway import onboarding as gw_onboarding
@@ -994,4 +1015,4 @@ def test_the_settings_draft_keeps_the_compiled_helpers_without_an_unpinned_twin(
                 "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {"light": "fast"}}
     resolution, _diagnostics = resolve_settings_subagent_candidate(settings)
     assert _helpers(configured_subagents_dict(resolution.config)["items"]) == {
-        "primary-builder": _on("account-a"), "fast-scout": _on("account-b", "fast")}
+        "primary-builder": _on("account-a"), "fast-scout": _on("account-b", "fast"), **ON_ROUTER}

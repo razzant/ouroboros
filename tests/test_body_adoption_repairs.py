@@ -373,6 +373,27 @@ def test_transfer_waits_for_the_previous_owners_processes(body, monkeypatch):
     assert moved["task_id"] == "root-second" and moved["owners"] == ["root-first", "root-second"]
 
 
+def test_transfer_hold_with_positive_and_gap_names_addresses_and_unknown_without_transferring(body, monkeypatch):
+    """#3176: a held transfer with both record addresses and a -1 gap refuses truthfully and changes nothing."""
+    serving, data = body
+    first = make_ctx(serving, data, "root-held")
+    body_candidate.prepare(first)
+    row = body_candidate.find("root-held")
+    monkeypatch.setattr(body_candidate, "_recorded_terminal", lambda task_id, root: True)
+    monkeypatch.setattr(body_candidate, "live_lineage_processes", lambda root, task_id: [4242, -1])
+    second = make_ctx(serving, data, "root-holder")
+    with pytest.raises(body_candidate.CandidateRefused) as refused:
+        body_candidate._transfer(second, row, "root-holder", via="test")
+    refused_text = refused.value.text
+    assert refused.value.code == "CANDIDATE_OWNER_PROCESSES_LIVE"
+    assert "4242" in refused_text and "not proof of a live process" in refused_text
+    assert "-1" not in refused_text  # the gap is told as unreadable state, never printed as a pid
+    assert "could not be read" in refused_text
+    assert "do not clean or write into the candidate's folder" in refused_text
+    kept = body_candidate.find("root-held")
+    assert kept["task_id"] == "root-held" and kept["owners"] == ["root-held"], "the hold changed nothing"
+
+
 def test_live_lineage_processes_reads_the_ownership_set_and_treats_unreadable_as_live(body, monkeypatch):
     serving, data = body
     records = [{"host_pid": 11, "owner_task": "root-a", "ledger_entry": {"pid": 11}},
@@ -620,3 +641,118 @@ def test_retry_kept_service_retains_original_candidate(body, monkeypatch):
     assert body_candidate.live_lineage_processes(data, "original-owner") == []
     assert body_candidate.retention_verdict(
         body_candidate.find("original-owner"), expired=True, data_dir=data)["remove"]
+
+
+# --------------------------------------------------------------------------- #
+# Switch-path hashing rides argv chunks: no stdin stream can stall the boot (#3557)
+# --------------------------------------------------------------------------- #
+def test_bootstrap_states_hash_regular_files_through_argv_chunks(body, monkeypatch):
+    import hashlib
+    import os
+
+    serving, _data = body
+    root = str(serving)
+    # `text eol=crlf` is a clean filter: an untouched CRLF file still reads as its LF blob.
+    (serving / ".gitattributes").write_text("*.crlf text eol=crlf\n", encoding="utf-8")
+    special = ["-leading-dash.crlf", "space name.crlf", "café.crlf"]
+    if os.name != "nt":
+        special += ["tab\tname.crlf", "line\nname.crlf"]
+    names = special + ["bulk-%03d.txt" % index for index in range(body_switch._CHUNK + 1 - len(special))]
+    blobs = {name: b"%d\nline\n" % index for index, name in enumerate(names)}  # what Git stores
+    for name, blob in blobs.items():
+        (serving / name).write_bytes(blob.replace(b"\n", b"\r\n") if name.endswith(".crlf") else blob)
+    real_run, calls = body_switch.subprocess.run, []
+
+    def run(cmd, **kwargs):
+        if cmd[1:2] == ["hash-object"]:
+            calls.append((cmd[2:], kwargs.get("input")))
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(body_switch.subprocess, "run", run)
+    tracked = body_switch._tracks_filemode(root)
+    states = body_switch._states(root, [{"path": name} for name in names], tracked)
+    head, tail = names[:body_switch._CHUNK], names[body_switch._CHUNK:]
+    # A batch holding a newline in a name keeps its old window: one call, one timeout, per file.
+    per_file = any("\n" in name for name in head)
+    expected = [["--", name] for name in head] if per_file else [["--", *head]]
+    assert calls == [(argv, None) for argv in expected + [["--", *tail]]]
+    kind = body_switch._file_mode("100644", tracked)
+    assert states == {name: (hashlib.sha1(b"blob %d\0" % len(blob) + blob).hexdigest(), kind)
+                      for name, blob in blobs.items()}
+
+
+def test_bootstrap_states_argv_never_spans_two_row_groups(monkeypatch):
+    """Existing long paths alternate with absent short ones. Packing the existing ones together
+    would pass Windows' 32767-character command line, which the row groups of ``_dirty`` and
+    ``_index_states`` stay far below; each hash argv is a subset of one such group, in order."""
+    import hashlib
+    import os
+    import stat
+    import subprocess
+
+    root = os.path.join(os.sep, "body-switch-row-groups")  # never touched: lstat and Git are fakes
+    rows = [{"path": ("long-%03d-" % index).ljust(180, "x") if index % 2 == 0
+             else ("gone-%03d-" % index).ljust(20, "y")} for index in range(2 * body_switch._CHUNK)]
+    existing = {row["path"] for row in rows[::2]}
+    real_lstat, calls = os.lstat, []
+
+    def lstat(path, *args, **kwargs):
+        if not str(path).startswith(root + os.sep):
+            return real_lstat(path, *args, **kwargs)
+        if str(path)[len(root) + 1:] in existing:
+            return os.stat_result((stat.S_IFREG | 0o644,) + (0,) * 9)
+        raise FileNotFoundError(path)
+
+    def run(cmd, **kwargs):
+        assert cmd[1:3] == ["hash-object", "--"] and kwargs.get("input") is None
+        calls.append(cmd[3:])
+        out = "".join(hashlib.sha1(path.encode()).hexdigest() + "\n" for path in cmd[3:])
+        return subprocess.CompletedProcess(cmd, 0, out.encode(), b"")
+
+    monkeypatch.setattr(body_switch.os, "lstat", lstat)
+    monkeypatch.setattr(body_switch.subprocess, "run", run)
+    states = body_switch._states(root, rows, True)
+    limit = 32767
+    groups = [[row["path"] for row in rows[start:start + body_switch._CHUNK]]
+              for start in range(0, len(rows), body_switch._CHUNK)]
+    packed = subprocess.list2cmdline(["git", "hash-object", "--", *[row["path"] for row in rows[::2]]])
+    status = [subprocess.list2cmdline(["git", "status", "--porcelain", "--untracked-files=all", "--", *group])
+              for group in groups]
+    assert max(map(len, status)) < limit < len(packed), "the fixture must separate the two shapes"
+    assert calls == [[path for path in group if path in existing] for group in groups]
+    assert all(len(subprocess.list2cmdline(["git", "hash-object", "--", *argv])) < limit for argv in calls)
+    assert states == {row["path"]: (hashlib.sha1(row["path"].encode()).hexdigest(), "100644")
+                      if row["path"] in existing else (None, None) for row in rows}
+
+
+def test_bootstrap_dependency_failure_returns_the_tree_with_argv_hashes(body, monkeypatch):
+    import subprocess
+
+    serving, data = body
+    ctx = make_ctx(serving, data, "root-deps-argv")
+    body_candidate.prepare(ctx)
+    cand = rich_commit(ctx.repo_dir)
+    body_candidate.record_reviewed_commit(ctx, cand)
+    handoff = _armed(serving, data, ctx, cand)
+    root, helper = str(serving), str(body_adoption.helper_dir(data))
+    handoff["deps_command"] = ["test-dependency-sync"]
+    monkeypatch.delenv("OUROBOROS_MANAGED_BY_LAUNCHER", raising=False)
+    real_run, hashed = subprocess.run, []
+
+    def run(cmd, **kwargs):
+        if cmd == handoff["deps_command"]:
+            assert git(serving, "rev-parse", "HEAD") == cand
+            return subprocess.CompletedProcess(cmd, 7)
+        if cmd[1:2] == ["hash-object"]:
+            hashed.append((cmd[2], kwargs.get("input")))
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(body_switch.subprocess, "run", run)
+    monkeypatch.setattr(body_switch, "_handover", lambda: pytest.fail("started on old tree; no handover"))
+    body_switch._switch(root, helper, handoff)
+    assert git(serving, "rev-parse", "HEAD") == handoff["old"]
+    assert git(serving, "status", "--porcelain") == ""
+    assert len(hashed) >= 2 and set(hashed) == {("--", None)}, "the switch and its return both hash by argv"
+    saved = body_adoption.read(data)
+    assert saved["phase"] == "abandoned" and saved["interpreter_state"] == "may_have_changed"
+    assert saved["events"][-1]["detail"] == "dependency_sync_failed:rc=7"

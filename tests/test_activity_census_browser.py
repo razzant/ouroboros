@@ -151,16 +151,17 @@ while True:
 # then ended. Its services stay, orphaned, in the server's custody; it writes the tasks' records first.
 _KEPT_PRODUCER = r'''
 import json, os, pathlib, subprocess, sys
+from ouroboros.launch_custody import open_local_service_log
 from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, SCOPE_VALUE, mint_marker
 from ouroboros.process_custody import spawn_supervised
 from ouroboros.task_results import write_task_result
 data, server, ports = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
 for task_id, name, title in json.loads(sys.argv[4]):
     write_task_result(data, task_id, "completed", title=title)
-    log = data / "services" / task_id / f"{name}.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
     marker = mint_marker(LAUNCH_SCOPE_PREFIX)
-    with log.open("ab") as handle:
+    # A kept launch writes its own log, as the services tool opens it (#3949): a bare `<name>.log` is no launch's.
+    _log, handle = open_local_service_log(data, task_id, name, marker, keep_alive=True)
+    with handle:
         spawn_supervised([sys.executable, server, str(ports / name)], drive_root=data, purpose=f"service:{name}",
                          scope="session", owner_task_id=task_id, scope_marker=marker,
                          env={**os.environ, marker: SCOPE_VALUE}, stdout=handle, stderr=subprocess.STDOUT,
@@ -285,7 +286,9 @@ def test_activity_background_shows_kept_services_after_their_producer_ended_and_
                 page.locator(f'[data-kept-service="{preview["launch_id"]}"]').wait_for(state="detached")
                 page.screenshot(path=str(evidence / f"{engine_name}-dark-1100x750-after-stop.png"))
                 assert not _answers(identities["preview"][0]) and _answers(identities[long_name][0])
-                assert (data / "services" / "task-preview" / "preview.log").exists(), "its log is kept"
+                # Its own launch's log (#3949: `<name>.~<launch>.log`), named by the listing, stays.
+                assert Path(preview["log_path"]).parent == data / "services" / "task-preview", preview
+                assert Path(preview["log_path"]).exists(), "its log is kept"
                 (evidence / "kept-stop-receipt.json").write_text(json.dumps({"request": request, "receipt": receipt},
                                                                            indent=2), encoding="utf-8")
                 # A synthetic owed declaration exercises the real inventory and rendered recovery state;
@@ -306,7 +309,13 @@ def test_activity_background_shows_kept_services_after_their_producer_ended_and_
                 dialog = page.get_by_role("dialog")
                 assert "rechecks it, stops any remaining processes" in dialog.inner_text()
                 page.screenshot(path=str(evidence / f"{engine_name}-dark-1100x750-capture-confirm.png"))
-                dialog.get_by_role("button", name="Cancel", exact=True).click()
+                # Cancel ends the row's action, and every Activity action ends with a refresh that renders the rows
+                # anew (activity.js, the click handler's `finally`). A row resolved before that render is detached
+                # by it, so the narrow frame waits for the render before it scrolls to the row (#3615).
+                with page.expect_response(lambda r: r.request.method == "GET"
+                                          and r.url.split("?")[0].endswith("/api/services/kept")):
+                    dialog.get_by_role("button", name="Cancel", exact=True).click()
+                page.locator('[data-activity-section="background"]:not([aria-busy])').wait_for()
                 page.set_viewport_size({"width": 390, "height": 844})
                 owed.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / f"{engine_name}-dark-390x844-capture-owed.png"))

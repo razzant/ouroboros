@@ -104,6 +104,36 @@ def test_a_rejoin_reuses_the_copy_as_the_reviewer_left_it(author, tmp_path):
     assert (area / "fixture.txt").read_text() == "reviewer work\n"
 
 
+def test_only_the_attempt_that_made_a_copy_retires_it_unsent(author, tmp_path):
+    """``allocation`` is the maker's proof (operation, capture generation, ``allocated_by``): a rejoin or a handoff to
+    an explicit successor revokes it, a remade copy has its own, an empty or partial one proves nothing, and a copy
+    that could not be made names none."""
+    from ouroboros.review_continuation import transfer_checking_copy
+
+    data = tmp_path / "data"
+    source = rc.freeze_checking_source(author, data_root=data, subject=rc.SUBJECT_INDEX)
+    made, rejoined = {}, {}
+    area = pathlib.Path(rc.prepare_seat_area(data, "task", "op-1", source, allocation=made))
+    assert made == {"operation_id": "op-1", "capture_id": "", "allocated_by": made["allocated_by"]} and made["allocated_by"]
+    assert rc.prepare_seat_area(data, "task", "op-1", source, allocation=rejoined) == str(area) and rejoined == {}
+    for unsent in (made, {**made, "allocated_by": ""}, {}):
+        assert rc.terminal_seat_evidence(data, "task", "op-1", None, unsent=unsent) == {} and area.is_dir()
+    assert rc.capture_seat_evidence(data, "task", "op-1")["status"] == "retained" and not area.exists()
+    again = {}
+    assert rc.prepare_seat_area(data, "task", "op-1", source, allocation=again) == str(area)
+    assert again["capture_id"] and again["capture_id"] != made["capture_id"]  # a new generation, a new maker
+    assert rc.terminal_seat_evidence(data, "task", "op-1", None, unsent={**again, "capture_id": ""}) == {}
+    transfer_checking_copy(data, "task", "op-1", "op-2")  # the copy now belongs to an explicit successor
+    assert rc.terminal_seat_evidence(data, "task", "op-1", None, unsent=again).get("status") == "capture_failed"
+    assert rc.terminal_seat_evidence(data, "task", "op-2", None, unsent=again) == {} and area.is_dir()
+    for view in source["evidence_views"].values():
+        shutil.rmtree(view)  # no longer retained: the next copy cannot be made
+    failed = {}
+    with pytest.raises(rc.CheckingAreaUnavailable, match="no longer retained"):
+        rc.prepare_seat_area(data, "task", "op-3", source, allocation=failed)
+    assert failed == {}
+
+
 def test_terminal_evidence_keeps_patch_named_files_and_ignored_listing_then_releases(author, tmp_path):
     data = tmp_path / "data"
     source = rc.freeze_checking_source(author, data_root=data, subject=rc.SUBJECT_INDEX)
@@ -440,3 +470,41 @@ def test_named_evidence_stays_a_stream_because_a_clone_would_be_refused_compress
     assert artifact_storage._may_share(retained) is False
     assert artifact_storage.compression_outcome(retained) == "compressed"
     assert retained.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_git_checking_delta_obeys_same_settings_floor(author, tmp_path, monkeypatch, configured):
+    from ouroboros import config, review_checking as rc
+
+    settings = {"MCP_SERVERS": [{"headers": {"Accept": "application/json",
+                                            "Authorization": "Bearer sample-fixture-value"}}]}
+    monkeypatch.setattr(config, "load_settings", lambda **kw: settings if configured else {})
+    data = tmp_path / "data"
+    copied = json.dumps(settings, indent=2).encode()  # the settings file's own bytes: a secret beside its name
+    (author / "former-output").write_bytes(copied)
+    _git(author, "add", "former-output")
+    source = rc.freeze_checking_source(author, data_root=data, subject=rc.SUBJECT_INDEX)
+    area = pathlib.Path(rc.prepare_seat_area(data, "task", "op-1", source))
+    (area / "former-output").unlink()
+    (area / "report.txt").write_text("sample result application/json, token sample-fixture-value", encoding="utf-8")
+    (area / "renamed.json").write_bytes(b"x" * ((1 << 20) - 4) + copied)
+    cache = area / "__pycache__"
+    cache.mkdir()
+    (cache / "byproduct.pyc").write_bytes(b"unused cache")
+    readers = []
+    popen = subprocess.Popen
+
+    def observe(argv, *args, **kwargs):
+        if "cat-file" in argv and ("--batch" in argv or "blob" in argv):
+            readers.append(argv[argv.index("cat-file") + 1])
+        return popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", observe)
+    receipt = rc.capture_seat_evidence(data, "task", "op-1")
+    patch = (pathlib.Path(receipt["evidence_dir"]) / "delta.patch").read_bytes()
+    assert readers == (["--batch"] if configured else [])
+    assert {g["path"] for g in receipt["gaps"] if g.get("reason") == "installation_settings" and g["size"]} == (
+        {"renamed.json", "former-output"} if configured else set())
+    assert b"sample result application/json, token sample-fixture-value" in patch  # a mention is evidence
+    assert (b'"Authorization": "Bearer sample-fixture-value"' in patch) != configured
+    assert b"byproduct.pyc" not in patch

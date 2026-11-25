@@ -4,13 +4,14 @@
 // comes from the card at once; the body reads the source's full entry and says
 // so while it does. Close, Escape and the backdrop return focus to the opener.
 import { bindDialogFocus } from './ui_interactions.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { mountConnectorPlaces } from './connector_places.js';
 import { reviewSentence } from './skill_card_renderer.js';
 import {
-    catalogWhoHtml, connectsServices, displayAddress, externalLinkHtml, officialMarkHtml, permissionWords, popularityText,
-    relativeAge, repoLabel, routeExternalLink, skillTitle, versionText,
+    catalogWhoHtml, connectsServices, declaredPermissionWords, displayAddress, externalLinkHtml, officialMarkHtml, permissionWords, popularityText,
+    relativeAge, repoLabel, routeExternalLink, skillTitle, trustSentence, versionText,
 } from './skill_presentation.js';
 
 function section(title, html) {
@@ -18,14 +19,6 @@ function section(title, html) {
 }
 
 const note = (html) => (html ? `<p class="skills-sheet-note">${html}</p>` : '');
-
-/** The one review sentence for a skill seen from the sheet (installed facts win). */
-function sheetReviewSentence(item, installed, source) {
-    if (installed) return reviewSentence(installed);
-    if (source?.kind === 'builtin') return 'Comes with the app and updates with Ouroboros.';
-    if (source?.trust === 'trusted') return `Installs without review: you trust ${source.name}.`;
-    return 'Ouroboros will review it on this computer before it runs. You can skip the review.';
-}
 
 function versionsHtml(detail, item, installed) {
     const rows = Array.isArray(detail?.versions) && detail.versions.length
@@ -38,14 +31,16 @@ function versionsHtml(detail, item, installed) {
     return lines.length ? `<p>${lines.join('<br>')}</p>` : '';
 }
 
-function usesHtml(detail, item) {
+function usesHtml(detail, item, declared = false) {
+    if (!Array.isArray(detail?.uses) && !Array.isArray(item.permissions) && !Array.isArray(item.needs_keys)) return '';
     // The entry's own words come from its permission ids (the cards say the same);
-    // an id this page has no word for keeps the source's label.
+    // an id this page has no word for keeps the source's label. An installed skill's own declaration (`declared`) is
+    // never dropped: an id with no word stands as declared, like the card's Can use.
     const uses = Array.isArray(detail?.uses) ? detail.uses.filter((use) => use && typeof use === 'object') : null;
     const permissions = uses ? uses.filter((use) => use.kind !== 'key') : (item.permissions || []).map((id) => ({ id }));
     const words = [];
     for (const use of permissions) {
-        const word = permissionWords([use.id])[0] || String(use.label || '');
+        const word = declared ? declaredPermissionWords([use.id])[0] : permissionWords([use.id])[0] || String(use.label || '');
         if (word && !words.includes(word)) words.push(word);
     }
     const keys = uses ? uses.filter((use) => use.kind === 'key').map((use) => String(use.id || '')).filter(Boolean) : (item.needs_keys || []);
@@ -92,9 +87,14 @@ function detailsHtml(item, installed) {
  * Open the sheet. `item` is the catalog entry (or the installed skill seen as
  * one); `actionsHtml` mirrors the card's action row; `onAction(action, node)`
  * receives presses on `[data-sheet-action]`. `readDetail()` fetches the full
- * entry; without it the sheet shows what the card had.
+ * entry; without it the sheet shows what the card had. Review says one thing, as the sheet opened: an installed
+ * copy's own recorded review, else how a new install goes while its source's setting holds (`policy`).
  */
-export function openSkillDetailSheet({ item, installed = null, source = null, actionsHtml = '', onAction = () => {}, readDetail = null, returnFocus = document.activeElement }) {
+export function openSkillDetailSheet({ item, installed = null, policy = null, actionsHtml = '', onAction = () => {}, readDetail = null, returnFocus = document.activeElement, access }) {
+    // `access`: undefined in Browse, where the catalog's entry says what a skill can use. The Installed sheet passes the
+    // loaded row's own `{permissions, needs_keys}` (its parsed manifest and grants), or null when none was read: the
+    // catalog entry, cached or fetched, is then never its access.
+    const before = document.activeElement;
     const dialog = document.createElement('dialog');
     dialog.className = 'document-reader skills-detail-sheet';
     dialog.setAttribute('aria-labelledby', 'skills-sheet-title');
@@ -109,13 +109,14 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
             <div class="document-reader-actions" data-sheet-actions>${actionsHtml}</div>
             <button type="button" class="btn btn-default document-reader-close" data-sheet-close>Close</button>
         </div>
-        <div class="document-reader-body skills-sheet-body is-quiet-focus" tabindex="-1" data-sheet-body><section class="skills-sheet-section" data-sheet-places hidden></section><div class="skills-sheet-content" data-sheet-content></div></div>
+        <div class="document-reader-body skills-sheet-body scroll-fade-y is-quiet-focus" tabindex="-1" data-sheet-body><section class="skills-sheet-section" data-sheet-places hidden></section><div class="skills-sheet-content" data-sheet-content></div></div>
     </div>`;
     const body = dialog.querySelector('[data-sheet-body]');
     const content = dialog.querySelector('[data-sheet-content]');
     let disposePlaces = null;
     let closed = false;
     let disposeFocus = null;
+    const disposeFade = bindScrollFade(body);
     let controller = null;
     const close = () => {
         if (closed) return;
@@ -126,11 +127,18 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
         // Close the modal first: WebKit's own close moves focus to what was focused before it opened
         // (a pressed button is not focused there), and the restore below then returns it to the opener.
         if (dialog.open && typeof dialog.close === 'function') dialog.close();
+        // That is the page region around the pressed card where one takes focus (Extensions' views): the browser
+        // put focus there, not the owner, so it is released for the restore.
+        const opener = typeof returnFocus === 'function' ? returnFocus() : returnFocus;
+        if (before !== opener && before !== document.body && document.activeElement === before && before?.contains?.(opener)) before.blur();
+        disposeFade();
         disposeFocus?.();
         dialog.remove();
     };
     const paint = (detail, { reading = false, error = '' } = {}) => {
         const about = String(detail?.about || item.description || '');
+        // A queue-only job has no installed review; a new install says how it goes while its source's setting holds.
+        const review = installed ? (installed.lifecycle_virtual ? '' : reviewSentence(installed)) : trustSentence(policy, { detail: true });
         const aboutError = detail && !detail.about && detail.about_error
             ? note(`Its SKILL.md couldn’t be read (${escapeHtml(detail.about_error)}); this is the catalog’s description.`) : '';
         destroyChatMarkdown(content.querySelector('.skills-sheet-about'));
@@ -138,8 +146,8 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
             reading ? `<p class="skills-sheet-status" role="status">Reading ${escapeHtml(sheetTitle(item, installed))} from ${escapeHtml(item.source_name || 'its source')}…</p>` : '',
             error ? `<div class="skills-sheet-status is-error" role="alert"><p>Couldn’t read the full description from ${escapeHtml(item.source_name || 'its source')}: ${escapeHtml(error)}.</p><button type="button" class="btn btn-default btn-sm" data-sheet-retry>Try again</button></div>` : '',
             `<section class="skills-sheet-section"><h3>About</h3><div class="skills-sheet-about" data-i18n-authored></div>${aboutError}</section>`,
-            section('What it can use', usesHtml(detail, item)),
-            section('Review', `<p>${escapeHtml(sheetReviewSentence(item, installed, source))}</p>`),
+            section('What it can use', access === undefined ? usesHtml(detail, item) : usesHtml(null, access || {}, true)),
+            section('Review', review && `<p>${escapeHtml(review)}</p>`),
             section('Author’s repository', authorRepoHtml(item)),
             section('Versions', versionsHtml(detail, item, installed)),
             section('Links', linksHtml(detail, item)),
@@ -182,6 +190,10 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
         close,
         get closed() { return closed; },
         /** Repaint the head's action row from the card's current state. */
-        setActions(html) { const host = dialog.querySelector('[data-sheet-actions]'); if (host) host.innerHTML = html; },
+        setActions(html) {
+            if (closed || html === actionsHtml) return;  // the same action keeps its button, and the keyboard its place
+            actionsHtml = html;
+            dialog.querySelector('[data-sheet-actions]').innerHTML = html;
+        },
     };
 }

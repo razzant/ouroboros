@@ -76,17 +76,65 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
         assert metrics["gap"] == pytest.approx(12, abs=0.5), metrics
         assert metrics["below"] == pytest.approx(12, abs=0.5), metrics
     header = page.locator(".chat-page-header")
-    paint = header.evaluate("""el => ({mask:getComputedStyle(el).maskImage,
-        overflow:getComputedStyle(el).overflow, background:getComputedStyle(el).backgroundColor,
-        before:getComputedStyle(el,'::before').content})""")
+    edge = """el => { const s = getComputedStyle(el), b = getComputedStyle(el, '::before'), a = getComputedStyle(el, '::after');
+        return {mask: s.maskImage, overflow: s.overflow, background: s.backgroundColor, bar: el.getBoundingClientRect().height,
+            darkening: b.backgroundImage, blur: b.backdropFilter, fade: b.maskImage, reach: parseFloat(b.height),
+            events: b.pointerEvents, strip: a.pointerEvents, stripHeight: parseFloat(a.height),
+            dark: document.documentElement.dataset.theme !== 'light'}; }"""
+    paint = header.evaluate(edge)
     assert paint["mask"] == "none" and paint["overflow"] == "visible", paint
-    # The full-width fade gave way to individually backed capsules (#2193); menus still escape the bar.
-    assert paint["background"] == "rgba(0, 0, 0, 0)" and paint["before"] in ("none", "normal"), paint
+    # Mask the decorative layer, never the bar or its menu. These reads check CSS, not rendered pixels.
+    assert paint["background"] == "rgba(0, 0, 0, 0)", paint
+    assert "linear-gradient" in paint["darkening"] and "0.72" in paint["darkening"], paint
+    assert "blur(12px)" in paint["blur"] and "linear-gradient" in paint["fade"] and paint["events"] == "none", paint
+    # Both gradients end transparent toward the transcript; 180deg is the default (omitted in computed CSS).
+    clear_end = ", rgba(0, 0, 0, 0) 100%)"
+    assert paint["fade"].startswith(("linear-gradient(rgb(", "linear-gradient(180deg,")) and paint["fade"].endswith(clear_end), paint
+    assert "0.5" in paint["fade"] and "0.14" in paint["fade"], paint
+    # The edge reaches one compact length below the bar on every layout, the desk included. This history read left
+    # Main's note under the bar: a later sibling at the bar's own level, it paints over the edge as the capsules do,
+    # so its words stay sharp.
+    reach = 32
+    assert paint["reach"] == pytest.approx(paint["bar"] + reach, abs=1), paint
+    # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.
+    feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
+    assert feed_top >= paint["bar"] + reach - 1, (feed_top, paint)
+    assert page.locator("#page-chat > .chat-page-note > *").count() and page.locator("#page-chat > .chat-page-note").is_visible()
+    order = page.evaluate("""() => { const bar = document.querySelector('#page-chat > .chat-page-header');
+        const note = document.querySelector('#page-chat > .chat-page-note');
+        return {after: Boolean(bar.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING),
+            bar: Number(getComputedStyle(bar).zIndex), note: Number(getComputedStyle(note).zIndex)}; }""")
+    assert order["after"] and order["note"] >= order["bar"], order
+    # The desktop window's title-band strip keeps the bar's ::after (style.css :root[data-window-chrome]): the edge
+    # never takes its box, and the strip still takes presses for the title bar.
+    page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
+    chrome = header.evaluate(edge)
+    page.evaluate("delete document.documentElement.dataset.windowChrome")
+    assert chrome["reach"] == pytest.approx(chrome["bar"] + reach, abs=1), chrome
+    assert "blur" in chrome["blur"], chrome
+    assert chrome["strip"] == "auto" and chrome["events"] == "none", chrome
+    # The composer's edge mirrors the bar's: the same authored tail from below, a 12 px blur, and no press taken.
+    composer = page.locator("#chat-input-area").evaluate(
+        "el => { const b = getComputedStyle(el, '::before');"
+        " return {content: b.content, mask: b.maskImage, blur: b.backdropFilter, events: b.pointerEvents}; }")
+    assert composer["content"] == '""' and composer["events"] == "none", composer
+    assert composer["mask"].startswith("linear-gradient(0deg,") and composer["mask"].endswith(clear_end), composer
+    assert "blur(12px)" in composer["blur"] and "0.5" in composer["mask"] and "0.14" in composer["mask"], composer
+    # With the keyboard up the top edge ends with the bar and the composer draws no edge at all (style.css).
+    page.evaluate("document.body.classList.add('keyboard-open')")
+    keyboard = header.evaluate(edge)
+    composer_gone = page.locator("#chat-input-area").evaluate("el => getComputedStyle(el, '::before').content")
+    page.evaluate("document.body.classList.remove('keyboard-open')")
+    assert keyboard["reach"] == pytest.approx(keyboard["bar"], abs=1), keyboard
+    assert composer_gone == "none", composer_gone
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
         return {alpha: channels[3] ?? 1, blur: s.backdropFilter, shadow: s.boxShadow};
     }""")
-    assert backing["alpha"] >= 0.98 and "blur" in backing["blur"] and backing["shadow"] != "none", backing
+    # On a dark room the capsules are the composer chips' glass, a light veil over a blur (owner 15.11, 17.11 3A);
+    # light keeps them white as the composer's.
+    assert "blur" in backing["blur"] and backing["shadow"] != "none", backing
+    assert (backing["alpha"] < 0.2) if paint["dark"] else (backing["alpha"] >= 0.98), backing
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=0")
     setup_browser.capture(page, f"shell-chat-actions-{width}")
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=160")
@@ -270,10 +318,11 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     main_top = lambda: page.locator(".nav-row-main").evaluate("el => el.getBoundingClientRect().top")
     scroll_to = lambda at: sidebar.evaluate("(el, at) => { el.scrollTop = at; return el.scrollTop; }", at)
     # Three zones (DESIGN "Shell", "Navigation"): a window this short cannot hold them, so the column itself is the
-    # ONE scroller, the Projects list shows every row in flow (no inner scroller) and the sections stay on the bottom
-    # edge. Where the card, one Project row and the sections still fit between the two bars, Main is pinned at the
-    # top (400 px); a column shorter still lets the card scroll away with the list, one scroll up, since two pinned
-    # bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489). Each step waits for
+    # ONE scroller and the Projects list shows every row in flow (no inner scroller). Where the card, one Project row
+    # and the sections still fit between the two bars, Main is pinned at the top and the sections on the bottom edge
+    # (400 px); a column shorter still lets both bars go with the list, the card one scroll up and the sections at its
+    # end, since two pinned bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489;
+    # the sections joined the card there in #3972, DESIGN "Navigation": "at its two ends"). Each step waits for
     # the window to have its size and for two frames, in which the bars' observer (layout.js) has measured it; a page
     # that draws no frame for 5 s fails there, by a timer.
     frames = lambda: page.evaluate("""() => new Promise((resolve, reject) => {
@@ -289,7 +338,13 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
         assert sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1"), ("the column is the fallback scroller", height)
         scroll_to(0)
         frames()
-        assert settings_reachable(), ("the sections stand on the edge at the top of the column", height)
+        crowd = sidebar.evaluate("el => el.hasAttribute('data-bars-crowd')")
+        foot = sidebar.evaluate("el => getComputedStyle(el.querySelector('.sidebar-foot')).position")
+        assert crowd is (not pinned), ("two pinned bars fit only where a Project row fits between them", height)
+        if pinned:
+            assert settings_reachable(), ("the sections stand on the edge at the top of the column", height)
+        else:
+            assert foot == "static", ("the sections go with the list where the bars crowd", height, foot)
         top_before = main_top()
         scrolled = scroll_to(10 ** 6)
         frames()
@@ -343,8 +398,9 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
 
 
 def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(subscription_ui):
-    """A tool server's page (Settings › Tools › a server): every field is the shared control under its own label, an
-    edit changes that field alone, and the environment's JSON is judged by the form before any Save."""
+    """A tool server's page (Extensions › MCP servers › a server, opened by its old Settings address): every field is
+    the shared control under its own label, an edit changes that field alone, and the environment's JSON is judged by
+    the form before any Save. A second server's page replaces the first; it never lies over it."""
     servers = [dict(id='web', name='HTTP server', transport='streamable_http', url='https://example.test/mcp',
                     auth_token='***', auth_header='Authorization', custom_option='retained'),
                dict(id='local', name='Local server', transport='stdio', command='npx', args=['-y','server'],
@@ -376,6 +432,7 @@ def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(
     refused = f'async () => {module}.validateMcpSettings().map(e=>e.input.dataset.mcpField)'
     assert page.evaluate(refused) == []
     level = server_page('local')
+    assert page.locator('#page-skills [data-settings-page^="tools/"]').count() == 1, 'one server page at a time'
     cards = level.locator('[data-mcp-card]')
     field = level.get_by_label('Environment (JSON)', exact=True)
     for invalid in ['{unfinished', '[]', '5', '{"PORT":8080}', '{"":"value"}']:
@@ -410,11 +467,13 @@ PILL_LANDING_JS = """async qid => {
     let last = null;
     for (let quiet = 0; quiet < 2;) { await frame(); quiet = feed.scrollTop === last ? quiet + 1 : 0; last = feed.scrollTop; }
     const page = document.querySelector('#page-chat');
-    const header = page.querySelector('.chat-page-header').getBoundingClientRect();
+    const bar = page.querySelector('.chat-page-header'), header = bar.getBoundingClientRect();
     const toolbar = page.querySelector('.chat-toolbar-row').getBoundingClientRect();
     const card = feed.querySelector(`.chat-quiz-card[data-quiz-id="${qid}"]`);
     const box = card.closest('.chat-bubble').getBoundingClientRect();
-    const top = Math.max(feed.getBoundingClientRect().top, header.bottom);
+    // Below the header and its frosted edge (style.css "A room's edges"), where every landing in the room clears.
+    const edge = parseFloat(getComputedStyle(bar).getPropertyValue('--edge-reach')) || 0;
+    const top = Math.max(feed.getBoundingClientRect().top, header.bottom + edge);
     return {below_header: Math.round(box.top - top), above_composer: Math.round(toolbar.top - box.top),
             scroll_top: feed.scrollTop, focused: document.activeElement === card.querySelector('.chat-quiz-question')};
 }"""
@@ -997,9 +1056,9 @@ def test_shared_dialog_head_wraps_a_long_title_and_keeps_close_inside(subscripti
             .openConfirmDialog({ title, body: 'Grant access?', confirmLabel: 'Grant access' }); }""", title)
         box = page.locator('.confirm-dialog').evaluate("""dialog => {
             const d = dialog.getBoundingClientRect(), h = dialog.querySelector('h3').getBoundingClientRect();
-            const c = dialog.querySelector('.marketplace-modal-actions [data-confirm-cancel]').getBoundingClientRect();
+            const c = dialog.querySelector('.ui-modal-actions [data-confirm-cancel]').getBoundingClientRect();
             return {inside: h.left >= d.left && h.right <= d.right + 0.5 && c.right <= d.right + 0.5,
-                headClose: dialog.querySelectorAll('.marketplace-modal-head button').length,
+                headClose: dialog.querySelectorAll('.ui-modal-head button').length,
                 centred: Math.abs((d.top + d.bottom) / 2 - innerHeight / 2) <= 1,
                 cancel: c.width, overflow: document.documentElement.scrollWidth - innerWidth};
         }""")

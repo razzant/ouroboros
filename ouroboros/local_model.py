@@ -28,6 +28,10 @@ _SERVING_MODEL_ARGV_RE = re.compile(r"\s--model (.+?) --port (\d+)(?:\s|$)")
 _HF_CACHE_PATH_RE = re.compile(r"[/\\]models--([^/\\]+)[/\\]snapshots[/\\][^/\\]+[/\\](.+)$")
 
 
+def local_dispatch_port() -> int:
+    return int(os.environ.get("LOCAL_MODEL_PORT", _LOCAL_MODEL_DEFAULT_PORT))
+
+
 def local_artifact_key(source: str = "", filename: str = "", *, model_path: str = "") -> str:
     """One identity for a configured artifact and the file ``download_model`` serves for it.
 
@@ -77,16 +81,14 @@ def _get_install_env() -> dict:
     """Return pip install env, enabling Metal flags on macOS."""
     env = os.environ.copy()
     if IS_MACOS:
-        env["CMAKE_ARGS"] = "-DGGML_METAL=on"
-        env["FORCE_CMAKE"] = "1"
+        env.update(CMAKE_ARGS="-DGGML_METAL=on", FORCE_CMAKE="1")
     return env
 
 
 def _get_runtime_hint() -> str:
     """Return a human-readable llama-cpp-python install hint."""
-    if IS_MACOS:
-        return 'CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python[server]'
-    return "pip install llama-cpp-python[server]"
+    prefix = 'CMAKE_ARGS="-DGGML_METAL=on" ' if IS_MACOS else ""
+    return f"{prefix}pip install llama-cpp-python[server]"
 
 
 def _with_hidden_subprocess(kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -97,6 +99,26 @@ def _with_hidden_subprocess(kwargs: Dict[str, Any]) -> Dict[str, Any]:
         existing = kwargs.get("creationflags", 0)
         kwargs["creationflags"] = existing | hidden.get("creationflags", 0)
     return kwargs
+
+
+def _run_runtime_probe() -> subprocess.CompletedProcess:
+    """The server application's import probe, shared by the runtime check and start_server."""
+    return subprocess.run(
+        [sys.executable, "-c", RUNTIME_PROBE],
+        **_with_hidden_subprocess({"capture_output": True, "text": True, "timeout": 15}),
+    )
+
+
+def _read_tail(stream, limit: int) -> bytes:
+    """Read a pipe to EOF, retaining only its last ``limit`` bytes."""
+    buf = b""
+    try:
+        while chunk := os.read(stream.fileno(), 4096):
+            buf = (buf + chunk)[-limit:]
+    except Exception:
+        pass
+    return buf
+
 
 _manager: Optional[LocalModelManager] = None
 _manager_lock = threading.Lock()
@@ -140,6 +162,7 @@ class LocalModelManager:
         # even before _install_proc is assigned, closing the panic-window race.
         self._install_cancelled = threading.Event()
         self._panic_requested = False
+        self._stopping: set = set()  # children a stop detached and still awaits: Panic's request reaches them
 
     def get_status(self) -> str:
         if self._proc is not None and self._proc.poll() is not None:
@@ -194,20 +217,12 @@ class LocalModelManager:
         Importing ``llama_cpp`` alone passed on an install whose server could not start (its web stack lacked a
         module); the probe imports the server application, so a broken runtime offers its (upgrading) install."""
         try:
-            probe = subprocess.run(
-                [sys.executable, "-c", RUNTIME_PROBE],
-                **_with_hidden_subprocess({
-                    "capture_output": True,
-                    "text": True,
-                    "timeout": 15,
-                }),
-            )
+            probe = _run_runtime_probe()
             if probe.returncode == 0:
                 self._runtime_status = "ok"
                 return True
-            else:
-                self._runtime_status = "missing"
-                return False
+            self._runtime_status = "missing"
+            return False
         except Exception as exc:
             log.warning("Runtime check failed: %s", exc)
             self._runtime_status = "missing"
@@ -255,28 +270,23 @@ class LocalModelManager:
 
             # stop_server may have run during Popen; kill immediately if so.
             if self._install_cancelled.is_set():
+                self._stopping.add(proc)  # that stop never saw this child: Panic reaches it until its exit is seen
                 try:
                     terminate_process_tree(proc)
                 except Exception:
                     pass
                 self._install_proc = None
                 self._runtime_status = "missing"
+                if proc.stdout:  # this thread sees the exit and lets the child go: no later Stop or Panic is needed
+                    _read_tail(proc.stdout, 4096)
+                proc.wait()
+                self._stopping.discard(proc)
                 return
-            output_bytes = b""
-            try:
-                if proc.stdout:
-                    fd = proc.stdout.fileno()
-                    while True:
-                        chunk = os.read(fd, 4096)
-                        if not chunk:
-                            break
-                        output_bytes = (output_bytes + chunk)[-4096:]
-            except Exception:
-                pass
+            output_bytes = _read_tail(proc.stdout, 4096) if proc.stdout else b""
             proc.wait()
             self._install_proc = None
-            output = output_bytes.decode("utf-8", errors="replace")
-            self._runtime_install_log = output
+            self._stopping.discard(proc)  # reaped here: a stop whose one poll came before the exit leaves it set
+            self._runtime_install_log = output_bytes.decode("utf-8", errors="replace")
 
             if proc.returncode == 0:
                 if self.check_runtime():
@@ -442,7 +452,6 @@ class LocalModelManager:
 
         try:
             if shard_info is not None:
-                _prefix, _shard_num, total_shards, _shard_w, _total_w, _suffix = shard_info
                 first_path: Optional[str] = None
                 for idx, shard_basename in enumerate(
                     self._all_shard_basenames(_prefix, total_shards, _suffix, _shard_w, _total_w), start=1
@@ -486,7 +495,6 @@ class LocalModelManager:
                 raise RuntimeError("Local model server is already running")
 
             self._model_path = model_path
-            self._port = port
             self._status = "loading"
             self._error = None
             launch = local_model_settings({"LOCAL_MODEL_SOURCE": source, "LOCAL_MODEL_FILENAME": filename,
@@ -499,9 +507,8 @@ class LocalModelManager:
             self._port = port = launch["LOCAL_MODEL_PORT"]
             n_gpu_layers, chat_format = launch["LOCAL_MODEL_N_GPU_LAYERS"], launch["LOCAL_MODEL_CHAT_FORMAT"]
 
-            python = sys.executable
             cmd = [
-                python, "-m", "ouroboros.local_model_server",
+                sys.executable, "-m", "ouroboros.local_model_server",
                 "--model", model_path,
                 "--port", str(port),
                 "--n_gpu_layers", str(n_gpu_layers),
@@ -518,14 +525,7 @@ class LocalModelManager:
             log.info("Starting local model server: %s", " ".join(cmd))
 
             try:
-                probe = subprocess.run(
-                    [python, "-c", RUNTIME_PROBE],
-                    **_with_hidden_subprocess({
-                        "capture_output": True,
-                        "text": True,
-                        "timeout": 15,
-                    }),
-                )
+                probe = _run_runtime_probe()
             except Exception as exc:
                 self._status = "error"
                 self._error = f"Failed to verify llama-cpp-python installation: {exc}"
@@ -540,14 +540,14 @@ class LocalModelManager:
                 raise RuntimeError(self._error)
 
             try:
-                _popen_kwargs = dict(
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,
-                    env={**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (
+                _popen_kwargs = {
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    "stdin": subprocess.DEVNULL,
+                    "env": {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (
                         str(pathlib.Path(__file__).resolve().parent.parent), os.environ.get("PYTHONPATH", ""))))},
-                )
-                _popen_kwargs.update(subprocess_new_group_kwargs())
+                    **subprocess_new_group_kwargs(),
+                }
                 self._proc = subprocess.Popen(cmd, **_with_hidden_subprocess(_popen_kwargs))
                 if self._panic_requested:
                     self.panic_stop(request_only=True)
@@ -583,17 +583,7 @@ class LocalModelManager:
         proc = self._proc
         if proc is None or proc.stderr is None:
             return
-        buf = b""
-        try:
-            fd = proc.stderr.fileno()
-            while True:
-                chunk = os.read(fd, 4096)
-                if not chunk:
-                    break
-                buf = (buf + chunk)[-2048:]
-        except Exception:
-            pass
-        self._stderr_buf = buf
+        self._stderr_buf = _read_tail(proc.stderr, 2048)
 
     def _wait_for_healthy(self, timeout: float = 300.0) -> None:
         """Poll the local server until healthy or timed out."""
@@ -653,13 +643,14 @@ class LocalModelManager:
         log.error(self._error)
 
     def panic_stop(self, *, request_only: bool = False) -> list:
-        """Signal our captured children before manager locks or cleanup waits."""
+        """Signal our captured children before manager locks or cleanup waits; release, never signal, an exited one."""
         from ouroboros.platform_layer import request_process_tree_kill
 
         self._panic_requested = True
         self._install_cancelled.set()
-        requests = [request_process_tree_kill(proc) for proc in (self._proc, self._install_proc)
-                    if proc is not None]
+        children = dict.fromkeys((self._proc, self._install_proc, *self._stopping.copy()))  # one key per child
+        requests = [request_process_tree_kill(proc) for proc in children  # a snapshot: each asked once
+                    if proc is not None and not self._forget_settled(proc)]  # poll() only: no wait, no lock
         if not request_only:
             self.stop_server()
         return requests
@@ -668,11 +659,14 @@ class LocalModelManager:
         """Stop the local model server subprocess and any ongoing install."""
         # Abort install even before _install_proc exists.
         self._install_cancelled.set()
+        for child in self._stopping.copy():  # an earlier stop's child that exited after that stop's poll goes now
+            self._forget_settled(child)
 
         with self._lock:
             proc = self._proc
             binding, self._service_binding = self._service_binding, None
             install_proc = self._install_proc
+            self._stopping.update(child for child in (install_proc, proc) if child is not None)  # before leaving view
             self._proc = None
             self._install_proc = None
             self._status = "offline"
@@ -695,6 +689,7 @@ class LocalModelManager:
                     kill_process_tree(install_proc)
                 except Exception:
                     pass
+            self._forget_settled(install_proc)
 
         if proc is None:
             return
@@ -711,11 +706,18 @@ class LocalModelManager:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        self._forget_settled(proc)
         if binding is not None and proc.poll() is not None:
             from ouroboros.config import DATA_DIR
             from ouroboros.server_process import clear_service_binding
 
             clear_service_binding(DATA_DIR, "local_model", binding)
+
+    def _forget_settled(self, child: subprocess.Popen) -> bool:
+        """An exited child leaves what Panic's request reaches (True); an unconfirmed one stays reachable."""
+        if (settled := child.poll() is not None):
+            self._stopping.discard(child)
+        return settled
 
     def health_check(self) -> Dict[str, Any]:
         """Query local server health and loaded-model info."""
@@ -736,14 +738,9 @@ class LocalModelManager:
         if not ctx:
             ctx = model_info.get("context_window", 0)
 
-        return {
-            "ok": True,
-            "model_name": model_info.get("id", "unknown"),
-            "context_length": ctx,
-        }
+        return {"ok": True, "model_name": model_info.get("id", "unknown"), "context_length": ctx}
 
-
-    def serving_context_evidence(self) -> Dict[str, Any]:
+    def serving_context_evidence(self, *, bind_endpoint: bool = False) -> Dict[str, Any]:
         """The live owned server's configured window, distinct from training metadata."""
         from ouroboros.utils import in_worker_process
 
@@ -752,9 +749,12 @@ class LocalModelManager:
         process = self._proc
         capacity = int(getattr(self, "_serving_context_length", 0) or 0)
         known = bool(process is not None and process.poll() is None and self._status == "ready" and capacity > 0)
-        return {"context_window": capacity if known else None, "confirmed": known,
-                "source": "owned_server_arguments" if known else "serving_window_unobserved",
-                "process_id": process.pid if known else None}
+        evidence = {"context_window": capacity if known else None, "confirmed": known,
+                    "source": "owned_server_arguments" if known else "serving_window_unobserved",
+                    "process_id": process.pid if known else None}
+        if bind_endpoint and known:
+            evidence["port"] = int(self._port)  # ready health outlives a failed binding write (``_wait_for_healthy``)
+        return evidence
 
     def serving_artifact(self) -> Dict[str, Any]:
         """The model file and port the live server was launched with, else ``{}``.
@@ -781,10 +781,9 @@ class LocalModelManager:
     def _published_serving_evidence(self) -> Dict[str, Any]:
         """A worker's view of the server its server process owns.
 
-        Workers never own the server. The owner publishes the ready instance's
-        service binding; it counts only while that exact process (pid and
-        platform-specific fingerprint) is live on this worker's loopback port,
-        and its window is that process's own ``--n_ctx`` argument.
+        Workers never own the server: the owner publishes the ready instance's service binding, which counts
+        only while that exact process (pid and platform fingerprint) is live on this worker's loopback port;
+        its window is that process's own ``--n_ctx`` argument.
         """
         unknown = {"context_window": None, "confirmed": False,
                    "source": "serving_window_unobserved", "process_id": None}
@@ -795,7 +794,7 @@ class LocalModelManager:
 
             binding = read_service_bindings(pathlib.Path(DATA_DIR)).get("local_model") or {}
             # The endpoint this worker's LLMClient._get_local_client dispatches to.
-            port = int(os.environ.get("LOCAL_MODEL_PORT", _LOCAL_MODEL_DEFAULT_PORT))
+            port = local_dispatch_port()
             if (binding.get("host"), binding.get("port")) != ("127.0.0.1", port):
                 return unknown
             # Read argv before the identity check: a pid that still matches its
@@ -809,30 +808,33 @@ class LocalModelManager:
         return {"context_window": window, "confirmed": True, "source": "published_server_arguments",
                 "process_id": int(binding["pid"]), "port": port}
 
-    def measure_prepared_input(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def measure_prepared_input(self, payload: Dict[str, Any], *, expected_port: Optional[int] = None) -> Dict[str, Any]:
         """Bounded read-only I/O to the same owned server; it never generates tokens."""
         from ouroboros.local_model_server import input_fingerprint
 
-        evidence = self.serving_context_evidence()
+        evidence = self.serving_context_evidence(bind_endpoint=True)
         unknown = {"supported": False, "input_is_exact": False, "reason": "measurement_unavailable"}
         # A published instance was launched by start_server, which always serves this route.
         published = evidence.get("source") == "published_server_arguments"
         if not evidence["confirmed"] or not (published or getattr(self, "_measurement_route", False)):
             return unknown
-        expected_pid = evidence["process_id"]
+        expected_pid, port = evidence["process_id"], evidence.get("port")
         try:
+            if port is None or port != (local_dispatch_port() if expected_port is None else expected_port):
+                return {**unknown, "reason": "measurement_endpoint_mismatch"}
             import requests
 
             with requests.Session() as session:
                 session.trust_env = False  # Owned loopback must not use an external proxy.
-                port = evidence["port"] if published else self._port
                 response = session.post(f"http://127.0.0.1:{port}/extras/measure_chat",
-                                        json=payload, timeout=5.0)
-                response.raise_for_status()
+                                        json=payload, timeout=5.0, allow_redirects=False)
+                if response.status_code != 200:
+                    return unknown
                 measured = response.json()
-            current = self.serving_context_evidence()
+            current = self.serving_context_evidence(bind_endpoint=True)
             if (not isinstance(measured, dict) or measured.get("process_id") != expected_pid
-                    or current.get("process_id") != expected_pid or not current.get("confirmed")
+                    or not current.get("confirmed")
+                    or any(current.get(key) != evidence.get(key) for key in ("source", "process_id", "port", "context_window"))
                     or measured.get("native_input_sha256") != input_fingerprint(payload)
                     or measured.get("context_window") != current.get("context_window")):
                 return {**unknown, "reason": "measurement_route_changed"}
@@ -850,8 +852,21 @@ class LocalModelManager:
         return self._context_length
 
     def test_tool_calling(self) -> Dict[str, Any]:
-        """Run basic chat and tool-call checks against the local server."""
+        """Run basic chat and tool-call checks against the local server.
+
+        Both probes are ordinary generations of the built-in model: each takes the server's own queue slot
+        (``model_concurrency.built_in_route``) inside its physical sender, as the local lane's sends do, so a
+        probe never opens beside a generation and the server's own count cannot enter while one is open. The
+        send time starts after that slot, so a queued probe reports its own generation, not its wait.
+
+        The slot names THIS server's endpoint (the port read once at probe start, the one ``start_server``
+        accepted) because the client below sends there: ``built_in_route`` otherwise names the lane's configured
+        port, and a server listening elsewhere is a different one whose queue this probe must neither join nor
+        block. One read also keeps a host that moves the port between them from splitting the address the SDK
+        calls from the queue it holds onto.
+        """
         from openai import OpenAI
+        from ouroboros.model_concurrency import built_in_route, limit_physical_send
         from ouroboros.usage_accounting import (
             AttemptRequest,
             UsageAccountingError,
@@ -861,11 +876,14 @@ class LocalModelManager:
             usage_scope,
         )
 
+        port = int(self._port)  # one read: the SDK's address and the queue below must name one endpoint
         client = OpenAI(
-            base_url=f"http://127.0.0.1:{self._port}/v1",
+            base_url=f"http://127.0.0.1:{port}/v1",
             api_key="local",
             max_retries=0,
         )
+        # The queue this server's generations and its own count share, at the endpoint the client below reaches.
+        route = built_in_route(port)
 
         def _dispatch_probe(payload: Dict[str, Any]) -> Any:
             request = AttemptRequest(
@@ -875,23 +893,30 @@ class LocalModelManager:
                 max_completion_tokens=int(payload.get("max_tokens") or 0),
                 source="capability_probe.local_model",
             )
+            elapsed = {"send": 0.0}
 
             def _send() -> Any:
-                return execute_physical_attempt(
-                    request,
-                    lambda: client.chat.completions.create(**payload),
-                )
+                started = time.monotonic()
+                try:
+                    return client.chat.completions.create(**payload)
+                finally:
+                    elapsed["send"] = time.monotonic() - started
+
+            def _attempt() -> Any:
+                return execute_physical_attempt(request, limit_physical_send(route, _send))
 
             if current_usage_scope() is not None:
-                return _send()
-            with usage_scope(UsageScope(
-                task_id="system:capability_probe",
-                root_task_id="system:capability_probe",
-                category="capability_probe",
-                non_task_operation=True,
-                source="capability_probe.local_model",
-            )):
-                return _send()
+                response = _attempt()
+            else:
+                with usage_scope(UsageScope(
+                    task_id="system:capability_probe",
+                    root_task_id="system:capability_probe",
+                    category="capability_probe",
+                    non_task_operation=True,
+                    source="capability_probe.local_model",
+                )):
+                    response = _attempt()
+            return response, elapsed["send"]
 
         result: Dict[str, Any] = {
             "success": False,
@@ -902,13 +927,11 @@ class LocalModelManager:
         }
 
         try:
-            t0 = time.time()
-            resp = _dispatch_probe({
+            resp, elapsed = _dispatch_probe({
                 "model": "local-model",
                 "messages": [{"role": "user", "content": "Say hello in one word."}],
                 "max_tokens": 32,
             })
-            elapsed = time.time() - t0
             text = (resp.choices[0].message.content or "") if resp.choices else ""
             tokens = resp.usage.completion_tokens if resp.usage else len(text.split())
             result["chat_ok"] = bool(text.strip())
@@ -929,7 +952,7 @@ class LocalModelManager:
                     "parameters": {"type": "object", "properties": {}},
                 },
             }]
-            resp = _dispatch_probe({
+            resp, _elapsed = _dispatch_probe({
                 "model": "local-model",
                 "messages": [{"role": "user", "content": "What time is it? Use the get_time tool."}],
                 "tools": tools,

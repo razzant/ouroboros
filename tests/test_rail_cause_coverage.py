@@ -188,15 +188,16 @@ def test_the_grace_toast_speaks_the_sentence_and_keeps_the_typed_incident(tmp_pa
     monkeypatch.setattr(workers, "get_event_q", lambda: types.SimpleNamespace(put=put.append), raising=False)
     assert task_reaper.request_finalization_grace(tmp_path, "t1", "idle_timeout", chat_id=7, stamp=1000)
     (toast,) = put
-    assert toast["text"].startswith(
-        "⏳ Task t1: The task made no progress for too long. Finalize artifacts/results now; ")
-    assert "idle_timeout" not in toast["text"]
+    assert toast["text"] == "The task made no progress for too long; it is wrapping up and stops after its grace window."
+    assert "idle_timeout" not in toast["text"] and "t1" not in toast["text"]
     assert toast["progress_meta"] == {"task_incident": "idle_timeout", "toast_once": "t1:idle_timeout:1000",
-                                      "toast_tone": "warning"}
-    # An unknown rail keeps its raw code on the toast rather than borrowing a sentence.
+                                      "toast_tone": "warning",
+                                      "notice": {"code": "finalization_grace", "details": "task t1, idle_timeout"}}
+    # An unknown rail borrows no sentence: its words stay general and its raw code is the notice's detail.
     put.clear()
     task_reaper.request_finalization_grace(tmp_path, "t2", "some_future_rail", chat_id=7, stamp=1000)
-    assert put[0]["text"].startswith("⏳ Task t2: some_future_rail. Finalize")
+    assert put[0]["text"].startswith("The task reached a limit; it is wrapping up") and "some_future_rail" not in put[0]["text"]
+    assert put[0]["progress_meta"]["notice"]["details"] == "task t2, some_future_rail"
     assert put[0]["progress_meta"]["task_incident"] == "some_future_rail"
     assert put[0]["progress_meta"]["toast_tone"] == "warning"
 
@@ -253,10 +254,18 @@ def test_the_kill_notice_leads_with_the_cause_and_keeps_the_typed_task_done(qenv
     })
     (chat_id, text, kw), = sent
     assert chat_id == 4
-    assert text.startswith("🛑 The task reached its maximum running time: task reap1 killed after 10s.\n")
-    assert "Absolute ceiling reached; task stopped." in text
-    assert "absolute_ceiling" not in text
+    # The row leaves before any respawn attempt and the slot may not be replaced: it states what was
+    # observed — the cause, the seconds, the stop — never a restart that has not happened.
+    assert text == "The task reached its maximum running time; it was stopped after 10 s."
+    assert "absolute_ceiling" not in text and "reap1" not in text
     assert kw["progress_meta"]["task_incident"] == "task_reaper_stopped"
+    # Its ids, the rail's code and which bound stopped it are the notice's details (DESIGN principle 7);
+    # the cause rides the translatable template (a closed host table), the seconds are a value, put back
+    # as written and never translated.
+    assert kw["progress_meta"]["notice"] == {"code": "task_reaper_stopped", "details": (
+        "task reap1, worker slot 0, absolute_ceiling. Absolute ceiling reached; task stopped."),
+        "template": "The task reached its maximum running time; it was stopped after {seconds} s.",
+        "values": {"seconds": "10"}}
     (done,) = [e for e in events if e.get("type") == "task_done"]
     assert done["reason_code"] == "absolute_ceiling"
     assert done["outcome_axes"]["execution"]["reason_code"] == "absolute_ceiling"

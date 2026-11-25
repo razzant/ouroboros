@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 import pytest
 
+from ouroboros.terminal_time import terminal_time_patch
+from tests._phone_touch import touch
 from tests._shared import producer_evidence_dir
 from tests._work_projection_shared import with_work_fields
 from tests.ui_console_errors import PageErrors
@@ -334,6 +336,12 @@ def test_portal_row_says_a_same_named_project_once_and_keeps_a_long_name_on_one_
     assert page.evaluate("window.titleWatches") == 0, "no portal watches its title"
 
 
+# The engine's own clicks (trusted), each read once its dispatch is over: whether the page took it as no press.
+ENGINE_CLICKS = """() => { const seen = window.engineClicks = [];
+    addEventListener('click', (event) => { if (event.isTrusted) seen.push(event); }, true); }"""
+TAKEN_CLICKS = "() => window.engineClicks.splice(0).map((event) => ({detail: event.detail, prevented: event.defaultPrevented}))"
+
+
 def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(project_chat, tmp_path):
     page, expect = project_chat["page"], project_chat["expect"]
     card = _card(page, "creation")
@@ -351,26 +359,75 @@ def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(p
     answer = page.locator('#chat-messages > .chat-bubble.assistant').first
     answer.locator('.chat-message-copy').focus()
     page.keyboard.press("Shift+F10")
-    expect(menu.locator('[role="menuitem"]')).to_have_text(["Reply", "Copy"])
+    keyboard_items = ["Reply", "Copy"]
+    if project_chat["width"] < 980:  # This fixture enables touch on its mobile page.
+        keyboard_items.append("Select text")
+    expect(menu.locator('[role="menuitem"]')).to_have_text(keyboard_items)
     page.keyboard.press("Escape")
     expect(answer.locator('.chat-message-copy')).to_be_focused()
-    # Touch: a held finger (no movement) opens it; the lifting finger presses nothing.
+    # Touch: a finger held still (no movement) on the answer opens its menu where it rests. Under a touch screen in
+    # Chromium the finger is real (CDP, as in test_status_marks_nav_browser) and lifts before Chromium's own long press,
+    # so the engine sends its lift the click a tap makes, where the menu now lies: that click is the finger's, never a
+    # press of the item under it. WebKit and a window without touch keep a dispatched finger, whose lift sends no click.
+    real = project_chat["engine"] == "chromium" and project_chat["width"] < 980
     box = answer.locator('.message').bounding_box()
     point = {"x": box["x"] + 20, "y": box["y"] + 8}
-    page.evaluate("""p => { const t = document.elementFromPoint(p.x, p.y);
-        t.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'touch', isPrimary: true, pointerId: 7,
-            clientX: p.x, clientY: p.y})); }""", point)
-    page.wait_for_timeout(600)
-    expect(menu.locator('[role="menuitem"]')).to_have_count(2)
-    # Where the finger lifts the menu now lies (it opened at the finger): the item under it is not pressed.
-    page.evaluate("""p => { const t = document.elementFromPoint(p.x + 12, p.y + 12);
-        document.querySelector('[data-task-id]')?.closest('#chat-messages')
-            .dispatchEvent(new PointerEvent('pointerup', {bubbles: true, pointerType: 'touch', pointerId: 7}));
-        t.click(); }""", point)
-    expect(menu).to_have_count(1)
+    items = menu.locator('[role="menuitem"]')
+    page.evaluate(ENGINE_CLICKS)
+
+    def hold_and_lift():
+        """The finger held past the long press, then lifted; the engine's own clicks since the last lift."""
+        page.evaluate("() => { window.engineClicks.length = 0; }")
+        if real:
+            touch(page, point["x"], point["y"], 600)
+            page.wait_for_function("() => window.engineClicks.length > 0", timeout=2000)
+        else:
+            page.evaluate("""p => document.elementFromPoint(p.x, p.y).dispatchEvent(new PointerEvent('pointerdown',
+                {bubbles: true, pointerType: 'touch', isPrimary: true, pointerId: 7, clientX: p.x, clientY: p.y}))""", point)
+            page.wait_for_timeout(600)
+            expect(items).to_have_count(3)
+            # A touch is captured by its first target: its end reaches the feed wherever the finger lifts.
+            page.evaluate("""() => document.getElementById('chat-messages').dispatchEvent(new PointerEvent('pointerup',
+                {bubbles: true, pointerType: 'touch', pointerId: 7}))""")
+        expect(items).to_have_count(3)
+        return page.evaluate(TAKEN_CLICKS)
+
+    lift = hold_and_lift()
+    expect(items).to_have_text(["Reply", "Copy", "Select text"])
     assert page.evaluate("() => document.querySelectorAll('.chat-quote--composer').length") == 0, "the lift pressed no item"
-    page.keyboard.press("Escape")
+    if real:
+        assert lift and all(click["prevented"] for click in lift), ("the lift's own click is no press", lift)
+    # An activation no finger made is no lift's: a script's click on Copy acts at once, while the dispatched finger's
+    # lift is still waiting for a click of its own.
+    menu.locator('[data-row-action="copy"]').evaluate("item => item.click()")
     expect(menu).to_have_count(0)
+    assert "audit the review runner" in page.evaluate("() => window.copiedText || ''"), "Copy acted"
+    # So is the keyboard's: Enter on Reply, the moment after another lift.
+    lift = hold_and_lift()
+    if real:
+        assert lift and all(click["prevented"] for click in lift), ("the lift's own click is no press", lift)
+    menu.locator('[data-row-action="reply"]').focus()
+    page.keyboard.press("Enter")
+    expect(menu).to_have_count(0)
+    expect(page.locator('.chat-quote--composer')).to_have_count(1)
+    # Select text, after one more lift, gives the touched body to native selection and presses nothing else.
+    box = answer.locator('.message').bounding_box()
+    point = {"x": box["x"] + 20, "y": box["y"] + 8}
+    lift = hold_and_lift()
+    if real:
+        assert lift and all(click["prevented"] for click in lift), ("the lift's own click is no press", lift)
+    expect(page.locator('.chat-quote--composer')).to_have_count(1)
+    menu.get_by_role("menuitem", name="Select text").click()
+    expect(menu).to_have_count(0)
+    assert answer.locator('.message').evaluate("""body => {
+        const selection = document.getSelection();
+        return selection.toString().trim().length > 0 && body.contains(selection.anchorNode);
+    }""")
+    # Reply to quote follows the selection's selectionchange, an ordinary task that a busy renderer (Chromium on the
+    # Ubuntu runner) runs after a key pressed at once: Esc dismisses the offer once it shows, as a reader's would.
+    expect(page.get_by_role("button", name="Reply to quote")).to_have_count(1)
+    page.keyboard.press("Escape")
+    expect(page.get_by_role("button", name="Reply to quote")).to_have_count(0)
 
 
 def test_a_reply_sends_only_the_quoted_rows_address(project_chat, tmp_path):
@@ -414,10 +471,15 @@ def _episode(number, span, outcome="", name=""):
                       if part)
 
 
+def _settled(task_id, status, started_at, ended_at):
+    """A settled record of one synthetic attempt; the host's producer stamps its end."""
+    row = {"task_id": task_id, "status": status, "started_at": started_at}
+    return {**row, **terminal_time_patch({}, row, status=status, task_id=task_id, observed_at=ended_at)}
+
+
 def _interrupted(**extra):
-    return {"task_id": "creation", "status": "failed", "reason_code": "model_provider_failed",
-            "terminal_time": {"occurred_at": "2026-10-08T14:09:00Z", "attempt": {"started_at": "2026-10-08T13:57:33Z"}},
-            **extra}
+    return {**_settled("creation", "failed", "2026-10-08T13:57:33Z", "2026-10-08T14:09:00Z"),
+            "reason_code": "model_provider_failed", **extra}
 
 
 def _continued():
@@ -569,7 +631,7 @@ def test_room_card_follows_a_continue_pressed_in_the_room(project_chat, chat_id,
                "text": "The model provider failed.", "ts": "2026-10-08T14:09:00Z", "history_id": "r-summary",
                "status": "failed", "task_terminal_status": "failed", "reason_code": "model_provider_failed",
                "outcome_axes": {"lifecycle": {"status": "failed"}}, "outcome_final": True,
-               "terminal_time": {"occurred_at": "2026-10-08T14:09:00Z", "attempt": {"started_at": "2026-10-08T13:57:33Z"}},
+               "terminal_time": _interrupted()["terminal_time"],
                "continuation_offer": _continued()["continuation_offer"]}
     _room_history(project_chat, [owner, {**first_line, "task_terminal_status": "failed"}, summary,
                                  _room_line(SUCCESSOR, "Continuing the audit", "2026-10-08T14:12:00Z", cancelable=True)])
@@ -672,9 +734,9 @@ def test_main_portal_follows_a_successor_that_already_finished(project_chat, jou
         continued_by={"state": "admitted", "successor_task_id": quick, "action_nonce": "n-2", "binding": binding},
         continuation_offer={"eligible": False, "refusal": "already_continued", "state": "admitted", "successor_task_id": quick})
     project_chat["details"][quick] = {
-        "task_id": quick, "status": "completed", "chat_id": 7, "project_id": "alpha",
-        "outcome_axes": {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}},
-        "terminal_time": {"occurred_at": "2026-10-08T14:12:00Z", "attempt": {"started_at": "2026-10-08T14:10:00Z"}}}
+        **_settled(quick, "completed", "2026-10-08T14:10:00Z", "2026-10-08T14:12:00Z"),
+        "chat_id": 7, "project_id": "alpha",
+        "outcome_axes": {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}}}
     state = project_chat["state"]
     state["task_bindings"][quick] = binding
     state["active_chat_activities"] = [row for row in state["active_chat_activities"] if row["activity_id"] != "creation"]
@@ -729,9 +791,9 @@ def test_an_already_failed_portal_follows_a_later_fast_continue(project_chat, jo
         continued_by={"state": "admitted", "successor_task_id": later, "binding": binding},
         continuation_offer={"eligible": False, "refusal": "already_continued", "state": "admitted", "successor_task_id": later})
     project_chat["details"][later] = {
-        "task_id": later, "status": "completed", "chat_id": 7, "project_id": "alpha",
-        "outcome_axes": {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}},
-        "terminal_time": {"occurred_at": "2026-10-08T14:12:00Z", "attempt": {"started_at": "2026-10-08T14:10:00Z"}}}
+        **_settled(later, "completed", "2026-10-08T14:10:00Z", "2026-10-08T14:12:00Z"),
+        "chat_id": 7, "project_id": "alpha",
+        "outcome_axes": {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}}}
     state["task_bindings"][later] = binding
     page.evaluate("""id => emit('chat', {chat_id: 1, task_id: id, role: 'assistant', content: 'The audit is complete.',
         project_id: 'alpha', project_name: 'Project Alpha', system_type: 'project_completion_summary',

@@ -195,3 +195,209 @@ def test_api_selected_task_id_retains_pause_resume_continue(api_host):
             assert load_task_result(api_host.root, target)["continued_by"]["by"]["task_id"] == actor
             assert _apply(event)["successor_task_id"] == outcome["successor_task_id"]
     assert not api_host.attempts
+
+
+def _roots(tmp_path, workers, *ids, drive=None, running=()):
+    from ouroboros.task_results import write_task_result
+
+    rows = {}
+    for task_id in ids:
+        rows[task_id] = {"id": task_id, "type": "task", "root_task_id": task_id, "chat_id": 7, "_attempt": 1,
+                         "admitted_dispatch": "none", **({"budget_drive_root": str(drive)} if drive else {})}
+        if task_id in running:
+            workers.RUNNING[task_id] = {"task": rows[task_id], "worker_id": 0, "attempt": 1}
+        else:
+            workers.PENDING.append(rows[task_id])
+        write_task_result(drive or tmp_path, task_id, "scheduled", root_task_id=task_id)
+    return rows
+
+
+def _list(ctx, tool, call_id, **kwargs):
+    """Call a list tool and run each ordinary event it emitted through the single handler, by task id."""
+    from ouroboros.tool_call_log import invocation_scope
+    from supervisor.events_mind_controls import _apply
+
+    ctx.pending_events.clear()
+    with invocation_scope({"tool_call_id": call_id}):
+        receipt = json.loads(tool(ctx, **kwargs))
+    events = list(ctx.pending_events)
+    assert all(event["list_call"] == call_id and "task_ids" not in event for event in events), events
+    return receipt, {event["task_id"]: _apply(event) for event in events}, events
+
+
+def _mind_ctx(tmp_path):
+    return SimpleNamespace(task_id="mind-root", drive_root=tmp_path, pending_events=[], event_queue=None)
+
+
+def test_a_list_call_is_one_ordinary_event_per_root_and_a_general_resume_keeps_pauses_ouroboros_did_not_place(
+        tmp_path, monkeypatch):
+    """A ``task_ids`` call emits one ordinary single event per root (its own nonce, the call's ``list_call``), and
+    each mails its own outcome through the single door: no list state. A list Resume is a general one: it lifts
+    the Pauses Ouroboros placed and keeps every Pause whose CREATING press was not Ouroboros's: the owner's
+    (``owner_paused_by_name``) and an undeclared one (``pause_author_unknown``), even after a list Pause filled
+    in Ouroboros as the visible author over it. A single named Resume lifts either. Panic is named first."""
+    from ouroboros.owner_pause import fence_closed, read_fence
+    from ouroboros.tools.control_mind import _pause_task, _resume_task
+    from supervisor.events_budget import HOLD_PANIC, hold_budget_row
+    from supervisor.events_mind_controls import _apply
+    from supervisor.owner_pause_control import request_owner_pause
+
+    _q, _state, workers = _install_queue(tmp_path, monkeypatch)
+    rows = _roots(tmp_path, workers, "a", "b", "owned", "anon", "bare", "panicked")
+    owner = {"actor": "owner", "text": "", "at": "2026-11-21T00:00:00+00:00"}
+    assert request_owner_pause("owned", request_id="owner-press", by=owner)["ok"]
+    for task_id in ("anon", "bare"):  # presses that declared nobody, as the window did before 20 Oct
+        assert request_owner_pause(task_id, request_id=f"bare-press-{task_id}")["ok"]
+    ctx = _mind_ctx(tmp_path)
+
+    from ouroboros.tool_call_log import invocation_scope
+    with invocation_scope({"tool_call_id": "args"}):
+        assert json.loads(_pause_task(ctx, "a", "x", task_ids=["b"]))["error"] == "invalid_task_ids"
+        assert "'bad id'" in json.loads(_pause_task(ctx, reason="x", task_ids=["a", "bad id"]))["detail"]
+        assert not ctx.pending_events, "a bad element refuses the whole call before anything is emitted"
+        for shape in ({}, "b", 7):  # a non-list beside one id refuses before the single form is chosen
+            assert json.loads(_pause_task(ctx, "a", "x", task_ids=shape))["error"] == "invalid_task_ids", shape
+        refused = json.loads(_pause_task(ctx, reason="x", task_ids=["a", 12345678]))
+        assert refused["error"] == "invalid_task_id" and "12345678" in refused["detail"], "list elements are strings"
+        assert not ctx.pending_events, "a non-list task_ids or a bad element emits nothing"
+        assert json.loads(_pause_task(ctx, "a", "x", task_ids=[]))["task_id"] == "a", "[] beside one id is no list"
+        ctx.pending_events.clear()
+    with invocation_scope({"tool_call_id": "numeric"}):  # non-strict providers deliver an all-digit id as a number
+        assert json.loads(_pause_task(ctx, 12345678, "x"))["task_id"] == "12345678", "the single form as on target"
+        assert [event["task_id"] for event in ctx.pending_events] == ["12345678"]
+        ctx.pending_events.clear()
+    receipt, outcomes, events = _list(ctx, _pause_task, "list-pause", reason="The owner paused all work",
+                                      task_ids=["a", "b", "a", "anon", "ghost", "mind-root"])
+    assert receipt["task_ids"] == ["a", "b", "anon", "ghost", "mind-root"], "de-duplicated, in order"
+    assert [event["task_id"] for event in events] == ["a", "b", "anon", "ghost"], "no event for self"
+    assert receipt["requests"][-1] == {"task_id": "mind-root", "ok": False, "error": "self_pause_refused"}
+    assert len({event["action_nonce"] for event in events}) == 4 and "general" not in events[0]
+    assert outcomes["a"]["ok"] and outcomes["b"]["ok"] and outcomes["anon"]["ok"]
+    assert outcomes["ghost"]["error"] == "task_not_live"
+    assert read_fence(tmp_path, "anon")["by"]["actor"] == "ouroboros", "the single door's enrichment is unchanged"
+
+    hold_budget_row(rows["panicked"], reason=HOLD_PANIC)
+    receipt, outcomes, events = _list(ctx, _resume_task, "list-resume", reason="The owner said resume everything",
+                                      task_ids=["a", "b", "owned", "anon", "bare", "panicked", "ghost"])
+    assert all(event["general"] for event in events) and len(events) == 7
+    assert outcomes["a"]["ok"] and outcomes["b"]["ok"] and not fence_closed(read_fence(tmp_path, "a"))
+    assert outcomes["owned"]["error"] == "owner_paused_by_name" and outcomes["owned"]["fence_id"]
+    for task_id in ("anon", "bare"):
+        assert outcomes[task_id]["error"] == "pause_author_unknown" and outcomes[task_id]["actor"] == "", task_id
+        assert outcomes[task_id]["message"] and fence_closed(read_fence(tmp_path, task_id)), task_id
+    assert fence_closed(read_fence(tmp_path, "owned"))
+    assert outcomes["panicked"]["error"] == "panic_requires_owner_resume"
+    assert rows["panicked"]["_budget_pause_hold"]["reason"] == HOLD_PANIC
+    assert outcomes["ghost"]["error"] == "task_not_pending"
+    # A single named Resume is unchanged: it lifts the owner's Pause and the undeclared one.
+    assert _apply(_event("resume_task", "owned", "named-owned"))["ok"]
+    assert _apply(_event("resume_task", "anon", "named-anon"))["ok"] and not fence_closed(read_fence(tmp_path, "anon"))
+
+
+def test_a_general_resume_reads_warm_rows_other_storage_roots_children_and_retry_attempts_as_the_door_does(
+        tmp_path, monkeypatch):
+    """The general checks read the row in RUNNING too, the fence and result in the root's own storage
+    (``budget_drive_root``) and a retry attempt's logical root: the owner's Pause stays in each; an unreadable result
+    is a typed refusal, never a pass; a child is the root's to choose (owner Q9)."""
+    from ouroboros import task_results
+    from ouroboros.owner_pause import fence_closed, install_fence, read_fence
+    from ouroboros.task_results import write_task_result
+    from supervisor.events_mind_controls import _apply, _kept_pause
+    from supervisor.owner_pause_control import request_owner_pause
+
+    _q, _state, workers = _install_queue(tmp_path, monkeypatch)
+    other = tmp_path / "other-root"
+    other.mkdir()
+    _roots(tmp_path, workers, "warm", running=("warm",))
+    _roots(tmp_path, workers, "away", "mine", drive=other)
+    owner = {"actor": "owner", "text": "", "at": "2026-11-21T00:00:00+00:00"}
+    for task_id in ("warm", "away"):
+        assert request_owner_pause(task_id, request_id=f"press-{task_id}", by=owner)["ok"], task_id
+    mind = {"actor": "ouroboros", "text": "later", "at": "2026-11-21T00:00:00+00:00"}
+    assert request_owner_pause("mine", request_id="press-mine", by=mind)["ok"]
+    workers.PENDING.append({"id": "kid", "type": "task", "root_task_id": "mine", "parent_task_id": "mine",
+                            "delegation_role": "subagent", "chat_id": 7, "_attempt": 1})
+    write_task_result(tmp_path, "kid", "scheduled", root_task_id="mine", parent_task_id="mine",
+                      delegation_role="subagent")
+    general = {**_event("resume_task", "", "general"), "list_call": "c", "general": True}
+    assert _apply({**general, "task_id": "warm"})["error"] == "owner_paused_by_name"
+    assert _apply({**general, "task_id": "away"})["error"] == "owner_paused_by_name"
+    assert fence_closed(read_fence(tmp_path, "warm")) and fence_closed(read_fence(other, "away"))
+    kid = _apply({**general, "task_id": "kid"})
+    assert kid["error"] == "not_a_root_task" and kid["root_task_id"] == "mine"
+    assert _apply({**general, "task_id": "mine"})["ok"]
+
+    write_task_result(tmp_path, "logical", "running", root_task_id="logical")
+    write_task_result(tmp_path, "logical-r1", "running", root_task_id="logical", delegation_role="root",
+                      original_task_id="logical", timeout_retry_from="logical")
+    install_fence(tmp_path, "logical", request_id="by-owner", by=owner)
+    assert _kept_pause("logical-r1")["error"] == "owner_paused_by_name", "the logical root's fence decides"
+    write_task_result(tmp_path, "logical2", "running", root_task_id="logical2")
+    write_task_result(tmp_path, "logical2-r1", "running", root_task_id="logical2", delegation_role="root",
+                      original_task_id="logical2", timeout_retry_from="logical2")
+    install_fence(tmp_path, "logical2", request_id="by-mind", by=mind)
+    assert _kept_pause("logical2-r1") is None
+
+    real = task_results.load_task_result
+    monkeypatch.setattr(task_results, "load_task_result", lambda root, task_id, *a, **k: (
+        (_ for _ in ()).throw(OSError("store busy")) if task_id == "warm" else real(root, task_id, *a, **k)))
+    assert _apply({**general, "task_id": "warm"})["error"] == "task_result_unreadable"
+
+
+def test_a_list_row_whose_sender_was_stopped_does_nothing_and_a_door_failure_is_that_rows_outcome(
+        tmp_path, monkeypatch):
+    """Each row first asks whether its sender was stopped since it was emitted; a door that raises gives that row
+    ``control_outcome_unknown`` in its own outcome mail, and the other rows are untouched events."""
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.owner_mailbox import _mailbox_path
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_mind import _pause_task
+    from supervisor import queue_transitions
+    from supervisor.events_mind_controls import _apply, handle_mind_task_control
+
+    _q, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _roots(tmp_path, workers, "a", "b")
+    write_task_result(tmp_path, "mind-root", "running", root_task_id="mind-root")
+    ctx = _mind_ctx(tmp_path)
+    from ouroboros.tool_call_log import invocation_scope
+    with invocation_scope({"tool_call_id": "stop-me"}):
+        json.loads(_pause_task(ctx, reason="all", task_ids=["a", "b"]))
+    first, second = ctx.pending_events
+    assert _apply(first)["ok"]
+    request_cancel(tmp_path, "mind-root", reason="owner stop", source="owner")
+    assert _apply(second) == {"ok": False, "error": "sender_stopped"}
+    assert _apply({**second, "list_call": ""})["ok"], "a single call has no sender check"
+
+    real = queue_transitions.resume_budget_paused_task
+    monkeypatch.setattr(queue_transitions, "resume_budget_paused_task",
+                        lambda task_id, **kw: (_ for _ in ()).throw(OSError("door down")) if task_id == "a"
+                        else real(task_id, **kw))
+    pushed = []
+    host = SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=SimpleNamespace(push_log=pushed.append))
+    handle_mind_task_control(_event("resume_task", "a", "door-a"), host)
+    handle_mind_task_control(_event("resume_task", "b", "door-b"), host)
+    lines = _mailbox_path(tmp_path, "mind-root").read_text(encoding="utf-8").splitlines()
+    outcomes = [json.loads(json.loads(line)["text"])["outcome"] for line in lines]
+    assert outcomes[0]["error"] == "control_outcome_unknown" and "door down" in outcomes[0]["detail"]
+    assert outcomes[1]["ok"], outcomes[1]
+
+
+def test_a_cascade_stop_of_a_retry_senders_logical_root_stops_its_list(tmp_path, monkeypatch):
+    """A timeout-retry attempt sends a list; the owner's graceful cascade Stop is keyed by its LOGICAL root, so each
+    remaining row checks that root too (lineage validated as the owner's Pause does): before the Stop the row acts,
+    after it the row refuses ``sender_stopped``. A sender whose retry lineage cannot be validated refuses."""
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.task_results import write_task_result
+    from supervisor.events_mind_controls import _sender_stopped
+
+    _install_queue(tmp_path, monkeypatch)
+    write_task_result(tmp_path, "original", "interrupted", root_task_id="original", delegation_role="root",
+                      retry_task_id="retry", superseded_by="retry")
+    write_task_result(tmp_path, "retry", "running", root_task_id="original", delegation_role="root",
+                      original_task_id="original", timeout_retry_from="original", supersedes_task_id="original")
+    assert _sender_stopped("retry") is None
+    request_cancel(tmp_path, "original", reason="owner stop", source="owner", scope="cascade")
+    assert _sender_stopped("retry") == {"ok": False, "error": "sender_stopped"}
+    write_task_result(tmp_path, "stale", "running", root_task_id="original", delegation_role="root",
+                      original_task_id="original", timeout_retry_from="original")
+    assert _sender_stopped("stale") == {"ok": False, "error": "sender_state_unreadable"}, "not the root's actor"

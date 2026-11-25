@@ -36,7 +36,7 @@ function liftLine(start) {
 }
 
 // The unread fact app.js hands the Projects list (createProjectsNav `isUnread`) for a row the list reads itself, such as
-// a room beyond the feed: pinned verbatim below and run here as the list runs it.
+// a room beyond the feed, the same rule its own rows and cursor merges use: pinned verbatim below and run here as they run it.
 const IS_UNREAD = '(row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0';
 
 function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}),
@@ -271,9 +271,9 @@ function listHarness({ host = {}, beyond = [], seen = {}, main = [90, 90] } = {}
         'paintProjectsNav', 'paintNavToggles'].map(lift).join('\n') + `
 let sharedSeenRead = null, knownProjectsJson = null, lastProjectRows = [];
 const projectRooms = new Map(), projectActivityIndex = { aggregate: { owner: false } }, navToggleNames = new WeakMap();
-const isUnread = ${IS_UNREAD};
+const projectUnread = ${IS_UNREAD};
 const projectsNav = { paint: () => paints.push('list'),
-    unreadRows: () => [...lastProjectRows.filter((row) => row._unread), ...beyond.filter(isUnread)] };
+    unreadRows: () => [...lastProjectRows.filter((row) => row._unread), ...beyond.filter(projectUnread)] };
 function patchProjectActivityMarkers() { paints.push('marks'); paintNavToggles(); }
 globalThis.api = { renderProjectsNav, observeMainRevision, mainUnreadCount, rows: () => lastProjectRows,
     mainWaits: (waits) => { if (waits) projectRooms.set('1', { owner: true }); else projectRooms.delete('1'); paintNavToggles(); },
@@ -290,7 +290,7 @@ globalThis.api = { renderProjectsNav, observeMainRevision, mainUnreadCount, rows
 }
 
 test("a Project row is unread by the same count as Main's number: its revision, its cursor, what was read ahead", () => {
-    assert.ok(source.includes(`isUnread: ${IS_UNREAD},`));
+    assert.ok(source.includes(`\nconst projectUnread = ${IS_UNREAD};\n`) && source.includes('isUnread: projectUnread,'));
     // The mark patch repaints the ☰ (its stub here does that alone).
     assert.match(lift('patchProjectActivityMarkers'), /\n {4}paintNavToggles\(\);\n/);
     const h = listHarness({ seen: { a: 1, b: 4, c: 0 } });
@@ -419,7 +419,8 @@ function pageHarness({ unread = 0, page = 'files', project = null } = {}) {
         projectInstances: new Map(),
         forgottenSelections: 0,
         roomCoversMain: () => true,
-        document: { hidden: false, querySelectorAll: () => [], getElementById: () => null },
+        document: { hidden: false, querySelectorAll: () => [], getElementById: () => ({ classList: { add() {} } }) },
+        pageNavigation: { go: async (_key, commit) => { commit(); return true; } },
         window: { dispatchEvent() {} },
         CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
         updateUnreadBadge() {}, acknowledgeMainAfterPaint() {},
@@ -431,7 +432,7 @@ function pageHarness({ unread = 0, page = 'files', project = null } = {}) {
         },
         mainUnreadCount: () => unread,
     });
-    vm.runInContext(`${['showPage', 'mainOnScreen', 'enterMain', 'syncMainLifetime'].map(lift).join('\n')}
+    vm.runInContext(`${['showPage', 'commitPage', 'mainOnScreen', 'enterMain', 'syncMainLifetime'].map(lift).join('\n')}
         Object.assign(globalThis, { show: showPage, syncMainLifetime, enterMain });`, context);
     return { context, claims };
 }

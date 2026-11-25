@@ -1,0 +1,479 @@
+[
+ {
+  "file": "bodies/stand-llama-b12421-first-contact.body.json",
+  "server": "llama.cpp",
+  "version": "b12421",
+  "provenance": "real response captured on the project stand 2026-11-15 (llama-server b12421-75fd7f9ec, Qwen3.5-9B Q8_0, -c 80000): the first Main request of a fresh install, Auto window (evidence2/00002)",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 272325,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "structured:llama.cpp"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/stand-llama-b12421-d-over-context.body.json",
+  "server": "llama.cpp",
+  "version": "b12421",
+  "provenance": "real response captured on the project stand 2026-11-15 (llama-server b12421-75fd7f9ec, Qwen3.5-9B Q8_0, -c 80000): a 90000-token probe (evidence/http/d-over-context)",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 90000,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "structured:llama.cpp"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/stand-llama-b12421-d-exact-limit.body.json",
+  "server": "llama.cpp",
+  "version": "b12421",
+  "provenance": "real response captured on the project stand 2026-11-15 (llama-server b12421-75fd7f9ec, Qwen3.5-9B Q8_0, -c 80000): exactly 80000 tokens is refused (n_tokens >= n_ctx)",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 80000,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "structured:llama.cpp"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/llama-task-286323.body.json",
+  "server": "llama.cpp",
+  "version": "7.10.0 report (server version unknown)",
+  "provenance": "the reporter's sentence (AbstractDL, 15.11) in the stand's wrapper; numbers his",
+  "status": 400,
+  "expected_refusal": {
+   "window": 75008,
+   "requested": 286323,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "structured:llama.cpp"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/llama-input-larger-branch.body.json",
+  "server": "llama.cpp",
+  "version": "b12421 server-context.cpp:4005",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it (the !can_split branch)",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 90000,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "structured:llama.cpp"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/vllm-0.11.2-input.body.json",
+  "server": "vLLM",
+  "version": "v0.11.2 serving_engine.py:960",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 90000,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "text:vllm/request-has-input"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/vllm-0.11.2-max_tokens.body.json",
+  "server": "vLLM",
+  "version": "v0.11.2 serving_engine.py:968",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 75000,
+   "reply": 8192,
+   "meaning": "input_plus_reply",
+   "units": "tokens",
+   "source": "text:vllm/max-tokens-beside-input"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/vllm-0.11.2-max_tokens-alone.body.json",
+  "server": "vLLM",
+  "version": "v0.11.2 serving_engine.py:968",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it; the reply alone exceeds the window; upstream frozen wording classifies context_overflow",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 1000,
+   "reply": 90000,
+   "meaning": "input_plus_reply",
+   "units": "tokens",
+   "source": "text:vllm/max-tokens-beside-input"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "frozen"
+ },
+ {
+  "file": "bodies/vllm-919d-renderer.body.json",
+  "server": "vLLM",
+  "version": "919d45fc renderers/params.py:542",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "request_too_large",
+  "recognition": "number_equals_declared",
+  "declared_limit": 80000,
+  "declared_kind": "total"
+ },
+ {
+  "file": "bodies/vllm-919d-renderer-atleast.body.json",
+  "server": "vLLM",
+  "version": "919d45fc renderers/params.py:542",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it (qualifier 'at least': a lower bound)",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "request_too_large",
+  "recognition": "number_equals_declared",
+  "declared_limit": 80000,
+  "declared_kind": "total"
+ },
+ {
+  "file": "bodies/vllm-919d-decoder.body.json",
+  "server": "vLLM",
+  "version": "919d45fc v1/engine/input_processor.py:569",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "number_equals_declared",
+  "declared_limit": 80000,
+  "declared_kind": "total"
+ },
+ {
+  "file": "bodies/vllm-919d-decoder-equal.body.json",
+  "server": "vLLM",
+  "version": "919d45fc v1/engine/input_processor.py:588",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it (prompt == max_model_len)",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "request_too_large",
+  "recognition": "number_equals_declared",
+  "declared_limit": 80000,
+  "declared_kind": "total"
+ },
+ {
+  "file": "bodies/ollama-openai-compat.body.json",
+  "server": "Ollama",
+  "version": "a5864fcb llm/llama_server.go:2652",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it; OpenAI-layer wrapper assumed (middleware path not traced)",
+  "status": 400,
+  "expected_refusal": {
+   "window": 0,
+   "requested": 0,
+   "meaning": "unknown",
+   "units": "tokens",
+   "source": "text:ollama/prompt-longer"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/ollama-native.body.json",
+  "server": "Ollama",
+  "version": "a5864fcb",
+  "provenance": "body built from the server's source at the pinned commit (o1/q4/bodies/sources, reports/O1 §4); wrapper as that source writes it; native {error} wrapper assumed; the host has no native Ollama client",
+  "status": 400,
+  "expected_refusal": {
+   "window": 0,
+   "requested": 0,
+   "meaning": "unknown",
+   "units": "tokens",
+   "source": "text:ollama/prompt-longer"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/lmstudio-546.body.json",
+  "server": "LM Studio",
+  "version": "0.3.13",
+  "provenance": "sentence from bug tracker #546 log; status and wrapper assumed",
+  "status": 400,
+  "expected_refusal": {
+   "window": 32768,
+   "requested": 0,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "text:lmstudio/loaded-only"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/lmstudio-mlx.body.json",
+  "server": "LM Studio MLX",
+  "version": "0.4.x",
+  "provenance": "sentence quoted in bug tracker #2339; status and wrapper assumed",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "unsupported"
+ },
+ {
+  "file": "bodies/zai-1261.body.json",
+  "server": "Z.ai",
+  "version": "error code 1261",
+  "provenance": "live refusal on this install 2026-11-20 22:06 UTC (zai::glm-5.3, logs/events.jsonl llm_api_error llm_912c35cf3f7c474688b85055e0d4fb0c): HTTP 400, code 1261, message verbatim; docs.z.ai/guides/llm/glm-5.3 states a 1M-token context and no per-request token counts in the refusal",
+  "status": 400,
+  "expected_refusal": {
+   "window": 0,
+   "requested": 0,
+   "meaning": "unknown",
+   "units": "tokens",
+   "source": "text:zai/prompt-too-long"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/openai-code.body.json",
+  "server": "OpenAI",
+  "version": "fixture",
+  "provenance": "the host's own fixture text (tests/test_context_refusal_passes.py:88), code context_length_exceeded",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 90000,
+   "reply": 8192,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "text:shared-vocabulary"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/openai-text-only.body.json",
+  "server": "OpenAI",
+  "version": "fixture",
+  "provenance": "the same text without a code",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 90000,
+   "reply": 8192,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "text:shared-vocabulary"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/openrouter-own.body.json",
+  "server": "OpenRouter",
+  "version": "fixture",
+  "provenance": "the host's fixture (tests/test_context_refusal_passes.py:95), the gateway's own refusal",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 90000,
+   "reply": 8192,
+   "meaning": "total",
+   "units": "tokens",
+   "source": "text:shared-vocabulary"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/openrouter-upstream-prompt-too-long.body.json",
+  "server": "OpenRouter -> Anthropic",
+  "version": "fixture",
+  "provenance": "gateway shape of tests/test_cross_model_reasoning_strip.py:115 with numbers set; the sentence only in error.metadata.raw",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 90000,
+   "meaning": "input",
+   "units": "tokens",
+   "source": "text:anthropic/prompt-too-long",
+   "gateway": "Anthropic"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/issue-3518-openrouter-alibaba.body.json",
+  "server": "OpenRouter -> Alibaba",
+  "version": "15.11.2026",
+  "provenance": "razzant/ouroboros#3518: metadata.raw and the outer message verbatim; code/provider_name/user_id assumed",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "number_equals_declared",
+  "declared_limit": 983616,
+  "declared_kind": "input"
+ },
+ {
+  "file": "bodies/alibaba-direct-compat.body.json",
+  "server": "Alibaba DashScope compatible",
+  "version": "15.11.2026",
+  "provenance": "the #3518 raw body as a direct answer (assumed)",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "number_equals_declared",
+  "declared_limit": 983616,
+  "declared_kind": "input"
+ },
+ {
+  "file": "bodies/anthropic-prompt-too-long.body.json",
+  "server": "Anthropic",
+  "version": "host regex/fixture",
+  "provenance": "native wrapper assumed; the host's regex form",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 90000,
+   "meaning": "input",
+   "units": "tokens",
+   "source": "text:anthropic/prompt-too-long"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/anthropic-input-plus-max_tokens.body.json",
+  "server": "Anthropic",
+  "version": "host regex/fixture",
+  "provenance": "native wrapper assumed; the host's regex form",
+  "status": 400,
+  "expected_refusal": {
+   "window": 80000,
+   "requested": 75000,
+   "reply": 8192,
+   "meaning": "input_plus_reply",
+   "units": "tokens",
+   "source": "text:anthropic/input-plus-max-tokens"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
+  "file": "bodies/ctl-llama-json-parse.body.json",
+  "server": "llama.cpp",
+  "version": "b12421 server-context.cpp:5316",
+  "provenance": "source path, exception text plausible",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/ctl-llama-invalid-tokens.body.json",
+  "server": "llama.cpp",
+  "version": "b12421 server-context.cpp:1940",
+  "provenance": "exact source text",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/ctl-llama-grammar-tools.body.json",
+  "server": "llama.cpp",
+  "version": "v1.0.0",
+  "provenance": "exact text quoted in reports/W2a §1 Q6",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/ctl-llama-loading-503.body.json",
+  "server": "llama.cpp",
+  "version": "b12421 server-common.cpp:126",
+  "provenance": "exact source text and type",
+  "status": 503,
+  "expected_refusal": null,
+  "expected_class": "provider_transient",
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/ctl-openai-empty-messages.body.json",
+  "server": "OpenAI",
+  "version": "synthetic",
+  "provenance": "synthetic in OpenAI's shape",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/ctl-openai-n-above-max.body.json",
+  "server": "OpenAI",
+  "version": "synthetic",
+  "provenance": "synthetic: an unrelated 400 with two numbers",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/ctl-image-dimensions.body.json",
+  "server": "generic",
+  "version": "synthetic",
+  "provenance": "synthetic: two size numbers that are not a token window",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/ctl-two-numbers-choices.body.json",
+  "server": "generic",
+  "version": "synthetic",
+  "provenance": "synthetic: 'tokens' and numbers, no window",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "bad_request",
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/ctl-max-tokens-cap.body.json",
+  "server": "generic",
+  "version": "synthetic",
+  "provenance": "synthetic: an output-token cap is an output limit",
+  "status": 400,
+  "expected_refusal": null,
+  "expected_class": "request_too_large",
+  "recognition": "not_size"
+ },
+ {
+  "file": "bodies/ctl-429-context-words.body.json",
+  "server": "generic",
+  "version": "synthetic",
+  "provenance": "synthetic: a rate limit worded with context numbers",
+  "status": 429,
+  "expected_refusal": null,
+  "expected_class": "provider_transient",
+  "recognition": "not_size"
+ }
+]

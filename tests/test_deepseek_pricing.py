@@ -12,6 +12,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,6 +208,62 @@ def test_one_read_in_flight_per_key(tariff, monkeypatch):
     assert catalog.account_currency(KEY) is None and calls == []
 
 
+def _wallet(currency: str, total: str = "0", granted: str = "0", topped: str = "0") -> dict:
+    """One documented entry: its currency beside the three amounts the billing rule reads."""
+    return {"currency": currency, "total_balance": total, "granted_balance": granted,
+            "topped_up_balance": topped}
+
+
+@pytest.mark.parametrize("infos, currency, reason", [
+    # At pin time, the only wallet with funds is CNY. This is not a receipt for a charge.
+    ([_wallet("USD"), _wallet("CNY", "3.00", granted="1.00", topped="2.00")], "CNY", None),
+    # The mirror: a funded USD wallet beside an empty CNY wallet supports the dollar tariff.
+    ([_wallet("CNY"), _wallet("USD", "3.00", granted="1.00", topped="2.00")], "USD", None),
+    # Two funded wallets stay ambiguous: a charge could land in either.
+    ([_wallet("USD", "1.00", topped="1.00"), _wallet("CNY", "2.00", topped="2.00")], None,
+     "currency_not_single"),
+    # Amounts nobody can read are not zero, so such an entry keeps its currency a candidate.
+    ([{"currency": "USD"}, _wallet("CNY", "5.00", topped="5.00")], None, "currency_not_single"),
+    ([_wallet("USD", "1", topped="1"), _wallet("CNY", "0", granted="1")], None, "currency_not_single"),
+    # Nothing holds money anywhere: the account names no single billing currency, so none is claimed.
+    ([_wallet("USD"), _wallet("CNY")], None, "currency_unfunded"),
+    # One wallet with nothing in it still names the currency the account bills in.
+    ([_wallet("USD")], "USD", None),
+])
+def test_a_wallet_that_provably_holds_nothing_does_not_make_the_currency_ambiguous(tariff, monkeypatch, infos,
+                                                                                 currency, reason):
+    _balance(monkeypatch, {"is_available": True, "balance_infos": infos})
+    fact = catalog.account_currency(KEY)
+    assert (fact["currency"], fact.get("reason")) == (currency, reason)
+
+
+@pytest.mark.parametrize("wallet", [
+    {"currency": "USD"}, _wallet("USD", "not a balance"), _wallet("USD", "NaN"), _wallet("USD", "Infinity"),
+    _wallet("USD", "-1"), _wallet("USD", "0", granted="1"), _wallet("USD", "2", topped="?"),
+    {**_wallet("USD", "2"), "granted_balance": None}, {**_wallet("USD"), "total_balance": True},
+])
+def test_an_unreadable_wallet_next_to_an_empty_one_is_not_evidence_of_funding(tariff, monkeypatch, wallet):
+    _balance(monkeypatch, {"is_available": True, "balance_infos": [wallet, _wallet("CNY")]})
+    fact = catalog.account_currency(KEY)
+    assert (fact["currency"], fact["reason"]) == (None, "currency_not_single")
+
+
+@pytest.mark.parametrize("status, reason", [({"is_available": False}, "balance_unavailable"),
+                                          ({}, "balance_unreadable"), ({"is_available": "false"}, "balance_unreadable")])
+def test_only_an_available_account_can_support_a_wallet_based_estimate(tariff, monkeypatch, status, reason):
+    _balance(monkeypatch, {**status, "balance_infos": [_wallet("CNY"), _wallet("USD", "1", topped="1")]})
+    fact = catalog.account_currency(KEY)
+    assert (fact["currency"], fact.get("reason")) == (None, reason)
+
+
+def test_even_a_tiny_positive_balance_is_not_an_empty_wallet(tariff, monkeypatch):
+    tiny = _wallet("CNY", "1e-400", granted="1e-400")
+    _balance(monkeypatch, {"is_available": True, "balance_infos": [_wallet("USD", "-0.00"), tiny]},
+             {"is_available": True, "balance_infos": [_wallet("USD", "2", topped="2"), tiny]})
+    assert catalog.account_currency(KEY)["currency"] == "CNY"
+    assert catalog.account_currency(KEY)["currency"] is None
+
+
 # --- the pin ---------------------------------------------------------------------------------------------------
 
 def test_the_pin_is_made_for_the_selected_deepseek_key_only(tariff, monkeypatch):
@@ -338,6 +395,44 @@ def _settled_row(root, evidence, reply=REPLY, *, body_error=False, **settle):
     return reservation, row
 
 
+@pytest.mark.parametrize("search, first, second", [(False, "USD", "CNY"), (True, "CNY", "USD")], ids=["chat", "search"])
+def test_each_attempt_uses_its_own_funded_wallet_snapshot(ledger, tariff, monkeypatch, search, first, second):
+    def balance(funded):
+        return {"is_available": True, "balance_infos": [
+            _wallet(code, "2", topped="2") if code == funded else _wallet(code) for code in ("USD", "CNY")]}
+
+    calls = _balance(monkeypatch, balance(first), balance(second))
+    _clock(monkeypatch, SATURDAY.replace(hour=2), SATURDAY.replace(hour=2, minute=1))
+    tick = 100.0
+    monkeypatch.setattr(catalog, "time", SimpleNamespace(monotonic=lambda: tick, time=catalog.time.time))
+    attempts = []
+    for _ in range(2):
+        pin = catalog.pin_tariff(TARGET, search=search, text_only=not search, drive_root=tariff)
+        request = _request(ledger, pin, model="" if search else TARGET["usage_model"], force_unknown_reservation=search)
+        reservation = ua.reserve_attempt(request)
+        ua.mark_dispatched(reservation)
+        attempts.append(reservation)
+        tick += 1
+
+    # Even the attempt that finishes last must price its own pre-send observation.
+    usage = ({"cost_evidence": {"outcome": "results", "http_status": 200, "results": 1}} if search
+             else usage_from_response({"usage": REPLY})[0])
+    for reservation in reversed(attempts):
+        ua.settle_attempt(reservation, usage)
+    rows = {row["attempt_id"]: row for row in ledger_rows(ledger)}
+    for reservation, currency in zip(attempts, (first, second)):
+        row = rows[reservation.attempt_id]
+        fact = row["cost_evidence"]["account_currency"]
+        assert fact == {"currency": currency, "source": "deepseek_user_balance", "observed_at": fact["observed_at"],
+                        "basis": "single_funded_wallet"}, "record the inference, not the balances"
+        assert (row["cost_estimated"], row["cost_final"]) == (currency == "USD", False)
+        if currency == "USD":
+            assert row["cost_usd"] == pytest.approx(0.00075 if search else PRO_OFF_PEAK)
+        else:
+            assert row["cost_usd"] is None and row["cost_evidence"]["tariff_pricing"] == {"unpriced": "currency_not_usd"}
+    assert len(calls) == 2, "one balance read per pin, none at settlement"
+
+
 @pytest.mark.parametrize("dispatched, settled", [
     (SATURDAY.replace(hour=2), SATURDAY.replace(hour=2, minute=3)),
     (THURSDAY.replace(hour=4, minute=30), THURSDAY.replace(hour=5, minute=10)),
@@ -417,6 +512,7 @@ def test_reported_cash_wins_and_invalid_cash_is_not_estimated(ledger, tariff, mo
     assert "tariff_pricing" not in row["cost_evidence"]
     _, row = _settled_row(ledger, _pinned(tariff), {**REPLY, "cost": "free"})
     assert (row["cost_usd"], row["cost_estimated"], row.get("cost_invalid")) == (None, False, True)
+    assert not row["cost_final"] and "tariff_pricing" not in row["cost_evidence"]
 
 
 @pytest.mark.parametrize("field", ["prompt_tokens", "completion_tokens", "cache_write_tokens",
@@ -440,8 +536,8 @@ def test_raw_token_counts_are_not_repaired_into_a_tariff(field, bad, body_error,
     assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (None, False, False)
     assert row["cost_evidence"]["tariff_pricing"]["unpriced"] == "usage_malformed"
     if field in {"prompt_tokens", "completion_tokens", "cache_write_tokens"}:
-        expected = None if isinstance(bad, bool) else max(0, int(bad))
-        assert row[field] == expected, "the historical ledger counter projection is unchanged"
+        expected = int(bad) if isinstance(bad, str) else None
+        assert row[field] == expected, "a malformed count is unknown on the row; an integer's digits are a count"
 
 
 @pytest.mark.parametrize("field", ["prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens"])
@@ -466,8 +562,14 @@ def test_raw_malformed_counts_do_not_discard_provider_cash(cash, body_error, led
     _, row = _settled_row(ledger, _pinned(tariff), {"prompt_tokens": -1, "completion_tokens": 0.9,
                                                         "prompt_cache_hit_tokens": "0", "cost": cash},
                           body_error=body_error)
-    assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (cash, False, True)
-    assert "tariff_pricing" not in row["cost_evidence"]
+    # A positive charge stands as reported, and so does a zero on a reply that is no error. A zero on an error body
+    # beside counts nobody can read is not a proved free call (they leave open whether work occurred): that amount
+    # alone stays unknown and non-final, and the pinned tariff cannot price unreadable counts either.
+    unproved_zero = body_error and cash == 0
+    assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (
+        (None, False, False) if unproved_zero else (cash, False, True))
+    assert (row["cost_evidence"].get("tariff_pricing") or {}).get("unpriced") == ("usage_malformed" if unproved_zero else None)
+    assert ("tariff_pricing" in row["cost_evidence"]) is unproved_zero
 
 
 @pytest.mark.parametrize("body_error", [False, True])

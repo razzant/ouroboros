@@ -336,6 +336,7 @@ _CONVERSATION_READERS = {
     "ouroboros/dialogue_store.py::_thread": "the store's own reference walk",
     "ouroboros/place_intake.py::_captured_arrival": "expands: the rebuilt event reaches the model",
     "ouroboros/place_arrivals.py::_room_details": "stored row, scalar title/name only",
+    "ouroboros/return_facts.py::_sort": "stored row, scalar full name/name/title only, for a place's label",
     "ouroboros/place_guard.py::_reply_touches": "validated reply_targets: literal conversation ids, never stored rows",
     "ouroboros/presence_events.py::parse_presence_event": "the connector's request payload, every live door",
     "ouroboros/presence_events.py::reply_targets": "the connector's message.reply_targets: literal address ids",
@@ -353,12 +354,14 @@ _CONVERSATION_READERS = {
     "ouroboros/dialogue_provenance.py::RoomLabelResolver.label": "whether a row's facts carry their conversation's scalars",
     "ouroboros/dialogue_provenance.py::RoomLabelResolver._place_label": "tail facts or a row: the scalar name/audience only",
     "ouroboros/memory_view_conversations.py::_scalars": "tail facts or a row: the conversation's scalars only, for a label",
+    "ouroboros/memory_view_events.py::receipt_situation": "the task document's route conversation: a string title/name/full name/username only, for a label",
     "ouroboros/tools/chronicle.py::publish_covered_page": "a page's own covers.conversation flag, never a row's conversation",
 }
 # Every function that decodes a stored dialogue body itself (``Row`` readers go through ``project_source``).
 _BODY_DECODERS = {
     "ouroboros/dialogue_store.py::whole_body": "expands",
     "ouroboros/dialogue_store.py::revise_text": "expands: refreshes the identity, returns the row as written",
+    "ouroboros/dialogue_store.py::annotation_sources": "stored row, its address only",
     "ouroboros/place_arrivals.py::project_source": "every Row reader: identity and words; whole_rows hands rows on",
     "ouroboros/place_arrivals.py::heard_replay": "stored row, identity and import marker only",
     "ouroboros/place_arrivals.py::record_heard": "stored row, identity only",

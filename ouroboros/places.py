@@ -62,14 +62,14 @@ def valid_wake_fact(fact: Any) -> bool:
     return isinstance(fact, str) and (fact in (*WAKE_FACTS, FACT_LEGACY_ADDRESSED) or is_wake_signal(fact))
 
 
-def declared_wake_signals(connector: str) -> set[str]:
-    """Only the authenticated connector's live publication can vouch for a signal."""
+def declared_fact_labels(connector: str) -> dict[str, str]:
+    """``{fact: label}`` its live publication words itself (a signal, which only it can vouch for, or a core kind)."""
     from ouroboros.extension_registry_state import live_contribution_projection
 
-    return {fact["id"] for row in live_contribution_projection()
+    return {fact["id"]: fact["label"] for row in live_contribution_projection()
             if row.get("provides") == "place" and row.get("skill") == connector
-            for fact in row.get("facts", [])
-            if isinstance(fact, dict) and is_wake_signal(fact.get("id"))}
+            for fact in row.get("facts", []) if isinstance(fact, dict)
+            and valid_wake_fact(fact.get("id")) and isinstance(fact.get("label"), str)}
 
 
 class PlaceError(ValueError):
@@ -681,11 +681,12 @@ def _expected(value: Any) -> int | None:
     return value
 
 
-def _transact(drive_root: Any, mutate: Any) -> None:
-    """One locked read-modify-write of the place document: ``mutate(document)`` returns the next document, or None
-    when nothing changes (nothing is written). The legacy import precedes the first edit, under the same lock file."""
+def _transact(drive_root: Any, mutate: Any, author: str = "", by: Any = None) -> None:
+    """One locked read-modify-write of the place document after the legacy import (same lock file): ``mutate(document)``
+    returns the next document or None (nothing written); removed words are kept first (``place_words_history``)."""
+    from ouroboros.place_words_history import keeping
     load_places(drive_root)
-    update_json_locked(places_path(drive_root), lambda current: mutate(_document(current)),
+    update_json_locked(places_path(drive_root), keeping(drive_root, mutate, author, by),
                        strict_existing_dict=True, reject_existing_empty_dict=True)
 
 
@@ -697,7 +698,7 @@ def _with_choices(document: dict, choices: dict) -> dict:
 
 
 def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int | None = None,
-           choose: Any = None) -> Place | None:
+           choose: Any = None, author: str = "", by: Any = None) -> Place | None:
     """One place's change; ``choose(choice, document)`` changes its circle or description in the same transaction.
     A changed choice is a change of the place: its revision moves (its connection's written revision with it), so a
     sheet holding the older revision meets a conflict instead of overwriting."""
@@ -735,7 +736,7 @@ def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int |
                 choices[place_id] = {**after, "connected_revision": result.connected_revision}
         return _with_choices({**current, "revision": revision, "places": rows, "connections": connections}, choices)
 
-    _transact(drive_root, mutate)
+    _transact(drive_root, mutate, author, by)
     return result
 
 
@@ -783,7 +784,7 @@ def _author(author: str) -> None:
 
 
 def edit_place(drive_root: Any, place_id: str, action: str, *, author: str,
-               expected_revision: int | None = None, **values: Any) -> Place | None:
+               expected_revision: int | None = None, by: Any = None, **values: Any) -> Place | None:
     """One writer shared by owner HTTP and the place verb; author is a host fact. ``update`` applies several changes
     (``values["changes"]``, ``(action, values)`` pairs) in one transaction, the place's circle and description too."""
     _author(author)
@@ -805,7 +806,7 @@ def edit_place(drive_root: Any, place_id: str, action: str, *, author: str,
             if name in _CHOICE_ACTIONS:
                 choice = _change_choice(choice, name, author, args, document)
         return choice
-    return _write(drive_root, place_id, change, expected_revision, choose)
+    return _write(drive_root, place_id, change, expected_revision, choose, author, by)
 
 
 def _change_choice(choice: dict, action: str, author: str, values: Mapping[str, Any], document: Mapping[str, Any]) -> dict:
@@ -873,7 +874,7 @@ def create_circle(drive_root: Any, *, name: str, text: str = "", model: str = ""
 
 
 def edit_circle(drive_root: Any, circle_id: str, *, author: str, expected_revision: int | None = None,
-                name: str | None = None, text: str | None = None, model: str | None = None) -> dict:
+                name: str | None = None, text: str | None = None, model: str | None = None, by: Any = None) -> dict:
     """Change a circle's name, words or model. Name/model edits keep word authorship; new words are ``author``'s.
     The same words saved again stay my human's unless my human saves them (then they become theirs)."""
     _author(author)
@@ -902,14 +903,15 @@ def edit_circle(drive_root: Any, circle_id: str, *, author: str, expected_revisi
         saved.update(circles[index])
         return {**current, "revision": current["revision"] + 1, "circles": circles}
 
-    _transact(drive_root, mutate)
+    _transact(drive_root, mutate, author, by)
     return saved
 
 
-def delete_circle(drive_root: Any, circle_id: str, *, expected_revision: int | None = None) -> dict:
+def delete_circle(drive_root: Any, circle_id: str, *, author: str, expected_revision: int | None = None,
+                  by: Any = None) -> dict:
     """Remove a circle. Its places stay connected and keep their notes, descriptions and states; they leave the
     circle in the same transaction (each one's revision moves). Returns the removed circle, its words included, and
-    the places it detached: there is no trash to restore from."""
+    the places it detached; its words stay in their history (``place_words_history``)."""
     _expected(expected_revision)
     outcome: dict[str, Any] = {}
 
@@ -939,13 +941,11 @@ def delete_circle(drive_root: Any, circle_id: str, *, expected_revision: int | N
         return _with_choices({**current, "revision": revision, "places": rows, "connections": connections,
                               "circles": circles}, choices)
 
-    _transact(drive_root, mutate)
+    _transact(drive_root, mutate, author, by)
     return outcome
 
 
 def _change_place(old: Place | None, action: str, author: str, values: dict) -> Place | None:
-    if action == "confirm_owner_account" and author != AUTHOR_OWNER:
-        raise PlaceError("place_owner_confirmation_required", "owner_accounts")
     if old is None:
         raise PlaceError("place_not_found", "place_id")
     if action == "disconnect":
@@ -963,14 +963,14 @@ def _change_place(old: Place | None, action: str, author: str, values: dict) -> 
         if not isinstance(facts, list) or any(not valid_wake_fact(f) for f in facts):
             raise PlaceError("place_wake_invalid", "wakes")
         added_signals = {f for f in facts if is_wake_signal(f)} - {w.fact for w in old.wakes}
-        if added_signals and not added_signals <= declared_wake_signals(old.connector):
+        if added_signals and not added_signals <= declared_fact_labels(old.connector).keys():
             raise PlaceError("place_wake_undeclared", "wakes", "place_wake_undeclared: this connector has not declared that signal; turn it on or choose a listed kind.")
         return replace(old, wakes=tuple(next((w for w in old.wakes if w.fact == fact), WakeItem(fact, author)) for fact in dict.fromkeys(facts)))
     if action in {"add_wake", "remove_wake"}:
         fact = values.get("fact", "")
         if not valid_wake_fact(fact):
             raise PlaceError("place_wake_invalid", "fact")
-        if action == "add_wake" and is_wake_signal(fact) and fact not in declared_wake_signals(old.connector):
+        if action == "add_wake" and is_wake_signal(fact) and fact not in declared_fact_labels(old.connector):
             raise PlaceError("place_wake_undeclared", "fact", "place_wake_undeclared: this connector has not declared that signal; turn it on or choose a listed kind.")
         items = tuple(w for w in old.wakes if w.fact != fact)
         if action == "add_wake":

@@ -1,7 +1,7 @@
 # Ouroboros CI — Five-tier cross-platform testing and release pipeline
 #
 # Lint:                 Manual / tag                                                   → ruff F, ESLint no-undef, generated Pages output
-# Tier 1 (Quick):       Manual                                                        → Ubuntu PERSIST battery, three duration shards
+# Tier 1 (Quick):       Manual / tag                                                   → Ubuntu PERSIST battery, three duration shards
 # Tier 2 (Full):        Manual / tag                                                   → Full 3-OS matrix, duration shards on every OS
 # Tier 1.5 (SQLite floor): Manual                                                      → store modules on ubuntu-22.04's system SQLite 3.37.2
 # Tier 2.5 (Integration): Manual / tag                                                 → Real-provider tests, reusable provider-canary.yml
@@ -128,7 +128,7 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────
   # Lint: deterministic source checks, on manual runs and release tags (a
-  # release requires it). Moved out of quick-test, which tags never ran.
+  # release requires it). Moved out of quick-test, which tags did not run then.
   # ──────────────────────────────────────────────────────────────────
   lint:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
@@ -174,11 +174,15 @@ jobs:
         run: cd web && npm ci --no-audit --no-fund && npm run lint:undef
 
   # ──────────────────────────────────────────────────────────────────
-  # Tier 1: Quick tests on Ubuntu (manual dispatch). The PERSIST battery in
-  # three duration shards; a diagnostic of manual runs, not part of the tag bar.
+  # Tier 1: Quick tests on Ubuntu (manual dispatch and release tags). The PERSIST
+  # battery in three duration shards on setup-python's 3.10. On a tag it is part of
+  # the release bar (owner 2026-11-17): apps up to 7.11.0 keep their bundled Python
+  # 3.10 across Update and run each release's code on it, while the other test lanes
+  # run the shipped interpreter. Drop the tag admission once 3.10 apps no longer
+  # receive Updates.
   # ──────────────────────────────────────────────────────────────────
   quick-test:
-    if: github.event_name == 'workflow_dispatch' && inputs.scope != 'tests'
+    if: (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && inputs.scope != 'tests'
     needs: shard-plan
     # The growth-mode step reads the pull request's label events; the accepted-failure
     # check reads issue label events.
@@ -991,7 +995,7 @@ jobs:
   # a runner with executed payload code at all (it used to run first on the
   # ubuntu leg, before that leg's install smoke).
   # A review leg runs Ouroboros's own skill review on ONE cheap stochastic
-  # reviewer slot (deepseek/deepseek-v4.1-flash, low effort, isolated settings;
+  # reviewer slot (z-ai/glm-5.3, low effort, isolated settings;
   # production reviewer defaults stay untouched), ubuntu-only (an
   # LLM verdict is OS-independent), one leg per review skill so the three
   # live reviews run in parallel under the product's own review window.
@@ -2677,9 +2681,28 @@ jobs:
           subject-path: ${{ steps.linux_packages.outputs.rpm_red80 }}
           sbom-path: dist/sbom-linux-rpm-red80-x86_64.cdx.json
 
-      # Upload the archive and its exact proof companions. The .deb/.rpm lines
-      # match nothing on macOS and Windows, which is fine — `error` fires only
-      # when the whole path set is empty.
+      # Each vendor runner downloads just its package. Release already merges
+      # ouroboros-* artifacts, including these two, into one directory.
+      - name: Upload the Astra Linux package
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ouroboros-package-astra
+          path: ${{ steps.linux_packages.outputs.deb }}
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the RED OS package
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ouroboros-package-redos
+          path: ${{ steps.linux_packages.outputs.rpm_red80 }}
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload build artifact
         if: matrix.os != 'windows-latest'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -2695,9 +2718,7 @@ jobs:
             dist/native-sources-linux-*.tar.gz.sha256
             dist/release-smoke-linux-appimage-x86_64.json
             dist/sbom-linux-appimage-x86_64.cdx.json
-            dist/ouroboros_*_amd64.deb
             dist/ouroboros-*-1.x86_64.rpm
-            dist/ouroboros-*-1.red80.x86_64.rpm
             dist/release-smoke-linux-deb-amd64.json
             dist/release-smoke-linux-rpm-x86_64.json
             dist/release-smoke-linux-rpm-red80-x86_64.json
@@ -2929,33 +2950,50 @@ jobs:
   # Gating a tagged release on that would trade a real publication failure for
   # someone else's outage, so the job runs alongside `release` rather than
   # ahead of it, and `continue-on-error` keeps a red result informational.
+  # Each OS is its own leg, so one registry's outage never hides the other.
   # ──────────────────────────────────────────────────────────────────
   vendor-package-smoke:
+    name: vendor-package-smoke (${{ matrix.leg }})
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     continue-on-error: true
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: astra
+            os: Astra Linux 1.8
+            package: 'ouroboros_{version}_amd64.deb'
+          - leg: redos
+            os: RED OS 8
+            package: 'ouroboros-{version}-1.red80.x86_64.rpm'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - name: Download Linux build artifact
+      - name: Download the package for this vendor
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ouroboros-ubuntu-latest
+          name: ouroboros-package-${{ matrix.leg }}
           path: linux-artifacts/
 
-      - name: Smoke packages on Astra Linux and RED OS
+      - name: Smoke the package on ${{ matrix.os }}
         id: vendor_smoke
         shell: bash
+        env:
+          LEG: ${{ matrix.leg }}
+          PACKAGE: ${{ matrix.package }}
         run: |
           set -euo pipefail
           VERSION="$(tr -d '[:space:]' < VERSION)"
-          bash scripts/smoke_linux_packages.sh vendor \
-            "linux-artifacts/ouroboros_${VERSION}_amd64.deb" \
-            "linux-artifacts/ouroboros-${VERSION}-1.x86_64.rpm" \
-            "linux-artifacts/ouroboros-${VERSION}-1.red80.x86_64.rpm"
+          package=${PACKAGE/'{version}'/"$VERSION"}
+          if [[ "$LEG" == redos ]]; then LEG=redos-ci; fi
+          bash scripts/smoke_linux_packages.sh "$LEG" "linux-artifacts/$package"
 
       # Without this, a non-blocking failure is easy to miss in the run list.
       - name: Report vendor smoke outcome
@@ -2963,14 +3001,14 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.vendor_smoke.outcome }}" = "success" ]; then
-            echo "Vendor package smoke passed on Astra Linux 1.8 and RED OS 8." >> "$GITHUB_STEP_SUMMARY"
+            echo "Vendor package smoke passed on ${{ matrix.os }}." >> "$GITHUB_STEP_SUMMARY"
           else
             {
-              echo "Vendor package smoke did not pass on Astra Linux 1.8 / RED OS 8."
+              echo "Vendor package smoke did not pass on ${{ matrix.os }}."
               echo ""
               echo "This lane is informational and does not block the release."
-              echo "Check whether registry.astralinux.ru and registry.red-soft.ru were"
-              echo "reachable before treating this as a packaging defect."
+              echo "Check whether the vendor's registry was reachable before"
+              echo "treating this as a packaging defect."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -2987,8 +3025,9 @@ jobs:
           needs.lint.result == 'success' && needs.full-test.result == 'success' && needs.system-e2e-mock.result == 'success' &&
           needs.ui-smoke.result == 'success' && needs.integration-test.result == 'success' && needs.marker-guards.result == 'success' &&
           needs.docker-ui-smoke.result == 'success' && needs.docker-portable-test.result == 'success' &&
-          needs.skill-smoke.result == 'success' && needs.test-verdict.result == 'success' }}
-    needs: [build, windows-proof, android-build, release-preflight, lint, full-test, integration-test, system-e2e-mock, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke, test-verdict]
+          needs.skill-smoke.result == 'success' && needs.test-verdict.result == 'success' &&
+          needs.quick-test.result == 'success' }}
+    needs: [build, windows-proof, android-build, release-preflight, lint, full-test, integration-test, system-e2e-mock, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke, test-verdict, quick-test]
     runs-on: ubuntu-latest
     concurrency:
       group: release-${{ github.ref }}
@@ -3093,6 +3132,7 @@ jobs:
             skill-smoke=${{ needs.skill-smoke.result }}
             lint=${{ needs.lint.result }}
             test-verdict=${{ needs.test-verdict.result }}
+            quick-test=${{ needs.quick-test.result }}
         shell: bash
         run: |
           set -euo pipefail

@@ -3,7 +3,9 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { clearStickyCardState } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
+import { replayedTerminalRecords } from '../modules/settled_card.js';
 import { classifyLiveFrame } from '../modules/notifications.js';
+import { terminalChildFrame } from '../modules/settled_card.js';
 
 import {
     OWNER_STOP_DETAIL_MARKER,
@@ -132,11 +134,39 @@ test('interrupted task_done remains retryable and cannot finish a root card', ()
         phase: 'working', headline: 'Working',
     });
     assert.match(chatSource, /if \(eventType === 'task_done' && summary\.terminal\)/);
-    assert.match(chatSource, /if \(!taskDoneIsTerminal\(terminalRecord\)\) return;/);
+    // History settles a card only from a terminal stamp: an interrupted one selects no ending.
+    const replayed = (status) => replayedTerminalRecords([{ task_id: 'retry', role: 'system', is_progress: true,
+        task_terminal_status: status, reason_code: evt.reason_code }], new Map(), new Map()).has('retry');
+    assert.deepEqual([replayed('interrupted'), replayed('failed')], [false, true]);
     assert.equal(taskDoneIsTerminal({
         status: 'completed',
         root_phase_checkpoint: { post_task_synthesis: 'running' },
     }), false);
+});
+
+test('history keeps one ending per task: a later lifecycle wins, detail refines its own, a bubble draws no completion', () => {
+    const select = (rows) => replayedTerminalRecords(rows, new Map(), new Map()).get('t');
+    const progress = { task_id: 't', role: 'system', is_progress: true, ts: '2026-09-05T00:00:00Z',
+        task_terminal_status: 'failed', reason_code: 'owner_requested_finalization',
+        outcome_axes: { lifecycle: { status: 'failed' }, execution: { status: 'failed' } } };
+    const final = { task_id: 't', role: 'assistant', text: 'Stopped.', ts: '2026-09-05T00:00:10Z' };
+    const newer = select([progress, { ...final, task_terminal_status: 'completed' }]);
+    assert.deepEqual([newer.phase, newer.drawn], ['done', true], 'the newer final of another lifecycle is the last word');
+    assert.equal(select([progress, { ...final, task_terminal_status: 'failed' }]).phase, 'error', 'the same lifecycle keeps its detail');
+    const answer = select([{ ...final, task_terminal_status: 'completed', outcome_axes: { execution: { status: 'ok' } } }]);
+    assert.deepEqual([answer.phase, answer.rich, answer.drawn], ['done', true, false], 'an answer applies its facts, draws no row');
+    // An unnumbered receipt cannot lend its quiet effect to a known attempt in the same physical task.
+    const summary = { task_id: 't', role: 'system', system_type: 'task_summary', ts: '2026-10-24T07:49:00Z', status: 'completed',
+        outcome_final: true, outcome_phase: 'done', reason_code: 'final_message',
+        terminal_time: { v: 1, source: 'executor_terminal', occurred_at: '2026-10-24T07:49:00Z', attempt: { task_attempt: 0 } } };
+    const receipt = { task_id: 't', role: 'system', system_type: 'task_summary', summary_kind: 'terminal_root_projection',
+        ts: '2026-10-24T07:50:00Z', historical_terminal: { status: 'completed', phase: 'done', ts: '2026-10-24T07:50:00Z',
+            quiet_effective: true } };
+    const quiet = select([summary, receipt]);
+    assert.deepEqual([quiet.detail.ts, quiet.detail.quiet_effective, quiet.drawn], [summary.ts, undefined, true]);
+    const matched = select([summary, { ...receipt, task_attempt: 0,
+        historical_terminal: { ...receipt.historical_terminal, task_attempt: 0 } }]);
+    assert.equal(matched.detail.quiet_effective, true, 'the exact attempt’s receipt still lends its quiet effect');
 });
 
 test('review lifecycle timeout and error are terminal lifecycle errors', () => {
@@ -182,11 +212,14 @@ test('failed child remains a compact local fact without owner-alarm semantics', 
     assert.doesNotMatch(child.fullBody, /Reason: /, 'no machine label in front of the owner sentence');
     assert.equal('ownerAlarm' in child, false);
     assert.equal('notification' in child, false);
-    const adapter = chatSource.slice(
-        chatSource.indexOf('function routeSubagentTerminalToCard'),
-        chatSource.indexOf('function updateLiveCardFromLogEvent'),
-    );
-    assert.match(adapter, /reason_code: evt\.reason_code \|\| ''/);
+    // The synthesized terminal frame (settled_card.js terminalChildFrame) names its child and keeps the daemon's own
+    // words; its cause code, event and delegation meta are pinned once, in wire_contract.test.js.
+    // The route itself is exercised behaviorally (extracted from chat.js and run) in
+    // reason_detail.test.js; no exact-spread source regex is pinned here.
+    const built = terminalChildFrame('child-failed', { parentId: 'root-working', role: 'researcher' }, {
+        status: 'failed', error: 'daemon unreachable' });
+    assert.equal(built.subagent_task_id, 'child-failed');
+    assert.equal(built.error, 'daemon unreachable');
 });
 
 test('interrupted child stays retryable with a Working chip and inspectable detail', () => {
@@ -357,16 +390,20 @@ test('task-detail healing keeps the terminal predicate and missing-task summary 
     // Keep the predicate seam without inventing detail states the server never emits.
     assert.match(cancelHeal, /taskDoneIsTerminal\(stored\)/);
 
+    // reconcileMissingManagedTask is callback-based now (readMissingCardDetail), not async;
+    // the seam itself — which branch may finish the card — is what the pins below guard.
     const missingHeal = chatSource.slice(
-        chatSource.indexOf('async function reconcileMissingManagedTask'),
+        chatSource.indexOf('function reconcileMissingManagedTask'),
         chatSource.indexOf('function observeMissingManagedTask'),
     );
+    assert.notEqual(missingHeal, '', 'reconcileMissingManagedTask seam not found — update this test');
     assert.match(missingHeal, /isTerminalTaskDetail\(detail\)/);
     assert.match(missingHeal, /appendTaskSummaryToLiveCard\(\{ \.\.\.detail, task_id: taskId \}\)/);
     // A retained typed historical lifecycle may finish the card only in the
-    // proven-absent result branch after complete fresh activity excluded it.
+    // proven-absent result branch after complete fresh activity excluded it:
+    // the settleMissingTaskRecord call must sit inside that branch, not anywhere else.
     assert.match(missingHeal, /if \(!vouched && detail === null\)/);
-    assert.match(missingHeal, /return settleMissingTaskRecord\(currentRecord\)/);
+    assert.match(missingHeal, /if \(!vouched && detail === null\)[\s\S]*?return settleMissingTaskRecord\(/);
     const fallback = chatSource.slice(chatSource.indexOf('function settleMissingTaskRecord'),
         chatSource.indexOf('function markTaskCancelable'));
     assert.match(fallback, /applyHistoricalModelExecution\(record, historical\)/);
@@ -697,6 +734,9 @@ test('a census pause says its word alone and what holds it on its line, never wh
     ]) {
         assert.deepEqual([view(cause).text, view(cause).secondary], [word, line], cause);
     }
+    const reason = 'The task will continue automatically when it can read which tasks are stopped for spending.';
+    assert.equal(taskActivityPresentation({ phase: 'budget_paused', pauseCause: 'authority', pauseReason: reason,
+        resumeAction: true }).secondary, reason);
     // The census's owner cause cannot tell the owner's Pause from Ouroboros's: the word alone, no line.
     assert.deepEqual([view('owner').text, view('owner').secondary], ['Paused', undefined]);
     assert.equal(view('owner', 'budget_pausing').text, 'Pausing…');

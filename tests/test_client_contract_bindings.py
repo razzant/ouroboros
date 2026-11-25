@@ -321,9 +321,9 @@ def test_every_published_and_owned_shape_has_one_field_identical_browser_twin():
         "ouroboros.gateway.management_contracts", "ouroboros.gateway.history_contracts"))
 
 
-@pytest.mark.parametrize("name", ["WorkLead", "WorkPrimaryRoute", "CitedModelWords", "WorkProcessing", "ProcessingReceipt",
-                                  "ProcessingTiers"])
-def test_nested_lead_provenance_has_a_field_identical_browser_twin(name):
+@pytest.mark.parametrize("name", ["WorkLead", "WorkPrimaryRoute", "WorkPendingRoute", "CitedModelWords", "WorkProcessing", "ProcessingReceipt",
+                                  "ProcessingTiers", "WorkMembers", "WorkMemberState", "WorkReason", "QueuedBehind"])
+def test_nested_work_contracts_have_a_field_identical_browser_twin(name):
     # Inline schemas do not appear in the published document's top-level name list.
     text = (REPO / "web" / "modules" / "work_types.js").read_text(encoding="utf-8")
     assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"work contract twins lack {name}"
@@ -480,9 +480,10 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     assert set(place["model_route"]) == _declared("PlaceModelRoute")
     assert validate_ingress({**place, "model_route": {"value": "x", "layer": "unknown"}}, contract_typed_dict("PlaceSummary"))
     assert set(place) <= _declared("PlaceSummary") and "connector_label" not in place
-    # The derived «only hears» fact is an optional boolean: present, it validates; any other type does not.
-    assert not validate_ingress({**place, "only_hears": True}, contract_typed_dict("PlaceSummary"))
-    assert validate_ingress({**place, "only_hears": "consciousness_off"}, contract_typed_dict("PlaceSummary"))
+    # The derived quiet cause is an optional object of words: present, it validates; any other type does not.
+    quiet = {"cause": "off", "word": "Hears only · consciousness off", "note": "…", "door": "consciousness"}
+    assert not validate_ingress({**place, "quiet": quiet}, contract_typed_dict("PlaceSummary"))
+    assert validate_ingress({**place, "quiet": "consciousness_off"}, contract_typed_dict("PlaceSummary"))
     assert [(n["text"], n["author"]) for n in place["notes"]] == [(connect["note"], "owner")]
     assert place["circle"]["circle_id"] == circle["circle_id"] and place["circle"]["placed_by"] == "owner"
     assert not validate_ingress(place["circle"], contract_typed_dict("PlaceCircleChoice"))

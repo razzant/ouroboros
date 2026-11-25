@@ -34,10 +34,12 @@ ObligationsUnavailable = store.StoreError  # the sets are rows: unavailable exac
 _FACT_COLUMNS = ("task_id", "headless_child_drive_root", "child_drive_root", "drive_root")
 
 
-def task_written(txn, task_id, columns=None):
+def task_written(txn, task_id, columns=None, *, current=None, document=None):
     """Publish duty inputs in the task writer's transaction. The terminal-write counter moves on
     closing/closed writes, never on a live task's writes, and stamps the row's ``terminal_seq`` with
-    its new value, so a pass keyed on the counter reads only the rows written since (``task_store``)."""
+    its new value, so a pass keyed on the counter reads only the rows written since (``task_store``).
+    ``current`` and ``document`` are the store's pristine and new documents when ``Txn.store_task``
+    holds both: the retirement half reads an unfinished work's write for the saved state it moved past."""
     from ouroboros.store_hot_facts import note_written
     from ouroboros.task_status import SETTLED_STATUSES
     note_written(columns)  # a control fact's writer moves the dispatcher's kept C2 admissions (dispatch_choice)
@@ -56,7 +58,7 @@ def task_written(txn, task_id, columns=None):
     from ouroboros.plan_collection_job import task_written as plan_written
     plan_written(txn, task_id, columns)
     from ouroboros.maintenance_retirement import task_written as retirement_written
-    retirement_written(txn, task_id, columns)
+    retirement_written(txn, task_id, columns, current=current, document=document)
 
 
 def review_collection_pending(row: dict) -> bool:
@@ -166,6 +168,10 @@ def result_memberships(row: dict) -> set[str]:
         from ouroboros.owner_quiz import quiz_needs_retention
         if any(quiz_needs_retention(block) for block in quizzes.values()):
             names.add("owner_questions")
+    if row.get("payload_release"):
+        from ouroboros.payload_release_state import flagged
+        if flagged(row):  # an open owner's choice, a decided move or a held staging (Storage -> Free)
+            names.add("payload_offers")
     return names
 
 

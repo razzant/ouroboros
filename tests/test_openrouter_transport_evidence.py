@@ -11,7 +11,7 @@ import pytest
 
 from ouroboros import usage_accounting as ua
 from ouroboros.llm import LLMClient
-from ouroboros.llm_stream import AssembledResponse, consume_stream, consume_stream_async
+from ouroboros.llm_stream import AssembledResponse, IncompleteProviderStream, consume_stream, consume_stream_async
 from tests._usage_store_testing import ledger_rows
 
 
@@ -88,9 +88,15 @@ def run_driver(wire, *, asynchronous=False, provider="openrouter"):
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("phase", ["read", "close", "cancel"])
 @pytest.mark.parametrize("cost", [0.0, 1.25])
-def test_received_price_survives_stream_failure(isolated, asynchronous, phase, cost):
+@pytest.mark.parametrize("envelope", [False, True], ids=["usage", "envelope"])
+def test_received_price_survives_stream_failure(isolated, asynchronous, phase, cost, envelope):
     failure = asyncio.CancelledError("owner stop") if phase == "cancel" else RuntimeError("wire failed")
-    chunks = [frame(usage={"cost": cost, "prompt_tokens": 11, "completion_tokens": 3}, finish="stop")]
+    usage = {"prompt_tokens": 11, "completion_tokens": 3}
+    if not envelope:
+        usage["cost"] = cost
+    chunks = [frame(usage=usage, finish="stop")]
+    if envelope:
+        chunks.append(("data: " + json.dumps({"total_cost_usd": cost}) + "\n\n").encode())
     if phase == "close":
         chunks.append(b"data: [DONE]\n\n")
     wire = Wire(chunks, read_error=failure if phase != "close" else None,
@@ -101,13 +107,40 @@ def test_received_price_survives_stream_failure(isolated, asynchronous, phase, c
         assert caught.value is failure
     # The async accounting custody wrapper re-emits cancellation; the original
     # physical failure retains its usage and no caller receives a partial reply.
-    assert failure.stream_usage["cost"] == cost
+    assert failure.stream_usage["total_cost_usd" if envelope else "cost"] == cost
     rows = ledger_rows(isolated)
     assert len(rows) == 1  # No repeated generation after partial response or Stop.
     assert rows[0]["cost_usd"] == cost and rows[0]["cost_final"] is True
     assert rows[0]["prompt_tokens"] == 11 and rows[0]["completion_tokens"] == 3
     assert rows[0]["provider_receipt_binding"]["generation_id"] == "gen-fixture"
     assert wire.close_calls >= 1
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("ending,upstream,state,amount", [
+    pytest.param("socket", None, "unresolved", None, id="fee-alone-socket-loss"),
+    pytest.param("eof", None, "unresolved", None, id="fee-alone-eof"),
+    pytest.param("socket", 0.02, "settled", 0.03, id="whole-byok-amount-socket-loss"),
+    pytest.param("close-after-terminal", None, "settled", None, id="fee-alone-after-terminal"),
+])
+def test_a_byok_gateway_fee_alone_cannot_settle_a_lost_stream(isolated, asynchronous, ending, upstream, state, amount):
+    """Before terminal framing only the whole sourced amount (here the gateway fee plus the provider-billed share)
+    settles a lost socket or an EOF; the fee alone leaves the original attempt unresolved, sent once."""
+    usage = {"prompt_tokens": 11, "completion_tokens": 3, "cost": 0.01, "is_byok": True}
+    if upstream is not None:
+        usage["cost_details"] = {"upstream_inference_cost": upstream}
+    terminal = ending == "close-after-terminal"
+    chunks = [frame(usage=usage, finish="stop" if terminal else None)] + ([b"data: [DONE]\n\n"] if terminal else [])
+    failure = RuntimeError("socket lost")
+    wire = Wire(chunks, read_error=failure if ending == "socket" else None, close_error=failure if terminal else None)
+    with pytest.raises(RuntimeError) as caught:
+        run_driver(wire, asynchronous=asynchronous)
+    assert isinstance(caught.value, IncompleteProviderStream) if ending == "eof" else caught.value is failure
+    row, = ledger_rows(isolated)  # one physical send: the lost stream is never replayed
+    assert row["state"] == state
+    assert row.get("cost_usd") == (None if amount is None else pytest.approx(amount, abs=1e-12))
+    assert bool(row.get("cost_final")) is (amount is not None)
+    assert (getattr(caught.value, "stream_usage", None) is None) is (state == "unresolved")
 
 
 @pytest.mark.parametrize(("header", "asynchronous"), [("", False), ("gen-fixture", True)])
@@ -348,10 +381,12 @@ def test_valid_alternate_price_outranks_invalid_cost(isolated, monkeypatch, pric
 
 
 def test_absent_price_still_permits_tariff_estimate(isolated, monkeypatch):
+    from ouroboros.llm_routing import OPENROUTER_BASE_URL
+
     body = {"choices": [{"message": {"content": "usable"}}],
             "usage": {"prompt_tokens": 10, "cost": None, "cost_invalid": True}}
     monkeypatch.setattr("ouroboros.pricing.estimate_cost_optional", lambda *a, **kw: 0.75)
-    _, usage = LLMClient()._normalize_remote_response(body, target())
+    _, usage = LLMClient()._normalize_remote_response(body, {**target(), "base_url": OPENROUTER_BASE_URL})
     normalized, cost, final = ua.usage_from_response(body)
     assert usage["cost"] == 0.75 and usage["cost_estimated"] is True and usage["cost_final"] is False
     assert cost is None and final is False

@@ -11,7 +11,10 @@ the owner's work in Main or any room and beside the focuses, which never hold it
 Tick order, each step a typed outcome: disabled → its own live wake → not yet due → the
 rolling-24h allowance (an unreadable ledger is the disclosed skip
 ``allowance_unknown``, never a silent block; known spend at the daily limit is
-``allowance_exhausted``) → an owner chat must be bound → launch. A skip keeps the window it met
+``allowance_exhausted``) → where it speaks, read once and passed to the launch: the bound owner
+chat, or Main while that slot is KNOWN empty (the person's first message binds it, the wake binds
+nothing); a binding that cannot be read is the disclosed skip ``owner_chat_unknown``, never a
+guessed chat or chat 0 → launch. A skip keeps the window it met
 (``allowance_fact``, the projection a wake's preparation carries) in its event and in the one
 overwritten ``consciousness_last_skip`` state key, which the mind's status read shows. An exhausted
 allowance waits for its window to free, a time chosen under the limit it met: a changed daily limit
@@ -21,10 +24,14 @@ What is left of that allowance is the launched tree's producer ceiling
 spend reaches it — no extra planning margin is subtracted or skipped (owner 2026-10-07) — while the
 ledger fence stays at the owner's per-task cap, so a wake never dies before its first call on a
 nearly spent day. The next
-wake is ``last finish + interval``: the MODEL's choice (``set_next_wakeup`` persists
+wake is ``last finish + interval``: the MODEL's choice (``set_next_wakeup(seconds)`` persists
 ``consciousness_next_interval_sec``) or ``WAKE_DEFAULT_SEC``, clamped into the owner's
 [min, max]; a runner failure — or a wake the lane could not admit — doubles it up to max until a
-wake succeeds. The persisted own actor id and cause fence completion; a carrier handoff
+wake succeeds. A time the mind named (``set_next_wakeup(at)``, ``consciousness_clock``) makes it
+sooner while it lies strictly ahead, never below min nor above max after that finish (and turning
+consciousness on comes first at one still ahead); the settlement of a wake appointed after it was
+stored consumes it once that wake ends at or after it, deciding on the state its own write holds
+(``_next_delay``). The persisted own actor id and cause fence completion; a carrier handoff
 does not finish the logical wake, and repeated terminal callbacks do not advance it twice.
 A wake a pending Restart refuses before its start stays a refusal, like every closed door:
 no failure, no row, no owner and no observation (``handle_wake_direct``). A pooled terminal
@@ -66,7 +73,9 @@ from ouroboros.config import (
 )
 from ouroboros.consciousness_allowance import STATUS_EXHAUSTED, STATUS_UNKNOWN, allowance_window
 from ouroboros.consciousness_authority import is_consciousness_origin, is_own_clock_wake
+from ouroboros.consciousness_clock import OWNER_ZONE_STATE_KEY, WAKE_TARGET_STATE_KEY, consumed_by, target_ts
 from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY, wake_continuity, wake_continuity_after, wake_task_metadata
+from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -143,7 +152,7 @@ def panic_blocks_wake(drive_root: Any) -> bool:
 
 
 # Who turned consciousness off, saved in the same state write as ``bg_consciousness_enabled`` (owner 11.11, 5A; the
-# twin of /evolve off's provenance): the owner's doors (/bg from the app, Telegram or onboarding) and Panic leave a stop
+# twin of /evolve off's provenance): the owner's doors (/bg from the app, Telegram or a setup page) and Panic leave a stop
 # only the owner's start lifts, in every mode (P0: the owner's decision binds in Cyber Pro too); toggle_consciousness lifts only
 # a stop it placed. A stop with no saved source (placed before this key, a recovered state) is unknown: owner's.
 STOP_SOURCE_KEY = "bg_consciousness_stop_source"
@@ -216,6 +225,30 @@ def _persist_stop(source: str) -> str:
             return _BACKUP_UNSAVED.format(exc.reason)
         return f" Not saved (runtime state unavailable, {exc.reason}): the stop holds in this process only."
     return ""
+
+
+def owner_chat_of(st: Dict[str, Any]) -> Optional[int]:
+    """The owner chat a state read names, the clock's ``owner_chat_id_fn`` on the server: the bound chat, or ``None``
+    while the slot is KNOWN empty: no owner message has bound one (``gateway.control._admit_description_task``
+    places a press by the same rule). A binding that cannot be read now, or a slot that holds no chat, raises
+    ``LookupError`` saying why: a failed read never reads as an empty slot, and a missing value never as chat 0."""
+    from supervisor.state import STATE_READ_KEY, control_value
+
+    known, chat_id = control_value(st, "owner_chat_id")
+    if known and chat_id is None:
+        return None
+    if known:
+        try:
+            if type(chat_id) is not bool and int(chat_id):
+                return int(chat_id)
+        except (TypeError, ValueError):
+            pass
+        raise LookupError(f"the owner chat slot holds {chat_id!r}")
+    read = st.get(STATE_READ_KEY) if isinstance(st, dict) else None
+    if isinstance(read, dict) and read.get("quality") not in ("current", "recovered", "recovered_transient"):
+        reason = f": {read['reason']}" if read.get("reason") else ""
+        raise LookupError(f"runtime state {read.get('quality')}{reason}")
+    raise LookupError("the owner chat binding is not confirmed")  # a recovery holds it unconfirmed
 
 
 class BackgroundConsciousness:
@@ -317,13 +350,26 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: %s not persisted", key, exc_info=True)
 
-    def _interval(self) -> int:
-        """The model's chosen interval (``set_next_wakeup``) or the default, clamped."""
+    def _interval(self, state: Optional[Dict[str, Any]] = None, bounds: Optional[Tuple[int, int]] = None) -> int:
+        """The model's chosen interval (``set_next_wakeup(seconds)``) or the default, clamped into ``bounds`` (MIN,
+        MAX; read from the settings when not given)."""
+        floor, ceiling = bounds or (self.floor, self.ceiling)
         try:
-            chosen = int(self._read_state().get(INTERVAL_STATE_KEY) or WAKE_DEFAULT_SEC)
+            chosen = int((self._read_state() if state is None else state).get(INTERVAL_STATE_KEY) or WAKE_DEFAULT_SEC)
         except (TypeError, ValueError):
             chosen = WAKE_DEFAULT_SEC
-        return max(self.floor, min(self.ceiling, chosen))
+        return max(floor, min(ceiling, chosen))
+
+    def _next_delay(self, now: float, state: Dict[str, Any], bounds: Optional[Tuple[int, int]] = None) -> float:
+        """The one next-delay rule of a settlement and a refused admission: the rhythm (the chosen interval times
+        the failure backoff, up to MAX), or sooner while a named time (``set_next_wakeup(at)``) lies strictly
+        ahead of ``now``, never below MIN nor above MAX after it. A passed named time changes nothing here."""
+        floor, ceiling = bounds or (self.floor, self.ceiling)
+        delay = min(ceiling, self._interval(state, (floor, ceiling)) * self._backoff)
+        target = target_ts(state.get(WAKE_TARGET_STATE_KEY))
+        if target is not None and target > now:
+            delay = min(delay, max(floor, min(ceiling, target - now)))
+        return delay
 
     def _archive_legacy_inbox(self) -> None:
         """One-time move of the retired observation inbox into the archive (never read)."""
@@ -387,9 +433,10 @@ class BackgroundConsciousness:
                 resets = parse_deadline_ts(str(window.get("resets_at") or ""))
                 return self._skip("allowance_exhausted", max(resets.timestamp() if resets else 0.0, now + self.floor),
                                   window, now=now)
-            if not self._owner_chat_id():
-                return self._skip("waiting_for_first_conversation", now + self.floor, window, now=now)
-        return self._launch(now, int(self._owner_chat_id() or 0), window)
+            chat_id, unread = self._destination()
+            if chat_id is None:
+                return self._skip("owner_chat_unknown", now + self.floor, window, now=now, error=unread)
+        return self._launch(now, chat_id, window)
 
     def _settle_unreported_terminal(self) -> bool:
         """Settle its own known wake from a pooled terminal no dispatcher reported (an orphan sweep, a
@@ -505,6 +552,10 @@ class BackgroundConsciousness:
             "window": allowance_fact(window),
             "counted_roots": live_consciousness_roots(), "max_tasks": get_consciousness_max_tasks(),
             "interval": self._interval(), "appointment_at": self._appointment_at,
+            # The "Own clock" section's facts (``consciousness_standing._clock_section``), in the state's shape.
+            "clock": {**{key: persisted[key] for key in (WAKE_TARGET_STATE_KEY, OWNER_ZONE_STATE_KEY)
+                         if key in persisted},
+                      APPOINTMENT_STATE_KEY: self._appointment_at, "floor": self.floor, "ceiling": self.ceiling},
         }
         bound_over, stopped_before_binding = None, False
 
@@ -544,7 +595,7 @@ class BackgroundConsciousness:
             if why == "admission_failed":
                 self._backoff = min(self._backoff * 2, 1024)
             transient = why == "repo_writer_gate_closed"
-            self._set_next_wake(now + (self.floor if transient else min(self.ceiling, self._interval() * self._backoff)))
+            self._set_next_wake(now + (self.floor if transient else self._next_delay(now, self._read_state())))
             self._record("consciousness_wake_rejected", reason=why, wake_reason=reason)
             return f"rejected:{why}"
         if stopped_before_binding:
@@ -634,14 +685,26 @@ class BackgroundConsciousness:
             else:
                 self._backoff, self._last_wake_outcome = min(self._backoff * 2, 1024), "failed"
                 self._last_error = f"wake-up {task_id} failed in its runner (see the chat and events.jsonl)"
-            self._next_wake_at = self._appointment_at = now + min(self.ceiling, self._interval() * self._backoff)
+            # Only a wake appointed after the named time was stored consumes it: judged by this wake's appointment.
+            prior, bounds = self._appointment_at, (self.floor, self.ceiling)
+            # Held when the settlement cannot be written; a written one decides on the state it holds.
+            self._next_wake_at = self._appointment_at = now + self._next_delay(now, self._read_state(), bounds)
+            settled = {OWN_WAKE_STATE_KEY: self._own_wake, LAST_WAKE_STATE_KEY: now,
+                       OBSERVATION_BOOTSTRAP_STATE_KEY: self._observation_bootstrap_since,
+                       CONTINUITY_STATE_KEY: dict(self._continuity)}
+
+            def settle(st: Dict[str, Any]) -> None:
+                # Under the state lock: a named time stored since the read above is the one judged and the one
+                # that sets the next appointment.
+                if consumed_by(st.get(WAKE_TARGET_STATE_KEY), appointment_at=prior, now=now):
+                    st.pop(WAKE_TARGET_STATE_KEY, None)
+                self._next_wake_at = self._appointment_at = now + self._next_delay(now, st, bounds)
+                st.update(settled, **{NEXT_WAKE_STATE_KEY: self._next_wake_at,
+                                      APPOINTMENT_STATE_KEY: self._appointment_at})
+
             from supervisor import state
             try:  # the notes past it (``None``: an unreadable row) persist with the settlement itself
-                state.update_state(lambda st: st.update({OWN_WAKE_STATE_KEY: self._own_wake,
-                    LAST_WAKE_STATE_KEY: now, NEXT_WAKE_STATE_KEY: self._next_wake_at,
-                    APPOINTMENT_STATE_KEY: self._appointment_at,
-                    OBSERVATION_BOOTSTRAP_STATE_KEY: self._observation_bootstrap_since,
-                    CONTINUITY_STATE_KEY: dict(self._continuity)}))
+                state.update_state(settle)
             except Exception:
                 log.debug("consciousness: wake completion not persisted", exc_info=True)
         if (row or {}).get("wake_summary") and not row.get("title"):
@@ -662,12 +725,34 @@ class BackgroundConsciousness:
             if refusal:
                 return refusal
             if self._enabled:
-                return "Background consciousness is already enabled." + note
+                return "Consciousness is already on." + note
             self._stopped, self._enabled, self._stop_source = False, True, ""
-            # The clock did not advance while disabled: never announce a wake in the past.
-            self._set_next_wake(max(self._next_wake_at, time.time()), appointment=True)
+            # The clock did not advance while disabled: never announce a wake in the past. A named time still ahead
+            # (one stored while off, ``set_next_wakeup(at)``) comes first when it is earlier than the next attempt Off
+            # left, no sooner than MIN after the last wake, boot or skip (the tool's contract).
+            now, stored = time.time(), self._read_state()
+            due, named = max(self._next_wake_at, now), target_ts(stored.get(WAKE_TARGET_STATE_KEY))
+            if named is not None and named > now:
+                skip = stored.get(LAST_SKIP_STATE_KEY)
+                skipped = parse_deadline_ts(skip.get("at")) if isinstance(skip, dict) else None
+                last = max(self._last_wake_at, self._booted_at, skipped.timestamp() if skipped is not None else 0.0)
+                due = min(due, max(named, last + self.floor))
+            self._set_next_wake(due, appointment=True)
             at = time.strftime('%H:%M', time.localtime(self._next_wake_at))
-            return f"Background consciousness enabled; next wake-up at {at}." + note
+        from ouroboros.consciousness_view import on_sentence
+        try:  # where it may speak now: one read that never holds the start (the words 15.11, 5A)
+            from ouroboros.places import load_places
+            places = load_places(self._drive_root)
+        except Exception:
+            log.debug("consciousness: places unreadable for the start sentence", exc_info=True)
+            places = None
+        try:  # a spent or unreadable window names no wake (reviews r3, r4): read now, not the status view's cache, and
+            # with the display's short wait, never the admission's long one that would hold the owner's next command (r5)
+            from ouroboros.consciousness_allowance import allowance_window
+            allowance = str(allowance_window(self._drive_root, allow_stale=True).get("status") or "")
+        except Exception:
+            allowance = "allowance_unknown"
+        return on_sentence(at, places, get_consciousness_autonomy(), get_consciousness_daily_usd(), allowance) + note
 
     def stop(self, source: str = "") -> str:
         """Stop this process first, then save the stop with ``source`` (``OWNER_STOP`` or ``AGENT_STOP``); Panic names
@@ -702,7 +787,7 @@ class BackgroundConsciousness:
         kept += "".join(f"\nKept firing on your words (schedule {sid}): «{quote}»"
                         for sid, quote in cited_owner_schedules(self._drive_root))
         if not wakes and not was_enabled:
-            return "Background consciousness is already disabled." + saved + kept
+            return "Consciousness is already off." + saved + kept
         for task_id in wakes:
             threading.Thread(target=self._stop_live_wake, args=(task_id,), name="wake-stop", daemon=True).start()
         # What Off leaves and what it ends, in the same row (owner 09.11, variant A). The stops are already on their
@@ -733,6 +818,20 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: graceful stop of wake %s failed", task_id, exc_info=True)
 
+    def _saved_stop_source(self) -> str:
+        """Who stopped it: the confirmed saved source (a Panic stays named after a restart, and a later stop of an
+        already stopped clock does not rename it), else this process's own stop."""
+        try:
+            if panic_blocks_wake(self._drive_root):  # a Panic waiting to be saved outranks an older saved stop (review r4)
+                return PANIC_STOP
+            from supervisor.state import control_value, read_state
+            known, source = control_value(read_state(self._drive_root).projection(), STOP_SOURCE_KEY)
+            if known and source:
+                return str(source)
+        except Exception:
+            pass
+        return self._stop_source
+
     def status_snapshot(self) -> Dict[str, Any]:
         from supervisor.consciousness_carriers import queued_wakes
 
@@ -753,6 +852,8 @@ class BackgroundConsciousness:
                 # What holds it, proven from its records; the current window's own verdict stays beside it.
                 "live_wake_hold": held_wake_cause(self._drive_root, wake) if held else None,
                 "allowance_status": str(window.get("status") or ""),
+                # Who turned it off (owner, panic, agent_tool): the switch's state line names a Panic (5A).
+                **({"stop_source": source} if not self._enabled and (source := self._saved_stop_source()) else {}),
                 "allowance_open_rows": window.get("accounting_open_rows"),
                 "allowance_room_after": str(window.get("room_after") or ""),
                 "model_route": model_route(),
@@ -824,11 +925,19 @@ class BackgroundConsciousness:
             return {}
         return dict(facts) if isinstance(facts, dict) else {}
 
-    def _owner_chat_id(self) -> Optional[int]:
+    def _destination(self) -> Tuple[Optional[int], str]:
+        """Where a wake speaks, observed once per tick (``owner_chat_id_fn``, ``owner_chat_of`` on the server): the bound
+        owner chat, or Main while the callback answers that slot is KNOWN empty (``None``); a callback that raises, or a
+        slot that holds no chat, is ``(None, why)``. Before this rule the wake waited for a bound chat as its only
+        destination (``8212eebed``); Main is a destination every surface shows."""
         try:
-            return int(self._owner_chat_id_fn() or 0) or None
-        except Exception:
-            return None
+            bound = self._owner_chat_id_fn()
+            if bound is None:
+                return WEB_UI_CHAT_ID, ""
+            chat_id = int(bound)
+        except Exception as exc:
+            return None, str(exc) or type(exc).__name__
+        return (chat_id, "") if chat_id else (None, "the owner chat slot holds no chat")
 
     def _record(self, event_type: str, **fields: Any) -> None:
         try:

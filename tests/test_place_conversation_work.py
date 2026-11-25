@@ -765,6 +765,112 @@ def test_a_cold_sleep_under_owner_pause_gets_nothing_and_is_never_resumed(host, 
     assert place_rows(world.data, task["id"]) == [] and wake_ready_sleepers(world.queue) == []
 
 
+# --- A change whose initiator is unknown (maybe my own echo): its sole reader's context, never a wake ------------------
+
+UNNAMED = {"platform": "chat", "attribution": "unknown"}  # who made the change: a connector that cannot name them
+UNKNOWN_LABEL = "A change, not new words; who made it is unknown"
+
+
+def post_change(world, *, actor=UNNAMED, thread="1.0", number=None):
+    """A state-only change as a connector reports it: no words, a ``state_change`` fact, no wake item."""
+    number = 5001 + world.sequence[0] if number is None else number
+    return post(world, number, text="", thread=thread, facts=(), actor=dict(actor), message={
+        "message_id": str(number), "source_order": number,
+        "non_text": [{"kind": "state_change", "description": "Assigned to ouroboros-agent"}]})
+
+
+def test_an_unattributed_change_reaches_the_sole_reading_root_as_context_and_ends_no_wait(host):
+    world = host(wakes=("mention", "any_message"))  # the wildcard selected too: still nobody's wake
+    task = dispatched(world, promote(world))
+    key = task["metadata"]["presence"]["event"]["conversation_key"]
+    seen, waited, woke = {}, threading.Event(), threading.Event()
+
+    def wait(_messages):
+        waited.set()
+        return call(("await_messages", {"timeout_sec": 50}))
+
+    def after(messages):
+        seen.update(text=json.dumps(messages, ensure_ascii=False), woke_at=time.monotonic())
+        woke.set()
+        return finish("Noted.")
+
+    box = run_root(world, task, wait, after)
+    assert waited.wait(60)
+    until(lambda: author_intake_accepting(world.data, task["id"], key), "the root's loop to read its conversation")
+    agents = len(world.h.agents)
+    change, reply = post_change(world)
+    assert reply.status_code == 200 and reply.json()["outcome"] == "silent", reply.text
+    rows = place_rows(world.data, task["id"])
+    assert [row["place_arrival"]["wake"] for row in rows] == [False], "its own mailbox, as context"
+    assert attention(world, change)["reason"] == "conversation_work" and attention(world, change)["recipient"] == task["id"]
+    assert json.loads(rows[0]["text"])["non_speech"] == UNKNOWN_LABEL
+    assert not woke.wait(1.5), "its wait goes on: context ends none"
+    assert len(world.h.agents) == agents and world.allowance.calls == 0, "no second focus, no allowance"
+    posted_at = time.monotonic()
+    follow, reply = post(world, text="One more thing.")
+    assert reply.status_code == 200 and attention(world, follow)["recipient"] == task["id"], reply.text
+    until(lambda: seen.get("text"), "the woken root's next model round")
+    assert seen["woke_at"] - posted_at < 30
+    assert UNKNOWN_LABEL in seen["text"] and "One more thing." in seen["text"], "the wake's round reads both"
+    until(lambda: (load_task_result(world.data, task["id"]) or {}).get("status") == "completed", "the root's terminal")
+    box["thread"].join(30)
+    assert "error" not in box
+
+
+def test_an_unattributed_change_before_the_roots_final_close_reopens_nothing(host):
+    world = host()
+    task = dispatched(world, promote(world))
+    seen = {}
+
+    def first(_messages):
+        seen["change"] = post_change(world)  # while its loop reads, before its final closes
+        return finish("All three are healthy.")
+
+    def second(_messages):
+        seen["reopened"] = True
+        return finish("Reopened.")
+
+    box = run_root(world, task, first, second)
+    until(lambda: (load_task_result(world.data, task["id"]) or {}).get("status") == "completed", "the root's terminal")
+    box["thread"].join(30)
+    assert "error" not in box
+    change, reply = seen["change"]
+    assert reply.status_code == 200 and attention(world, change)["recipient"] == task["id"], reply.text
+    assert [row["place_arrival"]["wake"] for row in place_rows(world.data, task["id"])] == [False]
+    assert "reopened" not in seen and world.focus_inputs == [], "its final stands: context reopens nothing"
+
+
+def test_an_unattributed_change_reaches_an_unheld_cold_sleep_without_waking_it(host, monkeypatch):
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    world = host()
+    task = _cold_sleeper(world, monkeypatch)
+    change, reply = post_change(world)
+    assert reply.status_code == 200 and reply.json()["outcome"] == "silent", reply.text
+    assert attention(world, change)["recipient"] == task["id"]
+    assert [row["place_arrival"]["wake"] for row in place_rows(world.data, task["id"])] == [False]
+    assert wake_ready_sleepers(world.queue) == [], "context never ends a sleep"
+    follow, reply = post(world, text="Are you still on it?")
+    assert reply.status_code == 200 and attention(world, follow)["recipient"] == task["id"], reply.text
+    granted = wake_ready_sleepers(world.queue)
+    assert granted[0]["ok"] is True and granted[0]["ready"]["reason"].startswith("mail:"), granted
+
+
+def test_a_named_actors_state_change_skips_a_root_and_several_readers_get_no_unattributed_one(host):
+    world = host()
+    first = reading(world, objective="First")
+    named, reply = post_change(world, actor={"platform_actor_id": "U2", "username": "person"})
+    assert reply.status_code == 200 and attention(world, named)["reason"] == "no_wake_match", reply.text
+    assert place_rows(world.data, first["id"]) == [], "a named state change: a current author's background, no root's"
+    second = reading(world, objective="Second")
+    change, reply = post_change(world)
+    assert reply.status_code == 200 and reply.json()["outcome"] == "silent", reply.text
+    assert attention(world, change)["reason"] == "change_actor_unknown"
+    assert place_rows(world.data, first["id"]) == place_rows(world.data, second["id"]) == []
+    assert _recipient(world, change) == {}, "no holder pinned and no mind asked"
+    assert world.allowance.calls == 0 and world.h.agents == [], "never a focus"
+
+
 # --- A root on its own drive; a superseded attempt's end ----------------------------------------------------------
 
 
@@ -831,6 +937,20 @@ def test_a_retry_after_a_lost_settlement_stays_with_its_holder_whatever_the_set_
     assert retried.status_code == 200 and retried.json()["outcome"] == "silent", retried.text
     assert len(place_rows(world.data, first["id"])) == 1 and place_rows(world.data, second["id"]) == []
     assert attention(world, source)["recipient"] == first["id"] and not world.h.agents
+
+
+def test_a_retried_unattributed_change_stays_with_its_holder_whatever_the_set_became(host, monkeypatch):
+    world = host()
+    first = reading(world, objective="First")
+    _settle_lost_once(monkeypatch)
+    change, failed = post_change(world, number=3100)
+    assert failed.status_code >= 400 and failed.json()["disposition"] == "retry", failed.text
+    second = reading(world, objective="Second")  # now two read: the retry keeps its one holder, still context
+    _same, retried = post_change(world, number=3100)
+    assert retried.status_code == 200 and retried.json()["outcome"] == "silent", retried.text
+    assert [row["place_arrival"]["wake"] for row in place_rows(world.data, first["id"])] == [False]
+    assert place_rows(world.data, second["id"]) == [] and attention(world, change)["recipient"] == first["id"]
+    assert not world.h.agents and world.allowance.calls == 0
 
 
 def test_a_published_queue_that_cannot_be_read_retries_rather_than_calling_it_heard(host):

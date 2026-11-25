@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 RESULT_LAYER = "result"
 RESULT_KIND = "result"
 RESULT_ROOT_KIND = "task_result"
+# The hold cause of a Blocking refusal: a debt the delivery owner keeps, never a one-shot fact (``delivery_facts``).
+BLOCKING_REFUSAL_CAUSE = "blocking_refusal"
 RESULT_USER_TURN = "Review the task result against its request, as the instructions above describe."
 # The rules a result wave is judged by: this section of docs/CHECKLISTS.md, read from the install as every
 # other review surface reads its own section (owner, 18.10: the rubric lives with the other checklists).
@@ -163,18 +165,18 @@ def _ask(ctx: Any) -> str:
 
 
 def _verification(ctx: Any) -> str:
-    from ouroboros.outcomes import read_context_verification_receipts
+    from ouroboros import outcomes, utils
     from ouroboros.review_evidence_sections import _accept_receipt_exhibits, _accept_verification_summary
 
     task_id = str(getattr(ctx, "task_id", "") or "")
     try:
-        receipts = read_context_verification_receipts(ctx, task_id, fallback_root=getattr(ctx, "drive_root", None)) if task_id else []
+        receipts = outcomes.read_context_verification_receipts(ctx, task_id) if task_id else []
     except Exception as exc:
         return _ASK_WORDS["unreadable"].format(error=f"{type(exc).__name__}: {exc}")
     if not receipts:
         return _ASK_WORDS["no_receipts"]
-    return json.dumps({"summary": _accept_verification_summary(receipts), "receipts": _accept_receipt_exhibits(receipts)},
-                      ensure_ascii=False, indent=1, default=str)
+    return utils.json_dumps_utf8({"summary": _accept_verification_summary(receipts), "receipts": _accept_receipt_exhibits(receipts)},
+                                 ensure_ascii=False, indent=1, default=str)
 
 
 _SUBJECT_HEAD = "# Task result under review\n\n## What was asked\n\n"
@@ -753,6 +755,7 @@ def _revised(ctx: Any, hold: Any, llm_trace: Dict[str, Any], subject: Any, recor
     one is put before the author once more unless its reasoned finish of this answer already chose (``_decided``);
     then that review is bound beside the delivered subject as an earlier version's, with the author's acceptance (an
     earlier PASS so accepted is Done with that label; Presence ``speech`` departed: nothing shown, asked or held).
+    Rewording reminders share the review-cycle ceiling via the existing saved question list.
     Blocking holds until a review passes the delivered version."""
     received, record_id = _outcome_received(ctx, llm_trace, record), str(record.get("record_id") or "")
     if blocking:
@@ -763,7 +766,11 @@ def _revised(ctx: Any, hold: Any, llm_trace: Dict[str, Any], subject: Any, recor
                                                                       "_result_review_request_asked"))
     words = [] if speech or pair in words_asked else _words_since(ctx, _retained_subject_text(ctx, str((record.get(
         "subject") or {}).get("diff_sha") or "")))
-    if not speech and (not received or words or (aggregate != "PASS" and pair not in asked and not _decided(ctx, content))):
+    # Rewording alone must not buy endless free handbacks. Reuse the saved questions and the existing review cap;
+    # unread outcomes and new owner words still reach the author, regardless of that allowance.
+    cap = _ceiling()
+    ask_revision = aggregate != "PASS" and pair not in asked and (cap is None or len(asked) < cap)
+    if not speech and (not received or words or (ask_revision and not _decided(ctx, content))):
         ctx._result_review_revision_asked = [*asked, pair]
         ctx._result_review_request_asked = [*words_asked, pair] if words else words_asked
         said = ["Its reviewers did not see these words of your human; do they change what was asked?",
@@ -926,7 +933,7 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
         elif not blocking:
             return _after_refusal(ctx, llm_trace, subject.diff_sha)
         elif standing or not required:  # still spent, or an author's own review: held until a review passes it
-            ctx._completion_hold_cause = "blocking_refusal"  # each hold names its cause to the delivery owner
+            ctx._completion_hold_cause = BLOCKING_REFUSAL_CAUSE  # each hold names its cause to the delivery owner
             hold(_findings_text(settled_result_record(ctx, subject.diff_sha, rows, refusal=True) or {"verdict": {
                 "aggregate": "NOT_DISPATCHED"}}, blocking=True, required=bool(required), raised=not standing))
             return True

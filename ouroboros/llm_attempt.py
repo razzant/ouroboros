@@ -24,12 +24,21 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from ouroboros.anthropic_native_custody import is_replayed_native_content
-from ouroboros._usage_response import provider_answer, typed_values
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, size_refusal
+from ouroboros._usage_response import (
+    _plain, processing_refusal_reason, provider_answer, provider_failure_payload, refusal_conflicts, typed_values,
+)
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, size_refusal
+from ouroboros.llm_helper_window import _helper_attempt_context, helper_context_for, priced_for
+from ouroboros.opencode_go import is_go_chat_route
+from ouroboros.transport_custody import (  # noqa: F401 -- shared with the catalog and native send builders
+    apply_processing_preference, attempt_pricing_fields, processing_transport_modes, provider_reported_cost_only,
+    submitted_processing_mode,
+)
 from ouroboros.request_wire_contract import physical_candidate_bytes as _canonical_candidate_bytes
 from ouroboros.request_wire_recovery import prepare_wire_payload_for_send
 from ouroboros.transport_custody import (  # noqa: F401 -- consumers import these two scopes through this module
-    ProviderNotDispatched, is_loopback_base_url, physical_attempt_tracker, single_physical_send,
+    ProcessingNotStarted, ProviderNotDispatched, is_loopback_base_url,
+    is_processing_refusal, physical_attempt_tracker, single_physical_send,
     single_physical_send_active, single_send_claim, track_physical_attempts)
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
@@ -164,7 +173,8 @@ class ProviderPolicyRefusal(RuntimeError):
 class ConnectionUnavailable(ProviderPolicyRefusal):
     """The route names an API connection that cannot serve it: ``missing`` (no such
     row, or it lacks its credential/endpoint), ``disabled``, ``kind_mismatch`` (the
-    name belongs to another kind) or ``invalid`` (a malformed spelling). Raised while
+    name belongs to another kind), ``invalid`` (a malformed spelling) or
+    ``invalid_api_surface`` (an OpenAI API choice outside its closed set). Raised while
     the target is resolved, so nothing is dispatched ($0); never re-sent on another
     connection's key (``provider_connections.connection_values``)."""
 
@@ -201,14 +211,20 @@ def body_error_facts(error: Dict[str, Any], transient: bool) -> Dict[str, Any]:
 
     Size is recognised on the whole object and before the transient heuristic (``transient``), so a size refusal
     that says "try again" is no outage; ``message`` stays the bounded log projection of the quoted sentence and
-    ``answer`` the record the loop stamps (``loop_transport.owner_provider_answer``)."""
+    ``answer`` the record the loop stamps (``loop_transport.owner_provider_answer``). A refusal its own code and
+    wording explain (#3858) is no untyped client refusal either: the cited-number step takes no number it cites."""
     from ouroboros.context_budget import SIZE_REFUSAL_STATUSES
-
+    from ouroboros.size_refusal import cited_size_refusal
     answer = provider_answer({"error": error})
     size = size_refusal(answer, answer.status)
     transient = transient and not size
     facts = answer.facts(size[2:] if size else ("", ""), basis=size[0] if size else "",
-                         untyped=not size and not transient and answer.status in SIZE_REFUSAL_STATUSES)
+                         untyped=not size and not transient and not cited_size_refusal(answer)
+                                 and answer.status in SIZE_REFUSAL_STATUSES)
+    from ouroboros.size_refusal import answer_fact
+    numbers = answer_fact(answer, answer.status)  # an excluded quotation keeps a numberless fact, as ``stamp``
+    if numbers is not None:
+        facts["size"] = numbers.to_json()
     sentence = facts.get("sentence", "")
     return {"code": error.get("code"), "type": error.get("type"), "message": sentence[:300],
             # A cut sentence says so: the owner's quote must not read this prefix as whole.
@@ -312,53 +328,7 @@ def _applied_payload_cache_ttl(payload: Dict[str, Any]) -> Optional[str]:
     return "default" if breakpoints else None
 
 
-def submitted_processing_mode(target: Dict[str, Any], payload: Dict[str, Any]) -> str:
-    """Read the actual native carrier, never infer execution from requested intent."""
-    provider = target.get("provider")
-    if provider in {"openai", "openrouter"}:
-        extra = payload.get("extra_body")
-        value = (extra["service_tier"] if isinstance(extra, dict) and "service_tier" in extra
-                 else payload.get("service_tier"))
-    elif provider == "anthropic":
-        value = payload.get("speed")
-    elif provider == "claudexor":
-        options = payload.get("options") or {}
-        value = options.get("processingPreference") or options.get("serviceTier")
-    else:
-        value = None
-    return value if isinstance(value, str) else ""
-
-
-def apply_processing_preference(target: Dict[str, Any], payload: Dict[str, Any]) -> None:
-    """Project already captured advisory intent before sealing this send copy.
-
-    These are provider protocol fields, not a model eligibility table. Explicit
-    native options win; unknown transports retain their ordinary request shape.
-    A retry already carries its replacement native mode and is never re-resolved.
-    """
-    preference = target.get("processing_preference")
-    if not preference:
-        return
-    if submitted_processing_mode(target, payload):
-        target["processing_native_origin"] = "native_override"
-        return
-    provider = target.get("provider")
-    if preference == "ultrafast" and provider in {"openai", "openrouter", "anthropic"}:
-        return  # no documented native field: honestly not submitted, never an invented service tier
-    if provider in {"openai", "openrouter"}:
-        payload["service_tier"] = {
-            "standard": "default", "fast": "priority", "economy": "flex",
-        }[preference]
-    elif provider == "anthropic":
-        # Messages has no synchronous Economy speed. Its explicit ordinary
-        # projection preserves the advisory request without inventing a tier.
-        payload["speed"] = "fast" if preference == "fast" else "standard"
-    else:
-        return
-    target["processing_native_origin"] = "preference"
-
-
-def attach_processing_receipt(target: Dict[str, Any], usage: Dict[str, Any]) -> None:
+def attach_processing_receipt(target: Dict[str, Any], usage: Dict[str, Any], *, attempt_ids: list[str] | None = None) -> None:
     """Project the matching terminal attempt; never reconstruct a pre-fallback mode."""
     from ouroboros._usage_response import processing_receipt
 
@@ -370,6 +340,14 @@ def attach_processing_receipt(target: Dict[str, Any], usage: Dict[str, Any]) -> 
     usage.pop("effort_resolution", None)
     if matched and capture.effort is not None:
         usage["effort"] = copy.deepcopy(capture.effort)
+    if provider in {"openai", "openrouter", "anthropic"}:
+        usage.pop("processing", None)  # An API usage extension is not a native session receipt.
+        received_id = attempt_ids[-1] if attempt_ids else target.get("received_attempt_id")
+        matched = matched and capture.attempt_id == received_id
+    usage.pop("provider_reported_cost_only", None)
+    reported_only = capture.provider_reported_cost_only if matched else provider_reported_cost_only(target)
+    if reported_only or (matched and target.get("received_unpriced_add_on")):
+        usage["provider_reported_cost_only"] = True
     requested = (capture.processing_preference if matched
                  else str(target.get("processing_preference") or ""))
     submitted = capture.submitted_processing_mode if matched else ""
@@ -383,16 +361,12 @@ def processing_contract_headers(target: Dict[str, Any], payload: Dict[str, Any])
     headers = dict(target.get("contract_headers") or {})
     if target.get("provider") == "anthropic" and payload.get("speed") == "standard":
         betas = [value.strip() for value in headers.get("anthropic-beta", "").split(",")
-                 if value.strip() != "fast-mode-2026-02-01"]
+                 if value.strip() not in ("", "fast-mode-2026-02-01")]
         if betas:
             headers["anthropic-beta"] = ",".join(betas)
         else:
             headers.pop("anthropic-beta", None)
-    if target.get("provider") == "anthropic" and (
-        payload.get("speed") == "fast" or (
-            "speed" not in payload and target.get("processing_preference") == "fast"
-        )
-    ):
+    if target.get("provider") == "anthropic" and payload.get("speed") == "fast":
         betas = [value.strip() for value in headers.get("anthropic-beta", "").split(",") if value.strip()]
         if "fast-mode-2026-02-01" not in betas:
             betas.append("fast-mode-2026-02-01")
@@ -400,63 +374,42 @@ def processing_contract_headers(target: Dict[str, Any], payload: Dict[str, Any])
     return headers
 
 
-class ProcessingNotStarted(ProviderNotDispatched):
-    """A provider-owned processing refusal proving this generation never began."""
-
-    def __init__(self, error: BaseException, *, reason: str):
-        super().__init__(str(error))
-        self.processing_reason = reason
-        for name in ("body", "code", "type", "status_code", "response"):
-            if hasattr(error, name):
-                setattr(self, name, getattr(error, name))
-
-
 def processing_refusal(target: Dict[str, Any], payload: Dict[str, Any],
                        error: BaseException) -> BaseException:
-    """Normalize only a documented native refusal; socket/stream errors stay unknown.
-
-    Dedicated Flex resource refusal and unsupported request fields precede
-    generation. Generic quota, overload, timeout and stream failures do not.
-    """
-    if getattr(error, "stream_incomplete", False) or isinstance(error, ProviderNotDispatched):
+    """Only an uncontradicted native refusal proves generation never started."""
+    if isinstance(error, (ProcessingNotStarted, ProviderNotDispatched)):
         return error
-    if (target.get("processing_preference") not in {"fast", "economy"}
-            or target.get("processing_native_origin") != "preference"):
+    mode = submitted_processing_mode(target, payload)
+    if mode not in {"priority", "fast", "flex", "ultrafast"}:
         return error
     response = getattr(error, "response", None)
     status = getattr(error, "status_code", None) or getattr(response, "status_code", None)
-    body = getattr(error, "body", None)
-    if body is None and response is not None and callable(getattr(response, "json", None)):
-        try:
-            body = response.json()
-        except (ValueError, TypeError):
-            return error
-    native_error = body.get("error", body) if isinstance(body, dict) else None
-    if not isinstance(native_error, dict):
-        return error
-    provider, mode = target.get("provider"), submitted_processing_mode(target, payload)
-    reason = ""
-    if (provider == "anthropic" and mode == "fast" and status == 429
-            and native_error.get("type") == "rate_limit_error"):
-        reason = "capacity"
-    elif provider in {"openai", "openrouter"} and mode in {"priority", "fast", "flex"}:
-        if mode == "flex" and status in {400, 429, 503} and native_error.get("code") in {
-            "resource_unavailable", "unsupported_service_tier",
-        }:
-            reason = "capacity"
-        elif (status == 400 and native_error.get("code") == "unsupported_parameter"
-              and native_error.get("param") == "service_tier"):
-            reason = "unsupported"
+    body = provider_failure_payload(error)
+    reason = processing_refusal_reason(target.get("provider"), mode, status, body)
+    if not reason and response is not None and getattr(error, "body", None) is not None:
+        reason = processing_refusal_reason(target.get("provider"), mode, status, _plain(response))
+    if not reason and status == 200 and getattr(error, "stream_prior_usage", None) is not None:
+        # A Chat SSE body may carry the same typed error and separate status as JSON.
+        # Read it for billing; an SSE terminal is not proof of pre-generation rejection.
+        native_error = body.get("error") if isinstance(body, dict) else None
+        body_status = native_error.get("status_code") if isinstance(native_error, dict) else None
+        if type(body_status) is int:
+            reason = processing_refusal_reason(target.get("provider"), mode, body_status, body)
+            if reason:
+                error.status_code = body_status
     if reason:
+        if refusal_conflicts(error):
+            error.processing_refusal_conflict = True
+            return error
         normalized = ProcessingNotStarted(error, reason=reason)
-        normalized.body = copy.deepcopy(body)
+        normalized.body = copy.deepcopy(getattr(error, "body", None) or body)
         return normalized
     return error
 
 
 def reasoning_strip_retry_allowed(exc: BaseException) -> bool:
     """A 400 may omit replay unless an existing refusal/overflow path owns it."""
-    if getattr(exc, "stream_incomplete", False) or isinstance(exc, ProcessingNotStarted):
+    if getattr(exc, "stream_incomplete", False) or is_processing_refusal(exc):
         return False
     if is_size_refusal(exc) or _is_provider_policy_refusal(exc):  # the loop's size recovery owns it
         return False
@@ -529,11 +482,16 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
         physical.rendered_mode, "", request.max_completion_tokens,
         working_reserve_tokens=request.working_reserve_tokens)[1]
     reserve = max(reserve, request.working_reserve_tokens or 0)
-    if getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano":
-        reserve = max(reserve, int(request.max_completion_tokens or 0))  # the reply the view without the book keeps
+    # API JSON carries a wire maximum. Claudexor also seals JSON, but its
+    # max_completion_tokens is a logical reserve, not an engine payload field.
+    if (request.provider != "claudexor" and request.candidate_measurement_kind == "canonical_json_v1") or (
+            getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano"):
+        reserve = max(reserve, int(request.max_completion_tokens or 0))
     exact = request.prompt_tokens_exact is not None
     size = request.prompt_tokens_exact if exact else math.ceil(
         request.prompt_tokens_bounded_estimate * (physical.measurement_density or 1.0))
+    if not exact and physical.view_kind == "helper":
+        size = max(size, request.prompt_tokens_bounded_estimate)  # same raw floor as the reply policy
     free = window - reserve - size
     if free >= 0:
         return None  # only physical W gates; the owner target never vetoes a send
@@ -544,6 +502,27 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
             "estimated_input_tokens": size, "predicted_free_tokens": free,
             "predicted_slack_tokens": reclaim_low_water_margin(None, window)}),
     )
+
+
+# A candidate's context: what the model reads (Chat/Messages ``system``/``messages``, Responses
+# ``instructions``/``input``) and its tool schemas; the full raw digest covers every other key too.
+CANDIDATE_CONTEXT_KEYS = ("system", "messages", "tools", "functions", "instructions", "input")
+
+
+def _provider_receipt_binding(target: Dict[str, Any]) -> dict | None:
+    """Private attempt identity. OpenRouter owns its existing generation-price binding."""
+    from ouroboros.openai_responses import responses_route
+    from ouroboros.openrouter_cost import binding_for_target
+
+    provider = target.get("provider")
+    if provider == "openrouter":
+        return binding_for_target(target)
+    key = target.get("api_key")
+    if not isinstance(key, str) or not key or not processing_transport_modes(target):
+        return None
+    surface = "messages" if provider == "anthropic" else ("responses" if responses_route(target) else "chat.completions")
+    return {"endpoint": target["base_url"].rstrip("/"), "api_surface": surface,
+            "credential_sha256": hashlib.sha256(key.encode("utf-8")).hexdigest()}
 
 
 def _attempt_request(
@@ -557,7 +536,7 @@ def _attempt_request(
         key: value
         for key, value in payload.items()
         if key not in {
-            "model", "max_tokens", "max_completion_tokens", "temperature",
+            "model", "max_tokens", "max_completion_tokens", "max_output_tokens", "temperature",
             "top_p", "top_k", "timeout", "stream",
         }
     }
@@ -578,11 +557,10 @@ def _attempt_request(
         )
     raw = _canonical_candidate_bytes(payload)
     context = _canonical_candidate_bytes({
-        key: payload[key] for key in ("system", "messages", "tools", "functions") if key in payload
+        key: payload[key] for key in CANDIDATE_CONTEXT_KEYS if key in payload
     })
     from ouroboros.send_clock import record_candidate, split_clock_note
     from ouroboros.vision_routing import note_candidate_images
-    from ouroboros.openrouter_cost import binding_for_target
 
     # The same bytes carry the Main clock line; its clock-free twin identifies
     # the candidate across two samples (the forced-final admission predicate).
@@ -595,7 +573,8 @@ def _attempt_request(
         model=str(target.get("usage_model") or target.get("resolved_model") or payload.get("model") or ""),
         provider=str(target.get("provider") or "unknown"),
         prompt_tokens_estimate=max(0, prompt_chars // 4),
-        max_completion_tokens=int(payload.get("max_completion_tokens") or payload.get("max_tokens") or 0),
+        max_completion_tokens=int(payload.get("max_completion_tokens") or payload.get("max_tokens")
+                                  or payload.get("max_output_tokens") or 0),
         source=str(request_source or ""),
         prompt_cache_ttl=_applied_payload_cache_ttl(payload) or "",
         candidate_raw_sha256=raw_sha256,
@@ -603,16 +582,18 @@ def _attempt_request(
         candidate_context_sha256=hashlib.sha256(context).hexdigest(),
         candidate_context_size_bytes=len(context),
         candidate_measurement_kind="canonical_json_v1",
-        physical_context=current_physical_attempt_context(),
+        physical_context=current_physical_attempt_context() or helper_context_for(target, payload),
         route_is_loopback=is_loopback_base_url(target.get("base_url")),
         prompt_tokens_bounded_estimate=bounded_tokens,
         prompt_tokens_exact=measured.get("input_tokens"),
         context_window_tokens_exact=measured.get("context_window"),
         processing_preference=str(target.get("processing_preference") or ""),
         submitted_processing_mode=submitted_processing_mode(target, payload),
+        **attempt_pricing_fields(target, payload),
         processing_basis=copy.deepcopy(target.get("processing_basis")),
         effort=effort_request_facts(target, payload),
-        provider_receipt_binding=binding_for_target(target),
+        provider_receipt_binding=_provider_receipt_binding(target),
+        opencode_go=is_go_chat_route(target.get("provider"), target.get("base_url")),
         candidate_clock_free_sha256=(
             hashlib.sha256(_canonical_candidate_bytes(clock_free)).hexdigest()
             if clock_note is not None else None
@@ -627,6 +608,7 @@ def _physical_candidate(payload: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(message, dict):
             message.pop(HOST_CONTEXT_KIND_KEY, None)
             message.pop(HOST_TEXT_SHA_KEY, None)
+            message.pop(REPLY_SOURCE_SHA_KEY, None)
             message.pop(TOOL_RESULT_RECORD_KEY, None)
             message.pop(REVIEW_HISTORY_MESSAGE_KEY, None)
             message.pop(REVIEW_CONTEXT_INDEX_KEY, None)
@@ -658,17 +640,17 @@ def _finalized_physical_candidate(
     if fresh_clock:
         physical = refresh_wire_clock(physical, api_surface=api_surface)
     physical = bound_reply_allowance(target, physical)
-    return prepare_wire_payload_for_send(
+    return priced_for(prepare_wire_payload_for_send(  # the context priced here serves its request too
         {**target, "contract_headers": processing_contract_headers(target, physical)},
         physical, api_surface=api_surface, logical_payload=payload,
-    )
+    ), None, source=physical)
 
 
 def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     """Apply the exact-route output maximum, then Nano's window-room policy.
 
     ``context_budget.reply_allowance_tokens`` on THIS candidate: its own bounded count
-    (system, messages, tools) times the density Main measured with, against the bound
+    (rows and tools, Chat or Responses) times the density Main measured with, against the bound
     capacity (the local lane: its confirmed serving window); the local server's exact
     count replaces the estimate and needs no slack. Low and Max retain the caller's
     allowance up to the separate known output maximum (no window-room shrink). A
@@ -676,47 +658,36 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
     the field is never created. An exact shortfall is the typed local overflow before
     any send, carrying this candidate's facts; an estimate never refuses.
     """
-    from ouroboros.context_budget import LocalContextTooLargeError, exact_reply_shortfall, reply_allowance_tokens
-    from ouroboros.context_fit import bounded_prompt_tokens_for_payload
+    from ouroboros.context_budget import LocalContextTooLargeError
+    from ouroboros.llm_helper_window import window_reply_candidate
 
     context = current_physical_attempt_context()
+    helper = context is None
     field = next((key for key in ("max_completion_tokens", "max_tokens", "max_output_tokens")
                   if isinstance(payload.get(key), int) and not isinstance(payload.get(key), bool)), None)
     if field is not None:
         from ouroboros.response_limits import response_limit_for_target
         payload = {**payload, field: response_limit_for_target(target).ceiling(payload[field])}
-    if context is None or field is None or context.rendered_mode != "nano":
+    if field is None:
         return payload
+    context = context or _helper_attempt_context(target, payload)
+    if context is None or context.rendered_mode != "nano":
+        return priced_for(payload, context) if helper else payload  # only a context built here is bound
     window, measured = context.capacity_total_tokens, _exact_local_measurement(target, payload)
-    exact = bool(measured)
     if target.get("provider") == "local":
         window = target.get("context_window_tokens") if target.get("context_window_confirmed") else window
-    if exact:
-        raw = input_tokens = int(measured["input_tokens"])
-        window = measured.get("context_window") or window
-    else:
-        from ouroboros.request_wire_recovery import registered_source_payload
-
-        source = registered_source_payload(payload) or payload  # a re-finalized wire form counts as its source
-        raw = bounded_prompt_tokens_for_payload(
-            {key: source[key] for key in ("system", "messages", "tools", "functions") if key in source}, 0)
-        input_tokens = math.ceil(raw * float(getattr(context, "measurement_density", None) or 1.0))
-    frame = dict(caller_max_tokens=int(payload[field]), nano=True, input_tokens=input_tokens, window_tokens=window)
-    # A directly required handbook keeps the reply this candidate without it gets; the admission charges both.
-    book = int(getattr(context, "required_book_tokens", 0) or 0)
-    density = 1.0 if exact else float(getattr(context, "measurement_density", None) or 1.0)
-    candidate = {**payload, field: reply_allowance_tokens(owner_nano=context.profile == "owner_nano", exact=exact,
-                                                          **{**frame, "input_tokens": input_tokens - book},
-                                                          raw_input_tokens=raw - book / density)}
-    if exact and exact_reply_shortfall(**frame):
-        request = _attempt_request(target, candidate)
+    candidate, shortfall, input_tokens, window = window_reply_candidate(
+        payload, field, context, window, measured, helper=helper)
+    if shortfall:
+        request = _attempt_request(target, priced_for(candidate, context) if helper else candidate)
         error = LocalContextTooLargeError(
-            f"the local model's window of {int(window)} tokens leaves {int(window) - input_tokens} for the reply "
-            f"after {input_tokens} exact input tokens, below the floor of {min(frame['caller_max_tokens'], 8_192)}")
+            f"the model's window of {int(window)} tokens leaves {int(window) - input_tokens} for the reply "
+            f"after {input_tokens} exact input tokens, "
+            f"below the floor of {min(payload[field], 8_192)}")
         error.refused_candidate = refused_candidate_facts(
             request, input_tokens=input_tokens, context_window_tokens=int(window))
         raise error
-    return candidate
+    return priced_for(candidate, context) if helper else candidate
 
 
 def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptRequest, *, prepare=None):
@@ -726,7 +697,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
     def _persist(reservation):
         raw = _canonical_candidate_bytes(candidate)
         context = _canonical_candidate_bytes({
-            key: candidate[key] for key in ("system", "messages", "tools", "functions") if key in candidate
+            key: candidate[key] for key in CANDIDATE_CONTEXT_KEYS if key in candidate
         })
         identity = (
             hashlib.sha256(raw).hexdigest(), len(raw),
@@ -756,9 +727,8 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 "candidate_context_sha256": request.candidate_context_sha256,
                 "candidate_context_size_bytes": request.candidate_context_size_bytes,
                 "candidate_measurement_kind": request.candidate_measurement_kind,
-                "physical_context": (
-                    dict(vars(request.physical_context)) if request.physical_context is not None else None
-                ),
+                "physical_context": asdict(request.physical_context) if request.physical_context is not None else None,
+                "file_witness": getattr(request.physical_context, "base_prompt_source", None),  # the seal's check only
             },
         )
         host_step("physical_candidate")

@@ -87,6 +87,80 @@ def test_evolution_status_names_no_count_stop_or_reserve(monkeypatch, enabled, f
     assert snapshot["budget_reserve_usd"] == 0.0
 
 
+@pytest.fixture
+def queued_cycle(tmp_path, monkeypatch):
+    from ouroboros.task_results import write_task_result
+    from supervisor import queue
+
+    cycle = {"id": "cycle", "type": "evolution"}
+    write_task_result(tmp_path, "cycle", "scheduled", root_task_id="cycle")
+    monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(queue, "PENDING", [cycle])
+    monkeypatch.setattr(queue, "RUNNING", {})
+    monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})
+    monkeypatch.setattr(queue, "load_state", lambda: {"evolution_mode_enabled": True, "owner_chat_id": 1})
+    monkeypatch.setattr(queue, "budget_remaining", lambda *_args, **_kwargs: 20.0)
+    monkeypatch.setattr(queue, "_read_evolution_campaign", lambda: {})
+    return queue, cycle
+
+
+@pytest.mark.parametrize("row,fence,expected", [
+    ({}, {}, "queued"),
+    ({}, {"status": "active", "fence_id": "money"}, "budget_stopped"),
+    ({"_budget_pause": {"status": "paused_before_dispatch"}}, {"status": "active", "cause": "owner_pause"}, "queued"),
+    ({"_budget_pause": {"status": "paused_before_dispatch"},
+      "_budget_pause_hold": {"reason": "panic_hold"}}, {}, "queued"),
+    ({"_budget_pause_hold": {"reason": "budget", "release": "none"}}, {}, "queued"),
+    ({"_budget_pause_hold": {"reason": "new_reason"}}, {}, "queued"),
+])
+def test_only_a_current_money_stop_released_by_resume_is_budget_stopped(queued_cycle, row, fence, expected):
+    queue, cycle = queued_cycle
+    cycle.update(row)
+    queue.BUDGET_ROOT_FENCES["cycle"] = fence
+    assert queue.get_evolution_status_snapshot()["status"] == expected
+
+
+def test_owner_pause_over_a_money_parked_cycle(queued_cycle, tmp_path, monkeypatch):
+    from ouroboros import owner_pause
+
+    queue, cycle = queued_cycle
+    cycle["_budget_pause"] = {"status": "paused_before_dispatch", "replay_safe": True}
+
+    def expect_status(expected):
+        snapshot = queue.get_evolution_status_snapshot()
+        assert (snapshot["queued_task_id"], snapshot["status"]) == ("cycle", expected)
+        assert ("Resume" in snapshot["detail"]) == (expected == "budget_stopped")
+
+    fence, _ = owner_pause.install_fence(tmp_path, "cycle", request_id="pause-cycle")
+    expect_status("queued")
+    owner_pause.set_fence_state(tmp_path, "cycle", fence_id=fence["fence_id"], state="paused")
+    expect_status("queued")
+    owner_pause.release_fence(tmp_path, "cycle", reason="owner_resume")
+    expect_status("budget_stopped")
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("synthetic owner fence read failure")
+
+    monkeypatch.setattr(owner_pause, "read_fence", unreadable)
+    expect_status("state_unknown")
+
+
+def test_evolution_control_restart_and_running_precede_a_parked_cycle(queued_cycle, monkeypatch):
+    queue, cycle = queued_cycle
+    cycle["_budget_pause"] = {"status": "paused_before_dispatch"}
+    live, campaign = {}, {"active_transaction": {"commit_sha": "abc", "restart_required": True}}
+    monkeypatch.setattr(queue, "load_state", lambda: live)
+    monkeypatch.setattr(queue, "_read_evolution_campaign", lambda: campaign)
+    queue.RUNNING["other"] = {"task": {"id": "other", "type": "evolution"}}
+    assert queue.get_evolution_status_snapshot()["status"] == "state_unknown"
+    live["evolution_mode_enabled"] = True
+    assert queue.get_evolution_status_snapshot()["status"] == "waiting_for_restart_verify"
+    campaign.clear()
+    assert queue.get_evolution_status_snapshot()["status"] == "running"
+    queue.RUNNING.clear()
+    assert queue.get_evolution_status_snapshot()["status"] == "budget_stopped"
+
+
 def test_a_subscription_main_is_not_budget_blocked_at_the_reached_limit(monkeypatch):
     from supervisor import queue as queue_module
 

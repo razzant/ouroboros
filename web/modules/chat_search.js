@@ -11,6 +11,7 @@
 // closes, when the room leaves the screen (chat.js closes it) and when the room is destroyed.
 import { apiClient, isStoreMigrating } from './api_client.js';
 import { authorOf } from './chat_reply_quote.js';
+import { foldHides } from './project_answer.js';
 import { fmt, tr } from './i18n.js';
 import { SHELL_ICONS, strokeIcon } from './page_icons.js';
 import { formatMsgTime } from './utils.js';
@@ -125,6 +126,8 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
         input.addEventListener('input', (event) => { if (!event.isComposing) clipQuery(input); schedule(); });
         input.addEventListener('compositionend', () => { if (clipQuery(input)) schedule(); });
         input.addEventListener('keydown', onKeydown);
+        input.addEventListener('focus', () => bar.setAttribute('data-focused', ''));
+        input.addEventListener('blur', () => bar.removeAttribute('data-focused'));
         root.addEventListener('keydown', (event) => {
             if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
             event.preventDefault();  // the room's layer keeps its own Escape for after the search
@@ -523,16 +526,6 @@ function itemOf(target, id) {
     if (!id || !target || target.dataset?.historyId === id) return target;
     return [...target.querySelectorAll?.('.chat-gallery-item[data-history-id], .chat-file-item[data-history-id]') || []]
         .find((item) => item.dataset.historyId === id) || target;
-}
-
-/** Whether a folded Project answer (project_answer.js: its seven-line fold, no expansion in Main) hides `words`. */
-function foldHides(words, target) {
-    const message = target.matches('.project-answer.is-folded') ? target.querySelector(':scope > .message') : null;
-    const box = words.getClientRects()[0];
-    if (!box || !message?.contains(words.startContainer)) return false;
-    const style = getComputedStyle(message);
-    const fold = parseFloat(style.lineHeight) * parseFloat(style.getPropertyValue('--project-answer-lines'));
-    return box.bottom > message.getBoundingClientRect().top + fold + 1;
 }
 
 const LATIN = /^[a-z]$/i;

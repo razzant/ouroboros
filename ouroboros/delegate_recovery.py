@@ -654,13 +654,45 @@ def _attach_only():
     return attach_only_gateway
 
 
-def _run_probe_error(run: Any) -> str:
+def _run_probe_error(drive: Any, run: Any) -> str:
     gateway = None
     try:  # the run's own engine (``execution_domain``): another engine's answer proves nothing about it
         from ouroboros import claudexor_daemon
+        from ouroboros.delegate_custody_usage import run_names
         from ouroboros.execution_domain import run_gateway
+        if run.resume_start_state is not None and run.terminal_state in custody.TERMINAL_STATES and run.terminal_source:
+            from ouroboros.delegate_collection import _read_source
+            retained = _read_source(drive, run, run.terminal_source)
+            if run.run_id in run_names(retained) and custody.summary_of(retained).get("state") == run.terminal_state:
+                return ""
+            return "saved_terminal_mismatch"
         gateway = run_gateway(run, claudexor_daemon.ensure_owned_gateway)
-        gateway.get_run(run.run_id)
+        detail = gateway.get_run(run.run_id)
+        names = run_names(detail)
+        if names and run.run_id not in names:
+            return "wrong_run"
+        if run.resume_start_state is not None:
+            from ouroboros.delegate_collection import observe_run
+            from ouroboros.delegate_custody_current import run as current_run
+            from ouroboros.delegate_resume import ACTIVE, recovered_cancel_detail
+
+            state = custody.summary_of(detail).get("state")
+            # The full read proves the recovered run's own answer (``recovered_cancel_detail``):
+            # its name and its own store, a silent store id riding the store the gateway itself
+            # confirms. A successful exact read also binds an admission-left-unbound row there.
+            custody.bind_daemon_store(drive, gateway, run)
+            if not recovered_cancel_detail(gateway, run, detail) or state not in ACTIVE | custody.TERMINAL_STATES:
+                return "start_state_unobserved"
+            # observe_run can return False for an unchanged live run. Its durable binding is the receipt.
+            observe_run(drive, run, detail)
+            observed = current_run(drive, run.run_id)
+            if (not observed or (observed.task_id, observed.invocation_id) != (run.task_id, run.invocation_id)
+                    or observed.resume_start_state not in ACTIVE | custody.TERMINAL_STATES):
+                return "start_state_unsaved"
+            terminal = state if state in custody.TERMINAL_STATES else observed.resume_start_state
+            if terminal in custody.TERMINAL_STATES and (observed.terminal_state != terminal or not observed.terminal_source):
+                return "terminal_unsaved"
+            run.terminal_state, run.settled = observed.terminal_state, observed.settled
         return ""
     except Exception as exc:
         return type(exc).__name__
@@ -1054,6 +1086,7 @@ def pre_adopt_planned_handoffs(
 
         saved = bool(governing_continuation(task))
         any_kept = False
+        recovered_proof_owed = False
         for holder in row["holders"]:
             if holder.get("status") == "refused":
                 continue
@@ -1062,11 +1095,16 @@ def pre_adopt_planned_handoffs(
             run, _, custody_error = _saved_handoff_holder(drive_root, scoped)
             error = error or custody_error
             if not error and run is not None and not run.settled and not saved:
-                error = "run_unobserved" if _run_probe_error(run) else ""
+                error = "run_unobserved" if _run_probe_error(drive_root, run) else ""
             if error:
                 holder.update(status="deferred" if error in {"custody_unreadable", "run_unobserved"} else "refused",
                               deferred_reason=error)
                 any_kept = any_kept or holder["status"] == "deferred"
+                # A deferred holder blocks admission only while a recovered run's first state (or
+                # the unreadable custody that would name its kind) is unproved: the startup gate
+                # for an unverified RECOVERED start stays shut.
+                recovered_proof_owed = recovered_proof_owed or (holder["status"] == "deferred" and (
+                    error == "custody_unreadable" or getattr(run, "resume_start_state", None) is not None))
                 continue
             holder.update(status="pre_adopted", pre_adopted_at=utc_now_iso())
             if run is not None:
@@ -1076,7 +1114,15 @@ def pre_adopt_planned_handoffs(
                 "task_id": task_id, "run_id": holder.get("run_id", ""),
                 "pending_invocation_id": holder.get("pending_invocation_id", ""),
                 "cause": CAUSE_PLANNED_SELF_RESTART, "phase": "before_startup_orphan_sweep"})
-        row["status"] = "pre_adopted" if any_kept else "vetoed"
+        # Orphan protection and admission are different facts: a deferred holder keeps its own
+        # protected status either way, while the row releases admission only when nothing kept
+        # still owes a recovered run's first proof. An ordinary run's liveness probe failing once
+        # defers its holder and admits the successor; its worker boot re-probes the physical run
+        # (``_adopt_holder``) instead of stranding the saved work behind a startup probe that may
+        # never come.
+        row["status"] = ("pre_adopted" if any(h["status"] == "pre_adopted" for h in row["holders"])
+                         or (any_kept and not recovered_proof_owed)
+                         else "reserved" if any_kept else "vetoed")
         try:
             _write(drive_root, row)
         except Exception:
@@ -1189,7 +1235,11 @@ def _adopt_holder(ctx: Any, task: Mapping[str, Any], row: dict, holder: dict, *,
         if pending.get("work_order_source_request"):
             retry["work_order_source_request"] = pending["work_order_source_request"]
         from ouroboros.delegate_pending import request_body
-        prompt = (request_body(drive, pending) or {}).get("prompt")
+        from ouroboros.evidence_packs import EvidenceUnavailable
+        try:
+            prompt = (request_body(drive, pending, raise_unavailable=True) or {}).get("prompt")
+        except EvidenceUnavailable:  # where the body lies cannot be learned now: the next pass reads it again
+            return {**identity, "status": "deferred", "reason": "evidence_unavailable"}
         if not isinstance(prompt, str) or not prompt:
             return {**identity, "status": "refused", "reason": "pending_request_prompt_missing"}
         parsed = delegate_payload(exact_start(ctx, prompt, retry))
@@ -1200,7 +1250,7 @@ def _adopt_holder(ctx: Any, task: Mapping[str, Any], row: dict, holder: dict, *,
                     "status": "refused" if fate.get("state") == "failed_definite" else "deferred",
                     "reason": "pending_recovery_definitely_refused" if fate.get("state") == "failed_definite" else "pending_recovery_deferred",
                     "detail": parsed}
-    if run is not None and not run.settled and not saved and _run_probe_error(run):
+    if run is not None and not run.settled and not saved and _run_probe_error(drive, run):
         return {**identity, "run_id": run.run_id, "status": "deferred", "reason": "run_unobserved"}
     run_id = run.run_id if run is not None else ""
     if run_id:

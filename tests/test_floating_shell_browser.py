@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from ouroboros.consciousness_view import describe_consciousness_state
+from tests.test_design_system_gate_browser import open_nav
 from tests.test_room_work_browser import PROJECT, Transport, activity, progress, reading
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 from tests.test_window_chrome_browser import record
@@ -200,11 +201,46 @@ def test_hidden_main_does_not_take_visible_projects_notice(shell_ui):
     assert edge["heads"] and "gaps" in edge["note"], edge
     # On a phone the Project covers Main whole, so Main still reads nothing (5e72b85224) and has no gap to tell yet.
     assert 1 not in reads, reads
+    # The reference was a jump from Settings (DESIGN "Layers and dismissal"): the room's × returns there; Main is
+    # then chosen in the drawer.
     page.click("#project-panel-close")
     page.wait_for_function("!document.body.classList.contains('project-panel-open')")
+    page.wait_for_selector("#page-settings.active")
+    open_nav(page, "chat")
     page.wait_for_function("document.querySelector('#page-chat .chat-load-older-note')?.textContent.includes('gaps')")
     assert _room_notices(page) == [], "Main shown after the Project tells its gap at its head, never as a notice"
     assert _gap_heads_history(page, "#page-chat")["heads"]
+
+
+def test_a_jumped_project_returns_to_its_reference_with_the_ring_of_the_close(shell_ui):
+    """A reference opens its Project as a jump (DESIGN "Layers and dismissal"): Escape closes the room to the reference
+    with the keyboard's ring, as a Settings return does; ×, a pointer's close, returns there with none."""
+    page = shell_ui["new_page"](viewport={"width": 1087, "height": 744})
+    Transport(page, projects=[PROJECT], history={1: reading(14), 42: reading(14, room="Project")})
+    page.goto(shell_ui["url"])
+    page.wait_for_selector("#chat-input")
+    page.evaluate("""async (project) => {
+        const { projectReference } = await import('/static/modules/project_reference.js');
+        const button = projectReference(project);
+        button.id = 'jump-reference';
+        document.querySelector('#page-chat').append(button);
+    }""", {"id": PROJECT["id"], "name": PROJECT["name"]})
+    returned = """() => { const el = document.getElementById('jump-reference');
+        return {focused: el === document.activeElement, input: el.dataset.returnFocus || '',
+                ring: getComputedStyle(el).outlineStyle, layers: window.__ouroLayers.ids()}; }"""
+    for close, expected in (("Escape", {"focused": True, "input": "keyboard", "ring": "solid", "layers": []}),
+                            ("×", {"focused": True, "input": "pointer", "ring": "none", "layers": []})):
+        page.locator("#jump-reference").focus()
+        page.keyboard.press("Enter")
+        page.wait_for_function("() => /^page-return-\\d+,project$/.test(window.__ouroLayers.ids().join())")
+        page.wait_for_selector("#project-panel.open .chat-input")
+        if close == "Escape":
+            page.keyboard.press("Escape")
+        else:
+            page.locator("#project-panel-close").click()
+        page.wait_for_function("() => !document.body.classList.contains('project-panel-open')")
+        page.wait_for_function("() => document.activeElement?.id === 'jump-reference'")
+        assert page.evaluate(returned) == expected, close
 
 
 @pytest.mark.parametrize("chat_id,keyboard", [(1, False), (1, True), (42, False), (42, True)])
@@ -315,10 +351,12 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
             const header = document.querySelector('#page-chat .chat-page-header');
             return {header: rect('#page-chat .chat-page-header'), toast: rect('.toast-stack--room .toast'),
                 composer: rect('#page-chat #chat-input-area'), background: getComputedStyle(header).backgroundColor,
-                before: getComputedStyle(header, '::before').content};
+                edge: getComputedStyle(header, '::before').backgroundImage,
+                edgeEvents: getComputedStyle(header, '::before').pointerEvents};
         }""")
+        # The bar paints nothing of its own; under its capsules lies the room's edge (DESIGN "A room's edges"), no press.
         assert facts["background"] == "rgba(0, 0, 0, 0)"
-        assert facts["before"] in ("none", "normal")
+        assert "linear-gradient" in facts["edge"] and facts["edgeEvents"] == "none", facts
         assert facts["toast"]["top"] > facts["header"]["bottom"]
         assert facts["toast"]["bottom"] <= facts["composer"]["top"]
         assert not page.locator("#page-chat .chat-page-note").is_visible()
@@ -413,6 +451,9 @@ def test_status_fitting_skips_unchanged_paints_and_tracks_capsule_width(shell_ui
     transport = Transport(page, activities=[activity("main-work", "thinking")], history={1: reading(14)})
     page.goto(shell_ui["url"])
     page.wait_for_selector("#page-chat .rw-trigger:not(:disabled)")
+    # Count from the census word on the capsule: its first paint replaces the markup's Connecting…, a new word that is
+    # measured once, and Chromium may draw it seconds after the trigger enables.
+    page.wait_for_function("document.querySelector('#page-chat .rw-trigger').title === 'Thinking'")
     page.wait_for_timeout(400)
     page.evaluate("""() => {
         const badge = document.querySelector('#page-chat .rw-trigger .status-badge');
@@ -434,10 +475,11 @@ def test_status_fitting_skips_unchanged_paints_and_tracks_capsule_width(shell_ui
     title.evaluate("el => { el.textContent = 'Main'; }")
     page.wait_for_function("document.querySelector('#page-chat .rw-trigger').dataset.word !== 'off'")
     capsule = page.locator("#page-chat .app-page-title-row")
-    rest = capsule.evaluate("el => getComputedStyle(el).backgroundImage")
+    paint = "el => { const s = getComputedStyle(el); return s.backgroundImage + ' ' + s.backgroundColor; }"
+    rest = capsule.evaluate(paint)
     title.hover()
     page.wait_for_timeout(160)
-    hover = capsule.evaluate("el => getComputedStyle(el).backgroundImage")
+    hover = capsule.evaluate(paint)
     assert hover != rest, "hovering the title answers across the whole capsule"
     title.click()
     page.wait_for_selector("#page-chat .rw-shade:not([hidden])")

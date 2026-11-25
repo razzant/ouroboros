@@ -58,9 +58,133 @@ def _historical_state(ctx, roots, task_id):
             "coverage": _HISTORICAL_COVERAGE, "anchors": [], "reason": "no_usable_input_captured"}
 
 
-def _historical_anchor(ctx, observation, roots, task_id):
-    """One plain, redacted source, copied into the existing reader stores before publication."""
+# The carriers a handoff reads as background rather than as words addressed to this work
+# (``owner_words._live_words``): the bound Project room's rows, the Project's retained origin rows
+# and the rows the marks in force target. A row that went to another work is background here too.
+_BACKGROUND_CARRIERS = frozenset({"room", "origin", "marked"})
+
+
+def owner_row_standing(row) -> str:
+    """``"context"`` for a row the starting words held as background, ``"tree"`` for words addressed to this work.
+
+    The carrier is the producer's own label (``owner_words``): ``room``, ``origin`` and ``marked``
+    are the rows a handoff reads as background, and ``went to …`` one that went to another work;
+    anything else stands for words addressed to this work. The birth pin's ``helper_owner_rows``
+    carries this standing and ``owner_relay.inject_carried`` reads it, so a background row that
+    arrives addressed is told so rather than shown its words again.
+    """
+    carrier = str(row.get("carrier") or "")
+    return "context" if carrier in _BACKGROUND_CARRIERS or carrier.startswith("went to ") else "tree"
+
+
+def helper_owner_rows_in_system(ctx, messages, system=None) -> dict[str, str]:
+    """Exact row identities in the helper's rendered owner-word fragment, at its system slot.
+
+    The memory renderer puts these words first in the room; the system composer
+    puts the room immediately after its captured dynamic head. The accepted send
+    holds that system text in the layout its own lane produced: the leading system
+    row's blocks, the one string a string-system lane folded them into, a native
+    request's top-level ``system`` blocks, or the OpenAI-family split of that row.
+    Only the composed text at that layout's own position attests the placement; a
+    printout of a stamp does not, and any other layout attests nothing.
+    """
+    from ouroboros.chat_chain import _FULL_DIGEST
+    from ouroboros.context_compaction import WIRE_TEXT_TYPES
+    from ouroboros.memory_view import snapshot_from_json
+    from ouroboros.owner_words import REPLY_TARGET, SCHEDULE_TEXT
+    from ouroboros.section_floor import render_sections, section_views
+
+    def last_text(blocks):
+        """The last text block's own text of a block list, or None for any other shape."""
+        item = blocks[-1] if isinstance(blocks, list) and blocks else None
+        return item.get("text") if isinstance(item, dict) and item.get("type") in WIRE_TEXT_TYPES else None
+
+    def block_texts(content):
+        """One row's content as text: the one string a lane folded, or its declared text blocks."""
+        if isinstance(content, str):
+            return [content]
+        if not isinstance(content, list):
+            return []
+        return [block["text"] for block in content if isinstance(block, dict)
+                and block.get("type") in WIRE_TEXT_TYPES and isinstance(block.get("text"), str)]
+
+    def folded_matches(folded, composed):
+        """Whether a string system row is this lane's own fold of the composed text blocks.
+
+        One join is the local lane's (``llm_local``: a blank line between blocks); the other is
+        the no-separator fold of a lane that flattens block lists into text. A lane that
+        reorders, trims or adds to the blocks matches neither, and ordinary delivery stays.
+        """
+        texts = block_texts(composed)
+        return bool(texts) and folded in {"\n\n".join(texts), "".join(texts)}
+
+    def split_matches(composed, rows):
+        """Whether the sealed rows are the OpenAI-family ``before_task`` split of the composed message.
+
+        The comparison is the lane's own declared projection of the same message
+        (``llm_messages.split_leading_system_prefix``): its leading system items and the one
+        notice row it puts before the task, at their own positions, with the same roles and
+        text. The ``after_task`` placement and a route that keeps more marked blocks are other
+        shapes, and keep the ordinary delivery.
+        """
+        from ouroboros.llm_messages import split_leading_system_prefix
+
+        sent, moved = split_leading_system_prefix([composed, {"role": "user", "content": ""}],
+                                                  placement="before_task")
+        if not moved:
+            return False
+        lead = next((index for index, row in enumerate(sent) if row.get("role") != "system"), len(sent))
+        if len(rows) <= lead or not all(isinstance(row, dict) for row in rows[:lead + 1]):
+            return False
+        return all(row.get("role") == sent[index].get("role")
+                   and block_texts(row.get("content")) == block_texts(sent[index].get("content"))
+                   for index, row in enumerate(rows[:lead + 1]))
+
+    plan = getattr(ctx, "context_fit_plan", None)
+    core = getattr(plan, "core", None)
+    if not getattr(core, "memory_view_json", "") or core.section_task_id != getattr(ctx, "task_id", None):
+        return {}
+    try:
+        snapshot = snapshot_from_json(core.memory_view_json)
+        if snapshot.spec.role != "child" or not snapshot.owner_words or not snapshot.owner_words_sources.get("rows"):
+            return {}
+        projection = plan.projection(getattr(ctx, "active_context_mode", None) or plan.initial_mode)
+        composed = projection.system_message()
+        composed_tail = last_text(composed.get("content"))
+        if not isinstance(composed_tail, str):
+            return {}
+        rows = messages if isinstance(messages, list) else []
+        leading = rows[0] if rows and isinstance(rows[0], dict) and rows[0].get("role") == "system" else None
+        if leading is not None:
+            content = leading.get("content")
+            if isinstance(content, str):  # a string-system lane folded the declared blocks into one string
+                placed = folded_matches(content, composed.get("content"))
+            else:
+                placed = last_text(content) == composed_tail or split_matches(composed, rows)
+        else:  # a native lane carries the request's system text outside the message list
+            placed = last_text(system) == composed_tail
+        if not placed:
+            return {}
+        head = render_sections(core.dynamic_head_sections, core.dynamic_head_text, section_views(
+            core.dynamic_head_sections, projection.memory_facts.get("host_sections_addressed", ())))
+        if not composed_tail.startswith(snapshot.owner_words, len(head) + 2 if head else 0):
+            return {}
+    except (AttributeError, KeyError, ValueError, TypeError):
+        log.debug("Exact helper owner-word fragment unavailable", exc_info=True)
+        return {}
+    return {row["row_sha256"]: owner_row_standing(row)
+            for row in snapshot.owner_words_sources["rows"]
+            if isinstance(row, dict) and row.get("source") not in (None, REPLY_TARGET, SCHEDULE_TEXT)
+            and isinstance(row.get("row_sha256"), str) and _FULL_DIGEST.fullmatch(row["row_sha256"])}
+
+
+def _historical_anchor(ctx, observation, roots, task_id, *, birth=False):
+    """One plain, redacted source, copied into the existing reader stores before publication. A physical input
+    whose bytes cannot be located now is recorded as ``evidence_unavailable`` with its address, from which a reader
+    gets the bytes later; the anchor itself never captures it again."""
     from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+    from ouroboros.context_compaction import physical_message_rows
+    from ouroboros.evidence_packs import EvidenceUnavailable
     from ouroboros.observability import read_blob_ref, read_call_manifest_ref, redact_projection
     from ouroboros.utils import truncate_within_limit
 
@@ -79,26 +203,46 @@ def _historical_anchor(ctx, observation, roots, task_id):
                "selected_view_revision": observation.get("revision"),
                "presence_origin": observation.get("historical_presence_origin"),
                "coverage": _HISTORICAL_COVERAGE, "physical_source_status": "unavailable"}
+    owner_rows = {}
     if observation.get("physical_source_status") == "observed_projection":
+        unlocated = None
         for root in roots:
             try:
                 ref = observation["physical_source_ref"]
                 manifest = read_call_manifest_ref(root, ref, task_id=task_id)
-                physical = read_blob_ref(root, manifest["full_payload_ref"])["messages"]
-                if not isinstance(physical, list):
+                sealed = read_blob_ref(root, manifest["full_payload_ref"], task_id=task_id)
+                physical = physical_message_rows(sealed)
+                if physical is None:
                     continue
                 payload.update(physical_messages=physical, physical_source_status="observed_projection",
                                physical_source_identity=ref,
                                physical_projection_seal=manifest.get("model_send_seal"),
                                physical_attempt_id=observation.get("physical_attempt_id"))
+                attempt = observation.get("physical_attempt_id")
+                if (birth and attempt and manifest.get("call_type") == "physical_llm_candidate"
+                        and manifest.get("call_id") == attempt
+                        and (manifest.get("model_send_seal") or {}).get("attempt_id") == attempt):
+                    # A native lane keeps the system text outside the message list; the recorded source holds it.
+                    native_system = sealed.get("system")
+                    owner_rows = helper_owner_rows_in_system(
+                        ctx, physical, native_system if isinstance(native_system, list) else None)
                 break
+            except EvidenceUnavailable as exc:
+                unlocated = exc
             except (OSError, ValueError, KeyError, TypeError):
                 continue
+        else:
+            if unlocated is not None:  # observed, but where its bytes lie cannot be learned now: keep the address
+                payload.update(physical_source_status="evidence_unavailable", physical_source_reason=unlocated.reason,
+                               physical_source_identity=observation["physical_source_ref"],
+                               physical_attempt_id=observation.get("physical_attempt_id"))
     redacted = redact_projection(payload)
     # Call identity differs even for the same selected view. It is provenance,
     # not a reason to duplicate identical first/latest input bodies.
     view = {key: redacted.value.get(key) for key in (
         "selected_messages", "physical_messages", "physical_source_status", "presence_origin")}
+    if payload["physical_source_status"] == "evidence_unavailable":  # no bytes to compare yet: its address tells it
+        view["physical_source_identity"] = redacted.value.get("physical_source_identity")
     view_sha = hashlib.sha256(json.dumps(view, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     if unpublished is not None and unpublished.get("view_sha256") != view_sha:
         return copy.deepcopy(unpublished)  # Its exact inputs are no longer available.
@@ -122,6 +266,8 @@ def _historical_anchor(ctx, observation, roots, task_id):
                 source_id="historical-author-input", data=raw, extension="json")
             read_actor_source_bytes(root, task_id, ref)
         anchor.update(status="captured", source_ref=ref)
+        if owner_rows:
+            anchor["helper_owner_rows"] = owner_rows
     except (OSError, ValueError) as exc:
         anchor["source_error"] = type(exc).__name__
     return anchor
@@ -157,7 +303,7 @@ def capture_historical_inputs(ctx) -> None:
         resumed = int(getattr(ctx, "task_attempt", 0) or 0) > 1 or state.get("reason") == "record_unavailable"
         reason = "record_unavailable" if state.get("reason") == "record_unavailable" else "original_input_not_retained"
         first = ({"status": "unavailable", "reason": reason} if resumed
-                 else _historical_anchor(ctx, observation, roots, task_id))
+                 else _historical_anchor(ctx, observation, roots, task_id, birth=True))
         state["anchors"] = [{**first, "position": "first"}]
         state["status"] = first["status"]
         state.pop("reason", None)
@@ -330,8 +476,8 @@ def task_input_pointer(env: Any, task: Dict[str, Any], user_content_json: str) -
 
 def _wake_forms(wake: Dict[str, Any]) -> List[str]:
     """A wake's bound deliveries in rescue order (``consciousness_wake.bind_wake_observation``): the projection (my
-    human's card answers whole beside the exact pointer), an older wake's middle step when it bound one, then the
-    bare pointer when bound apart. The choice among them is only ever their actual fit."""
+    human's card answers and the standing sections whole beside the exact pointer), an older wake's middle step when
+    it bound one, then the bare pointer when bound apart. The choice among them is only ever their actual fit."""
     keys = ("projection_text", "owner_projection_text", "pointer_text")
     return [text for text in dict.fromkeys(wake.get(key) for key in keys) if text]
 
@@ -346,14 +492,14 @@ def wake_deliveries(wake: Dict[str, Any], full: Dict[str, Any]) -> List[Dict[str
 
 def wake_input_checkpoint(wake: Dict[str, Any], content: Any, *, round_idx: int, after_overflow: bool) -> Dict[str, Any]:
     """The record of the wake delivery a request carried (``content``; ``None``: the whole observation): its
-    ``form`` is ``whole``, ``projection`` (my human's card answers inline) or ``pointer`` (the bare pointer,
-    nothing inline)."""
+    ``form`` is ``whole``, ``projection`` (my human's card answers or the standing sections inline) or ``pointer``
+    (the bare pointer, nothing inline)."""
     forms = _wake_forms(wake)
     if content is None:
         form = "whole"
-    elif content in forms[:-1]:  # any bound form before the last carries my human's words inline
+    elif content in forms[:-1]:  # any bound form before the last carries my human's words or standing facts inline
         form = "projection"
-    else:  # the last bound form, or a projection with no words of mine: the bare pointer
+    else:  # the last bound form, or a projection with nothing inline: the bare pointer
         form = "pointer"
     return {"checkpoint_kind": "wake_input_inline" if form == "whole" else "wake_input_by_source", "round": round_idx,
             "after_overflow": after_overflow, "form": form, "composition": wake.get("composition"),
@@ -482,9 +628,15 @@ def _declared_omissions(task: Dict[str, Any], spec: Any) -> Any:
                                other_conversations=False, owner_words=declared_inputs_carry_owner_words(task))
 
 
-def declared_receipt_section(task: Dict[str, Any]) -> str:
-    """``## Input source selection``: the native request's receipt, the one builder's view named in it."""
+def declared_receipt_section(task: Dict[str, Any], held_omitted: Any = ()) -> str:
+    """``## Input source selection``: the native request's receipt, the one builder's view named in it, and the notes
+    whose heads, with the heads theirs link, a shared child of this situation would hold (``held_omitted``, the
+    claiming topics; none named when none claim it)."""
     from ouroboros.subagent_work_order import input_source_selection_receipt  # D03->D07 is lazy-only
 
     receipt = input_source_selection_receipt(task, native=True)
+    if held_omitted:  # outside the receipt the work order carries, whose fingerprint stays
+        receipt["omitted_automatic"].append("the heads of the knowledge notes that claim this work's room, and of the "
+                                            "notes their heads link, which a shared child holds: "
+                                            + ", ".join(held_omitted))
     return "## Input source selection\n\n" + json.dumps(receipt, ensure_ascii=False, sort_keys=True)

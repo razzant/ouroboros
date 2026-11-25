@@ -17,7 +17,6 @@ def _wire(monkeypatch, *, cache_channel="stable", cache_ref="refs/ouroboros-mana
     monkeypatch.setattr(update_channels, "get_update_channel", lambda settings=None: "stable")
     monkeypatch.setattr(git_ops, "_read_managed_repo_meta", lambda: {"managed_remote_name": "managed"})
     monkeypatch.setattr(git_ops, "managed_branch_defaults", lambda: ("ouroboros", "ouroboros-stable"))
-    monkeypatch.setattr(git_ops, "_managed_update_target", lambda: ("managed", "main", "managed/main"))
     monkeypatch.setattr(
         git_ops,
         "_resolve_managed_update_target",
@@ -73,6 +72,29 @@ def test_passive_status_uses_cache_only_for_same_target_identity(monkeypatch):
     assert status["available"] is True
     assert status["latest_sha"] == LATEST
     assert status["from_cache"] is True
+
+
+@pytest.mark.parametrize("fetch", [False, True])
+def test_channel_and_branch_share_one_settings_read(monkeypatch, fetch):
+    import ouroboros.update_channels as update_channels
+
+    _wire(monkeypatch)
+    channels = iter(["development", "stable"])
+    monkeypatch.setattr(update_channels, "get_update_channel", lambda settings=None: next(channels))
+    monkeypatch.setattr(git_ops, "ensure_official_update_remote", lambda: (True, ""))
+    monkeypatch.setattr(git_ops, "git_fetch_bounded", lambda remote: (0, "", ""))
+    monkeypatch.setattr(git_ops, "_has_remote", lambda remote: True)
+    resolutions = []
+
+    def resolve(remote, branch, ref, channel):
+        resolutions.append((remote, branch, ref, channel))
+        return "", "", "no local target"
+
+    monkeypatch.setattr(git_ops, "_resolve_managed_update_target", resolve)
+    status = git_ops.compute_managed_update_status(fetch=fetch)
+    assert resolutions == [("managed", "ouroboros", "managed/ouroboros", "development")]
+    assert (status["remote_branch"], status["update_channel"]) == ("ouroboros", "development")
+    assert list(channels) == ["stable"]
 
 
 def test_passive_status_rejects_cache_from_previous_channel(monkeypatch):
@@ -270,7 +292,7 @@ def test_passive_payload_projects_letter_without_writing_it(monkeypatch):
         update_letter, "refresh_after_check",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("a passive read must not write the letter")),
     )
-    monkeypatch.setattr(update_letter, "read_record", lambda drive_root=None: {
+    monkeypatch.setattr(update_letter, "read_record", lambda drive_root=None, *, strict=False: {
         "key": {"base_sha": CURRENT, "target_sha": LATEST, "update_channel": "stable",
                 "target_ref": "refs/ouroboros-managed/tags/v6.87.5"},
         "checked_head_sha": CURRENT, "state": "ready", "text": "one paragraph",
@@ -294,7 +316,7 @@ def test_fetching_payload_writes_the_letter_through_the_one_seam(monkeypatch):
     monkeypatch.setattr(git_ops, "compute_managed_update_status", lambda fetch: dict(status, fetched=fetch))
     calls = []
     monkeypatch.setattr(update_letter, "refresh_after_check", lambda st, **k: calls.append(st))
-    monkeypatch.setattr(update_letter, "read_record", lambda drive_root=None: None)
+    monkeypatch.setattr(update_letter, "read_record", lambda drive_root=None, *, strict=False: None)
 
     payload = control._managed_update_payload(fetch=True, include_tags=False)
 
@@ -315,7 +337,7 @@ def test_gateway_preserves_optional_local_content_facts(monkeypatch, fetch, fact
     status = {"current_sha": CURRENT, "latest_sha": LATEST, **facts}
     monkeypatch.setattr(git_ops, "compute_managed_update_status", lambda fetch: dict(status))
     monkeypatch.setattr(update_letter, "refresh_after_check", lambda *_a, **_k: None)
-    monkeypatch.setattr(update_letter, "read_record", lambda drive_root=None: None)
+    monkeypatch.setattr(update_letter, "read_record", lambda drive_root=None, *, strict=False: None)
     payload = control._managed_update_payload(fetch=fetch, include_tags=False)
     assert {key: value for key, value in payload.items() if key.startswith("local_changes")} == facts
 

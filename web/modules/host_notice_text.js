@@ -1,13 +1,15 @@
-// Display-only form of a host sentence that its producer opens with a decorative
-// pictograph (DESIGN "Chat authorship and System rows"). The stored row keeps its bytes:
-// history, message keys, Copy, Telegram, the model's context and outcomes.py, which
-// reads their warning marks, see exactly what the producer wrote.
+// How the window says a host sentence (DESIGN principle 7 and "Chat authorship and System rows").
 //
-// A closed table, keyed by the row's typed `system_type`; each entry is one producer's
-// exact source prefix. Only a row whose type and opening both match loses the leading
-// mark and its space. Every other row renders as stored: another type, an untyped or
-// pre-typing row, authored words (reminder, skill notice, Project mirrors), a prefix
-// not listed here. Future producer changes must keep this display mapping in sync.
+// A host notice (ouroboros/host_notice.py) is drawn as it is: the one line its server assembled, the phrase and its
+// next step in the install's language, which Telegram and Copy say too (`noticeLine`); its raw details sit behind
+// Details. A notice has no pictograph to hide.
+//
+// Rows written before notices keep the display-only table below: a producer opened its sentence with a decorative
+// pictograph, and the stored row keeps its bytes (history, message keys, Copy, Telegram, the model's context). A
+// closed table, keyed by the row's typed `system_type`; each entry is one producer's exact source prefix. Only a row
+// whose type and opening both match loses the leading mark and its space. Every other row renders as stored: another
+// type, an untyped or pre-typing row, authored words (reminder, skill notice, Project mirrors), a prefix not listed
+// here. A producer that moves to a notice moves its prefixes to RETIRED_HOST_NOTICE_PREFIXES for the rows it wrote.
 import { fmt, tr, tx } from './i18n.js';
 
 export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
@@ -15,16 +17,16 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '♻️ Ouroboros did not start its recovery turn '],
     command_reply: ['⚠️ Command ignored: ', '✅ Owner chat registered.', '♻️ Restarting.', '⚠️ Restart cancelled: ',
         '🧬 Evolution campaign: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution did not turn on: ',
-        '🧠 Background consciousness ', '🧠 Background consciousness:', '🧠 Consciousness off: '],
+        '🧠 Background consciousness ', '🧠 Consciousness off: ', '🧠 Consciousness on: ', '🧠 Consciousness on, but ',
+        '🧠 Consciousness is already ', '🧠 Consciousness: '],
     restart_notice: ['♻️ Restart requested by agent: ', '⏳ Restart drain: ', '🧬 Restart cancelled: ',
-        '⚠️ Restart skipped: ', '🧬 Body adoption: '],
-    consciousness_notice: ['🧠 Background consciousness ', '🧠 Consciousness off: '],
-    evolution_notice: ['🧬 Evolution stayed OFF: ', '🧬 Evolution stayed off: ', '🧬 Evolution paused: ',
+        '⚠️ Restart skipped: '],
+    consciousness_notice: ['🧠 Background consciousness ', '🧠 Consciousness off: ', '🧠 Consciousness on: ', '🧠 Consciousness on, but '],
+    evolution_notice: ['🧬 Evolution stayed OFF: ', '🧬 Evolution stayed off: ',
         '🧬 Evolution: ', '🧬 Evolution campaigns are self-modification work',
         '🛑 Stopped evolution task(s): ', '⚠️ Evolution stop INCOMPLETE — still live: '],
-    evolution_cycle_outcome: ['🧬 Evolution cycle absorbed ', '⚠️ Evolution cycle abandoned '],
-    promotion_notice: ['❌ Evolution promotion refused: ', '❌ Failed to promote to stable: ', '✅ Promoted: '],
-    managed_update_notice: ['📦 Managed update: ', '🔒 An update is using the repository.'],
+    promotion_notice: ['❌ Evolution promotion refused: '],
+    managed_update_notice: ['🔒 An update is using the repository.'],
     supervisor_failure: ['🛑 The event-bus process of this server exited', '🛑 The task loop failed three times in a row'],
     retired_settings_notice: ['⚙️ Settings: '],
     review_pool_migration_notice: ['⚙️ Review pool: ', '⚙️ Review pool initialized. ', '⚙️ Review settings migrated. ',
@@ -34,22 +36,16 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     command_timeout_notice: ['⏱️ The separate per-call ceiling'],
     review_enforcement_notice: ['⚙️ This install had reviews set to Blocking.'],
     model_cap_notice: ['⚙️ "Requests at once per model" held 3 '],
+    subagent_cap_notice: ['⚙️ "At once, for one task" held 6 '],
     light_local_box_notice: ['⚙️ An empty Light model now follows its “Use the local model for this role” box everywhere.'],
-    task_admission_notice: ['🚫 Budget exhausted. '],
     budget_notice: ['🚫 Model budget reached. '],
-    deep_self_review_queued: ['🔎 Deep self-review queued: '],
     runtime_liveness_notice: ['⚠️ A chat turn looks wedged '],
     initialization_notice: ['⚠️ System is still initializing.', '⚠️ The data store is still being prepared ',
         '⚠️ Startup failed before the chat could accept messages', '⚠️ The chat is not accepting messages right now',
         '⚠️ Your message was not saved: '],
-    terminal_incident: ['🔌 Task ', '⚠️ Sending a message for task '],
-    task_reaper_notice: ['⚠️ A timed-out worker (task '],
-    worker_failure: ['❌ Task failed after ', '❌ Task `'],
-    worker_readiness_notice: ['⚠️ Worker checkout sampled after initialization ', '⚠️ Worker slot '],
+    worker_failure: ['❌ Task failed after '],
     // Progress rows: a task card's timeline line (`log_events.summarizeChatLiveEvent`).
     task_scheduled: ['🗓️ Scheduled subagent ', '🗓️ Scheduled task '],
-    task_error: ['⚠️ Error: '],
-    finalization_notice: ['⏳ Task ', '▶️ Task '],
     skill_review: ['✅ Skill review round ', '⚠️ Skill review round ', '❌ Skill review round ', '⏳ Skill review round '],
     host_progress: ['🌐 Connection restored ', '🌐 The new attempt could not reach the provider ',
         '🌐 Provider connection ', '🌐 The primary provider temporarily refused ', '🌐 No local model slot was free',
@@ -64,15 +60,29 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
 // display (host_notice_text.test.js pins that none of them is written again).
 export const RETIRED_HOST_NOTICE_PREFIXES = new Map(Object.entries({
     startup_notice: ['♻️ Restored pending queue from snapshot: ', '♻️ Cancelling '],
+    // The /bg status reply before the switch's words (owner 15.11, 5A) said «🧠 Background consciousness: …».
+    command_reply: ['🧠 Background consciousness:'],
     supervisor_failure: ['🛑 Supervisor loop died after repeated crashes; '],
     worker_failure: ['⚠️ Frequent worker crashes.', '❌ worker process crashed ',
-        '❌ Deep self-review failed: worker process crashed '],
+        '❌ Deep self-review failed: worker process crashed ', '❌ Task `'],
+    // Producers that now write a host notice (ouroboros/host_notice.py): a phrase without a mark, its raw facts behind Details.
+    restart_notice: ['🧬 Body adoption: '],
+    evolution_cycle_outcome: ['🧬 Evolution cycle absorbed ', '⚠️ Evolution cycle abandoned '],
+    promotion_notice: ['❌ Failed to promote to stable: ', '✅ Promoted: '],
+    managed_update_notice: ['📦 Managed update: '],
+    deep_self_review_queued: ['🔎 Deep self-review queued: '],
+    terminal_incident: ['🔌 Task ', '⚠️ Sending a message for task '],
+    task_reaper_notice: ['⚠️ A timed-out worker (task '],
+    worker_readiness_notice: ['⚠️ Worker checkout sampled after initialization ', '⚠️ Worker slot '],
+    task_error: ['⚠️ Error: '],
+    finalization_notice: ['⏳ Task ', '▶️ Task '],
     attachment_notice: ['📎 Attachment staging report for ', '⚠️ Task not started: every attachment was rejected.',
         '⚠️ Some declared attachments could not be staged; '],
     cancellation_notice: ['❌ cancel '],
-    task_admission_notice: ['✅ Repair task ', '⚠️ Cost accounting is unavailable. '],
+    task_admission_notice: ['✅ Repair task ', '⚠️ Cost accounting is unavailable. ', '🚫 Budget exhausted. '],
     task_started: ['🧬 Evolution task ', '🔎 Review task '],
-    evolution_notice: ['🛑 Cancelled evolution task(s): ', '🧬⚠️ Evolution paused: ', '💸 Evolution stopped: '],
+    evolution_notice: ['🛑 Cancelled evolution task(s): ', '🧬⚠️ Evolution paused: ', '💸 Evolution stopped: ',
+        '🧬 Evolution paused: '],
     host_progress: ['🌐 Could not establish a provider connection ', '📐 Plan review:', '📐 Plan review so far:',
         '🌐 The local Claudexor engine answered again after '],
 }));
@@ -92,6 +102,13 @@ export function hostNoticeDisplayText(text, systemType, shown = text) {
     if (prefix === '⚠️ PR #' && display.startsWith(mark)) return `${tr('task.host.warning', 'Warning')}: ${display.slice(mark.length)}`;
     return display.startsWith(mark) ? display.slice(mark.length) : display;
 }
+
+// A tool call the host typed as failed (`is_error`) opens its result with its warning mark before the error's code
+// (loop_tool_execution.py "⚠️ TOOL_ERROR (tool): …", mcp_client.py "⚠️ MCP_…"): the failure is said by its chip, so
+// the mark is hidden at display, as a known host prefix is; the record keeps it.
+const TOOL_ERROR_MARK = '⚠️ ';
+export const toolErrorDisplayText = (evt, text) => (evt?.is_error === true && String(text ?? '').startsWith(TOOL_ERROR_MARK)
+    ? String(text).slice(TOOL_ERROR_MARK.length) : text);
 
 // A pause notice's heads before the words its press recorded, which run up to the notice's retained clause
 // (ouroboros/pause_notices.py notice_text; web/tests/fixtures/pause_notice_parity.json pins both sides). The words
@@ -113,9 +130,16 @@ export function hostSentenceText(text) {
  *  task, so its row says who wrote it instead of «Message from task unknown». */
 export const hostTaskMessage = (evt) => evt?.provenance === 'system' && (!evt.source_task_id || evt.source_task_id === 'unknown');
 
+/** A host notice's line, the one its server assembled for every reader (`notice.line`); '' for any other row. */
+export const noticeLine = (row) => (row?.role === 'system' && row.narration !== true
+    && typeof row.notice?.line === 'string' ? row.notice.line : '');
+// A notice's raw details open from its card line as plain text (`fullBody`), never in a toast.
+export const noticeBody = (row) => (noticeLine(row) && row.notice.details ? { fullBody: String(row.notice.details), bodyFormat: 'text' } : {});
+
 // Authored narration outranks a stale host type, on both bubble and timeline paths.
 export function hostRowDisplayText(row, shown = row.text ?? row.content ?? '') {
     if (row.role !== 'system' || row.narration === true) return shown;
+    if (noticeLine(row)) return noticeLine(row);
     let text = String(row.text ?? row.content ?? '');
     // A progress envelope is not authored content. Remove it only together with
     // a recognized host opening; unknown and authored rows keep every character.

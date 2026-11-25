@@ -183,7 +183,10 @@ def open_updates(ui, current, *, theme="dark", width=1100, height=750):
 
     def answer(route):
         reads.append(route.request.url)
-        route.fulfill(json=current["status"])
+        if current.get("fail_status"):
+            route.fulfill(status=503, json={"error": "status unavailable"})
+        else:
+            route.fulfill(json=current["status"])
 
     page.route("**/api/update/status**", answer)
     page.route("**/api/git/log**", lambda route: route.fulfill(json=GIT_LOG))
@@ -205,6 +208,62 @@ def refresh(page, transport, reads):
     count = len(reads)
     transport.send({"type": "update_progress_changed"})
     wait_reads(page, reads, count + 2)
+
+
+def test_failed_status_read_keeps_last_attempt_and_recovery_check(updates_ui):
+    from playwright.sync_api import expect
+
+    failure = {"operation_id": OPERATION, "result": "failed", "outcome": "failed",
+               "active": False, "error": "Could not finish the update."}
+    recovery = status(None, failure)
+    recovery["update_tx"] = {"active": True, "phase": "gate_blocked"}
+    current = {"status": recovery}
+    page, transport, reads = open_updates(updates_ui, current)
+    primary = page.locator("#btn-update-primary")
+    hint = page.locator("#updates-hint")
+    attempt = page.locator("#updates-attempt")
+    restore = page.locator("#updates-attempt-restore")
+    expect(hint).to_contain_text("Quit and reopen")
+
+    current["fail_status"] = True
+    refresh(page, transport, reads)
+    expect(primary).to_have_text("Check again")
+    expect(hint).to_contain_text("Last reported")
+    expect(hint).to_contain_text("Quit and reopen")
+    expect(attempt).to_be_visible()
+    expect(attempt).to_contain_text(failure["error"])
+    expect(page.locator("#btn-update-replace")).to_be_disabled()
+
+    # Even a letter-only failure delivers fresh transaction facts on the owner's plain Check.
+    smoke = {**recovery, "letter": None, "letter_unavailable": True,
+             "update_tx": {"active": True, "phase": "pending_boot_smoke"}}
+    page.route("**/api/update/check", lambda route: route.fulfill(json=smoke))
+    with page.expect_request(lambda req: req.url.endswith("/api/update/check") and req.method == "POST"):
+        primary.click()
+    expect(primary).to_have_text("Restart now")
+    expect(hint).not_to_contain_text("Quit and reopen")
+    refresh(page, transport, reads)
+    expect(primary).to_have_text("Check again")
+
+    current.update(fail_status=False, status=status(record()))
+    refresh(page, transport, reads)
+    expect(restore).to_be_visible()
+    current["fail_status"] = True
+    refresh(page, transport, reads)
+    expect(attempt).to_be_visible()
+    expect(attempt).to_contain_text("Update completed.")
+    expect(restore).to_be_hidden()
+    expect(page.locator("#updates-attempt-time")).to_contain_text("last known")
+    restore.dispatch_event("click")
+    expect(page.get_by_role("dialog")).to_have_count(0)
+
+    current.update(fail_status=False, status=status(None, {}))
+    refresh(page, transport, reads)
+    expect(attempt).to_be_hidden()
+    expect(primary).to_have_text("Check and describe")
+    expect(page.locator("#btn-update-replace")).to_be_enabled()
+    assert [path for method, path in transport.requests if method == "POST" and path.startswith("/api/update/")] == [
+        "/api/update/check"]
 
 
 def test_action_row_preserves_empty_notes_and_hidden_primary_buttons(updates_ui):
@@ -279,8 +338,9 @@ def test_samples_are_rows_of_their_last_attempt_and_survive_refreshes(updates_ui
     page, transport, reads = open_updates(updates_ui, current, theme=theme, width=width, height=height)
     prefix = f"populated-{theme}-{width}"
     closed = facts(page)
-    # The card leads with the installation's state and its action; the samples add no block or sentence to it.
-    assert closed["headline"] == "Up to date · 7.8.0" and closed["action"] == "Check again"
+    # The card leads with the installation's state and its action (an up-to-date install's ordinary check also
+    # describes an update it finds); the samples add no block or sentence to it.
+    assert closed["headline"] == "Up to date · 7.8.0" and closed["action"] == "Check and describe"
     assert closed["attemptShown"] and not closed["open"] and closed["heads"] == [] and closed["strayBlocks"] == 0
     for word in ("RSS", "CPU", "Duty", "first model call", TARGET, "4e15961e", "Raw record"):
         assert word not in closed["cardText"], word
@@ -438,7 +498,7 @@ def drawer(page, width, opened):
     if width >= 980:
         return
     if opened:
-        page.click("[data-dashboard-list-back]")
+        page.click("#page-dashboard [data-shell-back]")
         page.locator("[data-mobile-nav-toggle]:visible").first.click()
         page.wait_for_function("document.getElementById('content').inert === true")
     else:

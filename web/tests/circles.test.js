@@ -14,7 +14,7 @@ import { setup, NodeStub } from './dashboard_dom_fixture.js';
 
 const strip = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 const raw = (id, fields = {}) => ({ place_id: id, connector: 'chat-bridge', provider: 'chat', label: `Chat · ${id}`, state: 'active',
-    revision: 2, notes: [], wakes: [], owner_accounts: [], readiness: { text: 'Connector on', tone: 'ok' }, ...fields });
+    revision: 2, notes: [], wakes: [{ fact: 'mention', author: 'owner' }], owner_accounts: [], readiness: { text: 'Connector on', tone: 'ok' }, ...fields });
 const RESPONSE = {
     connectors: [{ connector: 'chat-bridge', label: 'Chat', destination: 'vendor:chat', readiness: { text: 'Connector on', tone: 'ok' } }],
     circles: [
@@ -34,50 +34,73 @@ const [team, home] = VIEW.circles;
 
 test('a place row: its own name, the service, the state word, readiness only when not simply on, the last event, its description', () => {
     const row = placeRowHtml(alpha, { title: 'alpha', source: 'Chat' });
-    assert.match(strip(row), /^alpha Chat active · 39 min ago Where the team asks$/);
+    // The last event rides the quiet service label; the status slot holds the state and why it is quiet (owner 15.11, 5A).
+    assert.match(strip(row), /^alpha Chat · 39 min ago active Where the team asks$/);
     assert.match(row, /<span class="ui-status" data-tone="ok">active<\/span>/);
     assert.match(row, /<span class="place-row-meta" data-i18n-authored>Where the team asks<\/span>/);
     assert.match(row, /aria-label="Open alpha \(Chat\): active; last event 39 min ago"/);
     assert.doesNotMatch(row, /Connector on/, 'a connector that is simply on says nothing on its row');
     const off = placeRowHtml(beta);
     assert.match(off, /data-tone="muted">paused</);
-    assert.match(strip(off), /paused · Off in Skills · no captured event/, 'never «no activity»: what was captured');
+    assert.match(strip(off), /Chat · no captured event paused · Off in Skills/, 'never «no activity»: what was captured');
     assert.doesNotMatch(off, /place-row-meta/, 'an empty description leaves no line; nothing is copied from a note');
     assert.equal(lastEventText({ lastActivityAt: 'not a time' }), 'last event unknown');
     assert.doesNotMatch(placeRowHtml(alpha), /wakes for|spent|\$/, 'no wake list or spend on the row');
 });
 
-test('while consciousness is off a place that is not Paused says it only hears, muted, to the eye and to a screen reader', () => {
-    // Owner 06.11: Off silenced every place for 28 hours while each row went on reading «active» with the ok dot.
-    const [active, silent, paused] = normalizePlacesResponse({ ...RESPONSE, places: [raw('a', { only_hears: true }),
-        raw('s', { state: 'silent', only_hears: true }), raw('p', { state: 'paused' })] }).places;
+test('a place a cause keeps quiet says why, muted, to the eye and to a screen reader; its stored word stays the sheet\'s', () => {
+    // Owner 06.11: Off silenced every place for 28 hours while each row went on reading «active» with the ok dot; owner
+    // 15.11 (5A): a place says why it is quiet, by one cause, in the host's words.
+    const off = { cause: 'off', word: 'Hears only · consciousness off', note: 'Consciousness is off: …', door: 'consciousness' };
+    const [active, silent, paused] = normalizePlacesResponse({ ...RESPONSE, places: [raw('a', { quiet: off }),
+        raw('s', { state: 'silent', quiet: off }), raw('p', { state: 'paused' })] }).places;
     const row = placeRowHtml(active, { title: 'a', source: 'Chat' });
-    assert.match(row, /<span class="ui-status" data-tone="muted">active · consciousness off<\/span>/);
-    assert.match(row, /aria-label="Open a \(Chat\): active · consciousness off; last event /);
-    assert.match(placeRowHtml(silent), /data-tone="muted">silent · consciousness off</);
+    assert.match(row, /<span class="ui-status" data-tone="muted">Hears only · consciousness off<\/span>/);
+    assert.match(row, /aria-label="Open a \(Chat\): Hears only · consciousness off; last event /);
+    assert.match(placeRowHtml(silent), /data-tone="muted">Hears only · consciousness off</);
     assert.match(placeRowHtml(paused), /data-tone="muted">paused</);
     assert.doesNotMatch(placeRowHtml(paused), /consciousness off/, 'a Paused place hears nothing new to say');
-    assert.equal(alpha.onlyHears, false, 'without the host\'s fact the row keeps its stored word and the ok dot');
+    assert.equal(alpha.quiet, null, 'without the host\'s cause the row keeps its stored word and the ok dot');
     assert.match(placeRowHtml(alpha), /data-tone="ok">active</);
-    assert.equal(normalizePlacesResponse({ ...RESPONSE, places: [raw('t', { only_hears: 'true' })] }).places[0].onlyHears, false);
+    assert.equal(normalizePlacesResponse({ ...RESPONSE, places: [raw('t', { quiet: { cause: 'off' } })] }).places[0].quiet, null,
+        'a cause without its words is no cause');
+});
+
+test('a place with no wake kind checked says that setting beside its state, muted; Paused and Off keep their own words', () => {
+    // An Active place with an empty list read «active» with the ok dot, as if events called it at once. The row states
+    // the setting and promises neither a wake nor silence: an ongoing conversation can still wake it.
+    const [active, silent, paused, off, bots] = normalizePlacesResponse({ ...RESPONSE, places: [raw('a', { wakes: [] }),
+        raw('s', { state: 'silent', wakes: [] }), raw('p', { state: 'paused', wakes: [] }), raw('o', { wakes: [], quiet: { cause: 'off', word: 'Hears only · consciousness off', note: 'Consciousness is off: it only hears here, and nothing here wakes it until you turn it on.', door: 'consciousness' } }),
+        raw('b', { wakes: [{ fact: 'from_bot', author: 'owner' }] })] }).places;
+    const row = placeRowHtml(active, { title: 'a', source: 'Chat' });
+    assert.match(row, /<span class="ui-status" data-tone="muted">active · no wake kinds checked<\/span>/);
+    assert.match(row, /aria-label="Open a \(Chat\): active · no wake kinds checked; last event /);
+    assert.match(placeRowHtml(silent), /data-tone="muted">silent · no wake kinds checked</);
+    assert.match(placeRowHtml(paused), /data-tone="muted">paused</);
+    assert.doesNotMatch(placeRowHtml(paused), /kinds checked/, 'Paused already says nothing wakes it');
+    assert.match(placeRowHtml(off), /data-tone="muted">Hears only · consciousness off</);
+    assert.doesNotMatch(placeRowHtml(off), /kinds checked/, 'Off says the nearer cause once');
+    assert.match(placeRowHtml(bots), /data-tone="ok">active</, 'a bot check alone is a checked kind');
+    assert.doesNotMatch(row, /mentions|replies|every message/i, 'the wake list stays in the sheet');
+    assert.doesNotMatch(row, /nothing|never|silent|no event/i, 'the row promises no silence');
 });
 
 test('a row whose name is its service says the service once, to the eye and to a screen reader', () => {
     const [whole] = normalizePlacesResponse({ ...RESPONSE, places: [raw('whole', { label: 'Chat' })] }).places;
     const row = placeRowHtml(whole, { title: 'Chat', source: 'Chat' });
-    assert.doesNotMatch(row, /place-row-source/);
+    assert.match(row, /<span class="place-row-source">no captured event<\/span>/, 'only the last event beside the name');
     assert.match(row, /aria-label="Open Chat: active; last event no captured event"/);
     assert.equal((strip(row).match(/Chat/g) || []).length, 1);
     // Two such rows in one list keep the instance that tells them apart.
     const twins = placeRowsHtml([whole, { ...whole, id: 'twin', accountId: 'acct-2' }]);
-    assert.match(twins, /place-row-source" data-i18n-authored>Chat · acct-2</);
+    assert.match(twins, /place-row-source"><span data-i18n-authored>Chat · acct-2<\/span>/);
 });
 
 test('rows drop the service and the circle\'s own name from titles; the instance tells two same titles apart', () => {
     const html = placeRowsHtml([gamma, { ...gamma, id: 'delta', conversationId: 'room-2' }], { circle: team });
     assert.equal((html.match(/consciousness-place-name" data-i18n-authored>gamma</g) || []).length, 2);
-    assert.match(html, /place-row-source" data-i18n-authored>Chat · room-2</);
-    assert.match(placeRowsHtml([alpha]), /place-row-source" data-i18n-authored>Chat</);
+    assert.match(html, /place-row-source"><span data-i18n-authored>Chat · room-2<\/span>/);
+    assert.match(placeRowsHtml([alpha]), /place-row-source"><span data-i18n-authored>Chat<\/span>/);
     assert.equal(placeCountText([alpha, beta]), '2 places · 1 paused');
     assert.equal(placeCountText([alpha]), '1 place');
 });
@@ -149,7 +172,7 @@ test('a place row shows a model only when the place overrides; an inheriting pla
     assert.deepEqual([inherits.modelRoute, overrides.modelRoute],
         [{ value: GLM, layer: 'circle', local: false }, { value: 'openai::gpt-6', layer: 'place', local: false }]);
     const own = placeRowHtml(overrides, { title: 'beta', source: 'Chat' });
-    assert.match(strip(own), /^beta Chat paused · Off in Skills · no captured event · model gpt-6$/);
+    assert.match(strip(own), /^beta Chat · no captured event paused · Off in Skills · model gpt-6$/);
     assert.match(own, /aria-label="Open beta \(Chat\): paused; Off in Skills; last event no captured event; model gpt-6"/);
     assert.match(strip(placeRowHtml(aliased, { title: 'epsilon', source: 'Chat' })), /· model Main$/, 'a kept alias is named as it was chosen');
     for (const place of [inherits, follows, alpha]) {

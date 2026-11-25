@@ -1,0 +1,1 @@
+{"error": {"message": "image dimensions 8000 x 8000 exceed the maximum 2048 x 2048", "type": "invalid_request_error", "code": 400}}

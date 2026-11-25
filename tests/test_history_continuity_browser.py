@@ -156,16 +156,26 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             assert page.locator(feed).get_by_text('LIVE_REPLY_AT_PRESENT', exact=True).count() == 1
             assert abs(target.evaluate(offset) - placed) <= 8
             reads = page.evaluate("() => window.__historyReads.length")
+            # Read the first row that reaches the visible passage, not a row under the floating bar.
+            # The feed itself can move on resize; the reader's row should keep its screen position.
             resize_anchor = page.locator(feed).evaluate("""root => {
-                const top = root.getBoundingClientRect().top;
-                const node = [...root.querySelectorAll('.chat-bubble[data-history-id]')].find(n => n.getBoundingClientRect().bottom > top);
-                return {id: node.dataset.historyId, offset: node.getBoundingClientRect().top - top};
+                const feedBox = root.getBoundingClientRect();
+                const bar = root.closest('.project-panel').querySelector('.project-panel-bar');
+                const edge = parseFloat(getComputedStyle(bar, '::before').height) - bar.clientHeight;
+                const top = Math.max(feedBox.top, bar.getBoundingClientRect().bottom + (Math.max(0, edge) || 0));
+                const node = [...root.querySelectorAll('.chat-bubble[data-history-id]')].find(n => {
+                    const box = n.getBoundingClientRect();
+                    return box.height > 0 && box.bottom > top && box.top < feedBox.bottom;
+                });
+                return node && {id: node.dataset.historyId, top: node.getBoundingClientRect().top};
             }""")
+            assert resize_anchor, "an older row is visible below the project bar before resize"
             page.set_viewport_size({"width": 760, "height": 850})
             page.evaluate(_FRAMES)
             assert page.evaluate("() => window.__historyReads.length") == reads, "layout starts no archive read"
-            narrow = page.locator(f'{feed} [data-history-id="{resize_anchor["id"]}"]').evaluate(offset)
-            assert abs(narrow - resize_anchor["offset"]) <= 8, (resize_anchor, narrow)
+            narrow = page.locator(f'{feed} [data-history-id="{resize_anchor["id"]}"]').evaluate(
+                "node => node.getBoundingClientRect().top")
+            assert abs(narrow - resize_anchor["top"]) <= 8, (resize_anchor, narrow)
             _screenshot(page, tmp_path, f"continuity-live-narrow-{browser_engine}")
             (tmp_path / f"continuity-reads-{browser_engine}.json").write_text(json.dumps(
                 page.evaluate("() => window.__historyReads"), indent=2), encoding="utf-8")
@@ -280,6 +290,118 @@ def test_project_room_terminal_lines_separate_end_and_notification(direct_server
             box = late.bounding_box()
             assert box['x'] >= 0 and box['x'] + box['width'] <= 391, box
             _screenshot(page, tmp_path, f'room-terminal-times-narrow-{browser_engine}')
+        finally:
+            browser.close()
+
+
+def test_project_card_handled_git_refusal_and_cancel_times(direct_server_with_data, tmp_path, monkeypatch):
+    """A handled Git refusal stays in Done's Details; a Stop names its own cause and both clocks."""
+    from playwright.sync_api import expect, sync_playwright
+
+    from ouroboros.project_dialogue import append_terminal_task_projection
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tool_call_log import append_call_row
+    from tests.ui_console_errors import PageErrors
+
+    fixture = direct_server_with_data
+    root = fixture["data_dir"]
+    fixture["stop_server"]()
+    project = create_project(root, "inventory-cards", name="Garden inventory")
+    chat_id = project["chat_id"]
+    done, known, unknown = "inventory-checked", "inventory-stopped", "inventory-restored"
+    git_preview = "⚠️ GIT_ERROR: unknown revision inventory-before-sort"
+    known_reason = "Stopped from the app (Stop now) · The planting plan changed."
+    unknown_reason = "The server stopped while this task was still running."
+    # The unidentified end has a stored result timestamp too; it is not a cancellation clock.
+    cases = [
+        (done, "Check the inventory", "2026-09-25T15:19:01Z", "2026-09-25T15:19:09Z", {}),
+        (known, "Count the east bed", "2026-09-24T18:18:27Z", "2026-09-26T19:21:43Z",
+         {"source": "http_single", "reason": "The planting plan changed."}),
+        (unknown, "Count the west bed", "2026-09-25T12:06:00Z", "2026-09-26T19:25:00Z",
+         {"source": "snapshot_restore", "reason": "server_shutdown"}),
+    ]
+    for task_id, name, stored_at, added_at, cancel in cases:
+        bind_task_to_project(root, task_id, project["id"], chat_id, origin={"absent": "system"})
+        write_task_result(root, task_id, "running", task_attempt=1, started_at="2026-09-24T17:00:00Z",
+                          project_id=project["id"], chat_id=chat_id, suggested_name=name)
+        monkeypatch.setattr("ouroboros.task_results.utc_now_iso", lambda ts=stored_at: ts)
+        result = write_task_result(root, task_id, "cancelled" if cancel else "completed",
+                                   _terminal_observed=not cancel, _cancel_observed=task_id == known,
+                                   **({"cancel_origin": cancel, "reason_code": "cancelled"} if cancel else
+                                      {"result": "The inventory is ready.", "wake_summary": "The inventory is ready.",
+                                       "reason_code": "final_message", "tool_calls": 1, "tool_errors": 0}))
+        monkeypatch.setattr("ouroboros.terminal_projection.utc_now_iso", lambda ts=added_at: ts)
+        assert append_terminal_task_projection(root, task_id, {"id": task_id}, result, {})
+
+    # Two journal observations of ONE read-only call, not a hand-built history API response.
+    call = {"task_id": done, "task_attempt": 1, "tool": "vcs_read", "invocation_id": "inventory-git-1"}
+    for observation in (
+        {"type": "tool_call_started", "ts": "2026-09-25T15:18:02Z"},
+        {"type": "tool_call", "ts": "2026-09-25T15:18:03Z", "status": "git_error",
+         "is_error": False, "result_preview": git_preview},
+    ):
+        assert append_call_row({}, root / "logs", {**call, **observation})["task_log"]
+
+    fixture["start_server"]()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        errors = PageErrors(None, "chromium")
+        try:
+            for width in (1240, 390):
+                page = browser.new_page(viewport={"width": width, "height": 844}, locale="en-US", timezone_id="UTC",
+                                        is_mobile=width == 390, has_touch=width == 390)
+                errors.watch(page, navigates=False)
+                _open(page, fixture["url"])
+                feed = _open_project(page, project)
+                for task_id in (done, known, unknown):
+                    card = page.locator(f'{feed} .chat-live-card[data-task-id="{task_id}"]')
+                    summary = card.locator(':scope > [data-live-summary-button]')
+                    phase = summary.locator('[data-live-phase]')
+                    expect(card).to_have_attribute("data-finished", "1")
+                    timeline = card.locator(':scope > [data-live-timeline]')
+                    if task_id == done:
+                        titles = timeline.locator(':scope > .chat-live-line .chat-live-line-title')
+                        refused_title = page.locator(".chat-live-line-title", has_text=re.compile(r"^Git refused the operation$"))
+                        refusal = timeline.locator(':scope > .chat-live-line').filter(has=refused_title)
+                        expect(refusal).to_be_hidden()
+                    disclosure = summary.locator('[data-live-disclosure]')
+                    expect(disclosure).to_have_attribute("aria-expanded", "false")
+                    disclosure.click()
+                    if task_id == done:
+                        expect(refusal).to_have_count(1)
+                        expect(refusal).to_have_class(re.compile(r"\bwarn\b"))
+                        expect(refusal.locator(".chat-live-line-title")).to_be_visible()
+                        evidence = titles.filter(has_text=re.compile(r"^\d+ tool calls?\b"))
+                        expect(evidence).to_have_text(["1 tool call"], use_inner_text=True)
+                        expect(titles.filter(has_text="One of the steps failed")).to_have_count(0)
+                        body = refusal.locator(".chat-live-line-body")
+                        expect(body).to_have_text(git_preview, use_inner_text=True)
+                        shot = "handled-git-refusal"
+                    else:
+                        body = timeline.locator(':scope > .chat-live-line.cancelled .chat-live-line-body')
+                        if task_id == known:
+                            expect(body).to_contain_text(known_reason, use_inner_text=True)
+                            expect(body).to_contain_text(re.compile(
+                                r"Task cancelled Sep 24, 2026\D+06:18 PM · Notification added Sep 26, 2026\D+07:21 PM"),
+                                use_inner_text=True)
+                            expect(body).not_to_contain_text("Task end time not recorded", use_inner_text=True)
+                            shot = "cancel-known-time"
+                        else:
+                            expect(body).to_contain_text(unknown_reason, use_inner_text=True)
+                            expect(body).to_contain_text(re.compile(
+                                r"Task end time not recorded · Notification added Sep 26, 2026\D+07:25 PM"),
+                                use_inner_text=True)
+                            expect(body).not_to_contain_text(re.compile(r"Task (?:ended|cancelled) "), use_inner_text=True)
+                            shot = "cancel-unknown-time"
+                    card.scroll_into_view_if_needed()
+                    expect(phase).to_have_text("Done" if task_id == done else "Stopped")
+                    expect(phase).to_be_in_viewport()
+                    expect(body).to_be_visible()
+                    expect(body).to_be_in_viewport(ratio=1)
+                    _screenshot(page, tmp_path, f"{shot}-{width}")
+                page.close()
+            assert not errors.unexpected(), errors.report()
         finally:
             browser.close()
 

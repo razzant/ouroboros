@@ -12,7 +12,7 @@ import { otherKeyRows, providerRowFacts, quotaBars, quotaLeft } from '../modules
 import { editorLine, keyHeads, keyPath, keyTitle, parseKeyPath, referencesLine, setKeyEnabled } from '../modules/settings_connections.js';
 import { forgetSettingRows, readSettings } from '../modules/settings_controls.js';
 import { settingsPageFor } from '../modules/settings_pages.js';
-import { PROVIDER_CARDS, providerSettingsCard } from '../modules/settings_provider_cards.js';
+import { PROVIDER_CARDS, createFlatKeyChoices, providerSettingsCard } from '../modules/settings_provider_cards.js';
 import { HAND_WRITTEN, ROWS, rowById } from '../modules/settings_rows.js';
 import { secretRowHtml, storedKeyRow } from '../modules/settings_secrets.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
@@ -265,6 +265,13 @@ test('showing the list reads no status, starts no daemon and calls no provider; 
     assert.equal(world.find('#btn-harness-refresh').textContent, 'Refresh');
     assert.equal(world.find('#btn-claudexor-restart').textContent, 'Restart Claudexor');
     assert.ok(world.find('[data-family-maintenance]'), 'the program\'s row has its host above the accounts');
+    const family = world.find('[data-family="codex"]');
+    const login = family.querySelector('[data-family-login]');
+    const program = family.querySelector('[data-family-maintenance]');
+    await claudexorStatus.observe({ afterCurrent: true });
+    assert.equal(world.find('[data-family="codex"]'), family);
+    assert.equal(world.find('[data-family-login]'), login);
+    assert.equal(world.find('[data-family-maintenance]'), program);
     // Another page of Settings shown while this one stands reads nothing more.
     world.state.calls.length = 0;
     world.show('accounts');
@@ -569,6 +576,299 @@ test('the wizard\'s provider step renders and collects as before', async (t) => 
     assert.deepEqual(editor.collect(), { OUROBOROS_CONNECTIONS: [{ kind: 'openrouter', name: 'research-credits', label: 'Research credits', api_key: MASK, enabled: false }] });
     assert.equal(world.posts().length, 0);
     editor.destroy();
+});
+
+test('an added key\'s card row draws its API: a new one is saved and tested on Responses, a loaded one keeps what it stored', async (t) => {
+    const { createConnectionsEditor } = await import('../modules/settings_connections.js');
+    const world = server(t, { values: { OUROBOROS_CONNECTIONS: [
+        { kind: 'openai', name: 'lab', label: 'Lab', api_key: 'sk-lab', api_surface: 'responses' },
+        { kind: 'openai', name: 'old', label: 'Old', api_key: 'sk-old' }] } });
+    const element = globalThis.Element;
+    globalThis.Element = NodeStub;
+    t.after(() => { globalThis.Element = element; });
+    const root = new Stub('div');
+    root.innerHTML = `<div data-settings-panel="providers">${PROVIDER_CARDS.map(providerSettingsCard).join('')}</div>`;
+    const sent = [];
+    const editor = createConnectionsEditor({ root, test: async (body) => { sent.push(body); return { ok: true }; } });
+    const document = world.state.document();
+    editor.load(document, { modelSlots: document._meta.setup_contract.modelSlots });
+    const panel = root.querySelector('[data-settings-panel="providers"]');
+    const row = (name) => root.querySelectorAll('[data-connection-row]').find((each) => each.dataset.name === name);
+    const shown = (each) => each.querySelector('[data-connection-choice-value][aria-pressed="true"]')?.dataset.connectionChoiceValue;
+    assert.equal(root.querySelectorAll('[data-connection-row][data-builtin="1"] [data-connection-choice]').length, 0,
+        'the built-in key\'s choice stands on its own page and under the wizard\'s flat key');
+    assert.deepEqual([shown(row('lab')), shown(row('old'))], ['responses', 'chat_completions'], 'a stored word, or none: Chat');
+    assert.deepEqual(editor.collect(), {}, 'loading changes nothing');
+    await panel.fire('click', { target: row('old').querySelector('[data-connection-test]') });
+    assert.deepEqual(sent.pop(), { provider_id: 'openai', connection: 'old', overrides: {} }, 'a legacy row is tested as saved');
+    await panel.fire('click', { target: root.querySelector('[data-connection-add="openai"]') });
+    const fresh = root.querySelectorAll('[data-connection-row][data-draft="1"]').at(-1);
+    assert.equal(shown(fresh), 'responses', 'a new key starts where its save would put it');
+    fresh.querySelector('[data-connection-label]').value = 'Work';
+    fresh.querySelector('[data-connection-field="api_key"]').value = 'sk-work';
+    await panel.fire('click', { target: fresh.querySelector('[data-connection-test]') });
+    assert.equal(sent.pop().overrides.api_surface, 'responses', 'Test asks on the API Save stores');
+    assert.deepEqual(editor.collect().OUROBOROS_CONNECTIONS.at(-1), { kind: 'openai', name: 'work', label: 'Work', api_key: 'sk-work', api_surface: 'responses' });
+    await panel.fire('click', { target: fresh.querySelector('[data-connection-choice-value="chat_completions"]') });
+    assert.equal(editor.collect().OUROBOROS_CONNECTIONS.at(-1).api_surface, 'chat_completions', 'the owner\'s press is what travels');
+    await panel.fire('click', { target: row('old').querySelector('[data-connection-choice-value="chat_completions"]') });
+    assert.equal(editor.collect().OUROBOROS_CONNECTIONS.find((each) => each.name === 'old').api_surface, undefined,
+        'pressing the option a legacy row already shows stores nothing');
+    editor.destroy();
+});
+
+/* ---- An OpenAI key's API (settings_provider_cards.js: a choice among a kind's fields) -------------------------------
+   The stored words are the selected contract's: the flat `OPENAI_API_SURFACE`, a row's `api_surface`, `chat_completions`
+   or `responses`. A key saved before the choice existed stores neither and keeps Chat Completions. */
+const OPENAI = PROVIDER_CARDS.find((card) => card.kind === 'openai');
+const API = OPENAI.fields.find((field) => field.choices);
+const NOTES = Object.fromEntries(API.choices.map((choice) => [choice.value, choice.note]));
+/** The API strip of the key page mounted in `box`: what it shows, what travels, and a press. */
+function apiStrip(box) {
+    const input = () => box.querySelector('[data-connection-field="api_surface"]');
+    const options = () => box.querySelectorAll('[data-connection-choice-value]');
+    return {
+        input,
+        shown: () => options().filter((option) => option.getAttribute('aria-pressed') === 'true').map((option) => option.textContent),
+        marked: () => options().filter((option) => option.classList.contains('active')).map((option) => option.textContent),
+        held: () => options().map((option) => option.disabled),
+        note: () => box.querySelector('[data-connection-choice-note]').textContent,
+        tone: () => box.querySelector('[data-connection-choice-note]').dataset.tone || '',
+        press: async (value) => { await box.fire('click', { target: options().find((option) => option.dataset.connectionChoiceValue === value) }); await settle(); },
+    };
+}
+const pressOn = async (box, selector) => { await box.fire('click', { target: box.querySelector(selector) }); await settle(); };
+
+test('an OpenAI key saved before the choice keeps Chat Completions; only a pressed change is tested and saved, alone', async (t) => {
+    const world = server(t, { values: { OPENAI_API_KEY: 'sk-openai-real', OUROBOROS_MODEL: 'openai::gpt-kept' } });
+    const page = await world.mount('accounts/key/openai');
+    const api = apiStrip(world.container);
+    assert.deepEqual([api.shown(), api.marked(), api.input().value], [['Chat Completions'], ['Chat Completions'], ''],
+        'no stored word reads as Chat Completions, and nothing stands to be sent');
+    assert.equal(api.note(), NOTES.chat_completions);
+    assert.match(world.container.textContent, /Test checks a short tool call through the API chosen above\./);
+    // An ordinary save of another field is no migration: the key travels alone.
+    const key = world.find('[data-connection-field="api_key"]');
+    key.value = 'sk-openai-new';
+    await world.container.fire('input', { target: key });
+    await pressOn(world.container, '[data-editor-save]');
+    assert.deepEqual(world.posts(), [{ OPENAI_API_KEY: 'sk-openai-new' }]);
+    assert.equal('OPENAI_API_SURFACE' in world.state.values, false, 'the choice was not written by the way');
+    // A press is a draft: it ends what the last Test said of the key as it was, Test asks with it, nothing is saved
+    // until Save, and the line says what the option means.
+    const verdict = () => [world.find('[data-editor-result]').textContent, keyHeads(world.state.document()).keys.find((head) => head.id === 'openai').chip];
+    await pressOn(world.container, '[data-connection-test]');
+    assert.deepEqual(verdict(), ['Not ready — No credits', { text: 'Not ready — No credits', tone: 'warn' }]);
+    await api.press('responses');
+    assert.deepEqual(verdict(), ['', null], 'the verdict was about the draft that was tested');
+    assert.deepEqual([api.shown(), api.input().value, api.note()], [['Responses'], 'responses', NOTES.responses]);
+    assert.equal(world.posts().length, 1, 'a press writes nothing');
+    await pressOn(world.container, '[data-connection-test]');
+    assert.deepEqual(world.state.askedTests.at(-1), { provider_id: 'openai', overrides: { OPENAI_API_SURFACE: 'responses' } });
+    // Pressing the option the key already holds undoes the draft: nothing is left to send, and Test asks the saved key.
+    await api.press('chat_completions');
+    assert.deepEqual([api.shown(), api.input().value], [['Chat Completions'], '']);
+    await pressOn(world.container, '[data-connection-test]');
+    assert.deepEqual(world.state.askedTests.at(-1), { provider_id: 'openai', overrides: {} });
+    await pressOn(world.container, '[data-editor-save]');
+    assert.equal(world.posts().length, 1);
+    assert.equal(world.find('[data-editor-result]').textContent, 'Nothing changed.');
+    // The deliberate change: one key in the body, and the page shows what is stored after it.
+    await api.press('responses');
+    await pressOn(world.container, '[data-editor-save]');
+    assert.deepEqual(world.posts().at(-1), { OPENAI_API_SURFACE: 'responses' });
+    assert.match(world.find('[data-editor-result]').textContent, /^Saved/);
+    assert.deepEqual([apiStrip(world.container).shown(), apiStrip(world.container).input().value], [['Responses'], 'responses']);
+    assert.equal(world.state.values.OUROBOROS_MODEL, 'openai::gpt-kept', 'the model a role names is left as it was');
+    assert.match(keyHeads(world.state.document()).keys.find((head) => head.id === 'openai').meta, /^Responses API · Main$/);
+    // Back to the earlier API is stored as its own word: the key now has a choice on record.
+    await apiStrip(world.container).press('chat_completions');
+    await pressOn(world.container, '[data-editor-save]');
+    assert.deepEqual(world.posts().at(-1), { OPENAI_API_SURFACE: 'chat_completions' });
+    page.unmount();
+});
+
+test('a new OpenAI key starts on Responses and stores it with the key; the proposal is never sent alone', async (t) => {
+    const world = server(t);
+    // The built-in key that holds nothing yet (More providers): the strip proposes Responses.
+    let page = await world.mount('accounts/key/openai');
+    let api = apiStrip(world.container);
+    assert.deepEqual([api.shown(), api.input().value, api.note()], [['Responses'], 'responses', NOTES.responses]);
+    await pressOn(world.container, '[data-editor-save]');
+    assert.equal(world.posts().length, 0, 'a proposal nobody pressed is stored with the key, never alone');
+    assert.equal(world.find('[data-editor-result]').textContent, 'Nothing changed.');
+    await pressOn(world.container, '[data-connection-test]');
+    assert.deepEqual(world.state.askedTests.at(-1), { provider_id: 'openai', overrides: { OPENAI_API_SURFACE: 'responses' } }, 'Test asks through what a save would store');
+    const key = world.find('[data-connection-field="api_key"]');
+    key.value = 'sk-openai-first';
+    await world.container.fire('input', { target: key });
+    await pressOn(world.container, '[data-editor-save]');
+    assert.deepEqual(world.posts(), [{ OPENAI_API_KEY: 'sk-openai-first', OPENAI_API_SURFACE: 'responses' }]);
+    assert.deepEqual(apiStrip(world.container).shown(), ['Responses']);
+    page.unmount();
+    // A key added beside it, the provider chosen first: its row carries the word.
+    page = await world.mount('accounts/key/new');
+    assert.equal(world.find('[data-connection-choice]'), null, 'a kind without the choice draws no strip');
+    Object.assign(world.find('[data-key-kind]'), { value: 'openai' });
+    await world.container.fire('change', { target: world.find('[data-key-kind]') });
+    api = apiStrip(world.container);
+    assert.deepEqual([api.shown(), api.input().value], [['Responses'], 'responses']);
+    world.find('[data-connection-label]').value = 'Work account';
+    world.find('[data-connection-field="api_key"]').value = 'sk-work';
+    await pressOn(world.container, '[data-editor-save]');
+    assert.deepEqual(world.posts().at(-1).OUROBOROS_CONNECTIONS.at(-1), { kind: 'openai', name: 'work-account', label: 'Work account', api_key: 'sk-work', api_surface: 'responses' });
+    page.unmount();
+    // The owner may start a new key on the earlier API: that press is stored as its own word.
+    page = await world.mount('accounts/key/new');
+    Object.assign(world.find('[data-key-kind]'), { value: 'openai' });
+    await world.container.fire('change', { target: world.find('[data-key-kind]') });
+    await apiStrip(world.container).press('chat_completions');
+    world.find('[data-connection-label]').value = 'Old tools';
+    world.find('[data-connection-field="api_key"]').value = 'sk-old';
+    await pressOn(world.container, '[data-editor-save]');
+    assert.equal(world.posts().at(-1).OUROBOROS_CONNECTIONS.at(-1).api_surface, 'chat_completions');
+    page.unmount();
+    // Beside an older setup (the legacy base address this key reaches) the built-in key starts on the earlier API, as
+    // the server seeds it, and the word shown is stored with the key.
+    const older = server(t, { values: { OPENAI_BASE_URL: 'http://127.0.0.1:8080/v1' } });
+    page = await older.mount('accounts/key/openai');
+    api = apiStrip(older.container);
+    assert.deepEqual([api.shown(), api.input().value, api.input().dataset.seeded], [['Chat Completions'], 'chat_completions', '1']);
+    const reached = older.find('[data-connection-field="api_key"]');
+    reached.value = 'sk-openai-legacy';
+    await older.container.fire('input', { target: reached });
+    await pressOn(older.container, '[data-editor-save]');
+    assert.deepEqual(older.posts(), [{ OPENAI_API_KEY: 'sk-openai-legacy', OPENAI_API_SURFACE: 'chat_completions' }]);
+    page.unmount();
+});
+
+test('named OpenAI keys choose on their own; an unknown stored word is said; the environment\'s and the organization\'s keys keep the rule', async (t) => {
+    const world = server(t, { values: { OPENAI_API_KEY: 'sk-openai-real', OPENAI_API_SURFACE: 'responses', OUROBOROS_CONNECTIONS: [
+        { kind: 'openai', name: 'work', label: 'Work account', api_key: 'sk-work' },
+        { kind: 'openai', name: 'lab', label: 'Lab', api_key: 'sk-lab', api_surface: 'responses' },
+        { kind: 'openai', name: 'odd', label: 'Odd', api_key: 'sk-odd', api_surface: 'Response' }] } });
+    const metaOf = (id) => keyHeads(world.state.document()).keys.find((head) => head.id === id).meta;
+    assert.deepEqual(['openai', 'openai@work', 'openai@lab', 'openai@odd'].map(metaOf),
+        ['Responses API · No role uses it', 'Chat Completions API · No role uses it', 'Responses API · No role uses it', 'Unknown API · No role uses it']);
+    assert.equal(keyHeads(world.state.document()).keys.find((head) => head.id === 'openrouter').meta, 'Main', 'a kind without the choice says nothing of it');
+    // The key saved before the choice: its own row changes, the others and the built-in key stay as they were.
+    let page = await world.mount('accounts/key/openai/work');
+    let api = apiStrip(world.container);
+    assert.deepEqual([api.shown(), api.input().value], [['Chat Completions'], '']);
+    world.find('[data-connection-label]').value = 'Work';
+    await pressOn(world.container, '[data-editor-save]');
+    assert.deepEqual(world.posts().at(-1).OUROBOROS_CONNECTIONS[0], { kind: 'openai', name: 'work', label: 'Work', api_key: MASK }, 'renaming it writes no choice');
+    await apiStrip(world.container).press('responses');
+    await pressOn(world.container, '[data-connection-test]');
+    assert.deepEqual(world.state.askedTests.at(-1), { provider_id: 'openai', connection: 'work', overrides: { api_surface: 'responses' } });
+    await pressOn(world.container, '[data-editor-save]');
+    assert.deepEqual(world.posts().at(-1).OUROBOROS_CONNECTIONS.map((row) => row.api_surface), ['responses', 'responses', 'Response']);
+    assert.equal(world.state.values.OPENAI_API_SURFACE, 'responses');
+    page.unmount();
+    // A stored word that is neither option: neither is shown pressed, the line says so, and nothing travels by itself.
+    page = await world.mount('accounts/key/openai/odd');
+    api = apiStrip(world.container);
+    assert.deepEqual([api.shown(), api.marked(), api.tone()], [[], [], 'error']);
+    assert.equal(api.note(), 'Saved value “Response” is none of these. Choose one.');
+    await api.press('responses');
+    assert.deepEqual([api.shown(), api.tone(), api.note()], [['Responses'], '', NOTES.responses]);
+    await pressOn(world.container, '[data-editor-save]');
+    assert.equal(world.posts().at(-1).OUROBOROS_CONNECTIONS[2].api_surface, 'responses');
+    page.unmount();
+    // The server's refusal of a word is said on the page and the pressed option stays.
+    page = await world.mount('accounts/key/openai');
+    await apiStrip(world.container).press('chat_completions');
+    world.state.refuse = [{ saved: false, error: 'OPENAI_API_SURFACE must be chat_completions or responses.' }, 400];
+    await pressOn(world.container, '[data-editor-save]');
+    assert.match(world.find('[data-editor-result]').textContent, /^Not saved\. OPENAI_API_SURFACE must be chat_completions or responses\./);
+    assert.deepEqual(apiStrip(world.container).shown(), ['Chat Completions']);
+    page.unmount();
+
+    // A key the environment provides, with no word in the document, is an existing key: Chat Completions, not the seed.
+    const fromEnvironment = server(t, { values: { OPENAI_API_KEY: '' } });
+    const document = fromEnvironment.state.document;
+    fromEnvironment.state.document = () => {
+        const answer = document();
+        Object.assign(answer._meta.connections.find((entry) => entry.id === 'openai'), { configured: true, source: 'environment' });
+        return answer;
+    };
+    page = await fromEnvironment.mount('accounts/key/openai');
+    api = apiStrip(fromEnvironment.container);
+    assert.deepEqual([api.shown(), api.input().value, api.input().dataset.fresh || ''], [['Chat Completions'], '', '']);
+    assert.equal(keyHeads(fromEnvironment.state.document()).keys.find((head) => head.id === 'openai').meta, 'From the environment · Chat Completions API · No role uses it');
+    page.unmount();
+
+    // The organization's Supervisor sends through the key: the choice is shown, never changed.
+    const managed = server(t, { values: { OPENAI_API_KEY: 'sk-openai-real' } });
+    const plain = managed.state.document;
+    managed.state.document = () => ({ ...plain(), _meta: { ...plain()._meta, policy_state: { deployment: { checker: { connections: ['openai'], fields: [] } } } } });
+    page = await managed.mount('accounts/key/openai');
+    api = apiStrip(managed.container);
+    assert.deepEqual([api.shown(), api.held()], [['Chat Completions'], [true, true]]);
+    assert.equal(managed.find('[data-editor-save]'), null);
+    page.unmount();
+});
+
+test('the wizard\'s flat OpenAI key: a key typed where none was starts on Responses, a configured one keeps what it stored', async () => {
+    const fields = [{ id: 'openrouter-key', stateKey: 'openrouterKey', settingKey: 'OPENROUTER_API_KEY' },
+        { id: 'openai-key', stateKey: 'openaiKey', settingKey: 'OPENAI_API_KEY' }];
+    const mounted = ({ initial, held }) => {
+        const state = { ...initial };
+        let edits = 0;
+        const choices = createFlatKeyChoices({ state, initial, providerFields: fields, held, onChange: () => { edits += 1; } });
+        const root = new Stub('div');
+        root.innerHTML = `<input id="openai-key">${choices.html('OPENAI_API_KEY')}`;
+        choices.bind(root);
+        const holder = root.querySelector('[data-flat-key-choice]');
+        const type = async (text) => { state.openaiKey = text; await root.querySelector('#openai-key').fire('input', { target: { value: text } }); };
+        return { state, choices, root, holder, api: apiStrip(holder), type, edits: () => edits };
+    };
+    assert.equal(createFlatKeyChoices({ state: {}, providerFields: fields }).html('OPENROUTER_API_KEY'), '', 'a kind without the choice draws nothing');
+    // A fresh install: the strip waits for a key, comes with it on Responses, and the draft stores the word with the key.
+    let wizard = mounted({ initial: { openaiKey: '', openaiApiSurface: '' } });
+    assert.equal(wizard.holder.hidden, true);
+    assert.deepEqual([wizard.choices.draft(), wizard.choices.words('openaiKey')], [{}, []], 'no key, no choice');
+    await wizard.type('sk-typed');
+    assert.equal(wizard.holder.hidden, false);
+    assert.deepEqual([wizard.api.shown(), wizard.choices.draft(), wizard.choices.words('openaiKey')], [['Responses'], { OPENAI_API_SURFACE: 'responses' }, ['Responses API']]);
+    await wizard.api.press('chat_completions');
+    assert.deepEqual([wizard.api.shown(), wizard.choices.draft(), wizard.edits()], [['Chat Completions'], { OPENAI_API_SURFACE: 'chat_completions' }, 1]);
+    assert.match(wizard.choices.html('OPENAI_API_KEY'), /class="ui-segment active" data-connection-choice-value="chat_completions" aria-pressed="true"/, 'a later render draws the pressed option');
+    await wizard.type('');
+    assert.deepEqual([wizard.holder.hidden, wizard.choices.draft()], [true, {}], 'the key gone, its choice is no part of the draft');
+    // An install that already has a key (the bootstrap's configured marker, from the document or the environment) and
+    // no stored word: Chat Completions, and an untouched choice sends nothing.
+    wizard = mounted({ initial: { openaiKey: '***configured***' } });
+    assert.deepEqual([wizard.holder.hidden, wizard.api.shown(), wizard.choices.draft(), wizard.choices.words('openaiKey')],
+        [false, ['Chat Completions'], {}, ['Chat Completions API']]);
+    await wizard.type('sk-replaced');
+    assert.deepEqual([wizard.api.shown(), wizard.choices.draft()], [['Chat Completions'], {}], 'replacing its key does not switch it');
+    await wizard.api.press('responses');
+    assert.deepEqual(wizard.choices.draft(), { OPENAI_API_SURFACE: 'responses' });
+    await wizard.api.press('chat_completions');
+    assert.deepEqual([wizard.choices.draft(), wizard.state.openaiApiSurface], [{}, ''], 'pressed back, nothing is left to send');
+    // A stored word is kept as it is; the organization's key shows it and takes no press.
+    wizard = mounted({ initial: { openaiKey: '***configured***', openaiApiSurface: 'responses' }, held: (kind, key) => kind === 'openai' && key === 'OPENAI_API_SURFACE' });
+    assert.deepEqual([wizard.api.shown(), wizard.api.held(), wizard.choices.draft()], [['Responses'], [true, true], {}]);
+    // The setup contract lists the stored word as a field of its own: it is this strip, never a text field.
+    const listed = createFlatKeyChoices({ state: {}, providerFields: [...fields, { id: 'openai-api-surface', stateKey: 'openaiApiSurface', settingKey: 'OPENAI_API_SURFACE' }] });
+    assert.deepEqual([listed.owns({ settingKey: 'OPENAI_API_SURFACE' }), listed.owns({ settingKey: 'OPENAI_API_KEY' })], [true, false]);
+    // Beside an older setup a typed key starts on the earlier API, and the draft stores that word with it.
+    wizard = mounted({ initial: { openaiKey: '', legacyCompatibleBaseUrl: 'http://127.0.0.1:8080/v1' } });
+    await wizard.type('sk-typed');
+    assert.deepEqual([wizard.api.shown(), wizard.choices.draft()], [['Chat Completions'], { OPENAI_API_SURFACE: 'chat_completions' }]);
+    // The profile a proposal on one key takes is that key's own choice: the built-in key's as the draft holds it, an
+    // added key's as its row stores it (connectionDefaults asks per key, never one table for the whole kind).
+    wizard = mounted({ initial: { openaiKey: '', connections: [] } });
+    wizard.state.connections = [{ kind: 'openai', name: 'lab', api_surface: 'responses' }, { kind: 'openai', name: 'old' }];
+    assert.equal(wizard.choices.profileOf('openai'), '', 'no OpenAI key in the draft: the kind\'s own');
+    await wizard.type('sk-typed');
+    assert.equal(wizard.choices.profileOf('openai'), 'openai-responses');
+    assert.deepEqual([wizard.choices.profileOf('openai', 'lab'), wizard.choices.profileOf('openai', 'old')], ['openai-responses', ''],
+        'an added key answers by its own stored word; none is the earlier API');
+    await wizard.api.press('chat_completions');
+    assert.equal(wizard.choices.profileOf('openai'), '', 'the earlier API proposes the kind\'s own defaults');
+    assert.equal(wizard.choices.profileOf('anthropic', 'corp'), '', 'a kind without the choice has one profile');
 });
 
 test('a key saved, turned off or removed names the rows that still point at a key which cannot send; none, nothing is added', () => {

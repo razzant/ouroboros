@@ -418,6 +418,8 @@ def test_provider_test_of_an_added_key_takes_a_model_its_own_server_serves():
 
 
 def test_catalog_is_used_only_for_compatible_discovery(monkeypatch):
+    from ouroboros.settings_defaults import OPENROUTER_DEFAULTS
+
     discoveries = []
     probes = []
 
@@ -435,7 +437,7 @@ def test_catalog_is_used_only_for_compatible_discovery(monkeypatch):
         "openrouter", {"OPENROUTER_API_KEY": "key"},
     ) == {"ok": True}
     assert discoveries == []
-    assert probes == ["google/gemini-3.8-flash"]
+    assert probes == [OPENROUTER_DEFAULTS["main"]]  # a bare router key is probed on the shipped Main
     assert provider_api._run_provider_test_with_settings("openai-compatible", {
         "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
     }) == {"ok": True}
@@ -467,8 +469,6 @@ def test_discovery_failure_stops_before_generation(monkeypatch, discovery, error
     "model,settings,token_key",
     [
         ("openai/test", {"OPENROUTER_API_KEY": "key"}, "max_tokens"),
-        # Unlisted by any name prefix: the carrier is the direct provider's, not the name's.
-        ("openai::gpt-6-astra", {"OPENAI_API_KEY": "key"}, "max_completion_tokens"),
         ("openai-compatible::test", {
             "OPENAI_COMPATIBLE_API_KEY": "key",
             "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
@@ -723,6 +723,36 @@ def test_provider_test_attempts_are_physically_accounted_without_chat_side_effec
     assert not dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")
 
 
+def test_a_provider_test_inside_a_task_is_that_tasks_spending(monkeypatch, tmp_path):
+    """The Settings button has no task: its attempt is ``system:provider_test`` (above). A provider test a task runs
+    itself (its own live qualification) stays the task's: its root's ledger, budget and Stop fences, tagged
+    ``provider_test``, still one physical attempt; a system probe scope bound around it does not adopt it."""
+    import ouroboros.usage_accounting as accounting
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(accounting, "_reservation_cost", lambda _request: 0.01)
+    remote = _Remote([_Completion(), _Completion()])
+    client = LLMClient()
+    monkeypatch.setattr(client, "_new_remote_client", lambda _target: remote)
+    settings = {"OPENROUTER_API_KEY": "key"}
+    task = accounting.UsageScope(drive_root=tmp_path, task_id="qualify-1", root_task_id="qualify-1")
+    with accounting.usage_scope(task), accounting.capture_attempt_ids() as attempt_ids:
+        assert client.probe_provider_readiness("openai/test", settings=settings)["ok"] is True
+    probe = accounting.UsageScope(drive_root=tmp_path, task_id="system:other", root_task_id="system:other",
+                                  non_task_operation=True)
+    with accounting.usage_scope(probe):
+        assert client.probe_provider_readiness("openai/test", settings=settings)["ok"] is True
+    rows = {row["attempt_id"]: row for row in ledger_rows(tmp_path) if row.get("kind") == "attempt"}
+    assert len(attempt_ids) == 1 and len(rows) == 2
+    owned = rows[attempt_ids[0]]
+    assert (owned["task_id"], owned["root_task_id"], owned["source"], owned.get("non_task_operation")) == (
+        "qualify-1", "qualify-1", "provider_test", None)
+    [system] = [row for key, row in rows.items() if key != attempt_ids[0]]
+    assert (system["task_id"], system["root_task_id"], system["non_task_operation"]) == (
+        "system:provider_test", "system:provider_test", True)
+
+
 def test_response_log_and_accounting_expose_only_controlled_error(
     monkeypatch, caplog, tmp_path,
 ):
@@ -808,3 +838,236 @@ def test_provider_test_and_declarations_ignore_retired_review_keys(retired_key):
     declared = declared_model_settings(settings)
     assert declared["OUROBOROS_MODEL_FALLBACKS"] == settings["OUROBOROS_MODEL_FALLBACKS"]
     assert retired_key not in declared
+
+
+def _chat_reply(finish, *calls, content=None):
+    choice = {"message": {"role": "assistant", "content": content, **({"tool_calls": list(calls)} if calls else {})}}
+    return {"choices": [{**choice, **({"finish_reason": finish} if finish else {})}]}
+
+
+def _chat_call(arguments='{"ok":true}', **fields):
+    """A Chat custom call: the form the Chat probe's custom tool is answered in."""
+    return {"id": "c1", "type": "custom", "custom": {"name": "provider_test", "input": arguments}, **fields}
+
+
+def _response(status, *items, **body):
+    return {"status": status, "output": list(items), **body} if status else {"output": list(items), **body}
+
+
+def _response_call(arguments='{"ok":true}', **fields):
+    return {"type": "function_call", "call_id": "c1", "name": "provider_test", "arguments": arguments,
+            "status": "completed", **fields}
+
+
+_THOUGHT = {"type": "reasoning", "id": "rs_1", "summary": []}
+
+
+def _openai_refusal(message, *, param, code="unsupported_value"):
+    """The SDK's own HTTP 400 for a refused request form, as the direct OpenAI client raises it."""
+    import openai
+
+    body = {"message": message, "type": "invalid_request_error", "param": param, "code": code}
+    response = httpx.Response(400, json={"error": body},
+                              request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"))
+    return openai.BadRequestError(f"Error code: 400 - {json.dumps({'error': body})}", response=response, body=body)
+
+
+def _chat_function_call(name, arguments):
+    return _Completion({"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": None,
+        "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": name, "arguments": arguments}}]}}],
+        "usage": {"prompt_tokens": 30, "completion_tokens": 9}})
+
+
+_CUSTOM_REFUSED = ("custom tools are not supported", "tools[0].type")
+_FUNCTION_REFUSED = ("reasoning is not compatible with function tools; must use none", "reasoning_effort")
+
+
+class _FormPeer(_Remote):
+    """A direct OpenAI Chat peer answering by request form: the custom form, the function form with reasoning on
+    (``refuse_reasoning``) and with reasoning ``none`` (``refuse_none``) get the exact typed refusals the runtime's
+    ladder advances on; ``after`` scripts the answers to every later form; otherwise a call of the one tool."""
+
+    def __init__(self, *, refuse_reasoning=False, refuse_none=False, after=()):
+        super().__init__([])
+        self.refuse_reasoning, self.refuse_none, self.after = refuse_reasoning, refuse_none, list(after)
+
+    def create(self, **payload):
+        self.calls.append(payload)
+        tool, effort = payload["tools"][0], payload.get("reasoning_effort")
+        if tool["type"] == "custom":
+            raise _openai_refusal(_CUSTOM_REFUSED[0], param=_CUSTOM_REFUSED[1])
+        if self.after:
+            outcome = self.after.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        if (effort == "none" and self.refuse_none) or (effort != "none" and self.refuse_reasoning):
+            raise _openai_refusal(_FUNCTION_REFUSED[0], param=_FUNCTION_REFUSED[1])
+        name = tool["function"]["name"]
+        return _chat_function_call(name, '{"ok":true}' if name == "provider_test" else '{"word":"tail"}')
+
+
+def _chat_form(payload):
+    return payload["tools"][0]["type"], payload.get("reasoning_effort")
+
+
+@pytest.mark.parametrize(("peer", "forms", "error"), [
+    # Custom refused: the function rung, at the provider's default reasoning.
+    ({}, [("custom", None), ("function", None)], ""),
+    # Reasoning refused beside function tools too: the runtime's task-local rung, functions with reasoning none.
+    ({"refuse_reasoning": True}, [("custom", None), ("function", None), ("function", "none")], ""),
+    # Every rung refused: tool calls, not the key or the model, failed on this API.
+    ({"refuse_reasoning": True, "refuse_none": True}, [("custom", None), ("function", None), ("function", "none")],
+     "Tool calls refused by this API"),
+])
+def test_a_chat_model_refusing_a_rung_is_tested_on_the_rung_its_tool_rounds_take(monkeypatch, peer, forms, error):
+    """Counterexample: a saved direct OpenAI Chat model refuses the custom form, and maybe reasoning beside function
+    tools, with the exact typed refusals the runtime's ladder answers (``openai_chat_dispatch``), and its real tool round
+    still succeeds on the next rung. Provider Test walks the same rungs (``direct_openai_tool_candidate_ladder``), each
+    its own accounted one-shot, never on another API. A pass on the reasoning-off rung names that rung in the result's
+    ``applied`` mode: it confirms the tool call, not reasoning."""
+    import functools
+
+    lookup = [{"type": "function", "function": {"name": "lookup", "description": "Look up a word.", "parameters": {
+        "type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]}}}]
+    settings = {"OPENAI_API_KEY": "key"}
+    observed = _bypass_accounting(monkeypatch)
+    client = LLMClient()
+    monkeypatch.setattr(client, "_resolve_remote_target",
+                        functools.partial(LLMClient._resolve_remote_target, client, settings=settings))
+    if not error:  # the runtime itself, at its default effort, takes the same rung
+        runtime = _FormPeer(**peer)
+        monkeypatch.setattr(client, "_new_remote_client", lambda _target: runtime)
+        message, _usage = client.chat([{"role": "user", "content": "Look up 'tail'."}], "openai::gpt-4.1",
+                                      tools=lookup, tool_choice="required")
+        assert [_chat_form(call)[0] for call in runtime.calls] == [form for form, _effort in forms]
+        assert [call["function"]["name"] for call in message["tool_calls"]] == ["lookup"]
+    observed.clear()
+    probe = _FormPeer(**peer)
+    monkeypatch.setattr(client, "_new_remote_client", lambda _target: probe)
+    result = client.probe_provider_readiness("openai::gpt-4.1", settings=settings)
+    assert (result["ok"], result.get("error", "")) == (not error, error)
+    assert [_chat_form(call) for call in probe.calls] == forms
+    assert all(call["max_completion_tokens"] == 4096 and not {"reasoning", "input"} & set(call) for call in probe.calls)
+    assert all(call["tool_choice"] == "required" for call in probe.calls[1:])
+    assert probe.calls[1]["tools"] == [{"type": "function", "function": {
+        "name": "provider_test", "description": "Confirms that this connection can call a function.",
+        "parameters": probe.calls[1]["tools"][0]["function"]["parameters"]}}]
+    assert result["requested"] == {"api": "chat_completions", "tool_dialect": "openai_chat_custom",
+                                   "effort": "provider_default", "rung": "requested_wire_form"}
+    assert result["applied"] == {"api": "chat_completions", "tool_dialect": "function",
+                                 "effort": forms[-1][1] or "provider_default",
+                                 "rung": "task_local_availability_fallback" if forms[-1][1]
+                                 else "provider_rejected_tool_dialect"}
+    assert len(observed) == len(forms) and all(scope.task_id == "system:provider_test" for _request, scope in observed)
+
+
+def test_provider_test_resends_nothing_but_an_exact_rung_refusal(monkeypatch):
+    """Any other answer ends the test where it stands: a refusal of another field, a key refusal, a rate limit, a
+    reasoning refusal that names no tool dialect, or a connection broken after the send is never followed by
+    another form."""
+    observed = _bypass_accounting(monkeypatch)
+    for first in (_openai_refusal("Unsupported parameter: 'max_completion_tokens'", param="max_completion_tokens"),
+                  _openai_refusal("Incorrect API key provided", param=None, code="invalid_api_key")):
+        peer = _Remote([first])
+        client = LLMClient()
+        monkeypatch.setattr(client, "_new_remote_client", lambda _target, peer=peer: peer)
+        result = client.probe_provider_readiness("openai::gpt-4.1", settings={"OPENAI_API_KEY": "key"})
+        assert (result["ok"], result["error"], len(peer.calls)) == (False, "Model request failed", 1)
+        assert result["applied"]["tool_dialect"] == "openai_chat_custom"
+
+    class RateLimited(RuntimeError):
+        status_code = 429
+
+    after_custom = [
+        (RateLimited("slow down"), "Rate limited"),
+        (httpx.ReadTimeout("the connection broke after the send"), "Timed out"),
+        (_openai_refusal("reasoning_effort value medium is unsupported for this model", param="reasoning_effort"),
+         "Model request failed"),
+    ]
+    for outcome, error in after_custom:
+        peer = _FormPeer(after=[outcome])
+        client = LLMClient()
+        monkeypatch.setattr(client, "_new_remote_client", lambda _target, peer=peer: peer)
+        result = client.probe_provider_readiness("openai::gpt-4.1", settings={"OPENAI_API_KEY": "key"})
+        assert (result["ok"], result["error"]) == (False, error)
+        assert [_chat_form(call) for call in peer.calls] == [("custom", None), ("function", None)]  # no third form
+        assert result["applied"] == {"api": "chat_completions", "tool_dialect": "function",
+                                     "effort": "provider_default", "rung": "provider_rejected_tool_dialect"}
+    assert len(observed) == 2 + 2 * len(after_custom)
+
+
+def test_the_settings_button_says_works_without_claiming_reasoning(monkeypatch, caplog):
+    """The public answer keeps its frozen shape (``ProviderTestResponse``: ok, error): a pass on the reasoning-off
+    rung is "Works" for the tool call. Which form answered is in the ordinary provider_test log line, beside the one
+    asked for, on the connection's own API; nothing claims reasoning was tested."""
+    monkeypatch.setattr(provider_api, "load_settings", lambda: {
+        "OPENAI_API_KEY": "fixture-openai-key", "OUROBOROS_MODEL": "openai::gpt-4.1"})
+    _bypass_accounting(monkeypatch)
+    peer = _FormPeer(refuse_reasoning=True)
+    monkeypatch.setattr(LLMClient, "_new_remote_client", lambda _self, _target: peer)
+    with caplog.at_level("INFO"):
+        status, body = _post({"provider_id": "openai"})
+    assert (status, body) == (200, {"ok": True})
+    assert [_chat_form(call) for call in peer.calls] == [("custom", None), ("function", None), ("function", "none")]
+    logged = next(record.getMessage() for record in caplog.records if "provider_test result=" in record.getMessage())
+    assert "'applied': {'api': 'chat_completions', 'tool_dialect': 'function', 'effort': 'none'" in logged
+    assert "'requested': {'api': 'chat_completions', 'tool_dialect': 'openai_chat_custom'" in logged
+    assert "fixture-openai-key" not in logged
+
+
+@pytest.mark.parametrize(("surface", "reply", "error"), [
+    ("", _chat_reply("tool_calls", _chat_call()), ""),
+    ("", _chat_reply("stop", content="I would rather not."), "No function call returned"),
+    ("", _chat_reply("tool_calls", _chat_call(arguments='{"ok": false}')), "Function call malformed"),
+    ("", _chat_reply("tool_calls", _chat_call(arguments="{not json")), "Function call malformed"),
+    ("", _chat_reply("tool_calls", _chat_call(id="")), "Function call malformed"),
+    ("", _chat_reply("length"), "Reply incomplete (length)"),  # the cap ended it: tools are not established
+    ("", _chat_reply("content_filter", _chat_call()), "Reply incomplete (content_filter)"),
+    ("", _chat_reply(None, _chat_call()), "Reply status unknown"),
+    ("", _chat_reply("tool_calls", {"id": "c1", "type": "custom", "custom": {"name": "other", "input": '{"ok":true}'}}),
+     "Function call malformed"),
+    ("responses", _response("completed", _THOUGHT, _response_call()), ""),
+    ("responses", _response("completed", {"type": "message", "phase": "commentary", "status": "completed",
+                                          "content": [{"type": "output_text", "text": "Calling it next."}]}),
+     "No function call returned"),
+    ("responses", _response("completed", _response_call(arguments='{"ok": false}')), "Function call malformed"),
+    ("responses", _response("completed", _response_call(status="in_progress")), "Function call malformed"),
+    ("responses", _response("incomplete", _THOUGHT, incomplete_details={"reason": "max_output_tokens"}),
+     "Reply incomplete (max_output_tokens)"),
+    ("responses", _response("incomplete", _response_call(), incomplete_details={"reason": "content_filter"}),
+     "Reply incomplete (content_filter)"),  # a call inside an unfinished reply is no pass
+    ("responses", _response("incomplete", _THOUGHT), "Reply incomplete (no reason given)"),
+    ("responses", _response("failed", error={"code": "server_error", "message": "boom"}), "Reply failed (server_error)"),
+    ("responses", _response("", _response_call()), "Reply status unknown"),
+])
+def test_direct_openai_probe_is_one_attempt_whose_terminal_names_its_result(monkeypatch, surface, reply, error):
+    """Direct OpenAI is tested with a required call of a harmless test function through the connection's own API,
+    at the provider's default reasoning (no effort forced) and never as a text "Reply OK", a 16-token cap or
+    tool_choice none. Chat asks in the Chat lane's own tool form, the runtime's custom projection with its JSON
+    grammar, never plain functions beside default reasoning. One physical attempt decides: a pass needs a completed
+    reply whose calls are complete calls of the test function with ``{"ok": true}``. A reply its cap or provider left
+    unfinished (incomplete, failed, no terminal fact) says so as its own result, apart from a completed reply
+    without the call."""
+    observed = _bypass_accounting(monkeypatch)
+    remote = _Remote([_Completion(reply)])
+    remote.responses = types.SimpleNamespace(create=remote.create)
+    client = LLMClient()
+    monkeypatch.setattr(client, "_new_remote_client", lambda _target, remote=remote: remote)
+    result = client.probe_provider_readiness(
+        "openai::gpt-6-astra", settings={"OPENAI_API_KEY": "key", "OPENAI_API_SURFACE": surface})
+    assert (result["ok"], result.get("error", "")) == (not error, error)
+    [payload] = remote.calls
+    token_key = "max_output_tokens" if surface else "max_completion_tokens"
+    assert payload[token_key] == 4096 and payload["tool_choice"] == "required"
+    assert [tool.get("name") or tool["custom"]["name"] for tool in payload["tools"]] == ["provider_test"]
+    assert [tool["type"] for tool in payload["tools"]] == ["function" if surface else "custom"]
+    if not surface:  # the exact projection the Chat lane sends, not a lookalike
+        from ouroboros.openai_chat_custom import project_function_tool_request_to_openai_custom
+        from ouroboros.llm_probe import _PROBE_FUNCTION
+
+        lane = project_function_tool_request_to_openai_custom([{"type": "function", "function": _PROBE_FUNCTION}], "required")
+        assert payload["tools"] == lane.catalog.wire_tools() and payload["tool_choice"] == lane.tool_choice
+    assert ("input" in payload) is bool(surface) and not {"reasoning", "reasoning_effort", "include"} & set(payload)
+    request, _scope = observed[0]
+    assert len(observed) == 1 and request.max_completion_tokens == 4096 and request.source == "provider_test"

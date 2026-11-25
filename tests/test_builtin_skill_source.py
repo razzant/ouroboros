@@ -376,7 +376,7 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.4.16" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.4.21\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_connection.py", "lib/telegram_copies.py",
                  "lib/telegram_health.py", "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py",
                  "lib/telegram_state.py", "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):
@@ -387,6 +387,8 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     ("telegram", "7f71fe8d29c975e25b35a235e1c821e1b547674f", "1.3.1"),
     ("telegram", "6014e8896dabe371f5c06cf8adc5dc9902f53c2d", "1.3.2"),
     ("telegram", "08ed0f824df498a1c43c8ff9e04dd42e5c64ee76", "1.3.3"),
+    # Both sides of #3751 had a 1.4.18 manifest, but not the same payload.
+    ("telegram", "25cb4131511df8eded3d9762e23173ce9dcb8853", "1.4.18"),
 ])
 def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, old_version):
     """Full preceding payload from history: the re-seed delivers the bundled bytes,
@@ -435,6 +437,8 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
 ] + [('live_conversation', '96816f122', '0.1.1'),
      # The Calls UI changed after 0.1.33 shipped: an install that took that payload is reseeded too.
      ('live_conversation', 'cf6f95cf4', '0.1.33'),
+     # Retained Extensions forms need the new per-root Calls UI bindings after an app update.
+     ('live_conversation', '085f41abafcee74a61c60e79824025e7e5d3a4e1', '0.1.34'),
      ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
 def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
@@ -467,17 +471,20 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
     else:
-        version = {'live_conversation': '0.1.34', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
-                   'unix_computer_use': '0.7.2'}.get(name, '0.1.1')
+        version = {'live_conversation': '0.1.35', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
+                   'unix_computer_use': '0.9.0'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
         assert compute_content_hash(installed) != previous_hash
         # Pin the files that stayed stale on the stand, not just the manifest.
         paths = ["plugin.py"]
         if name == "live_conversation":
-            paths += ["driver.py", "ui/call_settings.js"]
+            paths += ["driver.py", "ui/call_settings.js", "ui/index.js"]
         elif name == "openai_realtime":
             paths += ["live.py"]
+        elif name == "unix_computer_use":
+            # The window capture's own helper and target mixin, and the native resolver it loads by path.
+            paths += ["capture.py", "macos_capture.py", "macos_native.py"]
         for path in paths:
             assert (installed / path).read_bytes() == (repo / "skills" / name / path).read_bytes()
     assert all((state / path).read_bytes() == value for path, value in retained.items())

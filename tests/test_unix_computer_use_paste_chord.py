@@ -1,15 +1,15 @@
 """unix_computer_use: the paste chord of type_text(via="paste") on a Mac, locally and over SSH (#2589).
 
 Measured in a macOS 26.4 guest on an AppKit Edit menu (the change's .review-evidence): the menu matched the
-Command-plane characters of the key event, so typing the layout's "v" (cliclick t:v) missed Paste under an ok receipt
+Command-plane characters of the key event, so typing the layout's "v" missed Paste under an ok receipt
 on Russian - PC (Option added) and Dvorak - QWERTY Command (its typing-plane "v" is "." under Command), and a fixed
 US-V key missed it on Dvorak ("k"), while the key whose Command plane is "v", posted with exactly the Command flag,
 pasted on all six layouts. ``skills/unix_computer_use/paste_chord.js`` posts input, so here it runs byte for byte under
 Node against inert stand-ins of the bridge it uses (``tests/fixtures/paste_chord_inert.cjs``: no ObjC, no CoreGraphics,
 nothing posted), is compiled without running, and goes through a real shell to stand-ins of the Mac's own tools.
 key() sends Command and one character through the same program, given that character as its argument (8.11.2026: under
-a Cyrillic layout cliclick refused cmd+g in desktop Slack, "Unable to get key code for g"); every other combo keeps
-cliclick.
+a Cyrillic layout the former typing helper refused cmd+g in desktop Slack, "Unable to get key code for g"); every
+other combo goes through the input program (input_events.js, #63).
 """
 from __future__ import annotations
 
@@ -21,8 +21,9 @@ from pathlib import Path
 
 import pytest
 
+from tests._unix_computer_use import CHORD_POSTED, DOWN, SAFARI, inputs, load_plugin, mac, receipt
+from tests._unix_computer_use import key as keys_op
 from tests.group_run import run_in_group
-from tests.test_unix_computer_use_targeting import CHORD_POSTED, SAFARI, inputs, load_plugin, mac, receipt
 
 CHORD = Path(__file__).resolve().parents[1] / "skills" / "unix_computer_use" / "paste_chord.js"
 INERT = Path(__file__).resolve().parent / "fixtures" / "paste_chord_inert.cjs"
@@ -64,6 +65,7 @@ def test_the_paste_chord_is_command_and_the_key_that_gives_v_under_command(tmp_p
         assert run["log"] == [f"paste chord: Command + key code {key} (v under Command in {layout['id']})"]
         # Exactly the Command flag: the Option the keyboard holds (each new event's own flags here) never rides along.
         assert run["posted"] == chord(key) and run["held"] == [] and run["source_state"] == 1, run  # HID system state
+        assert run["tags"] == [0x4F55524F] * 4, "every chord event carries the skill's mark, as the input program's do"
         assert [call for call in run["calls"] if call in ("CGEventPost", "delay")] == ["CGEventPost", "delay"] * 4
         # Key-down action, Command alone (cmdKey >> 8), the keyboard type in use, no dead keys; the lowest code wins.
         assert run["translated"] == [[code, 0, 1, 198, 1, 4] for code in range(key + 1)], run["translated"]
@@ -85,7 +87,9 @@ def test_a_refused_paste_chord_posts_nothing_in_the_words_the_receipt_reads(tmp_
         {"layout": ABC, "post": False})
     for run in (turkmen, unread, no_data, denied):
         assert run["error"] is None and run["posted"] == [] and "CGEventSourceCreate" not in run["calls"], run
-        assert run["leaked"] == [] and run["released"] == ([] if run is unread else ["TISInputSource"]), run
+        # Without the right to post the layout is never even read (the grant answers first).
+        assert run["leaked"] == [] and run["released"] == ([] if run in (unread, denied) else ["TISInputSource"]), run
+    assert denied["calls"][:1] == ["CGPreflightPostEventAccess"] and "TISCopyCurrentKeyboardLayoutInputSource" not in denied["calls"]
     assert turkmen["translated"] == [[code, 0, 1, 198, 1, 4] for code in range(128)], "every key code, then the refusal"
     assert turkmen["log"] == ["Unable to get key code for v (no key of com.apple.keylayout.Turkmen gives v under Command); "
                               "the paste chord was not sent"]
@@ -93,7 +97,7 @@ def test_a_refused_paste_chord_posts_nothing_in_the_words_the_receipt_reads(tmp_
                                                "the paste chord was not sent"]
     assert denied["log"] == ["WARNING: Accessibility privileges not enabled (no right to post input events); "
                              "the paste chord was not sent"]
-    for run, reason in ((turkmen, "untypable_characters"), (unread, "untypable_characters"), (denied, "permission_denied")):
+    for run, reason in ((turkmen, "untypable_characters"), (unread, "layout_unread"), (denied, "permission_denied")):
         module, api, state = mac(tmp_path, monkeypatch, chord=(0, "", run["log"][0] + "\n"))
         out = receipt(api.tools["type_text"](text="x", via="paste"))
         assert out["ok"] is False and out["reason"] == reason and out["dispatched"] is True and out["clipboard_done"] is True, out
@@ -167,7 +171,7 @@ def test_a_command_chord_posts_the_key_that_gives_its_character_under_command():
     assert no_word["log"] == bare["log"] == [CHORD_POSTED.strip()] and no_word["posted"] == bare["posted"] == chord(9)
     # A character only Command and Shift give is the same resolver's second pass, read as an app reads that chord: the
     # Command+Shift characters, or where the layout ignores Shift under Command the Shift plane's (cmd+? and cmd+} on ABC
-    # and Dvorak, the keys cliclick's typed Shift sent before; not Dvorak - QWERTY Command's =, whose Command+Shift is +).
+    # and Dvorak, the keys the former helper's typed Shift sent before; not Dvorak - QWERTY Command's =, whose Command+Shift is +).
     # The whole chord with Shift is made before anything is posted, never resent.
     shifted = ((ABC_KEYS, "?", 44), (ABC_KEYS, "}", 30), (RUSSIAN_KEYS, "?", 44), (RUSSIAN_KEYS, "}", 30),
                (DVORAK_KEYS, "?", 33), (DVORAK_KEYS, "}", 24), (QWERTY_CMD_KEYS, "?", 44), (QWERTY_CMD_KEYS, "}", 30))
@@ -198,7 +202,7 @@ def test_a_refused_command_chord_posts_nothing_and_a_malformed_argument_reaches_
         assert run["error"].startswith("the Command chord takes one printable character") and run["calls"] == [], run
 
 
-def test_only_command_and_one_character_takes_the_chord_and_every_other_combo_keeps_cliclick(tmp_path, monkeypatch):
+def test_only_command_and_one_character_takes_the_chord_and_every_other_combo_the_input_program(tmp_path, monkeypatch):
     module, api, state = mac(tmp_path, monkeypatch)
     out = receipt(api.tools["key"](keys="cmd+G"))  # a letter's case under a modifier is not a Shift
     assert out["ok"] is True and out["method"] == "command_chord" and out["keys"] == "cmd+G", out
@@ -208,9 +212,8 @@ def test_only_command_and_one_character_takes_the_chord_and_every_other_combo_ke
     receipt(api.tools["key"](keys="cmd+shift+g cmd+alt+g ctrl+g cmd+return cmd+tab g"))
     receipt(api.tools["hold_key"](keys="cmd", duration_ms=100))
     assert state["chords"] == [] and inputs(state) == [
-        ["cliclick", "kd:cmd,shift", "t:g", "ku:cmd,shift"], ["cliclick", "kd:cmd,alt", "t:g", "ku:cmd,alt"],
-        ["cliclick", "kd:ctrl", "t:g", "ku:ctrl"], ["cliclick", "kd:cmd", "kp:return", "ku:cmd"],
-        ["cliclick", "kd:cmd", "kp:tab", "ku:cmd"], ["cliclick", "t:g"], ["cliclick", "kd:cmd", "w:100", "ku:cmd"]]
+        [keys_op(None, "cmd", "shift", char="g")], [keys_op(None, "cmd", "alt", char="g")], [keys_op(None, "ctrl", char="g")],
+        [keys_op(36, "cmd")], [keys_op(48, "cmd")], [keys_op(None, char="g")], [{"op": "hold", "mods": ["cmd"], "ms": 100}]]
     # Each step's tool is checked before anything is switched or sent: no osascript, no chord, nothing at all.
     module, api, state = mac(tmp_path, monkeypatch)
     monkeypatch.setattr(module, "_which", lambda name: "" if name == "osascript" else f"/usr/bin/{name}")
@@ -226,7 +229,7 @@ DENIED = "WARNING: Accessibility privileges not enabled (no right to post input 
 
 def test_a_refused_shortcut_says_it_was_not_sent_and_a_failed_one_that_its_outcome_is_unknown(tmp_path, monkeypatch):
     """The program's own refusal happens before any event exists: nothing was posted, a known fact (dispatched false,
-    who was in front, never delivered_to), unlike cliclick's "may have been typed". A switch before it keeps its mark.
+    who was in front, never delivered_to). A switch before it keeps its mark.
     A program that ran and did not report success may have posted part of the chord: unknown, never "not sent"."""
     module, api, state = mac(tmp_path, monkeypatch, chord=(0, "", REFUSED_G))
     out = receipt(api.tools["key"](keys="cmd+g"))
@@ -262,7 +265,7 @@ def test_a_refused_shortcut_stops_its_sequence_with_the_earlier_steps_kept(tmp_p
     assert out["observed_effect"] is True and out["reason"] == "untypable_characters", "the arrow ran before it"
     assert out["note"] == ("1 of 3 step(s) completed while Safari was in front; the next step: the shortcut was not sent "
                            "(see error); this tool observed no UI change; the rest were not sent"), out
-    assert inputs(state) == [["cliclick", "kp:arrow-down"]] and len(state["chords"]) == 1, "return was never sent"
+    assert inputs(state) == [[DOWN]] and len(state["chords"]) == 1, "return was never sent"
 
 
 @pytest.mark.skipif(sys.platform == "win32" or not shutil.which("sh"), reason="the remote command is a POSIX shell command")
@@ -278,6 +281,7 @@ def test_an_ssh_shortcut_hands_its_character_to_the_same_program_as_a_separate_w
     out_dir.mkdir()
     (bin_dir / "osascript").write_text('#!/bin/sh\nn=$(ls "$OUT" | wc -l | tr -d " ")\n'
                                        'for a in "$@"; do printf "%s\\000" "$a"; done > "$OUT/$n"\n'
+                                       'case "$*" in *resolve*) echo \'{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}\';; esac\n'
                                        'echo "Command chord: Command + key code 5 (recorded)" >&2\n', encoding="utf-8", newline="\n")
     (bin_dir / "lsappinfo").write_text('#!/bin/sh\n[ "$1" = front ] && echo "ASN:0x0-0x1:" || '
                                        'printf \'"pid"=100\\n"CFBundleIdentifier"="com.apple.Safari"\\n"LSDisplayName"="Safari"\\n\'\n',
@@ -294,10 +298,12 @@ def test_an_ssh_shortcut_hands_its_character_to_the_same_program_as_a_separate_w
     out = receipt(api.tools["key"](keys=" ".join(f"cmd+{c}" for c in chars)))
     assert out["ok"] is True and out["steps"] == len(chars), out
     source = CHORD.read_text(encoding="utf-8")
-    for n, char in enumerate(chars):
-        argv = [a.decode() for a in (out_dir / str(n)).read_bytes().split(b"\0")[:-1]]
+    recorded = [[a.decode() for a in (out_dir / str(n)).read_bytes().split(b"\0")[:-1]] for n in range(len(list(out_dir.iterdir())))]
+    lookups = [argv for argv in recorded if '"op":"resolve"' in argv[-1]]  # the sequence's characters, looked up first
+    assert len(lookups) == 1 and json.loads(lookups[0][-1])["ops"][0]["command_chars"] == chars, lookups
+    for argv, char in zip([argv for argv in recorded if argv not in lookups], chars):
         assert argv == ["-l", "JavaScript", "-e", source, char], (char, argv[-1:])
-    assert all("cliclick kd:" not in argv[-1] for argv in calls)
+    assert all('"ops":' not in argv[-1] or '"op":"resolve"' in argv[-1] for argv in calls), "no step went through the input program"
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("osacompile"), reason="JavaScript for Automation is macOS")

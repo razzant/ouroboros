@@ -29,6 +29,7 @@ def spawn_maintenance_job(data_root, repo_dir, purpose, *, args=(), **popen):
     from ouroboros.launch_roots import BASIS_ENV, WorkRootUnavailable
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
     from ouroboros.process_custody import current_custody_session_id, lifeline_parent_env, spawn_supervised
+    from ouroboros.retention import get_gc_retention_days
 
     env = {key: os.environ[key] for key in (
         "PATH", "HOME", "USERPROFILE", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL",
@@ -41,7 +42,10 @@ def spawn_maintenance_job(data_root, repo_dir, purpose, *, args=(), **popen):
     # its own default APP_ROOT it would pick the historical folder the host refused (#1239).
     env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(repo_dir), OUROBOROS_DATA_DIR=str(data_root),
                OUROBOROS_REPO_DIR=str(repo_dir), OUROBOROS_SETTINGS_PATH=str(SETTINGS_PATH),
-               OUROBOROS_APP_ROOT=str(resolve_app_root()), **lifeline_parent_env())
+               OUROBOROS_APP_ROOT=str(resolve_app_root()), **lifeline_parent_env(),
+               # The owner's "Keep finished work for" days as this process resolved them: the child's retirers wait
+               # what Storage shows, never the default, and its job inputs match the server's look of them.
+               OUROBOROS_GC_RETENTION_DAYS=str(get_gc_retention_days()))
     for key, root in (("OUROBOROS_SUBAGENT_WORKTREE_ROOT", get_subagent_worktree_root),
                       ("OUROBOROS_SUBAGENT_PROJECTS_ROOT", get_subagent_projects_root),
                       ("OUROBOROS_DELIVERABLES_ROOT", get_deliverables_root)):
@@ -104,6 +108,31 @@ def finish_maintenance_job(job, process, data_root, started, parse, record):
     record(data_root, phase=phase, exit_code=exit_code,
            duration_seconds=time.monotonic() - started, **fields)
     return fields
+
+
+# The server's background children that share this spawn and one stop and census shape (``stop``,
+# ``live_children``), in stop order. The restart and Fault cleanup stops and counts them here
+# (``server._emergency_process_cleanup``); Panic asks each by name, inline; Quit stops only the
+# maintenance child. Who stops each kind at each door: ``tests/test_process_custody.py``.
+BACKGROUND_CHILDREN = (("ouroboros.maintenance", "child"), ("ouroboros.storage", "count"),
+                       ("ouroboros.storage_free", "free"))
+
+
+def stop_background_children() -> list:
+    """Stop each owner of BACKGROUND_CHILDREN; return them for ``live_background_children``. Each is
+    read from its module now (a test may replace it), all before the first stop: an import failure
+    raises before any stop, so a lost census never reads as an empty one."""
+    import importlib
+
+    owners = [getattr(importlib.import_module(module), name) for module, name in BACKGROUND_CHILDREN]
+    for owner in owners:
+        owner.stop()
+    return owners
+
+
+def live_background_children(owners) -> list:
+    """Their children alive now, read afresh: an unfinished spawn counts until its owner returns."""
+    return [child for owner in owners for child in owner.live_children()]
 
 
 class HistoricalAudit:

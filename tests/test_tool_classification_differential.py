@@ -560,9 +560,20 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # refreshed (or could not be), and an unreadable child result apply nothing to the target. Plain text the
     # registry adapts, so the live answer through the tool is the family's, the same as for the bare text.
     "INTEGRATE_NATIVE_CANCELLED": (True, "integration_blocked"),
+    "INTEGRATE_CAPTURE_FAILED": (True, "integration_blocked"),
     "INTEGRATE_NATIVE_CAPTURE": (True, "integration_blocked"),
     "INTEGRATE_NATIVE_CAPTURE_UNAVAILABLE": (True, "integration_blocked"),
     "INTEGRATE_RESULT_UNREADABLE": (True, "integration_blocked"),
+    # The delegated Git lane's own refusals: an unreceipted disposition
+    # (INTEGRATE_DISPOSITION_UNWRITTEN) and an incomplete, unreversed staging
+    # (INTEGRATE_APPLIED_UNSTAGED) are the INTEGRATE_ family's texts. The retired
+    # pair recorded (True, integration_blocked) for both identifiers, and their
+    # typed publications restore that exact answer instead of the generic provider
+    # failure, so the bare text and the native pair are asserted live here.
+    "INTEGRATE_DISPOSITION_UNWRITTEN": (True, "integration_blocked"),
+    "INTEGRATE_APPLIED_UNSTAGED": (True, "integration_blocked"),
+    "native:INTEGRATION_BLOCKED:INTEGRATE_DISPOSITION_UNWRITTEN": (True, "integration_blocked"),
+    "native:INTEGRATION_BLOCKED:INTEGRATE_APPLIED_UNSTAGED": (True, "integration_blocked"),
     # The harvest puts every identifier first. A standalone capture failure
     # is an error; the actual successful-write suffix is pinned separately.
     "OUTPUT_CAPTURE_FAILED": (True, "error"),
@@ -688,6 +699,16 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # review_collection) publish native LEGACY_UNAVAILABLE; the bare `_BUSY` warning is the retired chain's ok.
     "REVIEW_STATE_BUSY": (False, "ok"),
     "native:LEGACY_UNAVAILABLE:REVIEW_STATE_BUSY": (True, "unavailable"),
+    # join_ledger leaves the disposition unrecorded while child custody is held.
+    # This plain warning uses the generic legacy bucket, not a typed success receipt.
+    "CHILD_RESULT_DISPOSITION_BUSY": (False, "ok"),
+    # #3687 loop_completion_schema.fixed_refusal: an older schedule's frozen ceiling fixes message/answer_sha256 on
+    # presence_finish, refused before Safety/staging with native ACCESS_BLOCKED; bare `_ARGUMENT` is generic ok.
+    "SCHEDULE_REPORT_FIXED_ARGUMENT": (False, "ok"),
+    "native:ACCESS_BLOCKED:SCHEDULE_REPORT_FIXED_ARGUMENT": (True, "blocked"),
+    # #3981 control_storage._read_refusal: a task outside what the caller may read is refused before anything is read
+    # or proposed. The bare line is a policy denial like every ACCESS_BLOCKED publication; the retired pair never saw it.
+    "ACCESS_BLOCKED": (True, "blocked"),
 }
 
 

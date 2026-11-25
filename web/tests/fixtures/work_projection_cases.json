@@ -54,7 +54,8 @@
           "text": "Continue starts when the earlier attempt's work is confirmed finished"
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        },
        "h0": {
         "activity": "working",
@@ -65,7 +66,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        },
        "h1": {
         "activity": "working",
@@ -76,7 +78,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        },
        "h2": {
         "activity": "working",
@@ -87,7 +90,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -177,7 +181,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -291,7 +296,8 @@
           "text": "Waiting for your answer"
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        }
       }
      },
@@ -393,7 +399,8 @@
           "text": "Building context"
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -496,7 +503,8 @@
           "text": "Building context"
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -589,7 +597,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -716,7 +725,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "pause"
        }
       }
      },
@@ -833,7 +843,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "pause"
        }
       }
      },
@@ -945,7 +956,8 @@
           "text": "Spending limit reached"
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "pause"
        }
       }
      },
@@ -1066,7 +1078,8 @@
           ]
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        }
       }
      },
@@ -1192,7 +1205,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -1255,7 +1269,8 @@
           "text": ""
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        }
       }
      },
@@ -1387,7 +1402,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        },
        "pc-run": {
         "activity": "working",
@@ -1409,7 +1425,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        },
        "pc-new": {
         "activity": "paused",
@@ -1431,7 +1448,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "pause"
        }
       }
      },
@@ -1549,7 +1567,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -1602,7 +1621,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -1695,7 +1715,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -1788,6 +1809,16 @@
        ],
        "kind": "run",
        "state": "unknown"
+      },
+      {
+       "code": "external_runs_open",
+       "text": "1 external run is open",
+       "count": 1,
+       "ids": [
+        "run-q"
+       ],
+       "kind": "run",
+       "state": "open"
       }
      ],
      "live": false,
@@ -1832,7 +1863,29 @@
           }
          }
         ],
-        "tails": []
+        "tails": [
+         {
+          "code": "external_runs_unconfirmed",
+          "text": "1 external run may still be running",
+          "count": 1,
+          "ids": [
+           "run-s"
+          ],
+          "kind": "run",
+          "state": "unknown"
+         },
+         {
+          "code": "external_runs_open",
+          "text": "1 external run is open",
+          "count": 1,
+          "ids": [
+           "run-q"
+          ],
+          "kind": "run",
+          "state": "open"
+         }
+        ],
+        "mark": "pause"
        }
       }
      },
@@ -1916,7 +1969,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -2019,7 +2073,8 @@
           "text": "Sleeping until it is woken"
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        }
       }
      },
@@ -2139,7 +2194,19 @@
           ]
          }
         ],
-        "tails": []
+        "tails": [
+         {
+          "code": "awaited_helpers_mind",
+          "text": "1 subagent it waits for is paused until Ouroboros resumes it",
+          "count": 1,
+          "ids": [
+           "sw-c"
+          ],
+          "kind": "helper",
+          "state": "held"
+         }
+        ],
+        "mark": "still"
        },
        "sw-c": {
         "activity": "paused",
@@ -2155,7 +2222,8 @@
           "text": "Waiting for Ouroboros or you to resume it"
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "pause"
        }
       }
      },
@@ -2281,7 +2349,8 @@
           ]
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        },
        "sn-c": {
         "activity": "working",
@@ -2292,7 +2361,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -2412,7 +2482,8 @@
           ]
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "still"
        }
       }
      },
@@ -2458,6 +2529,1144 @@
    "works_complete": true,
    "works_gaps": []
   },
+  "queued_behind_project": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "Add Ollama support",
+     "episode": {
+      "task_id": "qh",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qh"
+      ],
+      "states": {
+       "qh": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": [],
+        "mark": "moving"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh"
+      },
+      {
+       "action": "hurry",
+       "target": "qh"
+      },
+      {
+       "action": "pause",
+       "target": "qh"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qp",
+     "room": 42,
+     "name": "Check CI after the merge",
+     "episode": {
+      "task_id": "qp",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Add Ollama support”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "project",
+        "name": "Add Ollama support"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qp"
+      ],
+      "states": {
+       "qp": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Add Ollama support”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "project",
+           "name": "Add Ollama support"
+          }
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qp"
+      },
+      {
+       "action": "stop",
+       "target": "qp",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qp"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_folder": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "Add Ollama support",
+     "episode": {
+      "task_id": "qh",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qh"
+      ],
+      "states": {
+       "qh": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": [],
+        "mark": "moving"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh"
+      },
+      {
+       "action": "hurry",
+       "target": "qh"
+      },
+      {
+       "action": "pause",
+       "target": "qh"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qf",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qf",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Add Ollama support”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "folder",
+        "name": "Add Ollama support",
+        "folder": "/work/shared"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qf"
+      ],
+      "states": {
+       "qf": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Add Ollama support”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "folder",
+           "name": "Add Ollama support",
+           "folder": "/work/shared"
+          }
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qf"
+      },
+      {
+       "action": "stop",
+       "target": "qf",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qf"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_retry": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "Add Ollama support",
+     "episode": {
+      "task_id": "qh-r2",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qh-r2"
+      ],
+      "states": {
+       "qh-r2": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": [],
+        "mark": "moving"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh-r2"
+      },
+      {
+       "action": "hurry",
+       "target": "qh-r2"
+      },
+      {
+       "action": "pause",
+       "target": "qh-r2"
+      },
+      {
+       "action": "stop",
+       "target": "qh-r2",
+       "scope": "cascade"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qr",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qr",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Add Ollama support”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "project",
+        "name": "Add Ollama support"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qr"
+      ],
+      "states": {
+       "qr": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Add Ollama support”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "project",
+           "name": "Add Ollama support"
+          }
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qr"
+      },
+      {
+       "action": "stop",
+       "target": "qr",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qr"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_derived_name": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qh",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qh"
+      ],
+      "states": {
+       "qh": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": [],
+        "mark": "moving"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh"
+      },
+      {
+       "action": "hurry",
+       "target": "qh"
+      },
+      {
+       "action": "pause",
+       "target": "qh"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qd",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qd",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Add Ollama support”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "project",
+        "name": "Add Ollama support"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qd"
+      ],
+      "states": {
+       "qd": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Add Ollama support”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "project",
+           "name": "Add Ollama support"
+          }
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qd"
+      },
+      {
+       "action": "stop",
+       "target": "qd",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qd"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_helper_first": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "Build index",
+     "episode": {
+      "task_id": "qh-r2",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qk",
+       "qh-r2"
+      ],
+      "states": {
+       "qk": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": ""
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       },
+       "qh-r2": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": [],
+        "mark": "moving"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh-r2"
+      },
+      {
+       "action": "hurry",
+       "target": "qh-r2"
+      },
+      {
+       "action": "pause",
+       "target": "qh-r2"
+      },
+      {
+       "action": "stop",
+       "target": "qh-r2",
+       "scope": "cascade"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qs",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qs",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Build index”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "project",
+        "name": "Build index"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qs"
+      ],
+      "states": {
+       "qs": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Build index”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "project",
+           "name": "Build index"
+          }
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qs"
+      },
+      {
+       "action": "stop",
+       "target": "qs",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qs"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_request_retry": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qh-r2",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qh-r2"
+      ],
+      "states": {
+       "qh-r2": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": [],
+        "mark": "moving"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh-r2"
+      },
+      {
+       "action": "hurry",
+       "target": "qh-r2"
+      },
+      {
+       "action": "pause",
+       "target": "qh-r2"
+      },
+      {
+       "action": "stop",
+       "target": "qh-r2",
+       "scope": "cascade"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qt",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qt",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Build index from source”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "project",
+        "name": "Build index from source"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qt"
+      ],
+      "states": {
+       "qt": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Build index from source”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "project",
+           "name": "Build index from source"
+          }
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qt"
+      },
+      {
+       "action": "stop",
+       "target": "qt",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qt"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_unlisted": {
+   "works": [
+    {
+     "work_id": "qu",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qu",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": ""
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qu"
+      ],
+      "states": {
+       "qu": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": ""
+         }
+        ],
+        "tails": [],
+        "mark": "still"
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qu"
+      },
+      {
+       "action": "stop",
+       "target": "qu",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "still",
+     "confirmed": true,
+     "works": [
+      "qu"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
   "unknown": {
    "works": [
     {
@@ -2492,7 +3701,8 @@
         "confirmed": false,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "ring"
        }
       }
      },
@@ -2658,7 +3868,8 @@
         "confirmed": true,
         "turn": [],
         "because": [],
-        "tails": []
+        "tails": [],
+        "mark": "moving"
        }
       }
      },
@@ -2787,7 +3998,18 @@
           }
          }
         ],
-        "tails": []
+        "tails": [
+         {
+          "code": "review_work_finishing",
+          "text": "Review work finishing",
+          "ids": [
+           "run-review"
+          ],
+          "kind": "review",
+          "state": "live"
+         }
+        ],
+        "mark": "pause"
        }
       }
      },
@@ -2971,7 +4193,8 @@
           "since": "2026-10-17T15:00:00Z"
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "pause"
        }
       }
      },
@@ -3111,7 +4334,8 @@
           "kind": "model",
           "state": "unknown"
          }
-        ]
+        ],
+        "mark": "pause"
        }
       }
      },
@@ -3239,6 +4463,7 @@
          }
         ],
         "tails": [],
+        "mark": "pause",
         "last_resume": {
          "at": "2026-10-17T15:05:00Z",
          "by": {
@@ -3376,6 +4601,7 @@
          }
         ],
         "tails": [],
+        "mark": "pause",
         "last_resume": {
          "at": "2026-10-17T15:05:00Z",
          "by": {
@@ -3509,7 +4735,8 @@
           }
          }
         ],
-        "tails": []
+        "tails": [],
+        "mark": "pause"
        }
       }
      },
@@ -3614,6 +4841,7 @@
          }
         ],
         "tails": [],
+        "mark": "still",
         "last_resume": {
          "at": "2026-10-17T15:05:00Z",
          "by": {
@@ -3669,6 +4897,93 @@
   }
  },
  "reasons": {
+  "dispatch_unconfirmed": {
+   "": "An earlier assignment may already have reached a worker"
+  },
+  "saved_work_unverified": {
+   "": "The saved work could not be verified for this attempt"
+  },
+  "resume_evidence_unavailable": {
+   "": "The evidence for starting this attempt could not be verified"
+  },
+  "saved_wait_unverified": {
+   "": "The saved wait could not be cleared to resume"
+  },
+  "schedule_receipt_busy": {
+   "": "The scheduled run's record was busy"
+  },
+  "schedule_receipt_unverified": {
+   "": "The record for this scheduled run could not be verified"
+  },
+  "schedule_settled": {
+   "": "The scheduled run has already ended"
+  },
+  "never_admitted": {
+   "": "The task was never admitted to run"
+  },
+  "task_terminal": {
+   "": "The task has already ended"
+  },
+  "cancel_requested": {
+   "": "Cancellation has been requested"
+  },
+  "continuation_publication_unconfirmed": {
+   "": "Continue has not been confirmed in the queue"
+  },
+  "stale_queue_row_grant_consumed": {
+   "": "The earlier Resume was already used"
+  },
+  "stale_resume_grant_superseded": {
+   "": "The earlier Resume no longer matches the current pause"
+  },
+  "resume_grant_revocation_unwritten": {
+   "": "Withdrawal of the earlier Resume could not be recorded"
+  },
+  "restart_revocation_unwritten": {
+   "": "The restart could not record withdrawal of the earlier Resume"
+  },
+  "pause_record_unreadable_at_revoke": {
+   "": "The pause record could not be read when withdrawing Resume"
+  },
+  "malformed_resume_identity": {
+   "": "The record does not identify which Resume was granted"
+  },
+  "root_acceptance_fenced_at_restore": {
+   "": "The root work entered result review"
+  },
+  "owner_held": {
+   "": "An owner hold is in effect"
+  },
+  "pause_record_missing": {
+   "": "No current pause record was found"
+  },
+  "pause_record_unreadable": {
+   "": "The pause record could not be read"
+  },
+  "pause_source_missing": {
+   "": "The pause has no saved work to resume"
+  },
+  "pause_source_unreadable": {
+   "": "The work saved at the pause could not be read"
+  },
+  "pause_identity_mismatch": {
+   "": "The saved pause belongs to a different pause request"
+  },
+  "not_an_exact_pause": {
+   "": "The queue has no exact pause to restore"
+  },
+  "owner_wait_source_unavailable": {
+   "": "The saved wait could not be restored"
+  },
+  "invalid_acceptance_fence_snapshot": {
+   "": "The saved acceptance state could not be verified"
+  },
+  "invalid_budget_fence_snapshot": {
+   "": "The saved budget hold could not be verified"
+  },
+  "restore_failed": {
+   "": "Its saved state could not be restored"
+  },
   "paused_by_owner": {
    "": "You paused it"
   },
@@ -3695,9 +5010,6 @@
   },
   "awaiting_selection": {
    "": "Waiting for Ouroboros or you to resume it"
-  },
-  "restore_failed": {
-   "": "Its saved state could not be restored"
   },
   "held": {
    "": "Held"
@@ -3757,6 +5069,18 @@
   "external_runs_unconfirmed": {
    "1": "1 external run may still be running",
    "3": "3 external runs may still be running"
+  },
+  "external_runs_open": {
+   "1": "1 external run is open",
+   "3": "3 external runs are open"
+  },
+  "external_runs_last_working": {
+   "1": "1 external run last observed working",
+   "3": "3 external runs last observed working"
+  },
+  "external_runs_last_waiting": {
+   "1": "1 external run last observed waiting",
+   "3": "3 external runs last observed waiting"
   },
   "awaited_helpers_mind": {
    "1": "1 subagent it waits for is paused until Ouroboros resumes it",

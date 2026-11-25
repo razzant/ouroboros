@@ -8,20 +8,32 @@ branch here is controlled: the platform flags are set, the processes are this ho
 import json
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from ouroboros import headless, maintenance, maintenance_jobs, process_custody, session_scratch, task_custody
-from ouroboros import workspace_executor
+from ouroboros import (
+    headless,
+    maintenance,
+    maintenance_jobs,
+    platform_layer,
+    process_custody,
+    session_scratch,
+    task_custody,
+    workspace_executor,
+)
 from ouroboros.artifacts import registered_task_artifact
 from ouroboros.launch_custody import stop_kept_service
 from ouroboros.task_results import write_task_result
-from ouroboros.tools import kept_service_outputs as kept, services, shell_outputs
+from ouroboros.tools import kept_service_outputs as kept
+from ouroboros.tools import services, shell_outputs
 from ouroboros.tools.kept_service_outputs import (
-    KeptDeclarationUnreadable, capture_kept_service_outputs, declaration_path, owed_declarations, owed_output_hold,
+    KeptDeclarationUnreadable,
+    capture_kept_service_outputs,
+    declaration_path,
+    owed_declarations,
+    owed_output_hold,
     unconsumed_declaration,
 )
 from ouroboros.tools.registry import ToolContext
@@ -32,6 +44,7 @@ from tests._launch_stop_shared import _PATIENCE, _end, _executor_ctx, write_scri
 from tests._store_shared import seed_result
 from tests.test_launch_stop import EXITING_WRITER, _kept_view, _queue_view, _registry, _start_late_writer, _wait_report
 from tests.test_session_scratch_release import OVER, _record, _started
+from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- this run's own scratch
 
 REPORT = b"report written after its task ended\n"
 READY = {"log_contains": "READY", "timeout_sec": 20}
@@ -259,7 +272,7 @@ def test_owed_outputs_in_an_allocated_scratch_wait_for_their_capture_and_then_re
         assert maintenance.run_job(data, "custody_trash")["state"] == "done"
         job = maintenance_jobs.job(data, "custody_trash")
         [hold] = job["holds"]
-        assert hold["class"] == "kept_service_capture_owed" and str(scratch) in hold["example"], hold
+        assert hold["class"] == "kept_service_capture_owed" and str(scratch.parent) in hold["example"], hold
         assert (scratch / "report.txt").read_bytes() == REPORT, "the owed bytes outlive the release"
         [entry] = (data / "state" / "custody_trash").iterdir()
         assert entry.name.startswith("task-1+scratch-"), entry
@@ -312,10 +325,18 @@ def test_a_local_launch_is_one_row_under_its_declaration_id_on_the_windows_branc
     pid = int(started["backend_pid"])
     monkeypatch.setattr(workspace_executor, "IS_WINDOWS", True)
     monkeypatch.setattr(process_custody, "IS_WINDOWS", True)
-    reaper_stop = threading.Event()  # POSIX keeps an unreaped child as a zombie; Windows has none to reap
-    reaper = threading.Thread(target=lambda: [record.local_proc.poll() or reaper_stop.wait(0.02)
-                                              for _ in iter(lambda: reaper_stop.is_set(), True)], daemon=True)
-    reaper.start()
+    # Windows keeps no zombie: a terminated process reads as exited at once, without anyone reaping it. POSIX keeps
+    # this unreaped child as one, which the stop counts as ended while the Windows branch's fresh read after it
+    # (``launch_custody.unsettled_selection``: ``pid_is_alive``) still sees it. A reaper thread racing that read loses
+    # on a busy host (#3495), so every presence read of this child reaps it first: a live child is untouched.
+    real_gone = platform_layer.pid_provably_gone
+
+    def gone_as_on_windows(candidate):
+        if int(candidate) == pid:
+            record.local_proc.poll()
+        return real_gone(candidate)
+
+    monkeypatch.setattr(platform_layer, "pid_provably_gone", gone_as_on_windows)
     try:
         assert not workspace_executor._recorded_launch(workspace_executor._load_process_record(record.durable_record_path))
         view = _kept_view(drive)
@@ -330,8 +351,7 @@ def test_a_local_launch_is_one_row_under_its_declaration_id_on_the_windows_branc
 
         assert not pid_is_alive(pid), "its process ended"
     finally:
-        reaper_stop.set()
-        reaper.join()
+        monkeypatch.setattr(platform_layer, "pid_provably_gone", real_gone)
         monkeypatch.setattr(workspace_executor, "IS_WINDOWS", False)
         monkeypatch.setattr(process_custody, "IS_WINDOWS", False)
         services._stop_service(ctx, name="windowsy")

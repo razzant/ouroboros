@@ -589,19 +589,17 @@ class TestBuildWindowsPs1:
 
 
 def test_python_standalone_pin_is_the_fixed_sqlite_release():
-    """Desktop packages take CPython 3.10.22 from python-build-standalone 20261009.
+    """Desktop packages take python-build-standalone 20261009 (SQLite 3.53.1, the WAL-reset fix).
 
-    That release is the last one that still ships Python 3.10, and its SQLite
-    is 3.53.1 (the WAL-reset fix). The two download scripts are the pin.
+    The two download scripts are the pin; tests/test_python_runtime_pin.py ties every carrier of
+    the Python version to it.
     """
     shell = _read("scripts/download_python_standalone.sh")
     windows = _read("scripts/download_python_standalone.ps1")
     assert 'RELEASE="20261009"' in shell
-    assert 'PY_VERSION="3.10.22"' in shell
     assert '$Release = "20261009"' in windows
-    assert '$PyVersion = "3.10.22"' in windows
     assert "20260211" not in shell and "20260211" not in windows
-    assert "3.10.19" not in shell and "3.10.19" not in windows
+    assert "3.10." not in shell and "3.10." not in windows
     for platform in (
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
@@ -678,7 +676,7 @@ class TestDockerfile:
         """``docker build -t ouroboros-web .`` must not depend on a locally built base tag.
 
         The interpreter is the pinned python-build-standalone build, checked in
-        the image build for Python 3.10.22 and SQLite >= 3.51.3.
+        the image build for the download scripts' Python and SQLite >= 3.51.3.
         """
         src = _read("Dockerfile")
         assert "FROM python:3.10-slim" not in src
@@ -1149,7 +1147,7 @@ class TestMacOSSigning:
 
         src = _read("build.sh")
         marker = "--- Removing stale WebKit, Playwright Chromium, debug-symbol and test payloads"
-        assert src.index(marker) < src.index("python3 -m PyInstaller")
+        assert src.index(marker) < _find_pyinstaller_cmd_pos(src)
         body = src[src.index("python3 - <<'PY'\n", src.index(marker)) + len("python3 - <<'PY'\n"):]
         body = body[:body.index("\nPY\n")]
         site = tmp_path / "python-standalone" / "lib" / "python3.10" / "site-packages"
@@ -1583,7 +1581,7 @@ def test_ci_release_preflight_validates_tag_matches_version():
 
 _RELEASE_REQUIRED = ("build", "windows-proof", "release-preflight", "lint", "full-test", "system-e2e-mock",
                      "ui-smoke", "integration-test", "marker-guards", "docker-ui-smoke", "docker-portable-test",
-                     "skill-smoke", "test-verdict")
+                     "skill-smoke", "test-verdict", "quick-test")
 
 
 def test_ci_collects_independent_failures_without_relaxing_release_gates():
@@ -1749,3 +1747,53 @@ def test_ci_has_fork_safe_three_os_betterleaks_candidate_matrix():
     assert "runner.temp" not in job_env
     assert steps.count("OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-betterleaks-data") == 3
     assert "secrets." not in job
+
+
+def _datas_the_spec_passes_to_analysis(monkeypatch, tmp_path, platform):
+    """Run the real ``Ouroboros.spec`` with PyInstaller's classes stubbed and return the ``datas`` it hands to Analysis."""
+    import types
+
+    captured = {}
+
+    class Analysis:
+        binaries, zipfiles, zipped_data, pure, scripts = [], [], [], [], []
+
+        def __init__(self, scripts, **kwargs):
+            captured.update(kwargs)
+            self.datas = list(kwargs["datas"])
+
+    def anything(*args, **kwargs):
+        return types.SimpleNamespace()
+
+    hooks = types.ModuleType("PyInstaller.utils.hooks")
+    hooks.collect_all = lambda package: ([(f"{package}_data", package)], [], [])
+    for name, module in (("PyInstaller", types.ModuleType("PyInstaller")),
+                         ("PyInstaller.utils", types.ModuleType("PyInstaller.utils")),
+                         ("PyInstaller.utils.hooks", hooks)):
+        monkeypatch.setitem(sys.modules, name, module)
+    for directory in ("node-standalone", "ripgrep-standalone", "betterleaks-standalone", "claudexor-runtime"):
+        (tmp_path / directory).mkdir()
+    (tmp_path / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(sys, "setrecursionlimit", lambda limit: None)
+    namespace = {"__name__": "ouroboros_spec", "Analysis": Analysis, "PYZ": anything, "EXE": anything,
+                 "COLLECT": anything, "BUNDLE": anything}
+    exec(compile(_pkg_read("Ouroboros.spec"), "Ouroboros.spec", "exec"), namespace)
+    return captured["datas"]
+
+
+@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_spec_does_not_bundle_the_tests_tree_but_keeps_runtime_trees(monkeypatch, tmp_path, platform):
+    """The managed checkout comes from ``repo.bundle`` (which carries ``tests``); nothing reads a bundled copy.
+
+    Checked on the ``datas`` list the spec passes to PyInstaller's Analysis, per platform, not on the spec's text."""
+    datas = _datas_the_spec_passes_to_analysis(monkeypatch, tmp_path, platform)
+    pairs = {(entry[0], entry[1]) for entry in datas}
+    assert not [pair for pair in pairs if pathlib.PurePosixPath(pair[0].replace("\\", "/")).parts[:1] == ("tests",)
+                or pathlib.PurePosixPath(pair[1].replace("\\", "/")).parts[:1] == ("tests",)]
+    for entry in (("web", "web"), ("docs", "docs"), ("prompts", "prompts"), ("skills", "skills"),
+                  ("supervisor", "supervisor"), ("ouroboros", "ouroboros"), ("repo.bundle", "."),
+                  ("python-standalone", "python-standalone")):
+        assert entry in pairs, entry

@@ -22,7 +22,7 @@ MAX_CITED_CHARS = 1024  # a published copy; the durable primary keeps the entire
 
 def cited_fields(carrier: Any) -> dict:
     """One bounded provenance shape on the acting primary or the primary it left."""
-    span = (carrier or {}).get("cited") if isinstance(carrier, Mapping) and carrier.get("source") == "owner_words" else None
+    span = (carrier or {}).get("cited") if isinstance(carrier, Mapping) and carrier.get("source") in route_choice.CITED_LEAD_SOURCES else None
     return {"cited": {"text": span[:MAX_CITED_CHARS], "clipped": len(span) > MAX_CITED_CHARS}} if isinstance(span, str) and span else {}
 
 
@@ -83,7 +83,7 @@ def lead_fact(ctx: Any, *, model: str | None = None, use_local: bool | None = No
         fact["basis"] = "owner"
     if departed:
         fact["primary"] = {"model": home[0], "use_local": home[1], "basis": basis}
-    if basis == "owner_words" and (departed or fact["basis"] == basis):
+    if basis in route_choice.CITED_LEAD_SOURCES and (departed or fact["basis"] == basis):
         (fact["primary"] if departed else fact).update(cited_fields((getattr(ctx, "task_metadata", None) or {}).get("lead")))
     if source in {"fallback", "switch_model", "wait_card"} and departed:
         identity = [model, local, fact["basis"], role, list(acting)]
@@ -162,26 +162,40 @@ def project_lead(fact: Any = None, task: Mapping | None = None, *, queued: bool 
     result.pop("pending", None)
     basis = result.get("basis")
     control = task.get("owner_model") or {}
+    pending_basis = None
+    binding_changed = False
     if control.get("request_id") and control["request_id"] != task.get("_lead_request_id"):
         from ouroboros.owner_model import recorded_primary
 
         primary = recorded_primary(task)
         model, local = primary["model"], primary["use_local"]
-        carrier = (task.get("metadata") or {}).get("lead")
+        carrier = route_choice.lead_snapshot((task.get("metadata") or {}).get("lead"))
+        action = control.get("action")
+        # Set/follow/keep replace the primary and clear its wait override at handover. Return/wait only
+        # retry it: an active override is not in this projection, so don't assert that account policy.
+        if action in {"set", "keep", "follow"} and carrier:
+            pending_basis = carrier["source"]
+            acting_on_lead = (basis in route_choice.LEAD_SOURCES and basis != "mind"
+                              and result.get("cause") != "wait_card")
+            binding_changed = basis != "main" if pending_basis == "main" else not acting_on_lead
+        moved = binding_changed or (model, local) != (result["model"], result["use_local"])
         if citation := cited_fields(carrier):
             result.pop("cited", None)
             # A fallback may be the primary's own model on another account: only an accepted reply ends it.
-            if basis != "fallback" and (model, local) == (result["model"], result["use_local"]):
+            if basis != "fallback" and not moved:
                 result.pop("primary", None)
-                result.update(basis="owner_words", **citation)
+                result.update(basis=carrier["source"], **citation)
             else:
-                result["primary"] = {"model": model, "use_local": local, "basis": "owner_words", **citation}
+                result["primary"] = {"model": model, "use_local": local, "basis": carrier["source"], **citation}
     elif basis in MODEL_ROLE_SETTINGS and basis != "fallback":
         model, local = route_choice.following_route(basis)
+        pending_basis = basis
     else:
         return result
-    if (model, local) != (result["model"], result["use_local"]):
+    if model and (binding_changed or (model, local) != (result["model"], result["use_local"])):
         result["pending"] = {"model": model, "use_local": local}
+        if pending_basis:
+            result["pending"]["basis"] = pending_basis
     return result
 
 
@@ -229,10 +243,10 @@ def lead_processing_fields(fact: Any = None, task: Mapping | None = None, *, que
 
 def chooser_words(basis: str, carrier: Any = None) -> str:
     words = {"room": "set by my human for this chat", "owner": "set by my human for this work",
-            "owner_words": "set by my human's words", "place": "set for this place",
+            "owner_press": "selected by my human's press", "owner_words": "set by my human's words", "place": "set for this place",
             "circle": "inherited from this circle", "mind": "chosen by me",
             "fallback": "fallback from Settings"}.get(basis, "")
-    cited = cited_fields(carrier).get("cited") if basis == "owner_words" else None
+    cited = cited_fields(carrier).get("cited") if basis in route_choice.CITED_LEAD_SOURCES else None
     return words + (f": «{cited['text']}»" + (" [quote clipped]" if cited["clipped"] else "") if cited else "")
 
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { PAGES, ZONES, pageById, pageLabel, pagesInZone, renderNavRow, renderNavRows, renderProjectsHeader } from '../modules/pages.js';
+import { PAGES, ZONES, pageById, pageLabel, pagesInZone, renderNavFoot, renderNavRow, renderNavRows, renderProjectsHeader } from '../modules/pages.js';
 import { PAGE_ICONS, SHELL_ICONS } from '../modules/page_icons.js';
 import { statusMarkHtml } from '../modules/status_mark.js';
 
@@ -12,10 +12,12 @@ import { statusMarkHtml } from '../modules/status_mark.js';
 test('the registry: unique ids, today\'s order, one place in the head and the tools in the foot', () => {
     // Circles leads the tools: the one home of the places Ouroboros lives in (DESIGN "Circles").
     assert.deepEqual(PAGES.map((p) => p.id), ['chat', 'circles', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
-    assert.deepEqual(PAGES.map((p) => p.label), ['Main Chat', 'Circles', 'Files', 'Skills', 'Widgets', 'Dashboard', 'Settings']);
+    assert.deepEqual(PAGES.map((p) => p.label), ['Main Chat', 'Circles', 'Files', 'Extensions', 'Widgets', 'Dashboard', 'Settings']);
     assert.deepEqual(pagesInZone('head').map((p) => p.id), ['chat']);
     assert.deepEqual(pagesInZone('foot').map((p) => p.id), ['circles', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
     assert.deepEqual(ZONES, ['head', 'foot']);
+    // The foot's two cards (owner 21.11): the sections, then the system rows.
+    assert.deepEqual(pagesInZone('foot').map((p) => p.group), ['sections', 'sections', 'sections', 'sections', 'system', 'system']);
     for (const page of PAGES) {
         assert.ok(PAGE_ICONS[page.icon], `${page.id} names an icon the registry holds`);
         assert.ok(ZONES.includes(page.zone));
@@ -77,15 +79,19 @@ test('the Projects header is the New project button alone, with the shell\'s plu
     assert.match(section, / aria-label="Projects"/);
 });
 
-test('section names wrap whole in the existing one, two and three column steps', () => {
-    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
-    assert.match(css, /\.nav-tools\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
-    assert.match(css, /@container \(min-width: 226px\)\s*\{\s*\.nav-tools\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
-    assert.match(css, /@container \(min-width: 328px\)\s*\{\s*html:not\(\[data-layout="stack"\]\) \.nav-tools\s*\{\s*grid-template-columns: repeat\(3, minmax\(0, max-content\)\)/);
-    assert.match(css, /\.nav-tools > \.nav-row\s*\{[^}]*max-width: 100%/);
-    const label = css.match(/\.nav-tools > \.nav-row > \.nav-row-label\s*\{([^}]+)\}/)?.[1];
-    for (const declaration of ['white-space: normal', 'hyphens: auto', 'overflow-wrap: break-word', 'overflow: visible', 'text-overflow: clip']) {
-        assert.ok(label?.includes(declaration), declaration);
-    }
+test('the foot is two cards from the registry: the sections, then the system rows over the version row', () => {
+    const foot = renderNavFoot();
+    const ids = (html) => [...html.matchAll(/data-nav-page="([a-z]+)"/g)].map((m) => m[1]);
+    const [sections, system] = foot.split('<div class="nav-card nav-system">');
+    assert.match(sections, /^<div class="nav-card nav-sections">/);
+    assert.deepEqual(ids(sections), ['circles', 'files', 'skills', 'widgets']);
+    // Each section stands in a cell of its own, the row itself unchanged: the cells are the card's columns.
+    assert.equal(sections, `<div class="nav-card nav-sections">${['circles', 'files', 'skills', 'widgets']
+        .map((id) => `<div class="nav-cell">${renderNavRow(pageById(id))}</div>`).join('')}</div>`);
+    assert.deepEqual(ids(system), ['dashboard', 'settings']);
+    assert.equal(renderNavRows('foot', 'system'), [pageById('dashboard'), pageById('settings')].map(renderNavRow).join('\n'));
+    // The version row closes the second card: utils.js writes #nav-version, update_status.js its check and capsule.
+    assert.match(system, /<\/div><div class="sidebar-foot-meta"><span id="nav-version"><\/span><\/div><\/div>$/);
+    // Names fit by layout alone (the cards' geometry is measured in tests/test_sidebar_short_window_browser.py).
     assert.doesNotMatch(readFileSync(new URL('../modules/pages.js', import.meta.url), 'utf8'), /measureNavTools|ResizeObserver|MutationObserver|createRange/);
 });

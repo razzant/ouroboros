@@ -1,11 +1,359 @@
 """Receipts for the forms actually visible, and numeric prices of what holds the room.
 
-These diagnostics share the renderers' source identities; cached values are counts
-and sizes, outside the persisted snapshot, and the holding prices are keyed by the
-priced text itself, for the snapshot's life. No rejected full view is drawn.
+These diagnostics share the renderers' source identities. Floor receipts cache only
+counts and prices; an explicit inspection can draw a retained snapshot's ordinary
+forms to account for every escaped character, without keeping its words in the map.
 """
 from ouroboros import memory_view as mv, memory_view_conversations as conversations, memory_view_legacy as legacy
 from ouroboros.memory_view_work import works, folded_work_rows, task_line, task_gist_line, task_gists_before_work_lines
+
+
+def _aggregate_source(source, room_id):
+    """Display endpoints need not enclose the selected rows in the stored stream."""
+    fold = "from" in source
+    task = source.get("task")
+    result = {"selection": ("Open lane-1 rows folded through the finish, excluding owner speech, relays, "
+                            "linked rows and rows also shown in this focus's room." if fold else
+                            "Captured open lane-2 rows grouped by root_task_id or, if absent, task_id.")}
+    if fold:
+        result["gist_source"] = (_composition_source({"address": source["finish_address"]}, room_id)
+                                 if source.get("finish_address") else {"read_gap": "Finish row address was not captured."})
+    if room_id is not None and source.get("stored_bounds"):
+        first, last = source["stored_bounds"]
+        args = {"room_id": room_id, "rows": True, "from": first, "to": last}
+        if task and not fold:
+            args["task_id"] = task
+        result.update(range_read={"tool": "memory_read", "arguments": args},
+                      row_membership_gap="Inclusive stored bounds. The reader can return rows outside the captured selection.")
+    else:
+        result["row_membership_gap"] = "Stored bounds were not captured. Display endpoints are navigation only."
+        if task and not fold:
+            result["navigation"] = {"tool": "get_task_result", "arguments": {"task_id": task}}
+    return result
+
+
+def _composition_source(source, room_id=None, *, citation=False):
+    """Only captured coordinates and facts; never a row's words, gist, quote or correction."""
+    if "key" in source and "rooms" in source:
+        return _composition_group(source)
+    fields = ("id", "kind", "room_id", "address", "first", "last", "ts", "last_ts", "date", "period",
+              "source_period", "period_basis", "revision", "status", "written", "selection", "told_by",
+              "part", "task", "task_id", "work_id", "immune", "owner_side", "owner_quoted", "ref",
+              "scope", "target", "accounts", "count", "span", "earliest", "latest", "running_tasks",
+              "key", "pos", "last_pos", "from", "to", "engaged", "overheard", "newest",
+              "transfer", "written_at", "stated_period", "byline", "source", "carrier", "supplier",
+              "schedule_id", "field", "supplier_task_id", "supplied_at", "missing", "revision_known",
+              "status_now", "current_revision", "later_corrections", "folded_into", "sha256", "again", "again_room")
+    result = {key: source[key] for key in fields if key in source}
+    if isinstance(source.get("author"), str):  # a row's speaker label; chronicle records already carry their byline
+        result["author"] = source["author"]
+    if isinstance(source.get("origin_ref"), dict):
+        result["origin_ref"] = {key: source["origin_ref"][key] for key in
+            ("chat_id", "client_message_id", "ts", "text_sha256", "row_sha256") if key in source["origin_ref"]}
+    room_id = source.get("room_id", room_id)
+    if room_id is not None:
+        result["room_id"] = room_id
+    address = source.get("address")
+    if not address and "carrier" in source and str(source.get("ref") or "").startswith("row:"):
+        address = result["address"] = source["ref"]  # e.g. a quoted target's own reference
+    first, last = source.get("first"), source.get("last")
+    if citation and (source.get("missing") or not source.get("revision") or not source.get("revision_known")):
+        result["read_gap"] = ("The cited record was missing from this chronicle at capture." if source.get("missing") else
+                              "The captured facts do not establish that this journal held the cited revision.")
+    elif citation:
+        result["read"] = {"tool": "memory_read", "arguments": {"node_id": source["id"], "revision": source["revision"]}}
+    elif "from" in source or (source.get("task") and isinstance(first, str) and isinstance(last, str)):
+        result.update(_aggregate_source(source, room_id))
+    elif room_id is not None and (address or (isinstance(first, str) and first and first == last)):
+        result["read"] = {"tool": "memory_read", "arguments": {"room_id": room_id, "rows": True,
+                                                               "from": address or first, "to": address or first}}
+    elif isinstance(address, str) and address.startswith("row:"):
+        # A row's address names the chat it was written in; a moved or held row shows
+        # elsewhere, so only a captured showing room makes an exact reader.
+        result["read_gap"] = ("No showing room was captured; the address prefix is where the row was written "
+                              "(navigation only), and a held row may live in another store.")
+    elif source.get("id") and not address:
+        args = {"node_id": source["id"]}
+        reader = "read"
+        if source.get("kind") == "mark":
+            result["read_basis"] = "Mark record by ID; its visibility and release state are read as of now."
+        elif source.get("revision"):
+            args["revision"] = source["revision"]
+            result["read_basis"] = "Record text at the captured revision; the reader also reports later relationships."
+        else:
+            reader = "navigation"
+            result["read_gap"] = "The captured record revision is unknown."
+        result[reader] = {"tool": "memory_read", "arguments": args}
+    elif (source.get("task") or source.get("task_id")) and "carrier" not in source:
+        # A carried owner row's task_id names its carrier, not the work that wrote it.
+        result["navigation"] = {"tool": "get_task_result", "arguments": {"task_id": source.get("task") or source["task_id"]}}
+        result["row_membership_gap"] = "Capture has no row-address bounds; the task reader reads the work, not this historical projection."
+    else:
+        result["read_gap"] = "No exact source reader in this captured metadata; current room/catalogue is navigation only."
+    if source.get("again"):  # a repeat line names its earlier copy, not this row's words
+        result["earlier"] = ({"read": {"tool": "memory_read", "arguments": {"room_id": source["again_room"], "rows": True,
+                                                                            "from": source["again"], "to": source["again"]}}}
+                             if source.get("again_room") else
+                             {"read_gap": "Snapshot predates the earlier copy's room; the rendered line names it."})
+    if result.get("running_tasks") is not None:
+        result["running_work"] = [{"task_id": task, "navigation": {"tool": "get_task_result", "arguments": {"task_id": task}}}
+                                  for task in result["running_tasks"]]
+        if result["running_tasks"]:
+            result["running_basis"] = "The work and its retries as they are now, not a source captured with this view."
+    if source.get("gist"):
+        result["gist_source"] = _composition_source({key: source["gist"][key] for key in
+            ("room_id", "address", "ts") if key in source["gist"]})
+    if "sources" in source:
+        result["cited_sources"] = [_composition_source(s, citation=True) for s in source.get("sources") or ()]
+    for key in ("words", "notes", "tasks"):
+        if isinstance(source.get(key), (list, tuple)):
+            result[key] = [_composition_source(item, room_id) for item in source[key]]
+    if source.get("folded"):
+        result["folded"] = _composition_source(source["folded"], room_id)
+    if source.get("events"):
+        event = source["events"]
+        result["events"] = {key: event[key] for key in ("count", "unknown_count", "unknown_chars", "unknown_last") if key in event}
+        result["events"]["samples"] = {key: _composition_source(event[key], room_id) for key in
+                                      ("first", "last", "unknown_first") if event.get(key)}
+        if "bounds" in event:
+            bounds = event["bounds"]
+            result["events"]["bounds"] = [_composition_source(bound, room_id) for bound in bounds]
+            result["events"]["selection"] = "Inbound lane-1 arrivals in captured open and sealed entries; bounds are inclusive, not an enumeration."
+            if bounds and room_id is not None:
+                result["events"]["range_read"] = {"tool": "memory_read", "arguments": {"room_id": room_id, "rows": True,
+                    "from": bounds[0]["address"], "to": bounds[-1]["address"]}}
+        result["events"]["membership_gap"] = "Capture keeps samples and counts, not every arrival address."
+    if "facts" in source:
+        result["facts"] = {key: source["facts"][key] for key in
+            ("rows", "earliest", "latest", "running_tasks", "pages", "last_covered", "gaps") if key in source["facts"]}
+    return result
+
+
+def _portable_source(ref):
+    """A task-relative handle also needs its owner to travel through memory_read."""
+    if (isinstance(ref, dict) and ref.get("kind") == "task_source" and ref.get("root") == "artifact_store"
+            and ref.get("task_id") and ref.get("path") and ref.get("sha256") and ref.get("size") is not None):
+        return {"tool": "memory_read", "arguments": {"source_ref": ref}}
+
+
+def _refusal_source(refusal):
+    """A helper's refused fold: the retold record that stayed open, and its answer's own reader when retained."""
+    path = refusal.get("path")
+    if reader := _portable_source(refusal.get("source_ref")):
+        answer = {"read": reader}
+    elif path:
+        answer = {"canonical_path": path, "read_gap": "Canonical data path only; no portable source reference was captured."}
+    else:
+        answer = {"read_gap": "No portable reference or canonical path for the helper's answer was captured."}
+    return {"kind": refusal.get("kind"), "retold_record": _composition_source(
+                {key: refusal[key] for key in ("id", "revision") if key in refusal}),
+            "answer": answer}
+
+
+def _mark_source(mark):
+    # The mark record has its own native node reader. Its target, including
+    # the retained full review, is a distinct source.
+    result = _composition_source({**mark, "kind": "mark"})
+    if late := mark.get("late_review"):
+        reader = _portable_source(late.get("source_ref"))
+        result["review"] = {"task_id": late.get("task_id"), "sha256": late.get("sha256"),
+                            **({"read": reader} if reader else
+                               {"read_gap": "No portable reader for the full review was captured; the mark record identifies its target."})}
+    return result
+
+
+def _sealed_source(record):
+    """A page another room published that seals rows here: read in its own room, never credited to the showing one."""
+    result = _composition_source(record)
+    if "room_id" not in record:
+        result["publishing_room_gap"] = "Snapshot predates the sealing page's own room; the showing room did not publish it."
+    return result
+
+
+def _change(kind, change_id, target, gap="Snapshot predates the change record's id; only the changed record is named."):
+    """A printed signed change: its immutable record at its own revision, and the record it changes (as of that
+    correction; a decision binds no revision). Never its words."""
+    result = {"kind": kind, "target": target}
+    if change_id:
+        result.update(id=change_id, read={"tool": "memory_read", "arguments": {"node_id": change_id, "revision": change_id}})
+    else:
+        result["read_gap"] = gap
+    if kind == "correction" and change_id:
+        result["target_read"] = {"tool": "memory_read", "arguments": {"node_id": target, "revision": change_id}}
+    else:
+        result["target_navigation"] = {"tool": "memory_read", "arguments": {"node_id": target}}
+    return result
+
+
+def _rendered_changes(kind, form, source):
+    """Readers of the signed changes the drawn form prints, never their words: a record's ``fixes`` where
+    ``_fix_lines`` runs, an account's ``told_fixes`` and its sources' later changes (``account_lines``).
+    A nested change keeps both readers: the change's, and the frozen revision its citing edge names
+    (``source_change_lines``); a directly cited draft's later acceptance names its decision where captured."""
+    if kind == "story_record" and form != "address" or kind == "room_record" and form == "whole" and "stamp" in source:
+        return [_change(fix["kind"], fix.get("id"), fix["target"]) for fix in source.get("fixes") or ()]
+    if kind != "account":
+        return []
+    changes = [_change(fix["kind"], fix.get("id"), fix["target"]) for fix in source.get("told_fixes") or ()]
+    for src in source.get("sources") or ():
+        if src.get("missing"):
+            continue
+        ident, printed, ids = str(src.get("id")), len(src.get("later_fixes") or ()), src.get("later_corrections") or []
+        changes += [_change("correction", ids[n] if len(ids) == printed else None, ident,
+                            "Captured later-correction ids do not match the printed corrections; only the source is named.")
+                    for n in range(printed)]
+        if src.get("status_now") == "rejected" and src.get("status") != "rejected":
+            changes.append(_change("rejection", src.get("rejection_id"), ident))
+        elif src.get("status") == "draft" and src.get("status_now") == "accepted":
+            changes.append(_change("acceptance", src.get("acceptance_id"), ident,
+                                   "Snapshot predates the captured acceptance id; only the accepted source is named."))
+        for nested in src.get("nested_changes") or ():
+            event = nested.get("event") or {}
+            name = "correction" if event.get("kind") == "correction" else "acceptance" if event.get("accepted") else "rejection"
+            member = str(nested.get("source_id"))
+            cited = ({"read": {"tool": "memory_read", "arguments": {"node_id": member, "revision": nested["revision"]}}}
+                     if nested.get("revision") else
+                     {"navigation": {"tool": "memory_read", "arguments": {"node_id": member}},
+                      "read_gap": "Part member; the member revision the citing edge used was not recorded."})
+            changes.append({**_change(name, event.get("id"), member), "via": list(nested.get("via") or ()),
+                            "cited_source": cited})
+    return changes
+
+
+def _composition_group(group, *, identity_only=False):
+    # ``running`` is rendered focus prose, never a metadata source. New captures
+    # retain IDs by room separately; old snapshots must not reverse-parse prose.
+    rooms = [{key: room[key] for key in ("room_id", "running_tasks") if key in room}
+             for room in group["rooms"]] if identity_only else group["rooms"]
+    result = {"key": group["key"], "rooms": [_composition_source(room) for room in rooms]}
+    if identity_only and group.get("running"):  # the line or heading prints each running work's reader, its focus if authored
+        result["running_focus_gap"] = ("A running work prints as its task reader, with authored focus text beside it "
+                                       "only where the capture found one; that text was read at capture, no immutable "
+                                       "reference to it was kept, and the task reader reads the work as it is now.")
+    if "catalogue_start" in group:
+        result["catalogue_start"] = group["catalogue_start"]
+    if any("running_tasks" not in room for room in group["rooms"]):
+        result["running_tasks_gap"] = "Snapshot predates structured running IDs by room; rendered focus is not parsed."
+    return result
+
+
+def _composition_key(key):
+    """Piece identities contain sets; serialize their members deterministically, without reinterpreting them."""
+    if isinstance(key, (set, frozenset)):
+        return sorted(key)
+    return [_composition_key(item) for item in key] if isinstance(key, (tuple, list)) else key
+
+
+def memory_composition(snapshot, level):
+    """Exact, disjoint metadata for the two rendered memory blocks, with no physical-floor note.
+
+    The renderer calls ``part`` as it emits lines; ``_room_parts`` and conversation
+    ``pieces`` supply section boundaries. No inventory of alternative rungs is priced here.
+    Escaped characters add; tokens are rounded once per block, never per row.
+    """
+    from ouroboros.memory_floor import tokens_of
+
+    gone, room = dict(level.addressed), snapshot.room or {}
+    hidden, _ = folded_work_rows(room, gone)
+    work_sources = {rows[-1]["address"]: [row for row in rows if row["address"] in hidden]
+                    for _key, rows in works(room)}
+    sections, fragments, scope = [], [], "story"
+
+    def part(lines, kind="framing", sources=(), form="whole", room_id=None):
+        if lines:
+            sources = work_sources[sources[0]["address"]] if kind == "work" else list(sources)
+            fragments.append({"kind": kind, "form": form,
+                "sources": [(_composition_group(s, identity_only=True) if kind == "conversation_identity" else
+                            _refusal_source(s) if kind == "refusal" else
+                            _mark_source(s) if kind in ("mark", "late_review") else
+                            _sealed_source(s) if kind == "sealed_by" else
+                            _composition_source(s, room_id if room_id is not None else
+                            room.get("room_id") if scope == "room" else None)) for s in sources],
+                "text_json_chars": sum(mv.json_chars(line) for line in lines),
+                "separator_before": "\n" if fragments else "", "line_joins": len(lines) - 1,
+                "separator_json_chars": 2 * (len(lines) - 1 + bool(fragments))})
+            if changes := [change for s in sources for change in _rendered_changes(kind, form, s)]:
+                fragments[-1]["changes"] = changes
+            if form == "without_gist":  # the line keeps the host's status and readers; the telling stands elsewhere
+                for drawn in fragments[-1]["sources"]:
+                    if "gist_source" in drawn:
+                        drawn["gist_alternative"] = {**drawn.pop("gist_source"), "basis":
+                            "This span's line renders without the telling; it stands on the span that shows it."}
+            if form == "whole" and kind in ("story_record", "room_record"):
+                # A whole page prints its writer's captured terminal rows; the node reader re-resolves them live.
+                for drawn, entry in zip(fragments[-1]["sources"], sources):
+                    if entry.get("terminal_links") and (kind == "story_record" or "stamp" in entry):
+                        drawn["terminal_links_gap"] = (
+                            "Host-linked terminal rows were resolved against live history at capture and print with "
+                            "their own captured row reader; the node reader re-resolves them at read time, so rows "
+                            "written after capture appear there and are no member of this span.")
+        return lines
+
+    def section(key, text):
+        nonlocal fragments
+        price = sum(p["text_json_chars"] + p["separator_json_chars"] for p in fragments)
+        if price != mv.json_chars(text):
+            raise ValueError("memory composition does not cover the renderer's section")
+        sections.append((key, fragments, price))
+        fragments = []
+        return price
+
+    story = mv._story_text(snapshot, dict(mv._story_key(level)), part=part)
+    section(("story",), story)
+    story_sections, sections = sections, []
+
+    def piece(key, make):
+        nonlocal scope
+        scope = key[0]
+        text = make()
+        if text and not fragments:
+            if key[0] == "owner_words":
+                metadata = snapshot.owner_words_sources
+                part([text], key[0], metadata.get("rows", ()))
+                if metadata:
+                    fragments[0]["capture"] = {name: metadata[name] for name in ("gaps", "absence", "schedules") if name in metadata}
+                else:
+                    fragments[0]["source_gap"] = "Captured governing block has no per-row coordinates; not a reconstructed reader."
+            else:
+                part([text], key[0])
+        return section(key, text)
+
+    mv._room_parts(snapshot, gone, piece, part=part)
+
+    def block(parts):
+        rows, identities, total = [], [], 0
+        for key, entries, size in parts:
+            if not size:
+                continue
+            if rows:  # _room_parts joins nonempty sections with a blank line
+                rows.append({"kind": "separator", "form": "literal", "separator": "\n\n",
+                             "text_json_chars": 0, "separator_json_chars": 4, "json_chars": 4,
+                             "span": [total, total + 4]})
+                total += 4
+            identities.append(_composition_key(key))  # a room's selected IDs occur once, not in every row
+            for row in entries:
+                size = row["text_json_chars"] + row["separator_json_chars"]
+                row.update(piece=len(identities) - 1, json_chars=size, span=[total, total + size])
+                total += size
+                rows.append(row)
+        return {"json_chars": total, "estimated_tokens": tokens_of(total), "pieces": identities, "parts": rows}
+
+    blocks = {"story": block(story_sections), "room": block(sections)}
+    return {"blocks": blocks, "estimated_tokens": sum(b["estimated_tokens"] for b in blocks.values()),
+            "represented_story_records": [_composition_source(e) for e in snapshot.story if e.get("told_by")],
+            "units": "JSON-escaped characters, excluding enclosing quotes; spans are half-open within each block",
+            "token_rule": "tokens_of(story.json_chars) + tokens_of(room.json_chars); two roundings, no floor note",
+            "scope": "Ordinary memory only, not selected Low, a calibrated request price or possible savings. "
+                     "Parts refer to the block's piece index; only parts contribute size. Sources may recur as readers. "
+                     "Completion and permission to fold are not inferred."}
+
+
+def ordinary_composition(snapshot):
+    from ouroboros.memory_floor import FORMS_VERSION, ordinary_level
+
+    level = ordinary_level(snapshot)
+    return {"forms_version": FORMS_VERSION, "ordinary_addressed": _composition_key(level.addressed),
+            **memory_composition(snapshot, level)}
 
 
 def form_counts(snapshot, level):

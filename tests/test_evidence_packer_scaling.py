@@ -10,7 +10,8 @@ import pytest
 
 from ouroboros import evidence_packer as packer, evidence_packs as packs, maintenance, obligations, observability, store, usage_store
 from supervisor import terminal_delivery
-from tests.test_evidence_packs import _handle_path, _result, _task
+from tests.test_evidence_pack_lock_holds import _HookedUnlinks
+from tests.test_evidence_packs import _blob, _handle_path, _result, _task
 from tests.test_evidence_packs import root as root
 
 
@@ -117,10 +118,11 @@ def test_measure_backfill_then_rest(root, n):
 def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
     for number in range(12):
         _task(root, f"settled-{number}", blobs=1)
-    active = {"writer": False, "publication": False, "task": None}
-    scans = []
-    open_store, name_lock = store.open_store, store.name_lock
+    active = {"writer": False, "task": None}
+    scans, rows = [], []
+    open_store = store.open_store
     loose_ids, stamps, unlink = packer._loose_task_ids, packer.task_stamps, packs.unlink_loose
+    packable = packs.task_packable
 
     @contextlib.contextmanager
     def opened(*args, **kwargs):
@@ -132,24 +134,19 @@ def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
             finally:
                 active["writer"] = before
 
-    @contextlib.contextmanager
-    def locked(root, name, **kwargs):
-        with name_lock(root, name, **kwargs):
-            before = active["publication"]
-            active["publication"] |= name == packs.PUBLICATION_LOCK_NAME
-            try:
-                yield
-            finally:
-                active["publication"] = before
-
     def ids(*args):
-        scans.append((active["writer"], active["publication"]))
+        scans.append(active["writer"])
         return loose_ids(*args)
 
     def observed_stamps(root, task, **kwargs):
-        if active["writer"] or active["publication"]:
+        if active["writer"]:
             assert task == active["task"], "foreign task evaluated during candidate unlink"
         return stamps(root, task, **kwargs)
+
+    def observed_packable(txn, task):
+        rows.append(task)
+        assert active["writer"] and task == active["task"], "a row read outside the candidate's barrier"
+        return packable(txn, task)
 
     def remove(root, task, *args, **kwargs):
         active["task"] = task
@@ -159,45 +156,68 @@ def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
             active["task"] = None
 
     monkeypatch.setattr(store, "open_store", opened)
-    monkeypatch.setattr(store, "name_lock", locked)
     monkeypatch.setattr(packer, "_loose_task_ids", ids)
     monkeypatch.setattr(packer, "task_stamps", observed_stamps)
+    monkeypatch.setattr(packs, "task_packable", observed_packable)
     monkeypatch.setattr(packs, "unlink_loose", remove)
     report = packer.run_pass(root)
     assert report["faults"] == 0 and report["unlinked"] == 24
-    assert scans and not any(writer or publication for writer, publication in scans)
+    assert scans and not any(scans)
+    assert set(rows) == {f"settled-{number}" for number in range(12)}  # each candidate's row read under its barrier
 
 
-@pytest.mark.parametrize("rewrite", [False, True])
-def test_manifest_published_after_keep_snapshot_protects_blob(root, monkeypatch, rewrite):
-    refs, _ = _task(root, "packing", blobs=1)
+@pytest.mark.parametrize("step", ["census", "pack", "unlink", "writer"])
+def test_a_blob_named_before_the_census_stays_loose_and_one_named_after_it_reads_from_the_pack(
+        root, monkeypatch, step):
+    """The keep-set is the pass's one census of live sharers, taken before its first unlink and never refreshed
+    (``PackSweep``): a blob a live task's manifest named before it stays loose until that task's own pass; one a
+    live task's manifest names after it leaves with the packed task, and its bytes read from that task's verified
+    pack, so every ref a manifest names stays readable, at whichever step of the pass its writer names it: the census
+    taken, the pack written, the blob's own unlink next, or the whole pass between the writer storing the blob
+    (present, so kept as it is) and publishing its manifest."""
+    (early, late), _ = _task(root, "packing", blobs=2)
     _task(root, "live", status="running", blobs=1)
-    if rewrite:
-        observability.write_call_manifest(root, task_id="live", call_id="late", manifest={})
-    write = packs.write_pack
-    manifests = []
-    read = packs.manifest_blob_refs
+    observability.write_call_manifest(root, task_id="live", call_id="early", manifest={"ref": early})
+    write, read, collect, manifests = packs.write_pack, packs.manifest_blob_refs, packer.PackSweep.collect_keep, []
+
+    def name_late(at):
+        if at == step:
+            observability.write_call_manifest(root, task_id="live", call_id="late", manifest={"ref": late})
 
     def read_refs(root, task):
         manifests.append(task)
         return read(root, task)
 
+    def census(sweep, rows):
+        collect(sweep, rows)
+        name_late("census")
+
     def publish(*args, **kwargs):
         result = write(*args, **kwargs)
-        assert "live" in manifests, "no keep-set snapshot was taken before compression"
-        observability.write_call_manifest(root, task_id="live", call_id="late", manifest={"ref": refs[0]})
+        assert "live" in manifests, "no keep-set census was taken before compression"
+        name_late("pack")
         return result
+
+    def unlink(path):
+        if str(path) == late["path"]:
+            name_late("unlink")
 
     with monkeypatch.context() as edits:
         edits.setattr(packs, "manifest_blob_refs", read_refs)
+        edits.setattr(packer.PackSweep, "collect_keep", census)
         edits.setattr(packs, "write_pack", publish)
+        edits.setattr(packs, "os", _HookedUnlinks(unlink))
+        if step == "writer":
+            observability.write_blob_bytes(root, packs.blob_bytes(root, late))
         report = packer.run_pass(root)
-    assert report["faults"] == 0 and report["kept"] == report["unlinked"] == 1
-    assert len([task for task in manifests if task == "live"]) == 1
-    assert packs.blob_bytes(root, refs[0])
+    name_late("writer")
+    assert report["faults"] == 0 and (report["kept"], report["unlinked"]) == (1, 2)  # unlinked: `late` and the handle
+    assert len([task for task in manifests if task == "live"]) == 1  # one census
+    assert pathlib.Path(early["path"]).exists() and not pathlib.Path(late["path"]).exists()
+    assert packs.blob_bytes(root, early) and packs.blob_bytes(root, late)
     _result(root, "live")
     assert packer.run_pass(root)["faults"] == 0
-    assert not pathlib.Path(refs[0]["path"]).exists()
+    assert not pathlib.Path(early["path"]).exists() and packs.blob_bytes(root, early)
 
 
 def test_unrelated_activity_during_a_pass_does_not_stop_the_backfill(root, monkeypatch):
@@ -251,15 +271,51 @@ def test_a_sharer_resumed_after_the_census_reads_its_shared_blob_from_the_pack(r
     assert not _handle_path(root, "other", other_handle).exists() and packs.blob_bytes(root, other[0]) == raw
 
 
-def test_publication_journal_exists_only_for_a_sweep_and_discards_crash_residue(root):
+def test_a_manifest_the_candidate_writes_during_its_unlink_keeps_it_owed_until_packed(root, monkeypatch):
+    """A manifest a candidate writes after the census (late evidence, here during its unlink) names a blob its pack
+    lacks: the pass leaves the task owed instead of recording it swept, and the next pass packs that blob as the
+    task's next generation. A candidate nothing writes to is swept and left alone by the next pass."""
+    refs, _ = _task(root, "late", blobs=2)
+    _task(root, "quiet", blobs=2)
+    added = []
+
+    def late_manifest(path):
+        if not added and str(path) in {ref["path"] for ref in refs}:
+            added.append(_blob(root, b'{"late": "tool result"}'))
+            observability.write_call_manifest(root, task_id="late", call_id="late", manifest={"ref": added[0]})
+
+    with monkeypatch.context() as edits:
+        edits.setattr(packs, "os", _HookedUnlinks(late_manifest))
+        report = packer.run_pass(root)
+    assert report["faults"] == 0 and report["deferred"] == 0 and report["unfinished"] == ["late"] and added
+    following = packer.run_pass(root)
+    assert following["faults"] == 0 and (following["examined"], following["packed"]) == (1, 1)  # `late` alone
+    assert [sidecar["generation"] for sidecar in packs.published_generations(root, "late")] == [1, 2]
+    assert not pathlib.Path(added[0]["path"]).exists()
+    assert packs.blob_bytes(root, added[0]) == b'{"late": "tool result"}'
+    assert packer.run_pass(root)["examined"] == 0
+
+
+def test_a_pass_keeps_no_publication_journal_and_removes_the_one_an_older_body_left(root, monkeypatch):
+    """No pass creates ``observability/packs/.publications``, the per-pass journal older bodies kept, during or after
+    itself; the first pass removes one an older body or a killed pass left, unread, and a manifest written beside it
+    never appends to it."""
     refs, _ = _task(root, "packing", blobs=1)
-    journal = packs.packs_dir(root) / packs.PUBLICATIONS_NAME
-    observability.write_call_manifest(root, task_id="packing", call_id="extra", manifest={"ref": refs[0]})
-    assert not journal.exists()
+    journal = packs.packs_dir(root) / ".publications"
     journal.parent.mkdir(parents=True, exist_ok=True)
     journal.write_bytes(b"incomplete old pass")
-    assert packer.run_pass(root)["unlinked"] == 2
-    assert not journal.exists()
+    observability.write_call_manifest(root, task_id="packing", call_id="extra", manifest={"ref": refs[0]})
+    assert journal.read_bytes() == b"incomplete old pass"
+    write, during = packs.write_pack, []
+
+    def publish(*args, **kwargs):
+        during.append(journal.exists())
+        return write(*args, **kwargs)
+
+    with monkeypatch.context() as edits:
+        edits.setattr(packs, "write_pack", publish)
+        assert packer.run_pass(root)["unlinked"] == 2
+    assert during == [False] and not journal.exists()
 
 
 def _former_blocker(root, index, task):
@@ -539,24 +595,42 @@ def _sidecar_listings(monkeypatch):
     return whole, named
 
 
-def test_a_pass_from_a_position_reads_its_candidates_own_sidecars_and_an_empty_one_reads_none(root, monkeypatch):
-    """Both directions beside many published packs of other tasks. A pass from a position with nothing to pack
-    reads no sidecar; one with a candidate finds that task's generations by their names, and its one whole
-    listing is the newest-pack mark that orders the candidates (``ordered_candidates``)."""
+def test_a_pass_reads_only_its_candidates_own_sidecars_and_an_empty_one_reads_none(root, monkeypatch):
+    """Both directions beside many published packs of other tasks. No pass lists every sidecar: the first
+    one (no position: a whole census) and one from a position find each candidate's generations by their
+    names, and the newest-pack mark that orders the candidates comes from the index; a pass from a position
+    with nothing to pack reads no sidecar. Each still packs what it should."""
     for number in range(6):
         _task(root, f"foreign-{number}", blobs=1)
-    assert packer.run_pass(root)["faults"] == 0  # no position: a whole census, one shared listing
+    packs.ensure_index(root)  # the builder's walk on a fresh install is not the pass's work
+    whole, named = _sidecar_listings(monkeypatch)
+    report = packer.run_pass(root)  # no position: a whole census
+    assert (report["candidates"], report["packed"], report["faults"], whole) == (6, 6, 0, [])
     assert len(packs._sidecar_names(root)) == 6
     since = packer.terminal_revision(root)
-    whole, named = _sidecar_listings(monkeypatch)
+    named.clear()
     report = packer.run_pass(root, since=since)
     assert report["candidates"] == 0 and (whole, named) == ([], [])
 
     _task(root, "late", blobs=1)
     report = packer.run_pass(root, since=since)
     assert (report["candidates"], report["packed"], report["faults"]) == (1, 1, 0)
-    assert len(whole) == 1 and all(set(names) <= {"late.members.json"} for names in named), (whole, named)
+    assert whole == [] and all(set(names) <= {"late.members.json"} for names in named), (whole, named)
     assert [sidecar["generation"] for sidecar in packs.published_generations(root, "late")] == [1]
+
+
+def test_candidates_changed_after_the_newest_pack_lead_and_the_backfill_follows_by_size(root, monkeypatch):
+    """The order the newest-pack mark serves, read from the index without a sidecar listing: the tasks
+    whose result changed after the packer's last verified pack, newest first, then the rest, largest first."""
+    _task(root, "packed", blobs=1)
+    assert packer.run_pass(root)["packed"] == 1
+    tasks = {"old-small": (1, "2020-01-01"), "old-large": (3, "2020-01-02"), "new-early": (1, "2998-01-01"),
+             "new-late": (1, "2999-01-01")}
+    for task, (blobs, day) in tasks.items():
+        _task(root, task, blobs=blobs, updated_at=f"{day}T00:00:00+00:00")
+    whole, _named = _sidecar_listings(monkeypatch)
+    ordered = packer.ordered_candidates(root, sorted(tasks), rows=packer.task_rows(root, tasks))
+    assert [task for task, _raw in ordered] == ["new-late", "new-early", "old-large", "old-small"] and whole == []
 
 
 def test_a_candidate_beside_its_homonym_takes_the_next_free_generation_and_keeps_to_its_own(root):
@@ -567,7 +641,7 @@ def test_a_candidate_beside_its_homonym_takes_the_next_free_generation_and_keeps
 
     handles = {task: _task(root, task, blobs=1, handle=f"# focus {task}\n".encode())[1] for task in ("a", "a.2")}
     assert packer.run_pass(root)["faults"] == 0
-    assert packs._task_sidecar_names(root, "a") == {"a.members.json", "a.2.members.json"}
+    assert list(packs._task_sidecar_names(root, "a")) == ["a.members.json", "a.2.members.json"]
     since = packer.terminal_revision(root)
     later = store_actor_source_bytes(root, "a", category="context_checkpoints", source_id="focus_source_later",
                                      data=b"# later focus\n", extension="md")
@@ -577,7 +651,6 @@ def test_a_candidate_beside_its_homonym_takes_the_next_free_generation_and_keeps
     assert [sidecar["generation"] for sidecar in packs.published_generations(root, "a")] == [1, 3]
     assert [sidecar["generation"] for sidecar in packs.published_generations(root, "a.2")] == [1]
     assert not _handle_path(root, "a", later).exists()  # its own pack holds it now
-    packs._VALIDATED.clear()  # the sidecars answer, not a cache this process validated
     assert packs.handle_bytes(root, "a", later["path"]) == b"# later focus\n"
     for task, handle in handles.items():
         assert packs.handle_bytes(root, task, handle["path"]) == f"# focus {task}\n".encode()

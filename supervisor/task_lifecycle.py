@@ -125,13 +125,16 @@ def root_cancellation_fenced(task: Dict[str, Any], root_task_id: str = "") -> bo
     """
     if not CANCELLED_ROOT_FENCES:
         return False
+    parent = str(task.get("parent_task_id") or "").strip()
     for candidate in (
         str(root_task_id or "").strip(),
         str(task.get("root_task_id") or "").strip(),
-        str(task.get("parent_task_id") or "").strip(),
+        parent,
     ):
         if candidate and candidate in CANCELLED_ROOT_FENCES:
             return True
+    if not parent:  # a root has no ancestry to walk: never build the live map for it
+        return False
     q = _queue_module()
     live: Dict[str, Dict[str, Any]] = {
         str(item.get("id") or ""): item for item in q.PENDING if isinstance(item, dict)
@@ -140,7 +143,6 @@ def root_cancellation_fenced(task: Dict[str, Any], root_task_id: str = "") -> bo
         str(rid): meta["task"] for rid, meta in q.RUNNING.items()
         if isinstance(meta, dict) and isinstance(meta.get("task"), dict)
     })
-    parent = str(task.get("parent_task_id") or "").strip()
     seen: set[str] = set()
     while parent and parent not in seen and len(seen) < 100:
         if parent in CANCELLED_ROOT_FENCES:
@@ -170,27 +172,28 @@ def apply_budget_root_admission_fence(task: Dict[str, Any], root_task_id: str) -
     return True
 
 
+def snapshot_acceptance_roots(rows):
+    roots = set()
+    if not isinstance(rows, list):
+        return roots, True
+    for fence in rows:
+        if not isinstance(fence, dict):
+            return roots, True
+        status = fence.get("status")
+        if status in ("active", "sealed"):
+            if not (root := str(fence.get("root_task_id") or "")):
+                return roots, True
+            # A saved author stop closes its own admission, not its children.
+            if status != "sealed" or fence.get("outcome") != "author_stop":
+                roots.add(root)
+    return roots, False
+
+
 def restore_queue_fences(
     raw_acceptance: Any, raw_budget: Any,
 ) -> tuple[set[str], bool, bool]:
     """Validate snapshot fences and restore the small root-budget admission map."""
-    malformed_acceptance = not isinstance(raw_acceptance, list)
-    fenced_roots: set[str] = set()
-    if not malformed_acceptance:
-        for fence in raw_acceptance:
-            if not isinstance(fence, dict):
-                malformed_acceptance = True
-                break
-            status = str(fence.get("status") or "")
-            root_id = str(fence.get("root_task_id") or "")
-            if status in {"active", "sealed"}:
-                if not root_id:
-                    malformed_acceptance = True
-                    break
-                # A saved author stop closes its own admission, not its children.
-                # Pre-terminal shutdown and cancel custody are restored separately.
-                if status != "sealed" or fence.get("outcome") != "author_stop":
-                    fenced_roots.add(root_id)
+    fenced_roots, malformed_acceptance = snapshot_acceptance_roots(raw_acceptance)
     malformed_budget = not isinstance(raw_budget, list)
     restored: Dict[str, Dict[str, Any]] = {}
     if not malformed_budget:
@@ -200,8 +203,7 @@ def restore_queue_fences(
                 break
             root_id = str(fence.get("root_task_id") or "").strip()
             fence_id = str(fence.get("fence_id") or "").strip()
-            status = str(fence.get("status") or "")
-            if status in {"active", "paused"}:
+            if fence.get("status") in ("active", "paused"):
                 if not root_id or not fence_id:
                     malformed_budget = True
                     break
@@ -323,7 +325,7 @@ def cancel_task_by_id(task_id: str) -> bool:
             )
             failed = {tid for tid, state in outcomes.items() if state == q.CANCEL_FAILED}
         # Delegated runs a settled member's end spared wait for this Stop (its verdict); the check below sees the rest.
-        _stop_open_tree_runs(q, task_id)
+        _stop_open_tree_runs(q, task_id, cascade_claim)
         # UNCONDITIONAL postcondition. For a CASCADE the answer is a property of the
         # TREE, not a tally of who did the killing: success means nothing of the
         # subtree is live and nothing refused custody. (A concurrent cascade over

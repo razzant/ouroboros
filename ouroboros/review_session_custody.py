@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional
+import logging
+from typing import Any, Callable, Dict, Optional, Tuple
+
+log = logging.getLogger(__name__)
+_SESSION_ANSWER = "review_session_answer"
 
 
 def owned_started_review_custody(
@@ -264,20 +268,22 @@ def review_continuation_descends_from(root: Any, run_id: str, anchor: dict) -> b
 
 
 def join_recorded_review_continuation(gateway: Any, root: Any, entry: Any, detail: dict, invocation: Any,
-                                      *, remaining: float, seen: set[str]) -> Any:
+                                      *, seen: set[str], checking: Optional[Dict[str, Any]] = None) -> Any:
     """Join a successor an older host recorded automatically under this seat's anchor; never create one.
 
     Continuation is now the author's explicit choice (``review_continuation``): a new operation
     collected through the existing exact recovery. A legacy successor already recorded under
-    ``("review_continue", invocation, run)`` is joined when started, or its UNKNOWN POST is replayed
-    with the same key and recorded body; a definite refusal or a missing record joins nothing.
+    ``("review_continue", invocation, run)`` is joined when started, or read through the engine's
+    noncreating lookup using its recorded body and key. An early 4xx can belong to an accepted
+    command with no native run yet: its job id binds just like a late 202 handle. A missing,
+    refused, unavailable or foreign-store lookup leaves the start pending and the predecessor's
+    original stop untouched; it never licenses a creating POST, even after the owner ended.
+    A bound successor whose checking copy is missing or foreign is still returned for observation: the gap
+    rides ``checking["legacy_capture_gap"]`` (``_legacy_capture``), which then answers its evidence.
     """
-    from types import SimpleNamespace
     from ouroboros import delegate_custody as custody
-    from ouroboros.budget_pause import dispatch_fenced
+    from ouroboros.delegate_accepted import bind_started, locate
     from ouroboros.delegate_collection import record_terminal_money
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-    from ouroboros.owner_pause import OwnerPauseRefused, run_operation
     from ouroboros.review_execution import ReviewRouteUnavailable
 
     token = custody.idempotency_key("review_continue", entry.invocation_id, entry.run_id)
@@ -292,37 +298,57 @@ def join_recorded_review_continuation(gateway: Any, root: Any, entry: Any, detai
                                      code="review_recovery_request_mismatch")
     if record["state"] == "started":
         run_id, successor = owned_started_review_custody(custody, root, record, entry.task_id)
-        return None if run_id in seen or successor.continuation_of != entry.run_id else successor
-    if remaining <= 0 or dispatch_fenced(entry.task_id):
-        return None
-    source = SimpleNamespace(drive_root=root, task_id=entry.task_id, root_task_id=entry.root_task_id)
-    try:  # the recorded legacy POST may have been accepted: replay its exact key and body only
-        handle = run_operation(source, lambda: gateway.start_run(body, idempotency_key=token))
-    except (ClaudexorUnavailable, OwnerPauseRefused) as exc:
-        if isinstance(exc, OwnerPauseRefused) or 400 <= int(getattr(exc, "status_code", 0) or 0) < 500:
-            if not custody.emit(root, custody.START_FAILED, {"invocation_id": token, "task_id": entry.task_id,
-                    "reason": str(getattr(exc, "code", "continuation_refused")), "definite": True,
-                    "surface": invocation.surface, "slot_id": invocation.slot_id}):
-                raise
-            return None  # Caller retains the stopped run's original typed failure.
-        raise  # Ambiguous acceptance remains replayable from the same token.
-    run_id = str(handle.get("runId") or handle.get("jobId") or "")
-    if not run_id or run_id in seen:
-        raise ReviewRouteUnavailable("Review continuation returned no new run handle",
-                                     code="invalid_continuation_handle")
+        if run_id in seen or successor.continuation_of != entry.run_id:
+            return None
+        return _legacy_capture(root, entry, invocation, successor, checking)
+    located = locate(gateway, {**record, "invocation_id": token})
+    if not located.bindable or located.run_id in seen:
+        return None  # Reading accepted work needs no generation window or permission to start another run.
+    run_id = located.run_id
     record_terminal_money(root, entry, detail)  # the stopped run's money; the final settlement takes the successor's
     successor = custody.RunCustody(run_id=run_id, invocation_id=token, idempotency_key=token,
-        continuation_of=entry.run_id, ledger_root=str(root), daemon_store_id=custody.admitted_store_id(handle),
+        continuation_of=entry.run_id, ledger_root=str(root), daemon_store_id=located.store_id,
+        engine_ref=entry.engine_ref, access=entry.access, mode=entry.mode, isolation=entry.isolation,
+        delegated=entry.delegated, max_seconds=entry.max_seconds,
         **{key: getattr(entry, key) for key in ("task_id", "route_id", "model", "profile_id", "project_id",
             "project_owned", "project_persistent", "root_task_id", "parent_task_id", "category", "source",
             "review_skill", "review_wave_id", "review_slot_id", "authority_source", "execution_root", "target_root")})
-    successor, landed = custody.bind_started(root, successor, shape={  # converges with any reader of this key
+    successor, landed, _adopted = bind_started(root, successor, exclusive=True, shape={
+            "accepted_start_lookup": located.outcome,
             "access": entry.access, "mode": entry.mode, "isolation": entry.isolation,
             "delegated": entry.delegated, "max_seconds": entry.max_seconds,
-            "surface": invocation.surface, "slot_id": invocation.slot_id})[:2]
-    if not landed:
+            "surface": invocation.surface, "slot_id": invocation.slot_id})
+    if successor is None or not landed:
         raise ReviewRouteUnavailable("Review successor start remains pending in custody",
                                      code="review_continuation_checkpoint_unwritable")
+    if successor.run_id in seen or successor.continuation_of != entry.run_id:
+        return None
+    return _legacy_capture(root, entry, invocation, successor, checking)
+
+
+def _legacy_capture(root: Any, entry: Any, invocation: Any, successor: Any, checking: Optional[Dict[str, Any]]) -> Any:
+    """Advance the capture generation for a bound legacy successor, or name why it cannot.
+
+    The successor is this seat's own bound run, so it is observed and settled whatever its copy's state. A
+    missing or foreign copy (``CheckingAreaUnavailable``) never re-materializes or takes over a copy and never
+    reuses the predecessor's capture receipt: the seat's evidence becomes this typed gap instead, and every
+    earlier capture stays as it is. A later successor whose generation advances replaces the gap."""
+    from ouroboros.review_checking import CheckingAreaUnavailable, prepare_legacy_successor_capture
+
+    try:
+        prepare_legacy_successor_capture(root, entry.task_id, invocation.operation_id, run_id=successor.run_id,
+                                         execution_root=successor.execution_root, access=successor.access)
+    except CheckingAreaUnavailable as exc:
+        if checking is None:
+            raise
+        log.warning("legacy review successor %s is observed without a capture: %s", successor.run_id, exc)
+        checking["legacy_capture_gap"] = {
+            "status": "capture_failed", "capture_gap": "legacy_successor_checking_copy_unavailable",
+            "run_id": successor.run_id, "operation_id": str(invocation.operation_id or ""),
+            "area": str(successor.execution_root or ""), "error": f"CheckingAreaUnavailable: {exc}"}
+        return successor
+    if checking is not None:
+        checking.pop("legacy_capture_gap", None)
     return successor
 
 
@@ -444,6 +470,151 @@ def _refuse_past(end: Optional[float]) -> None:
                                      "never re-posted", code="continuation_window_ended")
 
 
+def full_session_text(gateway: Any, run_id: str, detail: Dict[str, Any], *, checkpoint: Optional[tuple] = None) -> str:
+    """The session's final answer from the verified FULL primary output (D7).
+
+    The resolver fetches and verifies the full artifact when the engine reports truncation; an unresolvable full text
+    refuses rather than judging a head-cut transcript. ``checkpoint`` (root, entry, binding; the binding None where
+    the seat is bound to no operation) also keeps the complete textual primary output, masked, before any parsing;
+    the engine's own summary, which stands in as the text for a run with no primary output, never is kept."""
+    from ouroboros.delegate_output import _resolve_full_primary_output
+
+    primary, full_ok, disclosure = _resolve_full_primary_output(gateway, run_id, detail.get("primaryOutput"))
+    if not full_ok:
+        raise RuntimeError(
+            f"delegated review session {run_id} produced a truncated primary "
+            f"output whose full artifact could not be matched to the size or the "
+            f"preview the run reported ({(disclosure or {}).get('reason')}); a "
+            "verdict is never read from a preview"
+        )
+    text = str(primary.get("text") or "") if isinstance(primary, dict) else "" if primary is None else str(primary)
+    if checkpoint and checkpoint[2] and (answer := complete_session_primary_text(primary)):
+        _checkpoint_session_answer(*checkpoint, detail, answer, delivered_answer(primary, answer))
+    if not text.strip():
+        final_summary = detail.get("finalSummary")
+        text = final_summary if isinstance(final_summary, str) else ""
+    return text
+
+
+def complete_session_primary_text(primary: Any) -> str:
+    """A complete textual primary output, not a preview or engine summary."""
+    if isinstance(primary, dict):
+        primary = primary.get("text") if primary.get("truncated", False) is False else None
+    return primary if isinstance(primary, str) and primary.strip() else ""
+
+
+def answer_identity(text: str) -> Dict[str, Any]:
+    """The identity of a text, as the standard readers measure it: its UTF-8 bytes' sha256 and its characters. The
+    delivery binds it before any stored copy is masked; a retained copy names its own."""
+    import hashlib
+
+    return {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "chars": len(text)}
+
+
+def delivered_answer(primary: Any, text: str) -> Dict[str, Any]:
+    """The identity of the text the engine delivered and the check its own report of the output passed, under the check's
+    existing name: ``size`` or ``preview_prefix`` for a fetched full artifact
+    (``delegate_output._resolve_full_primary_output``), ``untruncated`` for the engine's whole inline text. The engine
+    serves text through ``redactSecrets`` and publishes no hash of the file, so a matching length, a shared prefix or an
+    untruncated flag compare the text with the engine's description of the output, never with the source's bytes: the
+    identity binds this delivery only (``answer_words``). A truncated preview is no delivered answer."""
+    fetched = isinstance(primary, dict) and primary.get("full_fetched") is True
+    if isinstance(primary, dict) and primary.get("truncated") is True and not fetched:
+        raise ValueError("a truncated preview is not a delivered answer")
+    checked_by = str(primary.get("verified_by") or "") if fetched else "untruncated"
+    return {**answer_identity(text), "checked_by": checked_by or "unrecorded"}
+
+
+def _text_masks(rules: Any) -> list:
+    """The masking rules a stored projection recorded on the answer's text."""
+    return sorted({str(rule.get("rule") or "") for rule in rules or []
+                   if isinstance(rule, dict) and rule.get("path") == "$.text"})
+
+
+def answer_words(delivered: Any, shown: str, masked: list) -> Dict[str, Any]:
+    """The one reading of what a retained answer's words are, from its checkpoint or from an older run's output alike.
+    What the engine delivered is a ``redacted_copy`` (the retained role ``redacted_run_answer``): the source's bytes
+    are never confirmed, so ``words_identity`` stays ``unknown`` and no ``sha256``/``chars`` is offered as the run's own.
+    ``copy_sha256``/``copy_chars`` name exactly the bytes shown and retained, after the host's own masking (``masked``:
+    the stored projection's rules, empty when it changed nothing), which the retained ref and ``read_source`` repeat.
+    ``checked_by`` keeps the delivery's check. A delivery bound to no recorded check, or shown words it does not explain
+    (changed, no recorded masking), prove nothing."""
+    delivered = delivered if isinstance(delivered, dict) else {}
+    bound = {"sha256": delivered.get("sha256"), "chars": delivered.get("chars")}
+    if not isinstance(bound["sha256"], str) or not bound["sha256"] or not delivered.get("checked_by"):
+        raise ValueError("the answer's delivered words are not bound to a recorded check")
+    copy = answer_identity(shown)
+    unchanged = copy == bound
+    if not (unchanged or masked):
+        raise ValueError("the shown words differ from the run's delivered answer and no recorded masking explains it")
+    return {"provenance": "redacted_copy", "masked": [] if unchanged else list(masked),
+            "checked_by": delivered["checked_by"], "words_identity": "unknown",
+            "copy_sha256": copy["sha256"], "copy_chars": copy["chars"]}
+
+
+_PREVIEW_ONLY = ("only a truncated preview of this run's answer is retained: its full text is unavailable, "
+                 "so none of its words are shown")
+
+
+def output_answer_words(primary: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """A run's retained primary output read as its answer without a checkpoint (an older producer's run):
+    ``(text, words)`` with the text masked as ``persist_call(keep_raw=False)`` stores it, before anything shows or keeps
+    it, and ``answer_words`` over its delivery. A truncated preview is ``("", unavailable)``: the gap is named and
+    nothing of the preview is kept. No textual output is None."""
+    from ouroboros.redaction import redact_projection
+
+    raw = complete_session_primary_text(primary)
+    if not raw:
+        truncated = isinstance(primary, dict) and primary.get("truncated") is True
+        return ("", {"provenance": "unavailable", "reason": _PREVIEW_ONLY}) if truncated else None
+    masked = redact_projection({"text": raw})
+    text = masked.value["text"]
+    return text, answer_words(delivered_answer(primary, raw), text, _text_masks(masked.manifest()["rules"]))
+
+
+def _checkpoint_session_answer(root: Any, entry: Any, binding: Optional[dict], detail: dict, text: str,
+                               delivered: Dict[str, Any]) -> None:
+    """Persist this run's full answer, not a completed review producer outcome. The stored payload is masked (no raw
+    copy), so the manifest binds the delivery's identity and check first (``read_session_answer_checkpoint``)."""
+    from ouroboros.delegate_custody_usage import run_names, summary_of
+    from ouroboros.observability import persist_call
+
+    summary = summary_of(detail)
+    if (not binding or not binding.get("operation_id") or not entry.invocation_id
+            or entry.task_id != binding.get("task_id") or entry.run_id not in run_names(detail)
+            or summary.get("state") != "succeeded"):
+        return
+    try:
+        if read_session_answer_checkpoint(root, binding) is not None:
+            return  # A rejoin cannot replace the original words with a later observation.
+        persist_call(root, task_id=entry.task_id, call_id=f"{binding['operation_id']}_{_SESSION_ANSWER}",
+                     call_type=_SESSION_ANSWER, keep_raw=False,
+                     manifest={"review_operation_binding": binding, "verified_answer": delivered},
+                     payload={"run_id": entry.run_id, "invocation_id": entry.invocation_id, "text": text,
+                              "conformance_passed": str(summary.get("outputConformance") or "").strip().lower() == "passed"})
+    except Exception:
+        log.warning("Original review session answer could not be retained: %s", entry.run_id, exc_info=True)
+
+
+def read_session_answer_checkpoint(root: Any, binding: dict) -> Optional[dict]:
+    """Read the original-answer CAS, independently of parser settlement, with what its words are (``words``:
+    ``answer_words`` over the delivery the manifest bound before masking and the masks it recorded). Missing is None;
+    a foreign binding, an unbound delivery, or a change no masking records raise."""
+    from ouroboros.observability import read_call_payload
+
+    try:
+        manifest, answer, _ = read_call_payload(root, task_id=binding["task_id"],
+                                              call_id=f"{binding['operation_id']}_{_SESSION_ANSWER}")
+    except FileNotFoundError:
+        return None
+    if (manifest.get("call_type") != _SESSION_ANSWER or manifest.get("review_operation_binding") != binding
+            or not isinstance(answer, dict) or not all(isinstance(answer.get(k), str) and answer[k].strip()
+                                                       for k in ("text", "run_id", "invocation_id"))):
+        raise ValueError("original session answer binding or payload mismatch")
+    masked = _text_masks((manifest.get("redaction") or {}).get("rules"))
+    return {**answer, "words": answer_words(manifest.get("verified_answer"), answer["text"], masked)}
+
+
 def stopped_review_failure(gateway: Any, run_id: str, detail: Dict[str, Any], summary: Dict[str, Any]) -> Any:
     """The typed failure of a run that did not succeed, with its stop facts and whole partial output.
 
@@ -467,3 +638,50 @@ def stopped_review_failure(gateway: Any, run_id: str, detail: Dict[str, Any], su
     except Exception as exc:  # an unreadable output is a named gap beside the typed failure
         failure.review_partial_output_gap = f"{type(exc).__name__}: {exc}"
     return failure
+
+
+def failed_start_seat_evidence(custody_drive: Any, task_id: str, operation_id: str, exc: BaseException,
+                               checking: Dict[str, Any], invocation_id: str, *, unrequested: bool,
+                               posted: bool) -> Dict[str, Any]:
+    """A writable seat's evidence once its start failed, never raising: the attempt's own typed failure stays its
+    outcome. An observed terminal is captured as ever. The copy this attempt made (``checking['allocation']``) is
+    captured, then released unless kept, only on the CURRENT attempt's proof that its start never ran: no
+    START_REQUESTED write (``unrequested``), or ``_start_never_ran``. Every other failure keeps the copy: an entered
+    POST whatever the engine answered (a 4xx too), which may hold an accepted command (``accepted_after_refusal``)."""
+    from ouroboros.review_checking import terminal_seat_evidence
+
+    if checking.get("legacy_capture_gap"):  # a bound legacy successor without its copy: never the old receipt
+        return dict(checking["legacy_capture_gap"])
+    try:
+        proven = unrequested or _start_never_ran(custody_drive, task_id, operation_id, checking, invocation_id,
+                                                 posted=posted)
+        return terminal_seat_evidence(custody_drive, task_id, operation_id, getattr(exc, "checking_terminal_detail", None),
+                                      unsent=checking.get("allocation") if proven else None)
+    except Exception as error:  # e.g. an unreadable install identity at the release: the copy stays for the prune
+        log.warning("checking evidence after the failed start of %s failed", operation_id, exc_info=True)
+        return {"status": "capture_failed", "operation_id": operation_id, "error": f"{type(error).__name__}: {error}"}
+
+
+def _start_never_ran(custody_drive: Any, task_id: str, operation_id: str, checking: Dict[str, Any],
+                     invocation_id: str, *, posted: bool) -> bool:
+    """This attempt's own recorded start provably never ran: its POST was never entered (``posted`` false: a launch
+    fence or any refusal after the START_REQUESTED write attempt), and ``invocation_id`` now reads back
+    ``failed_definite``, with no run, for this task, operation, copy and reviewed root. An entered POST proves
+    nothing whatever the engine answered: a typed body may be synthesized from a non-JSON one, and an accepted
+    command can end before execution and answer its start with a 4xx. A pending fate (the one a replay may still
+    send), a started one (a late STARTED keeps precedence), a legacy, absent or unreadable one prove nothing too."""
+    from ouroboros import delegate_custody as custody
+
+    if not invocation_id or posted:
+        return False
+    try:
+        record = custody.invocation_record(custody_drive, invocation_id) or {}
+    except Exception:
+        log.debug("review start %s: its custody fate is unreadable; the copy stays", invocation_id, exc_info=True)
+        return False
+    request, bound = record.get("request") or {}, checking.get("custody") or {}
+    return (record.get("state") == "failed_definite" and not record.get("run_id")
+            and (record.get("task_id"), record.get("operation_id")) == (task_id, operation_id)
+            and bool(bound.get("execution_root"))
+            and (request.get("execution") or {}).get("workspaceRoot") == bound["execution_root"]
+            and (request.get("scope") or {}).get("root") == bound.get("target_root"))

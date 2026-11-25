@@ -1,13 +1,5 @@
-"""Read queue projections against the last successfully published generation.
-
-The publisher (``supervisor/queue_publication.py``) writes large task values once per
-document, by content address under ``$shared``; ``load_queue_document`` expands them, so
-every reader sees whole rows, and keeps the parsed document of one file identity
-(mtime, size, inode) so repeated readers do not parse the same bytes again. The
-heartbeats and the pool's counts are read from the certificate (``queue.alive``) when
-it names the document's generation.
-"""
-
+"""Read queue documents by file identity. Readers expand shared task values and take heartbeats
+and pool counts from the generation-matched snapshot stamp. The dispatch document certifies itself."""
 import os
 import pathlib
 import threading
@@ -15,10 +7,9 @@ import time
 from typing import Any, Dict, Optional
 
 from ouroboros.shared_values import SHARED_KEY, SharedValueMissing, token_digest
-from ouroboros.utils import read_json_dict
+from ouroboros.utils import file_identity, read_json_dict
 
-_sleep = time.sleep  # the in-flight re-read's pause, kept apart from frozen test clocks
-_monotonic = time.monotonic
+_sleep = time.sleep  # the admission contention sleeper, independent of the snapshot observation clock
 
 #: ``SHARED_KEY`` (``shared_values``) names the publisher's table of shared task values and a row's reference into it.
 #: A ``queue.alive`` stamp older than this proves no live supervisor to its readers (``task_status``);
@@ -88,11 +79,11 @@ def expand_shared(document: dict) -> dict:
 def _parsed(path: pathlib.Path, *, fresh: bool) -> Optional[dict]:
     """The expanded document of ``path``: the cached one while the file identity holds, else re-read.
 
-    ``fresh`` returns an unshared copy (a restore mutates what it reads) and caches nothing.
+    ``fresh`` returns an unshared copy (a restore mutates what it reads) and caches nothing. The identity
+    carries the change time, so a withdrawn read permission is re-read; a failed read drops the cached one.
     """
     try:
-        stat = os.stat(path)
-        identity = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        identity = file_identity(os.stat(path))
     except OSError:
         identity = None
     if not fresh and identity is not None:
@@ -101,11 +92,13 @@ def _parsed(path: pathlib.Path, *, fresh: bool) -> Optional[dict]:
         if cached is not None and cached[0] == identity:
             return cached[1]
     document = read_json_dict(path)
-    if document is None:
-        return None
     try:
+        if document is None:
+            raise ValueError(path)
         expand_shared(document)
     except ValueError:
+        with _CACHE_LOCK:  # an unreadable document is unknown, never an older reading
+            _CACHE.pop(path, None)
         return None
     if fresh:
         return document
@@ -141,73 +134,38 @@ def load_queue_document(drive_root, name="queue_snapshot.json", *, fresh: bool =
     if document is None:
         return {"_snapshot_invalid" if path.exists() else "_snapshot_missing": True}
     document = document if fresh else _view(document)
-    alive = read_json_dict(path.parent / "queue.alive") or {}
-    # The certificate names each document's own generation: the snapshot's as ``generation``, another
-    # document's under ``documents`` when it was not rewritten with the snapshot (its bytes had not changed).
-    others = alive.get("documents")
-    if name != "queue_snapshot.json" and isinstance(others, dict) and name in others:
-        alive = {**alive, "generation": others[name]}
-    document["_queue_alive"] = alive
-    if name == "queue_snapshot.json":
-        from ouroboros.model_wait import execution_elapsed_seconds, quota_waited_seconds
+    if name != "queue_snapshot.json":
+        return document
+    document["_queue_alive"] = read_json_dict(path.parent / "queue.alive") or {}
+    from ouroboros.model_wait import execution_elapsed_seconds, quota_waited_seconds
 
-        stamp = queue_stamp(document)
-        pool = stamp.get("pool")
-        if isinstance(pool, dict) and pool_observation_status(document) == "observed":
-            # The certificate's counts are as of its stamp, the document's as of the document's own write.
-            document.update((key, pool[key]) for key in POOL_COUNT_KEYS if key in pool)
-        heartbeats = stamp.get("heartbeats") or {}
-        now = time.time()
-        for row in document.get("running") or []:
-            if not isinstance(row, dict):
-                continue
-            started = row.get("started_at") or 0
-            started = started if isinstance(started, (int, float)) else 0
-            heartbeat = heartbeats.get(str(row.get("id") or ""))
-            row.update(runtime_sec=round(max(0.0, now - started), 2) if started > 0 else 0.0,
-                       quota_wait_sec=quota_waited_seconds(row, now), execution_sec=execution_elapsed_seconds(row, now),
-                       heartbeat_lag_sec=round(max(0.0, now - heartbeat), 2) if isinstance(heartbeat, (int, float)) and heartbeat > 0 else None)
+    stamp = queue_stamp(document)
+    pool = stamp.get("pool")
+    if isinstance(pool, dict) and pool_observation_status(document) == "observed":
+        # The certificate's counts are as of its stamp, the document's as of the document's own write.
+        document.update((key, pool[key]) for key in POOL_COUNT_KEYS if key in pool)
+    heartbeats = stamp.get("heartbeats") or {}
+    now = time.time()
+    for row in document.get("running") or []:
+        if not isinstance(row, dict):
+            continue
+        started = row.get("started_at") or 0
+        started = started if isinstance(started, (int, float)) else 0
+        heartbeat = heartbeats.get(str(row.get("id") or ""))
+        row.update(runtime_sec=round(max(0.0, now - started), 2) if started > 0 else 0.0,
+                   quota_wait_sec=quota_waited_seconds(row, now), execution_sec=execution_elapsed_seconds(row, now),
+                   heartbeat_lag_sec=round(max(0.0, now - heartbeat), 2) if isinstance(heartbeat, (int, float)) and heartbeat > 0 else None)
     return document
 
 
-DISPATCH_PUBLICATION_WAIT_SEC = 30.0  # the wait budget for an in-flight queue publication on a loaded host
-DISPATCH_PUBLICATION_POLL_SEC = 0.05
-
-
-class DispatchPublicationPending(RuntimeError):
-    """A generated dispatch document is not certified yet; never permissive authority."""
-
-    def __init__(self, message: str, *, probe_elapsed_sec: float = 0.0):
-        super().__init__(message)
-        self.probe_elapsed_sec = probe_elapsed_sec
+def valid_dispatch_facts(document):
+    rows = document.get("budget_root_fences")
+    members = document.get("members", {})
+    return (isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
+            and isinstance(members, dict) and all(isinstance(member, dict) for member in members.values()))
 
 
 def dispatch_probe(drive_root):
-    """One read, with no sleep: a publication gap is distinct from a malformed document."""
-    started = _monotonic()
+    """A generated dispatch document stands from its atomic replacement."""
     document = load_queue_document(drive_root, "queue_dispatch.json")
-    if not document.get("generation"):
-        return None
-    if not queue_stamp(document):
-        raise DispatchPublicationPending(
-            f"root budget fence authority unavailable: {drive_root}/state/queue_dispatch.json",
-            probe_elapsed_sec=max(0.0, _monotonic() - started))
-    return document
-
-
-def published_dispatch(drive_root, *, attempts=None, pause_sec=DISPATCH_PUBLICATION_POLL_SEC):
-    """The dispatch document of the last successful publication: its generation certified by
-    queue.alive, whatever its age (a stalled tick never stops a send). A publication in flight
-    (the stamp is unlinked first) is re-read for up to DISPATCH_PUBLICATION_WAIT_SEC; None when
-    it stays uncertified (issue #1754: a one-second window failed sends under load)."""
-    if attempts is None:
-        attempts = max(1, int(DISPATCH_PUBLICATION_WAIT_SEC / pause_sec))
-    for attempt in range(attempts):
-        document = load_queue_document(drive_root, "queue_dispatch.json")
-        if not document.get("generation"):
-            return None  # Only an uncertified publication can be in flight.
-        if queue_stamp(document):
-            return document
-        if attempt + 1 < attempts:
-            _sleep(pause_sec)
-    return None
+    return document if isinstance(document.get("generation"), str) and document["generation"].strip() else None

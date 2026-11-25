@@ -17,12 +17,12 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from ouroboros.contracts.chat_id_policy import project_chat_id
 from ouroboros.composer_cognition import (ensure_project_cognition, main_cognition, project_cognition, project_model_choice,
-                                          project_processing_choice)
+                                          project_processing_choice, new_room_cognition)
 from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import project_display_name, sanitize_project_id
 from ouroboros.project_closure import apply_closed, select_projects
 from ouroboros.project_sources import apply_folder, require_durable_folder
-from ouroboros.store import StoreBusy, open_store
+from ouroboros.store import StoreBusy, StoreMigrating, open_store
 from ouroboros.store_capture import capture
 from ouroboros.store_hot_facts import CHAT_VERSION
 from ouroboros import utils
@@ -38,8 +38,8 @@ _BINDINGS_NAME = "project_task_bindings.json"
 # Additive schema: unstamped rows are version 0; reconstructed rows may lack
 # optional provenance fields, whose defaults must remain compatible.
 _REGISTRY_SCHEMA_VERSION = 2
-# v6.73.0: project_task_bindings.json gains source_text / origin_absent fields; a copied origin with
-# attachments adds source_attachments / source_channel / source_text_placeholder (optional).
+# Bindings optionally retain source_text, source_projectable, measured source_attachments, source_channel,
+# source_text_placeholder and a card answer's typed source_input. origin_absent records an explicitly absent opening.
 _BINDINGS_SCHEMA_VERSION = 1
 _LOCK = threading.RLock()
 
@@ -103,12 +103,12 @@ from ouroboros.project_admission import (  # noqa: E402, F401
 
 
 def _load(drive_root: Any, *, strict: bool = False,
-          project_id: Optional[str] = None) -> Dict[str, Any]:
+          project_id: Optional[str] = None, require_readable: bool = False, sidebar: bool = False) -> Dict[str, Any]:
     # A writer validates global identity and its target, preserving every other
     # raw row. None means a full strict reader; "" selects no row (append/census).
     data = (_strict_admission_snapshot(drive_root, allow_missing=True,
             identity_only=project_id is not None, preserve_raw=project_id is not None)[0] if strict
-            else display_registry_snapshot(drive_root))
+            else display_registry_snapshot(drive_root, require_readable=require_readable, sidebar=sidebar))
     for index, row in enumerate(data["projects"]):
         if strict and project_id is not None:
             if row["id"] != project_id:
@@ -180,14 +180,8 @@ _ORIGIN_REF_KEYS = ("chat_id", "client_message_id", "ts", "text_sha256")
 
 
 def _validated_origin(origin: Any, resolved_chat: int) -> Dict[str, Any]:
-    """Validate the REQUIRED typed origin of a binding; raise ValueError otherwise.
-
-    Content-derived identity lookups are forbidden (DEVELOPMENT.md anti-pattern):
-    the caller must pass the origin ref BY VALUE (captured at chat ingress) or a
-    typed absence reason. ``text`` is required exactly when the origin lives in a
-    DIFFERENT chat than the project room (cross-thread projection needs the
-    retention-proof copy); a same-room origin renders natively and stores no copy.
-    """
+    """Require an ingress ref by value or typed absence, never an identity inferred from text.
+    Retain a verified text copy only across rooms; a same-room origin renders natively."""
     if not isinstance(origin, dict) or ("ref" in origin) == ("absent" in origin):
         raise ValueError(
             "bind_task_to_project requires origin={'ref': {...}, 'text': ...} for a "
@@ -201,47 +195,55 @@ def _validated_origin(origin: Any, resolved_chat: int) -> Dict[str, Any]:
             )
         return {"origin_absent": reason}
     ref = origin.get("ref")
-    if not isinstance(ref, dict) or any(ref.get(key) in (None, "") for key in _ORIGIN_REF_KEYS):
-        raise ValueError(f"origin['ref'] must carry non-empty {_ORIGIN_REF_KEYS}")
+    from ouroboros.project_dialogue import _text_sha256, owner_message_ref_is_valid
+    if not owner_message_ref_is_valid(ref):
+        raise ValueError("origin['ref'] requires a room, client id (possibly empty), non-empty timestamp and SHA-256")
     clean_ref = {key: ref.get(key) for key in _ORIGIN_REF_KEYS}
+    if "row_sha256" in ref:
+        clean_ref["row_sha256"] = ref["row_sha256"]
     try:
         cross_thread = int(clean_ref.get("chat_id") or 0) != int(resolved_chat or 0)
     except (TypeError, ValueError):
         cross_thread = True
     text = origin.get("text")
-    if not cross_thread:
+    if not cross_thread and text is None:
         return {"source_ref": clean_ref}
     if not isinstance(text, str) or not text.strip():
         raise ValueError(
             "origin['text'] (the full original message) is required for a cross-thread "
             "origin — it is the retention-proof copy the Project lens projects"
         )
-    from ouroboros.project_dialogue import _text_sha256
-
     if _text_sha256(text) != str(clean_ref.get("text_sha256") or ""):
         raise ValueError("origin['text'] does not match origin['ref']['text_sha256'] (integrity check)")
-    return {"source_ref": clean_ref, "source_text": text}
+    return {"source_ref": clean_ref, **({"source_text": text} if cross_thread else {})}
 
 
 def _origin_media(drive_root: Any, origin: Any) -> Dict[str, Any]:
-    """The attachment refs, ``source`` and placeholder mark the origin's canonical row recorded —
-    found by the ref's own ids and verified against the whole ref, never guessed from the text.
-    No row, another row or an unreadable chain records nothing; the text copy still stands."""
+    """Keep the canonical row's projection decision, media and a card answer's typed facts (``opening_input``: a press
+    is never kept as words). A held row can attest visibility across drives."""
     ref = origin.get("ref") if isinstance(origin, dict) else None
-    if not isinstance(ref, dict) or not isinstance(origin.get("text"), str):
+    from ouroboros.project_dialogue import opening_input, owner_message_ref_is_valid, resolve_owner_message_source
+    if not owner_message_ref_is_valid(ref) or not isinstance(origin.get("text"), str):
         return {}
     from ouroboros.chat_uploads import stored_refs
-    from ouroboros.project_dialogue import entry_matches_source_ref
-    from supervisor.message_ingress import accepted_chat_message
+    from ouroboros.room_membership import binding_origin_allowed
+    from ouroboros.store import StoreError
+    snapshot = origin.get("snapshot") or {}
     try:
-        row = accepted_chat_message(drive_root, int(ref.get("chat_id") or 0), str(ref.get("client_message_id") or ""))
-    except (OSError, TypeError, ValueError):
-        log.debug("origin attachments unreadable for %r", ref, exc_info=True)
-        return {}
-    if not row or not row.get("attachments") or not entry_matches_source_ref(row, [ref]):
-        return {}
-    return {"source_attachments": stored_refs(row["attachments"]), "source_channel": str(row.get("source") or ""),
-            **({"source_text_placeholder": True} if row.get("text_placeholder") is True else {})}
+        row = resolve_owner_message_source(drive_root, ref)
+    except (OSError, StoreError):
+        row = None
+    facts = {"source_projectable": snapshot["projectable"]} if type(snapshot.get("projectable")) is bool else {}
+    if snapshot.get("attachments"):
+        facts.update(source_attachments=stored_refs(snapshot["attachments"]), source_channel=str(snapshot.get("source") or ""))
+    if row:
+        facts["source_projectable"] = snapshot.get("projectable") is not False and binding_origin_allowed(ref["chat_id"], row)
+        if row.get("attachments") and "source_attachments" not in facts:
+            facts.update(source_attachments=stored_refs(row["attachments"]), source_channel=str(row.get("source") or ""))
+    if snapshot.get("placeholder_text") or (row or {}).get("text_placeholder"):
+        facts["source_text_placeholder"] = True
+    typed = opening_input(row, drive_root, retained=snapshot.get("input"))
+    return {**facts, **({"source_input": typed} if typed else {})}
 
 
 def bind_task_to_project(
@@ -260,11 +262,8 @@ def bind_task_to_project(
     their original files, while history/live routing can resolve the task's
     project chat from this lightweight binding.
 
-    ``origin`` is REQUIRED and typed (see ``_validated_origin``): either the
-    owner-message ref captured at chat ingress (+full text for a cross-thread
-    origin) or a closed-enum absence reason. A same-task same-project re-bind
-    that supplies a valid ref UPGRADES a ref-less existing row (one-way
-    enrichment); an existing valid ref is never changed.
+    ``origin`` is REQUIRED and typed (see ``_validated_origin``). A same-task same-project re-bind that supplies a
+    valid ref UPGRADES a ref-less existing row (one-way enrichment); an existing valid ref is never changed.
     """
     tid = str(task_id or "").strip()
     pid = sanitize_project_id(project_id)
@@ -273,6 +272,7 @@ def bind_task_to_project(
     if not pid:
         raise ValueError(f"unusable project id: {project_id!r}")
     if admission_basis is None and get_reserved_project(drive_root, pid) is None:
+        _validated_origin(origin, int(chat_id) if chat_id is not None else project_chat_id(pid))
         create_project(drive_root, pid)
     media = _origin_media(drive_root, origin)  # a chat read: never under the registry's cross-process lock
     # Registry lock linearizes binding with destination deletion.
@@ -330,10 +330,12 @@ def bind_task_to_project(
     return dict(row)
 
 
-def project_task_bindings(drive_root: Any) -> Dict[str, Dict[str, Any]]:
-    """Copy of the immutable task-to-Project bindings for read models (the shared parse)."""
-    return {str(task_id): dict(row) for task_id, row in _load_bindings(drive_root)["bindings"].items()
-            if isinstance(row, dict)}
+def project_task_bindings(drive_root: Any, *, strict: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Copy of the immutable task-to-Project bindings (the shared parse); ``strict`` raises on a broken store or row."""
+    bindings = _load_bindings(drive_root, strict=strict)["bindings"]
+    for task_id in bindings if strict else ():  # a damaged row raises in the per-task reader's own strict check
+        project_binding_for_task(drive_root, task_id, strict=True, bindings_snapshot=bindings)
+    return {str(task_id): dict(row) for task_id, row in bindings.items() if isinstance(row, dict)}
 
 
 def all_task_bindings(drive_root: Any) -> Dict[str, int]:
@@ -356,11 +358,7 @@ def all_task_project_bindings(drive_root: Any, *, strict: bool = False) -> Dict[
         for tid, row in bindings.items():
             if not isinstance(row, dict):
                 continue
-            pid = str(row.get("project_id") or "").strip()
-            try:
-                cid = int(row.get("project_chat_id") or 0)
-            except (TypeError, ValueError):
-                cid = 0
+            pid, cid = str(row.get("project_id") or "").strip(), _binding_chat(row)
             if pid and cid:
                 out[str(tid)] = {"project_id": pid, "chat_id": cid, "project_name": str(names.get(pid) or pid)}
     except Exception:
@@ -413,14 +411,16 @@ def project_binding_for_task(drive_root: Any, task_id: str, *, strict: bool = Fa
     return dict(row) if isinstance(row, dict) else None
 
 
-def project_chat_for_task(drive_root: Any, task_id: str) -> int:
-    row = project_binding_for_task(drive_root, task_id)
-    if not row:
-        return 0
+def _binding_chat(row: Any) -> int:
+    """The Project chat a binding row names; 0 when it names none or an unreadable one."""
     try:
-        return int(row.get("project_chat_id") or 0)
+        return int(row.get("project_chat_id") or 0) if isinstance(row, dict) else 0
     except (TypeError, ValueError):
         return 0
+
+
+def project_chat_for_task(drive_root: Any, task_id: str) -> int:
+    return _binding_chat(project_binding_for_task(drive_root, task_id))
 
 
 def project_id_for_task(drive_root: Any, task_id: str, *, strict: bool = False) -> str:
@@ -619,8 +619,8 @@ def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Op
     admitted ``chat_id``), remembered per task id for the process (an existing task's
     lineage never changes); an id the store does not hold is absent from the answer
     (admission creates it later); ``None`` when the store cannot answer right now, except
-    that a ``strict`` reader keeps positive contention typed (``StoreBusy``) for its
-    acquisition owner to wait out: contention is not unknown lineage."""
+    that a ``strict`` reader propagates a busy or importing store: a temporary
+    inability to read is not unknown lineage."""
     try:
         with open_store(drive_root, write=False) as txn:
             typed = int(txn.meta("schema_version") or 1) >= CHAT_VERSION
@@ -628,8 +628,8 @@ def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Op
             captured = capture(txn.conn, _LINEAGE_SELECT.format(chat=chat), (json.dumps(sorted(task_ids)),),
                                ("task_id", "parent_task_id", "root_task_id", "delegation_role", "chat_id"))
         records = captured.tuples()
-    except StoreBusy as exc:
-        if strict and exc.reason == "contention":
+    except (StoreBusy, StoreMigrating):
+        if strict:
             raise
         log.debug("task lineage read failed", exc_info=True)
         return None
@@ -657,12 +657,13 @@ class RoomResolver:
     preserves the caller's address. Caller/store lineage is shared. Answers cache per
     bindings snapshot: conversion invalidates, commit does not; unavailable ancestors
     retry, absent ids read once per resolver. Strict publication uses fresh bindings
-    and propagates unreadable authority instead of pinning a guessed room."""
+    and propagates unreadable authority instead of pinning a guessed room. A strict caller's
+    one registry read (``reserved``, rows by id) answers Project membership, not a parse per task."""
 
-    __slots__ = ("root", "bindings", "answers", "misses", "_projects", "strict")
+    __slots__ = ("root", "bindings", "answers", "misses", "_projects", "strict", "reserved")
 
-    def __init__(self, drive_root: Any, *, strict: bool = False) -> None:
-        self.root, self.strict = drive_root, strict
+    def __init__(self, drive_root: Any, *, strict: bool = False, reserved: Optional[dict] = None) -> None:
+        self.root, self.strict, self.reserved = drive_root, strict, reserved if strict else None
         self.bindings = _load_bindings(drive_root, strict=strict)["bindings"]  # one ``stat`` per resolver
         key = str(_bindings_path(drive_root))
         cached = None if strict else _ROOM_ANSWERS.get(key)
@@ -672,7 +673,8 @@ class RoomResolver:
                 _ROOM_ANSWERS[key] = cached
         self.answers: Dict[str, int] = cached[1]
         self.misses: set = set()
-        self._projects: Optional[frozenset] = None
+        self._projects: Optional[frozenset] = (
+            None if self.reserved is None else frozenset(row["chat_id"] for row in self.reserved.values()) - {0})
 
     def _facts(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Cached or read facts; ``{}`` for a known miss; ``None`` when unavailable now."""
@@ -696,14 +698,12 @@ class RoomResolver:
     def _bound(self, task_id: str) -> int:
         row = project_binding_for_task(self.root, task_id, strict=self.strict, bindings_snapshot=self.bindings)
         if self.strict and row:
-            project = get_reserved_project(self.root, row["project_id"], strict=True)
+            project = (get_reserved_project(self.root, row["project_id"], strict=True) if self.reserved is None
+                       else self.reserved.get(row["project_id"]))
             if not project or type(project.get("chat_id")) is not int:
                 raise ValueError("project_source_unknown")
             return project["chat_id"]
-        try:
-            return int(row.get("project_chat_id") or 0) if isinstance(row, dict) else 0
-        except (TypeError, ValueError):
-            return 0
+        return _binding_chat(row)
 
     def __call__(self, task_id: Any, parent_task_id: Any = "", root_task_id: Any = "") -> int:
         tid = str(task_id or "").strip()
@@ -776,15 +776,22 @@ def project_chat_for_task_tree(
         return 0
 
 
-def list_reserved_projects(drive_root: Any, *, strict: bool = False) -> List[Dict[str, Any]]:
-    """Raw registry reservations, including frozen pre-cutover revisions for the importer."""
+def _registry_projects_snapshot(drive_root: Any, *, strict: bool = False, require_readable: bool = False,
+                                sidebar: bool = False) -> tuple[List[Dict[str, Any]], bool]:
     with _LOCK:
-        projects = _load(drive_root, strict=strict)["projects"]
-    return sorted(
-        projects,
+        snapshot = _load(drive_root, strict=strict, require_readable=require_readable, sidebar=sidebar)
+    projects = sorted(
+        snapshot["projects"],
         key=lambda p: str(p.get("last_active_at") or p.get("updated_at") or p.get("created_at") or ""),
         reverse=True,
     )
+    return projects, snapshot["sidebar_complete"] if sidebar else False
+
+
+def list_reserved_projects(drive_root: Any, *, strict: bool = False,
+                           require_readable: bool = False) -> List[Dict[str, Any]]:
+    """Raw reservations (including frozen importer revisions); ``require_readable`` refuses unproved emptiness."""
+    return _registry_projects_snapshot(drive_root, strict=strict, require_readable=require_readable)[0]
 
 
 def list_projects(drive_root: Any, *, strict: bool = False,
@@ -801,12 +808,11 @@ def list_projects(drive_root: Any, *, strict: bool = False,
                            closed=closed, oldest_first=oldest_first)
 
 
-def list_sidebar_projects(drive_root: Any) -> List[Dict[str, Any]]:
-    """Projects visible while active or while deletion is quiescing."""
-    return [
-        project for project in list_reserved_projects(drive_root)
-        if project.get("lifecycle") in {PROJECT_ACTIVE, PROJECT_DELETING}
-    ]
+def list_sidebar_projects(drive_root: Any, *, require_readable: bool = False,
+                          with_coverage: bool = False) -> List[Dict[str, Any]] | tuple[List[Dict[str, Any]], bool]:
+    """Active and quiescing rooms; optionally pair rows with completeness. Strict about unproved emptiness on request."""
+    snapshot = _registry_projects_snapshot(drive_root, require_readable=require_readable, sidebar=True)
+    return snapshot if with_coverage else snapshot[0]
 
 
 def reserved_project_chat_ids(drive_root: Any, *, strict: bool = False) -> set:
@@ -837,10 +843,7 @@ def readable_rooms(drive_root: Any) -> Optional[set]:
     when the registry names no room it can vouch for: it cannot be read, is lost beside its commit witness, or
     holds rows none of which is readable. That is an unknown set, never "no Projects"."""
     try:
-        rooms = {project["chat_id"] for project in list_reserved_projects(drive_root)} - {0}
-        if not rooms:  # empty is "no Projects" only where the strict reader agrees
-            _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)
-        return rooms
+        return {project["chat_id"] for project in list_reserved_projects(drive_root, require_readable=True)}
     except Exception as error:
         # Main's saved history and the room set wait on this answer, and a broken registry can outlast a restart:
         # its cause is named once a process and cause, where a person reading the log looks.
@@ -1018,12 +1021,10 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
         pname = "Project"
     # Nameless work of a Project is called by its Project: never a bare "Project › Task".
     task_name = task_presentation_name(*sources, fallback=pname or fallback)
-    label = f"{pname} › {task_name}" if pname else task_name
     # One name, said once: a task whose own name IS the project name renders
     # "Launch › Launch", which reads as two different things. Exact equality
     # only — a prefix rule would fold "Art" into "Arthur".
-    if pname and task_name == pname:
-        label = task_name
+    label = f"{pname} › {task_name}" if pname and task_name != pname else task_name
     return {"project_id": pid, "project_name": pname, "task_id": tid,
             "project_routable": registered, "task_name": task_name,
             "target_label": label}
@@ -1043,11 +1044,12 @@ def mirrored_answer(result: Any, phase: str) -> Dict[str, str]:
     salvage, internal quiet results and host notices are not published answers; a row sent while the
     task still reads ``working`` is frozen by the outbox and must stay a pointer.
     """
-    from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL, schedule_report_run
 
     row = result if isinstance(result, dict) else {}
     answer = row["result"].strip() if isinstance(row.get("result"), str) else ""
-    if (str(row.get("terminal_origin") or "") != TERMINAL_ORIGIN_MODEL_FINAL
+    if (schedule_report_run(row)
+            or str(row.get("terminal_origin") or "") != TERMINAL_ORIGIN_MODEL_FINAL
             or row.get("wake_silent") is True
             or str(phase or "") not in _TERMINAL_MIRROR_PHASES
             or not answer or len(answer) > MIRRORED_ANSWER_MAX_CHARS):
@@ -1089,7 +1091,7 @@ def create_project(
             "name": _validated_name(name, pid),
             "chat_id": project_chat_id(pid),
             "working_dir": str(working_dir or "").strip(),
-            "cognition": cognition,
+            "cognition": new_room_cognition(cognition),
             "origin": str(origin or "owner"),
             "created_at": utc_now_iso(),
             "last_active_at": utc_now_iso(),
@@ -1442,8 +1444,8 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
 
     ``chat_id`` addresses an active room, ``project_id`` an active or deleting one; registry reads retain lifecycle
     and binding authority. An unproved inactive room requires complete import; a pending, failed or invalid
-    interval is never inactivity. ``sidebar_rows``, for the unaddressed list only, is the caller's own
-    ``list_sidebar_projects`` read: this list and what the caller counts of it are then one registry observation.
+    interval is never inactivity. ``sidebar_rows``, for the unaddressed list only, carries the caller's observed rows.
+    Counts or coverage the caller carries from that same read describe the input, not a second registry observation.
     ``by_message`` (the owner's clients) orders and selects by ``last_message_at`` once the history is dated
     (``room_messages``); until then the rows carry none and keep the activity order. ``keep`` names chat ids whose
     rows the pinned-and-recent list holds beyond its recent slice, after it, in the same order.

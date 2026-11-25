@@ -241,12 +241,13 @@ def test_cards_activity_logs_and_budget_speak_the_status_marks(tmp_path, engine)
                         window.emitLog({ type: 'task_checkpoint', task_id: 'checking',
                             checkpoint_kind: 'context_fit_low_retry', ts: at(6) });
                     }""")
+                    # Logs colours only a failure: a settled task says its outcome in words, a warning in its own.
                     def headline(task_id):
-                        phase = page.locator(f'.log-task-card[data-task-group="{task_id}"] [data-task-phase]')
-                        return phase.inner_text(), phase.evaluate("el => getComputedStyle(el).color")
-                    assert headline("stopped") == ("cancelled", tokens["--text-secondary"])
-                    assert headline("warned") == ("warn", tokens["--status-ok-fg"])
-                    assert headline("checking") == ("warn", tokens["--status-warn-fg"])
+                        card = page.locator(f'.log-task-card[data-task-group="{task_id}"]')
+                        return card.locator(':scope > summary .log-words').inner_text(), card.locator('.log-failure').first.is_visible()
+                    assert headline("stopped") == ("Stopped", False)
+                    assert headline("warned") == ("Done with warnings", False)
+                    assert headline("checking")[1] is False
 
                     # The budget pill: a neutral fact at the very limit; amber only while its stop waits for the owner.
                     pill = page.locator("#chat-budget-pill")

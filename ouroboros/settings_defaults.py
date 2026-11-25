@@ -27,12 +27,12 @@ CLAUDEXOR_ADMISSION_POLL_SEC = 0.15
 # provider profiles gives onboarding, runtime defaults, and tests one vocabulary
 # instead of repeating model ids across those surfaces.
 OPENROUTER_DEFAULTS = {
-    "main": "google/gemini-3.8-flash",
+    "main": "google/gemini-4-hydrogen",
     "heavy": "",
     "light": "openai/gpt-6-luna",
     "vision": "",
     "consciousness": "",
-    "fallback": "openai/gpt-5.6-luna",
+    "fallback": "openai/gpt-6.1-terra",
     # Plain Sol, not the `-pro` routing slug: a pro-mode call bills the prompt
     # three to four times over (parallel test-time compute), so the density
     # witness it records can never admit a repository-sized pack, and every
@@ -42,7 +42,7 @@ OPENROUTER_DEFAULTS = {
 
 OPENROUTER_REVIEW_DEFAULTS = {
     "triad": (
-        "google/gemini-3.8-flash",
+        "google/gemini-4-hydrogen",
         "openai/gpt-6.1-sol",
         "anthropic/claude-opus-5.5",
     ),
@@ -52,11 +52,25 @@ OPENROUTER_REVIEW_DEFAULTS = {
     "advisory": "anthropic/claude-sonnet-5",
 }
 
+# Ordinary helpers (row id, model, recommended use) any reachable OpenRouter adds to a factory catalog beside
+# Main, Light and the subscriptions (owner, 2026-11-16): Auto effort, never marked Reviewer, never added to a
+# catalog the owner saved (``subscription_install_presets.compile_available_subagents``).
+OPENROUTER_HELPER_DEFAULTS = (
+    ("analysis-critic", "z-ai/glm-5.3",
+     "Use for analysis, labeling and an extra critical read from another model family."),
+    ("bulk-reader", "deepseek/deepseek-v4.1-flash-1017",
+     "Use as an inexpensive reader of large volumes of text and an independent view of them."),
+    ("alternative-voice", "moonshotai/kimi-k3.1-pro",
+     "Use as a stronger alternative voice on hard questions; its long answers cost more than the two lighter helpers."),
+)
+
 
 # Settings defaults
 SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OPENROUTER_API_KEY": "",
     "OPENAI_API_KEY": "",
+    # The built-in OpenAI connection's API: "" (never chosen: Chat Completions), "chat_completions" or "responses".
+    "OPENAI_API_SURFACE": "",
     "OPENAI_BASE_URL": "",
     "OPENAI_COMPATIBLE_API_KEY": "",
     "OPENAI_COMPATIBLE_BASE_URL": "",
@@ -105,7 +119,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_MODEL_FALLBACKS": OPENROUTER_DEFAULTS["fallback"],
     "OUROBOROS_SERVED_MODEL_REDOS": 2,  # redos of a round another model answered (`llm_substitution.py`)
     "OUROBOROS_MAX_WORKERS": "", "OUROBOROS_PRESENCE_MAX_ACTIVE": 2,  # "": no cap, memory admits (settings_scales)
-    "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6,
+    "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "",  # "": no number, the mind decides (settings_scales)
     "OUROBOROS_MAX_SUBAGENT_DEPTH": 3,
     # Mutative ("acting") subagents master toggle. Empty = follow runtime mode
     # (ON in advanced/pro, OFF in light); explicit true/false overrides. Owner-
@@ -136,7 +150,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_TRANSIENT_RETRY_MAX": 6,
     # The owner's limit on physical calls in flight per model route (``model_concurrency``): excess sends wait in
     # line (no clock of their own: a slot, the caller's deadline, Stop or Pause ends the wait). "": not chosen, so an
-    # API route has no limit of the host's and a local model keeps three (``settings_scales.MODEL_CAP_KEY``); a
+    # API route has no limit of the host's and the built-in server admits one (``settings_scales.MODEL_CAP_KEY``); a
     # whole number limits both; <=0 limits neither.
     "OUROBOROS_MODEL_MAX_CONCURRENCY": "",
     # The owner's interface language for this install: a BCP-47 tag ("ru", "pt-BR", "art-x-<slug>"
@@ -180,7 +194,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_BG_WAKEUP_MIN": 900,
     "OUROBOROS_BG_WAKEUP_MAX": 14400,
     "OUROBOROS_CONSCIOUSNESS_AUTONOMY": "act",
-    "OUROBOROS_CONSCIOUSNESS_DAILY_USD": 20.0,
+    "OUROBOROS_CONSCIOUSNESS_DAILY_USD": 15.0,
     "OUROBOROS_CONSCIOUSNESS_MAX_TASKS": 2,
     # Post-task self-evolution envelope (V4). Owner-enabled capability whose
     # CONTENT stays LLM-first; default OFF. When enabled, after a qualifying task
@@ -217,12 +231,13 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_SUBAGENTS": "",
     "OUROBOROS_SUBAGENTS_MODE": "auto",
     # INSTALL-TIME facts: the agent-preset generation this install received, and WHEN onboarding last completed
-    # and by which client attempt (recorded on EVERY completion). Endpoint-authored and disk-only — see
-    # ENDPOINT_AUTHORED_SETTINGS.
+    # and by which client attempt (recorded on EVERY completion), and "on" when its Consciousness switch was left on
+    # (a first state is born with it). Endpoint-authored and disk-only — see ENDPOINT_AUTHORED_SETTINGS.
     "OUROBOROS_SUBSCRIPTION_PRESET_VERSION": "",
     "OUROBOROS_SUBAGENT_PRESET_RECEIPT": "",
     "OUROBOROS_ONBOARDING_COMPLETED_AT": "",
     "OUROBOROS_ONBOARDING_ATTEMPT_ID": "",
+    "OUROBOROS_ONBOARDING_CONSCIOUSNESS": "",
     # Auto-grant reviewed-skill requests by default; grants stay bound to the
     # reviewed content hash and editing a skill still invalidates them.
     "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
@@ -291,7 +306,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # EVERY cache_control breakpoint on the Anthropic-normalizing family (direct, OpenRouter anthropic/, the
     # generic compatible lane) — main loop, review lanes, safety supervisor alike — at the ONE send-time
     # finalizer (llm._normalize_payload_cache_ttl). 'default' = bare markers (provider default 5m tier); '5m'/'1h'
-    # = the explicit Anthropic ephemeral tiers ('1h' bills writes at the documented 2x-vs-1.25x ratio). Other
+    # = the explicit Anthropic ephemeral tiers (pricing uses only applicable catalog rates). Other
     # wire formats are a NO-OP (Gemini documents no ttl field — the v5.30.0 outage class).
     "OUROBOROS_PROMPT_CACHE_TTL": "1h",
     # Main's primary TASK is independent of the helper corridor MIN <= MAX.
@@ -520,7 +535,8 @@ _DISK_AUTHORED_SETTINGS = ("OUROBOROS_CONTEXT_MODE", "OUROBOROS_CONTEXT_MODE_AUT
 # ENDPOINT-AUTHORED, DISK-ONLY: install-time facts POST /api/onboarding/complete alone writes. The ratchets above are
 # disk-authored yet DO project once the file carries them; these never leave disk in EITHER direction — an env timestamp alone closed the onboarding window on a fresh install, and an env marker was then persisted by a save.
 ENDPOINT_AUTHORED_SETTINGS = frozenset({"OUROBOROS_SUBSCRIPTION_PRESET_VERSION", "OUROBOROS_SUBAGENT_PRESET_RECEIPT",
-                                        "OUROBOROS_ONBOARDING_COMPLETED_AT", "OUROBOROS_ONBOARDING_ATTEMPT_ID"})
+                                        "OUROBOROS_ONBOARDING_COMPLETED_AT", "OUROBOROS_ONBOARDING_ATTEMPT_ID",
+                                        "OUROBOROS_ONBOARDING_CONSCIOUSNESS"})
 # ENDPOINT-WRITTEN, PROJECTED: one endpoint owns the write (the generic save skips the key and names the writer in
 # `ignored_keys`, so a language change always creates the memory header, fires the hooks and broadcasts), yet the value
 # projects to the environment like any setting: a restart, the worker and the Telegram bridge read it (the disk-only set above lost it).
@@ -560,7 +576,8 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
 # ABSENT key leaves the choice to the environment (a deployment's OUROBOROS_UI_DIR=none). A merged write
 # carries every key the read produced, so it must not author an absent key with the value the environment
 # or the default gave it: one unrelated Settings save would otherwise freeze the operator's choice on disk.
-SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR", "OUROBOROS_MAX_WORKERS", "OUROBOROS_MODEL_MAX_CONCURRENCY"})
+SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR", "OUROBOROS_MAX_WORKERS", "OUROBOROS_MODEL_MAX_CONCURRENCY",
+                                   "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"})
 
 
 def unauthored_saved_choices(prepared, stored, authored=()) -> frozenset:

@@ -8,6 +8,7 @@ Down to 320px the top bar wraps within the window, every Appearance choice on th
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
@@ -86,10 +87,16 @@ def _serve_login(page, harness):
     page.route("**/api/claudexor/login**", lambda route: route.fulfill(json=answer))
 
 
+STARTER = (pathlib.Path(__file__).resolve().parents[1] / "web/tests/fixtures/skills_v4/onboarding_starter_skills.json").read_text(
+    encoding="utf-8")
+
+
 def _open(ui, size, theme="light", connected=False):
     page = ui["page"]
     if not connected:
         ui["fixture"]["status"]["profiles"]["profiles"] = []
+    # The Skills step's list, as the gateway answers it (its cards are what the step's layout is about).
+    page.route("**/api/onboarding/starter-skills", lambda route: route.fulfill(content_type="application/json", body=STARTER))
     page.set_viewport_size(dict(zip(("width", "height"), size)))
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
     page.goto(ui["url"] + "/onboarding")
@@ -125,7 +132,7 @@ def test_an_ordinary_accounts_state_fits_the_setup_window(wizard, connected, the
     _assert_way_forward(facts)
     # What the compact layout dropped is the repetition, never the size of the text or what it says.
     assert (facts["badge"], facts["nudge"]) == (False, False)
-    assert (facts["railLabel"], facts["currentMarked"]) == ("Step 1 of 5", "step")
+    assert (facts["railLabel"], facts["currentMarked"]) == ("Step 1 of 7", "step")
     assert facts["sizes"] == {"stepTitle": "24px", "reason": "12px", "next": facts["sizes"]["next"]}
     assert facts["reasonInFooter"]
     if connected:
@@ -134,6 +141,142 @@ def test_an_ordinary_accounts_state_fits_the_setup_window(wizard, connected, the
     else:
         assert facts["reason"]["inView"] and facts["reasonText"].startswith("Connect Codex, enter an API key")
         assert page.locator("#agents-outcome").is_hidden()
+
+
+# An old program the engine can update: the Accounts step's one program line (docs/DESIGN.md §7), fictitious values.
+OLD_PROGRAM = {"harness": "codex", "selection": {"path": "/opt/vendor/bin/codex", "realPath": "/opt/vendor/bin/codex", "version": "0.50.0",
+               "versionOutput": "codex 0.50.0", "overrideEnv": None, "overrideValue": None},
+               "newest": {"status": "available", "source": "registry", "version": "0.60.0", "observedAt": "2026-11-20T00:00:00Z"},
+               "updateAvailable": "yes", "releaseNotesUrl": None, "operation": None, "observedAt": "2026-11-20T00:00:00Z",
+               "actions": {"update": {"available": True, "reason": None, "commands": []}, "install": {"available": True, "reason": None, "commands": []},
+                           "exactVersion": {"available": False, "reason": "Not offered"}}}
+PROGRAM_LINE = '[data-agent-family="codex"] .harness-model-program'
+
+
+def _serve_programs(page, asked):
+    def answer(route):
+        asked.append(route.request.url)
+        route.fulfill(json={"observedAt": "2026-11-20T00:00:00Z", "harnesses": [OLD_PROGRAM]})
+    page.route("**/api/claudexor/maintenance/harnesses**", answer)
+
+
+def _in_view(page, selector):
+    return page.locator(selector).first.evaluate("""el => { const b = el.getBoundingClientRect(), f = document.querySelector('.wizard-footer').getBoundingClientRect();
+        return b.top >= 0 && b.bottom <= f.top + 0.5 && b.left >= 0 && b.right <= innerWidth + 0.5; }""")
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_one_update_line_keeps_the_accounts_step_in_the_setup_window(wizard, theme, tmp_path):
+    evidence = diagnostic_directory(tmp_path / "frames", "program-line", publish=True)
+    asked = []
+    _serve_programs(wizard["page"], asked)
+    page = _open(wizard, SETUP_WINDOW, theme, connected=True)
+    page.wait_for_selector(PROGRAM_LINE)
+    page.screenshot(path=str(evidence / f"update-line-{SETUP_WINDOW[0]}x{SETUP_WINDOW[1]}-{theme}.png"), animations="disabled")
+    facts = _facts(page)
+    assert facts["overflow"] == 0, facts
+    assert all(row["inView"] and row["uncovered"] for row in facts["rows"] + facts["connects"])
+    _assert_way_forward(facts)
+    # One fact, its separator kept off the start of a line (docs/DESIGN.md §7).
+    assert page.locator(PROGRAM_LINE).inner_text().split() == ["Program", "0.50.0", "·", "0.60.0", "available", "Update"]
+    assert _in_view(page, f"{PROGRAM_LINE} [data-program-action]")
+    assert page.locator(".harness-model-program").count() == 1, "only the family with something to act on"
+    assert any("checkLatest=true" in url and "harness=codex" in url for url in asked), asked
+
+
+@pytest.mark.parametrize("size", [SETUP_WINDOW, PHONE], ids=["setup-window", "phone"])
+def test_a_failed_sign_in_and_the_update_offer_share_the_viewport(wizard, size, tmp_path):
+    evidence = diagnostic_directory(tmp_path / "frames", "program-line", publish=True)
+    page = wizard["page"]
+    _serve_programs(page, [])
+    failed = {"job_id": "fixture-login", "job": {"state": "failed", "harness": "codex", "outcome": {"reason": "vendor_program_failed"}},
+              "sequence": 1, "cursor": "fixture"}
+    page.route("**/api/claudexor/login**", lambda route: route.fulfill(json=failed))
+    page = _open(wizard, size)
+    page.wait_for_selector(PROGRAM_LINE)
+    page.click('[data-agent-connect="codex"]')
+    page.wait_for_selector("[data-login-verdict]")
+    # Scrolled just far enough that the verdict clears the pinned footer (WebKit's own reveal ignores its clearance),
+    # again on each frame until the card and the rows have settled: a late reflow can move the verdict after one scroll.
+    page.wait_for_function("""() => { const over = document.querySelector('[data-login-verdict]').getBoundingClientRect().bottom
+        - document.querySelector('.wizard-footer').getBoundingClientRect().top;
+        if (over > 0) window.scrollBy({behavior: 'instant', top: over + 4}); return over <= 0; }""", polling="raf")
+    page.screenshot(path=str(evidence / f"failed-sign-in-{size[0]}x{size[1]}.png"), animations="disabled")
+    assert _in_view(page, "[data-login-verdict]") and _in_view(page, f"{PROGRAM_LINE} [data-program-action]")
+    _assert_way_forward(_facts(page))
+
+
+def test_a_stopped_engine_shows_no_program_line_and_no_warning(wizard, tmp_path):
+    asked = []
+    _serve_programs(wizard["page"], asked)
+    wizard["fixture"]["status"]["daemon"] = {"state": "stale"}
+    page = _open(wizard, SETUP_WINDOW)
+    page.wait_for_timeout(500)
+    page.screenshot(path=str(diagnostic_directory(tmp_path / "frames", "program-line", publish=True) / "stopped-engine.png"), animations="disabled")
+    assert page.locator(".harness-model-program").count() == 0
+    assert "Program inspection" not in page.locator("#agents-accounts").inner_text()
+    assert asked == [], "a stopped engine is never asked about its programs"
+
+
+@pytest.mark.parametrize("size", [SETUP_WINDOW, PHONE], ids=["setup-window", "phone"])
+def test_an_update_the_engine_never_received_keeps_its_reason_and_offers_update_again(wizard, size, tmp_path):
+    """The engine could not be acquired for the press (``acceptance=not_submitted``): the reason stays beside Update,
+    a new press, through a visit to Models and back; the second press is sent."""
+    evidence = diagnostic_directory(tmp_path / "frames", "program-line", publish=True)
+    page = wizard["page"]
+    _serve_programs(page, [])
+    posts = []
+
+    def create(route):
+        posts.append(route.request.headers.get("idempotency-key"))
+        if len(posts) == 1:
+            route.fulfill(status=503, json={"error": {"code": "engine_unavailable", "message": "Engine temporarily busy",
+                                                       "context": {"acceptance": "not_submitted", "scope": "this_attempt"}}})
+        else:
+            route.fulfill(json={"id": "fixture-op", "harness": "codex", "state": "queued"})
+    page.route("**/api/claudexor/maintenance/operations", create)
+    page = _open(wizard, size, connected=True)
+    page.click(f"{PROGRAM_LINE} [data-program-action]")
+    page.wait_for_function(f"() => document.querySelector('{PROGRAM_LINE}')?.textContent.includes('Update not started')")
+    page.click("#next-btn")
+    page.wait_for_selector('[data-model-role-group="light"]')
+    page.click("#back-btn")
+    page.wait_for_selector(PROGRAM_LINE)
+    page.screenshot(path=str(evidence / f"not-submitted-{size[0]}x{size[1]}.png"), animations="disabled")
+    line = page.locator(PROGRAM_LINE)
+    assert "Update not started: Engine temporarily busy" in line.inner_text()
+    button = line.locator('[data-program-action="latest"]')
+    assert button.is_enabled() and button.inner_text() == "Update"
+    assert line.locator('[data-program-action="rejoin"]').count() == 0
+    button.click()
+    page.wait_for_function(f"() => document.querySelector('{PROGRAM_LINE}')?.textContent.includes('Update queued')")
+    assert len(posts) == 2 and posts[0] != posts[1], posts
+
+
+def test_a_line_arriving_for_one_family_keeps_focus_on_another(wizard, tmp_path):
+    page = wizard["page"]
+    held = []
+    unread = {**OLD_PROGRAM, "newest": {"status": "not_read", "source": None}, "updateAvailable": "cannot_tell"}
+
+    def answer(route):
+        if "checkLatest=true" in route.request.url:
+            held.append(route)
+        else:
+            route.fulfill(json={"observedAt": "2026-11-20T00:00:00Z", "harnesses": [unread]})
+    page.route("**/api/claudexor/maintenance/harnesses**", answer)
+    _serve_login(page, "claude")
+    page = _open(wizard, SETUP_WINDOW, connected=True)
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert held, "the newest-release read is outstanding"
+    page.focus('[data-agent-connect="claude"]')
+    held[0].fulfill(json={"observedAt": "2026-11-20T00:00:00Z", "harnesses": [OLD_PROGRAM]})
+    page.wait_for_selector(PROGRAM_LINE)
+    assert page.evaluate("() => document.activeElement?.dataset.agentConnect") == "claude"
+    page.keyboard.press("Enter")  # still Claude's Connect: its sign-in opens
+    page.wait_for_selector("[data-open-signin]")
 
 
 @pytest.mark.parametrize("scene, size, harness, keys", [
@@ -265,7 +408,7 @@ def test_revealing_a_pinned_control_never_moves_the_page(wizard, size):
     """It is already in view; the clearance that keeps fields out from under the footer does not apply to the footer."""
     page = _open(wizard, size, connected=True)
     page.click("#next-btn")
-    page.wait_for_selector('.wizard-steps[aria-label="Step 2 of 5"]')
+    page.wait_for_selector('.wizard-steps[aria-label="Step 2 of 7"]')
     page.evaluate("window.scrollTo(0, 120)")
     page.wait_for_function("window.scrollY === 120")
     for control in ("#back-btn", "#next-btn"):
@@ -280,23 +423,107 @@ def test_revealing_a_pinned_control_never_moves_the_page(wizard, size):
     assert page.evaluate("window.scrollY") == 120
 
 
+def _assert_consciousness_step_fits(page, size):
+    """The step's switch and Continue: at the setup window the whole step and Continue are in view without a scroll,
+    and at every size the switch's two positions are reachable, nothing scrolls sideways and every rail title stays
+    inside its pill (the one-word "Consciousness" ran into its neighbour at 840x640)."""
+    facts = page.evaluate("""() => { const se = document.scrollingElement, step = document.querySelector('[data-consciousness-step]');
+        const boxes = [...document.querySelectorAll('[data-consciousness-choice]')].map((el) => el.getBoundingClientRect());
+        return {overflow: se.scrollHeight - se.clientHeight, sideways: se.scrollWidth - se.clientWidth, choices: boxes.length,
+            stepBottom: step.getBoundingClientRect().bottom, footerTop: document.querySelector('.wizard-footer').getBoundingClientRect().top,
+            chosen: document.querySelector('[data-consciousness-choice][aria-pressed="true"]')?.dataset.consciousnessChoice,
+            spills: [...document.querySelectorAll('.wizard-step')].filter((el) => el.scrollWidth > el.clientWidth + 1)
+                .map((el) => el.textContent.trim())}; }""")
+    assert (facts["choices"], facts["chosen"], facts["sideways"] <= 1) == (2, "on", True), facts
+    assert facts["spills"] == [], "a rail title runs out of its pill"
+    if size == SETUP_WINDOW:
+        assert facts["overflow"] == 0 and facts["stepBottom"] <= facts["footerTop"] + 1, facts
+
+
+RAIL = r"""() => { const pills = [...document.querySelectorAll('.wizard-step')].filter((el) => el.offsetParent);
+    const title = document.querySelector('.step-title').getBoundingClientRect();
+    const footer = document.querySelector('.wizard-footer').getBoundingClientRect();
+    return {shown: pills.map((el) => el.innerText.replace(/\s+/g, ' ').trim()),
+        oneLine: pills.map((el) => { const t = el.querySelector('.wizard-step-title');
+            return t.getBoundingClientRect().height < 2 * parseFloat(getComputedStyle(t).fontSize); }),
+        title: {top: title.top, bottom: title.bottom}, footerTop: footer.top}; }"""
+
+
+def _assert_skills_step_usable(page, size):
+    """The Skills step (owner 2026-11-21) is taller than any window: it scrolls under the pinned footer, the rail's
+    seven titles stay inside their pills and nothing scrolls sideways, at the top of the list and at its end. The rail
+    names each step in one short word on one line; a phone's names the current one alone («5 of 7 Skills»), clipping
+    no neighbour. Entering the step, its title stands clear of the footer."""
+    page.wait_for_selector("[data-starter-skill]")
+    rail = page.evaluate(RAIL)
+    if size[0] <= 720:
+        assert rail["shown"] == ["5 of 7 Skills"], rail
+    else:
+        assert len(rail["shown"]) == 7 and all(rail["oneLine"]), rail
+    assert rail["title"]["top"] >= 0 and rail["title"]["bottom"] <= rail["footerTop"], rail
+    for place in ("top", "end"):
+        if place == "end":
+            page.locator(".skills-starter-trust").scroll_into_view_if_needed()
+        facts = _facts(page)
+        _assert_way_forward(facts)
+        spills = page.evaluate("""() => [...document.querySelectorAll('.wizard-step')]
+            .filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.textContent.trim())""")
+        assert spills == [], f"a rail title runs out of its pill at the {place}"
+        assert page.locator("[data-starter-skill]").evaluate_all(
+            "rows => rows.every((row) => row.getBoundingClientRect().right <= innerWidth + 0.5)"), size
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("size", [SETUP_WINDOW, (840, 640), PHONE], ids=["setup-window", "short", "phone"])
+def test_the_consciousness_and_skills_steps_fit_and_the_seven_step_rail_does_not_overflow(wizard, size, theme, tmp_path):
+    """Owner decisions 2026-11-20 and 2026-11-21: Consciousness is its own step, on by default, and Skills follows it
+    on Review & start. At 980×752 Consciousness fits with Continue in view; at 840×640 and phone width both stay
+    usable; the seven-step rail never pushes the page sideways."""
+    evidence = diagnostic_directory(tmp_path / "frames", "consciousness", publish=True)
+    page = _open(wizard, size, theme, connected=True)
+    page.click("#quick-start-btn")
+    page.wait_for_selector("[data-consciousness-step]")
+    page.screenshot(path=str(evidence / f"{size[0]}x{size[1]}-{theme}.png"), animations="disabled")
+    facts = _facts(page)
+    _assert_way_forward(facts)
+    assert (facts["railLabel"], facts["currentInRail"]) == ("Step 4 of 7", True), facts
+    _assert_consciousness_step_fits(page, size)
+    page.click('[data-consciousness-choice="off"]')
+    assert page.locator('[data-consciousness-choice="off"]').get_attribute("aria-pressed") == "true"
+    page.click("#next-btn")  # Review & start's Continue goes on to Skills
+    page.wait_for_selector('[data-starter-skills="step"]')
+    assert (_facts(page)["railLabel"], _facts(page)["currentInRail"]) == ("Step 5 of 7", True)
+    _assert_skills_step_usable(page, size)
+    page.screenshot(path=str(evidence / f"{size[0]}x{size[1]}-{theme}-skills.png"), animations="disabled")
+    page.click("#next-btn")  # and its Continue to Summary, which reads the choice as one row
+    page.wait_for_selector(".summary-card")
+    assert "Consciousness" in page.locator(".summary-card").inner_text()
+    assert "Off · Only when you write to it" in page.locator(".summary-card").inner_text()
+
+
 @pytest.mark.parametrize("size", [SETUP_WINDOW, PHONE], ids=["setup-window", "phone"])
 def test_every_step_keeps_the_way_forward_and_says_where_you_are(wizard, size, tmp_path):
     evidence = diagnostic_directory(tmp_path / "frames", "steps", publish=True)
     page = _open(wizard, size, connected=True)
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator("#openrouter-key").fill("sk-or-draft-fixture-0123456789")
-    for index, step in enumerate(("accounts", "models", "review", "budget", "summary"), start=1):
-        page.wait_for_selector(f'.wizard-steps[aria-label="Step {index} of 5"]')
+    for index, step in enumerate(("accounts", "models", "review", "consciousness", "skills", "budget", "summary"), start=1):
+        page.wait_for_selector(f'.wizard-steps[aria-label="Step {index} of 7"]')
         facts = _facts(page)
         page.screenshot(path=str(evidence / f"{size[0]}x{size[1]}-{index}-{step}.png"), animations="disabled")
         _assert_way_forward(facts)
-        assert (facts["railLabel"], facts["currentMarked"], facts["currentInRail"]) == (f"Step {index} of 5", "step", True), facts
+        assert (facts["railLabel"], facts["currentMarked"], facts["currentInRail"]) == (f"Step {index} of 7", "step", True), facts
         assert abs(facts["footerVar"] - facts["measured"]) < 1, facts
-        if index < 5:
+        if step == "consciousness":
+            _assert_consciousness_step_fits(page, size)
+        if step == "skills":
+            _assert_skills_step_usable(page, size)
+        if step == "models":  # the Light caption is drawn text, not a hover title
+            assert "Memory consolidation" in page.locator('[data-model-role-group="light"]').inner_text()
+        if index < 7:
             page.click("#next-btn")
     # Back walks the same footer, and the draft is still there.
-    for _ in range(4):
+    for _ in range(6):
         page.click("#back-btn")
     page.wait_for_selector("#openrouter-key")
     assert page.locator("#openrouter-key").input_value() == "sk-or-draft-fixture-0123456789"
@@ -315,6 +542,10 @@ def test_late_save_states_keep_their_actions_beside_a_wrapped_reason(wizard, siz
     page.route("**/api/onboarding/complete", lambda route: route.fulfill(**answers.pop(0)) if route.request.method == "POST" else route.fallback())
     page = _open(wizard, size, connected=True)
     page.click("#quick-start-btn")
+    page.wait_for_selector("[data-consciousness-step]")
+    page.click("#next-btn")  # Review & start lands on Consciousness; its Continue goes to Skills, then Summary
+    page.wait_for_selector('[data-starter-skills="step"]')
+    page.click("#next-btn")
     page.wait_for_selector(".summary-card")
 
     page.click("#next-btn")  # the first save's answer says nothing certain: read back, or retry explicitly

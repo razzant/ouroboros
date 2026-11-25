@@ -726,6 +726,247 @@ def test_my_own_change_is_stated_once_the_result_that_carried_it_is_folded_away(
     assert _changes(_round(world, ctx, folded, 5)) == [row]  # once
 
 
+def test_a_change_row_that_joined_before_the_first_answer_is_foldable_and_the_start_rows_stand(
+        world, quiet_roster, monkeypatch):
+    """A journal-backed change row that joined before my first answer is an arrival, not one of the first request's
+    host rows: a full fold may take it, so a mark released afterwards does not stay in force through the stale row. The
+    first request's own rows stand through the fold, byte for byte."""
+    from ouroboros import loop
+    from ouroboros.tools.compact_context import standing_rows
+
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_args, **_kwargs: None)
+    messages, _cap, ctx = _request(world, "root")
+    writer = _context(world, world.tasks["main"])
+    first_request = copy.deepcopy(messages)
+    glob = _marked(writer, node_id=world.page, scope="global", text="LIVE GLOBAL: measure the bridge again.")
+    messages = _round(world, ctx, messages, 2)  # the change row joins before any answer
+    [joined] = _changes(messages)
+    assert f"- #{glob['sequence']} " in joined
+    assert not standing_rows(messages)  # an arrival, not a first-request host row
+    folded = _fold(world, ctx, messages, 3)
+    [restated] = _changes(folded)
+    assert f"- #{glob['sequence']} " in restated  # the fold took the row; the same change is stated once more
+    assert folded[0] == first_request[0]  # the start block stands, byte for byte
+    view = _marked(writer, mark_id=glob["mark_id"], visibility="meaning", reason="Its meaning is enough.")
+    messages = _round(world, ctx, folded, 4)
+    assert any(f"- #{view['sequence']} " in row for row in _changes(messages))
+    release = _released(world, writer, glob["mark_id"], "The bridge is measured.")
+    messages = _round(world, ctx, messages, 5)
+    again = _fold(world, ctx, messages, 6)
+    [row] = _changes(again)
+    assert f"- #{release['sequence']} " in row  # the release is what stands
+    assert f"- #{glob['sequence']} " not in row and f"- #{view['sequence']} " not in row
+    assert _changes(_round(world, ctx, again, 7)) == [row]  # the last change is not repeated
+
+
+def _tool_unit(ctx, number):
+    """A real completed tool unit (its call and its result) as the mind's own work leaves it in the transcript."""
+    reply = _read(ctx, "knowledge_read", topic="contract-navigation", scope="global")
+    return [{"role": "assistant", "tool_calls": [{"id": f"unit-{number}", "type": "function", "function": {
+                "name": "knowledge_read", "arguments": json.dumps({"topic": "contract-navigation", "scope": "global"})}}]},
+            {"role": "tool", "tool_call_id": f"unit-{number}", "content": reply}]
+
+
+def test_a_change_row_that_joins_the_fold_round_is_foldable_and_the_folds_own_rows_stand(
+        world, quiet_roster, monkeypatch):
+    """A journal-backed change row that joins the very round a full fold applies in is an arrival, not one of the
+    fold's own rows: the fold's call, result and receipt stand, owned by the note the receipt names, and the change
+    row is an arrival a later full fold may take. So a view change and a release made afterwards supersede it instead
+    of standing beside its stale quote. The first request's own host fact and the fold's call, result and receipt stay
+    byte for byte."""
+    from ouroboros import loop
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.tools import compact_context as cc
+    from ouroboros.tools.compact_context import (RECEIPT_ROW_PREFIX, receipt_note, standing_rows)
+    from ouroboros.tools.compact_context import _compact_context, record_context_view
+
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_args, **_kwargs: None)
+    messages, _cap, ctx = _request(world, "root")
+    fact = bound_host_row("first_request_fact", "SYNTHETIC FIRST REQUEST FACT: the copper bridge is measured.")
+    messages = [*messages[:2], fact, *messages[2:]]  # a host fact of the first request, its own row beside the core
+    writer = _context(world, world.tasks["main"])
+    messages = _round(world, ctx, messages, 2) + _tool_unit(ctx, 1)  # a prior real tool unit the fold may take
+    record_context_view(ctx, messages, [])
+    reply = _compact_context(ctx, working_note="I keep the compass work and its measurements.", keep_unit_ids=[])
+    assert "requested" in reply, reply
+    call = {"role": "assistant", "tool_calls": [{"id": "fold-3", "type": "function", "function": {
+        "name": "compact_context", "arguments": "{}"}}]}
+    result = {"role": "tool", "tool_call_id": "fold-3", "content": reply}
+    messages += [call, result]
+    glob = _marked(writer, node_id=world.page, scope="global", quote="eastern support",
+                   text="LIVE GLOBAL: measure the bridge again.")  # another work, after the capture
+    folded = _round(world, ctx, messages, 3, tool_schemas=[], fit_candidate=lambda *_args: {"accepted": True})
+    assert ctx._context_view_receipt["status"] == "applied", ctx._context_view_receipt
+    receipt = next(row for row in folded if str(row.get("content") or "").startswith(RECEIPT_ROW_PREFIX))
+    note = receipt_note(receipt)
+    assert note.startswith("view:"), note
+    standing = standing_rows(folded)
+    call_at = next(index for index, row in enumerate(folded) if row.get("tool_calls")
+                   and row["tool_calls"][0]["function"]["name"] == "compact_context")
+    assert folded[call_at] == call and folded[call_at + 1] == result  # the anchor rows are exact
+    owner = standing[call_at]
+    assert owner is not None
+    assert standing[call_at + 1] == owner == standing[folded.index(receipt)]
+    assert cc._note_meta(folded[owner])["unit_id"] == note  # the receipt's own note owns those three rows
+    change = next(row for row in folded if row.get("_host_context_kind") == CHANGES)
+    assert folded.index(change) not in standing  # an arrival in the fold's own span, not one of its standing rows
+    assert folded[folded.index(fact)] == fact  # the first request's host fact stands, byte for byte
+    view = _marked(writer, mark_id=glob["mark_id"], visibility="meaning", reason="Its meaning is enough.")
+    stated = _round(world, ctx, folded, 4)
+    assert any(f"- #{view['sequence']} " in row for row in _changes(stated))
+    release = _released(world, writer, glob["mark_id"], "The bridge is measured.")
+    again = _fold(world, ctx, stated, 5)
+    [row] = _changes(again)
+    assert f"- #{release['sequence']} " in row  # the release is what stands
+    assert f"- #{glob['sequence']} " not in row and f"- #{view['sequence']} " not in row
+    assert "quote: eastern support" not in row  # the stale quote of the folded row is gone
+    assert _changes(_round(world, ctx, again, 6)) == [row]  # the last change is not repeated
+
+
+def _host_tail(number):
+    """The two host rows the send itself adds after that round's compaction: the round's facts and the clock of the
+    send that carried them (the real host kinds, bound to the text the mind read)."""
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+    from ouroboros.send_clock import CLOCK_ROW_NAME
+
+    return [bound_host_row(CONTEXT_FACTS_NAME, f"SYNTHETIC ROUND FACTS {number}: the copper bridge is measured."),
+            bound_host_row(CLOCK_ROW_NAME, f"SYNTHETIC SEND CLOCK {number}: the send spent its measured time.")]
+
+
+def _change_rows(messages):
+    """The arrival rows themselves (not their text): each change the host stated."""
+    return [row for row in messages if row.get("_host_context_kind") == CHANGES]
+
+
+def _fold_with_tail(world, ctx, messages, number):
+    """compact_context(keep_unit_ids=[]) applied by the next round's own hook, with the host rows that send adds."""
+    return [*_fold(world, ctx, messages, number), *_host_tail(number)]
+
+
+def test_a_change_arrival_before_the_first_answer_ends_the_first_requests_block(world, quiet_roster, monkeypatch):
+    """A change arrival that joined before my first answer is not one of that request's own rows: it ends that block,
+    so the round's own tail after it (its facts and the clock of that send) leaves with the next fold instead of
+    standing for ever. The first request's own host row stands, byte for byte."""
+    from ouroboros import loop
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+    from ouroboros.tools.compact_context import standing_rows
+
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_args, **_kwargs: None)
+    messages, _cap, ctx = _request(world, "root")
+    fact = bound_host_row("first_request_fact", "SYNTHETIC FIRST REQUEST FACT: the copper bridge is measured.")
+    messages = [*messages[:2], fact, *messages[2:]]
+    writer = _context(world, world.tasks["main"])
+    glob = _marked(writer, node_id=world.page, scope="global", quote="eastern support",
+                   text="LIVE GLOBAL: measure the bridge again.")
+    messages = [*_round(world, ctx, messages, 2), *_host_tail(2)]  # the arrival joins before my first answer
+    [arrival] = _change_rows(messages)
+    assert f"- #{glob['sequence']} " in arrival["content"]
+    standing = standing_rows(messages)
+    assert standing[messages.index(fact)] is None  # the first request's own host row stands
+    assert messages.index(messages[-2]) not in standing  # the round's own tail after the arrival does not
+    assert messages.index(messages[-1]) not in standing
+    messages = [*messages, {"role": "assistant", "content": "I keep the original measurements."}]
+    folded = _fold(world, ctx, messages, 3)
+    assert folded[folded.index(fact)] == fact  # the start row stands, byte for byte
+    assert not any(row.get("_host_context_kind") == CONTEXT_FACTS_NAME for row in folded)  # the tail left with it
+    assert len(_change_rows(folded)) == 1  # the same change is stated once more
+    assert f"- #{glob['sequence']} " in _changes(folded)[0]
+
+
+def test_three_folds_keep_the_second_receipt_and_leave_the_stale_arrival(world, quiet_roster, monkeypatch):
+    """A change arrival ends what stands in its round: the round's own tail after it (its facts and the clock of
+    that send) is state the next round writes again, so it leaves with the arrival instead of standing for ever.
+    Three real folds then keep the second fold's call, result and receipt: the second receipt survives the third."""
+    from ouroboros import loop
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.tools.compact_context import RECEIPT_ROW_PREFIX
+
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_args, **_kwargs: None)
+    messages, _cap, ctx = _request(world, "root")
+    fact = bound_host_row("first_request_fact", "SYNTHETIC FIRST REQUEST FACT: the copper bridge is measured.")
+    messages = [*messages[:2], fact, *messages[2:]]
+    writer = _context(world, world.tasks["main"])
+    messages = _round(world, ctx, messages, 2) + _tool_unit(ctx, 1)  # a prior real tool unit the first fold may take
+    _marked(writer, node_id=world.page, scope="global", quote="eastern support",
+            text="LIVE GLOBAL: measure the bridge again.")  # the arrival this round's fold will meet
+
+    first = _fold_with_tail(world, ctx, messages, 3)
+    [arrival] = _change_rows(first)
+    receipts = [row for row in first if str(row.get("content") or "").startswith(RECEIPT_ROW_PREFIX)]
+    assert len(receipts) == 1 and first.index(arrival) > first.index(receipts[0])  # the arrival lands after the receipt
+    first_receipt, first_tail = receipts[0], _host_tail(3)
+
+    second = _fold_with_tail(world, ctx, first, 4)
+    receipts = [row for row in second if str(row.get("content") or "").startswith(RECEIPT_ROW_PREFIX)]
+    assert len(receipts) == 2 and receipts[0] == first_receipt  # the first fold's own receipt stands
+    assert all(row not in second for row in first_tail)  # the first round's tail left with the arrival
+    assert len(_change_rows(second)) == 1  # the arrival is stated once more
+    second_receipt = receipts[1]
+
+    third = _fold_with_tail(world, ctx, second, 5)
+    receipts = [row for row in third if str(row.get("content") or "").startswith(RECEIPT_ROW_PREFIX)]
+    assert len(receipts) == 3
+    assert receipts[1] == second_receipt  # the second fold's receipt survives the third
+    assert all(row not in third for row in _host_tail(4))  # the second round's tail left with the arrival
+    assert len(_change_rows(third)) == 1  # exactly one current change
+    assert _changes(_round(world, ctx, third, 6)) == _changes(third)  # it is not repeated
+
+
+@pytest.mark.parametrize("arrival", ["before", "before_bare", "after"])
+def test_a_change_arrival_never_hides_the_later_clean_fold(world, quiet_roster, monkeypatch, arrival):
+    """A typed change arrival ends what stands where it lands; it never hides a later clean fold. The clean fold's
+    call, result and receipt stand and a later full fold keeps them, while the arrival itself and the round's own tail
+    after it leave instead of standing. The same holds whether the arrival joined before the first answer (it ends
+    that block, with or without a tail behind it) or after the fold's receipt (it ends that fold's range there): the
+    clean fold is found either way, and what stays keeps its order."""
+    from ouroboros import loop
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.tools import compact_context as cc
+    from ouroboros.tools.compact_context import RECEIPT_ROW_PREFIX, receipt_note, standing_rows
+
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_args, **_kwargs: None)
+    messages, _cap, ctx = _request(world, "root")
+    fact = bound_host_row("first_request_fact", "SYNTHETIC FIRST REQUEST FACT: the copper bridge is measured.")
+    messages = [*messages[:2], fact, *messages[2:]]
+    writer = _context(world, world.tasks["main"])
+    tail = _host_tail(2) if arrival == "before" else []
+    if arrival in {"before", "before_bare"}:
+        _marked(writer, node_id=world.page, scope="global", quote="eastern support",
+                text="LIVE GLOBAL: measure the bridge again.")
+        messages = [*_round(world, ctx, messages, 2), *tail]  # the arrival joins before my first answer
+    messages += _tool_unit(ctx, 1)  # one completed read the fold may take
+    cc.record_context_view(ctx, messages, [])
+    reply = cc._compact_context(ctx, working_note="I keep the compass work and its measurements.", fold_last_n=1)
+    assert "requested" in reply, reply
+    call = {"role": "assistant", "tool_calls": [{"id": "fold-3", "type": "function", "function": {
+                "name": "compact_context", "arguments": "{}"}}]}
+    result = {"role": "tool", "tool_call_id": "fold-3", "content": reply}
+    messages += [call, result]
+    if arrival == "after":
+        _marked(writer, node_id=world.page, scope="global", quote="eastern support",
+                text="LIVE GLOBAL: measure the bridge again.")
+    folded = _round(world, ctx, messages, 3, tool_schemas=[], fit_candidate=lambda *_args: {"accepted": True})
+    receipt = next(row for row in folded if str(row.get("content") or "").startswith(RECEIPT_ROW_PREFIX))
+    assert receipt_note(receipt).startswith("view:")
+    change = next(row for row in folded if row.get("_host_context_kind") == CHANGES)
+    standing = standing_rows(folded)
+    assert folded.index(receipt) in standing  # the clean fold is found: its own receipt stands
+    assert folded.index(change) not in standing  # the arrival itself never stands
+    if arrival == "before":
+        assert all(folded.index(row) not in standing for row in tail)  # the round's own tail after it does not stand
+    again = _fold(world, ctx, folded, 4)
+    assert any(row is receipt for row in again)  # the clean fold's receipt stays in view
+    assert not any(row is change for row in again)  # the stale arrival was not pinned
+    if arrival == "before":
+        assert not any(row is tail_row for row in again for tail_row in tail)  # its tail left with it
+    restated = [row for row in again if row.get("_host_context_kind") == CHANGES]
+    assert len(restated) == 1  # the host states the current change once more
+    receipt_at = next(index for index, row in enumerate(again) if row is receipt)
+    assert receipt_at < next(index for index, row in enumerate(again) if row is restated[0])  # ordered retention
+
+
 def test_the_capture_boundary_rides_beside_the_view_and_moves_no_hash(world, quiet_roster):
     """Two captures that differ only by a later journal record no section shows keep the same hashed view; each
     boundary rides beside it, outside the core hash, and the earlier one still brings a later change to its focus.

@@ -110,7 +110,7 @@ def owner_actions(activity: dict) -> tuple[dict, bool]:
 
     view = activity_stop_view(activity)
     return waits, (phase in {"budget_paused", "budget_pausing"} and not activity.get("live")
-                   and view["resumable"] and activity.get("can_resume") is True)
+                   and view["resumable"] and view["pause_cause"] != "authority" and activity.get("can_resume") is True)
 
 
 def question_waits(row: dict) -> bool:
@@ -153,14 +153,28 @@ def _question_sources(drive_root: Any, candidates: dict) -> dict:
     return sources
 
 
+# What this one measurement decided of a census row that could offer its owner an action (``main_decisions_snapshot``'s
+# ``verdicts``): ``OFFERED`` (a ``main_attention`` row, in its proven room), ``ELSEWHERE`` (another room's work, one
+# this measurement does not cover) or ``UNCONFIRMED`` (its room could not be proven: a gap, never an offer).
+OFFERED, ELSEWHERE, UNCONFIRMED = "offered", "elsewhere", "unconfirmed"
+
+
 def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: dict,
-                            *, activities_complete: bool = True, bindings_complete: bool = True) -> dict:
+                            *, activities_complete: bool = True, bindings_complete: bool = True,
+                            verdicts: dict | None = None) -> dict:
     """Return complete current question forms and existing human recovery controls.
+
+    ``verdicts`` is an out-parameter (as the census's ``decision_owners``): task id to what this measurement decided
+    of that row's owner action, ``{"state": OFFERED, "room": <chat id>, "waits": {...}, "resume": bool}`` (the one
+    address and availability ``main_attention`` carries), ``{"state": ELSEWHERE}`` or ``{"state": UNCONFIRMED}``. The
+    work projection places its owner turn by it, so a room's amber and Main's pill never answer from two reads.
 
     Project lookup uses the complete registry, including archived/deleting rows;
     a sidebar display limit never changes destination or visibility authority.
-    Question documents share the existing display batch; ancestry is warmed by
-    generation. A failed batch keeps the strict per-member read and its gaps.
+    Question documents share the existing display batch; questions and attention
+    rows share ONE strict room resolver, warmed in batched generations (never a
+    per-row lineage read) and given this one strict registry snapshot (never a registry
+    parse per bound task). A failed batch keeps the strict per-member read and its gaps.
     """
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from ouroboros.obligations import members
@@ -170,17 +184,23 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
 
     questions, attention = [], []
     gaps, action_gaps = [], []
-    questions_complete, attention_complete = bindings_complete, activities_complete
+    verdicts = {} if verdicts is None else verdicts
+    native_rooms_known = bindings_complete
+    questions_complete, attention_complete = bindings_complete, activities_complete and bindings_complete
     if not bindings_complete:
         gaps.append({"reason": "task_bindings_unavailable"})
+        action_gaps.append({"reason": "task_bindings_unavailable"})
+    registry = None  # the one strict read of every reserved row, lent to the room resolver
     try:
         projects = {str(row["id"]): row for row in list_reserved_projects(drive_root, strict=True)}
         projects_by_chat = {int(row["chat_id"]): row for row in projects.values() if row.get("chat_id")}
+        registry = projects
     except Exception:
         log.debug("Main decisions Project registry unavailable", exc_info=True)
         projects, projects_by_chat = {}, {}
-        questions_complete = attention_complete = False
+        native_rooms_known = questions_complete = attention_complete = False
         gaps.append({"reason": "project_registry_unavailable"})
+        action_gaps.append({"reason": "project_registry_unavailable"})
     try:
         candidates = members(drive_root, "owner_questions")
     except Exception:
@@ -193,7 +213,7 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
     try:
         # Missing/damaged sources have no lineage proof to cache (including after repair).
         if readable := [tid for tid, source in sources.items() if source is not None]:
-            rooms = RoomResolver(drive_root, strict=True)
+            rooms = RoomResolver(drive_root, strict=True, reserved=registry)
             rooms.warm(readable)
     except Exception:
         rooms = None
@@ -239,10 +259,49 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
             questions_complete = False
             gaps.append({"reason": "question_source_unavailable", "task_id": task_id})
             log.debug("Main question source unavailable: %s", task_id, exc_info=True)
+    # The attention loop's room reads ride the questions' strict snapshot, warmed in ONE batch: a census
+    # names dozens of rows and a per-row lineage read is the N+1 the questions' warm exists to prevent.
+    # Only rows that can offer their owner something are worth the read (the rest never reach the rule).
+    if native_rooms_known:
+        offered = []
+        for activity in activities:
+            phase = activity.get("phase")
+            parked = phase in {"budget_paused", "budget_pausing"}
+            if str(activity.get("activity_id") or "") and phase != "unknown" and (
+                    ({} if parked else activity.get("model_waits") or {}) or parked and activity.get("can_resume")):
+                offered.append(str(activity["activity_id"]))
+        if offered:
+            try:
+                if rooms is None:
+                    rooms = RoomResolver(drive_root, strict=True, reserved=registry)
+                rooms.warm(offered)
+            except Exception:
+                rooms = None
+                log.debug("Main attention rooms unavailable", exc_info=True)
     for activity in activities:
         task_id = str(activity.get("activity_id") or "")
-        project = projects.get(str(activity.get("project_id") or ""))
-        if not task_id or not project:
+        chat_id = activity.get("chat_id")
+        scoped = projects.get(str(activity.get("project_id") or ""))
+        project = None
+        if not task_id:
+            continue
+        nested = bool({str(activity.get(key) or "") for key in ("parent_task_id", "root_task_id")} - {"", task_id})
+        if scoped:
+            if chat_id is not None and chat_id not in (WEB_UI_CHAT_ID, scoped.get("chat_id")):
+                verdicts[task_id] = {"state": ELSEWHERE}
+                continue  # a contextual Project ID does not address another room's work to its owner
+            # The Project ID a census row carries is a SCOPE, and a scope is not a room: only that ID
+            # agreeing with the row's own room address (or no address claim at all) makes it one. A row
+            # addressed to Main stays Main's whatever registered Project its scope names: that ID can be
+            # the folder this Main work leases, not where its owner's decisions live. Even a matching
+            # room address is provisional: the strict room rule below confirms or replaces both. While the
+            # bindings cannot be read that rule cannot run, and a nested row's room is only what the census
+            # re-homed from the nearest live row it holds: an ended ancestor's later conversion is unseen
+            # by it, so no action is offered there. A row with no ancestry has no such conversion to miss.
+            if chat_id != WEB_UI_CHAT_ID and (native_rooms_known or not nested):
+                project = scoped
+        elif type(chat_id) is not int or chat_id != WEB_UI_CHAT_ID:
+            verdicts[task_id] = {"state": ELSEWHERE}
             continue
         # A quiz-bound owner_wait is represented by that exact question above.
         # Other model wait IDs and a Resume remain independent decisions, even
@@ -257,6 +316,39 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
         attempt = int(activity.get("task_attempt") or 1)
         parked = phase in {"budget_paused", "budget_pausing"}
         current_waits = {} if parked else activity.get("model_waits") or {}
+        offers = bool(current_waits or parked and activity.get("can_resume"))
+        placed = {}  # the room fields the strict rule proves against the row's own census address
+        if not project and (not native_rooms_known or not offers):
+            if offers:  # Main's own row whose room the strict rule cannot run for: no room, so no offer
+                verdicts[task_id] = {"state": UNCONFIRMED}
+            continue
+        # Main's address with a scope that is not its room: a lane ID no registered room has, or that
+        # room's own ID for a folder this Main work only leases
+        # (``worker_promotion._admit_promoted_workspace`` → ``project_scope_admission``). Either way
+        # the ID alone neither shows the row in Main nor proves the task left. A room address is
+        # provisional too: the census re-homes a nested row from the nearest LIVE owner row it holds
+        # (its parent's, else its root's), which can skip an ended intermediate ancestor's durable
+        # binding. The strict room rule decides both: the nearest explicit binding on task→parent→…,
+        # then root, else the row's own admitted registered chat; 0 keeps the address the row brought.
+        # A binding the census did not apply makes the row that registered Project's; unreadable
+        # bindings or ancestry, and a binding to a Project the registry lacks, stay a gap.
+        if native_rooms_known and offers:
+            try:
+                if rooms is None:
+                    rooms = RoomResolver(drive_root, strict=True, reserved=registry)
+                bound = rooms.bindings and rooms(task_id, activity.get("parent_task_id"), activity.get("root_task_id"))
+                if bound:
+                    resolved = projects_by_chat[bound]
+                    if resolved is not project or bound != chat_id:
+                        placed = {"project_id": str(resolved["id"]), "chat_id": resolved["chat_id"]}
+                    project = resolved
+                elif not project and activity.get("project_id"):
+                    placed = {"project_id": ""}  # Main's own row points at no Project
+            except Exception:
+                attention_complete = False
+                action_gaps.append({"reason": "action_room_unknown", "task_id": task_id})
+                verdicts[task_id] = {"state": UNCONFIRMED}
+                continue
         for key, row in current_waits.items():
             if (isinstance(row, dict) and row.get("state") == "waiting"
                     and row.get("task_attempt") == attempt
@@ -272,7 +364,14 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
             continue
         from ouroboros.work_stop import activity_stop_view
         cause = activity_stop_view(activity)["pause_cause"]
-        attention.append({**activity, "task_id": task_id, "project_name": project.get("name") or "Project",
+        # The one address this row's action stands at: the room the strict rule proved, else the row's own (a Project
+        # scope with no room address stands at that Project's room, Main's own row at Main's).
+        room = placed.get("chat_id", chat_id)
+        if type(room) is not int:
+            room = project.get("chat_id") if project else WEB_UI_CHAT_ID
+        verdicts[task_id] = {"state": OFFERED, "room": room, "waits": frozenset(waits), "resume": bool(can_resume)}
+        attention.append({**activity, **placed, "task_id": task_id,
+                          "project_name": (project.get("name") or "Project") if project else "",
                           "model_waits": waits, "can_resume": can_resume,
                           "cancelable": activity.get("cancelable") is True,
                           "attention_reason": (cause if cause in {"budget", "restart"} else "resume")

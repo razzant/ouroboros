@@ -16,9 +16,11 @@ from ouroboros.contracts.task_constraint import (
 from ouroboros.tool_access import active_tool_profile
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, ACTING_SUBAGENT_TOOL_NAMES, META_TOOL_NAMES
 from ouroboros.runtime_mode_policy import mode_allows_protected_write
+from ouroboros.tool_policy import initial_tool_schemas
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros import subagent_worktrees as sw
-from tests._store_shared import read_result, seed_result
+from tests._store_shared import seed_result
+from tests._workspace_git import capture_manifest_fields, git_repository, publish_capture
 
 
 def _git(repo, *args, check=True, text=True):
@@ -26,10 +28,7 @@ def _git(repo, *args, check=True, text=True):
 
 
 def _init_repo(path: pathlib.Path, files: dict) -> str:
-    path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "t@t")
-    _git(path, "config", "user.name", "t")
+    git_repository(path, unborn=True, identity=True)
     for rel, content in files.items():
         fp = path / rel
         fp.parent.mkdir(parents=True, exist_ok=True)
@@ -175,7 +174,7 @@ def test_cyber_acting_registry_exposes_review_skill_and_runtime_tools(tmp_path, 
     reg = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     reg._ctx = ctx
 
-    names = set(reg.initial_tool_names())
+    names = {schema["function"]["name"] for schema in initial_tool_schemas(reg)}
     assert {"review_status", "plan_task", "skill_review", "skill_exec", "toggle_evolution"} <= names
     assert "commit_reviewed" in names
     schemas = {
@@ -225,6 +224,21 @@ def test_acting_protected_write_blocked_without_pro_grant(tmp_path):
     assert "protected" in out.lower() or "PROTECTED" in out
 
 
+@pytest.mark.parametrize(("mode", "grant", "written"), [
+    ("pro", False, False), ("pro", True, True), ("cyber_pro", False, True),
+])
+def test_acting_protected_write_follows_the_one_rule(tmp_path, monkeypatch, mode, grant, written):
+    """The dispatcher reads the same ``protected_write_admitted`` as the integration doors: Pro needs the
+    child's own grant, Cyber Pro none (11.09, capability parity), so the doors' answers can no longer differ."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **kw: (True, ""))
+    reg, _ctx, worktree = _acting_registry(tmp_path, surface="self_worktree", grant=grant)
+    (worktree / "ouroboros").mkdir(exist_ok=True)
+    out = reg.execute("write_file", {"root": "active_workspace", "path": "ouroboros/safety.py", "content": "x\n"})
+    assert ("CORE_PROTECTION_BLOCKED" in out) is not written, out
+    assert (worktree / "ouroboros" / "safety.py").exists() is written, out
+
+
 def test_protected_write_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
     """Redundant repo-basename prefixes must use dispatch's protected-path normalization."""
     from ouroboros.tools.registry import ToolContext, ToolRegistry
@@ -257,8 +271,7 @@ def test_shrink_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     base = tmp_path / "repo"
-    base.mkdir()
-    subprocess.run(["git", "init"], cwd=base, check=True, capture_output=True)
+    git_repository(base, unborn=True)
     (base / "large.py").write_text("\n".join(f"line {i}" for i in range(300)), encoding="utf-8")
     subprocess.run(["git", "add", "large.py"], cwd=base, check=True, capture_output=True)
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i"],
@@ -274,9 +287,13 @@ def test_shrink_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
 
 def test_acting_tool_visibility_is_acting_set(tmp_path):
     reg, _ctx, _wt = _acting_registry(tmp_path)
-    names = set(reg.initial_tool_names())
+    # The array the child's first request really carries: the acting set less the compat
+    # aliases, which stay callable and are never advertised.
+    names = {schema["function"]["name"] for schema in initial_tool_schemas(reg)}
+    aliases = {entry.name for entry in reg._entries.values() if entry.alias_for}
     # The schema selectors ride every role (#1860): they load schemas and grant nothing.
-    assert names == set(ACTING_SUBAGENT_TOOL_NAMES) | META_TOOL_NAMES
+    assert META_TOOL_NAMES <= names
+    assert names == (set(ACTING_SUBAGENT_TOOL_NAMES) | META_TOOL_NAMES) - aliases
     assert "commit_reviewed" not in names
     assert "integrate_subagent_patch" in names
 
@@ -468,49 +485,14 @@ def _make_child_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: 
     return art
 
 
-def _make_child_delete_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: str, rel: str, parent_task_id: str = "parent1", surface: str = ""):
-    """Produce a real workspace.patch that deletes ``rel``."""
-    from ouroboros.artifacts import task_artifact_dir_path
-    from hashlib import sha256
-
-    (target_repo / rel).unlink()
-    patch = _git(target_repo, "diff", "--binary", "HEAD", "--", text=False).stdout
-    _git(target_repo, "checkout", "--", rel)
-    art = task_artifact_dir_path(drive, child_id, create=True)
-    patch_bytes = patch
-    (art / "workspace.patch").write_bytes(patch_bytes)
-    digest = sha256(patch_bytes).hexdigest()
-    manifest = {
-        "schema_version": 1,
-        "status": "ready_with_changes",
-        "patch_name": "workspace.patch",
-        "sha256": digest,
-        "tracked_changed": [rel],
-        "untracked_included": [],
-        "diffstat": f"{rel} | 1 -",
-    }
-    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
-    result = {
-        "_schema_version": 1,
-        "id": child_id,
-        "task_id": child_id,
-        "parent_task_id": parent_task_id,
-        "root_task_id": parent_task_id,
-        "delegation_role": "subagent",
-        "status": "done",
-    }
-    if surface:
-        result["task_constraint"] = {"mode": "acting_subagent", "surface": surface}
-    seed_result(drive, child_id, result)
-    return art
-
-
-def _record_child_workspace_root(drive: pathlib.Path, child_id: str, workspace: pathlib.Path) -> None:
-
-    child_result = read_result(drive, child_id)
-    child_result["workspace_root"] = str(workspace)
-    child_result.setdefault("task_constraint", {})["write_root"] = str(workspace)
-    seed_result(drive, child_id, child_result)
+def _publish_external_child(drive, child_id, workspace, base):
+    _, manifest = publish_capture(drive, {
+        "id": child_id, "parent_task_id": "parent-ext", "root_task_id": "parent-ext", "delegation_role": "subagent",
+        "workspace_root": str(workspace), "workspace_mode": "external",
+        "task_constraint": {"mode": "acting_subagent", "surface": "external_workspace",
+                            "write_root": str(workspace), "base_sha": base},
+    })
+    assert manifest["status"] == "ready_with_changes", manifest
 
 
 def _integrate_ctx(target_repo, drive, **constraint_kw):
@@ -601,11 +583,19 @@ def test_integrate_reject_records_verdict(tmp_path):
     assert child.get("child_result_disposition") == "irrelevant"
 
 
-@pytest.mark.parametrize(("mode", "caller"), [
-    ("advanced", "parent"), ("advanced", "acting"), ("pro", "acting"), ("cyber_pro", "acting"), ("pro", "granted"),
+@pytest.mark.parametrize(("mode", "caller", "applies"), [
+    ("advanced", "parent", False), ("advanced", "acting", False), ("pro", "acting", False), ("pro", "granted", True),
+    # Owner decision 6A (21.11.2026): Cyber Pro holds the dispatcher's rule here too. The acting child that may
+    # write ouroboros/safety.py itself applies its nested child's patch to it without a grant of its own.
+    ("cyber_pro", "acting", True),
+    # ...while a consciousness Act/Observe tree stays capped to light on any install.
+    ("cyber_pro", "capped", False),
 ])
-def test_integrate_protected_refusal_names_its_actual_cause(tmp_path, monkeypatch, mode, caller):
-    """The gate stays: mode allowing protected writes AND an acting caller's own protected_paths_grant.
+def test_integrate_protected_refusal_names_its_actual_cause(tmp_path, monkeypatch, mode, caller, applies):
+    """The door reads the dispatcher's own protected-path rule (``workspace_copies.protected_write_admitted``):
+    Pro admits protected paths with the applying task's own protected_paths_grant, Cyber Pro without one;
+    advanced and a tree capped to light refuse. What the refusal used to protect in Cyber Pro (a nested
+    child's changes reaching protected files without the delegator's own look) is the cost the owner accepted.
     #2734: a missing grant is named as the integrating task's own, never as a mode to switch to, and the
     captured result stays for its parent; a mode refusal keeps the policy's advice."""
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
@@ -616,16 +606,20 @@ def test_integrate_protected_refusal_names_its_actual_cause(tmp_path, monkeypatc
     _make_child_patch(repo, drive, "child3", "ouroboros/safety.py", "X = 2\n")
     acting = {} if caller == "parent" else {"mode": ACTING_SUBAGENT_MODE, "surface": "self_worktree",
                                             "protected_paths_grant": caller == "granted"}
-    out = _integrate_subagent_patch(_integrate_ctx(repo, drive, **acting), task_id="child3")
-    if caller == "granted":
+    ctx = _integrate_ctx(repo, drive, **acting)
+    if caller == "capped":
+        ctx.task_metadata = {"initiator": "consciousness", "consciousness_autonomy": "act", "runtime_mode_cap": "light"}
+    out = _integrate_subagent_patch(ctx, task_id="child3")
+    if applies:
         assert "Integrated subagent patch" in out, out
         assert (repo / "ouroboros/safety.py").read_text(encoding="utf-8") == "X = 2\n"
         return
     assert out.startswith("⚠️ CORE_PROTECTION_BLOCKED") and "ouroboros/safety.py" in out, out
-    assert ("protected_paths_grant" in out) == (caller == "acting"), out
+    assert ("protected_paths_grant" in out) == (caller in ("acting", "capped")), out
     assert ("Switch to runtime_mode" in out) == (caller == "parent"), out
-    if caller == "acting":
-        assert f"runtime_mode={mode!r}" in out and "kept unapplied" in out and "your parent" in out, out
+    if caller in ("acting", "capped"):
+        shown = "light" if caller == "capped" else mode
+        assert f"runtime_mode={shown!r}" in out and "kept unapplied" in out and "your parent" in out, out
     from ouroboros.task_status import load_effective_task_result
     assert not load_effective_task_result(drive, "child3").get("child_result_disposition")  # the result stays
     assert (repo / "ouroboros/safety.py").read_text(encoding="utf-8") == "X = 1\n"  # unchanged
@@ -751,13 +745,12 @@ def test_integrate_external_workspace_verifies_shared_files_without_reapplying(t
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_patch(workspace, drive, "ext1", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     # Production external_workspace children write into the same directory the parent
     # can inspect; integration should verify, not apply the patch a second time.
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext1", workspace)
+    _publish_external_child(drive, "ext1", workspace, base)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -779,11 +772,11 @@ def test_integrate_external_workspace_rejects_existing_but_mismatched_files(tmp_
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_patch(workspace, drive, "ext-drift", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
+    (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
+    _publish_external_child(drive, "ext-drift", workspace, base)
     (workspace / "a.txt").write_text("hi\ndrifted\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-drift", workspace)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -806,11 +799,10 @@ def test_integrate_external_workspace_verifies_without_parent_active_workspace(t
     system_repo = tmp_path / "system"
     _init_repo(system_repo, {"README.md": "system\n"})
     workspace = tmp_path / "project"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "state"; drive.mkdir()
-    _make_child_patch(workspace, drive, "ext-project", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-project", workspace)
+    _publish_external_child(drive, "ext-project", workspace, base)
     ctx = ToolContext(repo_dir=system_repo, drive_root=drive, task_id="parent-ext")
 
     monkeypatch.setattr("ouroboros.tool_access._user_files_root", lambda: tmp_path)
@@ -831,11 +823,10 @@ def test_integrate_external_workspace_verifies_assigned_child_root_outside_paren
     parent_workspace = tmp_path / "parent-project"
     _init_repo(parent_workspace, {"a.txt": "parent\n"})
     child_workspace = tmp_path / "other-project"
-    _init_repo(child_workspace, {"a.txt": "hi\n"})
+    base = _init_repo(child_workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_patch(child_workspace, drive, "ext-other", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     (child_workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-other", child_workspace)
+    _publish_external_child(drive, "ext-other", child_workspace, base)
     ctx = ToolContext(
         repo_dir=system_repo,
         drive_root=drive,
@@ -857,11 +848,10 @@ def test_integrate_external_workspace_verifies_deletions(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"obsolete.txt": "remove me\n"})
+    base = _init_repo(workspace, {"obsolete.txt": "remove me\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_delete_patch(workspace, drive, "ext-delete", "obsolete.txt", parent_task_id="parent-ext", surface="external_workspace")
     (workspace / "obsolete.txt").unlink()
-    _record_child_workspace_root(drive, "ext-delete", workspace)
+    _publish_external_child(drive, "ext-delete", workspace, base)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -878,19 +868,15 @@ def test_integrate_external_workspace_verifies_deletions(tmp_path):
     assert verdict["files"] == ["obsolete.txt"]
 
 
-def test_integrate_external_workspace_files_derived_from_patch_not_manifest(tmp_path):
+def test_integrate_external_workspace_files_derived_from_patch_not_manifest(tmp_path, monkeypatch):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    art = _make_child_patch(workspace, drive, "ext-lie", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
-    manifest = json.loads((art / "workspace_patch.json").read_text(encoding="utf-8"))
-    manifest["tracked_changed"] = []
-    manifest["untracked_included"] = []
-    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
+    capture_manifest_fields(monkeypatch, tracked_changed=[], untracked_included=[])
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-lie", workspace)
+    _publish_external_child(drive, "ext-lie", workspace, base)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -1144,8 +1130,7 @@ def test_external_workspace_unborn_first_commit_keeps_artifact(tmp_path, monkeyp
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})
     proj = tmp_path / "empty-gitproj"
-    proj.mkdir()
-    _git(proj, "init", "-q")
+    git_repository(proj, unborn=True)
     ctx = SimpleNamespace(REPO_DIR=repo)
     c, wr, wm, detail = _resolve_subagent_constraint(
         ctx,

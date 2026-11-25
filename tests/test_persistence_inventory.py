@@ -642,6 +642,10 @@ class _PathResolver:
                         rel, ok = self.resolve(node, consts, local)
                         if ok and _is_named(rel):
                             found.add(SUBROOT_ALIASES.get(rel, rel))
+                    elif isinstance(node, ast.Call) and _call_name(node) == "store_continuation_source" and len(node.args) >= 3:
+                        name = node.args[2]
+                        if isinstance(name, ast.BinOp) and isinstance(name.op, ast.Add) and isinstance(name.left, ast.Constant):
+                            found.add(f"task_results/artifacts/*/source_handles/context_checkpoints/{name.left.value}*-*.json")
                     elif isinstance(node, ast.Call) and _call_name(node) == "store_actor_source_bytes":
                         rel = self._source_handle_path(node, scope)
                         if rel:
@@ -996,7 +1000,37 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``<sha256>.json`` links (``ouroboros/consciousness_transitions.py``); its own row.
 # 470 -> 471 (T07 part 3): ``projects/*/workpad_history.jsonl``, the workpad's history beside its page
 # (``project_facts.project_workpad_history_path``, written by ``memory_texts``); its own row beside the project rows.
-EXPECTED_SCAN_PATHS = 471
+# 471 -> 472 (W1): the wake reader names the existing memory/knowledge_history.jsonl directly;
+# its inventory row already covers it. No new stored path.
+# 472 -> 473: the words a place change removes or replaces, ``state/place_words_history.jsonl``
+# (``ouroboros/place_words_history.py``, kept before ``state/places.json`` is written); its own row beside it.
+# 473 -> 474: an explicit context inspection retains its ordinary-memory map,
+# ``task_results/artifacts/*/source_handles/context_checkpoints/ordinary-memory-*.json``
+# (``ouroboros/tools/compact_context.py``, ``_ordinary_memory``); its own row beside the other context checkpoints.
+# The owner-wait and exact-pause writers name their checkpoint prefix at the shared serializer.
+# 476 -> 478: the retirer of saved states writes ``source_handles/retired_copies.jsonl`` (its own row) and its
+# scheduling looks at ``source_handles/working`` (``ouroboros/maintenance_retirement.py``).
+# 478 -> 479: the evidence index's damage mark ``observability/packs/.index.sqlite.damaged``, left by a read
+# that met the live index unusable or damaged and removed by its rebuild (``ouroboros/evidence_packs.py``,
+# ``DAMAGED_MARK``); the existing evidence-pack row names it.
+# 479 -> 480: the capture reader also names the existing task artifact workspace.patch.
+# 480 -> 479: an immutable artifact copy's name is built by ``immutable_artifact_name`` (``ouroboros/artifacts.py``), no
+# longer by an f-string at its writer, so the scan loses the family spelling ``task_results/artifacts/*/*-*``; the writer
+# and its ``task_results/artifacts/<id>/**`` row are unchanged.
+# 479 -> 480: a closed service's exact private copy, ``observability/service_logs/<sha256>.log``
+# (``tools/services._preserve_service_log``); its own row. The local filename owner in ``launch_custody``
+# now spells one host and one executor family (plain and launch-bound stems share the same suffixes).
+# 480 -> 481: staged session scratch records its source task in handoff.json.
+# 481 -> 485: a saved task file the owner releases is moved to a numbered slot under ``released/`` in the task's
+# custody staging folder and then in its custody trash folder (``payload_release_state._slot``, #3981); both folders
+# already have their row (``state/custody_staging/<id>-<token>/``, ``state/custody_trash/<id>-<token>/``).
+# 485 -> 487: the MCP call record ``state/mcp/calls/server-*.json`` and its directory (``ouroboros/mcp_catalog.py``,
+# ``record_call`` and the configuration-event remover ``prune_catalogs``); its own row beside the catalogs row.
+# 487 -> 488: what Main was last told of broken capabilities, ``state/capability_breakage_main.json``
+# (``ouroboros/capability_breakage.py`` ``_keep_main``), so Main's next turn hears a repair.
+# 488 -> 490: the subscription census and its refresh request (``ouroboros/subscription_census.py``), each with
+# its row.
+EXPECTED_SCAN_PATHS = 490
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1015,6 +1049,7 @@ SENTINELS = frozenset({
     "task_results/artifacts/*",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-reentry-*.json",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-transport-queue-*.json",
+    "task_results/artifacts/*/source_handles/context_checkpoints/ordinary-memory-*.json",
     "task_trees/*/blackboard.jsonl",
     "uploads",
     # stage-2: names that live in constants, helper returns or f-strings
@@ -1222,6 +1257,13 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # rotates it through ``rotate_jsonl_log_if_needed``, which takes the name as a
     # parameter the scan does not resolve.
     "logs/task_reflections.jsonl",
+    # Live writers the scan cannot root: ``knowledge_versions.claim_record_path`` and ``_held_version_path`` build
+    # ``shelf.parent / "knowledge_note_records" | "knowledge_held_versions"`` from the shelf they are handed. Every
+    # writing call site hands them the global shelf: ``prepare_claim_write`` takes a record path only for
+    # ``address.scope == "global"`` (a project note's claims hold nowhere), ``held_notes._entry`` retains versions
+    # of global notes alone, and ``held_write`` writes only into a folder that retention already made.
+    "memory/knowledge_note_records/*.json",
+    "memory/knowledge_held_versions/*",
 })
 
 
@@ -1559,3 +1601,21 @@ def test_an_enclosing_binding_is_unknown_never_the_module_literal(tmp_path):
         "    return inner, deeper, store\n",
         encoding='utf-8')
     assert scan_data_paths(tmp_path) == frozenset({'state/*', 'logs/*'})
+
+
+def test_wait_and_pause_source_prefixes_have_lifetime_rows():
+    for name in ("owner_wait", "budget_pause"):
+        tree = ast.parse((REPO / "ouroboros" / (name + ".py")).read_text(encoding="utf-8"))
+        prefixes = [node.args[2].left.value for node in ast.walk(tree) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "store_continuation_source"]
+        assert prefixes
+        for prefix in prefixes:
+            assert any("/context_checkpoints/" + prefix in line.split("|")[1]
+                       and "[disposable: ouroboros.saved_state_retirement.prune_worked_copies]" in line
+                       for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("|"))
+
+    for term in ("park_task", "cause", "auto_resume", "resume_policy", "authority_notice_registered", "selection_door"):
+        assert f"`{term}`" in next(line for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("| task documents:"))
+    for line in DOC.read_text(encoding="utf-8").splitlines():
+        if "/context_checkpoints/" in line and ("owner-wait-" in line or "budget-pause-" in line):
+            assert "prune_worked_copies" in line, "a saved state's row names the step that retires it"

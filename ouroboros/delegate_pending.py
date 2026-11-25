@@ -4,7 +4,53 @@ from __future__ import annotations
 
 import copy
 import pathlib
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+# A held head an external session received, as its stored request names it (``stored_request``).
+_HELD_HEAD = re.compile("\x00held head [^\x00]* sha256=([0-9a-f]{64}) size=([0-9]+)\x00")
+
+
+def _splice(instructions: str, text: Callable[[str, int], str]) -> str:
+    """Stored instructions with each held head's reference replaced by ``text(sha256, size)``."""
+    return _HELD_HEAD.sub(lambda found: text(found[1], int(found[2])), instructions)
+
+
+def stored_request(drive_root: Any, body: Dict[str, Any], heads: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """``(the envelope as custody stores it, the facts its start row adds)``: each held head the start sends
+    (``held_notes.sent_heads``) is one content-addressed blob of its text, shared by every start that sends
+    it, and the stored instructions name it by address, revision and digest; ``request_body`` puts it back.
+    Where putting the references back would not give the original envelope (a head's text inside another head's
+    reference, prose shaped like one), the envelope is stored whole, as before held heads, and the row says
+    ``held_heads_inline``."""
+    from ouroboros.observability import write_blob
+
+    instructions, facts, texts = str(body.get("instructions") or ""), [], {}
+    for head in heads or ():
+        facts.append({key: head[key] for key in ("topic", "revision", "chars")})
+        if not head["text"]:  # a zero-character head: its fact alone, no blob and no reference
+            continue
+        ref = write_blob(pathlib.Path(drive_root), head["text"], kind="txt")
+        texts[ref["sha256"], ref["size"]] = head["text"]
+        token = f"\x00held head {head['topic']}@{head['revision']} sha256={ref['sha256']} size={ref['size']}\x00"
+        instructions = instructions.replace(head["text"], token, 1)
+    if not facts:
+        return body, {}
+    try:
+        exact = {**body, "instructions": _splice(instructions, lambda sha, size: texts[sha, size])} == body
+    except (KeyError, ValueError):  # reference-shaped text that names no head this start sent, or no int() size
+        exact = False
+    if exact:
+        return {**body, "instructions": instructions}, {"held_heads": facts}
+    return body, {"held_heads": facts, "held_heads_inline": True}
+
+
+def head_references(row: Dict[str, Any]) -> Dict[str, Any]:
+    """The held heads a start's stored envelope names by reference (``stored_request``), as its row lists them. The
+    envelope of any other row (a start before held heads, one that sent none, one stored whole) is opaque:
+    ``request_body`` reads marker-shaped prose in it as written."""
+    names = row.get("held_heads") and not row.get("held_heads_inline")
+    return {"held_heads": copy.deepcopy(row["held_heads"])} if names else {}
 
 
 def request_shape(body):
@@ -51,6 +97,7 @@ def pending_invocations(
                 "operation_id": str(row.get("operation_id") or ""),
                 "request": row.get("request") if isinstance(row.get("request"), dict) else None,
                 "request_ref": row.get("request_ref"),
+                **head_references(row),
                 **({"request_shape": copy.deepcopy(row["request_shape"])} if "request_shape" in row else
                    {"request_shape": request_shape(row["request"])} if isinstance(row.get("request"), dict) else {}),
                 "route": str(row.get("route") or ""),
@@ -91,10 +138,12 @@ def pending_invocations(
                     if isinstance(row.get("work_order_source_request"), dict) else {}
                 ),
             }
+        elif kind == c.START_RISK_ACCEPTED and invocation_id in found and invocation_id not in state:
+            found[invocation_id].setdefault("resume_decisions", {})[row["resuming_task_id"]] = row["decision"]
         elif kind == c.STARTED:
             state[invocation_id] = "started"
         elif (
-            kind == c.START_FAILED
+            kind in (c.START_UNSENT, c.START_FAILED)
             and row.get("definite") is True
             and state.get(invocation_id) != "started"
         ):
@@ -117,13 +166,16 @@ def pending_invocations(
 
 def current_rows(root, rows):
     """Typed open facts only. Legacy gaps keep their identity until the child backfills them."""
+    from ouroboros.delegate_invocation import decision_facts
+
     pending = []
     for facts in rows:
         projected = (copy.deepcopy(facts["pending"]) if "pending" in facts else
                      pending_invocations(root, [facts["request"]], materialize=False))
         source = facts["request"]
         for record in projected:
-            record.update(store_facts(source))  # a cached projection may predate a store fact its row holds
+            record.update(decision_facts(facts))
+            record.update(store_facts(source), **head_references(source))  # a cached projection may predate a fact its row holds
             for key in ("processing", "row_processing"):
                 if key in source:
                     record[key] = copy.deepcopy(source[key])
@@ -144,13 +196,15 @@ def backfill_due(root, row, facts, child):
 
 
 def backfill(root, should_stop):
-    """One addressed pass over already-open requests, CAS against start/refusal races."""
+    """One addressed pass over already-open requests, CAS against start/refusal races. A request whose body
+    cannot be located now keeps no shape and leaves the job pending, so a later run reads it."""
     from ouroboros import maintenance_jobs, store
+    from ouroboros.evidence_packs import EvidenceUnavailable
 
     with store.open_store(root, write=False) as txn:
         request = txn.meta("job:" + JOB)
         rows = txn.set_rows("custody_open")
-    done = 0
+    done, owed = 0, False
     for key, facts in rows.items():
         if should_stop():
             return {"state": "pending", "items": done}
@@ -160,12 +214,18 @@ def backfill(root, should_stop):
         source = facts["request"]
         shape = source.get("request_shape")
         if shape is None:
-            shape = request_shape(request_body(root, source))
+            try:
+                shape = request_shape(request_body(root, source, raise_unavailable=True))
+            except EvidenceUnavailable:
+                owed = True
+                continue
         projected = pending_invocations(root, [{**source, "request_shape": shape}], materialize=False)
         with store.open_store(root, write=True) as txn:
             if txn.get_row("custody_open", key) == facts:
                 txn.put_row("custody_open", key, {**facts, "pending": projected})
         done += 1
+    if owed:
+        return {"state": "pending", "items": done}
     with store.open_store(root, write=True) as txn:
         if txn.meta("job:" + JOB) != request:
             return {"state": "pending", "items": done}  # an import/repair added open rows meanwhile
@@ -173,7 +233,7 @@ def backfill(root, should_stop):
     return {"state": "done", "items": done}
 
 
-def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any) -> str:
+def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any, *, require_identity: bool = False) -> str:
     """Why a recorded invocation key must not be re-sent to the serving store now, or "".
 
     Claudexor keeps idempotency keys inside each store's own database, so only the store that
@@ -183,8 +243,13 @@ def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any) -> str:
     is not replayed into a named store; ``handshake_store_id``, only the store its handshake saw,
     refuses a store that differs from it and never proves admission. A row naming the store it
     is for (``daemon_store_id``, as a review continuation names the stopped run's admitting store)
-    replays only while the serving store is that one; a row naming none keeps the earlier replay.
-    A refusal decides nothing about whether the first POST started a run."""
+    replays only while the serving store is that one. ``require_identity`` is the automatic sweep's
+    rule: no admitting-store receipt, no replay, including legacy or identity-less rows after their
+    owner ended. Explicit retries retain their earlier identity-less replay contract by default.
+    A refusal decides nothing about whether the first POST started a run; a positive lookup can
+    still bind it without replay through either consumer."""
+    if require_identity and (record.get("store_identity_unproven") is True or not record.get("daemon_store_id")):
+        return "the admitting store is unproven; an automatic sweep cannot replay this unknown POST"
     if record.get("store_identity_unproven") is True:
         # Engines naming no identity retain legacy single-store replay. A handshake observed before
         # an unknown POST cannot certify its admission: the store may have changed before that POST.
@@ -206,13 +271,19 @@ def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any) -> str:
             "its key or the run it continues")
 
 
-def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def request_body(drive_root: Any, row: Dict[str, Any], *,
+                 raise_unavailable: bool = False) -> Optional[Dict[str, Any]]:
     """Resolve the canonical replay envelope, legacy inline first, then raw CAS.
 
     The raw CAS blob holds the full unredacted envelope, stored before the
-    start-requested row. Unreadable references leave the request unknown for
-    the caller's existing refusal paths; never rebuild a paid invocation from
-    current settings.
+    start-requested row, its held heads by reference where the row lists them
+    (``head_references``).
+    Unreadable references leave the request unknown for the caller's existing
+    refusal paths; never rebuild a paid invocation from current settings. A body
+    whose bytes cannot be located now (the envelope or a held head's text) is
+    unknown too, never unrecorded: ``raise_unavailable`` hands its
+    ``EvidenceUnavailable`` to a caller that would otherwise record the request as
+    unrecorded.
     """
     inline = row.get("request")
     if isinstance(inline, dict) and inline:
@@ -220,10 +291,20 @@ def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any
     ref = row.get("request_ref")
     if not isinstance(ref, dict) or not ref:
         return None
+    from ouroboros.evidence_packs import EvidenceUnavailable
     from ouroboros.observability import read_blob_ref
 
     try:
-        body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json")
+        task_id = str(row.get("task_id") or "") or None
+        body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json", task_id=task_id)
+        if isinstance(body, dict) and head_references(row) and _HELD_HEAD.search(str(body.get("instructions") or "")):
+            body = {**body, "instructions": _splice(body["instructions"], lambda sha, size: read_blob_ref(
+                pathlib.Path(drive_root), {"sha256": sha, "kind": "txt", "encoding": "gzip", "size": size},
+                expected_kind="txt", task_id=task_id))}
+    except EvidenceUnavailable:
+        if raise_unavailable:
+            raise
+        return None
     except Exception:
         return None
     return body if isinstance(body, dict) and body else None

@@ -22,6 +22,8 @@ _LEAVES = (settings_defaults, settings_scales, model_slots, review_model_routes,
 # New subscription capabilities belong to the same leaves, but did not exist on
 # the historical extraction's facade and need not add compatibility re-exports.
 _ADDED_OWNERS = {
+    # Factory helper composition was added in this leaf, never moved out of the config facade.
+    "OPENROUTER_HELPER_DEFAULTS": settings_defaults,
     "VALID_SUBAGENTS_MODES": settings_scales,
     "normalize_subagents_mode": settings_scales,
     "_safety_values": safety_config,
@@ -64,9 +66,15 @@ _ADDED_OWNERS = {
     "OWNER_CAP_LEGACY": settings_scales,
     "OWNER_CAP_FORMAT_KEY": settings_scales,
     "document_optional_value": settings_scales,
+    # The owner's optional number of one root's acting subagents (owner, 21.11.2026), and the table of such numbers.
+    "SUBAGENT_CAP_KEY": settings_scales,
+    "SUBAGENT_CAP_LEGACY": settings_scales,
+    "SUBAGENT_CAP_FORMAT_KEY": settings_scales,
+    "OWNER_NUMBERS": settings_scales,
     # The owner's optional limit on requests per model, and the one read seam that takes a shipped value saved
     # before either number became optional as not chosen (owner cap 09.11, model limit 13.11).
     "MODEL_CAP_LOCAL": settings_scales,
+    "MODEL_CAP_LEGACY": settings_scales,
     "MODEL_CAP_FORMAT_KEY": settings_scales,
     "model_cap_value": settings_scales,
     "_UNCHOSEN_SAVED": settings_scales,
@@ -111,7 +119,7 @@ _ADDED_OWNERS = {
     "task_processing_preference": model_slots,
     "normalize_processing_preference": model_slots,
     "resolve_processing_preference": model_slots,
-    # A call's tier (Settings' three and the runtime-only Ultrafast) and the tiers /api/state publishes.
+    # Main and call tiers, including Ultrafast, and their /api/state projection.
     "CALL_TIERS": model_slots,
     "normalize_call_tier": model_slots,
     "processing_tiers": model_slots,

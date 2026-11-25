@@ -15,11 +15,12 @@ from __future__ import annotations
 import pathlib
 import subprocess
 
+from tests._workspace_git import git_repository
+
 
 def _genesis_repo(root: pathlib.Path, gitignore: str = "") -> pathlib.Path:
     """A freshly created project: one commit, optionally a .gitignore."""
-    root.mkdir()
-    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+    git_repository(root, unborn=True)
     (root / "README.md").write_text("base\n", encoding="utf-8")
     tracked = ["README.md"]
     if gitignore:
@@ -49,7 +50,7 @@ def test_a_project_without_a_gitignore_keeps_its_build_output_in_the_patch(tmp_p
 
     assert "dist/widget.js" in patch
     assert "dist/widget.js" in manifest["untracked_included"]
-    assert manifest["exclude_rules_version"] == 3
+    assert manifest["exclude_rules_version"] == 4
     assert not [item["path"] for item in manifest["untracked_excluded"]]
 
 
@@ -120,3 +121,20 @@ def test_the_benchmark_capture_script_owns_its_own_rule(tmp_path):
         assert "dist/" in text
         assert "workspace_patch_rules" not in text
     assert "dist" not in workspace_patch_rules._PATCH_JUNK_RE.pattern
+
+
+def test_policy_exclusion_needs_verified_file_results_to_claim_delivery():
+    from ouroboros.workspace_patch_rules import declared_capture_paths, format_patch_exclusions
+
+    manifest = {"tracked_changed": ["lock", "tracked.bin", "edit.txt"],
+                "tracked_excluded": [{"path": "lock", "reason": "incidental lockfile"},
+                                     {"path": "tracked.bin", "reason": "file reference"}],
+                "untracked_excluded": [{"path": "new.bin", "reason": "binary file"}],
+                "file_output_changes": [{"path": "tracked.bin"}, {"path": "new.bin"}]}
+    assert declared_capture_paths(manifest) == ["edit.txt", "new.bin", "tracked.bin"]
+    out = format_patch_exclusions(manifest)
+    assert "3 file(s) EXCLUDED" in out and "separate file result(s)" not in out
+    out = format_patch_exclusions(manifest, [{"path": "tracked.bin"}, {"path": "new.bin"}], "applied", ["new.bin"])
+    assert "1 file(s) EXCLUDED from this patch by capture policy: lock (incidental lockfile)" in out
+    assert "2 separate file result(s) delivered and staged" in out
+    assert "new.bin (binary file) [unstaged]; tracked.bin (file reference)." in out

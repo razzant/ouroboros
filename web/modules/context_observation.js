@@ -20,6 +20,10 @@ const at = (fact) => {
     return (Date.parse(stamp) || 0) + Number(fraction.slice(3, 6).padEnd(3, '0')) / 1000;
 };
 const identity = (fact) => `${fact.work}:${fact.task_attempt}:${fact.attempt_id}`;
+// A work the window took from the owner's Max runs in Low, temporarily, for the window, and is named Low; the owner's
+// choice stays Max beside it (`preferred_at_send`, owner 21.11.2026). Rows of 17-22 Nov 2026 named that state Max with
+// chapter maps (`applied` max, `books` maps; a room's own work reads whole books in Max otherwise): they read as Low.
+export const asSent = (fact) => (fact?.applied === 'max' && fact.books === 'maps' ? { ...fact, applied: 'low' } : fact);
 const newest = (facts) => facts.filter(Boolean).reduce((a, b) => (!a || at(b) > at(a) ? b : a), null);
 const sourceIdentity = (fact) => fact?._source_identity || identity(fact);
 const previousIdentity = (fact) => identity({ ...fact.previous, work: fact.work });
@@ -40,7 +44,10 @@ export function roomContextFacts(rows, chatId) {
         && CONTEXT_MODES.includes(row.context_attempt?.applied)
         && ['dispatched', 'settled', 'unresolved', 'released'].includes(row.context_attempt?.ledger_state)
         && (row.task_attempt == null || row.context_attempt.task_attempt === row.task_attempt))
-        .map((row) => ({ ...row.context_attempt, work: String(row.activity_id || '') }));
+        .map((row) => {
+            const fact = asSent(row.context_attempt);
+            return { ...fact, ...(fact.previous ? { previous: asSent(fact.previous) } : {}), work: String(row.activity_id || '') };
+        });
 }
 
 function revisedRelease(old, fact, releasedIds, withoutPrevious) {
@@ -125,20 +132,36 @@ const said = (mode) => translateString(CONTEXT_LABELS[mode] || '');
 const listed = (modes) => (modes.length > 1
     ? fmt('{first} and {second}', { first: modes.slice(0, -1).map(said).join(', '), second: said(modes.at(-1)) }) : said(modes[0]));
 
+// The recorded causes of a send that ran below the mode its work held at send (`causeOf` names each).
+const LOWERING = ['memory', 'request', 'route', 'window', 'after_start'];
+
 // Why the request ran below the mode its work held at send (`cause`), else that the owner's choice changed since. The
-// task card's start row says its recorded reason in these same words (`task_checkpoints.js`).
+// task card's start row says its recorded reason in these same words (`task_checkpoints.js`). A start the window took
+// from the owner's Max names the work's state (Low for now) apart from that choice, by its cause.
 export function causeOf(fact, preferred) {
     const asked = said(fact.preferred_at_send);
     const ran = said(fact.applied);
     switch (asked && fact.cause) {
-    case 'memory': return fmt('The history does not fit the {mode} window.', { mode: asked });
-    case 'route': return fmt('This model’s window cannot hold {mode}.', { mode: asked });
-    case 'window': return fmt('{mode} did not fit at the start.', { mode: asked });
+    case 'memory': return fmt('{mode} for now, not {chosen}: the whole books do not fit beside the history.', { mode: ran, chosen: asked });
+    case 'request': return fmt('{mode} for now, not {chosen}: even without the history, the request leaves the whole books no room.', { mode: ran, chosen: asked });
+    case 'route': return fmt('{mode} for now, not {chosen}: this model’s window cannot hold the whole books.', { mode: ran, chosen: asked });
+    case 'window': return fact.applied === 'low' && fact.preferred_at_send === 'max'  // rows of 17-22 Nov: schemas tipped it
+        ? fmt('{mode} for now, not {chosen}: the whole books did not fit beside the rest of the start.', { mode: ran, chosen: asked })
+        : fmt('{mode} did not fit at the start.', { mode: asked });
     case 'after_start': return fmt('The work moved to {mode} after it started.', { mode: ran });
     default: break;
     }
     return fact.preferred_at_send && fact.preferred_at_send !== preferred
         ? fmt('Sent before {mode} was chosen.', { mode: said(preferred) }) : '';
+}
+
+// Low's target missed at this room's newest owner-Low start (owner 15.11.2026, 3A: where the mode is chosen, the
+// screen says it before the next start): what the rest of that start's request took, from its own receipt; '' else.
+export function lowMissedOf(fact) {
+    const n = Number(fact?.no_memory_tokens);
+    if (fact?.applied !== 'low' || fact?.profile !== 'owner_low' || !fact?.target_missed || !(n > 0)) return '';
+    return fmt('Low’s 250K target was not met at the last start here: without memory it already needed about {n}; '
+        + 'memory keeps its shortest tellings.', { n: `${Math.round(n / 1000)}K` });
 }
 
 // An explicitly incomplete census: what it listed is kept, but it is not the room's whole current state.
@@ -173,12 +196,17 @@ export function contextShown(observation, preferred) {
     const when = { word: fmt(obs.state === 'now' ? '{mode} now' : '{mode} last', { mode: said(mode) }),
         time: time ? fmt('Request at {time}.', { time }) : '' };
     // Agreement is today's closed capsule: its own words name it (as the overlay translated them); open, it is dated.
+    // A send made under another mode keeps its own reason before the time (a Low the window took from Max, Low chosen
+    // since): a temporary Low never reads as the owner's own.
     const note = obs.partial ? incomplete() : '';
     if (mode === preferred) {
-        const text = [when.time, note].filter(Boolean).join(' ');
+        const sent = obs.latest?.preferred_at_send;
+        const why = sent && sent !== mode && LOWERING.includes(obs.latest.cause) ? causeOf(obs.latest, preferred) : '';
+        const text = [why, when.time, note].filter(Boolean).join(' ');
         return { actual: mode, word, lit: [mode], differs: false, label: '', fact: text ? { word: when.word, text } : null };
     }
-    const sentence = [causeOf(obs.latest, preferred), when.time, note].filter(Boolean).join(' ');
+    const why = causeOf(obs.latest, preferred);
+    const sentence = [why, when.time, note].filter(Boolean).join(' ');
     return { actual: mode, word, lit: [mode], differs: true,
         label: fmt(obs.state === 'now' ? 'Context: {word} now, {chosen} chosen' : 'Context: {word} last, {chosen} chosen', { word: said(mode), chosen }),
         fact: { word: when.word, text: sentence } };

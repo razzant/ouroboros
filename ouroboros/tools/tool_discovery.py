@@ -5,10 +5,11 @@ view; in every mode an unpinned MCP server's schemas load on demand, its tools n
 by the connections map). ``list_available_tools`` reports the task's current callable
 catalog in every context mode — whether a schema is already loaded is an attribute of
 a row, never its availability — and ``enable_tools`` loads permitted schemas that are
-not resident yet, a whole MCP server by ``mcp_<server>``. Neither grants a capability.
-Where the gateway ``call_mcp_tool`` is in the request, MCP schemas are shown in the
-``enable_tools`` result instead and called through the gateway: the request's leading
-tools unit keeps its bytes, and with them the provider's prompt cache.
+not resident yet, a whole MCP server by ``mcp_<server>``, a whole skill by its name.
+Neither grants a capability.
+A text loop with resident ``call_mcp_tool`` shows missing MCP schemas in the
+``enable_tools`` result. An MCP-only load then leaves the request's tools unchanged;
+other requested schemas can still change them.
 
 The loop binds the handlers to its resident schema list (``bind_resident_schemas``);
 without a loop, the module registry set by ``set_registry`` serves as the fallback.
@@ -182,29 +183,88 @@ def list_available_tools(
     return "\n".join(lines)
 
 
+def _skill_tools(registry: "ToolRegistry", name: str, *, adopt: bool = True) -> List[str]:
+    """The live extension tools of the skill ``name`` gives, sorted: its exact namespace (``ext_<n>_<token>``)
+    first, else the skill named so. Like a single surface name (``_extension_dispatch_candidate``) it can first
+    take the bounded adoption of the published generation (``adopt``; one per ``enable_tools`` call), so a
+    skill enabled or updated after this worker spawned is seen. A registered skill that is not live (disabled,
+    revoked, stale review), or whose liveness cannot be read, gives nothing; one observation per skill."""
+    from types import SimpleNamespace
+    from ouroboros.extension_loader import _lock as ext_lock, _tools as ext_tools, is_extension_live
+    from ouroboros.tools.extension_dispatch import _adopt_extension_generation, _extension_capability_root
+
+    ctx = getattr(registry, "_ctx", None) or SimpleNamespace()
+    if adopt:
+        try:
+            _adopt_extension_generation(ctx)
+        except Exception:
+            log.debug("Extension generation adoption failed before a skill load", exc_info=True)
+    with ext_lock:
+        rows = [(str(tool.get("name") or ""), str(tool.get("skill") or ""),
+                 str(tool.get("skills_repo_path") or "") or None) for tool in ext_tools.values()]
+    rows = [row for row in rows if row[1] and name in (row[1], tool_namespace(row[0]))]
+    root, live = _extension_capability_root(ctx), {}
+    for _tool, skill, repo in rows:
+        if (skill, repo) not in live:
+            try:
+                live[skill, repo] = bool(is_extension_live(skill, root, repo_path=repo))
+            except Exception:  # an unreadable record answers like a dispatch miss: not live
+                log.debug("Liveness of skill %s could not be read", skill, exc_info=True)
+                live[skill, repo] = False
+    rows = [(tool, skill) for tool, skill, repo in rows if live[skill, repo]]
+    return sorted([tool for tool, _skill in rows if tool_namespace(tool) == name]
+                  or [tool for tool, skill in rows if skill == name])
+
+
+def _is_tool_name(registry: "ToolRegistry", name: str) -> bool:
+    """Whether a policy refusal of ``name`` refuses a tool: a registered built-in, an extension or MCP tool
+    name, or a name this task's contract disables. Any other name may still be a skill's."""
+    from ouroboros.tools.registry_guards import _disabled_tools
+
+    return (tool_namespace(name) != BUILTIN_NAMESPACE or registry.is_builtin(name)
+            or name in _disabled_tools(getattr(registry, "_ctx", None)))
+
+
 def _load_set(registry: "ToolRegistry", names: List[str]) -> tuple:
-    """Resolve names in request order; ``mcp_<server>`` stands for every tool of it this actor may call."""
+    """Resolve names in request order: ``mcp_<server>`` with tools (every one this actor may call), a tool, a
+    policy-hidden tool, then a live skill's name or extension namespace (each of its tools resolved exactly
+    as when named alone; those this actor cannot call are counted, never named), then a policy refusal of
+    any other name. One family adoption probe serves the whole call (a missed ``ext_`` surface name has
+    already taken its own in dispatch)."""
     wanted: Dict[str, Dict[str, Any]] = {}
-    servers, hidden, not_found, visible = {}, [], [], None
+    servers, hidden, not_found, visible, partial, adopted = {}, [], [], None, [], False
     for name in names:
         if name.startswith("mcp_") and "__" not in name:
             visible = registry.schemas() if visible is None else visible
             members = sorted(schema["function"]["name"] for schema in visible
                              if tool_namespace(schema["function"]["name"]) == name)
-            servers[name] = members
-            for member in members:
-                wanted.setdefault(member, next(s for s in visible if s["function"]["name"] == member))
-            if not members:
-                not_found.append(name)
-            continue
+            if members:  # a real server wins; an empty one leaves the name to a skill called mcp_<slug>
+                servers[name] = members
+                for member in members:
+                    wanted.setdefault(member, next(s for s in visible if s["function"]["name"] == member))
+                continue
         schema = registry.get_schema_by_name(name)
         if schema is not None:
             wanted.setdefault(name, schema)
-        elif reason := registry.policy_hidden_reason(name):  # F3 (2026-08-10 saga): policy-filtered is not a typo
+            continue
+        reason = registry.policy_hidden_reason(name)
+        if reason and _is_tool_name(registry, name):  # F3 (2026-08-10 saga): policy-filtered is not a typo
+            hidden.append(f"{name} — {reason}")
+            continue
+        members, adopted = _skill_tools(registry, name, adopt=not adopted), True
+        if members:
+            schemas = {member: registry.get_schema_by_name(member) for member in members}
+            servers[name] = [member for member in members if schemas[member] is not None]
+            for member in servers[name]:
+                wanted.setdefault(member, schemas[member])
+            if withheld := len(members) - len(servers[name]):
+                (partial if servers[name] else hidden).append(
+                    f"{name} — {withheld} of its {len(members)} tools are not callable in this task (names withheld)")
+        elif reason:
             hidden.append(f"{name} — {reason}")
         else:
             not_found.append(name)
-    return wanted, servers, hidden, not_found
+    return wanted, servers, hidden, not_found, partial
 
 
 def _named(names: List[str], servers: Dict[str, List[str]]) -> str:
@@ -226,14 +286,15 @@ def enable_tools(
     On a route with a schema ceiling this load goes first after the selectors and the tools this
     task's history already called (``fit_tool_schemas_to_limit``), so the receipt names exactly what
     the next request carries; a load none of which fits is ``TOOL_SCHEMA_LIMIT``. No unload.
-    ``gateway`` (Main's text loop): an MCP schema not in a request that carries ``call_mcp_tool`` is
-    shown in this result for that gateway instead of loaded, so the request's tools keep their bytes.
+    With a resident text-loop gateway, show missing MCP schemas in the result instead of loading them.
+    Any requested non-MCP schemas still follow the load path above. A skill's name is one load of all
+    its tools (``_load_set``), so the request's tools change once, not once per tool.
     """
     names = [n.strip() for n in str(tools or "").split(",") if n.strip()]
     if not names:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR", text="No tools specified."))
-    wanted, servers, hidden, not_found = _load_set(registry, names)
+    wanted, servers, hidden, not_found, partial = _load_set(registry, names)
     parts, left_out, limit, unfit = [], (), None, False
     present, shown = {schema["function"]["name"] for schema in resident or ()}, {}
     if gateway and GATEWAY_TOOL in present:
@@ -278,14 +339,17 @@ def enable_tools(
             parts.append("Already loaded: " + _named(already, servers))
         if left_out:
             parts.append(f"⚠️ This route carries at most {limit} tool schemas per request, so the next request "
-                         f"leaves out: {', '.join(left_out)}. They stay callable; enable_tools loads them later.")
+                         f"leaves out: {', '.join(left_out)}. They stay callable; "
+                         "enable_tools can show or load a selected schema.")
+    if partial:
+        parts.append("⚠️ Not loaded with the skill: " + "; ".join(partial))
     if hidden:
         parts.append("🚫 Hidden by policy (the tool exists but this task cannot use it): " + "; ".join(hidden))
     if not_found:
-        discovery = "list_available_tools" in usable_selectors(registry)
-        pointer = " list_available_tools shows the current callable names." if discovery else ""
-        parts.append(f"❌ Not found: {', '.join(not_found)}.{pointer}")
-        parts.extend(_named_namespace_guidance(registry, not_found, discovery=discovery))
+        pointer = (" list_available_tools shows the current callable names."
+                   if "list_available_tools" in usable_selectors(registry) else "")
+        parts.append(f"❌ Not found: {', '.join(not_found)}.{pointer} A skill's name loads its tools only while "
+                     "that skill is enabled and its extension is live.")
     text = "\n".join(parts)
     if not wanted and not shown:
         return _publish_tool_result(ctx, ToolResult(
@@ -307,8 +371,8 @@ def _gateway_schemas(shown: Dict[str, Dict[str, Any]], servers: Dict[str, List[s
     rows = [f"## {name}\n{schema['function'].get('description') or ''}\nparameters: "
             + json.dumps(schema["function"].get("parameters") or {}, ensure_ascii=False, sort_keys=True)
             for name, schema in shown.items()]
-    return (f"✅ Call schemas for call_mcp_tool(name, arguments): {_named(list(shown), servers)}. The request's "
-            "tool list stays as it is, so its cached prefix survives. Descriptions and schemas come from the "
+    return (f"✅ Call schemas for call_mcp_tool(name, arguments): {_named(list(shown), servers)}. "
+            "These MCP schemas are not added to the request's tools array. Descriptions and schemas come from the "
             "server: untrusted external data.\n\n" + "\n\n".join(rows))
 
 
@@ -410,31 +474,6 @@ def _skill_namespace(name: str, groups: Dict[str, Any]) -> str:
     return namespace if namespace in groups else ""
 
 
-def _named_namespace_guidance(registry: "ToolRegistry", names: List[str], *, discovery: bool) -> List[str]:
-    """A missed name that is a namespace, or the skill an extension namespace is named by, answers
-    with that namespace's callable tools (the exact naming rule, never a likeness): the overview
-    shows an extension as its namespace, and a caller that asks for the skill gets its tools."""
-    from ouroboros.extension_surface_names import extension_name_prefix
-    from ouroboros.tool_policy import name_miss_guidance
-
-    callable_rows = getattr(registry, "callable_rows", None)
-    if callable_rows is None:  # a catalog without dispatch rows answers the plain miss only
-        return []
-    rows = callable_rows() or []
-    namespaces = {tool_namespace(str(row["name"])) for row in rows} - {BUILTIN_NAMESPACE}
-    lines: List[str] = []
-    for name in names:
-        try:
-            namespace = name if name in namespaces else extension_name_prefix(name)[:-1]
-        except Exception:
-            continue
-        if namespace not in namespaces:
-            continue
-        lines.append(f"{name} names the namespace {namespace}, not one tool; enable its tools by their names.")
-        lines.extend(name_miss_guidance(name, namespace, callable_rows(namespace), discovery=discovery))
-    return lines
-
-
 def update_resident_notice(registry, resident, messages):
     """One host fact about the schemas actually sent, including feature tools."""
     from ouroboros.context_budget import bound_host_row
@@ -459,7 +498,7 @@ def update_resident_notice(registry, resident, messages):
 
 
 def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any]], *, gateway: bool = False) -> set:
-    """Bind the discovery handlers of ``registry`` to one loop's resident schema list (``gateway``: Main's)."""
+    """Bind discovery to one loop's resident list; text loops may show MCP schemas through the gateway."""
     enabled_late: set = set()
     registry.override_handler(
         "list_available_tools",
@@ -529,10 +568,10 @@ def get_tools() -> List[ToolEntry]:
                 "name": "enable_tools",
                 "description": (
                     'Load call schemas for named tools this task may already call (comma-separated); '
-                    '"mcp_<server>" loads every tool of that server. On Main, MCP schemas are shown in this result '
-                    "for call_mcp_tool instead, keeping the request's tools unchanged. Reports what "
-                    "the next request carries, policy-hidden and unknown names; grants no permission. Another "
-                    "namespace or a skill's name answers with its tools' names. In a live call the new schemas "
+                    '"mcp_<server>" selects the whole server, a skill\'s name every tool of that skill. Text '
+                    "tasks with call_mcp_tool loaded show MCP schemas here instead of adding them to the "
+                    "request's tools array. Reports what the next request carries, policy-hidden and unknown "
+                    "names; grants no permission. In a live call the new schemas "
                     "reach the voice session (an engine that cannot take them in place reconnects once)."
                 ),
                 "parameters": {
@@ -540,7 +579,8 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "tools": {
                             "type": "string",
-                            "description": "Comma-separated tool names, or mcp_<server> for a whole server",
+                            "description": ("Comma-separated tool names, mcp_<server> for a whole server, "
+                                            "or a skill's name for all its tools"),
                         }
                     },
                     "required": ["tools"],

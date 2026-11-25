@@ -36,6 +36,7 @@ from ouroboros.config import (
 from ouroboros.consciousness_authority import apply_consciousness_authority, is_consciousness_origin
 from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract, normalize_allowed_resources  # noqa: F401
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug  # noqa: F401
+from ouroboros.host_notice import with_notice
 from ouroboros.outcomes import terminal_outcome_axes
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso  # noqa: F401
 from supervisor.evolution_lifecycle import (  # noqa: F401 -- public queue API and lazy scheduler dependencies
@@ -76,7 +77,7 @@ SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
 # OWNER_PID names that process: a child forked after ``init`` inherits INITIALIZED, not the pid.
 INITIALIZED = False
 OWNER_PID: Optional[int] = None
-QUEUE_PUBLICATION = None  # (path, encoded documents, snapshot generation, generation per document) of the last successful publication.
+QUEUE_PUBLICATION = None  # (path, encoded documents, snapshot generation) of the last successful publication.
 
 
 def owns_live_queue(drive_root: Any) -> bool:
@@ -802,9 +803,10 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
 
         try:
             system_review_row(reviewer)
-        except ReviewChangeArgumentError as exc:
-            send_with_budget(int(target_chat_id), f"Deep self-review could not be queued: {exc}.",
-                             **answers, role="system", system_type="deep_self_review_unavailable")
+        except ReviewChangeArgumentError as exc:  # the row's cause is the notice's detail (DESIGN principle 7)
+            send_with_budget(int(target_chat_id), "Deep self-review could not be queued for this reviewer row.", role="system",
+                             **with_notice(answers, "deep_self_review_unavailable", step="choose_reviewer", details=exc),
+                             system_type="deep_self_review_unavailable")
             return None
     if (not force) and queue_has_task_type("deep_self_review"):
         return None
@@ -825,17 +827,16 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
         # Restart restores a disabled worker pool and nothing else: a billing,
         # lookup or fence refusal keeps its own reason without that advice.
         restart = admitted["_admission_blocked"] == "worker_pool_unavailable"
-        hint = f" {detail}." if detail else " Use /restart to restore the worker pool." if restart else ""
-        send_with_budget(
-            int(target_chat_id),
-            f"Deep self-review could not be queued: {reason}.{hint}",
-            **answers, role="system", system_type="deep_self_review_unavailable",
-        )
+        send_with_budget(int(target_chat_id), "Deep self-review could not be queued.", **with_notice(
+            answers, "deep_self_review_not_admitted", step="restart" if restart and not detail else "",
+            details=f"{reason}{': ' + detail if detail else ''}"), role="system", system_type="deep_self_review_unavailable")
         return None
     persist_queue_snapshot(reason="deep_self_review_enqueued")
     # Typed SYSTEM row: an acknowledgement is never a task's answer, and the bench
     # trajectory reader takes the last UNTYPED outbound row as one.
-    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason}; reviewer: {reviewer or 'Main'})", **answers, role="system", system_type="deep_self_review_queued")
+    send_with_budget(int(target_chat_id), f"Deep self-review is queued; reviewer: {reviewer or 'Main'}.", role="system", system_type="deep_self_review_queued",
+                     **with_notice(answers, "deep_self_review_queued", details=f"task {tid}; requested as {reason}",  # its origin: a detail
+                                   template="Deep self-review is queued; reviewer: {reviewer}.", values={"reviewer": reviewer or "Main"}))
     return tid
 
 
@@ -908,8 +909,22 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         status = "running"
         detail = "Evolution task is running now."
     elif isinstance(queued_task, dict):
-        status = "queued"
-        detail = "Evolution task is queued."
+        from ouroboros.store_hot_facts import snapshot
+        from ouroboros.work_stop import current_stop, queue_control
+
+        status, detail = "queued", "Evolution task is queued."
+        # Only a possible money stop needs the census's addressed control read here.
+        if current_stop(queued_task, {"budget": BUDGET_ROOT_FENCES}).get("cause") == "money":
+            task_id = str(queued_task.get("id") or "")
+            root = queued_task.get("budget_drive_root") or DRIVE_ROOT
+            with snapshot(((root, task_id), (root, queued_task.get("root_task_id") or task_id))):
+                control = queue_control(root, queued_task, BUDGET_ROOT_FENCES)
+            view = control["view"]
+            if control["phase"] == "unknown":
+                status, detail = "state_unknown", "The queued cycle's pause state is unavailable."
+            elif control["phase"] == "budget_paused" and view["stop"].get("cause") == "money" and view["resumable"]:
+                status = "budget_stopped"
+                detail = "This cycle paused at the spending limit. Resume the task in Activity to continue."
     elif not accounting_available:
         status = "accounting_unavailable"
         detail = "Cost accounting is unavailable; evolution dispatch is paused without changing the campaign."

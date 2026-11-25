@@ -209,7 +209,7 @@ def test_reversed_mail_applies_the_later_durable_decision_once(host, monkeypatch
     second = act(host, model=C, request_id="second")
     assert first.status_code == second.status_code == 200
     assert second.json()["lead"] == {"model": A, "use_local": False, "basis": "main",
-                                     "pending": {"model": C, "use_local": False}}
+                                     "pending": {"model": C, "use_local": False, "basis": "owner"}}
     assert ctx.active_model == A  # admission never touches the running call
     for args, kwargs in reversed(delayed):
         assert write(*args, **kwargs)
@@ -383,7 +383,9 @@ def test_owner_fallback_exits_use_the_same_return_and_wait_as_the_tool(host, mon
     _other_tools, other = turn(host, monkeypatch)
     other.active_model = B
     assert "primary route" in _switch_model(other, primary=action)
-    assert act(host, action).status_code == 200
+    response = act(host, action)
+    assert response.status_code == 200
+    assert response.json()["lead"] == {**lead_fact.lead_fact(ctx), "pending": {"model": A, "use_local": False}}
     drain_and_apply(host, tools, ctx)
     assert ctx.active_model == other.active_model_override == A
     assert ctx.route_wait_on_primary is (action == "wait")
@@ -569,7 +571,7 @@ def test_model_control_and_pending_share_the_census_and_work_projection(host, mo
         return work
     assert {"action": "model", "target": "work"} in snapshot()["controls"]
     assert act(host, model=B).status_code == 200
-    assert snapshot()["lead"]["pending"] == {"model": B, "use_local": False}
+    assert snapshot()["lead"]["pending"] == {"model": B, "use_local": False, "basis": "owner"}
     drain_and_apply(host, tools, ctx)
     for event in list(ctx.event_queue.queue):
         _handle_work_lead(event, host[1])
@@ -709,10 +711,14 @@ def test_owner_model_act_during_a_tools_helper_wait_keeps_the_loop_running(host,
                                worker_slot_held=True) as waiter:
         waiter.tool_context = ctx
         ctx.model_wait_context = waiter
-        text, _, _ = loop.run_llm_loop([{"role": "user", "content": "Read the note"}], tools,
+        text, usage, trace = loop.run_llm_loop([{"role": "user", "content": "Read the note"}], tools,
             SimpleNamespace(default_model=lambda: A), host[0], lambda *_a, **_k: None,
             queue.Queue(), task_id="work", drive_root=host[0], event_queue=ctx.event_queue)
-    assert text == "done" and calls == [A, B] and len(ticks) == 2
+    # The helper still finishes its own wait. Only the successor sees the handover reminder.
+    assert len(ticks) == 2 and calls == [A, B, B] and text == "done"
+    [handover] = trace["route_handovers"]
+    assert (handover["from_model"], handover["to_model"], handover["selection"]) == (A, B, "answer")
+    assert handover["recovery_prompted"] and usage.get("reason_code") != "authoring_handover_incomplete"
 
 
 def test_forced_finalization_wait_does_not_spin_or_consume_a_primary_act(host, monkeypatch):
@@ -830,6 +836,25 @@ def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_c
     assert _successor(host[0], "work")["metadata"]["lead"] == carrier
 
 
+def test_same_model_can_change_binding_before_its_acting_fact_changes(host):
+    model = 'claudexor::codex=example'
+    save_owner({'OUROBOROS_MODEL': model, 'OUROBOROS_MODEL_ACCOUNTS': json.dumps({'main': 'home'})})
+    task = running(host)
+    acting = {'model': model, 'use_local': False, 'basis': 'main'}
+    live = host[2].RUNNING['work']
+    live['lead'] = acting
+    new = {'model': model, 'use_local': False, 'basis': 'owner'}
+    response = act(host, model=model)
+    assert response.json()['lead'] == {**acting, 'pending': new}
+    assert lead_fact.project_lead(acting, task) == response.json()['lead']
+    live.update(lead=new, _lead_request_id='press')
+    assert 'pending' not in act(host, model=model, request_id='same-choice').json()['lead']
+    response = act(host, 'follow', request_id='main-again')
+    assert response.json()['lead'] == {**new, 'pending': acting}
+    assert lead_fact.project_lead(new, task) == response.json()['lead']
+    assert 'pending' not in lead_fact.project_lead(acting, {**task, '_lead_request_id': 'main-again'})
+
+
 @pytest.mark.parametrize("action", ["return", "wait"])
 def test_a_cited_primary_on_its_own_model_through_a_fallback_account_stays_fallback_until_it_answers(host, action):
     """The ladder may answer on the primary's own model through another account. The owner's Return or Wait is a
@@ -943,3 +968,34 @@ def test_a_card_returns_an_uncited_cyber_start_to_its_own_primary(host, monkeypa
     assert ctx.primary_route == {"model": B, "use_local": False, "role": "lead"}
     assert ctx.route_wait_on_primary is (action == "wait")
     assert lead_fact.primary_basis(ctx) == "mind"
+
+
+@pytest.mark.parametrize("card_kind, label", [
+    ("quiz", "Choose the violet route"), ("quiz", "  Choose the violet route  "), ("living", "  File violet dates  "),
+])
+def test_a_model_selected_on_a_card_retains_the_press_as_its_basis(host, monkeypatch, card_kind, label):
+    from ouroboros.answer_facts import living_card_input
+    from ouroboros.tools.control_runtime import _switch_model
+    from ouroboros.owner_words import answered_card_reply
+    from supervisor.events_mind_controls import handle_mind_task_control
+
+    task = queued(host)
+    _, ctx = turn(host, monkeypatch)
+    if card_kind == "living":
+        act = living_card_input({"card_press": {"task_id": "violet-desk", "card_id": "card_0123456789abcdef",
+                                "request_id": "violet-dates", "submission": {"label": label, "values": {}}}})
+    else:
+        card = {"question": "Which route?", "options": [label, "Wait"], "answered_index": 0, "quiz_id": "violet-route"}
+        act = {"source": "owner_press", "content": "1. " + label, "reply_to": answered_card_reply(card, "route-desk"),
+               "quiz_id": "violet-route"}
+    ctx._owner_directives = [act]
+    ctx.event_queue = SimpleNamespace(put_nowait=lambda event: handle_mind_task_control(
+        event, SimpleNamespace(DRIVE_ROOT=host[0], bridge=SimpleNamespace(push_log=lambda row: None))))
+    assert "requires verified owner_words" in _switch_model(ctx, B, owner_words="violet")
+    result = _switch_model(ctx, B, owner_words=label.strip())
+    assert '"ok": true' in result
+    carrier = task["metadata"]["lead"]
+    assert carrier["source"] == "owner_press" and carrier["cited"] == label
+    assert load_task_result(host[0], "work")["metadata"]["lead"] == carrier
+    assert lead_fact.project_lead(task=task, queued=True)["cited"] == {"text": label, "clipped": False}
+    assert f"«{label}»" in lead_fact.chooser_words(carrier["source"], carrier)

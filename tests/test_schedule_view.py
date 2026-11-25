@@ -95,20 +95,82 @@ def test_withdrawal_reports_only_known_work_facts(facts, expected):
 
 
 def test_digest_orders_standing_first_then_attention_then_one_shots():
+    """Enabled standing rows stand outside the bound; a switched-off or withdrawn one with nothing outstanding is a
+    count beside the reader; attention, then one-shots, share the bound."""
     rows = [row("once"), row("held", hold={"reason": "capacity", "detail": "Busy"}),
             row("active", trigger={"type": "cron", "expr": "0 * * * *"}),
             row("paused", trigger={"type": "cron", "expr": "0 * * * *"}, enabled=False),
             row("withdrawn", trigger={"type": "cron", "expr": "0 * * * *"}, delete_requested_at="then"),
             row("history", completed_at="done", enabled=False)]
-    short = digest(rows, NOW, limit=3)
-    assert [entry["id"] for entry in short["standing"]] == ["active", "paused", "withdrawn"]
-    assert not short["attention"] and not short["one_shots"] and short["omitted_count"] == 2
+    short = digest(rows, NOW, limit=1)
+    assert [entry["id"] for entry in short["standing"]] == ["active"]
+    assert [entry["id"] for entry in short["attention"]] == ["held"] and not short["one_shots"]
+    assert short["omitted_count"] == 1 and short["inactive_standing_count"] == 2
     full = digest(rows, NOW)
-    assert [entry["status"] for entry in full["standing"]] == ["active", "disabled", "delete_pending"]
+    assert [entry["status"] for entry in full["standing"]] == ["active"]
     assert full["attention"][0]["waiting_reason"] == "capacity"
     assert full["one_shots"][0]["id"] == "once" and full["omitted_count"] == 0
-    assert full["pointer"] == "manage_schedules(action='list')"
+    assert full["inactive_standing_count"] == 2 and full["pointer"] == "manage_schedules(action='list')"
     assert "Check the report" not in json.dumps(full)
+
+
+def _cron(sid, **kw):
+    return row(sid, trigger={"type": "cron", "expr": "0 9 * * *"}, timezone="Europe/Moscow", **kw)
+
+
+def test_every_enabled_standing_row_stands_with_its_last_run_and_only_that_runs_outcome():
+    """More enabled standing rows than the bound all stand, each with its last run printed with its offset in the
+    schedule's own zone; the cached outcome only when it is that run's, else pending observation; never ran when no
+    run is recorded. The bound still holds attention and one-shots."""
+    done = {"task_id": "run-0", "state": "completed", "quiet": True, "line": "Private"}
+    rows = [_cron(f"cron-{n}", last_run_at="2026-11-20T06:00:00.123456+00:00", last_task_id=f"run-{n}",
+                  last_outcome={**done, "task_id": "run-0"}) for n in range(10)]
+    rows += [_cron("naive", last_run_at="2026-11-20T09:00:00", last_task_id="mine", last_outcome={**done, "task_id": "mine"}),
+             _cron("fresh"), _cron("note", kind="notify", notification={"text": "Note"}, last_run_at="2026-11-20T06:00:00+00:00")]
+    rows += [row(f"once-{n}") for n in range(9)]
+    view = digest(rows, NOW)
+    standing = {entry["id"]: entry for entry in view["standing"]}
+    assert list(standing) == [*(f"cron-{n}" for n in range(10)), "naive", "fresh", "note"]
+    assert standing["cron-0"]["last_run_at"] == "2026-11-20T09:00:00+03:00"
+    assert standing["cron-0"]["outcome"] == {"state": "completed", "quiet": True}
+    assert all(standing[f"cron-{n}"]["outcome"] == {"state": "pending_observation"} for n in range(1, 10))
+    assert standing["naive"]["last_run_at"] == "2026-11-20T09:00:00+03:00"  # a stored zone-less instant: the row's zone
+    assert standing["fresh"]["outcome"] == {"state": "never_ran"} and "last_run_at" not in standing["fresh"]
+    assert "outcome" not in standing["note"] and standing["note"]["last_run_at"] == "2026-11-20T09:00:00+03:00"
+    assert len(view["one_shots"]) == 8 and view["omitted_count"] == 1 and view["inactive_standing_count"] == 0
+    assert "never_ran" not in json.dumps(view["one_shots"]) and "Private" not in json.dumps(view)
+
+
+@pytest.mark.parametrize("fact", [
+    {"last_error": "bad time"}, {"followup_hold": {"hold_id": "h-1", "reason": "origin_stopped"}},
+    {"hold": {"reason": "capacity"}}, {"followup_wait": "origin_unavailable"},
+    {"previous_run_open": {"task_id": "last", "since": "then"}},
+    {"occurrence": {"phase": "admitted", "task_id": "run", "due_at": "then", "token": "t"}},
+    # Its occurrence settled, its run still going: the last run's outcome is not yet observed.
+    {"last_task_id": "run", "last_outcome": {"task_id": "earlier", "state": "completed"}},
+])
+def test_a_switched_off_standing_row_with_an_outstanding_effect_stands_under_attention(fact):
+    paused, withdrawn = _cron("paused", enabled=False, **fact), _cron("gone", enabled=False, delete_requested_at="then", **fact)
+    view = digest([paused, withdrawn, _cron("idle", enabled=False)], NOW)
+    assert [entry["id"] for entry in view["attention"]] == ["paused", "gone"] and not view["standing"]
+    assert view["inactive_standing_count"] == 1  # the one with nothing outstanding
+    if "occurrence" in fact:
+        assert view["attention"][0]["occurrence"] == {"phase": "admitted", "task_id": "run", "due_at": "then"}
+    if "last_task_id" in fact:
+        assert view["attention"][0]["outcome"] == {"state": "pending_observation"}
+        observed = _cron("seen", enabled=False, last_task_id="run", last_outcome={"task_id": "run", "state": "failed"})
+        assert digest([observed], NOW)["inactive_standing_count"] == 1, "its last run observed: nothing in flight"
+    # A one-shot keeps its own groups: a run in flight alone does not move it.
+    group = "one_shots" if "occurrence" in fact or "last_task_id" in fact else "attention"
+    assert [entry["id"] for entry in digest([row("once", **fact)], NOW)[group]] == ["once"]
+
+
+def test_nothing_to_show_is_no_digest():
+    assert digest([], NOW) == {}
+    assert digest([row("history", completed_at="done", enabled=False), "not a row"], NOW) == {}
+    switched_off = digest([_cron("idle", enabled=False)], NOW)
+    assert switched_off == {"standing": [], "attention": [], "one_shots": [], "omitted_count": 0,
+                            "inactive_standing_count": 1, "pointer": "manage_schedules(action='list')"}
 
 
 @pytest.mark.parametrize("at,enabled,marked", [
@@ -146,7 +208,7 @@ def test_tool_and_activity_share_facts_and_bound_after_decoration():
         assert activity[key] == tool[key]
     assert tool["objective_preview"] == "Remember"
     assert tool["waiting_detail"] == {"reason": "wait", "detail": "Detail", "followup_wait": "origin_unavailable"}
-    large = row(destination={}, last_task_id="last", last_outcome={"task_id": "last", "state": "completed", "line": "x" * 1800})
+    large = row(destination={}, last_task_id="last", last_outcome={"task_id": "last", "state": "completed", "report_only": False, "line": "x" * 1800})
     page = schedule_tool_projection({"tasks": [large, large]}, result_limit=5000)
     assert len(page["tasks"]) == 1 and page["next_offset"] == 1
     assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":"))) <= 4000

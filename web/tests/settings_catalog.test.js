@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { catalogReadNote, catalogReadState, mergeModelCatalog, refreshMaintenanceCatalogs, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
+import { createScopedModelCatalog, modelSlotCatalogQuery, catalogReadNote, catalogReadState, mergeModelCatalog, refreshMaintenanceCatalogs, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
 import { claudexorStatus } from '../modules/claudexor_status_store.js';
 
 const first = {
@@ -8,6 +8,50 @@ const first = {
     model_sources: [{ id: 'opaque', label: 'Model service', credentialHarness: 'codex' }],
     observed_at: 'earlier', errors: [],
 };
+
+test('an editor coalesces identical reads and publishes only current evidence for each scope', async () => {
+    const replies = [];
+    const catalog = createScopedModelCatalog({ fetchCatalog: (url, init) => new Promise(resolve => replies.push({ url, resolve, signal: init.signal })) });
+    const api = modelSlotCatalogQuery('openrouter@team', 'ignored');
+    const subscription = modelSlotCatalogQuery('subscription:opaque/source', 'my account');
+    assert.equal(api, 'provider_id=openrouter%40team');
+    assert.equal(subscription, 'source_id=opaque%2Fsource&credential_profile_id=my+account');
+    const previous = catalog.read('view=sources');
+    assert.equal(catalog.read('view=sources'), previous);
+    const newer = catalog.read('view=sources', { force: true });
+    const apiRead = catalog.read(api);
+    await Promise.resolve();
+    replies[1].resolve(first);
+    await newer;
+    replies[0].resolve({ items: [], model_sources: [] });
+    await previous;
+    replies[2].resolve({ items: [{ value: 'openrouter@team::model' }], model_sources: [] });
+    await apiRead;
+    assert.deepEqual(catalog.get('view=sources').model_sources, first.model_sources);
+    assert.equal(catalog.get(api).items.length, 1);
+    const pending = catalog.read(subscription);
+    await Promise.resolve();
+    catalog.dispose();
+    replies[3].resolve(first);
+    await pending;
+    assert.equal(catalog.get(subscription), undefined);
+    assert.equal(catalog.get(api), undefined);
+});
+
+test('a client on an older core uses only previously requested evidence for unsupported scopes', async () => {
+    const calls = [];
+    let previous;
+    const catalog = createScopedModelCatalog({ supportsScopes: () => false, legacyCatalog: () => previous,
+        fetchCatalog: async url => { calls.push(url); return first; } });
+    assert.equal((await catalog.read('view=sources')).errors[0].code, 'scoped_catalog_unsupported');
+    previous = { ...first, items: [...first.items, { value: 'vendor/default' }, { value: 'openrouter@work::owner/model' }] };
+    assert.deepEqual((await catalog.read('view=sources', { force: true })).model_sources, first.model_sources);
+    assert.deepEqual((await catalog.read('provider_id=openrouter%40work')).items, [{ value: 'openrouter@work::owner/model' }]);
+    assert.deepEqual(calls, []);
+    await catalog.read('source_id=opaque&credential_profile_id=personal');
+    assert.deepEqual(calls, ['/api/model-catalog?source_id=opaque&credential_profile_id=personal']);
+    catalog.dispose();
+});
 
 test('failed settlement reads stay retryable; successful receipts refresh once', async (t) => {
     const previousDocument = globalThis.document, previousFetch = globalThis.fetch;
@@ -322,4 +366,39 @@ test('a vendor message that ends in a period does not produce a double stop', ()
     });
     assert.match(note, /proton4: The selected managed Codex account requires sign-in\. 1 API model loaded\./);
     assert.doesNotMatch(note, /sign-in(\.\.|\.;|;)/);
+});
+
+test('a merge marks what this read itself said: what a gap keeps for the list is not that read\'s word', () => {
+    const merged = mergeModelCatalog({}, first);
+    assert.equal(merged.current, first, 'a whole read is its own word');
+    const partial = { items: [{ value: 'openai::new' }], model_sources: [], errors: [{ error: 'daemon unreachable' }] };
+    const kept = mergeModelCatalog(merged, partial);
+    assert.deepEqual([kept.items.length, kept.current], [first.items.length + 1, partial], 'the earlier rows stay listed; only the new answer is this read\'s');
+    const offline = mergeModelCatalog(kept, { read_state: 'transport', errors: [{ error: 'network offline' }] });
+    assert.deepEqual([offline.items.length, offline.current], [kept.items.length, null], 'a read that listed nothing said nothing');
+    assert.equal(mergeModelCatalog({}, kept).current, partial, 'a catalog merged before keeps the mark it has');
+});
+
+test('a scoped legacy read and a connection overlay use the entry\'s own identity, never a reparsed value', async () => {
+    const legacy = { items: [
+        { name: 'legacy-openrouter-nested', value: 'openrouter::openai::vendor/model' },
+        { name: 'legacy-unknown-head', value: 'vendor::family/model' },
+        { name: 'modern-openrouter-nested', provider_id: 'openrouter', id: 'openai::vendor/model', value: 'openai::vendor/model' },
+        { name: 'local', provider_id: 'local', id: 'qwen.gguf', value: 'local::qwen.gguf', use_local: true },
+        { name: 'modern-openai', provider_id: 'openai', id: 'vendor/model', value: 'openai::vendor/model' },
+    ] };
+    const names = (answer) => answer.items.map((item) => item.name);
+    const catalog = createScopedModelCatalog({ supportsScopes: () => false, legacyCatalog: () => legacy });
+    assert.deepEqual(names(await catalog.read('provider_id=openrouter')),
+        ['legacy-openrouter-nested', 'legacy-unknown-head', 'modern-openrouter-nested'],
+        'OpenRouter\'s own ids stay in its scope, including one whose head names no provider');
+    assert.deepEqual(names(await catalog.read('provider_id=openai')), ['modern-openai'],
+        'the OpenAI key keeps its own model, never the OpenRouter row that spells the same id');
+    assert.deepEqual(names(await catalog.read('provider_id=local')), ['local'],
+        'the local row is the local lane\'s, never a provider\'s');
+    // The connection overlay replaces exactly the rows of its own source.
+    const composed = withConnectionCatalogs({ read_state: 'ok', items: legacy.items }, { 'openai': [{ name: 'openai-connection' }] });
+    assert.deepEqual(composed.items.map((item) => item.name),
+        ['legacy-openrouter-nested', 'legacy-unknown-head', 'modern-openrouter-nested', 'local', 'openai-connection'],
+        'only the OpenAI connection\'s own rows are replaced');
 });

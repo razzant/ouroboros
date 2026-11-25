@@ -356,13 +356,16 @@ def test_cherry_pick_conflict_keeps_earlier_effects(invoke, monkeypatch, earlier
 def test_restore_partial_keeps_checkout_effect_and_target_receipt(invoke, tmp_path, monkeypatch, paths):
     from ouroboros.tools import git, git_vcs_ops
     # repository_path is ResolvedResourceBinding's default: no nested repository was selected.
-    binding = SimpleNamespace(root="active_workspace", base_path=tmp_path, repository_path=None)
-    monkeypatch.setattr(git, "_vcs_binding", lambda *a, **k: binding)
+    repo = tmp_path / "selected"
+    repo.mkdir()
+    binding = SimpleNamespace(root="active_workspace", base_path=repo, repository_path=None)
+    monkeypatch.setattr(git_vcs_ops, "_vcs_binding", lambda *a, **k: binding)
     monkeypatch.setattr(git, "binding_targets_system_repo", lambda *a: False)
     monkeypatch.setattr(git_vcs_ops, "_scope_changes", lambda *a, **k: [(" M", "changed.txt"), ("??", "loose.txt")])
     calls = []
 
     def command(args, **kwargs):
+        assert kwargs["cwd"] == repo
         calls.append(args)
         if args[1] == "clean":
             raise RuntimeError("cleanup failed")
@@ -372,7 +375,7 @@ def test_restore_partial_keeps_checkout_effect_and_target_receipt(invoke, tmp_pa
     monkeypatch.setattr(git, "run_cmd", command)
     result = invoke(git_vcs_ops._restore_to_head, confirm=True, paths=paths, root="active_workspace")
     assert result.code == "TOOL_ERROR" and [args[1] for args in calls] == ["rev-parse", "checkout", "clean"]
-    assert "RESTORE_PARTIAL" in result.text and "VCS target: root=active_workspace" in result.text
+    assert "RESTORE_PARTIAL" in result.text and result.text.endswith(f"VCS target: root=active_workspace; repo={repo}")
     assert "operation_outcome" not in result.meta
 
 
@@ -417,6 +420,7 @@ def test_tool_enablement_distinguishes_total_refusal_from_partial_effect(invoke,
         get_schema_by_name=lambda name: {"function": {"name": name}} if name == "known" else None,
         policy_hidden_reason=lambda name: "restricted" if name == "hidden" else "",
         callable_rows=lambda namespace="": [],
+        is_builtin=lambda name: False,
     )
     resident = []
     result = invoke(lambda ctx: enable_tools(catalog, ctx, names, resident))

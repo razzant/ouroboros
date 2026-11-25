@@ -12,16 +12,16 @@ import errno
 import io
 import os
 import stat
+import sys
 import threading
 import zipfile
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.testclient import TestClient
+from tests._task_file_http import task_file_client as _client
 
 from ouroboros import artifacts, headless
 from ouroboros.gateway import task_archive
@@ -49,17 +49,6 @@ def _split_child(tmp_path, *, status="completed"):
                       parent_task_id="parent1", root_task_id="parent1")
     (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
     return data, child, store
-
-
-def _client(data):
-    from ouroboros.gateway.tasks import api_task_artifact, api_task_get
-
-    app = Starlette(routes=[
-        Route("/api/tasks/{task_id}", endpoint=api_task_get, methods=["GET"]),
-        Route("/api/tasks/{task_id}/artifacts/{name}", endpoint=api_task_artifact, methods=["GET", "HEAD"]),
-    ])
-    app.state.drive_root = data
-    return TestClient(app)
 
 
 def _zip(response):
@@ -133,6 +122,87 @@ def test_exact_nested_selection_reads_both_own_stores_read_only(tmp_path):
     (store / "reports/a/summary.txt").unlink()
     after = client.get(url, params={"relpath": "reports/a/summary.txt"})
     assert (after.status_code, after.text) == (200, "alpha")  # the canonical copy at its relpath
+
+
+@confined
+def test_download_keeps_significant_filename_spaces(tmp_path):
+    data = tmp_path / "data"
+    store = artifacts.task_artifact_dir_path(data, TASK, create=True)
+    name = " report.txt" if os.name == "nt" else " report.txt "
+    files = {"report.txt": b"plain", name: b"with spaces", f"reports/{name}": b"nested with spaces"}
+    (store / "reports").mkdir()
+    for relpath, content in files.items():
+        (store / relpath).write_bytes(content)
+    write_task_result(data, TASK, "completed", artifacts=artifacts.collect_task_artifact_records(data, TASK))
+
+    client = _client(data)
+    url = f"/api/tasks/{TASK}/artifacts/{quote(name, safe='')}"
+    top = client.get(url)
+    nested = client.get(url, params={"relpath": f"reports/{name}"})
+    assert (top.status_code, top.content) == (200, files[name])
+    assert (nested.status_code, nested.content) == (200, files[f"reports/{name}"])
+
+
+@confined
+@pytest.mark.skipif(os.name == "nt", reason="POSIX filename bytes")
+def test_directory_download_and_basename_choices_with_a_posix_byte_name(tmp_path):
+    data = tmp_path / "data"
+    store = artifacts.task_artifact_dir_path(data, TASK, create=True)
+    plain = "reports/ready/summary.txt"
+    byte_dir = b"report-\xff".decode("utf-8", "surrogateescape")
+    byte_named = f"reports/{byte_dir}/summary.txt"
+    (store / plain).parent.mkdir(parents=True)
+    (store / plain).write_bytes(b"normal report")
+    if sys.platform == "linux":
+        (store / byte_named).parent.mkdir()
+        (store / byte_named).write_bytes(b"native report")
+        rows = artifacts.collect_task_artifact_records(data, TASK)
+    else:
+        # Filesystems without raw-byte names still read the saved result's metadata.
+        rows = [artifacts.artifact_record(store / plain),
+                {"name": "summary.txt", "path": str(store / byte_named), "relpath": byte_named, "status": "ready"}]
+    write_task_result(data, TASK, "completed", artifacts=rows)
+
+    client = _client(data)
+    detail = client.get(f"/api/tasks/{TASK}")
+    assert detail.status_code == 200
+    assert detail.json()["artifact_archives"]["reports"] == {
+        "name": "reports.zip", "files": 1, "size": len(b"normal report"), "excluded": 1, "released": 0, "available": True}
+    choices = client.get(f"/api/tasks/{TASK}/artifacts/summary.txt")
+    assert choices.status_code == 409
+    assert choices.json()["reason_code"] == "artifact_name_ambiguous"
+    assert choices.json()["relpaths"] == sorted([plain, byte_named])
+    with _zip(client.get(URL, params={"archive": "reports"})) as archive:
+        assert archive.namelist() == [plain]
+        assert archive.read(plain) == b"normal report"
+
+
+@confined
+@pytest.mark.skipif(os.name == "nt", reason="backslash is a POSIX filename character")
+def test_directory_archive_counts_a_posix_backslash_name_as_excluded(tmp_path):
+    data = tmp_path / "data"
+    store = artifacts.task_artifact_dir_path(data, TASK, create=True)
+    plain = "reports/ready/summary.txt"
+    native = "reports/ready/notes\\draft.txt"
+    native_directory = r"reports\draft"
+    nested = f"{native_directory}/notes.txt"
+    (store / plain).parent.mkdir(parents=True)
+    (store / plain).write_bytes(b"normal report")
+    (store / native).write_bytes(b"native report")
+    (store / native_directory).mkdir()
+    (store / nested).write_bytes(b"draft notes")
+    write_task_result(data, TASK, "completed", artifacts=artifacts.collect_task_artifact_records(data, TASK))
+
+    client = _client(data)
+    detail = client.get(f"/api/tasks/{TASK}")
+    assert detail.status_code == 200
+    assert {row["relpath"] for row in detail.json()["artifacts"]} == {plain, native, nested}
+    assert detail.json()["artifact_archives"] == {
+        "reports": {"name": "reports.zip", "files": 1, "size": len(b"normal report"), "excluded": 1, "released": 0, "available": True},
+        native_directory: {"name": native_directory + ".zip", "files": 0, "size": 0, "excluded": 1, "released": 0, "available": False}}
+    with _zip(client.get(URL, params={"archive": "reports"})) as archive:
+        assert archive.namelist() == [plain]
+        assert archive.read(plain) == b"normal report"
 
 
 @confined
@@ -255,7 +325,7 @@ def test_without_confined_opens_files_and_archives_fail_closed(tmp_path, monkeyp
     monkeypatch.setattr(task_archive, "CONFINED", False)
 
     assert client.get(f"/api/tasks/{TASK}").json()["artifact_archives"] == {
-        "reports": {"name": "reports.zip", "files": 0, "size": 0, "excluded": 2, "available": False}}
+        "reports": {"name": "reports.zip", "files": 0, "size": 0, "excluded": 2, "released": 0, "available": False}}
     refused = client.get(URL, params={"archive": "reports"})
     assert (refused.status_code, refused.json()["reason_code"]) == (503, "artifact_archive_unavailable")
     plain = client.get(f"/api/tasks/{TASK}/artifacts/summary.txt", params={"relpath": "reports/a/summary.txt"})
@@ -269,7 +339,7 @@ def test_directory_archive_keeps_relative_paths_one_member_per_relpath_canonical
     client = _client(data)
 
     assert client.get(f"/api/tasks/{TASK}").json()["artifact_archives"] == {
-        "reports": {"name": "reports.zip", "files": 2, "size": 9, "excluded": 0, "available": True}}
+        "reports": {"name": "reports.zip", "files": 2, "size": 9, "excluded": 0, "released": 0, "available": True}}
     response = client.get(URL, params={"archive": "reports"})
     archive = _zip(response)
     assert response.headers["content-disposition"] == 'attachment; filename="reports.zip"'
@@ -316,7 +386,7 @@ def test_directory_archive_excludes_and_counts_rows_it_cannot_serve(tmp_path):
 
     # The escaping link row never enters the view; gone, failed and errored rows are counted out.
     assert client.get(f"/api/tasks/{TASK}").json()["artifact_archives"] == {
-        "reports": {"name": "reports.zip", "files": 1, "size": 5, "excluded": 3, "available": True}}
+        "reports": {"name": "reports.zip", "files": 1, "size": 5, "excluded": 3, "released": 0, "available": True}}
     archive = _zip(client.get(URL, params={"archive": "reports"}))
     assert archive.namelist() == ["reports/a/summary.txt"]
 
@@ -494,7 +564,11 @@ def test_a_store_reached_through_a_link_serves_and_lists_nothing(tmp_path):
     linked_store.mkdir(parents=True, exist_ok=True)
     _link_or_skip(linked_store / TASK, outside, directory=True)
     refused = client.get(f"/api/tasks/{TASK}/artifacts/summary.txt")
-    assert refused.status_code in {404, 409} and SECRET not in refused.text
+    assert SECRET not in refused.text, refused.text
+    # #3981: the release state of a store reached through a link cannot be read, and an unreadable release state is
+    # held (503 artifact_unavailable), as an aliased store or an unaccounted loss is; before it, 404 or 409.
+    assert refused.status_code in {404, 409} or (
+        refused.status_code == 503 and refused.json()["reason_code"] == "artifact_unavailable"), refused.text
 
 
 @confined

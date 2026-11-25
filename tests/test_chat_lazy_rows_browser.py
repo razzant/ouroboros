@@ -72,17 +72,38 @@ _DRAG = """async ([feed, handleSelector, steps]) => {
     send('pointerup');
     return seen;
 }"""
-# The row the reading owner anchors on: the first one whose bottom is inside the feed's box.
-_PASSAGE = """feed => {
-    const root = document.querySelector(feed), top = root.getBoundingClientRect().top;
-    const node = [...root.querySelectorAll(':scope > [data-history-id]')].find(n => n.getBoundingClientRect().bottom > top);
-    return {id: node.dataset.historyId, offset: node.getBoundingClientRect().top - top, rows: root.children.length};
+# A row entirely behind the floating header can rewrap without moving the passage being read.
+_PASSAGE = """async feed => {
+    const { readBand } = await import('/static/modules/project_read_state.js');
+    const root = document.querySelector(feed), room = root.parentElement;
+    const header = room.querySelector(':scope > .chat-page-header')
+        || room.closest('.project-panel')?.querySelector('.project-panel-bar');
+    const composer = room.querySelector(':scope > :is(#chat-input-area, .chat-input-area)');
+    const band = readBand(root, header, composer);
+    const node = [...root.querySelectorAll(':scope > [data-history-id]')].find(n => {
+        const box = n.getBoundingClientRect();
+        return box.height > 0 && box.bottom > band.top && box.top < band.bottom;
+    });
+    if (!node) throw new Error(`No passage in ${feed}'s reading band ${band.top}–${band.bottom}`);
+    return {id: node.dataset.historyId, offset: node.getBoundingClientRect().top - root.getBoundingClientRect().top,
+            rows: root.children.length};
 }"""
 _OFFSET = """([feed, id]) => {
     const root = document.querySelector(feed);
     const node = [...root.querySelectorAll(':scope > [data-history-id]')].find(n => n.dataset.historyId === id);
     return node ? node.getBoundingClientRect().top - root.getBoundingClientRect().top : null;
 }"""
+# What the feed was doing when a wait gave up: the box's two widths (a scrollbar and a border are the difference
+# between them), the moving-width mark and where the feed's own scroll sits. A bare timeout names none of these.
+_FEED_STATE = """feed => { const root = document.querySelector(feed);
+    return {client: root.clientWidth, offset: root.offsetWidth, marked: root.hasAttribute('data-resizing'),
+            scrollTop: Math.round(root.scrollTop), scrollHeight: root.scrollHeight, rows: root.children.length}; }"""
+
+
+def _feed_state(page, feed):
+    return page.evaluate(_FEED_STATE, feed)
+
+
 # Up through what is loaded, a step at a time, without a wheel (a gesture at the top would read an older page):
 # the first row starting inside the feed must move by exactly the distance scrolled, two frames later.
 _CLIMB = """async ([feed, step]) => {
@@ -144,13 +165,20 @@ def _held(page, feed):
 
 def _jump(page, feed, passage, width):
     """One window jump is laid out at once: the feed is never marked, the passage keeps its place."""
+    from playwright.sync_api import TimeoutError as PWTimeout
+
     marks = page.evaluate(_LAZY, feed)["marks"]
     page.set_viewport_size({"width": width, "height": 850})
-    page.wait_for_function("""([feed, id, offset]) => {
-        const root = document.querySelector(feed);
-        const node = [...root.querySelectorAll(':scope > [data-history-id]')].find(n => n.dataset.historyId === id);
-        return node && Math.abs(node.getBoundingClientRect().top - root.getBoundingClientRect().top - offset) <= 2;
-    }""", arg=[feed, passage["id"], passage["offset"]], timeout=5_000)
+    try:
+        page.wait_for_function("""([feed, id, offset]) => {
+            const root = document.querySelector(feed);
+            const node = [...root.querySelectorAll(':scope > [data-history-id]')].find(n => n.dataset.historyId === id);
+            return node && Math.abs(node.getBoundingClientRect().top - root.getBoundingClientRect().top - offset) <= 2;
+        }""", arg=[feed, passage["id"], passage["offset"]], timeout=5_000)
+    except PWTimeout:
+        # The box the wait was looking at, then the same failure as before: nothing here is tolerated.
+        print("the passage never came back:", passage, _feed_state(page, feed), flush=True)
+        raise
     page.evaluate(_FRAMES)
     page.evaluate(_FRAMES)
     state = _held(page, feed)
@@ -160,11 +188,17 @@ def _jump(page, feed, passage, width):
 def _drag(page, feed, handle, passage, rows):
     """The handle dragged frame by frame: the rows far off the screen are skipped meanwhile; once the width holds no
     row is lazy and the passage is where it was read."""
+    from playwright.sync_api import TimeoutError as PWTimeout
+
     seen = page.evaluate(_DRAG, [feed, handle, 40])
     assert len({frame["width"] for frame in seen}) > 10, ("the feed's width followed the handle", seen)
     assert any(frame["marked"] for frame in seen), seen
     assert max(frame["skipped"] for frame in seen) > rows // 2, ("the browser skipped the rows off the screen", seen)
-    after = _held(page, feed)
+    try:
+        after = _held(page, feed)
+    except PWTimeout:
+        print("the feed never settled after the drag:", _feed_state(page, feed), flush=True)
+        raise
     assert after["lazy"] == after["asleep"] and not after["marked"], ("at rest only rows asleep are lazy", after)
     placed = page.evaluate(_OFFSET, [feed, passage["id"]])
     assert abs(placed - passage["offset"]) <= 1, (passage, placed)

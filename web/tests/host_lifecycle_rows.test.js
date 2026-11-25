@@ -7,7 +7,10 @@ import test from 'node:test';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
 import { foldWaitRow, waitEpisode } from '../modules/task_checkpoints.js';
-import { causeOf } from '../modules/context_observation.js';
+import { buildTimelineItemHtml } from '../modules/chat_activity.js';
+import { projectResultArtifacts } from '../modules/result_files.js';
+import { causeOf, contextShown, lowMissedOf, observeContext } from '../modules/context_observation.js';
+import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 import {
     summarizeChatLiveEvent,
@@ -60,11 +63,52 @@ test('#931 every typed checkpoint kind names itself; only a kindless one is peri
     assert.equal(taskCheckpointLabel({ checkpoint_number: 7 }), 'Checkpoint 7 — periodic self-check');
 });
 
+test('live, reopened and Logs service stops keep launch-specific links and a failed neighbour', () => {
+    const driveUrl = (version) => `/api/tasks/task1/artifacts/${version}`;
+    const run = (id, state, revision, files) => ({
+        type: 'task_checkpoint', checkpoint_kind: 'service_stop', task_id: 'task1', card_row_revision: revision,
+        artifact_outputs: '/private/raw-exception',
+        service_stop: { launch_id: `launch-${id}`, name: 'demo',
+            process: { state, returncode: state === 'stopped' ? 0 : null }, journal: { state: 'saved' },
+            outputs: [{ name: 'report.txt', state: files.length ? 'saved' : 'pending', files },
+                { name: 'not-created.txt', state: 'failed', files: [] }] },
+    });
+    const makeFile = (id) => ({ name: 'report.txt', path: `${id}.txt`, download_url: driveUrl(`${id}.txt`) });
+    const pending = run('aa', 'unconfirmed', 1, []);
+    const a = run('aa', 'stopped', 2, [makeFile('a')]);
+    const b = run('bb', 'stopped', 2, [makeFile('b')]);
+    const record = { items: [], expandedLineKeys: new Set() };
+    for (const evt of [pending, a, b, pending, a]) {
+        const summary = summarizeChatLiveEvent(evt);
+        updateLiveTimelineItem(record, summary, { syntheticKey: summary.dedupeKey, headline: summary.headline });
+    }
+    assert.equal(record.items.length, 2);
+    for (const [index, evt] of [a, b].entries()) {
+        const logs = summarizeLogEvent(evt);
+        assert.equal(logs.body, record.items[index].body);
+        assert.match(logs.body, /Stopped · exit 0\nJournal: saved\nreport.txt: saved\nnot-created.txt: not saved/);
+        // The card escapes its text through a real text node: the DOM rig a mounted chat provides.
+        const { prior } = installDom();
+        try {
+            const html = buildTimelineItemHtml(record.items[index], record);
+            assert.ok(html.includes(`href="${logs.serviceStop.links[0].download_url}" download="report.txt"`));
+            assert.ok(!html.includes('/private/'));
+        } finally { restoreDom(prior); }
+    }
+    for (const [index, evt] of [pending, a, b].entries()) {
+        mergeHistoricalTimelineItem(record, summarizeChatLiveEvent(evt), { history_id: `row-${index}` }, '');
+    }
+    assert.deepEqual(record.items.map((item) => item.serviceStop.links[0].download_url), [driveUrl('a.txt'), driveUrl('b.txt')]);
+    const versions = ['a', 'b'].map((id) => ({ name: `${id}.txt`, kind: 'service_output_version' }));
+    const files = projectResultArtifacts('task1', [{ name: 'report.txt' }, ...versions]);
+    assert.deepEqual(files.files.map((file) => file.name), ['report.txt']);
+});
+
 test('a lowered start names its recorded reason in the Context capsule\'s own words; a row without one names none', () => {
     // Audit item 23(a): the reason a person reads is the recorded one, on the capsule and on the task card alike.
     const row = (extra) => ({ checkpoint_kind: 'context_fit_physical_mode', preferred_mode: 'max', effective_mode: 'low',
         round: 1, ...extra });
-    for (const cause of ['memory', 'route', 'window']) {
+    for (const cause of ['memory', 'request', 'route', 'window']) {
         const said = causeOf({ preferred_at_send: 'max', applied: 'low', cause }, 'max');
         assert.ok(said, cause);
         assert.equal(taskCheckpointLabel(row({ cause })), `Context starts in a smaller mode. ${said}`);
@@ -75,6 +119,65 @@ test('a lowered start names its recorded reason in the Context capsule\'s own wo
     assert.equal(taskCheckpointLabel(row({ cause: 'after_start' })), moved);
     assert.equal(taskCheckpointLabel(row({})), 'Context starts in a smaller mode', 'a row written before the reason was');
     assert.equal(taskCheckpointLabel(row({ cause: '' })), 'Context starts in a smaller mode', 'an unknown start');
+});
+
+test('where Low is chosen, a room whose last owner-Low start missed the target says what the rest took', () => {
+    // Owner 15.11.2026, 3A: the screen says the target cannot be met; memory keeps its shortest tellings.
+    const fact = { applied: 'low', profile: 'owner_low', target_missed: true, no_memory_tokens: 532_173 };
+    assert.equal(lowMissedOf(fact), 'Low’s 250K target was not met at the last start here: without memory it '
+        + 'already needed about 532K; memory keeps its shortest tellings.');
+    assert.equal(lowMissedOf({ ...fact, target_missed: false }), '', 'a met target keeps the mode\'s own meaning');
+    assert.equal(lowMissedOf({ ...fact, no_memory_tokens: null }), '', 'an older row names no number');
+    assert.equal(lowMissedOf({ ...fact, profile: 'task_local_low' }), '', 'only the owner\'s Low has this target');
+});
+
+test('a start the window took from Max is Low for now beside the owner\'s Max, on the capsule and the task card', () => {
+    // Owner 21.11.2026: the work runs in Low, temporarily, for the window, and is named Low; the owner's choice stays
+    // Max. Rows of 17-22 Nov named the same state Max with chapter maps (effective Max, books maps): they read as Low.
+    const row = (extra) => ({ checkpoint_kind: 'context_fit_physical_mode', preferred_mode: 'max', effective_mode: 'low',
+        books: 'maps', round: 1, ...extra });
+    const at = '2026-11-17T10:00:00Z';
+    const census = (applied, cause) => [{ chat_id: 1, activity_id: 'w', task_attempt: 1, context_attempt: {
+        attempt_id: 'a', ledger_state: 'dispatched', task_attempt: 1, applied, books: 'maps', cause,
+        preferred_at_send: 'max', observed_at: at } }];
+    // A row of 17-22 Nov whose tool schemas tipped the start recorded `window`: the same Low for now (Astra 9).
+    for (const cause of ['memory', 'request', 'route', 'window']) {
+        const said = causeOf({ preferred_at_send: 'max', applied: 'low', cause }, 'max');
+        assert.match(said, /^Low for now, not Max: /, cause);
+        for (const effective of ['low', 'max']) {
+            assert.equal(taskCheckpointLabel(row({ cause, effective_mode: effective })), `Context starts in a smaller mode. ${said}`);
+            const observed = observeContext(null, census(effective, cause), 1);
+            assert.deepEqual(observed.modes, ['low'], effective);
+            const shown = contextShown(observed, 'max');
+            assert.equal(shown.word, 'Low');
+            assert.equal(shown.differs, true, 'the work runs in Low for now while the owner\'s choice stays Max');
+            assert.equal(shown.label, 'Context: Low now, Max chosen');
+            assert.ok(shown.fact.text.startsWith(said), cause);
+        }
+    }
+    assert.equal(causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'window' }, 'max'),
+        'Low for now, not Max: the whole books did not fit beside the rest of the start.');
+    assert.equal(causeOf({ preferred_at_send: 'low', applied: 'nano', cause: 'window' }, 'low'), 'Low did not fit at the start.');
+    assert.equal(taskCheckpointLabel(row({ cause: 'after_start', effective_mode: 'max' })), 'The work moved to Low after it started.');
+    // A row written before the books' form was kept tells the same start in the same words.
+    const old = row({ books: undefined, cause: 'memory' });
+    assert.equal(taskCheckpointLabel(old),
+        `Context starts in a smaller mode. ${causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'memory' }, 'max')}`);
+    // Low chosen meanwhile: the observation agrees with the choice, and the closed capsule is today's; open, it keeps
+    // the send's own reason before the time (Astra 10), which a Low chosen at send never has.
+    const agreed = contextShown(observeContext(null, census('max', 'memory'), 1), 'low');
+    assert.equal(agreed.differs, false);
+    assert.equal(agreed.label, '');
+    const reason = causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'memory' }, 'low');
+    assert.ok(agreed.fact.text.startsWith(`${reason} Request at `), agreed.fact.text);
+    const chosen = contextShown({ state: 'now', modes: ['low'], latest: { applied: 'low', books: 'maps',
+        preferred_at_send: 'low', cause: '', observed_at: at } }, 'low');
+    assert.ok(chosen.fact.text.startsWith('Request at '), chosen.fact.text);
+    // Whole books in Max add nothing to today's closed capsule.
+    const whole = contextShown({ state: 'now', modes: ['max'],
+        latest: { applied: 'max', books: 'whole', preferred_at_send: 'max', observed_at: at } }, 'max');
+    assert.equal(whole.label, '');
+    assert.ok(!whole.fact || !whole.fact.text.includes('for now'));
 });
 
 test('#931 typed checkpoints are task facts in the expanded card, never narration', () => {

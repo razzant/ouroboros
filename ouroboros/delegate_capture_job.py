@@ -1,9 +1,10 @@
-"""Addressed capture in the existing maintenance child; decisions remain with the server.
+"""Addressed capture in the existing maintenance child; decisions remain with the disposition-lock holder.
 
-The server requests an immutable binding under the snapshot disposition lock. The child
-holds that same cross-process lock while walking/copying/hashing, then publishes only an
-artifact reference. The server reacquires the lock and rechecks the current binding and
-continuation before accepting it. Neither a child exit nor a stopped observer is a receipt.
+``collect_terminal`` requests an immutable binding under the snapshot disposition lock. The
+child holds that same cross-process lock while walking/copying/hashing, then publishes only an
+artifact reference. A later holder of the lock, ``collect_terminal`` or an explicit Git
+disposition (``accept_ready_patch``), rechecks the current binding and continuation before
+accepting it. Neither a child exit nor a stopped observer is a receipt.
 """
 from __future__ import annotations
 
@@ -19,14 +20,40 @@ NAME = "delegate_capture"
 READY = {"ready", "ready_with_changes", "ready_no_changes"}
 
 
-def identity(entry):
+def identity(entry, *, named_evidence=None):
     facts = {key: getattr(entry, key) for key in (
         "run_id", "task_id", "invocation_id", "snapshot_id", "capture_id", "snapshot_task_id",
         "continuation_of", "superseded_by", "execution_root", "target_root", "baseline_sha",
         "resource_ref", "authority_source", "mode", "patch_disposed")}
-    facts.update(terminal_sha=entry.terminal_source.get("sha256"), policy=POLICY,
-                 named_source=entry.named_evidence.get("inputs"))
+    named = entry.named_evidence if named_evidence is None else named_evidence
+    facts.update(terminal_sha=entry.terminal_source.get("sha256"), policy=POLICY, named_source=named.get("inputs"))
     return hashlib.sha256(json.dumps(facts, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _bound(entry, binding):
+    job = entry.capture_job
+    # A failure after publishing this job's own named receipt must not turn its
+    # still-ready result into a new job. Other input changes still matter.
+    return job.get("binding") == binding or (
+        job.get("state") == "ready" and job.get("published_binding") == binding
+        and job.get("named_directory") == entry.named_evidence.get("directory"))
+
+
+def ready_result_owed(entry):
+    return entry.capture_job.get("state") == "ready" and _bound(entry, identity(entry))
+
+
+def ordinary_git(entry):
+    """A Git copy's capture, apart from a skill payload's and an engine directory's own contracts."""
+    from ouroboros.delegate_directory import is_directory_run
+
+    return entry.authority_source != "skill_payload" and not is_directory_run(entry)
+
+
+def manifest_recorded(entry, raw):
+    """An ordinary Git receipt binds exact manifest bytes; legacy rows, payloads and directories keep the flag."""
+    sha = getattr(entry, "patch_manifest_sha", "") if ordinary_git(entry) else ""
+    return entry.patch_captured and (not sha or sha == hashlib.sha256(raw).hexdigest())
 
 
 def _record(root, entry, outcome):
@@ -36,12 +63,12 @@ def _record(root, entry, outcome):
 
 
 def request_or_result(root, entry, *, generation, recapture=False):
-    """Server-only, under its disposition lock. Return prepared bytes or owe one child job."""
+    """Called by ``collect_terminal`` under the run's disposition lock. Return prepared bytes or owe one child job."""
     from ouroboros.delegate_collection import _read_source
 
     job, binding = entry.capture_job, identity(entry)
     recapture |= entry.named_evidence.get("status") == "unreadable"
-    if job.get("binding") == binding and (job.get("state") == "ready"
+    if _bound(entry, binding) and (job.get("state") == "ready"
                                          or job.get("state") == "consumed" and not recapture):
         try:
             result = _read_source(root, entry, job["source"])
@@ -62,14 +89,35 @@ def request_or_result(root, entry, *, generation, recapture=False):
     return {"status": "pending", "note": "The maintenance child owes this capture; no patch was applied."}
 
 
-def accept_result(root, entry, result):
-    """Server-only, after its fresh continuation check, still under the disposition lock."""
-    from ouroboros.delegate_named_evidence import _publish
+def accept_ready_patch(root, entry, *, custody_held=None):
+    """An explicit Git disposition joins a bound, digest-stamped child result before recapturing."""
+    from ouroboros.delegate_collection import _read_source
+
+    if not entry.capture_job.get("manifest_sha256") or not ready_result_owed(entry):
+        return None
+    result = _read_source(root, entry, entry.capture_job["source"])
+    if result.get("status") not in READY:
+        return None
+    if not accept_result(root, entry, result, custody_held=custody_held):
+        raise ValueError("prepared capture binding changed before publication")
+    return result
+
+
+def accept_result(root, entry, result, *, custody_held=None):
+    """The disposition-lock holder's acceptance (``collect_terminal``, or an explicit Git disposition through
+    ``accept_ready_patch``), after its fresh continuation check, still under that lock."""
+    from ouroboros.delegate_named_evidence import publish_saved, said_released, saved_named_evidence
     from ouroboros.delegate_continuation import disposition_refusal
 
     entry = current.run(root, entry.run_id)
-    if entry.capture_job.get("binding") != identity(entry) or disposition_refusal(root, entry):
+    if entry is None or not _bound(entry, identity(entry)) or disposition_refusal(root, entry):
         return False
+    named = result.get("named_evidence") or {}
+    if named.get("reason") in {"release_state_unavailable", "payload_release_pending"}:
+        _, latest = saved_named_evidence(root, entry, observe=False)
+        named = result["named_evidence"] = latest or {"status": "partial", "retry": "transient", "files": []}
+    elif named and entry.capture_job.get("state") == "consumed":
+        named = result["named_evidence"] = said_released(named)
     if entry.capture_job.get("state") == "consumed":
         return True
     if entry.capture_job.get("state") != "ready":
@@ -77,12 +125,26 @@ def accept_result(root, entry, result):
     if result.get("status") in READY:
         payload = {key: result[key] for key in ("status", "sha256", "patch_size", "execution_root", "no_changes")
                    if key in result}
-        payload["capture_dir"] = str(pathlib.Path(result["manifest_artifact"]).parent)
-        if not custody.record_patch_captured(root, entry, **payload):
+        path = pathlib.Path(result["manifest_artifact"])
+        raw = path.read_bytes()
+        sha = hashlib.sha256(raw).hexdigest()
+        if entry.capture_job.get("manifest_sha256", sha) != sha:
+            raise ValueError("prepared capture manifest changed before publication")
+        if ordinary_git(entry) and not manifest_recorded(entry, raw):
+            # The same proof a reopened Git capture needs: these bytes are the run's pinned attempt.
+            from ouroboros.tools.delegate_integration import _declared_capture_gap
+
+            gap, retry = _declared_capture_gap(entry, path.parent, raw, json.loads(raw.decode("utf-8")), root)
+            if gap:
+                raise (OSError if retry == "transient" else ValueError)(f"prepared capture not published: {gap}")
+        if (not entry.patch_captured or entry.patch_manifest_sha != sha) and not custody.record_patch_captured(
+                root, entry, **payload, capture_dir=str(path.parent), manifest_sha256=sha):
             raise OSError("patch receipt publication failed")
-    named = result.get("named_evidence") or {}
-    if named:
-        _publish(root, entry, pathlib.Path(named["evidence_dir"]).name, named)
+    if named.get("evidence_dir") and not named.get("reason"):
+        named = result["named_evidence"] = publish_saved(
+            root, entry, named, pathlib.Path(named["evidence_dir"]), custody_held=custody_held)
+    if named.get("reason"):
+        return True  # transport and patch remain usable; no named receipt or consumed acknowledgement
     if not _record(root, entry, {**entry.capture_job, "state": "consumed", "binding": identity(entry),
                                 "retry": result.get("retry") or named.get("retry", "")}):
         raise OSError("capture result acknowledgement failed")
@@ -143,7 +205,7 @@ def _capture(root, entry, should_stop):
 
     path = custody.disposition_lock_path(root, entry)
     # Only the child may wait: reclaiming a dead owner's name needs another acquisition,
-    # and the server that just requested capture may still be publishing its attempt.
+    # and the collector that just requested capture may still be publishing its attempt.
     fd = acquire_exclusive_file_lock(path, owner_aware_stale=True)
     if fd is None:
         return False
@@ -176,9 +238,20 @@ def _capture(root, entry, should_stop):
             except Exception as exc:
                 result = {"status": "failed", "note": f"{type(exc).__name__}: {exc}",
                           "retry": failure_retry(exc)}
+        extra = {}
+        if result.get("status") in READY:
+            try:
+                extra["manifest_sha256"] = hashlib.sha256(pathlib.Path(result["manifest_artifact"]).read_bytes()).hexdigest()
+            except OSError as exc:
+                result = {"status": "failed", "note": str(exc), "retry": failure_retry(exc)}
+            else:
+                named = result.get("named_evidence") or {}
+                if named.get("evidence_dir") and "inputs" in named:
+                    extra.update(published_binding=identity(entry, named_evidence=named),
+                                 named_directory=pathlib.Path(named["evidence_dir"]).name)
         source = _retain(root, entry, result, "capture-" + request["id"])
         return _record(root, entry, {**request, "state": "ready", "source": source,
-                                    "child_generation": GENERATION})
+                                    "child_generation": GENERATION, **extra})
     finally:
         release_exclusive_file_lock(path, fd)
 

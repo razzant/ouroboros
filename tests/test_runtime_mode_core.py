@@ -23,6 +23,8 @@ import sys
 
 import pytest
 from tests._safety_fixtures import disable_safety, owner_registry as _registry
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 from ouroboros.runtime_mode_policy import protected_path_category
 from ouroboros.tools.registry import ToolRegistry
@@ -40,13 +42,13 @@ def test_settings_defaults_include_phase2_keys():
 
     assert SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"] == "advanced"
     assert SETTINGS_DEFAULTS["OUROBOROS_SKILLS_REPO_PATH"] == ""
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-3.8-flash"
-    # Empty role slots inherit Main; Light (Luna 6) and Fallback (Luna 5.6, kept) use Luna explicitly.
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-4-hydrogen"
+    # Empty role slots inherit Main; Light (Luna 6) and Fallback (Terra 6.1, a stronger resilience path) are explicit.
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_HEAVY"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_VISION"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"] == "openai/gpt-6-luna"
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"] == "openai/gpt-5.6-luna"
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"] == "openai/gpt-6.1-terra"
     # Retired (review pool): the deep-review model is a reviewer row of the subagent
     # catalog; the read seam migrates the key, so it is no shipped default any more.
     assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" not in SETTINGS_DEFAULTS
@@ -306,7 +308,7 @@ def test_the_protected_path_messages_name_the_review_panel_and_the_review_gate(m
     refusal = policy.protected_write_block_message(path="BIBLE.md", runtime_mode="advanced", action="run tool 'write_file' against")
     assert refusal.endswith("Switch to runtime_mode='pro' and let the normal review panel "
                             "cover the protected core/contract/release change before commit.")
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     notice = policy.core_patch_notice(["BIBLE.md"])
     assert notice.endswith("These changes can be committed only through the normal review gate.")
     for text in (policy.__doc__ or "", refusal, notice):
@@ -362,7 +364,7 @@ def test_api_settings_post_clamps_unknown_runtime_mode(tmp_path, monkeypatch):
 
     with patch.object(srv, "load_settings", side_effect=fake_load_settings), \
             patch.object(srv, "save_settings", side_effect=fake_save_settings), \
-            patch.object(srv._gateway_settings, "_owner_read_settings_raw", side_effect=fake_load_settings), \
+            patch.object(srv._gateway_settings, "settings_read_view", side_effect=lambda **_: (fake_load_settings(), fake_load_settings())), \
             patch.object(srv._gateway_settings, "_owner_write_settings", side_effect=fake_save_settings), \
             patch.object(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None), \
             patch.object(srv, "_apply_settings_to_env", lambda *_a, **_k: None), \
@@ -412,7 +414,7 @@ def test_api_settings_post_silently_drops_runtime_mode_changes(monkeypatch):
 
     with patch.object(srv, "load_settings", side_effect=fake_load_settings), \
             patch.object(srv, "save_settings", side_effect=fake_save_settings), \
-            patch.object(srv._gateway_settings, "_owner_read_settings_raw", side_effect=fake_load_settings), \
+            patch.object(srv._gateway_settings, "settings_read_view", side_effect=lambda **_: (fake_load_settings(), fake_load_settings())), \
             patch.object(srv._gateway_settings, "_owner_write_settings", side_effect=fake_save_settings), \
             patch.object(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None), \
             patch.object(srv, "_apply_settings_to_env", lambda *_a, **_k: None), \
@@ -457,17 +459,18 @@ class _CommitCtx:
         return path
 
 
-def _git_repo(tmp_path: pathlib.Path) -> pathlib.Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+def _lay_git_repo(folder: pathlib.Path) -> None:
+    repo = git_repository(folder / "repo", unborn=True)
+    world_git(repo, "config", "user.email", "test@example.com")
+    world_git(repo, "config", "user.name", "Test")
     (repo / "README.md").write_text("ok\n", encoding="utf-8")
     (repo / "BIBLE.md").write_text("constitution\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
-    return repo
+    world_git(repo, "add", ".")
+    world_git(repo, "commit", "-m", "init")
+
+
+def _git_repo(tmp_path: pathlib.Path) -> pathlib.Path:
+    return clone_repository(world("runtime-mode-core-repo", _lay_git_repo) / "repo", tmp_path / "repo")
 
 
 # ----- Light mode blanket block -----

@@ -15,8 +15,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Tuple
 
-from ouroboros.tools.review_helpers import _VENDORED_NAMES, _VENDORED_SUFFIXES
-from ouroboros.tools.review_helpers import iter_repo_pack_entries  # noqa: F401 - public compatibility re-export
+from ouroboros.tools.review_helpers import _VENDORED_NAMES, _VENDORED_PATHS, _VENDORED_SUFFIXES
 
 TARGET_MODULE_LINES = 1000
 MAX_MODULE_LINES = 1600
@@ -27,6 +26,7 @@ MAX_FUNCTION_LINES = 300
 
 SIZE_RATCHET_MANIFEST_PATH = "ouroboros/size_ratchet_manifest.py"
 TEST_DURATIONS_PATH = "state/test-durations.json"  # under the data root
+_GIT_READ_SECONDS = 120  # the time bound of one offline batch read (the pulse's and the pairwise check's)
 
 
 class SizeRatchetRefUnavailable(ValueError):
@@ -110,6 +110,9 @@ class SizeRatchetInventory:
     # Modules between the band and the hard gate (1501-1600 lines).
     above_band_paths: frozenset[str] = frozenset()
 
+    def line_counts(self) -> dict[str, int]:
+        return {module.path: module.line_count for module in self.modules}
+
 
 def _exact_repo_relative_path(raw: str | pathlib.Path) -> str:
     text = str(raw)
@@ -142,7 +145,8 @@ def is_gated_js_module(path: str) -> bool:
     if any(part in _MODULE_SKIP_DIR_NAMES for part in posix.parts[:-1]):
         return False
     name = posix.name
-    return name not in _VENDORED_NAMES and not any(name.endswith(suffix) for suffix in _VENDORED_SUFFIXES)
+    return (name not in _VENDORED_NAMES and rel not in _VENDORED_PATHS
+            and not any(name.endswith(suffix) for suffix in _VENDORED_SUFFIXES))
 
 
 def _is_gated_module_path(path: str) -> bool:
@@ -220,9 +224,13 @@ def iter_gated_modules(
             path.resolve().relative_to(root)
         except ValueError as exc:
             raise ValueError(f"gated source path escapes repository: {rel}") from exc
-        raw = path.read_bytes()
-        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        text = _canonical_text(path.read_bytes())
         yield GatedModule(rel, len(text.splitlines()), len(text.encode("utf-8")), text)
+
+
+def _canonical_text(raw: bytes) -> str:
+    """A gated module's text as the inventory counts it: strict UTF-8 with LF line ends."""
+    return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _iter_lexical_functions(tree: ast.AST, path: str) -> Iterator[GatedFunction]:
@@ -306,15 +314,8 @@ def iter_gated_functions(
     yield from _iter_gated_functions_from_modules(iter_gated_modules(repo_dir, repo_paths=repo_paths))
 
 
-def collect_size_ratchet_inventory(
-    repo_dir: pathlib.Path,
-    *,
-    repo_paths: Iterable[str] | None = None,
-) -> SizeRatchetInventory:
-    """Collect one exact inventory for gates, health, census, and regeneration."""
-    injected = tuple(repo_paths) if repo_paths is not None else None
-    modules = tuple(iter_gated_modules(repo_dir, repo_paths=injected))
-    functions = tuple(_iter_gated_functions_from_modules(modules))
+def _inventory_of(modules: tuple[GatedModule, ...], functions: tuple[GatedFunction, ...]) -> SizeRatchetInventory:
+    """These modules and functions with the exact debt sets every gate and metric reads from them."""
     return SizeRatchetInventory(
         modules=modules,
         functions=functions,
@@ -332,78 +333,102 @@ def collect_size_ratchet_inventory(
     )
 
 
+def collect_size_ratchet_inventory(
+    repo_dir: pathlib.Path,
+    *,
+    repo_paths: Iterable[str] | None = None,
+) -> SizeRatchetInventory:
+    """Collect one exact inventory for gates, health, census, and regeneration."""
+    injected = tuple(repo_paths) if repo_paths is not None else None
+    modules = tuple(iter_gated_modules(repo_dir, repo_paths=injected))
+    return _inventory_of(modules, tuple(_iter_gated_functions_from_modules(modules)))
+
+
+def _gated_blobs(
+    root: pathlib.Path, ref: str, wanted: frozenset[str] | None = None, **run: Any,
+) -> Iterator[tuple[str, bytes]]:
+    """``(path, bytes)`` of each gated source in ``ref``'s tree, of ``wanted`` alone when given, read in
+    one ``git cat-file --batch`` (``run`` adds an environment or a time bound to both Git calls): a path
+    the tree lacks is absent; an object the local store lacks raises ``SizeRatchetRefUnavailable``; a
+    non-regular gated entry or malformed output ``ValueError``."""
+    tree = subprocess.run(["git", "ls-tree", "-rz", "--full-tree", ref], cwd=root, check=True,
+                          capture_output=True, **run)
+    entries: list[tuple[str, bytes]] = []
+    for record in tree.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, object_type, object_id = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise ValueError(f"git ls-tree returned a malformed entry at {ref}") from exc
+        path = _exact_repo_relative_path(raw_path.decode("utf-8"))
+        if not _is_gated_module_path(path) or wanted is not None and path not in wanted:
+            continue
+        if object_type != b"blob" or mode not in {b"100644", b"100755"}:
+            raise ValueError(f"gated source at {ref} must be a regular file: {path}")
+        entries.append((path, object_id))
+
+    # Avoid the observed parent/Git mutual pipe-write wait; blob validation stays below.
+    with tempfile.TemporaryFile() as source_ids:
+        source_ids.write(b"".join(object_id + b"\n" for _path, object_id in entries))
+        source_ids.seek(0)
+        batch = subprocess.run(["git", "cat-file", "--batch"], cwd=root, check=True, stdin=source_ids,
+                               capture_output=True, **run).stdout
+    cursor = 0
+    for path, expected_id in entries:
+        header_end = batch.find(b"\n", cursor)
+        if header_end < 0:
+            raise ValueError(f"git cat-file omitted the header for {path} at {ref}")
+        header = batch[cursor:header_end].split(b" ")
+        if header == [expected_id, b"missing"]:
+            raise SizeRatchetRefUnavailable(
+                f"git cat-file: object {expected_id.decode('ascii', errors='replace')} "
+                f"for {path} at {ref} is not in the local object store"
+            )
+        if len(header) != 3 or header[0] != expected_id:
+            raise ValueError(f"git cat-file returned a malformed header for {path} at {ref}")
+        if header[1] != b"blob":
+            raise ValueError(
+                f"git cat-file returned a non-blob object for {path} at {ref}: {header[1]!r}"
+            )
+        try:
+            size = int(header[2])
+        except ValueError as exc:
+            raise ValueError(f"git cat-file returned an invalid size for {path} at {ref}") from exc
+        blob_start = header_end + 1
+        blob_end = blob_start + size
+        if blob_end >= len(batch) or batch[blob_end : blob_end + 1] != b"\n":
+            raise ValueError(f"git cat-file returned a truncated blob for {path} at {ref}")
+        yield path, batch[blob_start:blob_end]
+        cursor = blob_end + 1
+    if cursor != len(batch):
+        raise ValueError(f"git cat-file returned unexpected trailing data at {ref}")
+
+
 @contextlib.contextmanager
 def _git_source_snapshot(repo_dir: pathlib.Path, ref: str) -> Iterator[tuple[pathlib.Path, tuple[str, ...]]]:
     root = pathlib.Path(repo_dir).resolve()
     with tempfile.TemporaryDirectory(prefix="ouroboros-size-ratchet-") as raw_temp:
         snapshot = pathlib.Path(raw_temp)
-        tree = subprocess.run(
-            ["git", "ls-tree", "-rz", "--full-tree", ref],
-            cwd=root,
-            check=True,
-            capture_output=True,
-        )
-        entries: list[tuple[str, bytes]] = []
-        for record in tree.stdout.split(b"\0"):
-            if not record:
-                continue
-            try:
-                metadata, raw_path = record.split(b"\t", 1)
-                mode, object_type, object_id = metadata.split(b" ", 2)
-            except ValueError as exc:
-                raise ValueError(f"git ls-tree returned a malformed entry at {ref}") from exc
-            path = _exact_repo_relative_path(raw_path.decode("utf-8"))
-            if not _is_gated_module_path(path):
-                continue
-            if object_type != b"blob" or mode not in {b"100644", b"100755"}:
-                raise ValueError(f"gated source at {ref} must be a regular file: {path}")
-            entries.append((path, object_id))
-
-        # Avoid the observed parent/Git mutual pipe-write wait; blob validation stays below.
-        with tempfile.TemporaryFile() as source_ids:
-            source_ids.write(b"".join(object_id + b"\n" for _path, object_id in entries))
-            source_ids.seek(0)
-            batch = subprocess.run(
-                ["git", "cat-file", "--batch"],
-                cwd=root,
-                check=True,
-                stdin=source_ids,
-                capture_output=True,
-            ).stdout
-        cursor = 0
         paths: list[str] = []
-        for path, expected_id in entries:
-            header_end = batch.find(b"\n", cursor)
-            if header_end < 0:
-                raise ValueError(f"git cat-file omitted the header for {path} at {ref}")
-            header = batch[cursor:header_end].split(b" ")
-            if header == [expected_id, b"missing"]:
-                raise SizeRatchetRefUnavailable(
-                    f"git cat-file: object {expected_id.decode('ascii', errors='replace')} "
-                    f"for {path} at {ref} is not in the local object store"
-                )
-            if len(header) != 3 or header[0] != expected_id:
-                raise ValueError(f"git cat-file returned a malformed header for {path} at {ref}")
-            if header[1] != b"blob":
-                raise ValueError(
-                    f"git cat-file returned a non-blob object for {path} at {ref}: {header[1]!r}"
-                )
-            try:
-                size = int(header[2])
-            except ValueError as exc:
-                raise ValueError(f"git cat-file returned an invalid size for {path} at {ref}") from exc
-            blob_start = header_end + 1
-            blob_end = blob_start + size
-            if blob_end >= len(batch) or batch[blob_end : blob_end + 1] != b"\n":
-                raise ValueError(f"git cat-file returned a truncated blob for {path} at {ref}")
+        for path, data in _gated_blobs(root, ref):
             destination = snapshot.joinpath(*pathlib.PurePosixPath(path).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(batch[blob_start:blob_end])
+            destination.write_bytes(data)
             paths.append(path)
-            cursor = blob_end + 1
-        if cursor != len(batch):
-            raise ValueError(f"git cat-file returned unexpected trailing data at {ref}")
         yield snapshot, tuple(paths)
+
+
+def _tree_line_counts(root: pathlib.Path, ref: str, paths: Iterable[str]) -> dict[str, int]:
+    """The inventory's line count of each gated module among ``paths`` that ``ref``'s tree holds, read
+    offline within ``_GIT_READ_SECONDS`` as the pulse reads: a partial clone fetches nothing, and an
+    object it lacks or a timeout raises (``SizeRatchetRefUnavailable``, ``subprocess.TimeoutExpired``)."""
+    from ouroboros.reference_books import _OFFLINE_GIT
+
+    offline = {"env": {**os.environ, **_OFFLINE_GIT}, "timeout": _GIT_READ_SECONDS}
+    return {path: len(_canonical_text(data).splitlines())
+            for path, data in _gated_blobs(root, ref, frozenset(paths), **offline)}
 
 
 def collect_size_ratchet_inventory_at_ref(repo_dir: pathlib.Path, ref: str) -> SizeRatchetInventory:
@@ -567,25 +592,20 @@ def load_size_ratchet_manifest(path: pathlib.Path) -> SizeRatchetManifest:
 _CHECKED_IN_MANIFEST = load_size_ratchet_manifest(pathlib.Path(__file__).with_name("size_ratchet_manifest.py"))
 GIANT_PATHS = _CHECKED_IN_MANIFEST.giant_paths
 FUNCTION_DEBT = _CHECKED_IN_MANIFEST.function_debt
-# Compatibility names remain public during the v7 migration; their keys are now exact.
-GRANDFATHERED_OVERSIZED_MODULES = GIANT_PATHS
-GRANDFATHERED_OVERSIZED_FUNCTIONS = FUNCTION_DEBT
 
 
 def validate_manifest_transition(
     current: SizeRatchetManifest,
     previous: SizeRatchetManifest,
-    *,
-    adjacent: bool = True,
+    line_counts: Mapping[str, int] | None = None,
+    recorded: Mapping[str, str | None] | None = None,
 ) -> list[str]:
-    """Validate shrink-only debt and rationale authority against the parent tree.
-
-    ``adjacent=False`` is the PAIRWISE (interval) form: byte-equality of a
-    surviving band rationale is only sound between adjacent manifests — across
-    an interval a path may legally retire and re-enter with a fresh rationale
-    (every intermediate step green) — so the interval form requires a nonblank
-    tip rationale instead of equality (Q18-A: interval archaeology is out of
-    scope; interval FALSE POSITIVES are not)."""
+    """Validate shrink-only debt and rationale authority against a previous manifest (the parent's,
+    or the event base's across an interval). A recorded band rationale may be replaced by another
+    (Git keeps the old text), never dropped; a new entry needs one. ``line_counts`` are the
+    candidate tree's module lines: an entry with a reason leaves with its module or with the band,
+    never while the module holds 1001-1600 lines. ``recorded`` are the reasons a drop is judged
+    against, the previous manifest's unless a pairwise check names its fork point's."""
     errors: list[str] = []
     if current.baseline_source_sha != previous.baseline_source_sha:
         errors.append("BASELINE_SOURCE_SHA is immutable")
@@ -614,20 +634,16 @@ def validate_manifest_transition(
 
     previous_band = set(previous.band_paths)
     for path in sorted(set(current.band_paths) - previous_band):
-        rationale = current.band_paths[path]
-        if not isinstance(rationale, str) or not rationale.strip():
-            errors.append(f"new or re-entered 1001-1500 path needs a nonblank rationale: {path}")
-    for path in sorted(set(current.band_paths) & previous_band):
-        old = previous.band_paths[path]
-        new = current.band_paths[path]
-        if adjacent:
-            if new != old:
-                errors.append(f"surviving band rationale is immutable: {path}")
-        elif old is not None and (new is None or not new.strip()):
-            # Interval form: a rewrite is legal (retire+re-enter), but DROPPING
-            # a recorded rationale — to None or to a blank string — across the
-            # interval launders the justification away.
-            errors.append(f"band rationale dropped across the interval: {path}")
+        if not (current.band_paths[path] or "").strip():
+            errors.append(f"new or re-entered 1001-1600 path needs a nonblank rationale: {path}")
+    reasons = previous.band_paths if recorded is None else recorded
+    for path in sorted(path for path, reason in reasons.items() if reason is not None):
+        lines = (line_counts or {}).get(path, 0)
+        if path not in current.band_paths and TARGET_MODULE_LINES < lines <= MAX_MODULE_LINES:
+            errors.append(f"band rationale dropped: {path} (entry removed at {lines} lines)")
+        # A blank string never parses; the check still holds for an in-memory candidate.
+        elif path in current.band_paths and not (current.band_paths[path] or "").strip():
+            errors.append(f"band rationale dropped: {path}")
 
     for path in sorted(set(current.byte_debt) - set(previous.byte_debt)):
         errors.append(f"new or re-entered module debt above {MAX_MODULE_BYTES} UTF-8 bytes: {path}")
@@ -658,6 +674,60 @@ def _manifest_inventory_errors(
     if dict(inventory.byte_debt) != dict(manifest.byte_debt):
         errors.append(f"BYTE_DEBT differs from live exact counts: live={dict(inventory.byte_debt)!r}")
     return errors
+
+
+def touched_band_errors(
+    manifest: SizeRatchetManifest, line_counts: Mapping[str, int], touched: Iterable[str],
+) -> list[str]:
+    """A module of 1001-1600 lines whose file a change touched carries a nonblank band rationale.
+
+    Untouched modules keep the record they have (a 1501-1600 module needs none, a baseline entry
+    may stay ``None``), so a check of an unchanged tree never turns red; a touched 1001-1500 module
+    without an entry is already the exactness check's missing live entry."""
+    errors: list[str] = []
+    for path in sorted(set(touched)):
+        lines = line_counts.get(path)
+        if (lines is None or not TARGET_MODULE_LINES < lines <= MAX_MODULE_LINES
+                or (manifest.band_paths.get(path) or "").strip()):
+            continue
+        if lines > BAND_MODULE_MAX_LINES or path in manifest.band_paths:
+            errors.append(f"touched {lines}-line module needs a nonblank band rationale: {path}")
+    return errors
+
+
+def _touched_paths(root: pathlib.Path, base: str, candidate: str | None) -> frozenset[str]:
+    """Paths whose file differs between ``base`` and ``candidate`` (a tree-ish; ``None`` is the
+    worktree with its untracked files: a file only the index dropped, ``git rm --cached``, is
+    touched when Git would add it with other content or mode); a Git failure raises."""
+    def names(*args: str, env: Mapping[str, str] | None = None) -> set[str]:
+        run = subprocess.run(["git", "--no-optional-locks", *args], cwd=root, check=True, capture_output=True, env=env)
+        return {item.decode("utf-8") for item in run.stdout.split(b"\0") if item}
+
+    if candidate is not None:
+        return frozenset(names("diff-tree", "-r", "--no-renames", "--name-only", "-z", base, candidate))
+    changed = names("diff", "--no-renames", "--name-only", "-z", base, "--")
+    untracked, same = names("ls-files", "--others", "--exclude-standard", "-z"), set()
+    if kept := sorted(changed & untracked):  # deleted from the index, still on disk: add it to a scratch index
+        with tempfile.TemporaryDirectory(prefix="ouroboros-ratchet-index-") as tmp:
+            scratch = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index"), "GIT_LITERAL_PATHSPECS": "1"}
+            names("update-index", "--add", "--info-only", "--", *kept, env=scratch)
+            same = set(kept) - names("diff-index", "--cached", "--name-only", "-z", base, "--", *kept, env=scratch)
+    return frozenset((changed | untracked) - same)
+
+
+def _touched_findings(
+    root: pathlib.Path, manifest: SizeRatchetManifest, inventory: SizeRatchetInventory,
+    base: str, candidate: str | None, *, staged: bool = False,
+) -> list[str]:
+    """``touched_band_errors`` of a candidate's inventory against ``base``, or a ``partial:``
+    finding when Git cannot list what the candidate touched."""
+    label = "staged " if staged else ""
+    try:
+        touched = _touched_paths(root, base, candidate)
+    except (OSError, UnicodeDecodeError, subprocess.CalledProcessError) as exc:
+        return [_partial_finding(f"{label}touched-file list", exc, "band rationales of touched modules")]
+    return [f"{'staged: ' if staged else ''}{error}"
+            for error in touched_band_errors(manifest, inventory.line_counts(), touched)]
 
 
 def _parent_base_fabrication_errors(
@@ -851,8 +921,10 @@ def _validate_manifest_candidate(
         return errors
     if previous is None:
         errors.extend(f"bootstrap: {error}" for error in _bootstrap_baseline_errors(current, inventory))
-    elif current_text != previous_text:
-        errors.extend(validate_manifest_transition(current, previous))
+    else:
+        if current_text != previous_text:
+            errors.extend(validate_manifest_transition(current, previous, inventory.line_counts()))
+        errors.extend(_touched_findings(root, current, inventory, "HEAD", None))
 
     if not include_staged:
         return errors
@@ -886,8 +958,11 @@ def _validate_manifest_candidate(
         errors.extend(
             f"staged bootstrap: {error}" for error in _bootstrap_baseline_errors(staged, staged_inventory)
         )
-    elif staged_text != previous_text:
-        errors.extend(f"staged: {error}" for error in validate_manifest_transition(staged, previous))
+        return errors
+    if staged_text != previous_text:
+        errors.extend(f"staged: {error}" for error in validate_manifest_transition(
+            staged, previous, staged_inventory.line_counts()))
+    errors.extend(_touched_findings(root, staged, staged_inventory, head_tree, index_tree, staged=True))
     return errors
 
 
@@ -901,7 +976,8 @@ def validate_size_ratchet(
 
     Enforcement contract: the OFFICIAL repository's CI ``size_ratchet`` lane
     BLOCKS on these findings (tip exactness, except that a band entry may stay
-    while its module sits at 1501-1600 lines, plus the pairwise base-vs-tip
+    while its module sits at 1501-1600 lines, the rationale of each module the
+    candidate touched against ``HEAD``, plus the pairwise base-vs-tip
     transition); every local surface (default pytest lanes exclude the marker;
     ``check_worktree_readiness`` and ``codebase_health`` report the findings)
     only WARNS. There is no committed-history replay: the previous manifest
@@ -959,7 +1035,13 @@ def validate_size_ratchet_transition_against_base(
     validated against the parent's own tree (fabricated bases are refused);
     no parent manifest at all = bootstrap, transition skipped. An unreadable
     tip, base or parent raises rather than passing as absent; unavailable
-    parent inventory produces a failing finding, never a false PASS."""
+    parent inventory produces a failing finding, never a false PASS. A module
+    HEAD changed since its merge-base with the base answers ``touched_band_errors``
+    even when the manifest did not change (a moved-on base, ahead of HEAD, lends
+    HEAD none of its own touches or reasons); with the parent degradation a merge answers only
+    for what it changed against every parent, so a target merged into a branch lends the branch
+    none of the target's touches. HEAD's line counts are read strictly, and a
+    blob or touched list Git cannot give is a ``partial:`` finding, never absence."""
     root = pathlib.Path(repo_dir).resolve()
     tip_text = _git_show_manifest(root, "HEAD", manifest_path)
     if tip_text is None:
@@ -969,6 +1051,7 @@ def validate_size_ratchet_transition_against_base(
     if ref and not ref.strip("0"):
         ref = ""  # all-zeros: no event base — fall through to the parent degradation
     base_text: str | None = None
+    base_commit = ""
     validate_parent_tree = False
     if ref:
         resolved = subprocess.run(
@@ -979,7 +1062,8 @@ def validate_size_ratchet_transition_against_base(
             text=True,
         )
         if resolved.returncode == 0:
-            base_text = _git_show_manifest(root, resolved.stdout.strip(), manifest_path)
+            base_commit = resolved.stdout.strip()
+            base_text = _git_show_manifest(root, base_commit, manifest_path)
             if base_text is None:
                 return [
                     f"pairwise: base {resolved.stdout.strip()[:12]} does not carry the "
@@ -995,7 +1079,7 @@ def validate_size_ratchet_transition_against_base(
             base_text = _git_show_manifest(root, parent, manifest_path)
             if base_text is not None:
                 validate_parent_tree = True  # the degraded parent base is always tree-verified
-                parent_ref = parent
+                base_commit = parent
                 break
     if base_text is None:
         return []
@@ -1005,7 +1089,7 @@ def validate_size_ratchet_transition_against_base(
         # pre-declares the tip's debt is byte-identical to the tip's manifest —
         # equality is exactly what the laundering constructs.
         try:
-            parent_inventory = collect_size_ratchet_inventory_at_ref(root, parent_ref)
+            parent_inventory = collect_size_ratchet_inventory_at_ref(root, base_commit)
             parent_errors = _parent_base_fabrication_errors(previous, parent_inventory)
         except Exception as exc:
             parent_errors = [f"pairwise-parent: inventory failed: {type(exc).__name__}: {exc}"]
@@ -1014,11 +1098,30 @@ def validate_size_ratchet_transition_against_base(
                 "pairwise: the degraded parent-base manifest does not match the parent's own tree "
                 "(a fabricated base cannot authorize a transition): " + "; ".join(parent_errors[:3])
             ]
-    if base_text == tip_text:
-        return []
-    return validate_manifest_transition(
-        parse_size_ratchet_manifest(tip_text), previous, adjacent=False
-    )
+    tip = parse_size_ratchet_manifest(tip_text)
+    # HEAD's own change runs from its fork point with the base, the base itself for CI's bases (ancestors
+    # of HEAD): a base ahead of HEAD (a target that moved on) lends HEAD neither its touches nor the
+    # reasons it recorded, so a drop is judged against the fork's. A push that rewinds a published branch
+    # (its `before` descends from HEAD) is out of scope: force-pushing `ouroboros` is forbidden by policy.
+    fork = subprocess.run(["git", "merge-base", base_commit, "HEAD"], cwd=root, capture_output=True, text=True)
+    since = fork.stdout.strip() if fork.returncode == 0 and fork.stdout.strip() else base_commit
+    reasons = previous.band_paths
+    try:
+        touched = _touched_paths(root, since, "HEAD")
+        if validate_parent_tree:  # no event base: a merge owes only what it changed against every parent
+            for other in [parent for parent in _commit_parents(root, "HEAD") if parent != base_commit]:
+                touched &= _touched_paths(root, other, "HEAD")
+        if since != base_commit:
+            forked = _git_show_manifest(root, since, manifest_path)
+            reasons = parse_size_ratchet_manifest(forked).band_paths if forked else {}
+        lines = _tree_line_counts(root, "HEAD", touched | (set(reasons) - set(tip.band_paths)))
+        unread: list[str] = []
+    except (OSError, subprocess.SubprocessError, SizeRatchetRefUnavailable) as exc:  # never read as absent
+        touched, lines = frozenset(), {}
+        unread = [_partial_finding("pairwise touched or recorded modules at HEAD", exc,
+                                   "band rationales of touched modules and removed entries")]
+    errors = [] if base_text == tip_text else validate_manifest_transition(tip, previous, lines, reasons)
+    return errors + touched_band_errors(tip, lines, touched) + unread
 
 
 def _metrics_from_inventory(inventory: SizeRatchetInventory) -> Dict[str, Any]:
@@ -1152,40 +1255,61 @@ def _declared_tests(source: str, path: str) -> tuple[int, collections.Counter]:
 
 def _recorded_test_seconds(paths: list[str]) -> tuple[float, int] | None:
     """What the last complete battery recorded for these test modules, on the slowest of
-    its systems, and how many it did not record; ``None`` without a readable table."""
+    its systems, and how many it did not record; ``None`` without a readable table (a file map
+    per system whose values for them are finite, non-negative milliseconds)."""
     from ouroboros import config
 
     try:
         table = json.loads((pathlib.Path(config.DATA_DIR) / TEST_DURATIONS_PATH).read_text(encoding="utf-8"))
         systems = list(table["platforms"].values())
-        recorded = [max(files.get(path, 0) for files in systems) for path in paths
-                    if any(path in files for files in systems)]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        if not all(isinstance(files, dict) for files in systems):
+            return None
+        recorded = []
+        for path in paths:
+            samples = [files[path] for files in systems if path in files]
+            if any(type(value) not in (int, float) or not (math.isfinite(value) and value >= 0) for value in samples):
+                return None  # every system's sample is checked before the slowest one is taken
+            if samples:
+                recorded.append(max(samples))
+        seconds = sum(recorded) / 1000
+    except Exception:  # a table of any shape Python cannot read is unknown, never a raise out of the pulse
         return None
-    return sum(recorded) / 1000, len(paths) - len(recorded)
+    return (seconds, len(paths) - len(recorded)) if math.isfinite(seconds) else None
 
 
 def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
     """The text of every git object spec (`rev:path`, `:path`), None where it is missing or absent from a
-    partial clone (never fetched): one `git cat-file --batch` for all of them (a spec holding whitespace is
-    read with its own `git show`)."""
+    partial clone (never fetched): one `git cat-file --batch` for all of them (a spec holding whitespace, or
+    every spec when the batch input cannot be prepared, is read with its own `git show`)."""
     from ouroboros.reference_books import _OFFLINE_GIT, _git_bytes
 
     texts: dict[str, str | None] = {}
     batched = [spec for spec in specs if not any(char.isspace() for char in spec)]
-    for spec in specs:
-        if spec not in batched:
-            raw = _git_bytes(root, "--no-optional-locks", "show", spec)
-            texts[spec] = None if raw is None else raw.decode("utf-8", "replace")
-    if not batched:
-        return texts
+    out = b""
+    inputs = contextlib.ExitStack()
     try:
-        done = subprocess.run(["git", "--no-optional-locks", "cat-file", "--batch"], cwd=str(root), timeout=120,
-                              input="".join(spec + "\n" for spec in batched).encode("utf-8"), capture_output=True,
-                              env={**os.environ, **_OFFLINE_GIT})
-        out = done.stdout if done.returncode == 0 else b""
-    except (OSError, subprocess.SubprocessError):
-        out = b""
+        if batched:
+            try:
+                source = inputs.enter_context(tempfile.TemporaryFile())
+                source.write("".join(spec + "\n" for spec in batched).encode("utf-8"))
+                source.seek(0)
+            except OSError:
+                batched = []  # only unstarted preparation falls back; a started batch is never repeated
+        for spec in specs:
+            if spec not in batched:
+                raw = _git_bytes(root, "--no-optional-locks", "show", spec)
+                texts[spec] = None if raw is None else raw.decode("utf-8", "replace")
+        if batched:
+            try:
+                done = subprocess.run(["git", "--no-optional-locks", "cat-file", "--batch"], cwd=str(root),
+                                      timeout=_GIT_READ_SECONDS, stdin=source, capture_output=True,
+                                      env={**os.environ, **_OFFLINE_GIT})
+                out = done.stdout if done.returncode == 0 else b""
+            except (OSError, subprocess.SubprocessError):
+                out = b""
+    finally:
+        with contextlib.suppress(OSError):
+            inputs.close()  # a failed buffered write may fail again on close
     position = 0
     for spec in batched:  # `<oid> <type> <size>\n<bytes>\n`, or `<spec> missing\n`, in input order
         end = out.find(b"\n", position)
@@ -1203,18 +1327,15 @@ def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
     return texts
 
 
-def _suite_facts(
-    root: pathlib.Path, base: str, staged: bool, rows: Mapping[str, tuple[int, int]], new: Iterable[str],
-) -> tuple[str, list[str]]:
-    """The fact line's text on the suite and the sizes of ``rows``, the changed test sources
-    with their added and removed lines: test modules left the module band, not the pulse."""
-    from ouroboros.test_selection import is_test_module
-
-    tests = [path for path in rows if is_test_module(path)]
-    # One `git cat-file --batch` per side: a `git show` per changed test module cost a large PR's commit
-    # fifty seconds of pulse. A spec with whitespace would split in batch input; it is read alone.
-    at_base = _blob_texts(root, [f"{base}:{path}" for path in tests])
-    in_index = _blob_texts(root, [f":{path}" for path in tests]) if staged else {}
+def _change_texts(
+    root: pathlib.Path, base: str, staged: bool, base_paths: list[str], current_paths: list[str],
+) -> tuple[dict[str, str | None], dict[str, str | None]]:
+    """Each path's text at ``base`` and in the candidate (the index when ``staged``, else the worktree),
+    ``None`` where absent or unread. One `git cat-file --batch` a side: a `git show` per changed test
+    module cost a large PR's commit fifty seconds of pulse (a spec with whitespace would split batch
+    input; it is read alone)."""
+    at_base = _blob_texts(root, [f"{base}:{path}" for path in base_paths])
+    in_index = _blob_texts(root, [f":{path}" for path in current_paths]) if staged else {}
 
     def current(path: str) -> str | None:
         if staged:
@@ -1224,20 +1345,35 @@ def _suite_facts(
         except OSError:
             return None
 
+    return ({path: at_base.get(f"{base}:{path}") for path in base_paths},
+            {path: current(path) for path in current_paths})
+
+
+def _suite_facts(
+    rows: Mapping[str, tuple[int, int]], at_base: Mapping[str, str | None],
+    current: Mapping[str, str | None], new: Iterable[str], unread: Iterable[str] = (),
+) -> tuple[str, list[str]]:
+    """The fact line's text on the suite and the sizes of ``rows``, the changed test sources
+    with their added and removed lines: test modules left the module band, not the pulse. A
+    module named ``unread`` (a side it has that was not read) is unreadable, never empty."""
+    from ouroboros.test_selection import is_test_module
+
     added = removed = unreadable = 0
     marks: collections.Counter = collections.Counter()
     sized: list[tuple[int, int, str, str]] = []
     for path, (plus, minus) in rows.items():
-        text = current(path)
+        text = current.get(path)
         if text is not None:
             lines = len(text.splitlines())
             sized.append((minus - plus, -lines, path, f"{path} {lines} (+{plus}/-{minus})"))
         if not is_test_module(path):
             continue
         try:
-            items, had = _declared_tests(at_base.get(f"{base}:{path}") or "", path)
+            if path in unread:
+                raise ValueError(path)
+            items, had = _declared_tests(at_base.get(path) or "", path)
             count, has = _declared_tests(text or "", path)
-        except (SyntaxError, ValueError):  # mid-edit text: unread, never counted as none
+        except (SyntaxError, ValueError, RecursionError, MemoryError):  # mid-edit or too deep: unread, never none
             unreadable += 1
             continue
         added, removed = added + max(count - items, 0), removed + max(items - count, 0)
@@ -1267,9 +1403,11 @@ def diff_pulse(
     reads the index (what a commit or a review subject holds), otherwise the worktree and
     its untracked files. ``paths`` names the modules and books shown (an edit's files);
     omitted, every changed path is. A shown test source adds the suite's facts (declared
-    items, new test modules, ``serial`` marks, recorded test-seconds, its lines). A fact
-    for the mind, never a gate: one shape and one question for any size, and the list
-    bounds are presentation only, counting the rest.
+    items, new test modules, ``serial`` marks, recorded test-seconds, its lines); a shown
+    Python source adds the code-shape line (``code_shape_facts``: module handles and the
+    calls through them, re-exported names, a test's patched product-module names and ``git init``
+    call sites). A fact for the mind, never a gate: one shape and one question for any size, and
+    the list bounds are presentation only, counting the rest.
     """
     from ouroboros.reference_books import _git_bytes, book_balance_note, contribution_base
 
@@ -1282,8 +1420,8 @@ def diff_pulse(
 
     for base in ((merge_base, "HEAD") if merge_base else ("HEAD",)):
         numstat = diff(base, "--numstat")
-        created = diff(base, "--name-only", "--diff-filter=A") if numstat is not None else None
-        if created is not None:
+        status = diff(base, "--name-status") if numstat is not None else None
+        if status is not None:
             break
     else:  # nothing to diff against here; the touched books keep whatever balance they have
         return book_balance_note(root, [str(path) for path in paths or ()])
@@ -1293,7 +1431,10 @@ def diff_pulse(
         minus, _, path = rest.partition("\t")
         if path:  # a binary file's "-" counts no lines
             changed[path] = (int(plus) if plus.isdigit() else 0, int(minus) if minus.isdigit() else 0)
-    new = [path for path in created.decode("utf-8", "replace").split("\0") if path]
+    fields = status.decode("utf-8", "replace").split("\0")  # `<A|D|M|T>\0<path>\0` per changed path
+    states = dict(zip(fields[1::2], fields[0::2]))
+    new = [path for path, state in states.items() if state == "A"]
+    gone = {path for path, state in states.items() if state == "D"}
     if not staged:
         untracked = _git_bytes(root, "--no-optional-locks", "ls-files", "--others", "--exclude-standard", "-z")
         for path in (untracked or b"").decode("utf-8", "replace").split("\0"):
@@ -1315,12 +1456,26 @@ def diff_pulse(
         more = f" (+{len(items) - limit} more)" if len(items) > limit else ""
         return ", ".join(items[:limit]) + more if items else "none"
 
-    suite = ""
+    suite = shape = ""
     rows = {path: changed[path] for path in shown if path in changed and path.endswith((".py", ".js"))
             and "tests" in pathlib.PurePosixPath(path).parts[:-1]}
+    python = [path for path in shown if path in changed and path.endswith(".py")]
+    at_base, current = _change_texts(root, base, staged, python, list(dict.fromkeys([*rows, *python])))
+    created = set(new)
+    # A side the file has but that was not read is unknown to both readers, never an addition or a deletion.
+    unread = [path for path in python if at_base[path] is None and path not in created
+              or current[path] is None and path not in gone]
     if rows:
-        facts, test_sizes = _suite_facts(root, base, staged, rows, new)
+        facts, test_sizes = _suite_facts(rows, at_base, current, new, unread)
         suite = f"; {facts}, test module lines: {listed(test_sizes)}"
+    if python:
+        from ouroboros.code_shape_facts import module_names, pulse_line
+
+        listing = _git_bytes(root, "--no-optional-locks", "ls-tree", "-r", "--name-only", "-z", base)
+        before = None if listing is None else module_names(listing.decode("utf-8", "replace").split("\0"))
+        after = None if before is None else (before - module_names(gone)) | module_names(created)
+        shape = pulse_line([(path, at_base[path], current[path]) for path in python], before, after,
+                           unreadable=unread, limit=limit)
 
     added, deleted = sum(plus for plus, _ in changed.values()), sum(minus for _, minus in changed.values())
     named = f"{upstream.removeprefix('refs/remotes/')} merge-base {merge_base[:12]}"
@@ -1330,7 +1485,7 @@ def diff_pulse(
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
             f"{listed(sizes)}{suite}.")
-    return "\n".join(part for part in (fact, book_balance_note(root, shown), DIFF_PULSE_QUESTION) if part)
+    return "\n".join(part for part in (fact, shape, book_balance_note(root, shown), DIFF_PULSE_QUESTION) if part)
 
 
 def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any]:
@@ -1354,22 +1509,7 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
             except SyntaxError as exc:
                 raise ValueError(f"gated Python module has invalid syntax: {rel}") from exc
             functions.extend(_iter_lexical_functions(tree, rel))
-    inventory = SizeRatchetInventory(
-        modules=tuple(sorted(modules)),
-        functions=tuple(sorted(functions)),
-        giant_paths=frozenset(item.path for item in modules if item.line_count > MAX_MODULE_LINES),
-        function_debt=frozenset(
-            (item.path, item.qualname) for item in functions if item.line_count > MAX_FUNCTION_LINES
-        ),
-        band_paths=frozenset(
-            item.path for item in modules if TARGET_MODULE_LINES < item.line_count <= BAND_MODULE_MAX_LINES
-        ),
-        byte_debt={item.path: item.utf8_bytes for item in modules if item.utf8_bytes > MAX_MODULE_BYTES},
-        above_band_paths=frozenset(
-            item.path for item in modules if BAND_MODULE_MAX_LINES < item.line_count <= MAX_MODULE_LINES
-        ),
-    )
-    return _metrics_from_inventory(inventory)
+    return _metrics_from_inventory(_inventory_of(tuple(sorted(modules)), tuple(sorted(functions))))
 
 
 def collect_sections(

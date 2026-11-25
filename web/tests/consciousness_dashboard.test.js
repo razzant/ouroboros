@@ -49,7 +49,7 @@ test('Dashboard keeps the host headline as its only clock', (t) => {
         const text = strip(summaryHtml(snapshot));
         assert.equal(text.split(detail).length - 1, 1);
         assert.doesNotMatch(text.replace(detail, ''), /\d\d:\d\d|[Dd]ue|since|[Nn]ext wake/);
-        assert.deepEqual(headlineView(snapshot), { text: detail, moving: false });
+        assert.deepEqual(headlineView(snapshot), { text: detail, position: '', moving: false });
     }
 });
 
@@ -91,9 +91,9 @@ test('server status alone owns the headline even with finished or active rows in
     assert.equal(liveWake({ recentWakes: [wake('214a31b6')] }), null);
     for (const [status, detail] of [['due', 'Due; the wake-up has not started yet.'],
         ['wake_failed', 'The last wake-up failed.'], ['wake_rejected', 'The last wake-up was refused.'],
-        ['wake_paused', 'The last wake-up returned while paused.'], ['disabled', 'Off: no own wakes; 2 places only hear.'],
-        ['waiting_for_first_conversation', 'No owner chat is bound yet; the first conversation binds it.']]) {
-        assert.deepEqual(headlineView({ ...full(), status, detail }), { text: detail, moving: false });
+        ['wake_paused', 'The last wake-up returned while paused.'], ['disabled', '2 places are heard, not answered.'],
+        ['owner_chat_unknown', 'The owner chat could not be read (runtime state unavailable); retry at 14:20.']]) {
+        assert.deepEqual(headlineView({ ...full(), status, detail, position: '' }), { text: detail, position: '', moving: false });
     }
     assert.equal(headlineView({ ...full(), status: 'thinking' }).moving, true);
 });
@@ -116,13 +116,15 @@ test('the headline card says the money of the last 24 hours alone; where it went
     // The allowance, its own tasks, its conversations, its model and its places are rows of the settings cards
     // (dashboard_settings.test.js), so no line here leads to Costs, Settings or Circles.
     assert.doesNotMatch(html, /data-cx-act="(costs|settings|circles)"|Costs ›|Settings ›|Circles ›/);
-    assert.match(strip(main), /Stop also ends a wake that is running now\./, 'stopping is said to end a running wake');
-    assert.doesNotMatch(summaryHtml({ ...snapshot, enabled: false }), /Stop also ends/, 'said only while there is a Stop');
+    // What a turn off ends at once is said in the dialog before it, only when something runs (consciousness_switch.js),
+    // never as a standing line on the card (owner 15.11, 5A).
+    assert.doesNotMatch(strip(main), /ends a wake|Stop also ends/);
     assert.match(details, /^<details class="ui-disclosure consciousness-details"><summary>Details<\/summary>/);
     assert.match(strip(details), /Own time\s*\$0\.62.*Some calls have no price\..*Release notes draft \(Slack · Acme\)/);
     assert.equal(countedRootsText(snapshot), 'Its own tasks: 1 of 2 · Release notes draft (Slack · Acme)');
     assert.match(strip(main), /Its own tasks: 1 of 2/);
-    assert.match(summaryHtml(snapshot), /data-cx-act="toggle" data-enabled="1">Stop</);
+    assert.match(summaryHtml(snapshot), /data-cx-act="toggle" data-enabled="1">Turn off</);
+    assert.match(summaryHtml({ ...snapshot, enabled: false }), /data-cx-act="toggle" data-enabled="0">Turn on</);
     assert.doesNotMatch(summaryHtml(normalizeConsciousness({})), /data-cx-act="toggle"/);
     assert.match(summaryHtml(snapshot, { detailsOpen: true }), /consciousness-details" open>/, 'an opened Details stays open');
 });
@@ -163,8 +165,10 @@ test('a state that cannot wake wears its failure mark and offers Restart; starti
     assert.equal(headlineView(noted).note, 'Resume keeps that limit.');
     assert.ok(!('note' in headlineView(held)), 'a state without a note keeps the headline shape it had');
     // A Start/Stop on its way says so and waits; nothing else on the card changes.
-    assert.match(summaryHtml(fromState(), { toggling: 'stop' }), /data-cx-act="toggle" data-enabled="1" disabled>Stopping…</);
-    assert.match(summaryHtml({ ...fromState(), enabled: false }, { toggling: 'start' }), /disabled>Starting…</);
+    assert.match(summaryHtml(fromState(), { toggling: 'stop' }), /data-cx-act="toggle" data-enabled="1" disabled>Turning off…</);
+    assert.match(summaryHtml({ ...fromState(), enabled: false }, { toggling: 'start' }), /disabled>Turning on…</);
+    // While the turn's preview is read (seconds on a large install) the button says so, never a silent pause.
+    assert.match(summaryHtml(fromState(), { toggling: 'read' }), /data-cx-act="toggle" data-enabled="1" disabled>Reading…</);
     assert.match(summaryHtml(fromState()), /class="btn btn-default btn-sm" data-cx-act="toggle"/, 'the neutral small capsule');
 });
 
@@ -301,7 +305,7 @@ test('while the full snapshot is not served, /api/state still gives the status; 
     });
     try {
         await controller.refresh();
-        assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /Consciousness · on/);
+        assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /dashboard-hero-kicker">Consciousness · when Ouroboros acts</);
         assert.equal(reads, 0);
         assert.equal(mount.regions.has('[data-cx-places]'), false);
         assert.match(mount.regions.get('[data-cx-wakes]').innerHTML, /does not report its recent wakes yet/);
@@ -368,7 +372,7 @@ test('a failed read keeps the earlier values and says so', async () => {
         await controller.refresh();
         assert.match(mount.regions.get('[data-cx-status]').textContent, /Could not read consciousness: offline\. Earlier values are shown\./);
         assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /Sleeping until/);
-        assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /data-enabled="1" disabled>Stop</, 'no socket, no toggle press');
+        assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /data-enabled="1" disabled>Turn off</, 'no socket, no toggle press');
     } finally {
         controller.destroy();
         globalThis.window = priorWindow;
@@ -653,4 +657,20 @@ test('Safety chips name what they checked in sentence case, keeping raw tool ids
     assert.equal(wakeCheckText({ chip: 'not_checked', tool: 'update_memory' }), 'Not checked (update_memory)');
     assert.equal(wakeCheckText({ chip: 'not_checked', tool: '' }), 'Not checked');
     assert.equal(wakeCheckText({ chip: 'unknown', tool: 'x' }), '');
+});
+
+test('the headline names the switch by meaning: the gloss over the position, the host\'s state line beneath', () => {
+    // Owner 15.11 (5A): one switch, named Consciousness, glossed and its positions named by what they mean, in the host's
+    // words (consciousness_view): the card adds none of its own.
+    const off = normalizeConsciousness({ enabled: false, status: 'disabled', detail: '31 places are heard, not answered.',
+        position: 'Only when you write to it', gloss: 'When Ouroboros acts' });
+    const html = summaryHtml(off);
+    assert.match(html, /dashboard-hero-kicker">Consciousness · when Ouroboros acts</);
+    assert.match(html, /consciousness-headline">Only when you write to it</);
+    assert.match(html, /consciousness-headline-state">31 places are heard, not answered\.</);
+    assert.deepEqual(headlineView(off), { text: '31 places are heard, not answered.', position: 'Only when you write to it', moving: false });
+    // A server that names no position keeps the host's line as the headline, with no second line.
+    const plain = summaryHtml(normalizeConsciousness({ enabled: true, status: 'sleeping', detail: 'Sleeping until 13:00.' }));
+    assert.match(plain, /consciousness-headline">Sleeping until 13:00\.</);
+    assert.doesNotMatch(plain, /consciousness-headline-state/);
 });

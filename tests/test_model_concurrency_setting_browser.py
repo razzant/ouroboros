@@ -4,7 +4,7 @@ The REAL SPA against the REAL isolated server (``direct_server_with_data``: its 
 root, ports and mock provider): the field is edited in Settings › Models › More, saved through the
 real gateway, read back from ``settings.json`` and from a fresh page load, and the runtime's own reader
 (``model_concurrency._cap``) is pointed at that very document. The field of an untouched install is empty and says
-"Not set" (no limit for API models, three for a local one); 0 (no limit for either), 3 and 7, an earlier saved 5 and
+"Not set" (no limit for API models, one for the built-in server); 0 (no limit for either), 3 and 7, an earlier saved 5 and
 the blank itself must all round-trip; an unrelated save must leave a saved 0 alone. An install whose document was
 written by an earlier release holds the 3 that release saved by itself and no format marker: the field loads it as
 not set, the runtime reads it so, and the first save ends that reading for good. An install whose document
@@ -108,7 +108,7 @@ class _Run:
         assert result.startswith('Saved'), result
 
     def unrelated_save(self, page, value):
-        open_settings(page, 'tools', 'OUROBOROS_TOOL_TIMEOUT_SEC')
+        open_settings(page, 'computer/advanced', 'OUROBOROS_TOOL_TIMEOUT_SEC')
         assert commit_row(page, 'OUROBOROS_TOOL_TIMEOUT_SEC', value).startswith('Saved')
         self.load_settings(page, DESKTOP)
 
@@ -130,15 +130,15 @@ class _Run:
         page = self.open_settings("light", DESKTOP)
         assert page.input_value(FIELD) == ("" if untouched else str(left_by_earlier_pass))
         assert page.get_attribute(FIELD, "placeholder") == "Not set"
-        if untouched:  # no number of the owner's: an API route is not queued here, a local model keeps three
-            assert (self.runtime_cap(), self.runtime_cap(True)) == (0, 3) and self.runtime_enabled() is False
+        if untouched:  # no number of the owner's: an API route is not queued here, the built-in server admits one
+            assert (self.runtime_cap(), self.runtime_cap(True)) == (0, 1) and self.runtime_enabled() is False
         self.shot(page, "light-1232-factory" if untouched else "light-1232-opening")
         for saved in (5, 0, 7, 3, ""):
             page.fill(FIELD, str(saved))
             self.save(page)
             assert self.stored()[KEY] == saved and isinstance(self.stored()[KEY], type(saved)), self.stored().get(KEY)
             assert self.runtime_cap() == (saved or 0), "the runtime's reader sees the saved cap at once"
-            assert self.runtime_cap(True) == (3 if saved == "" else saved), "a local model keeps three while none is set"
+            assert self.runtime_cap(True) == (1 if saved == "" else saved), "the built-in server admits one while none is set"
             assert page.request.get(self.url + "/api/settings").json()[KEY] == saved
             self.reload(page, DESKTOP)
             assert page.input_value(FIELD) == str(saved), "a fresh load shows the actual saved value"
@@ -212,7 +212,7 @@ class _Run:
         page = self.open_settings("light", DESKTOP)
         assert page.input_value(FIELD) == "", "the shipped 3 nobody chose loads as not set"
         assert page.request.get(self.url + "/api/settings").json()[KEY] == ""
-        assert (self.runtime_cap(), self.runtime_cap(True)) == (0, 3), "and the runtime reads the same document so"
+        assert (self.runtime_cap(), self.runtime_cap(True)) == (0, 1), "and the runtime reads the same document so"
         self.shot(page, "light-1232-earlier-release-3")
         for theme in ("light", "dark"):  # the unset field and its word at a phone width, before anything is saved
             phone = self.open_settings(theme, PHONE)
@@ -286,6 +286,6 @@ def test_concurrency_field(direct_server_with_data, monkeypatch):
         assert desktop["labelText"] == "Requests at once per model"
         words = desktop["helpText"]
         assert "counted per model, key and server" in words
-        assert "Not set: no limit for API models, 3 for the built-in local model. 0 or less: no limit for either." in words
+        assert "Not set: no limit for API models, 1 for the built-in local model. 0 or less: no limit for either." in words
         assert "waits in line until a slot frees" in words and "never sent elsewhere for waiting" in words
         assert "Routes your subscriptions serve are not limited here" in words

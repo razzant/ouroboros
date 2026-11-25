@@ -311,6 +311,22 @@ def test_a_foreign_focus_reads_the_marks_source_by_the_named_reader_never_the_au
     assert "FOREIGN-CRITIQUE" in _memory_read(_ctx(tmp_path, "wake1", meta=WAKE), source_ref=shown)
     plain = json.loads(_memory_mark(_ctx(tmp_path, "main1"), text="mine", task_id="main1"))
     assert "\nsource: " not in _memory_read(_ctx(tmp_path, "main1"), node_id=plain["mark_id"])  # other targets unchanged
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    task = {"id": "next-turn", "chat_id": 1}
+    snap = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
+    parts = ordinary_composition(snap)["blocks"]["room"]["parts"]
+    marks = {s["id"]: s for p in parts if p["kind"] in ("mark", "late_review") for s in p["sources"]}
+    wake = _ctx(tmp_path, "wake1", meta=WAKE)
+    assert "text:\nmine" in _memory_read(wake, **marks[plain["mark_id"]]["read"]["arguments"])
+    late = marks[mark_id]
+    assert "as of now" in late["read_basis"]
+    assert _memory_read(wake, **late["read"]["arguments"]) == node
+    assert late["review"]["read"]["arguments"] == {"source_ref": shown}
+    assert "FOREIGN-CRITIQUE" in _memory_read(wake, **late["review"]["read"]["arguments"])
+    assert _release(tmp_path, mark_id, direct=True)["ok"]
+    assert "mark_release" in _memory_read(wake, **late["read"]["arguments"])
+    assert "FOREIGN-CRITIQUE" in _memory_read(wake, **late["review"]["read"]["arguments"])
 
 
 def test_a_retained_source_is_read_without_the_chronicle_and_other_modes_still_wait(tmp_path, monkeypatch):
@@ -636,6 +652,49 @@ def test_a_late_pass_keeps_the_saved_candidate_remainder_and_cleanup_its_card_st
     [stored, late] = _js_views([[row, None], [current, event]])
     assert stored[:2] == late[:2] == ["done", sentence]
     assert late[2] == ["done", "Done", sentence, sentence], "the card's collapsed line is the cause"
+
+
+def test_a_resolved_pass_never_lets_the_older_review_status_copy_revive_the_pending_acceptance(tmp_path, monkeypatch):
+    """R6 (review-status precedence): the pipeline stores the review axis beside its outcome as the
+    record's top-level ``review_status`` (a delivery-time copy; test_agent_task_pipeline pins the copy
+    equal). A late PASS resolution rewrites the canonical ``outcome_axes.review`` to an explicit current
+    PASS and REMOVES the acceptance decision it supersedes, while the older copy still holds it. The
+    stored copy stays untouched audit detail; the wake/card readers read the resolved record exactly as
+    one without the stale copy."""
+    from copy import deepcopy
+
+    from ouroboros import review_ledger
+    from ouroboros.late_review_marks import resolve_pending_result_review
+    from ouroboros.outcomes import _objective_axis
+    from ouroboros.project_dialogue import _completion_verdict, outcome_phase
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    review = {"status": "awaiting", "source": "result_review", "author_finish": "author_finish_pending",
+              "pending_review": {"record_id": "rl-late", "subject_sha": "subject-a"},
+              "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
+                                      "reason": "author_finish_pending", "enforcement": "advisory"}}
+    write_task_result(tmp_path, "task-1", "completed", reason_code="final_message",
+                      outcome_axes={"execution": {"status": "ok", "reason_code": "final_message"},
+                                    "review": review, "objective": _objective_axis(review)},
+                      review_status=deepcopy(review))  # the pipeline's delivery-time copy
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": "PASS"}, "ts": "t"})
+    assert resolve_pending_result_review(tmp_path, "task-1", "rl-late") is True
+    stored = load_task_result(tmp_path, "task-1")
+    assert stored["outcome_axes"]["review"]["status"] == "pass"
+    assert "acceptance_decision" not in stored["outcome_axes"]["review"]
+    assert stored["review_status"]["acceptance_decision"]["reason"] == "author_finish_pending"  # audit copy intact
+    assert outcome_phase(stored, {}) == "done"
+    control = {key: value for key, value in stored.items() if key != "review_status"}
+    assert _completion_verdict(stored, {}) == _completion_verdict(control, {}) == ""
+    assert "before the reviewers answered" not in _completion_verdict(stored, {})
+    assert _completion_verdict(stored, {}, include_review_details=False) == ""
+    # A complete current review axis owns its decision even when there was no review on this revision.
+    from ouroboros.outcomes import _review_axis
+
+    current = {**control, "outcome_axes": {"execution": {"status": "ok"}, "review": _review_axis({})}}
+    older = {"outcome_axes": {"review": deepcopy(review)}}
+    assert _completion_verdict(current, older) == ""
 
 
 _FAILED_PRE_BRANCH = [{"tool": "submit_skill_to_hub", "is_error": True, "status": "error", "skill_publish_attempt": {

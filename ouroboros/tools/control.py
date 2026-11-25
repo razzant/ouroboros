@@ -114,10 +114,10 @@ GIST_RULE = (
 # this work is the citing mind's reading, shown on the card. Cited work is my human's (their allowance, not stopped
 # by the consciousness switch); uncited work from a wake is my own.
 _OWNER_WORDS_PARAM = (
-    "Optional: the exact words of your human asking for this work, copied verbatim from one message of theirs that "
-    "reached this run (their confirmed account; a forward or a colleague's line is not theirs). Verified by bytes: the "
-    "work then runs as their order; a quote not found is refused and nothing starts. Omitted in a place turn or a wake, "
-    "the work is your own; in Main the work is already your human's.")
+    "Optional. Copy your human's words verbatim from one message that reached this run, or the complete label they "
+    "pressed without adding words. The host verifies the words or press and records which one you cited. A place "
+    "message must come directly from their confirmed account. A verified choice starts their work. A missing cite "
+    "leaves work from a place turn or wake your own. In Main the work is already your human's.")
 _START_TASK_DESCRIPTION = (
     "Start a NEW, separate independent work with its own task id and card. "
     "The work reading the current request already exists and can do that request itself. "
@@ -170,31 +170,24 @@ _START_CHOICE_PARAMS = {
 # Too large for the direct-OpenAI custom description bound, this tool goes there as its lead beside the bare
 # structure of its schema; tests/test_openai_chat_custom_contract.py holds the lead whole on every actual profile.
 _SCHEDULE_SUBAGENT_DESCRIPTION = (
-    # SYSTEM also says start_task is separate work, an evidence-only copy owes no apply, and shared-tree work is
-    # verified, not reapplied (integrate_subagent_patch's lead too): this lead pays the typed input_files schema.
-    "Start a child on one objective; it reports back and returns task_id. Children may write knowledge "
-    "notes, memory marks and chronicle drafts in their own name (the integrating mind accepts or rejects drafts: "
-    "chronicle_write kind=decision); no child commits, grants itself tools or writes identity/scratchpad. Default "
-    "native READ-ONLY children inspect local repo/data/history and web/browser and return findings; no other local "
-    "writes or shell/review/runtime/skills. workspace_root: start folder, else yours. write_surface "
-    "picks a MUTATIVE (acting) child: self_worktree isolates its Git source's current eligible files (uncommitted "
-    "too) for integrate_subagent_patch; native external_workspace writes in the SHARED directory (write_root, else "
-    "the selected/inherited workspace_root, else one new Git tree for such descendants); genesis gives EACH an empty "
-    "Git repo in the durable projects root that IS the deliverable; acting harness work uses a private snapshot and "
-    "integrate_delegated_patch. "
-    # Where the custom projection sends this tool without parameter prose, this choice must survive in the tool lead.
-    "A non-acting Agent session keeps configured access in an evidence-only private checking copy; "
-    "access='readonly' selects read-only session execution. Runtime data (installed skill payloads too) is "
-    "never a write_surface. Cyber-effective children inherit "
-    "selected review/skill/runtime tools within explicit task restrictions. Nesting obeys configured "
-    "depth/cap limits. Children scheduled in one round run concurrently; on cache-write-priced routes each "
-    "sibling started before the first responds pays a full prefix write. Native children can address you, "
-    "siblings or any task in their tree; ongoing addressed turns need "
-    "objective/constraints stating what is interim, whom to address and what ends participation. Continue "
-    "settled sessions via delegate_start(subagent_id=id, continue_from=run_id, prompt=''): new run, "
-    "same session if possible, else a new one with retained evidence; work may repeat. "
-    "Retrieve the handoff with get_task_result, "
-    "wait_task or wait_tasks before relying on it."
+    "Start a child on one objective; it returns task_id and reports back. Children may write knowledge notes, "
+    "memory marks and chronicle drafts in their own name (the integrating mind accepts or rejects drafts: "
+    "chronicle_write kind=decision); no child commits, grants itself tools or writes identity/scratchpad. "
+    # The default child reads; only a write_surface value below makes it acting. Both words stay in this lead,
+    # which is all a custom projection without parameter prose shows of that choice.
+    "Default native READ-ONLY children inspect repo/data/history and web/browser; no other "
+    "writes or shell/review/runtime/skills. workspace_root: start folder, else yours. Read-only input_files: "
+    "file/git_range. write_surface makes a child ACTING: self_worktree isolates eligible Git files (uncommitted "
+    "too) for integrate_subagent_patch; external_workspace writes the SHARED directory (write_root, else "
+    "workspace_root, else one new Git tree); genesis gives EACH an empty durable Git repo that IS the "
+    "deliverable; harness work uses a private snapshot and integrate_delegated_patch. Non-acting sessions keep "
+    "configured access in an evidence-only private checking copy; access='readonly' selects read-only "
+    "execution. Runtime data is never a write_surface. Cyber-effective children inherit review/skill/runtime "
+    "tools within task restrictions; nesting is capped. Children scheduled in one round run concurrently; on "
+    "cache-write-priced routes each sibling started before the first responds pays a full prefix write. Native "
+    "children can address you, siblings or any task in their tree: state what is interim, whom to address and "
+    "when to stop. Continue: delegate_start(subagent_id=id, continue_from=run_id, prompt=''); work "
+    "may repeat. Read the handoff before relying on it."
 )
 
 
@@ -361,9 +354,14 @@ def get_tools() -> List[ToolEntry]:
                     "review_answer": {"type": "boolean", "default": False, "description": "true when your human asks that this work's answer itself be checked: under task review Required the host reviews its whole final answer before delivery even when no file was made."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
                     **_START_CHOICE_PARAMS,
-                    "model": {"type": "string", "description": "Model for this new work, with your human's verbatim owner_words. An uncited choice is your own only in Cyber Pro; an owner choice still binds.", "default": ""},
+                    "model": {"type": "string", "description": "Model for this new work, with owner_words citing your human's words or their pressed choice. An uncited choice is your own only in Cyber Pro; an owner choice still binds.", "default": ""},
                     "model_as_typed": {"type": "boolean", "default": False, "description": "Use the exact typed id despite similar catalog suggestions. The route is unverified; this confirms your choice, not availability."},
                     "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM, "default": ""},
+                    "owner_source": {"type": "string", "default": "", "description": (
+                        "A held owner_quote_handle: which of your human's messages the new work answers (its Reply, files and source); "
+                        "empty keeps the message this run answers, with its files. A held message's files never refuse the start; "
+                        "a turn's own fresh files stage what they can and refuse it only if none can; others' stay named, not given. "
+                        "Only a root your human started.")},
                 },
                 "required": ["objective", "title"],
             },
@@ -452,7 +450,8 @@ def get_tools() -> List[ToolEntry]:
                            "earlier fold too) into one text you accept, placed where the oldest was. Originals are journaled first, unnamed blocks stay, a stale or "
                            "ambiguous selection changes nothing; nothing leaves by count, size or age. Write what you carry now, in any form: intentions, concerns, "
                            "questions, debts, waits, decisions that coordinate work, and why you would return; several can stand side by side. Another work's status "
-                           "stands in its own facts: repeat it only where it changes what you intend. Persists across sessions, read whole at every task start. Project "
+                           "stands in its own facts: repeat it only where it changes what you intend. Persists across sessions; integrating foci read it whole when "
+                           "their context is built, delegated children do not; a write does not reach a work already running. Project "
                            "rooms included: one working memory in every room.",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "The new block, or the accepted text of a fold"},
@@ -513,26 +512,33 @@ def get_tools() -> List[ToolEntry]:
         }, _toggle_consciousness),
         ToolEntry("set_next_wakeup", {
             "name": "set_next_wakeup", "description": (
-                "Choose the consciousness wake-up interval: how long after a wake-up ends the next one starts, "
-                "clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A wake-up calling this sets its own next "
-                "one; one already pending keeps its time; with consciousness off it is stored for later. The alarm "
-                "adjusts it: a failed wake-up doubles the interval (up to MAX), a skipped one retries after MIN (an "
-                "exhausted allowance waits for its reset or a changed daily limit), and no wake-up starts sooner "
-                "than MIN after the last wake-up, boot or skip. Events never bring a wake-up forward; the next one "
-                "observes them."),
-            "parameters": {"type": "object", "properties": {"seconds": {"type": "integer", "description": "Seconds from the end of a wake-up to the next one"}}, "required": ["seconds"]},
+                "Choose the next consciousness wake-up: seconds, how long after a wake-up ends the next one starts, "
+                "and/or at, a named time; the earlier wins, clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A "
+                "wake-up calling this sets its own next one; one already pending keeps its time; with consciousness "
+                "off it is stored for later. A failed wake-up doubles the interval (up to MAX), a skipped one retries "
+                "after MIN (an exhausted allowance waits for its reset or a changed daily limit), and none starts "
+                "sooner than MIN after the last wake-up, boot or skip. Events never bring a wake-up forward."),
+            "parameters": {"type": "object", "properties": {
+                "seconds": {"type": "integer", "description": "Seconds from the end of a wake-up to the next one (the interval)"},
+                "at": {"type": "string", "description": (
+                    "A named time: ISO 8601 with an explicit UTC offset or Z, e.g. 2026-11-21T09:00:00+03:00; a time "
+                    "without an offset, or not in the future, is refused, and so is one at or before a wake-up already "
+                    "appointed (that one keeps its time). It stands until a wake-up appointed after it was stored ends "
+                    "at or after it, so a time beyond MAX is reached through intermediate wake-ups and one a wake-up "
+                    "outlives adds none; seconds leaves it standing, a later at replaces it.")},
+            }, "required": []},
         }, _set_next_wakeup),
         ToolEntry("switch_model", {
             "name": "switch_model",
             "description": (
                 'Switch model or reasoning effort on the next round. No arguments lists available models. After a host '
                 "fallback, primary='return' or 'wait' returns to this turn's primary route. "
-                "A model beyond Main and Light needs your human's cited words (owner_words, scope)."
+                "A model beyond Main and Light needs your human's cited words or pressed choice (owner_words, scope)."
             ),
             "parameters": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Exact model route. Cited work/Main choices require it; cited scope room accepts empty or main to follow Main. An uncited empty work switch keeps its acting route."},
                 "model_as_typed": {"type": "boolean", "default": False, "description": "With owner_words, use the exact typed id despite similar catalog suggestions. It remains unverified; this grants no additional model authority."},
-                "owner_words": {"type": "string", "description": "Your human's verbatim words choosing the model; the host checks provenance by bytes, you read their meaning."},
+                "owner_words": {"type": "string", "description": "Copy your human's words verbatim or the complete label they pressed. The host verifies the cited source."},
                 "scope": {"type": "string", "enum": ["work", "room", "main"], "default": "work",
                           "description": "With owner_words: work sets this work's primary; room saves its room's model; main changes Main itself. Without a cite, work keeps the existing Main/Light acting switch; in Cyber Pro use the settings writer for your own room or Main changes."},
                 "project_id": {"type": "string", "description": "For scope room: existing room id; omitted uses this work's room."},
@@ -669,7 +675,6 @@ from ouroboros.tools.control_task_results import (  # noqa: E402, F401 -- intent
     _wait_attention_poll,
     _wait_for_task,
     _wait_for_tasks,
-    cache_horizon_note,
     disclosable_capability_delta,
 )
 

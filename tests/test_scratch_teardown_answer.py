@@ -313,7 +313,11 @@ def test_a_marker_beneath_a_proven_gate_root_keeps_its_folder_and_is_held_by_its
     repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
     parent = (tmp_path / "temp").resolve()
     monkeypatch.setattr(test_environment, "default_temp_parent", lambda: parent)
-    root, worktree = parent / "obs-preflight-kept", parent / "obs-preflight-kept" / "repo"
+    parent.mkdir()
+    monkeypatch.delenv("OUROBOROS_TEST_TEMP_ROOT", raising=False)
+    run = {}
+    root = test_environment.gate_root(evidence=run)
+    container, worktree = root.parent, root / "repo"
     subprocess.run(["git", "worktree", "add", "--detach", str(worktree), "HEAD"], cwd=repo, check=True, capture_output=True)
     (root / "b0").mkdir()
     test_environment.declare_scratch(root / "b0", "pytest-basetemp")
@@ -328,7 +332,7 @@ def test_a_marker_beneath_a_proven_gate_root_keeps_its_folder_and_is_held_by_its
     ctx = SimpleNamespace(task_id="t-kept", drive_root=str(data))
     tokens = ["OURO_PROC_CONTAINER_lane"]
     try:
-        test_evidence.finish_gate({"path": evidence, "cleanup": (repo, root, worktree, True, ""),
+        test_evidence.finish_gate({**run, "path": evidence, "cleanup": (repo, root, worktree, True, ""),
                                    "containment_tokens": [*tokens, ""]}, None, "post_commit", pr._release_hermetic_tree, ctx=ctx)
         result = json.loads((evidence / "result.json").read_text(encoding="utf-8"))
         assert (result["cleanup"], result["retention_reason"]) == ("retained", reason)
@@ -336,16 +340,156 @@ def test_a_marker_beneath_a_proven_gate_root_keeps_its_folder_and_is_held_by_its
         assert worktree.exists() is _registered(repo, root) is in_worktree, "a worktree goes with its registration, or stays with it"
         assert not (root / RETENTION_MARKER).exists(), "one nested marker kept the whole gate root"
         drive = data / "task_drives" / ctx.task_id
-        row = json.loads((drive / "session_scratch_owners" / root.name / "scratch.json").read_text(encoding="utf-8"))
+        row = json.loads((drive / "session_scratch_owners" / container.name / "scratch.json").read_text(encoding="utf-8"))
+        assert row["schema_version"] == 2 and row["path"] == str(container)
         assert row["kept"] == result["kept"] == [{"path": str(held), "reasons": [reason]}]
         assert row["containment_tokens"] == result["containment_tokens"] == tokens
-        assert (data / "state" / "session_scratch" / ctx.task_id / f"{root.name}.json").is_file()
+        assert (data / "state" / "session_scratch" / ctx.task_id / f"{container.name}.json").is_file()
         # The reader every task's scratch has: the marker holds the tree, and once it is gone the tree goes.
         assert session_scratch.release_session_scratch(drive) and held.is_dir()
         assert retire_synthetic_retention(held / "deep", reason)
         assert not session_scratch.release_session_scratch(drive) and not root.exists()
     finally:
         retire_synthetic_retention(held / "deep", reason)
+
+
+def _file_gate(tmp_path, monkeypatch):
+    """The real fresh allocator and finisher, but synthetic files and no worktree/process launches."""
+    parent = (tmp_path / "temp").resolve()
+    parent.mkdir()
+    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: parent)
+    monkeypatch.delenv("OUROBOROS_TEST_TEMP_ROOT", raising=False)
+    monkeypatch.delenv("OUROBOROS_PREFLIGHT_KEEP", raising=False)
+    run = {"path": tmp_path / "evidence", "containment_tokens": ["synthetic-lane", ""]}
+    run["path"].mkdir()
+    root = test_environment.gate_root(evidence=run)
+    repo, worktree = tmp_path / "repo", root / "repo"
+    repo.mkdir()
+    worktree.mkdir()
+    run["cleanup"] = (repo, root, worktree, False, "")
+    ctx = SimpleNamespace(task_id="gate-task", drive_root=str(tmp_path / "data"))
+    record = (pathlib.Path(ctx.drive_root) / "task_drives" / ctx.task_id / "session_scratch_owners"
+              / root.parent.name / "scratch.json")
+    return run, ctx, root, record
+
+
+@pytest.mark.parametrize("hold", ["nested", "root", "debug", "release-error"])
+def test_new_gate_carries_its_issued_nonce_through_finish_and_the_real_custody_reader(tmp_path, monkeypatch, hold):
+    from ouroboros import owner_keep, task_custody, work_domain
+    from ouroboros.workspace_preflight import release_finished_scratch
+    from tests._store_shared import seed_result
+
+    run, ctx, root, record = _file_gate(tmp_path, monkeypatch)
+    container, identity = root.parent, dict(run["scratch_ownership"])
+    held = root / "held" if hold == "nested" else root
+    held.mkdir(exist_ok=True)
+    (held / "payload").write_bytes(b"NEW-GATE")
+    reason = f"synthetic gate hold: {hold}"
+    if hold != "release-error":
+        test_environment.retain_tree(held, reason)
+    if hold == "debug":
+        monkeypatch.setenv("OUROBOROS_PREFLIGHT_KEEP", "1")
+    release = pr._release_hermetic_tree
+    if hold == "release-error":
+        def release(*_args):
+            raise OSError(reason)
+    test_evidence.finish_gate(run, None, "pre_commit", release, ctx=ctx)
+    row = json.loads(record.read_text())
+    result = json.loads((run["path"] / "result.json").read_text())
+    assert {key: row[key] for key in identity} == identity
+    assert row["kept"] == result["kept"] and row["containment_tokens"] == ["synthetic-lane"]
+    before = record.read_bytes(), (container / session_scratch.SCRATCH_MARKER).read_bytes()
+    lstat = work_domain.lstat
+
+    def renumbered(path):
+        seen = lstat(path)
+        return SimpleNamespace(st_mode=seen.st_mode, st_dev=seen.st_dev + 1, st_ino=seen.st_ino) if path == container else seen
+
+    monkeypatch.setattr(work_domain, "lstat", renumbered)
+    assert session_scratch.recorded_scratch(record) == container
+    # A repeated finish re-notes this same record, never replacing its nonce or former facts.
+    test_evidence.finish_gate(run, None, "pre_commit", release, ctx=ctx)
+    assert (record.read_bytes(), (container / session_scratch.SCRATCH_MARKER).read_bytes()) == before
+    data = pathlib.Path(ctx.drive_root)
+    seed_result(data, ctx.task_id, {"status": "completed"})
+    monkeypatch.setattr(session_scratch, "task_hold", lambda *_a: "")  # no process census: synthetic ended owner
+    owner_keep.set_owner_keep(data, ctx.task_id, keep=True, source={"basis": "test"})
+    assert [h["class"] for h in release_finished_scratch(data, lambda _t: False)["holds"]] == ["owner_keep"]
+    owner_keep.set_owner_keep(data, ctx.task_id, keep=False, source={"basis": "test"})
+    assert release_finished_scratch(data, lambda _t: False)["released"]
+    retired = task_custody.remove_custody_trash(data)
+    assert [h["class"] for h in retired["holds"]] == ["producer_retained"]
+    assert (held / "payload").read_bytes() == b"NEW-GATE"
+    # These exact markers were made above, never old retained data or an unknown process.
+    for marker in (root / RETENTION_MARKER, held / RETENTION_MARKER, container / RETENTION_MARKER):
+        marker.unlink(missing_ok=True)
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not container.exists()
+
+
+def test_a_released_new_gate_removes_its_workspace_and_verified_outside_container(tmp_path, monkeypatch):
+    run, ctx, root, record = _file_gate(tmp_path, monkeypatch)
+    test_evidence.finish_gate(run, None, "pre_commit", pr._release_hermetic_tree, ctx=ctx)
+    assert not root.parent.exists() and not record.exists()
+    assert json.loads((run["path"] / "result.json").read_text())["cleanup"] == "released"
+
+
+@pytest.mark.parametrize("fault", ["carrier-lost", "nonce-changed", "record-write"])
+def test_an_unknown_or_failed_new_gate_writer_never_invents_ownership_or_removes_the_retained_tree(
+        tmp_path, monkeypatch, capsys, fault):
+    run, ctx, root, record = _file_gate(tmp_path, monkeypatch)
+    container = root.parent
+    if fault != "carrier-lost":
+        test_environment.retain_tree(root, "synthetic hold")
+    (root / "payload").write_bytes(b"KEPT")
+    if fault == "carrier-lost":
+        run.pop("scratch_ownership")
+    elif fault == "nonce-changed":
+        (container / session_scratch.SCRATCH_MARKER).write_bytes(b"f" * 32 + b"\n")
+    else:
+        write = test_evidence.write_record
+
+        def failed(path, value):
+            if pathlib.Path(path).name == "scratch.json":
+                raise OSError("synthetic record write failure")
+            return write(path, value)
+        monkeypatch.setattr(test_evidence, "write_record", failed)
+    test_evidence.finish_gate(run, None, "pre_commit", pr._release_hermetic_tree, ctx=ctx)
+    assert not record.exists() and (root / "payload").read_bytes() == b"KEPT"
+    assert "PREFLIGHT_EVIDENCE_INCOMPLETE" in capsys.readouterr().err
+    assert not list((tmp_path / "data").rglob("scratch.json")), "no legacy fallback or root adoption"
+    result = json.loads((run["path"] / "result.json").read_text())
+    assert result["diagnostics_incomplete"] and result["evidence_errors"]
+    reason = result["retention_reason"]
+    assert reason == "synthetic hold" or reason.startswith("gate scratch identity unconfirmed:")
+    assert retire_synthetic_retention(root, "synthetic hold", reason, "hermetic preflight: synthetic hold")
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_a_former_kept_gate_record_stays_v1_byte_for_byte_and_still_holds_a_device_mismatch(
+        tmp_path, monkeypatch, mismatch):
+    parent = (tmp_path / "temp").resolve()
+    root = parent / "obs-old-gate"
+    root.mkdir(parents=True)
+    (root / "payload").write_bytes(b"LEGACY")
+    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: parent)
+    data = tmp_path / "data"
+    ctx = SimpleNamespace(task_id="old-task", drive_root=str(data))
+    record = data / "task_drives" / ctx.task_id / "session_scratch_owners" / root.name / "scratch.json"
+    record.parent.mkdir(parents=True)
+    seen = root.lstat()
+    row = {"schema_version": 1, "path": str(root), "identity": [seen.st_dev + mismatch, seen.st_ino],
+           "kept": [{"path": str(root), "reasons": ["former facts"]}], "containment_tokens": ["old-token"]}
+    test_evidence.write_record(record, row)  # the former writer's exact shape is the negative control
+    before = record.read_bytes()
+    if mismatch:
+        with pytest.raises(session_scratch.ScratchIdentityMismatch):
+            test_evidence.record_kept_scratch(ctx, root, [], ["new-token"])
+        assert session_scratch.release_session_scratch(record.parents[2])[0]["class"] == "identity_unverified"
+    else:
+        test_evidence.record_kept_scratch(ctx, root, [], ["new-token"])
+        assert session_scratch.recorded_scratch(record) == root
+    assert record.read_bytes() == before and (root / "payload").read_bytes() == b"LEGACY"
+    assert not (root / session_scratch.SCRATCH_MARKER).exists(), "no opportunistic v1 migration"
 
 
 # --- Retiring a hold the test itself manufactured

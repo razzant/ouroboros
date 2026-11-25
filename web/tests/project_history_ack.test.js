@@ -116,6 +116,12 @@ function lift(name) {
     assert.ok(from >= 0 && until > from, `${name} is a top-level function in app.js`);
     return source.slice(source.lastIndexOf('\n', from) + 1, until + 2);
 }
+// The one Project-unread rule app.js's list, landing and cursor merges share, as its top-level line stands.
+const unreadRule = (() => {
+    const from = source.indexOf('\nconst projectUnread = ') + 1;
+    assert.ok(from > 0, 'projectUnread is a top-level line in app.js');
+    return source.slice(from, source.indexOf('\n', from) + 1);
+})();
 
 function cursorHarness({ seen = {}, rows = [], answer = () => ({}), view = readAhead } = {}) {
     const posts = [], paints = [];
@@ -127,7 +133,7 @@ function cursorHarness({ seen = {}, rows = [], answer = () => ({}), view = readA
         patchProjectActivityMarkers: () => {}, mergeMainSeenRevision: () => false,
         fetchJson: async (url, init = {}) => { posts.push([url, init.method || 'GET', init.body || '']); return answer(init); },
     });
-    vm.runInContext(`${lift('markProjectViewed')}\n${lift('mergeProjectSeenRevisions')}
+    vm.runInContext(`${unreadRule}${lift('markProjectViewed')}\n${lift('mergeProjectSeenRevisions')}
         let sharedSeenRead = null;\n${lift('refreshSharedProjectSeen')}
         globalThis.api = { markProjectViewed, mergeProjectSeenRevisions, refreshSharedProjectSeen,
             pending: () => sharedSeenRead };`, context);
@@ -320,7 +326,7 @@ function pollHarness({ read = true, hidden = false, failures = 1 } = {}) {
         },
         console: { error() {} },
     });
-    vm.runInContext(`${ackSource}\n${lift('markProjectViewed')}\n${lift('mergeProjectSeenRevisions')}
+    vm.runInContext(`${unreadRule}${ackSource}\n${lift('markProjectViewed')}\n${lift('mergeProjectSeenRevisions')}
         ${lift('renderProjectsNav')}
         globalThis.poll = () => renderProjectsNav([{ id: 'p1', name: 'P', chat_id: 9, lifecycle: 'active',
             visible_revision: 5 }], [9]);`, context);
@@ -390,8 +396,10 @@ function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, cove
         projectInstances: new Map(), projectPaintRequests: new Map(), projectReveals: new Map(),
         lastProjectRows: [project], state: { projectSeenRevision: {} }, mainChat: null,
         projectPanelTitle: {}, projectPanelBody: {}, ctx: {},
+        pageNavigation: { capture: () => ({}) },
+        layers: { back: () => context.api.close() },
         // The panel's exit has run by the next sync here (as under reduced motion): a retired room is put away.
-        showPage: async () => true, isStackLayout: () => stack, roomCoversMain: () => covers, createChatInstance: instance,
+        showPage: async (_name, options) => { options.enter(); return true; }, isStackLayout: () => stack, roomCoversMain: () => covers, createChatInstance: instance,
         document: { hidden: false },
         syncNavigationState() {
             if (context.mainChat) context.syncMainLifetime();
@@ -402,9 +410,9 @@ function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, cove
         mainUnread: 0, mainUnreadCount: () => context.mainUnread,
         console: { error() {} }, createRoomRetirement, roomSocket: (socket) => socket, ws: {},
     });
-    vm.runInContext(`let projectNavigationGeneration = 0, projectPanelOpeningSince = 0;
-        ${['mainOnScreen', 'enterMain', 'syncMainLifetime', 'cancelProjectPaint',
-        'closeProjectPanel', 'openProjectPanel', 'resolveProjectRoom', 'freshProjectRow', 'revealProjectQuestion'].map(lift).join('\n')}\n${ackSource}
+    vm.runInContext(`let projectNavigationGeneration = 0, projectPanelOpeningSince = 0;\n${unreadRule}
+        ${['mainOnScreen', 'enterMain', 'syncMainLifetime', 'cancelProjectPaint', 'closeProjectPanel', 'openProjectPanel',
+        'landInProject', 'resolveProjectRoom', 'freshProjectRow', 'revealProjectQuestion'].map(lift).join('\n')}\n${ackSource}
         const rooms = createRoomRetirement({ instances: projectInstances, cancelPaint: cancelProjectPaint });
         Object.assign(globalThis, { rooms, openProjectPanel });
         globalThis.api = { open: (options) => openProjectPanel(lastProjectRows[0], options), close: () => closeProjectPanel(),
@@ -574,6 +582,35 @@ test('a return follows the place the room was left at; a notification outranks i
     await h.context.openProjectPanel(h.context.lastProjectRows[0], { openOnly: true, latest: true });
     assert.equal(room.arrivals.length, 1, 'no return decides the place');
     assert.equal(room.latest?.arrive, true, 'unread: the notification lands on what arrived last');
+});
+
+for (const unread of [false, true]) test(`a notification to an already open room lands latest (${unread ? 'unread' : 'read'})`, { timeout: 1000 }, async () => {
+    const h = navigationHarness({ pendingWork: false });
+    await h.api.open();
+    const room = h.built[0], latest = [], reads = room.refreshes;
+    h.context.state.projectSeenRevision.p1 = unread ? 4 : 5;
+    room.showLatest = ({ arrive }) => { latest.push(arrive); };
+    h.context.projectReveals.set('p1', {});
+    h.context.projectPaintRequests.set('p1', { revision: 5, paintOnly: true, promise: new Promise(() => {}) });
+    await h.api.open({ openOnly: true, latest: true });
+    assert.deepEqual(latest, [unread], 'the notification is a new latest intent even in the current room');
+    assert.equal(h.context.navState.activeProjectId, 'p1');
+    assert.equal(h.built.length, 1, 'the retained instance is reused');
+    assert.equal(room.arrivals.length, 1, 'a notification does not resume the older saved passage');
+    assert.equal(h.context.projectReveals.has('p1'), false, 'an older reveal no longer owns the read decision');
+    assert.equal(room.refreshes, reads + Number(unread), 'a read room needs no new receipt read');
+});
+
+test('a notification to the room on screen keeps the newer revision its own lookup read', { timeout: 1000 }, async () => {
+    const h = navigationHarness({ pendingWork: false });
+    await h.api.open();
+    const room = h.built[0], latest = [], reads = room.refreshes;
+    h.context.state.projectSeenRevision.p1 = 5;  // the sidebar row and the seen cursor still say 5
+    room.showLatest = ({ arrive }) => { latest.push(arrive); };
+    await h.api.openAs({ ...h.project, visible_revision: 6 }, { openOnly: true, latest: true });
+    assert.deepEqual(latest, [true], 'what arrived at revision 6 is unread: the notification lands on it');
+    assert.equal(room.refreshes, reads + 1, 'and revision 6 is read');
+    assert.deepEqual(h.acked.at(-1), ['p1', 6]);
 });
 
 test('a question reveal still in progress keeps withholding the read of its own showing', async () => {

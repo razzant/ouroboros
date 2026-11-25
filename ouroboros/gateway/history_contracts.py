@@ -8,10 +8,10 @@ reads a room's saved messages for a word search (``gateway/chat_search.py``). Th
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from ouroboros.gateway.attachment_contracts import ChatAttachmentView
-from ouroboros.gateway.reference_contracts import ChatReplyReference
+from ouroboros.gateway.reference_contracts import ChatReplyReference, HostNoticeField
 
 try:
     from typing import Literal, Required, TypedDict
@@ -53,7 +53,8 @@ class PresenceContact(TypedDict, total=False):
 class ChatHistoryQuiz(TypedDict, total=False):
     """The question card of a ``msg_type: "quiz"`` row (the question itself is the row's ``text``).
     ``state`` is the durable lifecycle merged at read time: open, answered, closed,
-    expired_terminal or superseded. ``answered_index`` and ``comment`` are the recorded answer."""
+    expired_terminal or superseded. ``answered_index`` and ``comment`` are the recorded answer,
+    ``answer_row_address`` its own row, which the card shows (DESIGN "Replies")."""
 
     quiz_id: Required[str]
     options: List[Dict[str, Any]]  # QuizOption rows: {label, detail?, recommended?}
@@ -66,6 +67,7 @@ class ChatHistoryQuiz(TypedDict, total=False):
     host_facts: str
     answered_index: int
     comment: str
+    answer_row_address: str
     owner_wait_state: str
     owner_wait_resume_reason: str
 
@@ -118,9 +120,30 @@ class PlaceHistoryFacts(TypedDict, total=False):
     historical_import: PlaceHistoryImport  # never owner confirmation or attention
     sent_at: str  # the provider send time its arrival recorded (``source_order``); absent: unknown, never inferred
     reaction: PlaceHistoryReaction  # a typed reaction arrival or receipt; absent: not one
+    non_text: List[Dict[str, str]]  # the connector's {kind, description} beside the words (kind state_change: a change), never speech
 
 
-class ChatHistoryMessage(TypedDict, total=False):
+class HistoricalTerminal(TypedDict, total=False):
+    """Facts frozen on one published ending. Its publication time and observed end time are separate."""
+
+    status: Required[str]
+    phase: Required[Literal["done", "warn", "error", "cancelled"]]
+    ts: Required[str]
+    provenance: Required[Literal["canonical_task_result_after_finalization"]]
+    model_execution: Dict[str, Any]
+    task_attempt: int
+    terminal_time: Dict[str, Any]
+    terminal_delivery: Dict[str, Any]
+    wake_summary: str
+    suggested_name: str
+    schedule_name: str
+    place_origin: Dict[str, Any]
+    wake_silent: bool
+    quiet_effective: bool
+    schedule_report_only: bool
+
+
+class ChatHistoryMessage(HostNoticeField, total=False):
     """One ``GET /api/chat/history`` row. Every row has the six required keys; a stored row also
     has ``history_id`` and ``history_position``. Live frames call ``text`` ``content``.
 
@@ -141,6 +164,8 @@ class ChatHistoryMessage(TypedDict, total=False):
     place_history: PlaceHistoryFacts
     wait_ended_at: str
     row_address: str
+    reply_excerpt_disabled: bool
+    reply_author_label: str  # whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
     row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening)
     reply_to: ChatReplyReference
     relay: Dict[str, Any]
@@ -161,7 +186,10 @@ class ChatHistoryMessage(TypedDict, total=False):
     text_placeholder: bool
     chat_annotation: Dict[str, Any]  # the routing outcome shown on an owner message
     origin_id: str
+    source_row_address: str  # the physical original of a retained copy, even outside this store
     origin_projected: bool  # a Project's start message rebuilt from its binding's own copy
+    opening_input_kind: Literal["owner_press", "owner_card_input", "owner_quiz_answer", "owner_mailbox"]
+    chat_id: int  # on that copy: the room its original was written in (its receipt's room)
     msg_type: Literal["document", "photo", "video", "links", "quiz", "card"]
     filename: str
     mime: str
@@ -174,8 +202,27 @@ class ChatHistoryMessage(TypedDict, total=False):
     quiz: ChatHistoryQuiz
     card: ChatHistoryCard
     summary_kind: str
-    historical_terminal: Dict[str, Any]
-    current_outcome: Dict[str, Any]  # the current terminal outcome projection; distinct from historical_terminal
+    schedule_report_only: bool  # terminal card links to a saved report, not a transcript message
+    status: str
+    task_terminal_status: str
+    task_phase: str
+    task_attempt: int
+    task_outcome: Union[str, Dict[str, Any]]  # a legacy status or the recorded ending
+    historical_terminal: HistoricalTerminal
+    current_outcome: Dict[str, Any]  # separately scoped by its own task_attempt and terminal_time when known
+    terminal_time: Dict[str, Any]
+    terminal_delivery: Dict[str, Any]  # scope="task" for unbound debt, preserved_path=None for an unverified copy
+    reason_code: str
+    outcome_axes: Dict[str, Any]
+    _result_text_present: bool
+    delegated_runs_unreconciled: List[str]
+    review_projection: Dict[str, Any]
+    wake_summary: str
+    suggested_name: str
+    schedule_name: str
+    place_origin: Dict[str, Any]
+    wake_silent: bool
+    quiet_effective: bool
     model_waits: Dict[str, Any]  # system_type task_model_wait: wait_id -> the wait's latest revision
     lifecycle_virtual: bool  # the running skill operation, rebuilt on every read, never stored
     review_group: Dict[str, Any]  # folded skill review attempts of one task-bound group
@@ -315,10 +362,10 @@ class ChatSearchQuestion(TypedDict, total=False):
     comment: str
 
 
-class ChatSearchCandidate(TypedDict, total=False):
+class ChatSearchCandidate(HostNoticeField, total=False):
     """One saved message of the room as the fields the room's renderer draws its words from: the text history
     gives it (``system_type``, ``markdown``, ``narration``, ``source`` and the owner's ``attachments`` names choose
-    how), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
+    how) or a host notice's line (``notice``; its details, template and values are not searched), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
     question's ``quiz``, a Project lifecycle row's answer and ending (``completion_answer``, ``project_id``,
     ``project_name``, ``task_name``, ``completion_notice``). Whether its words contain the query is the client's
     reading of those words. ``history_id`` and ``row_address`` are the row's identity in ``GET /api/chat/history``, whose
@@ -386,7 +433,7 @@ class ChatSearchResponse(TypedDict, total=False):
 
 __all__ = [
     "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
-    "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
+    "ChatHistoryQuiz", "ChatHistoryCard", "HistoricalTerminal", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
     "ChatSearchAttachment", "ChatSearchLink", "ChatSearchQuestion", "ChatSearchCandidate", "ChatSearchSpan",
     "ChatSearchResponse",

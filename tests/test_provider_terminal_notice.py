@@ -72,7 +72,8 @@ def test_pipeline_delivery_and_rebuild_keep_raw_bytes_and_known_wait_custody(tmp
                                           7, "parent1", stored)
     assert notified is current
     if current:
-        assert notice in incidents[0][0][1]
+        # The row says one stable phrase; the provider's own diagnostic is its notice's details (RV4 10).
+        assert notice in incidents[0][1]["progress_meta"]["notice"]["details"]
         assert "re-run the task" not in incidents[0][0][1]
         assert "Retry when connectivity returns" not in incidents[0][0][1]
 
@@ -316,7 +317,8 @@ def test_body_error_diagnostic_is_masked_before_terminal_publication(tmp_path, m
     loop._replace_delivery_candidate(registry, ctx, trace, RAW, control="replace")
     text, usage, trace = loop._handle_provider_unavailable(ctx, error_kind=usage["_last_llm_error_kind"])
     notices = []
-    assert send_provider_death_notice(SimpleNamespace(send_with_budget=lambda *a, **k: notices.append(a[1])), 7, "parent1", usage)
+    assert send_provider_death_notice(SimpleNamespace(send_with_budget=lambda *a, **k: notices.append(
+        a[1] + "\n" + k["progress_meta"]["notice"]["details"])), 7, "parent1", usage)  # the words and their details
     assert text == RAW
     assert secret not in usage["_last_llm_error"] + usage["terminal_provider_notice"] + notices[0]
     assert "***" in notices[0]
@@ -328,14 +330,14 @@ def test_host_authored_primary_carries_its_own_notice_without_a_second_row():
     """A host-authored primary (the notice itself, or a salvage receipt) already
     says it; a model-authored primary still gets the separate not-completed row."""
     sent = []
-    ctx = SimpleNamespace(send_with_budget=lambda *a, **k: sent.append(a[1]))
+    ctx = SimpleNamespace(send_with_budget=lambda *a, **k: sent.append({"text": a[1], **k}))
     for origin in ("host_notice", "host_salvage"):
         assert send_provider_death_notice(ctx, 7, "t1", {"terminal_origin": origin,
                                                          "terminal_provider_notice": "⚠️ n"}) is False
     assert sent == []
     assert send_provider_death_notice(ctx, 7, "t1", {"terminal_origin": "model_final",
                                                      "terminal_provider_notice": "⚠️ n"}) is True
-    assert sent and "⚠️ n" in sent[0]
+    assert sent and "⚠️ n" in sent[0]["progress_meta"]["notice"]["details"] and "⚠️" not in sent[0]["text"]
 
 
 def test_a_request_that_never_started_generation_is_not_called_a_provider_reply():

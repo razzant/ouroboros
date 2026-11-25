@@ -3,6 +3,7 @@
 // with who wrote them and who placed the place there, the place's own notes in brief and its optional description;
 // its conversations follow. Connect is separate in place_connect.js; the body stays here for the place-room integration.
 import { bindDialogFocus } from './ui_interactions.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { renderSegmentedField } from './page_header.js';
 import { chipHtml, skillIconHtml } from './skill_presentation.js';
@@ -15,11 +16,11 @@ import { modelCatalog } from './model_catalog_store.js';
 import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
 import {
-    PLACE_STATES, SILENT_CARD, WAKE_FACT_WORDS, accountIdText, authorWord, capitalized, inheritedModel, listWords, placeService, placeStateOf,
-    placeStateWord, placeTitle, placedByWord, sameWords, signalLabels, wakeFactWord, writtenByWord,
+    ACTIVE_UNCHECKED_NOTE, PLACE_STATES, SILENT_CARD, WAKE_FACT_WORDS, accountIdText, authorWord, capitalized, inheritedModel, listWords, noKindChecked,
+    placeService, placeStateOf, placeStateWord, placeTitle, placedByWord, sameWords, signalLabels, wakeFactWord, writtenByWord,
 } from './consciousness_words.js';
 
-/** Ask the Skills page for one installed skill's card, or Browse filtered to connectors. */
+/** Ask Extensions for one installed skill's card on Skills, or Browse filtered to connectors. */
 export function openSkillsFor(detail) {
     globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-skills', { detail }));
 }
@@ -116,14 +117,21 @@ function stateHtml(place, ui) {
     const options = PLACE_STATES.map(({ value, label }) => ({ value, label }));
     const group = renderSegmentedField({ target: `place-state-${place.id}`, options, modifier: 'data-place-state' });
     // What the chosen state does: a quiet note in the tray; what Silent guarantees is a host fact in the
-    // System voice, under the tray (fills never stack). While consciousness is off it only hears (the host's
-    // `only_hears`), whatever the stored choice says it would do.
-    const note = place.onlyHears ? tr('places.only_hears.note', 'Consciousness is off: it only hears here.')
-        : state?.note || 'Its state could not be read.';
+    // System voice, under the tray (fills never stack).
+    // Why it is quiet now, by its one cause, in the host's words (owner 15.11, 5A), with the door where that cause
+    // is changed; the stored choice stays chosen in the strip above it. Active with no kind checked claims no wake
+    // (the list says that setting).
+    const quiet = place.quiet;
+    const door = quiet?.door === 'costs' ? ['open-costs', tr('places.costs.door', 'Costs ›')]
+        : quiet ? ['open-consciousness', tr('places.consciousness.door', 'Consciousness ›')] : null;
+    const note = quiet ? tr(quiet.note, quiet.note)
+        : place.state === 'active' && noKindChecked(place) ? tr('places.state.active.unchecked', ACTIVE_UNCHECKED_NOTE)
+            : state?.note || 'Its state could not be read.';
+    const doorHtml = door ? ` <button type="button" class="consciousness-inline-link ui-hit-area" data-place-act="${door[0]}">${escapeHtml(door[1])}</button>` : '';
     return `<div class="settings-effort-card place-state">
             <label id="place-state-label">What it does here</label>
             ${group}
-            ${silent ? '' : `<p class="place-state-note">${escapeHtml(note)}</p>`}
+            ${silent && !quiet ? '' : `<p class="place-state-note">${escapeHtml(note)}${doorHtml}</p>`}
         </div>
         ${silent ? `<p class="place-silent-card" role="note">${escapeHtml(`${state.note} ${SILENT_CARD}`)}</p>` : ''}`;
 }
@@ -142,12 +150,15 @@ function wakesHtml(place, ui) {
             <span${authored ? ' data-i18n-authored' : ''}>${escapeHtml(label)}</span></label>${chosen ? chipHtml(tr(`places.author.${chosen.author}`, authorWord(chosen.author)), 'neutral') : ''}</li>`;
     }).join('');
     const service = `<span data-i18n-authored>${escapeHtml(ui.serviceLabel || place.serviceLabel || place.provider)}</span>`;
+    const unchecked = noKindChecked(place);
     return `<p class="place-sheet-note">${fmt('A checked kind calls it here at once, when {service} reports it.', { service })}</p>
         <ul class="place-wake-list">${items}</ul>
         ${vocabulary.includes('from_bot') ? `<p class="place-sheet-note">${tr('places.wake.bots', 'Bot messages need this check; once checked, they can wake it without another checked kind.')}</p>` : ''}
-        ${place.onlyHears ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}
-            <button type="button" class="consciousness-inline-link ui-hit-area" data-place-act="open-consciousness">${tr('places.consciousness.door', 'Consciousness ›')}</button></p>`
-        : place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}
+        ${['off', 'panic'].includes(place.quiet?.cause) ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}</p>`
+        : place.quiet?.cause === 'allowance' ? `<p class="place-sheet-note">${tr('places.wake.allowance', 'While its allowance is spent, nothing here starts a new wake.')}</p>`
+        : place.state === 'paused' ? ''
+            : unchecked ? `<p class="place-sheet-note">${tr('places.wake.none', 'No kind is checked: no event starts a new conversation here at once. An ongoing conversation can still wake it.')}</p>`
+                : place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}
         ${place.state === 'paused' ? `<p class="place-sheet-note">${tr('places.wake.paused', 'While this place is Paused, nothing here wakes it.')}</p>` : ''}
         <p class="place-sheet-note">${tr('places.wake.honesty', 'Everything else here it sees at its next own wake and decides what to read.')}</p>`;
 }
@@ -314,7 +325,7 @@ export function placeSheetBodyHtml(place, ui = {}) {
 // The sheet's title is the place as its row names it (placeTitle); its meta line says what the title does not: the
 // service it is on (unless the title is the service) and the state.
 export const placeSheetMetaText = (place, title = '') => [sameWords(title, placeService(place)) ? '' : placeService(place),
-    placeStateWord(place.state)].filter(Boolean).join(' · ');
+    place.quiet?.word || placeStateWord(place.state)].filter(Boolean).join(' · ');
 
 export function sheetShell(titleHtml, metaText, modifier = '') {
     const dialog = document.createElement('dialog');
@@ -330,7 +341,7 @@ export function sheetShell(titleHtml, metaText, modifier = '') {
             <div class="document-reader-actions"></div>
             <button type="button" class="btn btn-default document-reader-close" data-place-close>${tr('places.close', 'Close')}</button>
         </div>
-        <div class="document-reader-body place-sheet-body is-quiet-focus" tabindex="-1" data-place-body></div>
+        <div class="document-reader-body place-sheet-body scroll-fade-y is-quiet-focus" tabindex="-1" data-place-body></div>
     </div>`;
     return dialog;
 }
@@ -339,10 +350,12 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
     const body = dialog.querySelector('[data-place-body]');
     let closed = false;
     let disposeFocus = null;
+    const disposeFade = bindScrollFade(body);
     const close = () => {
         if (closed) return;
         closed = true;
         if (dialog.open && typeof dialog.close === 'function') dialog.close();
+        disposeFade();
         disposeFocus?.();
         dialog.remove();
         onClose?.();
@@ -521,7 +534,8 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         const quiet = sameWords(title, service) ? '' : service;
         const meta = dialog.querySelector('[data-place-meta]');
         if (meta) meta.innerHTML = `${quiet ? `<span data-i18n-authored>${escapeHtml(quiet)}</span> · ` : ''}${escapeHtml(ui.removed
-            ? tr('places.disconnected.word', 'disconnected') : tr(`places.state.${subject.state}`, placeStateWord(subject.state)))}`;
+            ? tr('places.disconnected.word', 'disconnected') : subject.quiet ? tr(subject.quiet.word, subject.quiet.word)
+                : tr(`places.state.${subject.state}`, placeStateWord(subject.state)))}`;
         // A conversation open in the reader: its name is the title, the place (as its row names it) the meta line.
         if (selected && meta) meta.innerHTML = `<span data-i18n-authored>${escapeHtml([title, quiet].filter(Boolean).join(' · '))}</span>`;
         dialog.querySelector('[data-place-label]').textContent = selected?.label || selected?.address || title;
@@ -646,6 +660,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         if (act === 'open-connector') { sheet.close(); openSkillsFor({ skill: current.connector }); return; }
         // Its Start stands with the daily limit it spends under: the door goes there, it starts nothing itself.
         if (act === 'open-consciousness') { sheet.close(); openDashboard({ tab: 'consciousness' }); return; }
+        if (act === 'open-costs') { sheet.close(); openDashboard({ tab: 'costs', row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' }); return; }
         if (act === 'edit-circle') { const id = current.circle?.id || ''; sheet.close(); openCircles({ circle: id, edit: Boolean(id) }); return; }
         if (act === 'open-latest') { const latest = recentRooms(ui.roomIndex?.rooms)[0]; if (latest) openRoom(latest); return; }
         if (act === 'all-rooms') { ui.allRooms = true; paint(); return; }

@@ -548,10 +548,18 @@ def stamp_direct_chat_turn(task_id: str, **fields: Any) -> bool:
 def _stage_promoted_initial_attachments(
     evt: dict, task: dict, tid: str, *, inherited_manifest: Any = None,
 ) -> tuple[list[dict], Optional[dict]]:
-    """Stage before any durable project/workspace/task admission side effect."""
+    """Stage before any durable project/workspace/task admission side effect.
+
+    Files a start inherits from the row it answers or selects (specs marked ``inherited``,
+    ``owner_relay.source_upload_specs``) never refuse it: one that cannot be staged is named with its
+    reason, and a ``path_only`` row's image rides as a path, outside ``attachment_images``. A turn's
+    own fresh files stay atomic (В25c)."""
 
     uploads = evt.get("attachment_uploads")
     uploads = uploads if isinstance(uploads, list) else []
+    historical = _historical_uploads(evt, inherited_manifest)
+    if historical:
+        task["_historical_attachments"] = True  # read once by the promotion that called this, then dropped
     inherited_authority = inherited_manifest if isinstance(inherited_manifest, dict) else {}
     inherited = inherited_authority.get("attachment_manifest") if inherited_authority else inherited_manifest
     inherited = inherited if isinstance(inherited, list) else []
@@ -610,7 +618,7 @@ def _stage_promoted_initial_attachments(
         rendered = _render_attachment_lines(manifest)
         # В25c partial-default; a FULLY-rejected set stays atomic (the task
         # would start with none of its declared material).
-        if attachment_manifest_all_rejected(manifest):
+        if attachment_manifest_all_rejected(manifest) and not historical:
             remove_staged_attachments(manifest)
             from ouroboros.headless import remove_subagent_task_drive
             from supervisor.queue import task_settlement_interlock, task_settlement_liveness
@@ -627,7 +635,7 @@ def _stage_promoted_initial_attachments(
             task["attachments"] = manifest
             task["attachment_images"] = [
                 item for item in manifest
-                if str(item.get("status") or "staged") == "staged" and item.get("is_image")
+                if str(item.get("status") or "staged") == "staged" and item.get("is_image") and not item.get("path_only")
             ]
         return manifest, None
     except Exception:
@@ -650,6 +658,9 @@ def _stage_promoted_initial_attachments(
             }
             for index, item in enumerate(declared)
         ]
+        if historical:  # the start proceeds; every file is named as not staged
+            task["attachments"] = manifest
+            return manifest, None
         return manifest, {
             "status": "needs_manual_target",
             "reason": "attachment_admission_rejected",
@@ -660,6 +671,13 @@ def _stage_promoted_initial_attachments(
             "attachment_manifest": manifest,
             "task_id": tid,
         }
+
+
+def _historical_uploads(evt: dict, inherited_manifest: Any = None) -> bool:
+    """Every file of this start is one it inherits from a held owner row; none is a turn's own or a place's."""
+    uploads = evt.get("attachment_uploads")
+    return bool(isinstance(uploads, list) and uploads and not inherited_manifest
+                and all(isinstance(spec, dict) and spec.get("inherited") is True for spec in uploads))
 
 
 def _reject_promoted_after_attachment_stage(
@@ -745,9 +763,21 @@ def _relocate_promoted_attachments(task: dict, tid: str, manifest: list[dict]) -
         return False
 
 
-def _promoted_scheduled_outcome(task: dict, admitted: Any, tid: str) -> dict:
-    """Carry the exact admitted contract to the canonical result writer."""
+# What admission itself set on the row about where the work runs and what it is called: ``queue.ensure_control_task_result``
+# seeds the same keys from a queue row, and Continue reads them back from a root no worker started (``continuation_room``,
+# ``work_shown_name``). The writer keeps ``suggested_name`` beside ``title``, never in its place.
+_ADMITTED_RECORD_KEYS = ("chat_id", "title", "workspace_root", "workspace_mode", "memory_mode", "drive_root",
+                         "budget_drive_root")
 
+
+def _promoted_scheduled_outcome(task: dict, admitted: Any, tid: str) -> dict:
+    """Carry the exact admitted contract and record to the canonical result writer.
+
+    The record is the admitted row's own, value by value: never the source event's, the source message's room or
+    the room's current default, and nothing admission did not set (a start with no folder keeps none, an unauthored
+    title stays absent). No deadline joins it: this producer sets none, and the admitted contract already rides."""
+
+    row = admitted if isinstance(admitted, dict) else task
     admitted_contract = (
         admitted.get("task_contract")
         if isinstance(admitted, dict)
@@ -758,7 +788,8 @@ def _promoted_scheduled_outcome(task: dict, admitted: Any, tid: str) -> dict:
         "status": "scheduled",
         "task_id": tid,
         "_admitted_task_contract": dict(admitted_contract or {}),
-        **{k: v for k, v in (admitted if isinstance(admitted, dict) else task).items() if k == "_project_admission"},
+        "_admitted_record": {key: row[key] for key in _ADMITTED_RECORD_KEYS if row.get(key) not in (None, "")},
+        **{k: v for k, v in row.items() if k == "_project_admission"},
     }
 
 
@@ -1417,7 +1448,7 @@ def kill_workers(
     A stop without ``lanes`` owns every slot: Panic, Restart and a managed update.
     """
     global _WORKER_POOL_DISABLED_REASON
-    from supervisor import conversation_lane, queue, restart_retention as retention  # every door retains saved pauses
+    from supervisor import conversation_lane, events_budget, queue, restart_retention as retention
     lane_spared = lanes is not None and LANE_CONVERSATION not in lanes  # a project fence: the lane's rows stay
     with _queue_lock:
         if disable_reason:
@@ -1440,7 +1471,7 @@ def kill_workers(
     # Kill and join OUTSIDE the queue lock: the lifecycle serializer still
     # excludes pool starts and kills, and ingress/stop doors are not held.
     _tear_down_slots(doomed)
-    with _queue_lock:
+    with events_budget._parking_lock() as revoked:
         # The spared rows are chosen under THIS hold, the one the terminalization below runs under:
         # a lane turn admitted during the teardown is spared with the rest.
         spared_rows = _spare_rows_for_stop(lanes, doomed)
@@ -1460,7 +1491,7 @@ def kill_workers(
             sleep_hold_reason = retention.saved_sleep_hold_reason(
                 DRIVE_ROOT, owner_restart=hold_never_started or stop_source == "owner_restart")
             retention.park_saved_running_rows(RUNNING, PENDING, preserve_running, DRIVE_ROOT,
-                                             sleep_hold_reason=sleep_hold_reason)
+                                             sleep_hold_reason=sleep_hold_reason, revoked=revoked)
             # An application stop keeps rows whose attempt saved work in RUNNING for the next boot.
             retained_running_ids = retention.retain_saved_running(RUNNING, preserve_running, DRIVE_ROOT) \
                 if retain_saved_work else []
@@ -1520,8 +1551,7 @@ def kill_workers(
                 if task_id in retained_running_ids:
                     continue
                 if task_id in preserve_running:
-                    from supervisor.events_budget import fold_consumed_resume
-                    fold_consumed_resume(meta, DRIVE_ROOT)
+                    events_budget.fold_consumed_resume(meta, DRIVE_ROOT)
                     successor = dict(task)
                     continuing_wait = isinstance(successor.get("_owner_wait_resume"), dict)
                     successor["_attempt"] = int(meta.get("attempt") or task.get("_attempt") or 1) + (0 if continuing_wait else 1)
@@ -1600,7 +1630,7 @@ def kill_workers(
                 if preserve_pending and tid in preserve_running:
                     PENDING.append(task)
                     continue
-                paused = retention.retained_pending(task, sleep_hold_reason=sleep_hold_reason)
+                paused = retention.retained_pending(task, sleep_hold_reason=sleep_hold_reason, revoked=revoked)
                 # Accepted work never ends with the application (boot decides), nor a returned owner turn with a project
                 # fence (1A), except a child whose parent this stop interrupted: invariant 19 settles it as before.
                 if paused or ((retain_saved_work or lane_spared and conversation_lane.resumes_on_lane(task))
@@ -1655,7 +1685,7 @@ def kill_workers(
     if reconcile_review_custody:
         _reconcile_review_owners(DRIVE_ROOT, dead_pids)
     try:
-        snapshot_ok = queue.publish_queue_snapshot(reason=stop_source or "kill_workers") is not False  # barrier (LB): the door names the export
+        snapshot_ok = retention.publish_pending_parks(queue, stop_source or "kill_workers", final=True) is not False
     except Exception:
         snapshot_ok = False
         log.warning("Failed to persist queue snapshot after worker shutdown", exc_info=True)

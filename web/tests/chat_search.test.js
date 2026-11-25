@@ -5,6 +5,12 @@
 // Esc, a hidden room, destroy) without touching the composer's draft. A candidate's shown words here are its text as a
 // stream; drawing them through the room's renderer is the browser's (tests/test_history_reply_browser.py), and the
 // matching of words (chat_search_words.js) is pinned below on streams.
+//
+// The helpers wait for the search's own observable transition — its root stops carrying `data-searching` — not for a
+// fixed number of event-loop turns, and the fixture's default slice pause yields one real macrotask turn instead of a
+// mocked setTimeout the test never ticks: under load a scan really does cross SLICE_MS and pause, and both halves are
+// what kept the reads honest there (#3435). The two fixtures that keep a read open on purpose (a held page, a gated
+// pause) opt out of the idle wait and assert their suspended state directly.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { bindChatSearchKeys, createChatSearch } from '../modules/chat_search.js';
@@ -23,10 +29,19 @@ const page = (candidates, { cursor = null, reached = '', importing = false, gaps
 const streamOf = (row) => wordStream([[{ n: row.history_id }, row.text]]);
 const unreadable = () => Object.assign(new Error('unreadable'), { status: 503, body: { reason_code: 'history_source_unavailable' } });
 const twenty = Array.from({ length: 20 }, (_unused, index) => match(40 - index));
-const flush = async () => { for (let i = 0; i < 20; i += 1) await new Promise((done) => setImmediate(done)); };
+// One real event-loop turn: a macrotask, like the product's setTimeout(0) slice pause — not a microtask, so a pause
+// taken mid-scan really does hand the loop over and resolve on a later turn.
+const turn = () => new Promise((done) => setImmediate(done));
+const flush = async () => { for (let i = 0; i < 20; i += 1) await turn(); };
+// A chain reads at most a few pages of ≤ 20 candidates and each slice pause costs one turn, so a healthy search
+// settles in far fewer turns than this; the bound only turns a wedge into a failure instead of a hang.
+const SETTLE_TURNS = 400;
 
 function fixture(t, { pages = [], present = () => true, answer = () => ({ state: 'found', target: null }), words = streamOf,
-    pause } = {}) {
+    pause = turn, waitIdle = true } = {}) {
+    // The default pause must not run on the mocked setTimeout below: the debounce is ticked by hand, and a scan that
+    // crosses the real SLICE_MS under load would wait for a tick that never comes (#3435). A test that gates its own
+    // pause keeps full control by passing one.
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const env = installDomDouble();
     const { doc, el } = env;
@@ -46,7 +61,7 @@ function fixture(t, { pages = [], present = () => true, answer = () => ({ state:
         landings.push({ address, current: isCurrent() });
         return answer(address);
     };
-    const search = createChatSearch({ chatId: 1, feed, reveal, present, api, words, ...(pause ? { pause } : {}) });
+    const search = createChatSearch({ chatId: 1, feed, reveal, present, api, words, pause });
     t.after(() => { search.destroy(); env.restore(); });
     const parts = () => {
         const root = room.querySelector('.chat-find');
@@ -54,20 +69,33 @@ function fixture(t, { pages = [], present = () => true, answer = () => ({ state:
             note: root?.querySelector('.chat-find-note'), list: root?.querySelector('.chat-find-results'),
             results: root?.querySelectorAll('.chat-find-result') || [] };
     };
+    // The search's own quiescence signal: chat_search.js's render() carries `data-searching` on the root exactly
+    // while a read is on, and a landing an Enter queued during that read is recorded in the same task that clears
+    // the flag, so the turn that first sees it clear also carries the landing's effects. A closed or absent sheet
+    // counts as idle. Waiting on this transition — instead of counting turns — is what survives a loaded machine:
+    // every slice pause of a running scan resolves on the next turn, so the wait ends when the reads really end.
+    const idle = () => { const { root } = parts(); return !root || Boolean(root.hidden) || !root.hasAttribute('data-searching'); };
+    const settle = async (what = 'its reads to finish') => {
+        for (let i = 0; i < SETTLE_TURNS; i += 1) { await turn(); if (idle()) return; }
+        assert.ok(idle(), `the search never went idle: timed out waiting for ${what}`);
+    };
+    // Fixtures that keep a read open on purpose (a held page, a gated pause) opt out: for them the old bounded drain
+    // stays, and the test asserts the suspended state itself.
+    const rest = () => (waitIdle ? settle() : flush());
     const type = async (words) => {
         const { input } = parts();
         input.value = words;
         input.emit('input');
         t.mock.timers.tick(220);
-        await flush();
+        await rest();
     };
     const key = async (name, extra = {}) => {
         const event = parts().input.emit('keydown', { key: name, ...extra });
-        await flush();
+        await rest();
         return event;
     };
     const landed = () => landings.map((landing) => landing.address);
-    return { ...env, feed, draft, room, search, reads, landed, landings, parts, type, key };
+    return { ...env, feed, draft, room, search, reads, landed, landings, parts, type, key, settle };
 }
 
 test('Ctrl+F off a Mac opens the room in front; a dialog, a menu, another key or no room keeps the key', (t) => {
@@ -145,6 +173,10 @@ test('typing reads the room once after a pause and reads on to the first match; 
     f.search.open();
     const { input, root, list } = f.parts();
     assert.equal(f.doc.activeElement, input, 'the keyboard goes to the field');
+    input.emit('focus');
+    assert.equal(root.querySelector('.chat-find-bar').hasAttribute('data-focused'), true);
+    input.emit('blur');
+    assert.equal(root.querySelector('.chat-find-bar').hasAttribute('data-focused'), false);
     assert.equal(root.hidden, false);
     assert.equal(f.parts().note.hidden, true, 'a fresh sheet is the field alone: no empty status line under it');
     assert.equal(f.parts().list.hidden, true);
@@ -156,7 +188,7 @@ test('typing reads the room once after a pause and reads on to the first match; 
     t.mock.timers.tick(219);
     assert.deepEqual(f.reads, [], 'nothing is read while the words are still being typed');
     t.mock.timers.tick(1);
-    await flush();
+    await f.settle();
     assert.deepEqual(f.reads.map(({ q, cursor, chatId }) => [q, cursor, chatId]),
         [['needle', null, 1], ['needle', 'c1', 1], ['needle', 'c2', 1]], 'a page without a match reads on');
     const { count, results, note } = f.parts();
@@ -181,7 +213,7 @@ test('a search that stops with older messages left says how far it read and offe
     assert.match(note.textContent, /^Searched back to .*Search older messages$/);
     const drawn = [...f.parts().results];
     note.querySelector('[data-find-more]').click();
-    await flush();
+    await f.settle();
     assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1']);
     assert.equal(f.parts().count.textContent, '21 found');
     const after = [...f.parts().results];
@@ -209,7 +241,7 @@ test('Enter lands on the next match through the room\'s reveal, keeping the keyb
     await f.key('ArrowUp');  // the newest match has no newer one
     assert.deepEqual(f.landed().slice(1), [twenty[1].row_address, twenty[0].row_address]);
     f.parts().results[19].emit('click');
-    await flush();
+    await f.settle();
     assert.equal(f.landed().at(-1), twenty[19].row_address, 'a press on a match lands on it');
     assert.equal(f.reads.length, 1);
     await f.key('Enter');
@@ -258,7 +290,7 @@ test('a read that fails says so with Try again; history being upgraded is said a
     assert.equal(f.parts().count.textContent, '', 'a first read that failed counts nothing, never "0 found"');
     assert.match(note.textContent, /^Saved history is being upgraded\. Try again shortly\.Try again$/);
     note.querySelector('[data-find-more]').click();
-    await flush();
+    await f.settle();
     assert.equal(f.parts().count.textContent, '1 found');
 });
 
@@ -287,7 +319,7 @@ test('a count is exact only for the whole room: the import frontier, unreadable 
         assert.equal(f.parts().count.textContent, '1+', 'a failed continuation leaves the count partial');
         assert.match(f.parts().note.textContent, /^Saved history could not be searched\.Try again$/);
         f.parts().note.querySelector('[data-find-more]').click();
-        await flush();
+        await f.settle();
         assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1', 'c1'], 'Try again reads on from the same cut');
         assert.equal(f.parts().count.textContent, '2 found');
     });
@@ -323,7 +355,7 @@ test('a continuation that fails and then reads on clears its failure; a room rea
         f.search.open();
         await f.type('needle');
         f.parts().results[19].emit('click');
-        await flush();
+        await f.settle();
         await f.key('ArrowDown');  // past the loaded matches: the read of older history fails
         assert.match(f.parts().note.textContent, /^Saved history is being upgraded\. Try again shortly\.Try again$/);
         await f.key('ArrowDown');  // the same cut, read again, reaches the beginning without a new match
@@ -338,11 +370,11 @@ test('a continuation that fails and then reads on clears its failure; a room rea
         f.search.open();
         await f.type('needle');
         f.parts().note.querySelector('[data-find-more]').click();
-        await flush();
+        await f.settle();
         assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1', 'c1'], 'a failed retry keeps its cut');
         assert.match(f.parts().note.textContent, /^Saved history could not be searched\.Try again$/);
         f.parts().note.querySelector('[data-find-more]').click();
-        await flush();
+        await f.settle();
         assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1', 'c1', 'c1']);
         assert.equal(f.parts().count.textContent, '2 found');
         assert.equal(f.parts().note.hidden, true, 'no failure and no older messages are left to say');
@@ -390,7 +422,7 @@ test('the field holds as many code points as the host searches: an emoji query i
     input.emit('compositionend');
     assert.equal(input.value, 'x'.repeat(200), 'its words are clipped once the composition ends');
     t.mock.timers.tick(220);
-    await flush();
+    await f.settle();
     assert.equal(f.reads.length, reads + 1, 'and read once, clipped');
     assert.equal(f.reads.at(-1).q, 'x'.repeat(200));
 });
@@ -399,7 +431,9 @@ test('new words, Esc, a hidden room and destroy end the reads; Esc gives the fie
     const signals = [];
     let shown = true;
     const held = (params) => { signals.push(params.signal); return new Promise(() => {}); };
-    const f = fixture(t, { pages: [held, held, held], present: () => shown });
+    // These reads never finish — that is the point: the test asserts the abort signals on the suspended state, so
+    // the fixture opts out of the idle wait and keeps the bounded drain.
+    const f = fixture(t, { pages: [held, held, held], present: () => shown, waitIdle: false });
     f.draft.focus();
     f.search.open();
     await f.type('needle');
@@ -517,7 +551,8 @@ test('a page is read a slice at a time; new words end the old reading, whose mat
     const gates = [];
     const slow = (row) => { const until = Date.now() + 15; while (Date.now() < until) { /* one slice */ } return streamOf(row); };
     const f = fixture(t, { pages: [page([match(9), match(8), match(7)]), page([candidate(4, 'needles here')])], words: slow,
-        pause: () => new Promise((done) => gates.push(done)) });
+        // The gates are the test's own: a slice pauses until it releases one, so there is no idle to wait for.
+        pause: () => new Promise((done) => gates.push(done)), waitIdle: false });
     f.search.open();
     await f.type('needle');
     assert.equal(gates.length, 1, 'the reading yields once its slice is spent');
@@ -562,7 +597,7 @@ test('a read after a failed landing says what it read, never the old landing\'s 
     f.search.open();
     await f.type('needle');
     f.parts().results[19].emit('click');
-    await flush();
+    await f.settle();
     assert.match(f.parts().note.textContent, /^This message is no longer in saved history\./);
     await f.key('Enter');  // past the loaded matches: the read of older history, with no new match, says what it read
     assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1']);

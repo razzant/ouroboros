@@ -104,8 +104,8 @@ STATEMENT_SAMPLE = 80
 NEEDLES: Dict[str, List[str]] = {}
 # The clocks a measured process meets beside the work it counts: production bounds that the drive's own duration or the
 # stand's age crosses, so they split identical work by elapsed time, never by history (counting is not timing). Each is
-# held, before the server is imported, where the stand's intended state holds at every size: an install just restarted,
-# its supervisor alive. A spec's ``clocks`` replaces any of them in its own unit: the instrument's controls drive the
+# set for the stand's intended state at every size: an install just restarted, its supervisor and workers alive.
+# A spec's ``clocks`` replaces any of them in its own unit: the instrument's controls drive the
 # production values and see the work move.
 CLOCKS: Dict[str, float] = {
     # ``utils``, ``skill_identity`` and ``skill_discovery_reuse`` (a copy made at import) ``_RACY_NS``, 2 s: a file read
@@ -120,6 +120,9 @@ CLOCKS: Dict[str, float] = {
     # pass that outlasts it takes every queued task for live (B7: three evidence tasks wait, 336 VM steps and 16
     # statements each).
     "queue_alive_fresh_sec": math.inf,
+    # B8/B7 observe the live workers at their heartbeat. A finite age past
+    # the orphan grace exercises the genuine stale check on the same stand.
+    "duty_heartbeat_age_sec": 0.0,
     # ``restore_pending_from_snapshot``'s ``max_age_sec``, 900 s: the boot restores the stand's queue only while the
     # fixture's stamp is younger, so a stand restored 15 minutes after its build boots another way (B2, B3, B5, the
     # cancel sweep's first pass).
@@ -320,8 +323,14 @@ def _stub_duty_effects(result: Dict[str, Any]) -> Dict[str, Any]:
     workers._EVENT_Q = ObservedEventQueue()
     claudexor_daemon.read_owned_gateway = no_daemon
     claudexor_daemon.ensure_owned_gateway = no_daemon
-    maintenance.spawn_maintenance_job = lambda data_root, repo_dir, purpose, **_k: (
-        result.setdefault("child_spawns", []).append(tag_of()) or _NoProcess())
+    def spawn_maintenance_job(data_root, repo_dir, purpose, **kw):
+        # The child the product would start, without a process: its own --lane is what its pass runs.
+        args = kw.get("args") or ()
+        result.setdefault("child_spawns", []).append(tag_of())
+        result.setdefault("child_lanes", []).append(args[args.index("--lane") + 1] if "--lane" in args else None)
+        return _NoProcess()
+
+    maintenance.spawn_maintenance_job = spawn_maintenance_job
     maintenance.finish_maintenance_job = lambda *_args, **_kwargs: None
     park, clock = _Park(delegate_collection.BodyRuntime.tick), _Clock()
     delegate_collection.BodyRuntime.tick = park.parked()
@@ -792,12 +801,18 @@ def _drain(meter: CostMeter, tag: str, sm: Any, root: pathlib.Path, stop: thread
     child reports stays on the pass's tag (``child_reports``), where B7 reads it: a thread does not lose it."""
     from ouroboros import maintenance
 
-    def child_pass() -> None:
+    def child_pass(lanes: List[Any]) -> None:
         done: Dict[str, Any] = {}
 
         def jobs() -> None:
             try:
-                done["report"] = maintenance.run(root, should_stop=lambda: False)
+                report: Dict[str, Any] = {"status": "completed", "jobs": {}}
+                for lane in lanes:  # each new spawn's own lane; a pre-lane body (no --lane) runs every job
+                    part = maintenance.run(root, should_stop=lambda: False, **({"lane": lane} if lane else {}))
+                    if part.get("status") == "failed":
+                        report["status"] = "failed"
+                    report["jobs"].update(part.get("jobs") or {})
+                done["report"] = report
             except Exception as exc:  # what the child process reports for a pass that raised (maintenance.main)
                 done["report"] = {"status": "failed", "jobs": {}, "raised": f"{type(exc).__name__}: {exc}"}
 
@@ -815,8 +830,9 @@ def _drain(meter: CostMeter, tag: str, sm: Any, root: pathlib.Path, stop: thread
             result["errors"].append(f"{tag}: threads still alive: {alive}")
         woke = False
         if len(result.get("child_spawns", ())) > spawned:
+            lanes = [lane for lane in (result.get("child_lanes") or [])[spawned:] if lane] or [None]
             spawned, woke = len(result["child_spawns"]), True
-            tagged(tag, child_pass)
+            tagged(tag, lambda: child_pass(lanes))
         if maintenance.child.owed():
             woke = True
             tagged(tag, sm._tick_maintenance_child)
@@ -910,11 +926,22 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
         request_cancel(root, "cur-cancel-me", reason="cost contract", source="owner", requested_by="owner")
         return "an open cancel intent for a task nobody runs"
 
+    def census_file() -> str:
+        """A census file is on disk (here a torn one, which no facts row reads as a census): the census pass reads the
+        engine again, finds no descriptor and keeps that failed read for a second one. No engine descriptor is laid,
+        so the turns measured after the duties meet the same unprovisioned install."""
+        from ouroboros.subscription_census import CENSUS_FILE
+
+        (root / CENSUS_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (root / CENSUS_FILE).write_text("{}", encoding="utf-8")
+        return "a torn census file and no engine descriptor"
+
     from tests._live_set import companions as live_set_companions
 
     return {"delegated-body": body, "abandoned_usage_reconciliation": late_body, "custody-maintenance": owed_projection,
             "reconcile-maintenance": owed_mark, "maintenance-child": child_job, "question_delivery_replay": question,
-            "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel, **live_set_companions(root)}
+            "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel, "subscription-census": census_file,
+            **live_set_companions(root)}
 
 
 def _completion(root: pathlib.Path, who: str, _k: int) -> None:
@@ -1032,6 +1059,17 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
                child.request if duty.name == "maintenance-child" else (lambda: None))
 
 
+@contextlib.contextmanager
+def _duty_heartbeats(root: pathlib.Path, age_sec: float):
+    from unittest.mock import patch
+    from ouroboros import task_status
+
+    observed = heartbeats(root) + age_sec
+    clock = SimpleNamespace(time=lambda: observed, monotonic=time.monotonic, sleep=time.sleep)
+    with patch.object(task_status, "time", clock):
+        yield observed
+
+
 def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str, Any], root: pathlib.Path,
                       facts: Dict[str, Any], stubs: Dict[str, Any]) -> None:
     _chat_frame(meter, client, result, "B4", "cost-contract-1")
@@ -1044,9 +1082,9 @@ def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str,
     _request(meter, client, result, "B5", "POST", f"/api/tasks/{CURRENT['stop_root']}/cancel", json={"cascade": True})
     _boundary(meter, result, "B9", lambda: _addressed_stream(root, result))
     if facts.get("held_runs"):  # a root with the duties' shapes: B8 first, then B7
-        heartbeats(root)
-        _measure_boundaries(meter, srv, result, root, facts)
-        _measure_duties(meter, srv, result, root, facts, stubs)
+        with _duty_heartbeats(root, float(result["clocks"]["duty_heartbeat_age_sec"])):
+            _measure_boundaries(meter, srv, result, root, facts)
+            _measure_duties(meter, srv, result, root, facts, stubs)
     _measure_turns(meter, srv, result, root, facts)  # B10 last: no earlier law's inputs change
 
 

@@ -104,7 +104,8 @@ def _lay_tiny_repo(repo: pathlib.Path, *, web: bool, lanes: tuple) -> None:
             "test('tiny', () => assert.ok(true));\n", encoding="utf-8")
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "tiny suite")
+    # Finish maintenance before world() inventories and clones this immutable template.
+    _git(repo, "-c", "maintenance.autoDetach=false", "commit", "-qm", "tiny suite")
 
 
 def _tiny_repo(root, *, web=False, lanes=("parallel", "serial")) -> pathlib.Path:
@@ -709,6 +710,13 @@ def test_a_red_hung_leaking_or_partial_run_never_mints(tmp_path, monkeypatch, ou
              "workers_lost": {}, "parallel_empty": {"parallel": (5, "no tests ran", "")}}[outcome]
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda python, worktree, temp, args, timeout: fixed.get(
         "parallel" if "-n" in args else "serial", (0, "green", "")))
+    if outcome == "workers_lost":
+        from ouroboros import test_parallelism
+
+        # Requesting two does not mean the host admitted two. Inject the admission so
+        # one observed worker is a loss even when the runner has room for only one.
+        monkeypatch.setattr(test_parallelism, "admission", lambda *_a, **_kw:
+                            test_parallelism.Admission(2, test_parallelism.HostRuns()))
     monkeypatch.setattr(pr, "observed_worker_ids", lambda *_a: {"gw0"} if outcome == "workers_lost" else {"gw0", "gw1"})
     ctx = _ctx(repo, canonical)
     temp_root = (tmp_path / "preflight-root").resolve()
@@ -723,6 +731,8 @@ def test_a_red_hung_leaking_or_partial_run_never_mints(tmp_path, monkeypatch, ou
             assert (receipt["status"], receipt["reason"]) == ("declined", "the parallel pass collected no tests")
         else:
             assert error and not getattr(ctx, "_preflight_test_proof", None)
+            if outcome == "workers_lost":
+                assert "PREFLIGHT_PARALLELISM_LOST" in error, error
         assert temp_root.exists() is (outcome == "containment")
     finally:
         retire_synthetic_gate_hold(repo, temp_root, "pid 4242 is still alive")  # the stubbed lane proved no process

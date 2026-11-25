@@ -460,3 +460,120 @@ def test_bible_and_the_prompts_follow_the_book_rule(tmp_path):
     assert ruled_text_sizes(tmp_path, "constitution") == {"BIBLE.md": 17}
     assert "BIBLE.md 17 B: +0 B vs HEAD" in book_balance_note(tmp_path, ["BIBLE.md"])
     assert ruled_text_paths(tmp_path) == ["BIBLE.md", "prompts/NEW.md", "prompts/SAFETY.md", "prompts/SYSTEM.md"]
+
+
+def test_review_blob_batch_uses_file_and_keeps_whitespace_and_missing_specs(tmp_path, monkeypatch):
+    import os
+    import stat
+    from ouroboros import review
+
+    repo = _book_repo(tmp_path / "repo", official=False)
+    contents = {"tests/test_plain.py": "def test_a():\n    pass\n",
+                "tests/test space.py": "def test_space():\n    pass\n"}
+    for path, text in contents.items():
+        (repo / path).parent.mkdir(exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8", newline="\n")
+    _git(repo, "add", "tests")
+    specs = [":tests/test_plain.py"] * 16000 + [":tests/test space.py", ":missing"]
+    expected_input = (":tests/test_plain.py\n" * 16000 + ":missing\n").encode()
+    real_run, sources = subprocess.run, []
+
+    def run(cmd, **kwargs):
+        if cmd[-2:] == ["cat-file", "--batch"]:
+            assert "input" not in kwargs
+            source = kwargs["stdin"]
+            sources.append(source)
+            assert stat.S_ISREG(os.fstat(source.fileno()).st_mode) and source.tell() == 0
+            assert source.read() == expected_input
+            source.seek(0)
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(review.subprocess, "run", run)
+    assert review._blob_texts(repo, specs) == {":" + path: text for path, text in contents.items()} | {":missing": None}
+    assert len(sources) == 1 and sources[0].closed
+
+
+@pytest.mark.parametrize("stage", ["create", "write", "seek", "seek_and_close"])
+def test_review_temp_failure_uses_offline_show_and_preserves_suite_facts(tmp_path, monkeypatch, stage):
+    import io
+    from ouroboros import review, reference_books
+
+    repo = _book_repo(tmp_path / "repo", official=False)
+    path = "tests/test_sample.py"
+    (repo / "tests").mkdir(exist_ok=True)
+    (repo / path).write_text("def test_a():\n    pass\n", encoding="utf-8")
+    _git(repo, "add", path)
+    _git(repo, "commit", "-qm", "suite base")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / path).write_text("def test_a():\n    pass\n\ndef test_b():\n    pass\n", encoding="utf-8")
+    _git(repo, "add", path)
+    rows = {path: (3, 0)}
+
+    def suite_facts():  # what the pulse reads, both sides of the index, then the facts of those texts
+        return review._suite_facts(rows, *review._change_texts(repo, base, True, [path], [path]), [])
+
+    expected = suite_facts()
+    sources, shows = [], []
+    real_run = subprocess.run
+
+    class Source(io.BytesIO):
+        def write(self, value):
+            if stage == "write":
+                raise OSError("temp write failed")
+            return super().write(value)
+
+        def seek(self, offset, *args):
+            if stage in {"seek", "seek_and_close"}:
+                raise OSError("temp seek failed")
+            return super().seek(offset, *args)
+
+        def close(self):
+            was_closed = self.closed
+            super().close()
+            if stage == "seek_and_close" and not was_closed:
+                raise OSError("failed write flushes again at close")
+
+    def temporary():
+        if stage == "create":
+            raise OSError("temp create failed")
+        source = Source()
+        sources.append(source)
+        return source
+
+    def run(cmd, **kwargs):
+        assert "cat-file" not in cmd, "failed preparation never starts a batch"
+        if "show" in cmd:
+            shows.append(cmd[-1])
+            assert all(kwargs["env"][key] == value for key, value in reference_books._OFFLINE_GIT.items())
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(review.tempfile, "TemporaryFile", temporary)
+    monkeypatch.setattr(review.subprocess, "run", run)
+    assert suite_facts() == expected
+    assert "items +1/-0" in expected[0]
+    assert review._blob_texts(repo, [":missing"]) == {":missing": None}
+    assert shows == [f"{base}:{path}", f":{path}", ":missing"]
+    assert all(source.closed for source in sources)
+
+
+@pytest.mark.parametrize("failure", [1, OSError("start"), subprocess.TimeoutExpired("git", 120), KeyboardInterrupt()])
+def test_review_started_batch_is_not_retried_and_closes_input(tmp_path, monkeypatch, failure):
+    from ouroboros import review, reference_books
+
+    sources = []
+
+    def run(cmd, **kwargs):
+        sources.append(kwargs["stdin"])
+        assert sources[0].tell() == 0 and "input" not in kwargs
+        if failure == 1:
+            return subprocess.CompletedProcess(cmd, 1, b"", b"batch failed")
+        raise failure
+
+    monkeypatch.setattr(review.subprocess, "run", run)
+    monkeypatch.setattr(reference_books, "_git_bytes", lambda *a: pytest.fail("no fallback after batch dispatch"))
+    if isinstance(failure, KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt):
+            review._blob_texts(tmp_path, ["HEAD:tests/test_a.py"])
+    else:
+        assert review._blob_texts(tmp_path, ["HEAD:tests/test_a.py"]) == {"HEAD:tests/test_a.py": None}
+    assert len(sources) == 1 and sources[0].closed

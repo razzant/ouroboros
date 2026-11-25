@@ -240,14 +240,16 @@ def _current_feedback_positions(messages):
 def _cut_units(messages):
     """Oldest eligible atomic units; protection is independent of dialogue kind."""
     from ouroboros import context_compaction as cc
-    from ouroboros.context_budget import OWNER_WORDS_KIND, host_row_intact
+    from ouroboros.context_budget import (HOST_TEXT_SHA_KEY, OWNER_WORDS_KIND, REPLY_CITATION_KIND,
+                                         REPLY_SOURCE_SHA_KEY, RETURN_FACTS_KIND, host_row_intact)
     from ouroboros.context_source_view import chosen_read_units
     from ouroboros.main_context_authority import LATE_ANSWER_NOTES_NAME, PREDECESSOR_NOTES_NAME
     from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, obsolete_review_index_positions
     first = next((i for i, row in enumerate(messages) if row.get('role') == 'user'), -1)
     latest = max((i for i, row in enumerate(messages) if i > first
                   and row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND), default=len(messages) - 1)
-    while latest > first + 1 and messages[latest - 1].get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND:
+    while latest > first + 1 and messages[latest - 1].get(HOST_CONTEXT_KIND_KEY) in {
+            OWNER_WORDS_KIND, REPLY_CITATION_KIND, RETURN_FACTS_KIND}:  # context beside the newest owner turn
         latest -= 1
     obsolete = set(obsolete_review_index_positions(messages))
     feedback = _current_feedback_positions(messages)
@@ -256,6 +258,11 @@ def _cut_units(messages):
         or row.get(HOST_CONTEXT_KIND_KEY) in {PREDECESSOR_NOTES_NAME, LATE_ANSWER_NOTES_NAME}
         or i in feedback or (row.get(REVIEW_CONTEXT_INDEX_KEY) and i not in obsolete)
         or row.get(HOST_CONTEXT_KIND_KEY) == 'context_physical_cut'}
+    # A fresh selection may reuse a source delivered many turns ago. Its digest, rather than adjacency,
+    # keeps that exact reading (including its files) beside the protected turn.
+    needed = {messages[i][REPLY_SOURCE_SHA_KEY] for i in protected if messages[i].get(REPLY_SOURCE_SHA_KEY)}
+    protected.update(i for i, row in enumerate(messages) if row.get(HOST_CONTEXT_KIND_KEY) == REPLY_CITATION_KIND
+                     and row.get(HOST_TEXT_SHA_KEY) in needed and host_row_intact(row))
     prior = {i for i, row in enumerate(messages) if first < i < latest
              and row.get(HOST_CONTEXT_KIND_KEY) == 'context_physical_cut' and host_row_intact(row)}
     units = cc.context_units(list(messages), scope='tool')
@@ -264,7 +271,14 @@ def _cut_units(messages):
     groups, i = [], first + 1
     while i < latest:
         unit = spans.get(i)
-        group = tuple(range(i, unit.end + 1)) if unit else (i,)
+        end = unit.end if unit else i
+        if messages[i].get(HOST_CONTEXT_KIND_KEY) == REPLY_CITATION_KIND:
+            words = i + 1
+            if words < latest and messages[words].get(HOST_CONTEXT_KIND_KEY) == RETURN_FACTS_KIND:
+                words += 1  # the drain may insert a host fact before its first owner words
+            if words < latest and messages[words].get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND:
+                end = words  # retain or evict the addressed pair together
+        group = tuple(range(i, end + 1))
         if not protected.intersection(group) and not (unit and unit.unit_id in chosen):
             groups.append(group)
         i = group[-1] + 1

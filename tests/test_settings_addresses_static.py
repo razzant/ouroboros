@@ -6,7 +6,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 LIVING = (
     "Models", "Agents", "Your rules", "Permissions and checks", "Accounts and keys",
-    "Tools", "Appearance", "Notifications", "Voice and calls", "This computer",
+    "Extensions", "Appearance", "Notifications", "Voice and calls", "This computer",
 )
 PENDING = {}
 # A release's row of README's Version History says what that release called a page; history is not rewritten, and
@@ -18,14 +18,14 @@ RELEASE_ROW = re.compile(r"^\| \d+\.\d+\.\d+\S* \| \d{4}-\d{2}-\d{2} \|")
 # them, so no release date is promised: they stay dead text until a skill release rewrites them.
 _TELEGRAM_DEBT = "dead text in the Telegram skill, wording only; stays until a skill release rewrites it"
 PROTECTED_KNOWN = {
-    ('skills/telegram/lib/telegram_api.py', 1083): _TELEGRAM_DEBT,
-    ('skills/telegram/lib/telegram_api.py', 1088): _TELEGRAM_DEBT,
+    ('skills/telegram/lib/telegram_api.py', 1093): _TELEGRAM_DEBT,
+    ('skills/telegram/lib/telegram_api.py', 1098): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 1): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 146): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 204): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 450): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_token.py', 214): _TELEGRAM_DEBT,
-    ('skills/telegram/plugin.py', 1489): _TELEGRAM_DEBT,
+    ('skills/telegram/plugin.py', 1477): _TELEGRAM_DEBT,
     ('skills/telegram/scripts/companion.py', 519): _TELEGRAM_DEBT,
 }
 ADDRESS = re.compile(r"\bSettings\s*(?:→|›|->|>)\s*(?=[A-Za-z])")
@@ -46,9 +46,10 @@ def dead_addresses(text):
 
 
 def test_written_settings_addresses_name_living_pages():
-    broken = "Settings→Behavior; Settings › Advanced; Settings > Secrets; Settings->Providers; Settings → Accounts; Settings › Review; Settings > Runtime Limits"
-    living = "Settings→Models; Settings › Agents; Settings > Your rules; Settings->Permissions and checks; Settings → Accounts and keys; Settings › Tools; Settings > Appearance; Settings->Notifications; Settings → Voice and calls; Settings › This computer › Advanced; System Settings → Privacy & Security"
-    assert len(list(dead_addresses(broken))) == 7
+    # MCP servers are in Extensions. The old Tools route still opens them, but no Settings row bears that name.
+    broken = "Settings→Behavior; Settings › Advanced; Settings > Secrets; Settings->Providers; Settings → Accounts; Settings › Review; Settings > Runtime Limits; Settings → Tools"
+    living = "Settings→Models; Settings › Agents; Settings > Your rules; Settings->Permissions and checks; Settings → Accounts and keys; Settings › Extensions; Settings > Appearance; Settings->Notifications; Settings → Voice and calls; Settings › This computer › Advanced; System Settings → Privacy & Security"
+    assert len(list(dead_addresses(broken))) == 8
     assert list(dead_addresses(living)) == []
     assert RELEASE_ROW.match("| 7.9.0 | 2026-10-28 | **feat: Settings → Accounts holds several API keys.**")
     assert not RELEASE_ROW.match("Add the key in Settings → Secrets.")

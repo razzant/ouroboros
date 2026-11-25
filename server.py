@@ -37,8 +37,8 @@ from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root
                                          find_free_port, parse_server_args, raise_gc_threshold, reserved_service_ports,
                                          shorten_switch_interval, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
-from ouroboros import body_adoption, places, process_scope, server_boot, store_switch
-from ouroboros.server_web import ServedUI
+from ouroboros import body_adoption, consciousness_clock, host_notice, places, process_scope, server_boot, store_switch
+from ouroboros.server_web import TEXT_COMPRESSION, ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
 from ouroboros.task_finalization import host_operation_reply_kwargs
@@ -286,7 +286,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any, *, timeout: float = 1
 
 
 def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: list) -> int:
-    from supervisor.message_bus import coerce_chat_identity
+    from supervisor.message_bus import coerce_chat_identity, record_inbound_message
     from ouroboros.chat_uploads import attachment_placeholder
 
     for upd in updates:
@@ -300,8 +300,9 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         if hasattr(bridge, "activate_update_transport"):
             bridge.activate_update_transport(msg)
 
-        chat_id = coerce_chat_identity((msg.get("chat") or {}).get("id"), 1)
-        user_id = coerce_chat_identity((msg.get("from") or {}).get("id"), chat_id or 1)
+        sender_id, conversation_id = (msg.get("from") or {}).get("id"), (msg.get("chat") or {}).get("id")
+        chat_id = coerce_chat_identity(conversation_id, 1)
+        user_id = coerce_chat_identity(sender_id, chat_id or 1)
         text = str(msg.get("text") or "")
         source = str(msg.get("source") or "web")
         sender_session_id = str(msg.get("sender_session_id") or "")
@@ -311,9 +312,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         image_mime = str(msg.get("image_mime") or "image/jpeg")
         image_caption = str(msg.get("image_caption") or "")
         task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
-        task_metadata = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else None
         image_data = (image_base64, image_mime, image_caption) if image_base64 else None
-        log_text = text.strip() or image_caption.strip() or attachment_placeholder(image_base64, task_metadata)
+        log_text = text.strip() or image_caption.strip() or attachment_placeholder(image_base64, msg.get("task_metadata"))
         now_iso = utc_now_iso()
         if not client_message_id:
             # Some owner transports have no client-generated id.  Give the
@@ -356,26 +356,26 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         from ouroboros.server_control import external_owner_binding
 
         ext_known, owner_ext_id, bound_pair = external_owner_binding(st)
-        if panic and external_identity_present and ext_known and owner_ext_id is not None and (
-                bound_pair == (user_id, chat_id)):
+        bound_owner = external_identity_present and ext_known and owner_ext_id is not None and bound_pair == (user_id, chat_id)
+        if panic and bound_owner:
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
             return offset
+        # A task's owner binding and the owner's zone match the bridge's positive identities, not the display defaults above.
+        bound_external_owner = is_external_transport and bound_owner and all(type(value) is int and value > 0 for value in (sender_id, conversation_id))
 
-        from supervisor.message_bus import record_inbound_message
-
-        # The same writer mints ordinary ingress and validates preaccepted
-        # skill deliveries; the latter already have their one canonical row.
+        # The writer validates or mints the canonical row and may resolve Reply in task metadata.
         origin_message_ref = record_inbound_message(
             bridge, msg, chat_id=chat_id, user_id=user_id,
             client_message_id=client_message_id, text=log_text, ts=now_iso,
         )
+        task_metadata = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else None
         if task_metadata or msg.get("accepted_source_ref"):
             task_metadata = {k: v for k, v in (task_metadata or {}).items() if k != "_host_operation"}
             if msg.get("accepted_source_ref"):
                 task_metadata["_host_operation"] = True
         reply_source = origin_message_ref if msg.get("accepted_source_ref") else None
-        def reply(body: str, status: str = "completed") -> None:
-            ctx.send_with_budget(chat_id, body, **host_operation_reply_kwargs(reply_source, status, client_message_id), role="system", system_type="command_reply")
+        def reply(body: str, status: str = "completed", said=None) -> None:  # said: a host notice's fields (principle 7)
+            ctx.send_with_budget(chat_id, body, **host_notice.carried(host_operation_reply_kwargs(reply_source, status, client_message_id), said), role="system", system_type="command_reply")
         def _stamp_owner_activity(live: dict) -> None:
             # Global owner = primary chat for outbound notices (web on desktop, the first
             # transport on headless Colab), bound once — only into a slot KNOWN to be empty.
@@ -383,6 +383,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 live["owner_id"] = user_id
                 live["owner_chat_id"] = _owner_binding_chat_id(ctx, chat_id, is_external_transport)
             live["last_owner_message_at"] = now_iso
+            consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_external_owner, message=origin_message_ref, at=now_iso, accepted=msg.get("accepted_source_row"))
 
         try:
             ctx.update_state(_stamp_owner_activity)
@@ -428,7 +429,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             reply("♻️ Restarting." + restart_gate_line(REPO_DIR, DATA_DIR), "")
             ok, restart_msg = _perform_owner_restart(ctx, reply)
             if not ok:
-                reply(f"⚠️ Restart cancelled: {restart_msg}", "failed")
+                reply("The restart was cancelled.", "failed", host_notice.fields("restart_cancelled", details=restart_msg))
                 continue
             _preserve_unprocessed_updates(bridge, updates, cursor[0])  # best effort; this generation handles nothing more
             return offset  # Remaining accepted rows stay durable; no replay is promised.
@@ -451,7 +452,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 from supervisor.events_runtime_controls import owner_evolution_start
 
                 refusal = owner_evolution_start(objective, source="owner_chat")
-                reply(refusal or "🧬 Evolution campaign: ON", "failed" if refusal else "completed")
+                reply(refusal.get("text") or "🧬 Evolution campaign: ON", "failed" if refusal else "completed", refusal)
             else:
                 reply(f"🧬 Evolution campaign: {_owner_evolution_stop(ctx, chat_id)}")
         elif lowered.startswith("/bg"):
@@ -460,16 +461,14 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             if action in ("start", "on", "1", "stop", "off", "0"):
                 from ouroboros.consciousness import OWNER_STOP
 
-                on = action in ("start", "on", "1")  # the owner's door: app, Telegram and onboarding all send /bg
+                on = action in ("start", "on", "1")  # the owner's door: the app, Telegram and a custom setup page send /bg
                 result = ctx.consciousness.start() if on else ctx.consciousness.stop(source=OWNER_STOP)
                 reply(f"🧠 {result}")
             else:
-                from supervisor.state import control_value
-
                 known, enabled = control_value(ctx.load_state(), "bg_consciousness_enabled")
                 described = _describe_bg_consciousness_state(bool(enabled) if known else None)
-                note = f" {described['detail_note']}" if described.get("detail_note") else ""
-                reply(f"🧠 Background consciousness: {described['status']} — {described['detail']}{note}")
+                from ouroboros.consciousness_view import status_reply
+                reply(status_reply(described))  # the switch's position, its level while on, the state line (5A)
         elif lowered.startswith("/status"):
             from supervisor.state import status_text
 
@@ -487,9 +486,11 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                     "image_data": image_data,
                     "task_constraint": task_constraint,
                     "task_metadata": task_metadata,
-                    "log_text": log_text,
-                    "origin_message_ref": origin_message_ref,
+                    "log_text": log_text, "origin_message_ref": origin_message_ref,
+                    "accepted_source_row": msg.get("accepted_source_row") if reply_source else None,
+                    "origin_message_snapshot": msg.get("_origin_snapshot"), "origin_unkept": msg.get("_origin_unkept") is True,
                     "source": source, "received_at": str(msg.get("received_at") or ""),
+                    "bound_external_owner": bound_external_owner,
                 },
             )
     return offset
@@ -691,7 +692,7 @@ def _run_supervisor(settings: dict) -> None:
         ))
 
         from supervisor.message_bus import send_with_budget
-        from ouroboros.consciousness import BackgroundConsciousness
+        from ouroboros.consciousness import BackgroundConsciousness, owner_chat_of
         import types
 
         prior_worker_pids = _startup_worker_pids(DATA_DIR)
@@ -741,15 +742,11 @@ def _run_supervisor(settings: dict) -> None:
         startup_upgrade_notices(settings)
 
         run_startup_phase(_loop_liveness, "startup:resume", auto_resume_after_restart)
+        from supervisor.first_meeting import admit_first_meeting  # setup's Start opens one root, at most once a state
+        run_startup_phase(_loop_liveness, "startup:first_meeting", lambda: admit_first_meeting(DATA_DIR))
 
-        def _get_owner_chat_id() -> Optional[int]:
-            try:
-                return int((load_state() or {}).get("owner_chat_id") or 0) or None
-            except Exception:
-                return None
-
-        _consciousness = BackgroundConsciousness(
-            drive_root=DATA_DIR, repo_dir=REPO_DIR, owner_chat_id_fn=_get_owner_chat_id,
+        _consciousness = BackgroundConsciousness(  # wakes speak in the bound chat, or Main while it is known empty
+            drive_root=DATA_DIR, repo_dir=REPO_DIR, owner_chat_id_fn=lambda: owner_chat_of(load_state()),
             routing_metadata_fn=lambda cid: main_lane_routing_metadata(_event_ctx, cid))  # _event_ctx is built below
 
         # A boot grant needs a KNOWN True and no unconsumed Panic flag (#1307).
@@ -935,7 +932,7 @@ def _boot_managed_update_tasks() -> None:
     try:
         from ouroboros.gateway.update_progress import observe_boot
         from supervisor.git_ops import advance_recovery_point, compute_managed_update_status
-        from supervisor.update_merge import active_update_tx, finalize_managed_update_on_boot
+        from supervisor.update_merge import active_update_tx, boot_outcome_notice, finalize_managed_update_on_boot
 
         ready = _wait_for_supervisor_update_finalize()
         # Observation only: the finalizer's result and every decision below stay its own.
@@ -955,7 +952,7 @@ def _boot_managed_update_tasks() -> None:
 
                 owner_chat = int((_load_state() or {}).get("owner_chat_id") or 0)
                 if owner_chat:
-                    send_with_budget(owner_chat, f"📦 Managed update: {stash_note}", role="system", system_type="managed_update_notice")
+                    send_with_budget(owner_chat, **boot_outcome_notice(result), role="system", system_type="managed_update_notice")
             except Exception:
                 log.debug("stash note owner notification failed", exc_info=True)
         if result.get("rolled_back") is True and active_update_tx():
@@ -1040,7 +1037,7 @@ def _startup_owner_command(command: str, *, send_kwargs=None, source="web", user
         if not ok:
             log.error("Startup owner restart cancelled: %s", message)
             if reply is not None:
-                reply(f"⚠️ Restart cancelled: {message}", "failed")
+                reply("The restart was cancelled.", "failed", host_notice.fields("restart_cancelled", details=message))
         return True
 
     return execute
@@ -1346,7 +1343,7 @@ async def lifespan(app):
         _shutdown_supervisor_event_bus()
 
 
-app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan), served_ui=served_ui)
+app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan, middleware=TEXT_COMPRESSION), served_ui=served_ui)
 app.app.state.drive_root = pathlib.Path(DATA_DIR)  # type: ignore[attr-defined]
 app.app.state.repo_dir = pathlib.Path(REPO_DIR)  # type: ignore[attr-defined]
 app.app.state.broadcast_ws_sync = broadcast_ws_sync  # type: ignore[attr-defined]
@@ -1376,12 +1373,11 @@ def _restart_cleanup_kwargs() -> dict:
 def _emergency_process_cleanup() -> dict:
     """Kill child processes, workers and companions; the kill census. The main and
     Host Service listeners close with this process: no port is swept."""
-    from ouroboros.maintenance import child as maintenance_child
-    from ouroboros.storage import count as storage_count
-    from ouroboros.storage_free import free as storage_free
-    maintenance_child.stop()
-    storage_count.stop()
-    storage_free.stop()
+    from ouroboros.startup_historical_audit import live_background_children, stop_background_children
+    background = stop_background_children()  # the maintenance child, the Storage count and Free
+    with suppress(Exception):  # a teardown cut short may not have stopped the local model: ask the loaded one, if any
+        if (model := sys.modules["ouroboros.local_model"].get_manager(create=False)) is not None:  # no import: it waits
+            model.panic_stop(request_only=True)  # its server, an install and a stop still waiting: no lock, no wait
     begin_owned_stop(DATA_DIR, cause=server_stop_cause())  # the grace starts here; cause and pending stops are recorded before any wait
     worker_exits = None  # the pool's own PID census; None until kill_workers ran to its end
     try:
@@ -1419,8 +1415,7 @@ def _emergency_process_cleanup() -> dict:
             pass
     if _restart_requested.is_set():  # only the restart that carried an adoption can arm it; never a wait
         body_adoption.arm(DATA_DIR, worker_exits=worker_exits,
-                          live_children=multiprocessing.active_children() + maintenance_child.live_children()
-                          + storage_count.live_children() + storage_free.live_children(),
+                          live_children=multiprocessing.active_children() + live_background_children(background),
                           owned_stop=owned_stop, owner_restart=_owner_restart_requested.is_set())
     try:
         from ouroboros.extension_companion import panic_kill_all
@@ -1428,8 +1423,7 @@ def _emergency_process_cleanup() -> dict:
     except Exception:
         pass
     return {"worker_exits": worker_exits, "owned_stop": owned_stop,
-            "live_children": multiprocessing.active_children() + maintenance_child.live_children()
-            + storage_count.live_children() + storage_free.live_children()}
+            "live_children": multiprocessing.active_children() + live_background_children(background)}
 
 def main() -> int:
     from ouroboros.delegate_recovery import observe_restart_parent

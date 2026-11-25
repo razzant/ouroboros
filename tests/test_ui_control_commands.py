@@ -70,7 +70,7 @@ def test_an_http_press_leaves_only_its_receipt_and_a_typed_command_stays_words(h
     from ouroboros.gateway import control
 
     client = _app(Route("/api/command", control.api_command, methods=["POST"]))
-    assert client.post("/api/command", json={"cmd": "/bg start", "ui_control": {"name": "setup_consciousness"}}).status_code == 200
+    assert client.post("/api/command", json={"cmd": "/bg start", "ui_control": {"name": "consciousness_toggle"}}).status_code == 200
     _drain(host)
     assert client.post("/api/command", json={"cmd": "/bg stop"}).status_code == 200  # the CLI's typed command
     _drain(host)
@@ -111,7 +111,7 @@ def test_the_objective_typed_into_evolution_stays_my_human_s_exact_words(host, m
 
     started: list = []
     monkeypatch.setattr("supervisor.events_runtime_controls.owner_evolution_start",
-                        lambda objective, **_kw: started.append(objective) or "")
+                        lambda objective, **_kw: started.append(objective) or {})  # the authorized start answers {} on success
     entered = "  Make the test suite faster —\nwithout skipping any check. "
     client = _app(Route("/api/command", control.api_command, methods=["POST"]))
     body = {"cmd": f"/evolve on {entered.strip()}", "ui_control": {"name": "evolution_start", "owner_text": entered}}
@@ -177,10 +177,11 @@ def test_the_telegram_buttons_mark_their_command_as_a_press():
 
 
 @pytest.mark.parametrize(("path", "frame"), [
-    ("web/modules/activity.js", "cmd: `/bg ${on ? 'stop' : 'start'}`, ui_control: { name: 'consciousness_toggle' }"),
-    ("web/modules/consciousness_dashboard.js", "cmd: `/bg ${toggling}`, ui_control: { name: 'consciousness_toggle' }"),
-    ("web/modules/consciousness_status.js", "cmd: `/bg ${pending}`, ui_control: { name: 'consciousness_toggle' }"),
-    ("web/modules/onboarding_consciousness.js", "ui_control: { name: 'setup_consciousness' }"),
+    # The one switch (owner 15.11, 5A): the Dashboard, the chip's Shade and Activity send it through one part.
+    ("web/modules/consciousness_switch.js", "cmd: `/bg ${to === 'off' ? 'stop' : 'start'}`, ui_control: { name: 'consciousness_toggle' }"),
+    ("web/modules/activity.js", "turnConsciousness("),
+    ("web/modules/consciousness_dashboard.js", "turnConsciousness("),
+    ("web/modules/consciousness_status.js", "turn = turnConsciousness"),
     ("web/modules/chat_activity.js", "cmd: '/restart', ui_control: { name: 'restart' }"),
     ("web/modules/updates.js", "cmd: '/restart', ui_control: { name: 'restart' }"),
     ("web/modules/review_command.js", "ui_control: { name: 'deep_review' }"),

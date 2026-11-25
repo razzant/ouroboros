@@ -312,6 +312,39 @@ def test_dated_pool_of_unknown_cause_waits_visibly_as_unavailable_never_as_quota
     assert load_task_result(root, "task-one")["model_waits"][rows[0]["wait_id"]]["reason"] == "unavailable"
 
 
+@pytest.mark.parametrize(("code", "context", "reason"), [
+    ("subscription_window_exhausted", {"resetsAt": "2099-01-01T00:00:00Z"}, "quota"),
+    ("auth_required", {"resetsAt": "2099-01-01T00:00:00Z"}, "auth"),
+    ("credential_pool_exhausted", {"poolCause": "mixed", "resetsAt": None}, "auth_quota"),
+    ("credential_pool_exhausted", {"resetsAt": "2099-01-01T00:00:00Z"}, "unavailable"),
+], ids=["quota", "auth", "combined", "unavailable"])
+def test_a_live_wait_row_carries_what_its_confirmed_refusal_proved_for_the_card(elapsed_quota_wait, code, context, reason):
+    """The card words the wait and offers sign-in from ``access_reason`` (model_wait.js): the engine's own typed refusal,
+    with its custody confirmed, proves exactly its admission reason, on every row of the wait through its resolution."""
+    _root, transport, client, _controller, events, _decide = elapsed_quota_wait
+    transport.results = [result(outcome="failed", problem={"code": code, "message": "fixture resource refusal",
+                                                           "context": context}), result()]
+    transport.dispatch = ["not_started", "response_received"]
+    client.chat([{"role": "user", "content": "hi"}], MODEL, model_role="main")
+    rows = list(events.queue)
+    assert rows[0]["state"] == "waiting" and rows[-1]["state"] == "resolved"
+    assert {row["reason"] for row in rows} == {reason} and {row["access_reason"] for row in rows} == {reason}
+    assert "availability_observation" not in rows[0], "an engine route is observed: its card may offer sign-in"
+
+
+def test_a_wait_without_a_confirmed_refusal_proves_no_access_reason(live_wait):
+    """The admission reason still governs the wait, but a refusal whose custody is not confirmed proves nothing the card
+    could act on: it says "Waiting for provider access" and offers no sign-in."""
+    from ouroboros.llm_claudexor import ClaudexorModelNotDispatched
+
+    _root, _transport, client, controller, events, _decide = live_wait
+    error = ClaudexorModelNotDispatched({"code": "auth_required", "context": {}}, model_role="main")
+    with pytest.raises(model_wait.ModelWaitInterrupted):
+        controller.wait(client, error, {"model": MODEL, "model_role": "main", "model_poll_control": lambda: "cancelled"})
+    waiting = list(events.queue)[0]
+    assert waiting["state"] == "waiting" and (waiting["reason"], waiting["access_reason"]) == ("auth", "")
+
+
 def test_async_cancellation_resolves_only_its_wait_and_keeps_shared_task(live_wait, monkeypatch):
     root, transport, client, controller, events, _decide = live_wait
     transport.results = [_refusal()]
@@ -363,6 +396,52 @@ def test_auth_wait_does_not_pause_execution_clock(live_wait, monkeypatch):
     monkeypatch.setattr(client, "claudexor_model_catalog", catalog)
     client.chat([{"role": "user", "content": "hi"}], MODEL, model_role="light")
     assert controller.paused_seconds() == 0
+
+
+def test_confirmed_quota_pauses_the_clock_but_an_unconfirmed_declared_wait_does_not(elapsed_quota_wait):
+    """Scenario pair for the clock's evidence: a typed engine refusal with released custody proves quota
+    in ``access_reason`` and pauses execution; the same admission reason on an unconfirmed refusal (the
+    declared primary Wait maps the coarse classification while ``access_reason`` stays empty) still waits
+    but consumes execution. DESIGN "Subscription waits inside task cards"."""
+    from ouroboros.llm_claudexor import ClaudexorModelNotDispatched
+
+    _root, transport, client, controller, events, _decide = elapsed_quota_wait
+    transport.results = [_refusal(), result()]
+    transport.dispatch = ["not_started", "response_received"]
+    client.chat([{"role": "user", "content": "confirmed quota heals on the same call"}], MODEL, model_role="main")
+    rows = list(events.queue)
+    confirmed = [row for row in rows if row["state"] == "waiting"]
+    # One wait identity per episode, though the live wait republishes the same wait_id as
+    # increasing revisions once its credential harness is identified (TaskModelWait._publish).
+    assert {row["wait_id"] for row in confirmed} == {confirmed[0]["wait_id"]}
+    revisions = [row["revision"] for row in confirmed]
+    assert revisions == sorted(revisions) and len(set(revisions)) == len(revisions)
+    assert {row["reason"] for row in confirmed} == {"quota"}
+    assert {row["access_reason"] for row in confirmed} == {"quota"}  # every waiting revision carries the proof
+    assert all(row["quota_clock"]["active"] is True for row in confirmed), "confirmed quota pauses the clock"
+    resolved = [row for row in rows if row["wait_id"] == confirmed[0]["wait_id"] and row["state"] == "resolved"]
+    assert len(resolved) == 1 and resolved[0]["resolution"] == "resource_available"
+    assert resolved[0]["quota_clock"]["active"] is False
+    assert controller.paused_seconds() == pytest.approx(2.5)
+
+    unconfirmed = ClaudexorModelNotDispatched({"code": "quota_exhausted", "message": "untyped status fallback"},
+                                              model_role="main")
+    unconfirmed.task_resource_wait_reason = "quota"  # the declared wait's mapping of the coarse classification
+    with pytest.raises(model_wait.ModelWaitInterrupted):
+        controller.wait(client, unconfirmed, {"model": MODEL, "model_role": "main",
+                                              "model_poll_control": lambda: "cancelled"})
+    confirmed_id = confirmed[0]["wait_id"]
+    waiting = [row for row in events.queue
+               if row.get("wait_id") != confirmed_id and row["state"] == "waiting"]
+    # The second episode is its own wait identity; its reused row keeps the parsed source.
+    assert {row["wait_id"] for row in waiting} == {waiting[0]["wait_id"]}
+    assert all(row["source"] == confirmed[0]["source"] for row in waiting)
+    assert {row["reason"] for row in waiting} == {"quota"} and {row["access_reason"] for row in waiting} == {""}
+    assert all(row["quota_clock"]["active"] is False for row in waiting), \
+        "admission is unchanged; only confirmed evidence pauses the clock"
+    cleanup = [row for row in events.queue if row["wait_id"] == waiting[0]["wait_id"] and row["state"] == "resolved"]
+    assert len(cleanup) == 1 and cleanup[0]["resolution"] == "cancelled"
+    assert controller.paused_seconds() == pytest.approx(2.5), "the unconfirmed wait added no paused time"
 
 
 def test_quota_pause_cannot_move_explicit_calendar_deadline(tmp_path):
@@ -434,6 +513,64 @@ def test_two_waits_can_receive_same_request_id_without_control_collision(live_wa
     controller._drain_controls()
     assert all(row["auto_continue"] is False for row in controller.waits.values())
     assert controller.auto_continue == {"main": False, "light": False}
+
+
+@pytest.mark.parametrize("role", ["main", "reviewer:main"])
+def test_main_wait_confirms_settings_before_exposing_switch(live_wait, monkeypatch, role):
+    from ouroboros import config
+    from ouroboros.gateway import owner_settings
+
+    root, _transport, _client, controller, _events, decide = live_wait
+    path = root / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    old = {"OUROBOROS_MODEL": MODEL, "OUROBOROS_MODEL_ACCOUNTS": '{"main":"first"}',
+           "OUROBOROS_MODEL_PROCESSING_PREFERENCES": '{"main":"ultrafast"}'}
+    path.write_text(json.dumps(old))
+    row = {"wait_id": "wait-one", "revision": 1, "task_attempt": 1, "state": "waiting", "role": role}
+    if role == "reviewer:main":
+        from ouroboros import review_operation
+        controller = review_operation._OperationWait(task=controller.task, drive_root=root, event_queue=None, worker_slot_held=False)
+        controller.owner_id = "fixture-review"
+        row.update(model_wait_owner_id=controller.owner_id, review_operation={"owner_id": controller.owner_id})
+        monkeypatch.setattr(review_operation, "review_operation_controller", lambda *_: controller)
+    model_wait.mutate_wait(root, "task-one", "wait-one", lambda _: row)
+    controller.waits["wait-one"] = dict(row)
+    action = _action_for({**row, "task_id": "task-one"}, "switch", model=MODEL,
+                         credential_profile_id="second", use_local=False, persist_role=True)
+    writer = owner_settings._owner_update_settings
+
+    def before_save(*args, **kwargs):
+        current = load_task_result(root, "task-one")["model_waits"]["wait-one"]
+        assert "pending_action" not in current  # even an eager direct-review controller cannot consume it
+        return writer(*args, **kwargs)
+
+    monkeypatch.setattr(owner_settings, "_owner_update_settings", before_save)
+    refused = decide(action)
+    assert refused.status_code == 400
+    reply = json.loads(refused.body)
+    assert not reply["saved"] and not reply["applied"] and "uncheck" in reply["error"]
+    assert json.loads(path.read_text()) == old
+    current = load_task_result(root, "task-one")["model_waits"]["wait-one"]
+    assert "pending_action" not in current
+    assert not (root / "memory/owner_mailbox/task-one.jsonl").exists()
+    assert decide({**action, "persist_role": False}).status_code == 202
+    if role == "reviewer:main":
+        controller._drain_controls()
+        assert controller.waits["wait-one"]["_action"]["credential_profile_id"] == "second"
+    assert json.loads(path.read_text()) == old
+
+    # A second wait on the same task with the same request id is another decision. An explicit
+    # Standard on Main now permits the persistent pin change and this wait owns its receipt.
+    next_row = {**row, "wait_id": "wait-two", "revision": 2}
+    model_wait.mutate_wait(root, "task-one", "wait-two", lambda _: next_row)
+    controller.waits["wait-two"] = dict(next_row)
+    path.write_text(json.dumps({**old, "OUROBOROS_MODEL_PROCESSING_PREFERENCES": '{"main":"standard"}'}))
+    monkeypatch.setattr(owner_settings, "_owner_update_settings", writer)
+    accepted = decide({**action, "decision_id": "model_wait:task-one:wait-two", "revision": 2})
+    assert accepted.status_code == 202 and json.loads(accepted.body)["saved"]
+    assert json.loads(json.loads(path.read_text())["OUROBOROS_MODEL_ACCOUNTS"])["main"] == "second"
+    controller._drain_controls()
+    assert controller.waits["wait-two"]["_action"]["request_id"] == action["request_id"]
 
 
 def test_permanent_switch_uses_existing_owner_writer_once(live_wait, monkeypatch):
@@ -679,6 +816,7 @@ def test_confirmed_mixed_pool_waits_and_heals_on_the_same_live_call(elapsed_quot
     assert len(usage["ledger_attempt_ids"]) == 2
     rows = list(events.queue)
     assert rows[0]["reason"] == rows[-1]["reason"] == "auth_quota"
+    assert {row["access_reason"] for row in rows} == {"auth_quota"}  # released or settled custody: the same proof
     assert all(row["requires_owner_action"] is False for row in rows)
     assert rows[0]["credential_profile_id"] == "", "A mixed pool has no single login target"
     assert rows[0]["quota_clock"]["active"] is True
@@ -808,8 +946,9 @@ def test_owner_keep_checker_role_persists_and_resumes_but_nonowner_cannot(live_w
     path = root / "settings.json"
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
     monkeypatch.setattr(config, "DATA_DIR", root)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
-    path.write_text(json.dumps({"OUROBOROS_MODEL": "original/main", "OUROBOROS_MODEL_LIGHT": "" if role == "main" else "original/light",
+    config.initialize_runtime_mode_baseline("light")
+    path.write_text(json.dumps({"OUROBOROS_RUNTIME_MODE": "light",
+                               "OUROBOROS_MODEL": "original/main", "OUROBOROS_MODEL_LIGHT": "" if role == "main" else "original/light",
                                "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}))
     before = path.read_bytes()
     with pytest.raises(PermissionError, match="owner-controlled"):

@@ -14,10 +14,11 @@ pointer and both windows, also says how its work ended (``_ended_work_facts``):
 an author stop's open Continue is a fact the next focus reads, not one it must
 dig for, and ``continue_task`` is among the valid actions it may choose. These
 facts ride where the decision lane is built (``server_owner_routing``: a Project
-room's turn; a Main turn when the install has Projects, a live root or an
-unreadable roots list) and in a wake's Main facts, and Main's manifest only beside
-Projects or live roots: a Main turn of a Project-less install with no live work
-reads a stopped card in its own room and the offer through ``get_task_result``.
+room's turn; a Main turn when the install has Projects, a live root or any root's
+record, or when one of them cannot be read) and in a wake's Main facts. Main's
+manifest is the same with Projects or without (owner decision, 21.11.2026): it
+stays while it names a Project, a live root or a root's result, or says the results
+could not be read; only an install with none of them, such as a new one, gets none.
 """
 
 from __future__ import annotations
@@ -243,7 +244,7 @@ def _ended_work_facts(row: Dict[str, Any], task_id: str) -> Dict[str, Any]:
     that author's account. Computed on the LOADED row, whose stop the stripped projection no longer holds; a row
     these facts cannot be read from is unknown, never ``author_finished``."""
     try:
-        from ouroboros.outcomes import recorded_cause
+        from ouroboros.outcomes import normalize_outcome_axes, recorded_cause
         from ouroboros.owner_continue import offer_view
         from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, outcome_phase
         from ouroboros.review_records import recorded_stop_rationale
@@ -254,17 +255,23 @@ def _ended_work_facts(row: Dict[str, Any], task_id: str) -> Dict[str, Any]:
             "outcome": "Interrupted" if row.get("status") == "interrupted" else OUTCOME_PHASE_HEADLINE[outcome_phase(ended, {})],
             "cause": recorded_cause(row), "ended_at": terminal_time_fact(row).get("occurred_at")}
         origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
-        if row.get("status") == "cancelled" and origin:
-            # A cancel ended this work. Its row keeps the reason code of the stop that preceded the cancel
-            # (a pause, a spent budget): that is the earlier stop, never the cause of the end. The owner-stop
-            # rail's own code (Stop now ending an inline turn, or the provider wait it ended) is that same
-            # stop, read as one command by the rail's reader, never an earlier one.
-            from supervisor.owner_stop import owner_stop_ending
+        if row.get("status") == "cancelled":
+            execution = normalize_outcome_axes(row)["execution"]
+            earlier = execution.get("earlier_stop")
+            policy = execution.get("cancel_policy_reason")
+            if origin:
+                from supervisor.owner_stop import owner_stop_ending
 
-            same_stop = any(owner_stop_ending(row))
-            earlier = facts["cause"] if facts["cause"] not in ("", "cancelled") and not same_stop else None
-            facts.update(cause="cancelled", **({"cancelled_by": str(origin["source"])} if origin.get("source") else {}),
-                         **({"earlier_stop": earlier} if earlier else {}))
+                # Old rows kept an earlier cause in reason_code. A reason of this very Stop is not earlier.
+                if not earlier and facts["cause"] not in ("", "cancelled") and not any(owner_stop_ending(row)):
+                    earlier = facts["cause"]
+                facts.update(cause="cancelled", **({"cancelled_by": str(origin["source"])} if origin.get("source") else {}))
+            elif policy == "evolution_disabled_in_light_mode":
+                facts["cause"] = policy  # display only: offer_view still consumes the untouched result
+            elif earlier == facts["cause"] and execution.get("reason_code") == "cancelled":
+                facts["cause"] = "cancelled"  # current cancellation, source unknown
+            if isinstance(earlier, str) and earlier:
+                facts["earlier_stop"] = earlier
         offer = offer_view(row, task_id)
         if offer is not None:
             facts["continuation_offer"] = offer
@@ -413,6 +420,25 @@ def _recent_root_results(ctx: Any, project_id: str = "") -> tuple:
         "final_results_error": "",
         "children": children,
     }
+
+
+def _root_results_exist(ctx: Any) -> bool:
+    """Whether the store holds any root's record, live or ended: one row of the root index
+    (``newest_root_ids``), read without waiting on contention, since owner-message intake runs on
+    the supervisor loop. A new install's store holds none. A busy or unreadable store is unknown
+    and answers yes, like an unreadable Projects list: the turn is admitted for the manifest's
+    own read, which then says what it could not read, or finds the store empty."""
+    from ouroboros.store import StoreBusy, acquisition_budget
+    from ouroboros.task_store import newest_root_ids
+
+    try:
+        with acquisition_budget(0):
+            return bool(newest_root_ids(ctx.DRIVE_ROOT, 1))
+    except StoreBusy:  # contention: the manifest's own read may still wait, as beside Projects
+        return True
+    except Exception:
+        log.warning("Unable to inspect root results for owner routing", exc_info=True)
+        return True
 
 
 def _cancel_state_facts(ctx: Any, task_id: str) -> Dict[str, Any]:
@@ -606,7 +632,7 @@ def _main_routing_manifest(ctx: Any, roots: Optional[RootSnapshot] = None) -> Di
 
 
 def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task_metadata: Any,
-                            roots: Optional[RootSnapshot] = None) -> Any:
+                            roots: Optional[RootSnapshot] = None, *, decided_project_id: Optional[str] = None) -> Any:
     """Enrich a chat turn's metadata with the structural facts the decision turn
     needs: the RUNNING tasks in THIS chat (so it can tell_task the right one
     instead of spawning a duplicate) and the originating message id (for idempotent
@@ -614,16 +640,16 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
     judgment among answer / tell_task / start_task / move_to_project / continue_task.
     ``roots``: the message's one ``addressable_roots`` snapshot, read here when not
     handed down. Built where the decision lane is (``server_owner_routing``: a Project
-    room; Main when the install has Projects, a live root or an unreadable roots
-    list) and for a wake (``main_lane_routing_metadata``); Main's manifest stays only
-    beside Projects or live roots."""
+    room; Main when the install has Projects, a live root or any root's record, or when
+    one of them cannot be read) and for a wake (``main_lane_routing_metadata``); Main's
+    manifest stays while it names a Project, a live root or a root's result, or an
+    unreadable result store, the same with Projects or without."""
     md = dict(task_metadata) if isinstance(task_metadata, dict) else {}
     roots = roots if roots is not None else addressable_roots(ctx)
     addressable_here = roots.rows(chat_id)
     running_here = [row for row in addressable_here if row.get("status") == "running"]
-    project_id = str(md.get("project_id") or "").strip() or _project_id_for_registered_chat(
-        ctx, chat_id,
-    )
+    project_id = decided_project_id if decided_project_id is not None else (
+        str(md.get("project_id") or "").strip() or _project_id_for_registered_chat(ctx, chat_id))
     is_main_lane = not bool(project_id)
     try:
         # Every non-Project owner transport is the Main lane.  External transports
@@ -633,6 +659,8 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
         main_manifest = _main_routing_manifest(ctx, roots) if is_main_lane else {}
         if main_manifest and not (
             main_manifest.get("projects") or main_manifest.get("root_tasks")
+            or main_manifest.get("final_results")
+            or (main_manifest.get("omissions") or {}).get("final_results_error")
         ):
             main_manifest = {}
     except Exception:
@@ -663,27 +691,38 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
             log.warning("Unable to build the project routing manifest", exc_info=True)
     if client_message_id:
         md["client_message_id"] = client_message_id
+    from ouroboros.chat_annotations import receipt_source_room, routing_source_address
+    from ouroboros.chat_references import TURN_ADDRESS
+    ref = md.get("origin_message_ref")
+    source_room = receipt_source_room(ref, client_message_id, chat_id)
     routing_contract = {
         "llm_first": True,
         "source_lane": "main" if is_main_lane else "project",
+        **({"source_chat_id": source_room} if client_message_id else {}),
         "valid_actions": [
             "answer_inline", "tell_task", "start_task", "move_to_project", "continue_task",
         ],
         # Unknown, never none: the roots of this chat and of Main could not be read now.
         **({"live_roots_unavailable": roots.gap} if roots.gap else {}),
     }
-    receipt = _message_routing_receipt(ctx, client_message_id)
-    if receipt:
+    from ouroboros.routing_wait import message_routing_acts
+    try:
+        address = routing_source_address(ref, source_room, client_message_id)
+        acts = ([] if md.get("origin_suppressed") or (not address and md.get(TURN_ADDRESS)) else
+                message_routing_acts(pathlib.Path(ctx.DRIVE_ROOT), [(source_room, client_message_id, address)]))
+    except Exception:
+        log.debug("message routing receipts unreadable at turn start", exc_info=True)
+        acts = []
+    if acts:
         # DISCLOSURE, not a gate (owner decision B5=A): one owner message became a
         # task and was then steered into three more live roots, each paying its own
         # review wave, because the deciding turn was never told a receipt already
         # existed. The choice stays with the model - no host ban on a second root.
-        routing_contract["message_routing_receipt"] = receipt
-        acts = _message_routing_acts(ctx, client_message_id)
+        routing_contract["message_routing_receipt"] = acts[-1]
         if len(acts) > 1:
             # The latest row hides earlier acts on the same message (a promote, then
             # a steer): each act keeps its own receipt, read, never inferred.
-            routing_contract["message_routing_acts"] = acts
+            routing_contract["message_routing_acts"] = sorted(acts, key=lambda act: act["ts"])
             routing_contract["message_routing_acts_note"] = (
                 "Recorded routing acts already taken for THIS owner message, oldest first. "
                 "Each receipt identifies the work and its recorded outcome.")
@@ -702,49 +741,6 @@ def main_lane_routing_metadata(ctx: Any, chat_id: int) -> Dict[str, Any]:
     """
     facts = _decision_turn_metadata(ctx, int(chat_id or 0), "", {})
     return dict(facts) if isinstance(facts, dict) else {}
-
-
-def _message_routing_receipt(ctx: Any, client_message_id: str) -> Dict[str, Any]:
-    """The existing routing receipt for THIS owner message, or {} when there is none.
-
-    Read from the annotation the routing rail already writes, so no new store and no
-    new reader: the decision turn simply sees what was already decided for the same
-    message (a promote's or route's status from its admission, as every reader shows
-    it: ``routing_wait.routing_act_fields``). Fail-soft - a missing or torn
-    annotations file leaves the turn exactly as it was.
-    """
-    if not client_message_id:
-        return {}
-    try:
-        from ouroboros.project_dialogue import latest_chat_annotations
-        from ouroboros.routing_wait import routing_act_fields
-
-        row = latest_chat_annotations(ctx.DRIVE_ROOT).get(str(client_message_id)) or {}
-        return routing_act_fields(pathlib.Path(ctx.DRIVE_ROOT), str(client_message_id), row) if row else {}
-    except Exception:
-        log.debug("message routing receipt lookup failed", exc_info=True)
-        return {}
-
-
-def _message_routing_acts(ctx: Any, client_message_id: str) -> list:
-    """Every routing act recorded for THIS owner message (latest row per act), oldest first.
-
-    The routing rail already keeps one receipt per (message, routing token); this
-    only reads it. Acts keyed to a synthetic ``agent-steer:*`` id or to another
-    task's id carry no link to this message and stay unlisted (a producer gap).
-    """
-    try:
-        from ouroboros.project_dialogue import _ANNOTATIONS_NAME, _latest_annotations_by_token
-        from ouroboros.routing_wait import routing_act_fields
-
-        root = pathlib.Path(ctx.DRIVE_ROOT)
-        rows = [row for (message_id, _token), row in _latest_annotations_by_token(
-            root / "logs" / _ANNOTATIONS_NAME).items() if message_id == str(client_message_id)]
-        return [routing_act_fields(root, str(client_message_id), row)
-                for row in sorted(rows, key=lambda row: str(row.get("ts") or ""))]
-    except Exception:
-        log.debug("message routing acts lookup failed", exc_info=True)
-        return []
 
 
 def _scoped_task_metadata(project_id: str, task_metadata: Any) -> Any:
@@ -799,33 +795,10 @@ def _project_id_for_registered_chat(ctx: Any, chat_id: int) -> str:
     return ""
 
 
-def _main_lane_chat(chat_id: int) -> bool:
-    """Host-attested absence of a Project room, answered without the registry.
-
-    Ids below the Project floor are Main, hidden or A2A. A transport id shares
-    the numeric range, so only the positively bound external owner slot (written
-    by that transport's own slash command) proves its chat is the owner's Main;
-    any other id at or above the floor still needs the strict registry read.
-    """
-    from ouroboros.contracts.chat_id_policy import is_project_chat_id
-
-    cid = int(chat_id or 0)
-    if not is_project_chat_id(cid):
-        return True
-    try:
-        from supervisor.state import control_value, load_state
-
-        known, bound = control_value(load_state(), "owner_external_chat_id")
-    except Exception:
-        return False  # an unreadable binding proves nothing
-    return known and type(bound) is int and bound == cid
-
-
 def _reserved_project_for_chat(ctx: Any, chat_id: int) -> Dict[str, Any]:
-    """Execution routing requires positive absence, not an unavailable display lens."""
+    """Resolve a logical room; the caller handles proven physical ingress separately."""
+    from ouroboros.contracts.chat_id_policy import is_project_chat_id
     from ouroboros.project_admission import reserved_project_for_chat
 
     cid = int(chat_id or 0)
-    if _main_lane_chat(cid):
-        return {}  # Host-attested: this chat cannot belong to a Project room.
-    return reserved_project_for_chat(ctx.DRIVE_ROOT, cid)
+    return reserved_project_for_chat(ctx.DRIVE_ROOT, cid) if is_project_chat_id(cid) else {}

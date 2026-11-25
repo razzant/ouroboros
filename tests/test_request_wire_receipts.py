@@ -36,6 +36,12 @@ from ouroboros.request_wire_resolution import resolve_effort_action_set
 from ouroboros.usage_accounting import PhysicalAttemptCapture
 
 
+
+def _actions_at(root, profile):
+    """The stored actions of ``profile`` under ``root``, as the contract records them."""
+    return tuple(wire._wire_action_dict(record.action) for record in wire._read_wire_action_records_at(root, profile))
+
+
 def _target():
     return {
         "provider": "openai",
@@ -929,5 +935,5 @@ def test_applied_action_snapshot_is_recursively_immutable_and_commits_bound_fact
         semantic_observation=observation,
     )
     assert wire._commit_wire_compatibility_at(tmp_path, receipt).committed
-    committed = wire._read_wire_actions_at(tmp_path, pending.profile)
+    committed = _actions_at(tmp_path, pending.profile)
     assert committed[0]["fields"] == ["temperature"]

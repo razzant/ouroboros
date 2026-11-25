@@ -29,7 +29,8 @@ with these facts kept under its own mutex and nothing else:
 * **Lane depth and age.** Each envelope keeps the manager process's own
   monotonic stamp of its put; ``lane_facts`` answers per lane how many wait
   and how long the oldest has (the per-minute ``supervisor_load`` row reads
-  it), one process and one clock. A restored envelope keeps its first stamp.
+  it), one process and one clock. A restored envelope keeps its first stamp;
+  ``drain`` hands each envelope its wait on that clock, the consumer's event lag.
 """
 from __future__ import annotations
 
@@ -113,17 +114,19 @@ class ObservedEventQueue(queue.Queue):
         return self._take()[0]
 
     def drain(self, max_items: int) -> list:
-        """Up to ``max_items`` envelopes ``(event, put_at)`` in ONE call, in the order that many
-        consecutive ``get`` calls would serve them now: control lane first, FIFO in each lane.
+        """Up to ``max_items`` envelopes ``(event, put_at, waited_sec)`` in ONE call, in the order that
+        many consecutive ``get`` calls would serve them now: control lane first, FIFO in each lane.
 
         The consumer's one manager round trip per drain pass (cost law L11; one ``get_nowait``
         per event paid ~940 proxy round trips a minute on 01.11). ``put_at`` is this bus's own
-        put stamp, opaque to the consumer: ``restore_front`` keeps the lane ages exact with it.
+        put stamp, opaque to the consumer: ``restore_front`` keeps the lane ages exact with it;
+        ``waited_sec`` is the envelope's wait in the bus, put to this take, on that same clock.
         The idle-input index forgets what is taken exactly as ``get`` does; delivery membership
         is untouched (the consumer releases each send after its handler, as before).
         """
         with self.mutex:
-            taken = [self._take() for _ in range(min(max(0, int(max_items)), self._qsize()))]
+            taken, now = [self._take() for _ in range(min(max(0, int(max_items)), self._qsize()))], time.monotonic()
+            taken = [(item, put_at, round(now - put_at, 3)) for item, put_at in taken]
             if taken:
                 self.not_full.notify(len(taken))
         return taken
@@ -135,7 +138,7 @@ class ObservedEventQueue(queue.Queue):
         its time bound or a handler raises; no producer put happens, membership was never released.
         """
         with self.mutex:
-            for item, put_at in reversed(list(envelopes)):
+            for item, put_at, *_waited in reversed(list(envelopes)):
                 addresses = idle_input_addresses(item)
                 self._lanes[event_lane(item)].appendleft((item, addresses, put_at))
                 self._pending.update(addresses)

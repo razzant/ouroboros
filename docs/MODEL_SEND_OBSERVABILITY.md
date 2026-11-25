@@ -8,6 +8,22 @@ audit, never launched by boot);
 `tests/test_model_send_seal.py` verifies it. The claim is deliberately narrow:
 a reconstruction mismatch is an observability fact, not a dispatch gate.
 
+## Local request inspection
+
+From a **separate matching source checkout** without an adoption pointer, run `python -m ouroboros.context_attempt_reader --data-root DATA TASK` to list a task's physical attempts, newest first, with their states and times; a delegated session, an unmetered dispatch or imported history is not one request, and selecting it says so (`not_one_attempt`). `TASK` is the task's own full ID. Dashboard › Logs shows it: open the task's entry, then one of its events; the record under the event names it as `subagent_task_id` when the event has one, else as `task_id`. The ID beside a Logs entry is cut to eight characters, and a Context Lens chart is named by a hash; neither is the full ID. Do not use the serving checkout: Python imports its startup hook before even `--help`, and may finish a pending body adoption. Pass the original installation's data root explicitly; one without `state/usage.sqlite` is named as such. Add `--attempt ID` to print the selected redacted body to standard output and its ledger state, exclusions and file trace to standard error; the recorded times, route and a failure's type come only with `--report`. The tool uses local OS file access; it is not an HTTP or extension API. The body is private even after default redaction, so keep it out of shared terminals and logs.
+
+If the selected body exceeds the 16 MiB default, or its sealed record (manifest) 2 MiB, the reader reports that size (the body also its redacted reference, the path relative to DATA) without printing a partial body. `--attempt ID --max-bytes N` only raises bounds: the request's to N, the record's too above 2 MiB. `over_limit` names the one N that admits both; `manifest_over_limit` can name only the record's size, so that run opens the record and learns the request's, and a request larger than the record then names its own N. Integrity verification still comes before output. A recorded candidate can have been released without dispatch. The reader never replaces a missing selection with a subsequent attempt and never reads the raw blob. A file trace names the captured `prompts/SYSTEM.md` SHA-256 when the leading system message still carries its exact normalized text. The capture's witness rides beside the send's physical context in memory and is no field of that record: the manifest's verified `file_trace` is its one durable copy, and no accounting row, receipt, capture or checkpoint carries it. Native top-level `system`/other serializers, older attempts and a send whose first message is not that prompt report no trace; a run that did not open the record reports it `not_read`. The digest describes the file at capture, not its present contents, and no offset in the redacted body or provider receipt is asserted.
+
+An attempt without a ledger-bound capture reference reports `not_linked` (trace `not_read`), even if failed preparation left a manifest on disk; a usage-reported row (a live conversation's), `receipt_only` (trace `not_recorded`). Inspection declines an export-marked usage store without completing its handoff. SQLite may use its ordinary sidecars and locks. A packed body is read from its task's own pack first; the shared evidence index is only read, never rebuilt (the packing pass rebuilds it). A read that must consult it and finds it missing or damaged leaves `observability/packs/.index.sqlite.damaged` for that pass, and a place that cannot be learned now is `evidence_unavailable`, never a loss. None of this changes the recorded request or accounting rows. Diagnostics and the redacted body may still contain private text or paths.
+
+Beautiful Context on Widgets opens a locally selected report in an isolated frame, not from a server archive route. Generate one with the retained request reader in a separate source checkout containing it, from a private local shell:
+
+```sh
+python -m ouroboros.context_attempt_reader --data-root LOCAL_DATA TASK_ID --attempt ATTEMPT_ID --report > PRIVATE_REPORT.json
+```
+
+Use binary-safe stdout redirection (e.g. a POSIX shell or `cmd.exe`), a new private non-synced path outside Files, and discard failed exports. Reports can contain private text even after redaction and are not meant to be forwarded automatically. Open the JSON with **Beautiful Context → Open local report**; the frame neither uploads nor persists its selection, and closing it clears the view. A report belongs to one attempt: it carries that attempt's IDs, ledger state and what the ledger recorded of its times, route and a failure's type (never its words), so two attempts that sent the same body stay two reports. The page lists the request's messages and tools as rows that open into their whole text, and keeps the retained redacted host JSON literal and whole beside the recorded file versions. It is the host's historical copy, not a receipt of provider input, and a ledger state is accounting of the attempt's record, never proof of delivery or of a final price. A gap stays a gap: a report without a body (`not_linked`, `not_recorded`, `unavailable`, any reason above) is still written, the terminal names the gap, and the page says which one it is instead of showing an earlier result; an empty or cut file is refused as such. A request whose report would exceed the page's 48 MiB is `over_page_limit`: a bounded report of the attempt with a failure's type and its file trace, the request's size and the report's (a floor when the request alone exceeds the page, whose report is never built), and the reader's command that writes the request to a file without `--report`, which still writes the exact stored JSON bytes.
+
 ## 1. Scope of the claim
 
 The invariant binds exactly one object: **`model_send` — the physical
@@ -234,7 +250,9 @@ only; nothing decides by them.
 
 - `work` (`context_timing.counted`): `secret_scan`, bytes of request-view parts
   the redaction worked out (once per part per task, §3.2); `new_parts`, bytes
-  of shared parts the CAS stored for the first time (`observability.write_parts`).
+  of shared parts the CAS stored for the first time (`observability.write_parts`);
+  `packed_reads`, blob reads an evidence pack answered (`evidence_packs.blob_bytes`),
+  none where the loose file did.
   R1 (`tests/test_cost_round.py`): round 2 scans exactly the bytes it adds, at
   any start size. A scan is keyed by the part's own key order and the CAS by its
   sorted bytes, so a part met in two orders is scanned twice and stored once.
@@ -242,9 +260,13 @@ only; nothing decides by them.
   (the batch's end to the model call), `model_call` (to the first record),
   `request_record`, `physical_candidate`, `daemon_upload`, `create_operation`
   (CPU null: it ends on the model sender's thread).
-- `host_steps.sections_ms`: wall ms of each record's `redact`, `blobs`,
-  `lock_wait` and `manifest_write`; `context_facts`;
-  `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window).
+- `host_steps.sections_ms`: wall ms of each record's `redact`, `blobs` and
+  `manifest_write` (a manifest waits on no lock); `context_facts`;
+  `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window);
+  `prologue` and `prologue.*`: host work measured before the window opened and
+  carried once, a start's restore, route rebind and tools, a retained answer's
+  post-batch `delivery_evidence` read and an authored view's receipt transfer
+  (`source_retention`), in one receipt.
 - `host_steps.rusage`: the process's voluntary and involuntary context
   switches, major faults and block writes since the batch's end; absent on
   Windows.
@@ -332,10 +354,10 @@ that reported both cache counts; the others are counted apart (`uncounted_calls`
 the same calls: `tokens_shared` are the tokens of the calls whose cost was shared (`tokens`
 counts every call), the cost no tariff or count could share is its own part with
 `unshared_calls`, and a cause row's `write_cost` is of its `shared_write_tokens`. A model
-none of whose calls has a recorded price has `cost: null`. `write_price_in_reads` is how many read tokens one
-written token costs at `write_price_lifetime` (the lifetime most of the model's
-tokens were written at, by the provider's split when it accounts for every write)
-at the model's base price.
+none of whose calls has a recorded price has `cost: null`. `write_price_lifetime` names the lifetime with the
+most written tokens, using the provider's split when it accounts for every write. `write_price_in_reads` divides
+that lifetime's base write rate by the base read rate. A missing rate or a zero read rate gives `null`.
+A zero write rate and a positive read rate give `0`.
 Delegated subscription sessions and unmetered dispatches carry no reservation time
 and are not in a period.
 A consciousness wake reads the 24-hour view once and carries its cache writes as one

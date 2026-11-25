@@ -123,6 +123,17 @@ test('Plan review references normalize from both live and nested durable envelop
     });
 });
 
+test('an interrupted review says its notice line with the fresh-review step, never its raw reason (RVD4 11)', () => {
+    const lifecycle = { kind: 'review', status: 'interrupted', phase: 'interrupted', target: 'alpha', id: 'job-9',
+        group_id: 'task:root:alpha', presentation_owner_task_id: 'root', error: 'owner_process_exited' };
+    const line = 'Skill review: `alpha` — interrupted Start a fresh review of this skill before you enable it or grant it access.';
+    const notice = { code: 'skill_review_interrupted', step: 'review_again', details: 'owner_process_exited', line };
+    const [said] = classifyReviewLifecycle({ role: 'system', lifecycle, notice }).group.attempts;
+    assert.equal(said.summary, line);
+    const [older] = classifyReviewLifecycle({ role: 'system', lifecycle }).group.attempts;
+    assert.equal(older.summary, 'owner_process_exited', 'a row written before notices keeps its words');
+});
+
 test('live lifecycle ignores its synthetic outer task id and updates the same group', () => {
     const live = reviewGroupFromLifecycle({
         task_id: 'skill_lifecycle_review_alpha_job-2',
@@ -1393,6 +1404,29 @@ test('invalid review revisions stay opaque and do not become ordered counters', 
     await hydrator.hydrate('root', 42);
     await hydrator.hydrate('root', 42);
     assert.equal(reads, 2);
+});
+
+// `settled_card.js` resolves a read that speaks for no one (a newer attempt, or a newer read that already answered)
+// as `undefined`, and a genuinely absent record as `null`. Only the second is an answer about the card: the first
+// neither claims the detail was read nor leaves the card spinning beside a Retry a real failure earned.
+test('a read that proved nothing leaves the card\'s word alone; a proven absence still settles it', async () => {
+    const answers = [Promise.reject(new Error('detail read failed')), Promise.resolve(undefined), Promise.resolve(null)];
+    const states = [], applied = [];
+    const hydrator = createReviewHydrator({
+        fetchDetail: () => answers.shift(),
+        applyDetail: (_id, detail) => { applied.push(detail); return true; },
+        onState: (_id, status) => { states.push(status); return true; },
+    });
+    await hydrator.hydrate('root');
+    assert.deepEqual(states, ['loading', 'error'], 'a failed read says so');
+    await hydrator.hydrate('root');
+    assert.deepEqual(applied, [], 'a superseded read carries no detail');
+    assert.equal(states.at(-1), 'error', 'a read that spoke for no one neither claims success nor leaves a spinner');
+    assert.equal(hydrator.ready('root'), false, 'the card still owes its detail to a reader');
+    await hydrator.hydrate('root');
+    assert.deepEqual(applied, [], 'an absent record is not a detail to attach');
+    assert.equal(states.at(-1), 'idle', 'what the read proved settles the word');
+    assert.equal(hydrator.ready('root'), true);
 });
 
 test('a re-render that replaces a focused control hands focus to the same group toggle', () => {

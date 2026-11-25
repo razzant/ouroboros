@@ -16,6 +16,7 @@ import sys
 import pytest
 
 from ouroboros.tools.registry import ToolRegistry
+from tests._workspace_git import git_repository
 
 # Spawns real OS subprocesses (git, the `sys.executable` Python, and a POSIX `sh` in one guarded
 # case) via _tracked_subprocess_run — not parallel-safe under `pytest -n auto` (DEVELOPMENT.md
@@ -26,10 +27,7 @@ from ouroboros.tools.registry import ToolRegistry
 # ----------------------------------------------------------------------------- helpers
 def _git_ws(parent, name="proj"):
     """A git worktree under user_files (scratch requires a git-worktree cwd)."""
-    ws = parent / name
-    ws.mkdir()
-    _git(ws, "init", "-q")
-    return ws
+    return git_repository(parent / name, unborn=True)
 
 
 def _reg(tmp_path, monkeypatch):
@@ -135,10 +133,7 @@ def test_headless_excludes_declared_scratch_from_workspace_patch(tmp_path):
     from hashlib import sha256
     from ouroboros.headless import SCRATCH_MANIFEST_NAME, write_workspace_patch_artifacts
 
-    repo = tmp_path / "ws"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "commit", "--allow-empty", "-m", "base", "-q")
+    repo = git_repository(tmp_path / "ws")  # one empty commit "base"
     (repo / "real_deliverable.txt").write_text("keep\n")          # genuine new file -> included
     scratch_body = "// throwaway\n"
     (repo / "scratch_probe_test.go").write_text(scratch_body)      # declared scratch -> excluded (sha match)

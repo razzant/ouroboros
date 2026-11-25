@@ -5,8 +5,9 @@ Run before producers on every startup door: ``ensure_current_store`` opens or cr
 ``store_import``), the admissible legacy cancel latches become intents, and the
 boot admissions no document derives (drives present on disk, the one-time upgrade
 receipts) join the owner-held rows, and legacy questions bind their publication
-address once. ``state/migrations.json`` keeps the watermarks: the store, the
-cancel-latch, the question-publication and the retired-set generations.
+address once (a closed one whose card no room shows retires its closure note). ``state/migrations.json``
+keeps the watermarks: the store, the cancel-latch, the question-publication, the closures-owed-nowhere and the
+retired-set generations.
 ``python -m ouroboros.startup_migrations`` is the explicit rebuild job, including
 its historical seal audit (no audit watermark). An owner-held obligation set whose producer
 this body retired (``RETIRED_SETS``) has no reader or remover left, so the first boot of its
@@ -30,6 +31,7 @@ from ouroboros.utils import append_jsonl, read_json_dict, update_json_locked, ut
 log = logging.getLogger(__name__)
 SCHEMA_GENERATION = 7
 QUESTION_PUBLICATIONS_GENERATION = 1
+CLOSURES_OWED_NOWHERE_GENERATION = 1  # closures an earlier import's verdict owes nowhere, retired once
 RETIRED_SETS = ("memory_max",)  # the lost-Max episode's one row, retired 29.10 with its producer
 RETIRED_SETS_GENERATION = 2  # also retire the old episode's unsent outbox lines; generation 1 removed only its set
 
@@ -123,7 +125,11 @@ def migrate_question_publications(root, *, rebuild=False, legacy=False):
             if not job or job.get("state") == "done":
                 maintenance_jobs.record(root, "legacy_reconcile", state="pending", reason="question_publication_retry",
                                         cursor=None, done=0, total=None, error=None)
-        return {}
+        if marks.get("closures_owed_nowhere_generation") == CLOSURES_OWED_NOWHERE_GENERATION:
+            return {}
+        retired = retire_closures_owed_nowhere(root)  # once: what an older body's attempts left owed
+        stamp(root, closures_owed_nowhere_generation=CLOSURES_OWED_NOWHERE_GENERATION)
+        return {"retired": retired} if retired else {}
     needed = set()
     for tid in obligations.members(root, "owner_questions"):
         try:
@@ -147,10 +153,31 @@ def migrate_question_publications(root, *, rebuild=False, legacy=False):
             obligations.remove(root, "unknowns", key)  # re-classified: bound, answered or gone
     for key, facts in unknowns.items():
         obligations.add(root, "unknowns", key, facts)
+    retired = retire_closures_owed_nowhere(root, unknowns)
     attempts = (retry.get("attempts", 0) if current and not rebuild else 0) + 1
-    stamp(root, question_publications_generation=QUESTION_PUBLICATIONS_GENERATION, question_publication_retry=(
+    stamp(root, question_publications_generation=QUESTION_PUBLICATIONS_GENERATION,
+          closures_owed_nowhere_generation=CLOSURES_OWED_NOWHERE_GENERATION, question_publication_retry=(
         {"attempts": attempts, "state": "pending" if attempts < 2 else "rebuild_required"} if unsettled else None))
-    return {"bound": len(publications), "unknown": len(unknowns)}
+    return {"bound": len(publications), "unknown": len(unknowns) - retired, **({"retired": retired} if retired else {})}
+
+
+def retire_closures_owed_nowhere(root, verdicts=None) -> int:
+    """A closed question whose card left no row in readable, stable history (``publication_address_missing``)
+    owes its closure note nowhere once its attempt found no address (``owner_quiz.retire_closure_owed_nowhere``),
+    and its ``question:`` unknown leaves with it. ``verdicts``: the import's own, the one row a closure's delivery
+    attempt reads (``supervisor.events_chat_delivery``), else, once per install, every unknown row earlier imports
+    recorded; no history is read. Returns the closures retired."""
+    from ouroboros import obligations
+    from ouroboros.owner_quiz import retire_closure_owed_nowhere
+
+    retired = 0
+    for key, facts in (obligations.members(root, "unknowns") if verdicts is None else verdicts).items():
+        if (key.startswith("question:") and isinstance(facts, dict)
+                and facts.get("reason") == "publication_address_missing"
+                and retire_closure_owed_nowhere(root, str(facts.get("task_id") or ""), str(facts.get("quiz_id") or ""))):
+            obligations.remove(root, "unknowns", key)
+            retired += 1
+    return retired
 
 
 def retire_sets(root, *, rebuild=False) -> int:

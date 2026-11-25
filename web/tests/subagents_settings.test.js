@@ -9,7 +9,11 @@ import {
     configuredApiProviders,
     compoundSessionEffortConflict,
     normalizeRouteSpec,
+    routeModelFields,
+    routeModelSuggestions,
+    routeTargetFromModel,
     serializeRouteSpec,
+    sourceIdentityLabel,
 } from '../modules/route_editor_primitives.js';
 import {
     MAX_AVAILABLE_SUBAGENTS,
@@ -26,9 +30,10 @@ import {
     validateAvailableSubagentsSetting,
 } from '../modules/subagents_settings.js';
 import {
-    lastReviewRunText, modelTariffText, reviewCostText, reviewMoneyLine, reviewTwinAllowed, rowMeta, rowStatus, rowTaskRun, sessionRouteVerdict,
+    lastReviewRunText, modelTariffText, reviewCostText, reviewMoneyLine, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowTaskRun, sessionRouteVerdict,
 } from '../modules/subagent_status_primitives.js';
 import { revealNewRow } from '../modules/ui_helpers.js';
+import { createAgentModelCatalog } from '../modules/agent_model_catalog.js';
 import { accessEditorDom, apiRow, sessionRow, setting } from './helpers/subagents_editor.js';
 
 const CONTRACT_FIXTURE = JSON.parse(fs.readFileSync(
@@ -420,7 +425,7 @@ test('session status never calls a missing model or failed pin available', () =>
             }],
             profiles: { harnessAccounts: [], profiles: [{
                 profile: { harness_id: 'codex', profile_id: 'koshak', enabled: true },
-                status: { verification: 'failed' },
+                status: { verification: 'passed' },
             }] },
             quota: [],
         },
@@ -429,6 +434,9 @@ test('session status never calls a missing model or failed pin available', () =>
     assert.match(missingModel, /selected model gpt-5\.6-sol-high currently unavailable/);
     assert.doesNotMatch(missingModel, /available now/);
 
+    state.snapshot.profiles.profiles[0].status.verification = 'failed';
+    assert.match(availableSubagentRowMarkup(sessionRow(), state), /pinned account koshak currently unavailable/,
+        'a failed pin is the named cause even when the model is absent too');
     state.snapshot.harnesses[0].models = [{ id: 'gpt-5.6-sol-high' }];
     const failedPin = availableSubagentRowMarkup(sessionRow(), state);
     assert.match(failedPin, /pinned account koshak currently unavailable/);
@@ -1359,6 +1367,212 @@ test('a reviewer says its model\'s published tariff until a review is measured, 
     assert.equal(reviewMoneyLine(sessionRow(), null, ''), 'uses a session seat and time');
 });
 
+test('a list head\'s rate is the whole figures its own key publishes, by the route\'s one spelling', () => {
+    const at = (target, extra = {}) => apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: target }, ...extra });
+    const builtin = { read_state: 'ok', items: [{ value: 'vendor/model', price: { input: 3, output: 15 } },
+        { value: 'vendor/ranged', price: { input: 2, output: 10, tiers: [{ input: 4, output: 15 }] } },
+        { value: 'vendor/free', price: { input: 0, output: 0 } }, { value: 'vendor/unpriced' },
+        { value: 'vendor/conditional', price_condition: 'off_peak_usd' }] };
+    // The built-in key's bare, explicit and @default spellings are one route; a named key's entry is its own.
+    for (const target of ['vendor/model', 'openrouter::vendor/model', 'openrouter@default::vendor/model']) {
+        assert.equal(modelTariffText(at(target), builtin, '', { rate: true }), '$3 in / $15 out per 1M tokens', target);
+    }
+    assert.equal(modelTariffText(at('openrouter@work::vendor/model'), builtin, '', { rate: true }), '', 'another key\'s row never takes this price');
+    assert.equal(modelTariffText(at('openrouter@work::vendor/model'),
+        { read_state: 'ok', items: [{ value: 'openrouter@work::vendor/model', price: { input: 1, output: 2 } }] }, '', { rate: true }),
+    '$1 in / $2 out per 1M tokens');
+    assert.equal(modelTariffText(at('vendor/ranged'), builtin, '', { rate: true }), '$2–4 in / $10–15 out per 1M tokens');
+    assert.equal(modelTariffText(at('vendor/free'), builtin, '', { rate: true }), 'free');
+    // A condition, an unknown, an unlisted model, an unread catalog or a tier that pays another rate: no figure at all.
+    for (const [row, read, tier] of [[at('vendor/unpriced'), builtin, ''], [at('vendor/conditional'), builtin, ''],
+        [at('vendor/unlisted'), builtin, ''], [at('vendor/model'), {}, ''], [at('vendor/model'), builtin, 'fast'],
+        [at('vendor/model', { processing_preference: 'economy' }), builtin, '']]) {
+        assert.equal(modelTariffText(row, read, tier, { rate: true }), '');
+    }
+    // The Details tariff reads the same spelling rule.
+    assert.equal(modelTariffText(at('openrouter::vendor/model'), builtin), '$3 in / $15 out per 1M tokens');
+});
+
+test('an opaque model id keeps its own connection: a nested :: never takes another source\'s price', () => {
+    const at = (target) => apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: target } });
+    const other = { read_state: 'ok', items: [{ value: 'openrouter::a::b', price: { input: 1, output: 2 } }] };
+    // The built-in key's spellings collapse to one; every other connection keeps its tag, so `openai::a::b` reads as
+    // its own (unlisted) row and never as `openrouter::a::b`'s price.
+    assert.equal(modelTariffText(at('openai::a::b'), other), 'Price unknown');
+    assert.equal(modelTariffText(at('openai::a::b'), other, '', { rate: true }), '');
+    // A local route pays no per-token rate, and its bare spelling is not an OpenRouter read.
+    assert.equal(routeModelFields(at('foo (local)').route, []).local, true);
+    assert.equal(modelTariffText(at('foo (local)'), other), '');
+    assert.equal(modelTariffText(at('foo (local)'), other, '', { rate: true }), '');
+});
+
+test('a built-in-key model id holding `::` is never another key\'s model: each reads only its own entry', () => {
+    const at = (target) => apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: target } });
+    // `openrouter::openai::foo` is an OpenRouter id and `openai::foo` is the OpenAI key's model; one canonical
+    // spelling would join them, so the entry is the row's only by its source and its model together.
+    const mixed = { read_state: 'ok', items: [{ value: 'openrouter::openai::foo', price: { input: 9, output: 9 } },
+        { value: 'openai::foo', price: { input: 1, output: 2 } }] };
+    assert.equal(modelTariffText(at('openai::foo'), mixed), '$1 in / $2 out per 1M tokens');
+    assert.equal(modelTariffText(at('openrouter::openai::foo'), mixed), '$9 in / $9 out per 1M tokens');
+    // Alone in a Details catalog, the lookalike lends neither row a figure: the key's own model is unlisted.
+    const builtin = { read_state: 'ok', items: [mixed.items[0]] };
+    assert.equal(modelTariffText(at('openai::foo'), builtin), 'Price unknown');
+    assert.equal(modelTariffText(at('openai::foo'), builtin, '', { rate: true }), '');
+    // The same rule on the other side: the OpenAI key's entry is no OpenRouter model's price.
+    assert.equal(modelTariffText(at('openrouter::openai::foo'), { read_state: 'ok', items: [mixed.items[1]] }), 'Price unknown');
+});
+
+test('a local route names the local lane, never a provider whose catalog and tariff it never touches', () => {
+    for (const target of ['qwen.gguf (local)', 'openai::gpt-5 (local)', 'deepseek@work::chat (local)']) {
+        assert.equal(sourceIdentityLabel({ kind: ROUTE_KIND_API_MODEL, target_id: target }), 'Local · model', target);
+        assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: target } }),
+            { read_state: 'ok', items: [{ value: 'qwen.gguf', price: { input: 1, output: 2 } }] }), '', target);
+    }
+    // The ` (local)` suffix decides, not the head: the saved form still round-trips untouched.
+    const local = { kind: ROUTE_KIND_API_MODEL, target_id: 'openai::gpt-5 (local)' };
+    assert.equal(sourceIdentityLabel({ kind: ROUTE_KIND_API_MODEL, target_id: 'openai::gpt-5' }), 'API · OpenAI');
+    assert.equal(routeTargetFromModel(local, routeModelFields(local, []).model), 'openai::gpt-5 (local)');
+    assert.equal(routeTargetFromModel({ kind: ROUTE_KIND_API_MODEL, target_id: 'qwen.gguf (local)' }, 'qwen.gguf (local)'),
+        'qwen.gguf (local)');
+});
+
+test('a catalog entry\'s own provider and opaque id price the row; a head that names no provider is OpenRouter\'s id', () => {
+    const at = (target) => apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: target } });
+    // The wire shape of `gateway/models._build_model_catalog_entry`: `provider_id`, the opaque `id` (which may
+    // itself hold `::`), and a `value` that is bare for OpenRouter — so reparsing that value would name another
+    // connection's model.
+    const catalog = { read_state: 'ok', items: [
+        { provider_id: 'openrouter', id: 'openai::vendor/model', value: 'openai::vendor/model', name: 'openai::vendor/model', price: { input: 3, output: 15 } },
+        { provider_id: 'openai', id: 'vendor/model', value: 'openai::vendor/model', name: 'vendor/model', price: { input: 10, output: 30 } },
+    ] };
+    // The OpenRouter row's own rate, never the OpenAI key's, though both entries spell the same id.
+    assert.match(modelTariffText(at('openrouter::openai::vendor/model'), catalog), /\$3 in \/ \$15 out/);
+    assert.match(modelTariffText(at('openai::vendor/model'), catalog), /\$10 in \/ \$30 out/);
+    // A head that names no known provider is not a connection: the runtime reads the whole spelling as one
+    // OpenRouter id, so the row keeps OpenRouter's own entry.
+    const opaque = { read_state: 'ok', items: [
+        { provider_id: 'openrouter', id: 'vendor::family/model', value: 'vendor::family/model', name: 'vendor::family/model', price: { input: 2, output: 8 } },
+    ] };
+    assert.match(modelTariffText(at('vendor::family/model'), opaque), /\$2 in \/ \$8 out/);
+    // A legacy row that states only a value is read by the same grammar: the whole spelling is OpenRouter's id.
+    const legacy = { read_state: 'ok', items: [{ value: 'vendor::family/model', name: 'vendor::family/model', price: { input: 4, output: 9 } }] };
+    assert.match(modelTariffText(at('vendor::family/model'), legacy), /\$4 in \/ \$9 out/);
+    assert.match(modelTariffText(at('openrouter::vendor::family/model'), legacy), /\$4 in \/ \$9 out/);
+});
+
+test('a local row is the local lane: a neutral mark and no automatic read — its chooser still offers alternatives', async (t) => {
+    const local = apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::codex=foo (local)' } });
+    const sources = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
+    assert.equal(routeModelFields(local.route, sources).local, true, 'the suffix decides the lane');
+    // The identity is the neutral local one, never the subscription's brand.
+    const identity = rowIdentity(local, { modelSources: sources });
+    assert.equal(identity.harnessId, 'api');
+    assert.equal(identity.channel, 'api');
+    assert.equal(identity.label, 'Local · model');
+    // The automatic pass reads no catalog for it (it exists only to price or mark a row), while an explicit
+    // opening reads its own source and offers that source's models as the alternatives.
+    const asked = [];
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+        asked.push(String(url).split('?')[1]);
+        return new Response(JSON.stringify({ read_state: 'ok', errors: [], model_sources: [],
+            items: [{ provider_id: 'claudexor', source_id: 'codex', id: 'gpt-6-astra', value: 'claudexor::codex=gpt-6-astra', name: 'gpt-6-astra' }] }),
+        { headers: { 'content-type': 'application/json' } });
+    };
+    t.after(() => { globalThis.fetch = real; });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
+    const catalog = createAgentModelCatalog({ state: { providers: [{ id: 'openrouter' }], modelSources: sources },
+        saved: true, rows: () => [local], apiCatalogAllowed: () => true, supportsScopes: () => true,
+        changed() {}, adoptSources() {} });
+    catalog.refresh({ list: true });
+    await settle();
+    assert.deepEqual(asked, [], 'the automatic pass reads nothing for a local row');
+    catalog.open(local);
+    await settle();
+    assert.deepEqual(asked, ['source_id=codex'], 'an explicit opening reads its own source');
+    assert.deepEqual(routeModelSuggestions(local.route, catalog.get(local).items), ['gpt-6-astra'],
+        'the alternatives it offers are that source\'s models');
+});
+
+test('the built-in key\'s own spellings read as one source, and a named lane never lends its rate', () => {
+    const at = (target) => apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: target } });
+    // The built-in key's spellings — bare, tagged and its long `@default` form — are one source.
+    const builtin = { read_state: 'ok', items: [
+        { provider_id: 'openrouter', id: 'gpt-6', value: 'gpt-6', name: 'gpt-6', price: { input: 1, output: 5 } }] };
+    for (const target of ['gpt-6', 'openrouter::gpt-6', 'openrouter@default::gpt-6']) {
+        assert.match(modelTariffText(at(target), builtin), /\$1 in \/ \$5 out/, target);
+    }
+    // A named lane is a source of its own: it prices its own row and never lends its rate to the built-in key.
+    const lanes = { read_state: 'ok', items: [
+        { provider_id: 'openrouter', id: 'openai::vendor/model', value: 'openai::vendor/model', name: 'openai::vendor/model', price: { input: 3, output: 15 } },
+        { provider_id: 'openrouter@claude-credits', id: 'anthropic/claude-opus-5.5', value: 'openrouter@claude-credits::anthropic/claude-opus-5.5',
+            name: 'Claude Opus 5.5', price: { input: 4, output: 20 } }] };
+    assert.match(modelTariffText(at('openrouter@claude-credits::anthropic/claude-opus-5.5'), lanes),
+        /\$4 in \/ \$20 out/, 'the named lane entry');
+    assert.match(modelTariffText(at('openrouter::openai::vendor/model'), lanes), /\$3 in \/ \$15 out/,
+        'the built-in key keeps its own rate');
+    // A legacy entry that states only a value is read by the same grammar, bare or tagged.
+    const legacy = { read_state: 'ok', items: [
+        { value: 'anthropic/claude-opus-5.5', name: 'anthropic/claude-opus-5.5', price: { input: 4, output: 20 } }] };
+    assert.match(modelTariffText(at('anthropic/claude-opus-5.5'), legacy), /\$4 in \/ \$20 out/, 'bare model');
+    assert.match(modelTariffText(at('openrouter::anthropic/claude-opus-5.5'), legacy), /\$4 in \/ \$20 out/, 'tagged model');
+});
+
+test('a model no read listed is unknown only once the catalog is read whole', () => {
+    const at = (target) => apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: target } });
+    // A partial read (another source failed) says nothing about a model it did not list.
+    assert.equal(modelTariffText(at('unlisted/model'), { read_state: 'partial', items: [] }), '');
+    // The whole catalog read: the model's price is unknown.
+    assert.match(modelTariffText(at('unlisted/model'), { read_state: 'ok', items: [] }), /Price unknown/i);
+});
+
+test('a list head reads a key\'s catalog only for a row that shows a rate: a tier-only twin never costs a read', async (t) => {
+    const asked = [];
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+        asked.push(String(url).split('?')[1]);
+        return new Response(JSON.stringify({ read_state: 'ok', items: [], errors: [], model_sources: [] }),
+            { headers: { 'content-type': 'application/json' } });
+    };
+    t.after(() => { globalThis.fetch = real; });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
+    const keys = () => asked.filter((query) => String(query).startsWith('provider_id'));
+    const catalogFor = (rows) => createAgentModelCatalog({ state: { providers: [{ id: 'openrouter' }], modelSources: [] },
+        saved: true, rows: () => rows, apiCatalogAllowed: () => true, supportsScopes: () => true, changed() {}, adoptSources() {} });
+    const tier = apiRow({ subagent_id: 'tier', processing_preference: 'fast' });
+    const standard = apiRow({ subagent_id: 'plain', processing_preference: 'standard' });
+    // One query serves both rows; the screen decides before the dedup, so neither roster order loses the read the
+    // row that shows a rate needs — and the tier-only key is never read at all.
+    for (const roster of [[standard, tier], [tier, standard]]) {
+        asked.length = 0;
+        catalogFor(roster).refresh({ list: true });
+        await settle();
+        assert.deepEqual(keys(), ['provider_id=openrouter'], `${roster[0].subagent_id} first`);
+    }
+    asked.length = 0;
+    catalogFor([tier]).refresh({ list: true });
+    await settle();
+    assert.deepEqual(keys(), [], 'a tier-only key is not read for the list');
+    // The screen is the list head's alone: the edit form still reads that key.
+    asked.length = 0;
+    catalogFor([]).read(tier);
+    await settle();
+    assert.deepEqual(keys(), ['provider_id=openrouter'], 'the edit form still reads the tier row\'s key');
+});
+
+test('an opaque subscription source id is not a harness mark without a descriptor; its label reads the id', () => {
+    // `claudexor::agy=…` spells a program, but without a model-source descriptor that is not evidence of the native
+    // harness: a neutral mark (empty harness id) beside the source's own label. A descriptor's credential harness
+    // earns the real program's mark.
+    const opaque = apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::agy=claude-x' } });
+    const state = { modelSources: [], snapshot: { harnesses: [] }, catalogKnown: false };
+    const unconfirmed = rowIdentity(opaque, state);
+    assert.equal(unconfirmed.harnessId, '');
+    assert.match(unconfirmed.label, /^agy\b/);
+    const confirmed = rowIdentity(opaque, { ...state, modelSources: [{ id: 'agy', label: 'Antigravity models', credentialHarness: 'agy' }] });
+    assert.equal(confirmed.harnessId, 'agy');
+});
+
 test('a minted row names its origin, and a copy keeps the mark but never the origin', () => {
     assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, minted_from: 'review_lane' }), QUIET_STATE, 0),
         /<div data-subagent-minted><dt>Origin<\/dt><dd>From a former review lane<\/dd>/);
@@ -1380,7 +1594,7 @@ test('a minted row names its origin, and a copy keeps the mark but never the ori
     editor.destroy();
 });
 
-test('two marked rows on one engine are a repeat; a twin only one of which reviews is still a copy slip', () => {
+test('same-engine twins preserve runtime origins; unminted twins need both Reviewer marks', () => {
     const twins = (first, second) => validateAvailableSubagentsSetting(setting([
         apiRow({ subagent_id: 'one', ...first }), apiRow({ subagent_id: 'two', ...second }),
     ]), { uniqueEngines: true });
@@ -1388,7 +1602,24 @@ test('two marked rows on one engine are a repeat; a twin only one of which revie
     assert.deepEqual(twins({ review_eligible: true, minted_from: 'review_lane' }, {}), [],
         'a review row minted beside the owner delegation row is no slip');
     assert.match(twins({ review_eligible: true }, {})[0], /^Subagent 2 runs the same engine as Subagent 1 — .* mark both as Reviewer for a repeated review, or remove it\.$/);
-    assert.match(twins({ review_eligible: true, minted_from: 'factory_default' }, { minted_from: 'review_lane' })[0], /same engine as Subagent 1/);
+    // Match validate_unique_engines: migration can mint both an old review seat
+    // and a helper (or two helpers). Either birth marker permits the pair.
+    for (const [first, second] of [
+        [{ review_eligible: true, minted_from: 'factory_default' }, { minted_from: 'review_lane' }],
+        [{ minted_from: 'review_lane' }, { review_eligible: true, minted_from: 'review_lane' }],
+        [{ minted_from: 'review_lane' }, { minted_from: 'review_lane' }],
+    ]) {
+        assert.deepEqual(twins(first, second), []);
+        const rows = setting([apiRow({ subagent_id: 'one', ...first }), apiRow({ subagent_id: 'two', ...second })]);
+        assert.doesNotMatch(rowMeta(rows.items[1], { ...QUIET_STATE, setting: rows }, []).text, /same engine/);
+        const dom = accessEditorDom();
+        const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+        editor.load(setting([...rows.items, poolReviewer()]));
+        dom.row(1).querySelector('[data-subagent-field="recommended_use"]').emit('input', 'Updated purpose.');
+        assert.deepEqual(editor.validate(), []);
+        assert.equal(editor.setting.items[1].minted_from, second.minted_from);
+        editor.destroy();
+    }
     assert.equal(reviewTwinAllowed({ review_eligible: true }, { review_eligible: true }), true);
     assert.equal(reviewTwinAllowed({}, {}), false);
 

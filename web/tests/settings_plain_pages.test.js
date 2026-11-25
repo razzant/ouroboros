@@ -124,7 +124,7 @@ test('every key of the plain pages has exactly one row, on a page that is regist
     [['runtimeMode', 'raiseAccess'], ['safetyMode', 'lowerSafety'], ['safetyMode', 'lowerSafety'], ['autoGrant', 'autoGrantOn'], ['generic', 'openNetwork']]);
     assert.deepEqual(JSON.parse(JSON.stringify(ROWS)), ROWS);
     // A page's rare rows sit behind its one fold: the fold rows of each page are few and named.
-    assert.deepEqual(mine.filter((row) => row.fold).map((row) => row.id), ['OUROBOROS_REVIEW_MAX_CYCLES', 'appearance:translations', 'computer:reset']);
+    assert.deepEqual(mine.filter((row) => row.fold).map((row) => row.id), ['appearance:translations', 'computer:reset']);
 });
 
 test('the Safety scale reads Off, Outgoing, + Commands wherever it is drawn, and stores off, light, full', async (t) => {
@@ -235,18 +235,20 @@ test('lowering a Safety level asks first and raising one does not', async (t) =>
     assert.equal(declined.option('OUROBOROS_SAFETY_MODE', 'full').getAttribute('aria-pressed'), 'true');
 });
 
-test('Permissions and checks: three questions and what it is trusted with, doors that say their fact, one fold, no hover title', async (t) => {
+test('Permissions and checks: three questions and what it is trusted with, doors that say their fact, the review cap in sight, no hover title', async (t) => {
     const page = await open(t, 'permissions', { values: { OUROBOROS_MODEL_SAFETY: 'anthropic::claude-opus-5.5' } });
     assert.deepEqual(page.container.querySelectorAll('.settings-card-title').map((title) => title.textContent),
         ['What it may change', 'Who watches its actions', 'Who checks its results', 'Trust it without asking']);
     assert.deepEqual(page.container.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow), [
         'OUROBOROS_RUNTIME_MODE', 'OUROBOROS_SAFETY_MODE', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'permissions:rules', 'permissions:supervisor',
-        'permissions:second-check', 'OUROBOROS_TASK_REVIEW_MODE', 'permissions:reviewers',
-        'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS', 'OUROBOROS_REVIEW_MAX_CYCLES']);
-    const folds = page.container.querySelectorAll('details[data-settings-fold]');
-    assert.equal(folds.length, 1);
-    assert.equal(folds[0].querySelector('summary').textContent, 'More: review rounds');
-    assert.deepEqual(folds[0].querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow), ['OUROBOROS_REVIEW_MAX_CYCLES']);
+        'permissions:second-check', 'OUROBOROS_TASK_REVIEW_MODE', 'OUROBOROS_REVIEW_MAX_CYCLES', 'permissions:reviewers',
+        'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS']);
+    // The cap on paid review rounds stands in the card of what it limits, in sight: this page folds nothing away.
+    assert.deepEqual(page.container.querySelectorAll('.settings-card')
+        .find((each) => each.querySelector('.settings-card-title')?.textContent === 'Who checks its results')
+        .querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow),
+    ['OUROBOROS_TASK_REVIEW_MODE', 'OUROBOROS_REVIEW_MAX_CYCLES', 'permissions:reviewers']);
+    assert.equal(page.container.querySelectorAll('details[data-settings-fold]').length, 0);
     assert.equal(page.meta('permissions:supervisor'), 'claude-opus-5.5');
     assert.equal(page.meta('permissions:second-check'), 'Off');
     assert.equal(page.container.querySelector('[data-safety-skips]').textContent, 'No safety checks let through in the last 24 h.',
@@ -259,6 +261,15 @@ test('Permissions and checks: three questions and what it is trusted with, doors
         await page.press(page.row(id));
         assert.equal(page.opened.at(-1), to, id);
     }
+    // The cap is changed where it stands: one press writes its one key, and the pressed option is the chosen one.
+    const CAP = 'OUROBOROS_REVIEW_MAX_CYCLES';
+    const offered = (shown) => shown.row(CAP).querySelectorAll('[data-setting-value]').map((button) => button.dataset.settingValue);
+    assert.deepEqual([page.row(CAP).querySelector('.ui-row-title').textContent, page.meta(CAP)], ['Max review cycles', 'Paid cycles per task, for each kind of review.']);
+    assert.deepEqual(offered(page), ['1', '2', '3', '5', 'unlimited']);
+    assert.equal(page.option(CAP, '2').getAttribute('aria-pressed'), 'true');
+    await page.press(page.option(CAP, 'unlimited'));
+    assert.deepEqual(page.server.writes('/api/settings'), [{ [CAP]: 'unlimited' }]);
+    assert.equal(page.option(CAP, 'unlimited').getAttribute('aria-pressed'), 'true');
     // Turning the grant on asks first; turning it off does not.
     await page.press(page.row('OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS'));
     const grant = page.row('OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS').querySelector('[data-setting-control]');
@@ -268,12 +279,23 @@ test('Permissions and checks: three questions and what it is trusted with, doors
     assert.equal(page.asked.at(-1).title, 'Give reviewed skills their keys?');
     assert.deepEqual(page.server.writes('/api/owner/auto-grant'), [{ enabled: true }]);
     assert.doesNotMatch(settingsPageSource(), / title="/, 'what a row needs to say is in its meta or its result line');
+    // (A page opened anew: it comes last, since opening it forgets the first one's rows.)
+    // A stored number the strip does not offer is shown as the chosen one, and stays offered after another choice.
+    const kept = await open(t, 'permissions', { values: { [CAP]: '4' } });
+    assert.deepEqual(offered(kept), ['1', '2', '3', '4', '5', 'unlimited']);
+    assert.equal(kept.option(CAP, '4').getAttribute('aria-pressed'), 'true');
+    await kept.press(kept.option(CAP, '5'));
+    assert.deepEqual(offered(kept), ['1', '2', '3', '4', '5', 'unlimited'], 'the way back stays');
+    assert.equal(kept.option(CAP, '5').getAttribute('aria-pressed'), 'true');
+    assert.match(kept.line(CAP), /^Saved.*was 4/, 'and the row still says what the press did: the page was not drawn again');
+    await kept.press(kept.option(CAP, '4'));
+    assert.deepEqual(kept.server.writes('/api/settings'), [{ [CAP]: '5' }, { [CAP]: '4' }]);
 });
 
 const settingsPageSource = () => fs.readFileSync(new URL('../modules/settings_ui.js', import.meta.url), 'utf8')
     + fs.readFileSync(new URL('../modules/settings_safety.js', import.meta.url), 'utf8');
 
-test('what a managed deployment locks is said in its row, and an unmanaged one leaves the rows as described', () => {
+test('what a managed deployment locks is said in its row, an unmanaged one leaves the rows as described, and the review cap keeps a stored number', () => {
     const rows = () => rowsOf('permissions').map((row) => structuredClone(row));
     const row = (list, id) => list.find((each) => each.id === id);
     const managed = tunePermissionRows(rows(), { OUROBOROS_MODEL_SAFETY: '', _meta: { policy_state: {
@@ -293,6 +315,28 @@ test('what a managed deployment locks is said in its row, and an unmanaged one l
     const plain = tunePermissionRows(rows(), { _meta: { policy_state: { access: { configured: 'pro', current_process: 'pro' } } } });
     assert.deepEqual(row(plain, 'OUROBOROS_TASK_REVIEW_MODE').control, rowById('OUROBOROS_TASK_REVIEW_MODE').control);
     assert.deepEqual(row(plain, 'OUROBOROS_RUNTIME_MODE').control, rowById('OUROBOROS_RUNTIME_MODE').control);
+    // The review cap: a stored positive number its strip does not offer is one more option in its numeric place; a value
+    // the strip offers, no value and text the settings endpoint never stores leave the strip as described.
+    const CAP = 'OUROBOROS_REVIEW_MAX_CYCLES';
+    const caps = (list) => row(list, CAP).control.options.map((option) => option.value);
+    assert.deepEqual(row(plain, CAP).control, rowById(CAP).control);
+    for (const stored of ['2', 'unlimited', '', '0', '04', ' 4 ', 'abc']) {
+        assert.deepEqual(row(tunePermissionRows(rows(), { [CAP]: stored }), CAP).control, rowById(CAP).control, `stored "${stored}"`);
+    }
+    assert.deepEqual(caps(tunePermissionRows(rows(), { [CAP]: '4' })), ['1', '2', '3', '4', '5', 'unlimited']);
+    assert.deepEqual(caps(tunePermissionRows(rows(), { [CAP]: 10 })), ['1', '2', '3', '5', '10', 'unlimited']);
+    // While the page is open it stays offered after another choice; a newer such number takes its place.
+    const shown = tunePermissionRows(rows(), { [CAP]: '4' });
+    assert.deepEqual(caps(tunePermissionRows(shown, { [CAP]: '5' })), ['1', '2', '3', '4', '5', 'unlimited']);
+    assert.deepEqual(caps(tunePermissionRows(shown, { [CAP]: '7' })), ['1', '2', '3', '5', '7', 'unlimited']);
+    // The page's options are its own: writing to them never reaches the described row.
+    for (const stored of ['2', '4']) {
+        const mine = row(tunePermissionRows(rows(), { [CAP]: stored }), CAP).control.options;
+        mine.forEach((option) => { option.label = 'changed'; });
+        mine.length = 0;
+    }
+    assert.deepEqual(rowById(CAP).control.options.map((option) => [option.value, option.label]),
+        [['1', '1'], ['2', '2'], ['3', '3'], ['5', '5'], ['unlimited', '∞']], 'the described row is not changed');
 });
 
 test('Permissions and checks: under an organization\'s Supervisor the spare-model line is hidden; the ordinary page shows it', async (t) => {
@@ -580,7 +624,10 @@ test('Advanced holds what an installation rarely changes, and About the reset in
     const advanced = await open(t, 'computer/advanced');
     assert.match(advanced.container.textContent, /^Most installations never change these\./);
     assert.deepEqual(advanced.container.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow),
-        ['OUROBOROS_MAX_WORKERS', 'OUROBOROS_UI_DIR', 'OUROBOROS_EXTRA_CA_BUNDLE']);
+        ['OUROBOROS_MAX_WORKERS', 'OUROBOROS_TOOL_TIMEOUT_SEC', 'OUROBOROS_UI_DIR', 'OUROBOROS_EXTRA_CA_BUNDLE']);
+    for (const [key, page] of [['OUROBOROS_TOOL_TIMEOUT_SEC', 'computer/advanced'], ['MCP_TOOL_TIMEOUT_SEC', 'tools']]) {
+        assert.deepEqual(ROWS.filter((row) => row.keys.includes(key)).map((row) => row.page), [page], `${key} has one home`);
+    }
     await advanced.shown();
     assert.equal(advanced.meta('OUROBOROS_UI_DIR'), 'Empty serves the built-in interface.');
     const served = advanced.row('OUROBOROS_UI_DIR').querySelector('[data-served-ui]');
@@ -608,6 +655,10 @@ test('Advanced holds what an installation rarely changes, and About the reset in
     const cap = advanced.row('OUROBOROS_MAX_WORKERS');
     const noLimit = cap.querySelector('[data-setting-no-limit]');
     assert.deepEqual([cap.querySelector('[data-setting-control]').value, noLimit.getAttribute('aria-pressed')], ['', 'true']);
+    const sent = advanced.server.writes('/api/settings').length;
+    await type('OUROBOROS_MAX_WORKERS', '0');  // its declared lower bound refuses here: a zero is no number
+    assert.equal(advanced.server.writes('/api/settings').length, sent);
+    assert.match(advanced.line('OUROBOROS_MAX_WORKERS'), /Enter a number, 1 or more\./);
     await type('OUROBOROS_MAX_WORKERS', '4');
     assert.deepEqual(advanced.server.writes('/api/settings').at(-1), { OUROBOROS_MAX_WORKERS: 4 });
     assert.equal(advanced.line('OUROBOROS_MAX_WORKERS'), 'Saved · was no limit');

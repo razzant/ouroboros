@@ -40,7 +40,7 @@ def main_loop(tmp_path, monkeypatch):
                         inputs=[], progress=[], incoming=queue.Queue(), events=queue.Queue())
     f.messages = f.ctx.context_fit_plan.messages_for("max")
 
-    def run(responses, *, initial_effort=effort):
+    def run(responses, *, initial_effort=effort, first_projection=None, first_candidate=None):
         replies = iter(responses)
 
         class Provider:
@@ -52,12 +52,16 @@ def main_loop(tmp_path, monkeypatch):
                 from ouroboros.model_send_seal import persist_physical_candidate
 
                 ua.adopt_physical_attempt_capture(None)
+                if first_projection is not None and not f.inputs:
+                    kwargs["messages"] = first_projection(kwargs["messages"])
                 f.inputs.append(deepcopy(kwargs))
                 reply = next(replies)
                 if isinstance(reply, Exception):
                     raise reply
                 message = reply(kwargs) if callable(reply) else deepcopy(reply)
                 candidate = _physical_candidate({key: kwargs[key] for key in ("messages", "tools", "model")})
+                if first_candidate is not None and len(f.inputs) == 1:
+                    candidate = first_candidate(candidate)  # the lane's own sealed shape of the accepted send
                 request = _attempt_request({"provider": "openai", "usage_model": kwargs["model"]}, candidate)
                 attempt_id = f"authored-send-{len(f.inputs)}"
                 persisted = persist_physical_candidate(f.ctx.drive_root, task_id="authored-main",
@@ -80,6 +84,185 @@ def main_loop(tmp_path, monkeypatch):
 
     f.run = run
     return f
+
+
+@pytest.mark.parametrize("carrier", ["messages", "anthropic_system", "local_string", "split_before_task"])
+@pytest.mark.parametrize("carried_in_accepted_input", [True, False])
+def test_late_helper_delivery_uses_the_first_accepted_owner_words(
+        main_loop, tmp_path, carried_in_accepted_input, carrier):
+    from ouroboros import context, dialogue_store, owner_relay
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_messages import split_leading_system_prefix
+    from ouroboros.chat_uploads import store_upload
+    from ouroboros.task_results import write_task_result
+    from tests.test_doc_context import _make_env_and_memory
+
+    f = main_loop
+    env, memory = _make_env_and_memory(tmp_path / "source")
+    f.ctx.task_metadata = {"delegation_role": "subagent", "root_task_id": "quarterly-report"}
+    task = {"id": "authored-main", "type": "task", "text": "Draft a summary of the quarter.",
+            "metadata": f.ctx.task_metadata, "drive_root": str(f.ctx.drive_root), "budget_drive_root": str(f.ctx.drive_root)}
+    evidence = SimpleNamespace(route_fp="route-a", status="confirmed", stale=False, window_tokens=900_000)
+
+    def build(subject):
+        rows, _ = context.build_llm_messages(env, memory, subject, ctx=f.ctx, reasoning_effort="medium",
+            route_resolver=lambda *_a, **_kw: ({"provider": "openai", "model": "openai/test-model"}, evidence))
+        return rows
+
+    fallback = build(task)
+    data, words = b"region,sales\neast,4\n", "Use the attached final figures."
+    _path, upload = store_upload(data, "figures.csv", data_dir=f.ctx.drive_root)
+    row = {"direction": "in", "chat_id": 1, "ts": "2026-10-04T06:00:00+00:00", "text": words,
+           "client_message_id": "quarterly-figures", "attachments": [upload]}
+    dialogue_store.append(f.ctx.drive_root, "chat", row)
+    address = owner_relay.owner_row_address(row)
+    held = {address: {**row, "carried": {"went_to": "sibling"}}}
+    write_task_result(f.ctx.drive_root, task["id"], "running", delegation_role="subagent",
+                      parent_task_id="quarterly-report", root_task_id="quarterly-report", held_owner_messages=held)
+    f.messages = build({**task, "held_owner_messages": held})
+
+    def attach(_kwargs):
+        ref, _ = owner_relay.owner_row_source(row)
+        owner_relay.carry_row_at_receipt(f.ctx.drive_root, "quarterly-report", 1, "quarterly-figures", source_ref=ref)
+        return call("read_file", {"path": "evidence.txt"}, "draft")
+
+    def physical_projection(messages):
+        # Stub the ordinary transport after host selection. Both cases retain
+        # the same upcoming host view; this fallback had no such room input.
+        return messages if carried_in_accepted_input else [deepcopy(fallback[0]), *messages[1:]]
+
+    def sealed_shape(candidate):  # the layout the lane itself seals for the accepted first send
+        lane, rows = LLMClient.__new__(LLMClient), candidate["messages"]
+        source = rows if carried_in_accepted_input else [deepcopy(fallback[0]), *rows[1:]]
+        if carrier == "anthropic_system":  # the native lane moves the system row's blocks to the request slot
+            system, messages = lane._build_anthropic_messages(source)
+            assert all(str(row.get("role") or "") != "system" for row in messages)
+            return {**candidate, "messages": messages, "system": system}
+        if carrier == "local_string":  # a string-system lane folds the declared blocks into one string
+            return {**candidate, "messages": lane._build_local_candidate(source, None, 512, "auto")[1]["messages"]}
+        if carrier == "split_before_task":  # the Codex/OpenAI projection: leading items, then one notice row
+            sent, moved = split_leading_system_prefix(source, placement="before_task")
+            assert moved, "the fixture's composed system message declares no splittable stable prefix"
+            return {**candidate, "messages": sent}
+        return candidate
+
+    f.run([attach, {"content": "The quarterly summary is ready."}],
+          first_projection=physical_projection, first_candidate=sealed_shape)
+    accepted = str(f.inputs[0]["messages"][0]["content"])
+    second = f.inputs[1]["messages"]
+    assert (words in accepted) is carried_in_accepted_input
+    assert words in str(second[0]["content"])  # deliberately identical current system view
+    anchor = f.ctx._historical_author_inputs["anchors"][0]
+    assert anchor["physical_source_status"] == "observed_projection"
+    digest = owner_relay.owner_row_identity(row)["row_sha256"]
+    assert (digest in anchor.get("helper_owner_rows", {})) is carried_in_accepted_input
+    tail = str(second[1:])
+    if carried_in_accepted_input:
+        assert f"the row {address} in your starting words was addressed to this work" in tail
+        assert words not in tail
+    else:
+        assert words in tail and "[Host attachment delivery]" in tail and "figures.csv" in tail and "status=staged" in tail
+        assert "in your starting words was addressed" not in tail
+    staged = task_artifact_dir_path(f.ctx.drive_root, "authored-main") / "attachments"
+    assert any(file.is_file() and file.read_bytes() == data for file in staged.iterdir())
+
+
+@pytest.mark.parametrize("standing", ["context", "tree"])
+@pytest.mark.parametrize("carrier", ["origin", "marked"])
+def test_a_background_row_in_the_starting_words_is_answered_as_addressed(main_loop, carrier, standing):
+    """The rows a handoff reads as background — the Project's retained origin rows and the rows marks keep in
+    view — are not words addressed to this work: the typed builder's own carriers say so, and the birth pin's
+    standing follows. When such a row arrives addressed, the helper is told it was already in its starting
+    words and is not shown them again; a row that stood as addressed to this work gets nothing more."""
+    from ouroboros import dialogue_store, owner_relay
+    from ouroboros.context_input_selection import owner_row_standing
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_words import _row
+
+    f, root, task_id = main_loop, main_loop.ctx.drive_root, "authored-main"
+    words = "The project opened with these words."
+    built = _row(words, source="origin_message" if carrier == "origin" else "marked_message", carrier=carrier,
+                 ts="2026-10-04T06:00:00+00:00")
+    assert owner_row_standing(built) == "context"                       # background, whatever carrier held it
+    assert owner_row_standing({**built, "carrier": "went to sibling"}) == "context"
+    assert owner_row_standing({**built, "carrier": "held"}) == "tree"   # the same words addressed to this work
+    row = {"direction": "in", "chat_id": 1, "ts": built["ts"], "text": words,
+           "client_message_id": f"quarterly-{carrier}"}
+    dialogue_store.append(root, "chat", row)
+    address, digest = owner_relay.owner_row_address(row), owner_relay.owner_row_identity(row)["row_sha256"]
+    f.ctx.task_metadata = {"delegation_role": "subagent", "root_task_id": "quarterly-report"}
+    f.ctx.task_id = task_id
+    f.ctx._historical_author_inputs = {"version": 1, "task_id": task_id, "status": "captured", "anchors": [
+        {"position": "first", "status": "captured", "physical_source_status": "observed_projection",
+         "source_ref": "context_checkpoints/historical-author-input", "helper_owner_rows": {digest: standing}}]}
+    owner_relay.write_relay(root, task_id, relay_id=f"carry:{address}", note="", chat_id=1,
+                            quotes=[owner_relay.owner_quote(root, row, address=address)],
+                            teller_task_id="quarterly-report", canonical_root=root, host_carried={"went_to": ""})
+    messages = []
+    controls = _drain_incoming_messages(messages, queue.Queue(), root, task_id, None, set(), owner_ctx=f.ctx)
+    if standing == "context":
+        assert [m["content"] for m in messages] == [
+            f"[Host fact: the row {address} in your starting words was addressed to this work]"]
+        assert controls["owner_carried_addressed"] == [address] and words not in str(messages)
+    else:
+        assert messages == [] and "owner_carried_addressed" not in controls
+
+
+@pytest.mark.parametrize("view_rebuilt_before_dispatch", [False, True])
+def test_a_row_waiting_at_a_helpers_first_send_is_delivered_whatever_view_is_dispatched(
+        main_loop, tmp_path, view_rebuilt_before_dispatch):
+    """A carried row already in the helper's mail at its first drain meets a view no input has pinned yet. Its words
+    and file status go out as a row of the transcript, so they reach the accepted input whether the drafted view is
+    sent as drafted or rebuilt without the row, once, and stay in the next request; no host line claims the starting
+    words held it."""
+    from ouroboros import context, dialogue_store, owner_relay
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.chat_uploads import store_upload
+    from ouroboros.task_results import write_task_result
+    from tests.test_doc_context import _make_env_and_memory
+
+    f = main_loop
+    env, memory = _make_env_and_memory(tmp_path / "source")
+    f.ctx.task_metadata = {"delegation_role": "subagent", "root_task_id": "quarterly-report"}
+    task = {"id": "authored-main", "type": "task", "text": "Draft a summary of the quarter.",
+            "metadata": f.ctx.task_metadata, "drive_root": str(f.ctx.drive_root), "budget_drive_root": str(f.ctx.drive_root)}
+    evidence = SimpleNamespace(route_fp="route-a", status="confirmed", stale=False, window_tokens=900_000)
+
+    def build(subject):
+        rows, _ = context.build_llm_messages(env, memory, subject, ctx=f.ctx, reasoning_effort="medium",
+            route_resolver=lambda *_a, **_kw: ({"provider": "openai", "model": "openai/test-model"}, evidence))
+        return rows
+
+    without_row = build(task)
+    data, words = b"region,sales\neast,4\n", "Use the attached final figures."
+    _path, upload = store_upload(data, "figures.csv", data_dir=f.ctx.drive_root)
+    row = {"direction": "in", "chat_id": 1, "ts": "2026-10-04T06:00:00+00:00", "text": words,
+           "client_message_id": "quarterly-figures", "attachments": [upload]}
+    dialogue_store.append(f.ctx.drive_root, "chat", row)
+    address = owner_relay.owner_row_address(row)
+    held = {address: {**row, "carried": {"went_to": "sibling"}}}
+    write_task_result(f.ctx.drive_root, task["id"], "running", delegation_role="subagent",
+                      parent_task_id="quarterly-report", root_task_id="quarterly-report", held_owner_messages=held)
+    f.messages = build({**task, "held_owner_messages": held})
+    assert words in str(f.messages[0]["content"])  # the drafted view holds the row as context
+    ref, _ = owner_relay.owner_row_source(row)
+    owner_relay.carry_row_at_receipt(f.ctx.drive_root, "quarterly-report", 1, "quarterly-figures", source_ref=ref)
+
+    def dispatched(messages):  # the ordinary transport after host selection: the draft, or a view rebuilt without the row
+        return [deepcopy(without_row[0]), *messages[1:]] if view_rebuilt_before_dispatch else messages
+
+    f.run([call("read_file", {"path": "evidence.txt"}, "draft"), {"content": "The quarterly summary is ready."}],
+          first_projection=dispatched)
+    first, second = (request["messages"] for request in f.inputs[:2])
+    assert (words in str(first[0]["content"])) is not view_rebuilt_before_dispatch
+    for tail in (str(first[1:]), str(second[1:])):  # delivered with the first input and kept in the next
+        assert tail.count(f"carried to this work by the host (reached this work); handle {address}]") == 1
+        assert words in tail and "[Host attachment delivery]" in tail and "figures.csv" in tail and "status=staged" in tail
+        assert "in your starting words was addressed" not in tail
+    assert owner_relay.held_owner_messages(f.ctx)[address]["carried"]["went_to"] == ""
+    staged = task_artifact_dir_path(f.ctx.drive_root, "authored-main") / "attachments"
+    assert any(file.is_file() and file.read_bytes() == data for file in staged.iterdir())
 
 
 def test_main_records_and_applies_authored_view_without_manual_observation(main_loop):
@@ -144,13 +327,15 @@ def test_retelling_instructions_and_authored_account_reach_next_send(main_loop, 
         return call("compact_context", {"working_note": note, "keep_unit_ids": []}, "compact")
 
     def restore(kwargs):
-        accounts = [block["text"] for message in kwargs["messages"]
+        from ouroboros.context_compaction import note_written
+
+        accounts = [(block["text"], note_written(block["_context_capsule"])) for message in kwargs["messages"]
                     if message.get("role") == "assistant" and not message.get("tool_calls")
                     and isinstance(message.get("content"), list)
                     for block in message["content"]
                     if block.get("type") == "text" and block.get("_context_capsule")]
-        assert any(text == "[Actor-authored working view; exact source retained by checkpoint]\n" + note
-                   for text in accounts)
+        assert any(text == f"[Actor-authored working view, written {written}; exact source retained by checkpoint]\n"
+                   + note for text, written in accounts)
         assert not any(m.get("tool_call_id") == "read" for m in kwargs["messages"])
         return call("compact_context", {"restore_unit_refs": [restored]}, "restore")
 
@@ -356,12 +541,13 @@ def test_main_schema_only_view_uses_the_active_envelope(main_loop, monkeypatch, 
     f.ctx.context_fit_plan = replace(f.ctx.context_fit_plan, preferred_mode=mode, initial_mode=mode,
         nano_projection=replace(f.ctx.context_fit_plan.max_projection, mode="nano"))
     f.messages = f.ctx.context_fit_plan.messages_for(mode)
-    f.run([call("compact_context", {"working_note": "", "schema_names": ["read_file"]}, "schemas"),
+    # A tool outside Nano's standing work set (``tool_policy.NANO_RESIDENT_SCHEMA_NAMES``) arrives only when named.
+    f.run([call("compact_context", {"working_note": "", "schema_names": ["query_code"]}, "schemas"),
            {"content": "done"}])
     before = {s["function"]["name"] for s in f.inputs[0]["tools"]}
     after = {s["function"]["name"] for s in f.inputs[1]["tools"]}
     if mode == "nano":
-        assert "read_file" not in before and "read_file" in after
+        assert "query_code" not in before and "query_code" in after
         assert f.ctx._context_view_receipt["status"] == "applied"
     else:
         assert before == after and f.ctx._context_view_receipt["status"] == "no_op"
@@ -437,3 +623,128 @@ def test_main_keeps_earlier_notes_under_empty_keep_and_merges_only_named_ones(ma
     assert replaced["checkpoint_ref"] == seen["address"]["checkpoint_ref"]
     restored = [text for text in accounts(f.inputs[7]["messages"]) if text.startswith("[Historical source")]
     assert len(restored) == 1 and goal in restored[0]
+
+
+def _plain(rows):
+    """A request's rows as a provider's cache compares them: the host's cache marks and text-block wrapping aside."""
+    def row(message):
+        out = {key: value for key, value in message.items() if key != "cache_control"}
+        content = out.get("content")
+        if isinstance(content, list) and content and all(isinstance(b, dict) and set(b) - {"cache_control"} == {"type", "text"}
+                                                         for b in content):
+            out["content"] = "".join(block["text"] for block in content)
+        return out
+    return [row(message) for message in rows]
+
+
+def test_two_full_folds_leave_the_start_and_the_first_folds_request_in_place(main_loop):
+    """Test 1 of the cheap-folds order: a full fold leaves the request's start rows byte-identical and writes its note
+    after them; its own call keeps the arguments the model sent, the note's exact text included; the next full fold
+    leaves every row of the request sent after the first fold, up to its last row before the model's answer, as
+    that request carried it, and writes its note after them."""
+    from ouroboros.context_compaction import _capsule_metadata
+
+    f = main_loop
+    first_note, second_note = "The first read holds the conclusion.", "The second read agrees with the first."
+    f.run([call("read_file", {"path": "evidence.txt"}, "read-1"),
+           call("compact_context", {"working_note": first_note, "keep_unit_ids": []}, "fold-1"),
+           call("read_file", {"path": "evidence.txt"}, "read-2"),
+           call("compact_context", {"working_note": second_note, "keep_unit_ids": []}, "fold-2"),
+           {"content": "done"}])
+    start, after_first, after_second = (_plain(f.inputs[i]["messages"]) for i in (0, 2, 4))
+    assert [row.get(HOST_CONTEXT_KIND_KEY) for row in start[2:]] == ["ouroboros_roster_snapshot", "ouroboros_context_facts"]
+    notes = [(i, meta) for i, row in enumerate(after_first) if (meta := _capsule_metadata(row)[1])]
+    (at, meta), = notes
+    assert at == len(start) and after_first[:at] == start  # the start's host rows stand, the note follows them
+    own = after_first[at + 1]
+    assert own["tool_calls"][0]["id"] == "fold-1"
+    assert json.loads(own["tool_calls"][0]["function"]["arguments"]) == {"working_note": first_note, "keep_unit_ids": []}
+    assert after_first[at]["content"][0]["text"].endswith("\n" + first_note)
+    assert after_second[:len(after_first)] == after_first  # that whole request stands, superseded facts included
+    second = after_second[len(after_first)]
+    assert _capsule_metadata(second)[1] and second["content"][0]["text"].endswith("\n" + second_note)
+
+
+def _roster_after_a_change(monkeypatch):
+    """A roster of twelve independent roots whose titles carry a version; ``bump`` changes it as a reply is produced."""
+    from ouroboros import peer_roster
+
+    state = {"v": 0}
+    monkeypatch.setattr(peer_roster, "independent_roots", lambda _root: {"roots": [
+        {"task_id": f"peer-{n}", "title": f"Peer work {n} at version {state['v']} " + "x" * 80, "project_id": "",
+         "chat_id": 1, "status": "running"} for n in range(12)], "incomplete": False})
+
+    def bump(reply):
+        def produce(_kwargs):
+            state["v"] += 1
+            return reply
+        return produce
+    return bump
+
+
+def _rosters(rows):
+    return [i for i, row in enumerate(rows) if str(row.get(HOST_CONTEXT_KIND_KEY) or "").startswith("ouroboros_roster")]
+
+
+def test_a_round_that_applies_a_fold_holds_a_changed_roster_back_one_round(main_loop, monkeypatch):
+    """Three directions at the loop's seam: with the roster changed, the round that applies a fold appends no roster
+    row and the next round appends it; a round without a fold appends it at once; when a fold is applied in two
+    consecutive rounds, the first round appends no roster row and the second does."""
+    from ouroboros.context_compaction import _capsule_metadata
+
+    f, bump = main_loop, _roster_after_a_change(monkeypatch)
+    read = lambda n: call("read_file", {"path": "evidence.txt"}, f"read-{n}")  # noqa: E731
+    f.run([read(1), bump(call("compact_context", {"working_note": "N1 holds read one.", "keep_unit_ids": []}, "fold-1")),
+           read(2), bump(read(3)),
+           bump(call("compact_context", {"working_note": "N2 holds read three.", "fold_last_n": 1}, "fold-2")),
+           bump(call("compact_context", {"working_note": "N3 holds the rest.", "keep_unit_ids": []}, "fold-3")),
+           {"content": "done"}])
+    requests = [_plain(f.inputs[i]["messages"]) for i in range(len(f.inputs))]
+
+    def after_last_note(rows):
+        return [i for i in _rosters(rows) if i > max(i for i, row in enumerate(rows) if _capsule_metadata(row)[1])]
+
+    def calls_before(rows, ident):
+        return next(i for i, row in enumerate(rows) if ident in {c["id"] for c in row.get("tool_calls") or ()})
+
+    assert not after_last_note(requests[2]) and after_last_note(requests[3])  # held by fold-1, then appended
+    assert max(_rosters(requests[4])) > calls_before(requests[4], "read-3")  # no fold: at once
+    assert not after_last_note(requests[5])  # held by fold-2
+    assert after_last_note(requests[6])  # fold-3 the next round: appended anyway (that fold then stands nothing)
+
+
+def test_four_full_folds_with_a_changing_roster_keep_at_most_two_snapshots_and_each_request(main_loop, monkeypatch):
+    """Over four full folds with a roster that changes before each, the view never holds more than two roster rows,
+    and the request sent after each fold is a prefix of the request sent after the next."""
+    f, bump = main_loop, _roster_after_a_change(monkeypatch)
+    script = []
+    for n in range(1, 5):
+        script += [bump(call("read_file", {"path": "evidence.txt"}, f"read-{n}")),
+                   call("compact_context", {"working_note": f"N{n} holds read {n}.", "keep_unit_ids": []}, f"fold-{n}")]
+    f.run([*script, {"content": "done"}])
+    requests = [_plain(f.inputs[i]["messages"]) for i in range(len(f.inputs))]
+    assert max(len(_rosters(rows)) for rows in requests) <= 2, [len(_rosters(rows)) for rows in requests]
+    folded = requests[2::2]
+    assert len(folded) == 4 and all(later[:len(earlier)] == earlier for earlier, later in zip(folded, folded[1:]))
+
+
+def test_six_consecutive_full_folds_with_a_changing_roster_deliver_it_and_never_pin_it(main_loop, monkeypatch):
+    """Six full folds in six consecutive rounds, the roster changing before each: the changed roster reaches the view
+    within one round every time, no roster row ever stands as a fold's own row (a fold whose round holds one leaves
+    nothing standing), and after each fold the view holds at most two roster rows."""
+    from ouroboros.tools.compact_context import standing_rows
+
+    f, bump = main_loop, _roster_after_a_change(monkeypatch)
+    f.run([call("read_file", {"path": "evidence.txt"}, "read-1"), *(bump(call(
+        "compact_context", {"working_note": f"N{n} holds what came before.", "keep_unit_ids": []}, f"fold-{n}"))
+        for n in range(1, 7)), {"content": "done"}])
+    requests = [f.inputs[i]["messages"] for i in range(len(f.inputs))]
+    def versions(rows):
+        return {v for i in _rosters(rows) for v in range(8) if f"at version {v} " in str(rows[i].get("content"))}
+
+    for r in range(2, len(requests) - 1):  # request r is built after reply r - 1 set version r - 1: it or the next
+        assert max(versions(requests[r]) | versions(requests[r + 1])) >= r - 1, (r, versions(requests[r]))
+    for rows in requests:
+        standing = standing_rows(rows)
+        assert not [i for i in _rosters(rows) if standing.get(i) is not None]
+        assert len(_rosters(rows)) <= 2, [len(_rosters(r)) for r in requests]

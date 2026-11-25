@@ -185,7 +185,10 @@ def test_floor_no_pending_ambiguous_apply(tmp_path):
     assert custody.emit(tmp_path, custody.PATCH_APPLY_STARTED, {"run_id": "run-snap", "task_id": "t-a",
                                                                 "snapshot_id": "snap-1", "apply_idempotency_key": "k"})
     custody._CUSTODY.clear()
-    assert _gate(tmp_path, "run-snap", **kwargs)[1] == continuation.REFUSAL_APPLY_AMBIGUOUS
+    _facts, code, detail = _gate(tmp_path, "run-snap", **kwargs)
+    assert code == continuation.REFUSAL_APPLY_AMBIGUOUS
+    # An ordinary Git run is first offered the call that records a provable apply without changing a file.
+    assert detail.index("decision='apply'") < detail.index("APPLY_AMBIGUOUS") < detail.index("acknowledge_ambiguous=true")
     assert custody.emit(tmp_path, custody.PATCH_DISPOSED, {"run_id": "run-snap", "task_id": "t-a",
                                                            "snapshot_id": "snap-1", "disposition": "rejected"})
     custody._CUSTODY.clear()
@@ -389,6 +392,22 @@ def test_an_engine_without_continue_from_refuses_typed_and_starts_nothing(tmp_pa
     assert "plain new run" in payload["detail"]
 
 
+@pytest.mark.parametrize("health,asks", [(("", "2099-01-01T00:00:00Z"), True), (("route_disabled", ""), False)])
+def test_a_start_refused_on_a_spent_route_asks_the_subscription_census_for_a_read(tmp_path, monkeypatch, health, asks):
+    """Route health proves the subscription spent: the typed, definitely unrun refusal asks the census for a read; an
+    unrelated blocker refuses the same way and asks nothing."""
+    from ouroboros import claudexor_daemon, config, subagents
+    from ouroboros import subscription_census as census
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    monkeypatch.setattr(subagents, "route_health", lambda *_a, **_k: health)
+    _select_transport_access(monkeypatch, "readonly")
+    request, payload, _ctx, calls = _start(tmp_path, monkeypatch, acting=False, run_id="run-spent")
+    assert request is None and calls == [] and payload["definitely_unrun"] is True
+    assert (census.request_mtime() is not None) is asks
+
+
 def test_argument_refusals_precede_the_daemon(tmp_path):
     from ouroboros.delegate_shared import delegate_payload
     from ouroboros.tools import delegate
@@ -541,16 +560,21 @@ def test_pending_continuation_recovery_keeps_lineage_and_refuses_predecessor_dis
     assert {key: pending[key] for key in lineage} == lineage
 
     class RecoveryGateway:
-        def start_run(self, body, *, idempotency_key):
+        def operations(self):
+            return [{"method": "POST", "path": "/v2/runs/lookup"}]
+        def lookup_run(self, body, *, idempotency_key):
             assert body == request and idempotency_key == invocation
-            return {"runId": "run-next"}
+            return {"status": "found", "storeId": "fixture-store", "handle": {
+                "jobId": "accepted-next", "runId": "run-next", "state": "running"}}
+        def start_run(self, *_a, **_kw):
+            pytest.fail("an unknown continuation must be read, not automatically re-POSTed")
 
         def get_run(self, run_id):
             assert run_id == "run-next"
             return {"summary": {"state": "running"}}
 
     custody._CUSTODY.clear()  # Recovery has only the durable pending invocation.
-    recovered = _recover_pending_invocation(tmp_path, RecoveryGateway(), pending)
+    recovered = _recover_pending_invocation(tmp_path, RecoveryGateway(), pending, may_read=True)
     assert recovered["action"] == "left_live"
     assert custody.pending_invocations(tmp_path) == []
     refusal = _integrate_delegated_patch(ctx, run_id="run-first", decision=decision)

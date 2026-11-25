@@ -91,8 +91,10 @@ test('Activity refresh keeps the host sentence as its only clock and names own t
         routes.set('/api/state', response({ bg_consciousness_enabled: true, bg_consciousness_state: bg }));
         await activity.refresh();
         const text = mount.querySelector('[data-activity-section="background"]').textContent;
-        assert.equal(text.split(override.detail).length - 1, 1);
-        assert.doesNotMatch(text.replace(override.detail, ''), /\d\d:\d\d|[Dd]ue|since|[Nn]ext wake/);
+        const said = override.detail.replace(/\.$/, '');  // inside the row's «·» list, without its closing period
+        assert.equal(text.split(said).length - 1, 1);
+        assert.equal(text.includes(override.detail), false, 'the row\'s list carries the sentence without its period');
+        assert.doesNotMatch(text.replace(said, ''), /\d\d:\d\d|[Dd]ue|since|[Nn]ext wake/);
         assert.match(text, /own tasks 1\/2/);
     }
 });

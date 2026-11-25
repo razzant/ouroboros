@@ -276,14 +276,15 @@ STARTED_STR_FIELDS: Tuple[Tuple[str, str], ...] = tuple(
 # window origin. ``row_effort`` is the configured pin ('' = Auto), ``effort`` the leaf's level; ``row_processing``
 # the row's own tier, ``processing_preference`` the run's.
 STARTED_MAPPING_FIELDS = ("authority_ceiling", "promotion")
-STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort", "row_processing", "window_started_at")
+STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort", "row_processing", "window_started_at",
+                         "resume_start_state")
 # Progress carried forward from a previous row: an idempotent re-start writes a
 # SECOND started row; replacing wholesale would forget a settlement and put a
 # finished run back into the orphan sweep (which would cancel it).
 STARTED_PROGRESS_FLAGS: Tuple[str, ...] = (
     "ledger_recorded", "settled", "containment_disclosed", "unread_disclosed",
     "output_artifact", "output_complete", "output_sha", "output_consumed", "output_source",
-    "patch_captured", "patch_disposed", "patch_disposed_by", "patch_result_lost", "patch_apply_pending",
+    "patch_captured", "patch_manifest_sha", "patch_disposed", "patch_disposed_by", "patch_result_lost", "patch_apply_pending",
     "superseded_by")
 # The closing facts SETTLED wrote (and the fault CONTAINMENT_FAULT recorded): a later
 # STARTED row never carries them, so replacing wholesale would forget a run's cost,

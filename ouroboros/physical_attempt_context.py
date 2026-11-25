@@ -8,8 +8,8 @@ import contextlib
 import contextvars
 import datetime
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Literal, Optional, TypedDict
+from dataclasses import InitVar, dataclass, field
+from typing import Any, Callable, Iterator, Literal, Optional, Tuple, TypedDict
 
 log = logging.getLogger(__name__)
 
@@ -34,17 +34,39 @@ class PhysicalAttemptContext:
     window_observation_fp: str = ""  # Main account scope, separate from capability/density route_fp
     required_book_tokens: int = 0  # a directly required handbook inside this candidate (density applied), its note too
     preferred_mode: str = ""  # the owner's mode this task's plan holds at send (Settings may differ by now)
-    # Why ``rendered_mode`` is lower ("" for agreement or an unknown cause): ``memory`` crowded the start's Max room,
-    # ``route`` the window cannot hold the books and core, ``window`` the start's window took it otherwise,
-    # ``after_start`` a lower mode the task took after its start (``context_measurement.mode_cause``).
+    # Why ``rendered_mode`` is lower ("" for agreement or an unknown cause): the start's Max room lost its whole books
+    # to ``memory``, to what the ``request`` itself carries, or to the ``route``'s window; ``window`` the start's window
+    # took it otherwise; ``after_start`` a lower mode the task took after its start (``context_measurement.mode_cause``).
     mode_cause: str = ""
+    # Low's missed target at this task's start: the request with no memory at all, reply reserve included
+    # (``memory_floor``'s ``floor.no_memory_tokens``); None when the target was met or none applied, and on older rows.
+    no_memory_tokens: Optional[int] = None
     # What this request did to its route's cached start, read from the host's own earlier sends on that route
     # (``transcript_prefix.attempt_prefix_fact``): never the provider's verdict, which is the row's measured counts.
     # None on rows written before it existed and on sends without a Main candidate.
     prefix: Optional[dict] = field(default=None, compare=False)
+    # The capture's prompt-file witness (``ContextCore.base_prompt_source``), unverified until the send seam matches
+    # it against the leading system content (``model_send_seal``). Carried beside the record, never in it: it is no
+    # field, so no ``asdict`` of a ledger row, receipt, capture or checkpoint holds it; ``replace`` keeps it.
+    base_prompt_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
+
+    def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]]) -> None:
+        # Only a witness is kept on the instance: without one, ``vars`` holds just the record's fields, and ``replace``
+        # reads the class's None back (it reads every InitVar with ``getattr``).
+        if base_prompt_source is not None:
+            object.__setattr__(self, "base_prompt_source", tuple(base_prompt_source))
 
 
 OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledger records as made
+
+
+def shown_mode(rendered_mode: str, *, compact: bool = False) -> Tuple[str, str]:
+    """``(mode, books)``: the mode a send is named in and its books' form, the one fact every surface reads. A start
+    the window took from my human's Max renders the ``low`` frame and is named Low: it runs in Low, temporarily, for
+    the window, while the owner's choice stays Max beside it (``preferred_at_send``, owner 21.11.2026). Low and Nano
+    show chapter maps; Max shows the whole books unless its actor reads them as maps by design (a delegated child,
+    ``compact``)."""
+    return rendered_mode, "whole" if rendered_mode == "max" and not compact else "maps"
 
 
 class ContextAttemptObservation(TypedDict, total=False):
@@ -58,9 +80,12 @@ class ContextAttemptObservation(TypedDict, total=False):
     ledger_state: Literal["dispatched", "settled", "unresolved", "released"]
     round_id: str
     preferred_at_send: Literal["", "max", "low", "nano"]  # the task plan's owner mode when it sent
-    applied: Literal["max", "low", "nano"]  # the mode the sent candidate was rendered in
+    applied: Literal["max", "low", "nano"]  # the mode the send is named in (``shown_mode``): Low for Low under Max
+    books: Literal["whole", "maps"]  # the books' form in this send
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
-    cause: Literal["", "memory", "route", "window", "after_start"]  # why lower; "" also when the original start is unknown
+    cause: Literal["", "memory", "request", "route", "window", "after_start"]  # why lower; "" also when unknown
+    target_missed: bool  # this send exceeded the owner's mode target (``context_target_miss``)
+    no_memory_tokens: Optional[int]  # Low's missed target: the start's request with no memory at all, else None
     observed_at: str
     task_attempt: int
     llm_call_id: str
@@ -85,9 +110,15 @@ def attempt_fact(capture: Any, round_id: str = "") -> Optional[ContextAttemptFac
         if (not isinstance(context, PhysicalAttemptContext) or getattr(capture, "state", "") not in OBSERVED | {"released"}
                 or (round_id and context.round_id != round_id)):
             return None
+        from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES  # a delegated child or nanny reads compact books
+
+        applied, books = shown_mode(context.rendered_mode, compact=context.view_kind in DELEGATED_FOCUS_ROLES)
+        # Task-local Low exists only under my human's Max: a row written before the owner's mode was kept says so too
+        preferred = context.preferred_mode or ("max" if context.profile == "task_local_low" else "")
         return {"attempt_id": str(capture.attempt_id), "ledger_state": str(capture.state), "round_id": context.round_id,
-                "preferred_at_send": context.preferred_mode, "applied": context.rendered_mode,
+                "preferred_at_send": preferred, "applied": applied, "books": books,
                 "profile": context.profile, "cause": context.mode_cause,
+                "target_missed": bool(context.context_target_miss), "no_memory_tokens": context.no_memory_tokens,
                 "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
     except Exception:  # a projection, never the send's authority
         return None

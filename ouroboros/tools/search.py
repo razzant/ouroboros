@@ -1,6 +1,9 @@
-"""Web search tool: one leg per Source of ``search_routes``, tried in the route's cascade. The paid legs (OpenAI
-Responses, the OpenRouter and Anthropic server tools, DeepSeek Search) are accounted per physical attempt; ddgs,
-an unofficial scraper, is not."""
+"""Web search accounts each physical provider attempt. Failed Responses, OpenRouter and Anthropic attempts retry or
+cascade only after a proven no-send or a typed no-start refusal without contrary evidence. A router's status and words
+(OpenRouter's free 404 "No endpoints found") make another source possible, not supported. A confirmed empty Responses
+completion may advance Auto as a separate leg. DeepSeek follows its Search API contract. DDGS is an unofficial scraper.
+A leg's ``llm_usage`` event states the amount its attempt row settled, final or
+the ledger's own estimate, that row's ``cost_invalid`` and its token counts; the tool prices and counts nothing itself."""
 
 from __future__ import annotations
 
@@ -12,9 +15,10 @@ import time
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
+from ouroboros._usage_response import refusal_conflicts, refusal_failure_payload, typed_search_refusal
 from ouroboros.gateways import search_api
-from ouroboros.pricing import estimate_cost_optional
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.transport_custody import _capture_on_chain, is_processing_refusal, release_pre_dispatch_attempt, stream_incomplete_on_chain
 from ouroboros.usage_accounting import (
     AttemptRequest,
     PhysicalAttemptCapture,
@@ -46,25 +50,22 @@ def _wrapped_provider_error(provider: str, exc: Exception) -> RuntimeError:
     detail = sanitize_tool_result_for_log(str(exc))[:500]
     wrapped = RuntimeError(f"{provider} web search failed ({type(exc).__name__}): {detail}")
     wrapped.ledger_attempt_ids = list(getattr(exc, "ledger_attempt_ids", []) or [])
-    capture = getattr(exc, "physical_attempt_capture", None)
+    capture = _capture_on_chain(exc)
     if isinstance(capture, PhysicalAttemptCapture):
         setattr(wrapped, "physical_attempt_capture", capture)
     return wrapped
 
 
 def _provider_outcome_is_unknown(exc: Exception) -> bool:
-    """Whether paid work started without a typed terminal provider outcome."""
-    from ouroboros.transport_custody import outcome_unknown_on_chain
-
-    capture = getattr(exc, "physical_attempt_capture", None)
-    return bool(
-        isinstance(capture, PhysicalAttemptCapture)
-        and outcome_unknown_on_chain(exc)
-        and capture.provider_status_code is None
-    )
+    """Whether another leg might repeat a search. Settlement alone says nothing about that."""
+    capture = _capture_on_chain(exc)
+    if getattr(capture, "provider", None) == "deepseek":
+        return stream_incomplete_on_chain(exc, exclude_rejected=True) or (
+            capture.state in {"dispatched", "unresolved"} and capture.provider_status_code is None)
+    return refusal_conflicts(exc)
 
 
-def _unknown_provider_outcome(backend: str) -> str:
+def _unknown_provider_outcome(backend: str, attempt_ids=()) -> str:
     return json.dumps({
         "error": (
             f"{backend} web search was dispatched but its provider outcome is unknown; "
@@ -72,6 +73,7 @@ def _unknown_provider_outcome(backend: str) -> str:
         ),
         "backend": backend,
         "reason_code": "provider_outcome_unknown",
+        "ledger_attempt_ids": list(attempt_ids),
     }, ensure_ascii=False, indent=2)
 
 
@@ -152,34 +154,30 @@ def _accounting_scope(ctx: ToolContext, source: str) -> UsageScope:
     )
 
 
-def _estimate_openai_cost(model: str, input_tokens: int, output_tokens: int) -> Optional[float]:
-    """Direct OpenAI Responses cost is unknown without provider-reported cost."""
-    pricing_model = model if "/" in str(model or "") else f"openai/{model}"
-    return estimate_cost_optional(
-        pricing_model, input_tokens, output_tokens, provider="openai",
-    )
+def _search_target(kind: str, connection: str, model: str) -> dict:
+    """The resolved target the search leg sends ``model`` on, read once through the one resolver: its connection's
+    endpoint, credential, headers, billing identity (``usage_model``) and provider routing; {} when it cannot serve."""
+    from ouroboros.llm_routing import resolve_target
+    from ouroboros.provider_models import connection_id, legacy_openai_base
+
+    if kind == "openai" and not connection and legacy_openai_base():
+        return {}  # The legacy key belongs to that compatible endpoint, never to official Responses.
+
+    try:
+        target = resolve_target(f"{connection_id(kind, connection)}::{model}")
+    except Exception:
+        return {}
+    if kind == "anthropic" and not connection and (legacy_base := os.environ.get("ANTHROPIC_BASE_URL")):
+        # The built-in SDK search historically uses this prefix. Named keys belong to their resolved endpoint.
+        base = legacy_base.rstrip("/") + "/v1"
+        target = {**target, "base_url": base, "capability_route": {**target["capability_route"], "dispatch_base_url": base}}
+    key = str(target.get("api_key") or "").strip()
+    return {**target, "api_key": key} if key else {}
 
 
 def _search_key(kind: str, connection: str = "") -> str:
-    """The key of the search leg's connection, read through the one resolver ('' when it cannot serve)."""
-    from ouroboros.llm_routing import resolve_target
-    from ouroboros.provider_models import connection_id
-
-    try:
-        return str(resolve_target(f"{connection_id(kind, connection)}::search").get("api_key") or "").strip()
-    except Exception:
-        return ""
-
-
-def _resolve_openai_client_settings(connection: str = "") -> tuple[str, str | None, str, str]:
-    """Return credentials only for official OpenAI Responses web search: the built-in key
-    beside the legacy compatible base URL belongs to that endpoint, not to OpenAI."""
-    from ouroboros.provider_models import legacy_openai_base
-
-    official_key = _search_key("openai", connection)
-    if official_key and (connection or not legacy_openai_base()):
-        return official_key, None, "openai", "openai"
-    return "", None, "openai", "openai"
+    """The key of the search leg's connection ('' when it cannot serve)."""
+    return str(_search_target(kind, connection, "search").get("api_key") or "")
 
 
 def _leg_model(source: str, model: str) -> str:
@@ -253,34 +251,39 @@ def _web_search_outer_timeout_sec() -> int:
     )
 
 
-def _emit_simple_usage(
-    ctx: ToolContext,
-    *,
-    provider: str,
-    model: str,
-    prompt_tokens: int | None = None,
-    completion_tokens: int | None = None,
-    usage: Dict[str, Any] | None = None,
-) -> None:
+def _settled_fact(attempt_ids: List[str], drive_root: Any = None) -> Dict[str, Any]:
+    """The ledger's money and counts of the attempt that carried a leg's reply (its last id). ``drive_root`` is
+    that reservation's own; a leg sent through the shared driver reads it from this context's last capture, which
+    must be that very attempt's. Empty when either is missing."""
+    from ouroboros._usage_settlement import attempt_money_fact
+    from ouroboros.usage_accounting import current_physical_attempt_drive_root, last_physical_attempt_capture
+
+    if not attempt_ids:
+        return {}
+    if drive_root is None and getattr(last_physical_attempt_capture(), "attempt_id", None) == attempt_ids[-1]:
+        drive_root = current_physical_attempt_drive_root()
+    return attempt_money_fact(drive_root, attempt_ids[-1]) if drive_root is not None else {}
+
+
+def _emit_simple_usage(ctx: ToolContext, *, provider: str, model: str, api_key_type: str = "",
+                       usage: Dict[str, Any] | None = None, settled: Dict[str, Any] | None = None) -> None:
+    """One ``llm_usage`` display event of a paid leg. Its money and its four token counts are ``settled``, what the
+    attempt ledger holds for the reply's own attempt (``_usage_settlement.attempt_money_fact``): the amount, final
+    or the ledger's own estimate, whether the row found the bill unreadable, and the counts as that row normalized
+    them. Nothing is priced, judged or counted again here, and the reply's own ``cost_invalid`` label is not the
+    row's; without that fact the event states no amount, no validity and no count."""
     if not hasattr(ctx, "pending_events"):
         return
     metadata = getattr(ctx, "task_metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
     try:
-        from ouroboros._usage_response import observed_processing_mode, provider_cost_value
-        from ouroboros.event_usage import event_token_counts
+        from ouroboros.event_usage import REPORTED_TOKENS_KEY, TOKEN_COUNTER_ALIASES
 
-        mode = observed_processing_mode(provider, usage or {})
-        cost = provider_cost_value((usage or {}).get("cost"))
-        if cost is None:
-            cost = estimate_cost_optional(
-                model if "/" in str(model) else f"{provider}/{model}",
-                int(prompt_tokens or 0),
-                int(completion_tokens or 0),
-                provider=provider,
-                **({"processing_mode": mode} if mode else {}),
-            )
+        settled = settled or {}
+        money = {"cost": settled.get("cost"),
+                 **{key: bool(settled.get(key)) for key in ("cost_final", "cost_estimated", "cost_invalid")}}
+        counts = {name: settled.get(name) for name in TOKEN_COUNTER_ALIASES}  # None: the row does not know it
         ctx.pending_events.append({
             "type": "llm_usage",
             "task_id": str(getattr(ctx, "task_id", "") or ""),
@@ -289,12 +292,12 @@ def _emit_simple_usage(
             "delegation_role": str(metadata.get("delegation_role") or ""),
             "provider": provider,
             "model": model,
-            "api_key_type": provider,
+            "api_key_type": api_key_type or provider,
             "model_category": "websearch",
-            # #1578: an unreported counter stays null, never a measured zero.
-            **event_token_counts(usage, {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}),
-            "usage": usage or {},
-            "cost": cost,
+            **counts,
+            # The supervisor reads this copy first: the row's amount and counts in both places.
+            "usage": {**(usage or {}), **money, REPORTED_TOKENS_KEY: counts},
+            **money,
             "source": "web_search",
             "ts": utc_now_iso(),
             "category": "task",
@@ -302,26 +305,32 @@ def _emit_simple_usage(
             "ledger_attempt_ids": list((usage or {}).get("ledger_attempt_ids") or []),
         })
     except Exception:
-        log.debug("Failed to emit web_search fallback cost event", exc_info=True)
+        log.debug("Failed to emit web_search usage event", exc_info=True)
 
 
 def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search_context_size: str = "",
                            processing_preference: Optional[str] = None, connection: str = "") -> str:
     if _web_search_deadline_exhausted(ctx):
         return _web_search_deadline_result()
-    api_key = _search_key("openrouter", connection)
-    if not api_key:
+    try:
+        active_model = _leg_model("openrouter", model)
+    except Exception as exc:
+        raise _wrapped_provider_error("OpenRouter", exc) from exc
+    # Read once: the same resolved target gates, sends and bills the leg.
+    target = _search_target("openrouter", connection, active_model)
+    if not target:
         raise RuntimeError(f"OpenRouter connection {connection} is not configured" if connection
                            else "OPENROUTER_API_KEY is not configured")
+    response = None
     try:
-        from ouroboros.llm import openrouter_web_search_server_tool
+        from ouroboros.llm import LLMClient, openrouter_web_search_server_tool
 
-        active_model = _leg_model("openrouter", model)
         if getattr(ctx, "emit_progress_fn", None):
             ctx.emit_progress_fn(f"🔍 Trying OpenRouter web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
         with capture_attempt_ids() as attempt_ids:
             response = openrouter_web_search_server_tool(
-                api_key=api_key,
+                api_key=target["api_key"],
+                target=target,
                 model=active_model,
                 query=query,
                 search_context_size=search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE,
@@ -330,25 +339,31 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
                 processing_preference=processing_preference,
                 **_web_search_caller_deadline(ctx),
             )
-        message = response.choices[0].message if getattr(response, "choices", None) else None
-        text = str(getattr(message, "content", "") or "").strip()
-        from ouroboros._usage_response import usage_from_response
+        from ouroboros._usage_response import failed_chat_completion, usage_from_response
         from ouroboros.llm_attempt import attach_processing_receipt
 
-        usage, _cost, _final = usage_from_response(response)
-        attach_processing_receipt({"provider": "openrouter", "usage_model": active_model}, usage)
-        # Guard: an exotic (non-dict) usage object must not crash the leg with a
-        # successful paid answer in hand — mirror the Anthropic leg's isinstance
-        # check (a `.get` on a non-dict would raise and discard the result).
-        if not isinstance(usage, dict):
-            usage = {}
+        body = search_api.plain(response)
+        usage, cost, final = usage_from_response(response, payload=body, provider="openrouter", provider_reported_cost_only=True)
+        attach_processing_receipt(target, usage, attempt_ids=attempt_ids)
         usage["ledger_attempt_ids"] = list(attempt_ids)
-        _emit_simple_usage(ctx, provider="openrouter", model=active_model, prompt_tokens=usage.get("prompt_tokens"),
-                           completion_tokens=usage.get("completion_tokens"), usage=usage)
+        _emit_simple_usage(ctx, provider="openrouter", model=str(target.get("usage_model") or active_model),
+                           usage=usage, settled=_settled_fact(attempt_ids))
+        error = LLMClient._provider_body_error(body)
+        if error is not None:
+            if (typed_search_refusal(error.get("status_code", error.get("code")), error.get("code"), error.get("type"))
+                    and not refusal_conflicts(body, reported_cost=cost)):
+                return json.dumps({"error": sanitize_tool_result_for_log(str(error.get("message") or "Search refused"))[:500],
+                                   "ledger_attempt_ids": attempt_ids})
+            return _unknown_provider_outcome("openrouter_server_tool", attempt_ids)
+        if failed_chat_completion(body):
+            return _unknown_provider_outcome("openrouter_server_tool", attempt_ids)
+        choices = body.get("choices") if isinstance(body, dict) else None
+        message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+        text = str((message or {}).get("content") or "").strip()
         return json.dumps({
             "answer": text or "(no answer)",
             "answer_type": "summary",
-            "sources": search_api.cited_sources(response),
+            "sources": search_api.cited_sources(body),
             "backend": "openrouter_server_tool",
             "model": active_model, "reported_model": getattr(response, "model", None), "ledger_attempt_ids": list(attempt_ids),
         }, ensure_ascii=False, indent=2)
@@ -357,6 +372,8 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
             return _web_search_deadline_result()
         raise
     except Exception as exc:
+        if response is not None:
+            return _unusable_reply("openrouter_server_tool", exc, attempt_ids)
         raise _wrapped_provider_error("OpenRouter", exc) from exc
 
 
@@ -364,20 +381,21 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
                           processing_preference: Optional[str] = None, connection: str = "") -> str:
     if _web_search_deadline_exhausted(ctx):
         return _web_search_deadline_result()
-    api_key = _search_key("anthropic", connection)
-    if not api_key:
+    active_model = _leg_model("anthropic", model)
+    target = _search_target("anthropic", connection, active_model)
+    if not target:
         raise RuntimeError(f"Anthropic connection {connection} is not configured" if connection
                            else "ANTHROPIC_API_KEY is not configured")
+    response = None
     try:
         import anthropic  # noqa: F401 — the SDK's own import failure precedes any attempt claim
         from ouroboros.llm import anthropic_web_search_server_tool
 
-        active_model = _leg_model("anthropic", model)
         if getattr(ctx, "emit_progress_fn", None):
             ctx.emit_progress_fn(f"🔍 Trying Anthropic web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
         with capture_attempt_ids() as attempt_ids:
             response = anthropic_web_search_server_tool(
-                api_key=api_key,
+                api_key=target["api_key"], target=target,
                 model=active_model,
                 query=query,
                 accounting_scope=_accounting_scope(ctx, "web_search.anthropic"),
@@ -396,13 +414,13 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
             usage = {}
         from ouroboros.llm_attempt import attach_processing_receipt
 
-        attach_processing_receipt({"provider": "anthropic", "usage_model": active_model}, usage)
+        attach_processing_receipt(target, usage, attempt_ids=attempt_ids)
         usage["ledger_attempt_ids"] = list(attempt_ids)
         from ouroboros.event_usage import REPORTED_TOKENS_KEY, anthropic_token_counts
 
         usage[REPORTED_TOKENS_KEY] = anthropic_token_counts(usage)  # native input_tokens is not the total (#1578)
-        _emit_simple_usage(ctx, provider="anthropic", model=active_model, prompt_tokens=usage.get("input_tokens"),
-                           completion_tokens=usage.get("output_tokens"), usage=usage)
+        _emit_simple_usage(ctx, provider="anthropic", model=target["usage_model"], usage=usage,
+                           settled=_settled_fact(attempt_ids))
         return json.dumps({
             "answer": "".join(text_parts).strip() or "(no answer)",
             "answer_type": "summary",
@@ -415,7 +433,14 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
             return _web_search_deadline_result()
         raise
     except Exception as exc:
+        if response is not None:
+            return _unusable_reply("anthropic_server_tool", exc, attempt_ids)
         raise _wrapped_provider_error("Anthropic", exc) from exc
+
+
+def _unusable_reply(backend, error, attempt_ids):
+    return json.dumps({"backend": backend, "error": sanitize_tool_result_for_log(str(error))[:500],
+                       "reason_code": "provider_response_failed", "ledger_attempt_ids": attempt_ids})
 
 
 def _web_search_ddgs(query: str, *, _max_attempts: int = 3) -> str:
@@ -544,15 +569,14 @@ def _provider_status_code(exc: Exception) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def _stream_failure_error(event_type: str, error: Any, response: Any) -> RuntimeError:
-    """Preserve a terminal Responses-event status for the safe retry policy."""
-    detail = sanitize_tool_result_for_log(
-        str(getattr(error, "message", None) or error or "no detail")
-    )[:300]
+def _stream_failure_error(event_type: str, error: dict, response: dict) -> RuntimeError:
+    """Retain the event's native error fields, including any reported HTTP status."""
+    detail = sanitize_tool_result_for_log(str(error.get("message") or "no detail"))[:300]
     exc = RuntimeError(f"OpenAI web search {event_type}: {detail}")
-    for obj in (error, getattr(response, "error", None), response):
+    exc.body = response
+    for obj in (error, response):
         for field in ("status_code", "http_status", "status", "code"):
-            value = obj.get(field) if isinstance(obj, dict) else getattr(obj, field, None)
+            value = obj.get(field)
             try:
                 status = int(value)
             except (TypeError, ValueError):
@@ -563,16 +587,15 @@ def _stream_failure_error(event_type: str, error: Any, response: Any) -> Runtime
     return exc
 
 
-def _responses_search_candidate(ctx, query: str, model: str, options: dict):
+def _responses_search_candidate(ctx, query: str, resolved: dict, options: dict):
     """One complete Responses body supplies capture, reservation and actual send."""
     from ouroboros.llm_attempt import (
         _attempt_request, _candidate_before_dispatch, _finalized_physical_candidate,
         apply_processing_preference,
     )
-    target = {"provider": "openai", "resolved_model": model, "base_url": options["base_url"],
-              "usage_model": model if "/" in model else f"openai/{model}",
+    target = {**resolved, "api_surface": "responses",
               "processing_preference": options["preference"], "requested_reasoning_effort": options["effort"]}
-    payload = {"model": model,
+    payload = {"model": target["resolved_model"],
                "tools": [{"type": "web_search", "search_context_size": options["search_context_size"]}],
                "reasoning": {"effort": options["effort"]}, "tool_choice": "auto", "input": query,
                "stream": True}
@@ -603,28 +626,34 @@ def _web_search_openai(
     _processing_preference: Optional[str] = None,
     _processing_submission: Optional[str] = None,
     connection: str = "",
+    _resolved_target: Optional[dict] = None,
 ) -> str:
     from ouroboros.model_slots import resolve_processing_preference
 
     preference = resolve_processing_preference("websearch", override=_processing_preference)
     if _web_search_deadline_exhausted(ctx):
         return _web_search_deadline_result()
-    def _fallbacks(previous_errors=None):
-        return json.dumps({"error": "; ".join(previous_errors or ["Official OpenAI search is unavailable"]),
-                           "backend": "openai_responses", "ledger_attempt_ids": attempt_ids})
+    def failed(message, **facts):
+        return json.dumps({"error": message, "backend": "openai_responses", "ledger_attempt_ids": attempt_ids, **facts})
     attempt_ids = []
-    api_key, base_url, provider, api_key_type = _resolve_openai_client_settings(*((connection,) if connection else ()))
-    if not api_key:
-        return _fallbacks()
     active_model = model or runtime_setting("OUROBOROS_WEBSEARCH_MODEL", DEFAULT_SEARCH_MODEL)
+    resolved = _resolved_target or _search_target("openai", connection, active_model)
+    provider = str(resolved.get("provider") or "openai") if resolved else "openai"
+    if not resolved or not str(resolved.get("api_key") or "").strip():
+        return failed("Official OpenAI search is unavailable")
     active_context = search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE
     active_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
     reservation = None
     dispatched = False
     send_started = False
-    explicit_provider_failure = False
+    stream = None
+    refused_before_work = work_seen = False
+    terminal = False
+    terminal_response = None
+    failure_usage = None
     manifest = None
     try:
+        from ouroboros._usage_response import processing_receipt, search_failure_usage, usage_from_response
         from ouroboros.config import get_finalization_grace_sec
         from ouroboros.deadline_utils import physical_dispatch_timeout
         from ouroboros.llm_attempt import _PhysicalSendNotStarted
@@ -633,12 +662,12 @@ def _web_search_openai(
         # Explicit per-attempt transport bound; the outer ToolEntry covers the
         # configured paid cascade rather than acting as the socket timeout.
         client = web_search_openai_client(
-            api_key=api_key,
-            base_url=base_url,
+            api_key=resolved["api_key"], base_url=resolved["base_url"],
+            default_headers=resolved.get("default_headers"),
             timeout=transport_timeout,
         )
-        target, candidate, request, before_dispatch = _responses_search_candidate(ctx, query, active_model, {
-            "base_url": base_url, "preference": preference, "submission": _processing_submission,
+        target, candidate, request, before_dispatch = _responses_search_candidate(ctx, query, resolved, {
+            "preference": preference, "submission": _processing_submission,
             "search_context_size": active_context, "effort": active_effort})
         reservation = reserve_attempt(request)
         attempt_ids.append(reservation.attempt_id)
@@ -668,28 +697,41 @@ def _web_search_openai(
             from ouroboros.llm_attempt import processing_refusal
 
             refusal = processing_refusal(target, candidate, error)
-            if refusal is error:
+            if refusal is not error:
+                raise refusal from error
+            if is_processing_refusal(error):
                 raise
-            raise refusal from error
+            terminal_response = refusal_failure_payload(error)
+            work_seen = refusal_conflicts(error)
+            if work_seen:
+                raise
+            native = terminal_response.get("error", terminal_response) if isinstance(terminal_response, dict) else {}
+            if isinstance(native, dict):
+                refused_before_work = typed_search_refusal(_provider_status_code(error), native.get("code"), native.get("type"))
+            raise
         text_parts: list[str] = []
         usage: dict = {}
         sources: List[Dict[str, str]] = []
         progress_sent = False
-        response_completed = False
         reported_cost, reported_cost_final = None, False
 
         for event in stream:
             etype = getattr(event, "type", "")
 
-            # Provider-side failure events must NOT be swallowed: an errored or
-            # incomplete response would otherwise fall through to the "(no
-            # answer)" success return below, so the OpenAI leg "succeeds" empty
-            # and the OpenRouter/Anthropic/ddgs cascade never engages.
             if etype in ("response.failed", "error", "response.incomplete"):
-                explicit_provider_failure = True
                 resp_obj = getattr(event, "response", None)
-                err = getattr(event, "error", None) or (getattr(resp_obj, "error", None) if resp_obj else None)
-                raise _stream_failure_error(etype, err, resp_obj)
+                received = resp_obj if resp_obj is not None else event
+                body = search_api.plain(received)
+                terminal_response = body if isinstance(body, dict) else {}
+                terminal = etype != "error" and resp_obj is not None and isinstance(body, dict)
+                err = terminal_response.get("error") or search_api.plain(getattr(event, "error", None)) or terminal_response
+                native = err if isinstance(err, dict) else {}
+                failure = _stream_failure_error(etype, native, terminal_response)
+                failure_usage = usage_from_response(received, payload=terminal_response, provider="openai", provider_reported_cost_only=True)
+                if (terminal and etype == "response.failed" and not work_seen
+                        and not refusal_conflicts(failure, reported_cost=failure_usage[1])):
+                    refused_before_work = typed_search_refusal(_provider_status_code(failure), native.get("code"), native.get("type"))
+                raise failure
 
             # Web search lifecycle — emit progress so the user sees activity
             if etype in (
@@ -712,24 +754,24 @@ def _web_search_openai(
 
             # Final event — extract usage for cost tracking
             elif etype == "response.completed":
-                response_completed = True
                 resp_obj = getattr(event, "response", None)
-                if resp_obj:
-                    from ouroboros._usage_response import processing_receipt, usage_from_response
-
+                terminal = resp_obj is not None
+                if terminal:
+                    terminal_response = resp_obj
                     usage, reported_cost, reported_cost_final = usage_from_response(resp_obj)
                     receipt = processing_receipt("openai", usage,
                         requested=request.processing_preference, submitted_native=request.submitted_processing_mode)
                     if receipt is not None:
                         usage["processing"] = receipt
                     sources = search_api.cited_sources(resp_obj)
+                break
+            if etype not in ("response.created", "response.queued", "response.in_progress"):
+                work_seen = True
 
         text = "".join(text_parts)
-        input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
         usage["ledger_attempt_ids"] = [reservation.attempt_id]
         try:
-            if response_completed:
+            if terminal:
                 settle_attempt(reservation, usage, cost_usd=reported_cost,
                                cost_final=reported_cost_final)
             else:
@@ -751,69 +793,49 @@ def _web_search_openai(
             except Exception:
                 log.exception("Failed to mark Responses settlement unresolved")
 
-        if not response_completed:
-            return json.dumps({
-                "error": (
-                    "OpenAI web search ended without a terminal provider outcome; "
-                    "no retry or paid fallback was sent."
-                ),
-                "backend": "openai_responses",
-                "reason_code": "provider_outcome_unknown",
-                "ledger_attempt_ids": attempt_ids,
-            }, ensure_ascii=False, indent=2)
+        if not terminal:
+            return _unknown_provider_outcome("openai_responses", attempt_ids)
 
-        # Track web search cost (estimate from tokens — OpenAI usage has no total_cost)
-        if usage and hasattr(ctx, "pending_events"):
-            cost = _estimate_openai_cost(active_model, input_tokens, output_tokens)
-            metadata = getattr(ctx, "task_metadata", {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            try:
-                from ouroboros.event_usage import event_token_counts
-
-                ctx.pending_events.append({
-                    "type": "llm_usage",
-                    "task_id": str(getattr(ctx, "task_id", "") or ""),
-                    "root_task_id": str(metadata.get("root_task_id") or ""),
-                    "parent_task_id": str(metadata.get("parent_task_id") or ""),
-                    "delegation_role": str(metadata.get("delegation_role") or ""),
-                    "provider": provider,
-                    "model": active_model,
-                    "api_key_type": api_key_type,
-                    "model_category": "websearch",
-                    **event_token_counts(usage),  # the cost estimate above alone reads unknown as 0
-                    "usage": usage,
-                    "cost": cost,
-                    "source": "web_search",
-                    "ts": utc_now_iso(),
-                    "category": "task",
-                    "accounting_authority": "physical_attempt_ledger",
-                    "ledger_attempt_ids": [reservation.attempt_id],
-                })
-            except Exception:
-                log.debug("Failed to emit web_search cost event", exc_info=True)
+        _emit_simple_usage(ctx, provider=provider, model=reservation.model, usage=usage,
+                           settled=_settled_fact([reservation.attempt_id], reservation.drive_root))
 
         if text.strip() or sources:
             return json.dumps({"answer": text or "(no answer)", "answer_type": "summary", "sources": sources, "backend": "openai_responses", "model": active_model, "reported_model": getattr(resp_obj, "model", None), "ledger_attempt_ids": attempt_ids}, ensure_ascii=False, indent=2)
+        # A complete but empty result can advance Auto; its attempt and settlement stay here.
+        return failed("OpenAI web search returned no answer and no sources")
     except Exception as e:
-        from ouroboros.llm_attempt import ProcessingNotStarted
-
-        processing_refused = isinstance(e, ProcessingNotStarted)
         proven_not_started = False
-        if dispatched:
-            from ouroboros.transport_custody import release_pre_dispatch_attempt
+        processing_refused = False
+        if dispatched and stream is None and is_processing_refusal(e):
+            from ouroboros.usage_accounting import _terminalize_failed_attempt
 
+            try:
+                state = _terminalize_failed_attempt(reservation, e)
+            except Exception:
+                log.exception("Failed to record the processing refusal")
+                return _unknown_provider_outcome("openai_responses", attempt_ids)
+            if state != "settled" or getattr(e, "processing_refusal_conflict", False):
+                return _unknown_provider_outcome("openai_responses", attempt_ids)
+            dispatched = False
+            processing_refused = refused_before_work = True
+        elif dispatched and stream is None and not work_seen:
             proven_not_started = release_pre_dispatch_attempt(reservation, e)
             dispatched = not proven_not_started
         was_dispatched = send_started and not proven_not_started
         if reservation is not None and dispatched:
             from ouroboros.usage_accounting import _retain_physical_failure
 
+            if terminal_response is None:  # SDK iterators can raise with a received error envelope.
+                terminal_response = refusal_failure_payload(e)
             _retain_physical_failure(reservation, exc=e)  # this send's receive path ended raising
             try:
-                mark_unresolved(reservation, f"{type(e).__name__}: {e}")
+                usage, cost, final = search_failure_usage(e, terminal_response, failure_usage, work_seen=work_seen)
+                if terminal or refused_before_work or cost is not None:
+                    settle_attempt(reservation, usage, cost_usd=cost, cost_final=final)
+                else:
+                    mark_unresolved(reservation, f"{type(e).__name__}: {e}")
             except Exception:
-                log.exception("Failed to mark OpenAI Responses search unresolved")
+                log.exception("Failed to record OpenAI Responses search failure")
         if reservation is not None and (not send_started or proven_not_started):
             from ouroboros.usage_accounting import _pre_dispatch_failure
 
@@ -828,44 +850,29 @@ def _web_search_openai(
             raise
         detail = sanitize_tool_result_for_log(str(e))[:500]
         status = _provider_status_code(e)
-        terminal_provider_failure = explicit_provider_failure or status is not None
-        if was_dispatched and not terminal_provider_failure:
-            return json.dumps({
-                "error": (
-                    "OpenAI web search was dispatched but its provider outcome is "
-                    "unknown; no retry or paid fallback was sent."
-                ),
-                "backend": "openai_responses",
-                "reason_code": "provider_outcome_unknown",
-                "ledger_attempt_ids": attempt_ids,
-            }, ensure_ascii=False, indent=2)
-        retryable_terminal = status == 408 or status == 429 or (
-            status is not None and 500 <= status <= 599
-        )
-        # One retry is safe only before dispatch or after an explicit terminal
-        # provider response. An ambiguous dispatched outcome stops the cascade.
+        if was_dispatched and not refused_before_work:
+            if terminal:
+                return failed(detail, reason_code="provider_response_failed")
+            return _unknown_provider_outcome("openai_responses", attempt_ids)
+        retryable_refusal = refused_before_work and status in (429, 503, 529)
         if _attempt == 0 and (
-            (_is_timeout_error(e) and not was_dispatched) or retryable_terminal or processing_refused
+            (_is_timeout_error(e) and not was_dispatched) or retryable_refusal or processing_refused
         ):
             from ouroboros.deadline_utils import deadline_remaining_sec, has_deadline
 
             if has_deadline(ctx) and deadline_remaining_sec(ctx) <= max(
                 1.0, float(get_finalization_grace_sec())
             ):
-                return _fallbacks([f"OpenAI web search timed out before a safe retry: {detail}"])
-            log.debug("web_search OpenAI safe terminal/pre-dispatch retry")
+                return failed(f"OpenAI web search timed out before a safe retry: {detail}")
             return _web_search_openai(
-                ctx, query, model=model, search_context_size=search_context_size,
+                ctx, query, model=active_model, search_context_size=search_context_size,
                 reasoning_effort=reasoning_effort, _attempt=1,
                 _processing_preference=preference,
+                _resolved_target=resolved,
                 _processing_submission="standard" if processing_refused else _processing_submission,
                 **({"connection": connection} if connection else {}),
             )
-        return _fallbacks([f"OpenAI web search failed ({type(e).__name__}): {detail}"])
-    # An empty completed result is a soft failure. Leave this backend's
-    # cleanup/capture scope before the cascade so another backend's exception
-    # cannot release this paid attempt or return its physical claim.
-    return _fallbacks(["OpenAI web search returned no answer and no sources"])
+        return failed(f"OpenAI web search failed ({type(e).__name__}): {detail}")
 
 
 def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_size: str = "",
@@ -914,7 +921,7 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
         except Exception as exc:
             result = (json.loads(_unknown_provider_outcome(leg["backend"])) if _provider_outcome_is_unknown(exc)
                       else {"error": sanitize_tool_result_for_log(str(exc))[:500]})
-            capture = getattr(exc, "physical_attempt_capture", None)
+            capture = _capture_on_chain(exc)
             if capture and getattr(capture, "attempt_id", None):
                 ids.append(capture.attempt_id)
             ids.extend(getattr(exc, "ledger_attempt_ids", []) or [])
@@ -924,7 +931,7 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
         tried.append({**leg, "outcome": result.get("reason_code") or ("failed" if "error" in result else "succeeded"),
                       "ledger_attempt_ids": list(dict.fromkeys([*ids, *result.get("ledger_attempt_ids", [])])),
                       **({"error": result["error"]} if "error" in result else {})})
-        if "error" not in result or result.get("reason_code") in {"provider_outcome_unknown", "deadline_exhausted"}:
+        if "error" not in result or result.get("reason_code") in {"provider_outcome_unknown", "provider_response_failed", "deadline_exhausted"}:
             break
     last = _SOURCE_LABELS.get(tried[-1]["source"], "") if tried else ""
     if "error" not in result and len(tried) > 1:
@@ -968,13 +975,11 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("web_search", {
             "name": "web_search",
             "description": (
-                (
                 'Search with the configured Source and Model (a blank Model is the recommended one). Returns a summary '
                 'lead with sources; open them with browse_page to verify load-bearing facts. Auto uses eligible built-in '
                 'routes; a named source is strict. A model you pass is mandatory: only it is sent (under Auto an id without '
                 'source:: may also go through another provider of that model), and if it cannot run the call fails and says why. '
                 'Split compound questions into focused searches. Skills, MCP and browser tools remain separate choices.'
-            )
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "A single focused search query (split compound asks into separate calls)."},

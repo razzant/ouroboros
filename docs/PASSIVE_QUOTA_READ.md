@@ -144,6 +144,41 @@ and catalog facts (including a base-only `[1m]` qualifier) stay visible with
 `Not checked`. Resource merges bind scope to quota: retained rows keep their scope;
 unproven or mixed-scope replacement clears it. No new request is made.
 
+## Subscription census
+
+`subscription_census.py` reads this passive path (`_quota_payload`: the roster and one quota epoch, no handshake
+or refresh) from its own maintenance duty: every 600 s while a task runs or a direct actor works (a pending-only queue
+reads nothing), or at the next tick after a refresh request, never sooner than 15 s after its previous pass. Any
+process leaves one when the engine refuses or settles a run, a review thread turn, a reviewer seat (a plan fan-out
+seat included) or a model call (its create included) on a spent window or quota pool (a structural pool excepted; a
+plain rate limit asks nothing), or Settings confirms an account created, enabled, disabled or removed. Each dispatched pass removes the
+request it answers, failed read or not, so an engine that does not answer is asked again only at the 600 s cadence
+or on a newer request, never in a 15 s loop (on 21.11 the managed engine stalled under load with a full accept
+queue), and a restart never answers an answered request again; an engine never provisioned is never asked. Per
+family it counts the enabled named profiles of a subscription credential kind
+(`gateway/onboarding._SUBSCRIPTION_CREDENTIAL_KINDS`), each judged by the shared `quota_availability` on its
+subscription-route rows and absences alone (`vendor_native`; a paid key's rows of the same id stay out):
+verification failed first (the Accounts rule), then the engine's at-limit and with-room verdicts, then its unknowns
+by cause (no measured general window, no quota source, not freshly read). Profiles with room add each window
+length's highest fresh measured share (least and greatest over profiles, cut to two decimals, with their coverage,
+or that no fresh window measured them); model-scoped blocks still ahead count once per profile and model list (the
+engine's prefixes when it names any), with the earliest reset to the nearest minute and, when that block's row is
+stale, the time it was seen. The census adds no availability interpretation: the rules above stand. Its dated result
+is `state/subscription_census.json` (PERSISTENCE): rewritten when what it states changes, its `since` (shown to the
+second) moving only with the counts, resets and blocks; share ranges, their read time and a stale block's `seen` are
+refreshed but never make the part due (the owner's 1A). A roster that names no subscription account is a stored
+`none` whatever the quota read says. The round's facts row reads only that file (ARCHITECTURE §6) and is rebuilt,
+not reused, when a part is due. A failed read, a missing descriptor or a text scope the engine no longer certifies
+included, is recorded once a failed streak has lasted 600 s and keeps the values; its text names the last confirmed
+read and the code beside the counts epoch and the shares' read time. Only an accepted read that is stored (or already
+was) confirms. The part goes to the foci that may choose an executor (`subscription_census.chooses_executors`): every
+integrating focus, a Presence task whose ceiling grants an executor or reviewer tool, and a delegated focus with an
+acting profile or the delegation right and an entry it opens (the scheduler or a direct start), a tool its contract
+withholds granting nothing. Disclosed: after an idle period the file is as old as that period until the duty's first
+read lands; after a restart `confirmed_at` is the stored one; a duty that stops silently cannot say so; a request
+whose read failed waits for the cadence or a newer request (a pending file stays pending that long); two value epochs
+inside one second compare equal; an owner's quote that spells a whole quota part can stand in for one.
+
 ## Primary-route observation
 
 While a fallback acts, `primary_route_observation.observe_primary_route` asks

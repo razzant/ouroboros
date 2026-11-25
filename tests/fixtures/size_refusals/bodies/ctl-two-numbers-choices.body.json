@@ -1,0 +1,1 @@
+{"error": {"message": "Requested 3 choices (2 tokens each) but only 1 to 2 are supported", "type": "invalid_request_error", "code": 400}}

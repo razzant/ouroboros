@@ -3,27 +3,38 @@ wait for its result line, open an entry's editor and press its Save.
 
 Settings has no URL: a path is opened through the shell's opener (the loopback debug hook ``window.__ouroSettings``,
 the same function app.js's ``openSettings`` calls), so a test reaches a page the way any caller does. The hooks are
-the shell's (settings.js: ``[data-settings-home]``, ``[data-settings-page]``, ``[data-settings-back]``), the home's
+the shell's (settings.js: ``[data-settings-home]``, ``[data-settings-page]``, ``[data-shell-back]``), the home's
 (settings_home.js: ``[data-settings-open]``, ``[data-settings-answer]``, the card ``[data-settings-card]`` with its
 rows ``[data-needs]``, the search field ``#settings-search`` and a result ``[data-settings-result]``) and the row
 helper's (settings_controls.js:
 ``[data-setting-row]``, ``[data-setting-control]``, ``[data-setting-result]``; an editor's ``[data-entry-id]``,
-``[data-editor-save]``, ``[data-editor-result]``)."""
+``[data-editor-save]``, ``[data-editor-result]``). The pages that moved to Extensions (MCP servers, a skill's form, the
+skill sources) keep their old addresses: the opener shows them in ``#page-skills``, and the helpers read whichever
+section is shown."""
 from __future__ import annotations
 
 SETTINGS = "#page-settings"
 HOME = f"{SETTINGS} [data-settings-home]"
+EXTENSIONS = "#page-skills"
+
+
+def in_extensions(path: str) -> bool:
+    """A page of Extensions (settings_pages.js ``extensionsPageOf``): its old Settings address opens it there."""
+    head = str(path or "").split("/")[0]
+    return head in {"tools", "skill"} or path == "skill-sources"
 
 
 def settings_page(page, path: str = ""):
-    """The locator of the level showing `path` ('' is the home)."""
-    return page.locator(HOME if not path else f'{SETTINGS} [data-settings-page="{path}"]')
+    """The locator of the level showing `path` ('' is the home); a page of Extensions is drawn in that place."""
+    if not path:
+        return page.locator(HOME)
+    return page.locator(f'{EXTENSIONS if in_extensions(path) else SETTINGS} [data-settings-page="{path}"]')
 
 
 def open_settings(page, path: str = "", row: str = "", *, timeout: float = 10_000):
     """Show Settings at `path`, revealing `row` when given, and wait until that level is visible."""
     page.wait_for_function("() => Boolean(window.__ouroSettings)", timeout=timeout)
-    opened = page.evaluate("([path, row]) => window.__ouroSettings.open(path, { row })", [path, row])
+    opened = page.evaluate("([path, row]) => window.__ouroSettings.open(path, { row, map: true })", [path, row])
     assert opened is not False, f"Settings refused to open {path!r}"
     level = settings_page(page, path)
     level.wait_for(state="visible", timeout=timeout)
@@ -71,21 +82,30 @@ def walk_settings(page, measure, *, skill: str = "", settle=None):
     return paths
 
 
+# The section shown now: Settings, or Extensions where a page of Extensions was asked of Settings (settings.js).
+_SHOWN_LEVELS = ("[...document.querySelectorAll('#page-settings.active [data-settings-page], #page-skills.active "
+                 "[data-settings-page]')]")
+
+
 def top_path(page) -> str:
-    """The path Settings shows now ('' is the home): the visible level, else the home."""
-    return page.evaluate("""() => {
-        const levels = [...document.querySelectorAll('#page-settings [data-settings-page]')].filter((e) => !e.hidden);
+    """The path the shown section shows now ('' is the home): the visible level, else the home."""
+    return page.evaluate(f"""() => {{
+        const levels = {_SHOWN_LEVELS}.filter((e) => !e.hidden);
         return levels.length ? levels.at(-1).dataset.settingsPage : '';
-    }""")
+    }}""")
 
 
 def go_back(page):
     """Press the section header's Back and return the path shown after it."""
     before = top_path(page)
-    page.locator(f"{SETTINGS} > .app-page-header [data-settings-back]").click()
-    page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
-                           "[data-settings-page]')]; return !levels.some((e) => e.dataset.settingsPage === before); }",
-                           arg=before)
+    place = page.locator("#page-settings.active, #page-skills.active").get_attribute("id")
+    page.locator("#page-settings.active > .app-page-header [data-shell-back], "
+                 "#page-skills.active > .app-page-header [data-shell-back]").click()
+    page.wait_for_function("""([place, before]) => {
+        const root = document.getElementById(place);
+        return !root.classList.contains('active') || ![...root.querySelectorAll('[data-settings-page]')]
+            .some(e => !e.hidden && e.dataset.settingsPage === before);
+    }""", arg=[place, before])
     return top_path(page)
 
 
@@ -126,7 +146,7 @@ _WATCH_ROW = """id => {
         if (records.some((record) => row(record.target)?.dataset.settingRow === id
             && (record.type === 'attributes' ? record.target.getAttribute('aria-busy') === 'true' : Boolean(line(record.target))))) seen.moved = true;
     });
-    observer.observe(document.querySelector('#page-settings'),
+    observer.observe(document.querySelector('#page-settings.active, #page-skills.active') || document.querySelector('#page-settings'),
         { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['aria-busy'] });
     window.__ouroRowWatch?.observer.disconnect();
     window.__ouroRowWatch = { seen, observer };
@@ -157,7 +177,7 @@ def commit_row(page, row_id: str, value=None, *, timeout: float = 10_000) -> str
         control.fill(str(value))
         control.evaluate("element => element.blur()")
     page.wait_for_function("""id => {
-        const rows = [...document.querySelectorAll(`#page-settings [data-setting-row="${CSS.escape(id)}"]`)];
+        const rows = [...document.querySelectorAll(`#page-settings [data-setting-row="${CSS.escape(id)}"], #page-skills [data-setting-row="${CSS.escape(id)}"]`)];
         const row = rows.find((node) => node.getClientRects().length);
         const line = row?.querySelector('[data-setting-result]');
         if (!(line && window.__ouroRowWatch?.seen.moved && !row.querySelector('[aria-busy="true"]') && line.textContent.trim())) return false;
@@ -172,8 +192,7 @@ def open_entry(page, entry_id: str, *, timeout: float = 10_000):
     before = top_path(page)
     settings_page(page, before).locator(f'[data-entry-id="{entry_id}"]').first.locator(
         '[data-entry-open], [data-subagent-field="open"]').click()
-    page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
-                           "[data-settings-page]')].filter((e) => !e.hidden); return levels.length && "
+    page.wait_for_function(f"before => {{ const levels = {_SHOWN_LEVELS}.filter((e) => !e.hidden); return levels.length && "
                            "levels.at(-1).dataset.settingsPage !== before; }", arg=before, timeout=timeout)
     return settings_page(page, top_path(page))
 
@@ -185,7 +204,8 @@ def press_editor_save(page, *, timeout: float = 10_000) -> str:
     before = result.inner_text() if result.count() else ""
     editor.locator("[data-editor-save]").first.click()
     page.wait_for_function("""before => {
-        const levels = [...document.querySelectorAll('#page-settings [data-settings-page]')].filter((e) => !e.hidden);
+        const levels = [...document.querySelectorAll('#page-settings.active [data-settings-page], #page-skills.active [data-settings-page]')]
+            .filter((e) => !e.hidden);
         const editor = levels.at(-1);
         const line = editor?.querySelector('[data-editor-result]');
         const save = editor?.querySelector('[data-editor-save]');

@@ -22,15 +22,18 @@ from ouroboros.llm_attempt import (
     openai_family_route, supports_message_cache_control,
 )
 from ouroboros.llm_messages import project_declared_system_prefix
+from ouroboros.openai_responses import (
+    REPLY_FACT_KEYS, attach_reply_facts, completion_view, responses_payload, responses_route,
+)
 from ouroboros.usage_accounting import UsageScope, usage_scope
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
+from ouroboros.opencode_go import go_chat_headers, is_go_chat_route
 from ouroboros.llm_capability_policy import (
     _EFFORT_CLAMP_CVAR,
     _OPTIONAL_DROPPABLE_PARAMS,
     normalize_reasoning_effort,
 )
-from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
-from ouroboros.llm_routing import _resolve_or_provider
+from ouroboros.llm_routing import _resolve_or_provider, openrouter_chat_routing
 from ouroboros.provider_models import (
     normalize_deepseek_reasoning_effort,
     normalize_minimax_reasoning_effort,
@@ -43,8 +46,11 @@ from ouroboros.request_wire_recovery import (
 )
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
-from ouroboros._usage_response import observed_processing_mode, reported_price
-from ouroboros.event_usage import REPORTED_TOKENS_KEY
+from ouroboros._usage_response import (
+    _reported_token_count, cache_pricing_usage, cache_read_count, cache_write_total, malformed_token_counts,
+    normalize_go_price, observed_processing_mode, response_reported_price, text_token_counts,
+)
+from ouroboros.event_usage import REPORTED_TOKENS_KEY, event_token_counts
 
 
 # The moved warnings keep the logger identity they were emitted under.
@@ -155,6 +161,9 @@ class _OpenAICompatibleLaneMixin:
         # a caption or a marker was decided by the send policy (vision_routing),
         # never by this builder from a model name.
         messages = _project_openai_family_system(target, messages)
+        if responses_route(target):  # the connection's own API: the same options in a Responses body
+            return self._responses_kwargs(target, messages, max_tokens, tool_choice, temperature, tools,
+                                          response_format, cache_affinity, stream)
         # Official direct OpenAI Chat uses the current completion-token carrier:
         # provider-wide; model names are not capability authority across routes.
         direct_openai = provider == "openai"
@@ -270,6 +279,8 @@ class _OpenAICompatibleLaneMixin:
             if prepared_tools:
                 kwargs["tools"] = prepared_tools
                 kwargs["tool_choice"] = tool_choice
+            if headers := go_chat_headers(target):
+                kwargs["extra_headers"] = headers
             if bypass_response_cache and provider == "openai-compatible":
                 # Must ride in extra_body: the OpenAI SDK rejects unknown top-level
                 # kwargs with TypeError, so a raw `cache=` argument never reaches
@@ -320,39 +331,9 @@ class _OpenAICompatibleLaneMixin:
             # OpenRouter request fields; session_id provides sticky routing.
             extra_body["session_id"] = cache_identity
 
-        if cache_model.startswith("anthropic/"):
-            extra_body["provider"] = {
-                "require_parameters": True,
-            }
-        # Replayed reasoning is endpoint-bound only when the artifact itself is SEALED
-        # (opaque or signed, and not vouched by the signed-portable roster) — see
-        # transcript_has_sealed_reasoning. Readable text/summary artifacts replay fine on
-        # any sibling endpoint of the same model, so they must stay failover-eligible:
-        # pinning them surfaces one upstream's rate-limit while healthy siblings idle
-        # (issue #468). Routing is sticky, so the prompt cache stays warm on the primary
-        # and only a real outage triggers the cross-provider failover. The reactive 400
-        # strip-and-retry (_openrouter_signature_retry_kwargs) remains the safety net for a
-        # misclassification in either direction.
-        if transcript_has_sealed_reasoning(messages, cache_model):
-            provider_body = extra_body.setdefault("provider", {})
-            if isinstance(provider_body, dict):
-                provider_body["allow_fallbacks"] = False
-        # Owner-configured OpenRouter provider routing (resilience/repro): the global
-        # setting with this connection's own ``provider_routing`` merged over it. Gap-merge:
-        # NEVER override the anthropic require_parameters pin or the (sealed-artifact)
-        # reasoning-continuity allow_fallbacks=False pin set above. Affects same-model
-        # provider routing only — it never changes the MODEL, so the P3 reviewer context
-        # floor is untouched.
-        _or_provider = _resolve_or_provider(target.get("provider_routing"))
-        if _or_provider:
-            provider_body = extra_body.setdefault("provider", {})
-            if isinstance(provider_body, dict):
-                for _k, _v in _or_provider.items():
-                    if _k == "require_parameters" and provider_body.get("require_parameters"):
-                        continue
-                    if _k == "allow_fallbacks" and provider_body.get("allow_fallbacks") is False:
-                        continue
-                    provider_body[_k] = _v
+        routing = openrouter_chat_routing(target, messages)
+        if routing:
+            extra_body["provider"] = routing
 
         kwargs: Dict[str, Any] = {
             "model": resolved_model,
@@ -422,6 +403,19 @@ class _OpenAICompatibleLaneMixin:
             self._cache_declared_system_context(messages, kwargs)
         return kwargs
 
+    def _responses_kwargs(self, target: Dict[str, Any], messages: List[Dict[str, Any]], max_tokens: int,
+                          tool_choice: Any, temperature: Optional[float], tools: Optional[List[Dict[str, Any]]],
+                          response_format: Optional[Dict[str, Any]], cache_affinity: str, stream: bool) -> Dict[str, Any]:
+        """One direct OpenAI Responses body: the same sanitized tools, effort, affinity key and processing as Chat."""
+        model = str(target.get("usage_model") or target.get("resolved_model") or "")
+        kwargs = responses_payload(
+            target, messages, effort=target["requested_reasoning_effort"], max_tokens=max_tokens,
+            tool_choice=tool_choice, temperature=temperature, response_format=response_format, stream=stream,
+            tools=[{k: v for k, v in tool.items() if k != "cache_control"} for tool in self._sanitize_chat_completion_tools(tools)],
+            cache_identity=self._prompt_cache_identity(model, messages) or self._explicit_cache_affinity_identity(model, cache_affinity))
+        apply_processing_preference(target, kwargs)
+        return kwargs
+
     def _normalize_remote_response(
         self,
         resp_dict: Dict[str, Any],
@@ -430,15 +424,31 @@ class _OpenAICompatibleLaneMixin:
         prompt_cache_ttl: Optional[str] = None,
         wire_completion: Any = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Normalize a reply without generation lookup; skip_cost_fetch also skips tariffs."""
+        """Normalize a reply without generation lookup; skip_cost_fetch also skips tariffs.
+
+        A Responses reply is read through ``openai_responses.completion_view`` and leaves with its exact items
+        and terminal facts attached (``attach_reply_facts``); every other step is the one Chat takes."""
+        responses_facts = None
+        cost, cost_invalid, cost_basis = response_reported_price(
+            resp_dict, dict(resp_dict.get("usage") or {}), getattr(wire_completion, "total_cost_usd", None))
+        if responses_route(target):
+            resp_dict, responses_facts = completion_view(resp_dict)
         usage = dict(resp_dict.get("usage") or {})
-        # What the reply consumed (a BYOK reply: gateway charge + provider-billed share).
-        usage["cost"], cost_invalid, cost_basis = reported_price(usage, resp_dict.get("total_cost_usd"))
-        usage.pop("cost_invalid", None)  # Host fact, never a provider usage extension.
-        if cost_invalid:
-            usage["cost_invalid"] = True
-        if cost_basis:
-            usage["cost_basis"] = cost_basis
+        for host_key in REPLY_FACT_KEYS:  # host-owned terminal facts: a provider usage extension never sets them
+            usage.pop(host_key, None)
+        if is_go_chat_route(target.get("provider"), target.get("base_url")):
+            normalize_go_price(usage)
+        else:
+            # What the reply consumed (a BYOK reply: gateway charge + provider-billed share).
+            usage["cost"] = cost
+            usage.pop("cost_estimated", None)  # Only the host's estimator below sets this flag.
+            usage.pop("cost_invalid", None)  # Host fact, never a provider usage extension.
+            if cost_invalid:
+                usage["cost_invalid"] = True
+            if cost_basis:
+                usage["cost_basis"] = cost_basis
+        usage.pop("processing", None)  # The adapter constructs this receipt, including on compatible endpoints.
+        usage.pop("service_tier", None)
         if "service_tier" in resp_dict:
             usage["service_tier"] = resp_dict["service_tier"]
         attach_processing_receipt(target, usage)
@@ -527,6 +537,22 @@ class _OpenAICompatibleLaneMixin:
         # already gets. Cross-family sends strip it (sanitize_reasoning_on_model_switch
         # + the outbound scrubber), and the deepseek outbound build replays it.
         provider = str(target.get("provider") or "")
+        if (provider == "openai-compatible" and isinstance(msg.get("content"), str)
+                and not any(msg.get(key) for key in ("reasoning_content", "reasoning", "reasoning_details"))):
+            # A local server (llama.cpp without a reasoning parser, vLLM) can return the model's leading reasoning, or
+            # its lone closing ``</think>``, inside the answer; a reply with its own reasoning field is not read. The
+            # built-in lane's reader splits it off (``llm_local._split_leading_reasoning``); the reasoning stays beside
+            # the answer as the portable ``reasoning`` the outbound scrubber drops. An answer left empty takes the
+            # empty-response recovery. A reply with tool calls keeps its history (llama.cpp #24890) and gains its
+            # display projection (``llm_local.stamp_display``).
+            from ouroboros.llm_local import _split_leading_reasoning, stamp_display
+
+            if msg.get("tool_calls"):
+                stamp_display(msg)
+            elif (split := _split_leading_reasoning(msg["content"]))[0] != msg["content"]:
+                msg["content"] = split[0]
+                if split[1]:
+                    msg["reasoning"] = split[1]
         # MiniMax's two continuation carriers stay verbatim, including unknown
         # shapes. Retention does not make an opaque value displayable or portable.
         if provider not in {"deepseek", "minimax"}:
@@ -538,31 +564,34 @@ class _OpenAICompatibleLaneMixin:
             # message-level 400 recovery. Only strings enter the transcript.
             msg.pop("reasoning_content", None)
 
-        if not usage.get("cached_tokens"):
-            prompt_details = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
-                usage["cached_tokens"] = int(prompt_details["cached_tokens"])
-        if not usage.get("cached_tokens") and usage.get("prompt_cache_hit_tokens"):
-            # DeepSeek mirrors its automatic-cache split as top-level
-            # prompt_cache_hit/miss_tokens beside the details block; the
-            # details block wins when present, this is the fallback.
-            try:
-                usage["cached_tokens"] = int(usage["prompt_cache_hit_tokens"])
-            except (TypeError, ValueError):
-                pass
+        # The billing-shaped counters hold a reported count or nothing: a malformed one (negative, fractional,
+        # not a number) is neither lifted nor left for a later fold or tariff to read as a number.
+        malformed = malformed_token_counts(usage)
+        # The ledger's reading of the reply as reported (``cache_read_count``): the details block wins, DeepSeek's
+        # top-level prompt_cache_hit_tokens mirror is the fallback, and a reported zero is a measurement.
+        cache_read = cache_read_count(usage)
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
+            if usage.get(key) is not None:
+                usage[key] = _reported_token_count(usage, key)
+        # A positive count is lifted to the top level. A zero is written there only when the reply's other names
+        # would read as something else in the event (``event_token_counts``, whose own order puts the top-level
+        # names first); reported nowhere else, it stays where the reply put it.
+        if cache_read or (cache_read == 0 and event_token_counts(usage)["cached_tokens"] != 0):
+            usage["cached_tokens"] = cache_read
         # LM Studio MLX exposes prefix-cache hits only in stderr/logs, not
         # OpenAI-compatible usage; cached_tokens=0 is therefore expected.
 
-        if not usage.get("cache_write_tokens"):
-            prompt_details_for_write = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details_for_write, dict):
-                cache_write = (
-                    prompt_details_for_write.get("cache_write_tokens")
-                    or prompt_details_for_write.get("cache_creation_tokens")
-                    or prompt_details_for_write.get("cache_creation_input_tokens")
-                )
-                if cache_write:
-                    usage["cache_write_tokens"] = int(cache_write)
+        write_split = self._cache_write_split(usage)
+        written, invalid_write = cache_write_total(usage, write_split)
+        usage.pop("cache_write_tokens_invalid", None)
+        if invalid_write:
+            usage["cache_write_tokens_invalid"] = True
+            usage["cache_write_tokens"] = written
+        if write_split:
+            usage["cache_write_tokens_by_ttl"] = write_split
+        # A zero reported only inside Responses details stays there. A complete pair of bins establishes a total.
+        if written is not None and (responses_facts is None or written or write_split or "cache_write_tokens" in usage):
+            usage["cache_write_tokens"] = written
 
         usage["provider"] = str(target.get("provider") or "openrouter")
         usage["resolved_model"] = str(target.get("usage_model") or target.get("resolved_model") or "")
@@ -570,32 +599,22 @@ class _OpenAICompatibleLaneMixin:
         prompt_cache_ttl = _applied_payload_cache_ttl(terminal.physical_payload()) if terminal is not None else prompt_cache_ttl
         if prompt_cache_ttl and not usage.get("prompt_cache_ttl"):
             usage["prompt_cache_ttl"] = prompt_cache_ttl
-        # Anthropic's per-tier write split, when the route passed it through.
-        _write_split = self._cache_write_split(usage)
-        if _write_split and not usage.get("cache_write_tokens_by_ttl"):
-            usage["cache_write_tokens_by_ttl"] = _write_split
         if usage["provider"] == "deepseek" and usage.get("cost") is None and not usage.get("cost_invalid"):
             from ouroboros._usage_settlement import settled_cost_facts
 
             usage.update(settled_cost_facts(usage))  # its attempt row's pinned amount, never a fresh price
-        if (usage.get("cost") is None and not usage.get("cost_invalid")
-                and (usage.get("prompt_tokens") or usage.get("completion_tokens"))):
+        counts = text_token_counts(usage)  # the ledger's reading: an unreported count stays None, never 0
+        if (usage.get("cost") is None and not usage.get("cost_invalid") and not usage.get("provider_reported_cost_only")
+                and any(counts)):
+            from ouroboros._usage_settlement import has_nontext_usage
             from ouroboros.pricing import estimate_cost_optional
 
-            estimated_cost = estimate_cost_optional(
+            # The ledger's rules: reported audio or image usage is never priced as text, and a malformed count is
+            # no observed zero. A reported bill stays.
+            estimated_cost = None if has_nontext_usage(usage) or malformed else estimate_cost_optional(
                 usage["resolved_model"],
-                int(usage.get("prompt_tokens") or 0),
-                int(usage.get("completion_tokens") or 0),
-                cache_usage={
-                    "cached_tokens": int(usage.get("cached_tokens") or 0),
-                    "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
-                    "prompt_cache_ttl": usage.get("prompt_cache_ttl"),
-                    "cache_write_tokens_by_ttl": (
-                        usage.get("cache_write_tokens_by_ttl")
-                        if isinstance(usage.get("cache_write_tokens_by_ttl"), dict)
-                        else None
-                    ),
-                },
+                *counts,
+                cache_usage=cache_pricing_usage(usage, written, write_split),
                 allow_live_fetch=not skip_cost_fetch,
                 provider=usage["provider"],
                 **({"processing_mode": observed_processing_mode(usage["provider"], usage)}
@@ -606,6 +625,8 @@ class _OpenAICompatibleLaneMixin:
                 usage["cost_estimated"] = True
         if usage.get("cost") is None:
             usage["cost"] = None
+            if malformed:  # settlement's own fact: the loop's estimator stays off the malformed count as well
+                usage["cost_coverage"] = "partial"
         usage["cost_final"] = bool(
             usage.get("cost") is not None and not usage.get("cost_estimated")
         )
@@ -627,6 +648,8 @@ class _OpenAICompatibleLaneMixin:
             usage["reasoning_pin"] = _pin_note
         from ouroboros.openai_chat_dispatch import normalize_direct_openai_completion
 
+        if responses_facts is not None:
+            msg, usage = attach_reply_facts(msg, usage, responses_facts, target)
         msg, usage = normalize_direct_openai_completion(msg, usage, wire_completion)
         _custom_receipts = usage.get("_request_wire_custom_receipts", ())
         finalize_wire_response(msg, usage, custom_receipts=_custom_receipts)
@@ -701,26 +724,39 @@ def openrouter_web_search_server_tool(
     accounting_scope: Optional[UsageScope] = None,
     timeout: Optional[float] = None,
     processing_preference: str | None = None,
+    target: Optional[Dict[str, Any]] = None,
     _recovery: Any,
 ) -> Any:
-    """Run OpenRouter's provider-owned web_search server tool."""
+    """Run OpenRouter's provider-owned web_search server tool.
+
+    ``target`` is the search leg's resolved connection (``llm_routing.resolve_target``): the send carries its
+    endpoint, credential, headers, redirect rule, billing identity (``usage_model``) and provider routing, merged
+    as a chat send merges it (``_resolve_or_provider``), so a named connection's restrictions hold and it is
+    priced as that connection. Without one: the built-in public connection with ``api_key`` and the app identity.
+    The tier is projected as on any send; the server tool's per-use charge leaves the reservation unknown
+    (``llm_routing.carries_add_on_charge``)."""
 
     from ouroboros.net_transport import web_search_openai_client
     from ouroboros.model_slots import resolve_processing_preference
     from ouroboros.usage_accounting import current_usage_scope
     from dataclasses import replace
 
-    target = {"provider": "openrouter", "usage_model": model, "resolved_model": model,
-              "processing_preference": resolve_processing_preference("websearch", override=processing_preference)}
+    from ouroboros.llm_routing import OPENROUTER_BASE_URL
+
+    target = dict(target) if target is not None else {
+        "provider": "openrouter", "usage_model": model, "resolved_model": model,
+        "base_url": OPENROUTER_BASE_URL, "api_key": api_key, "default_headers": dict(OPENROUTER_APP_HEADERS)}
+    target["processing_preference"] = resolve_processing_preference("websearch", override=processing_preference)
 
     client = web_search_openai_client(
-        api_key=api_key,
-        base_url="https://openrouter.ai/api/v1",
+        api_key=target["api_key"],
+        base_url=target["base_url"],
         timeout=timeout,
-        default_headers=dict(OPENROUTER_APP_HEADERS),
+        default_headers=dict(target.get("default_headers") or {}),
+        follow_redirects=target.get("follow_redirects") is not False,
     )
     payload = dict(
-        model=model,
+        model=str(target.get("resolved_model") or model),
         messages=[{"role": "user", "content": query}],
         tools=[{
             "type": "openrouter:web_search",
@@ -730,9 +766,12 @@ def openrouter_web_search_server_tool(
             },
         }],
     )
+    routing = _resolve_or_provider(target.get("provider_routing"))
+    if routing:
+        payload["extra_body"] = {"provider": routing}
     apply_processing_preference(target, payload)
     if timeout is not None:
         payload["timeout"] = float(timeout)  # the leg's own bound: each send narrows it, never replaces it (#572)
     scope = replace(accounting_scope or current_usage_scope() or UsageScope(), source="web_search.openrouter")
     with usage_scope(scope):
-        return _recovery(client.chat.completions.create, payload, target)
+        return _recovery(client.chat.completions.create, payload, target, search_server_tool=True)

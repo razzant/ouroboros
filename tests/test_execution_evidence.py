@@ -577,8 +577,13 @@ class TestTerminalFrameDelivery:
     def test_a_clean_completion_still_reads_as_a_clean_completion(
             self, tmp_path, monkeypatch):
         text, meta = self._dispatch_text(tmp_path, monkeypatch)
-        assert text == "✅ Subagent child-1 completed (publication-auditor)."
+        assert text == "Subagent completed (publication-auditor)."
         assert meta["subagent_event"] == "completed" and meta["status"] == "completed"
+        # The real phrase contract: the constant words ride the translatable template and the role goes
+        # back as a value, never translated; its id is a detail.
+        assert meta["notice"] == {"code": "subagent_finished", "details": "task child-1",
+                                  "template": "Subagent completed ({role}).",
+                                  "values": {"role": "publication-auditor"}}, "its id is a detail"
 
     @pytest.mark.parametrize("terminal_facts", [
         {"outcome_axes": {"execution": {"status": "degraded"}}},
@@ -598,8 +603,21 @@ class TestTerminalFrameDelivery:
         key on, and a terminal must not change identity to change its wording.
         """
         text, meta = self._dispatch_text(tmp_path, monkeypatch, **terminal_facts)
-        assert text == "⚠️ Subagent child-1 finished with warnings (publication-auditor)."
+        assert text == "Subagent finished with warnings (publication-auditor)."
         assert meta["subagent_event"] == "completed" and meta["status"] == "completed"
+
+    @pytest.mark.parametrize("debt", [["run-1"], []])
+    def test_the_terminal_frame_carries_the_rows_debt_list_an_empty_one_included(
+            self, tmp_path, monkeypatch, debt):
+        """The frame a card replays from states the list the row held at its terminal; an explicit ``[]`` travels as
+        ``[]`` (a stored custody stamp is not live debt), so history can later replace either with the current list."""
+        _text, meta = self._dispatch_text(tmp_path, monkeypatch, delegated_runs_unreconciled=debt)
+        assert meta["delegated_runs_unreconciled"] == debt
+        assert meta["subagent_event"] == "completed" and meta["status"] == "completed"
+
+    def test_a_row_with_no_debt_list_puts_none_on_its_terminal_frame(self, tmp_path, monkeypatch):
+        _text, meta = self._dispatch_text(tmp_path, monkeypatch)
+        assert "delegated_runs_unreconciled" not in meta, "no list is no proof of reconciliation"
 
     def test_panel_chat_zero_receives_the_terminal_evidence_frame(
             self, tmp_path, monkeypatch):

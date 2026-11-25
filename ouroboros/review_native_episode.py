@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.config import get_finalization_grace_sec
 from ouroboros.deadline_utils import caller_deadline_arguments, owner_deadline_exhausted, review_transport_timeout
 from ouroboros.event_usage import event_token_counts
+from ouroboros._usage_response import usage_reply_unfinished, usage_reply_usability
 from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp
 from ouroboros.review_verdict_extraction import canonicalize_session_verdict
 from ouroboros.review_native_images import NativeReviewImages, staged_image_registry
@@ -470,6 +471,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         self._window = asdict(resolve_reviewer_window(
             slot.model, use_local=slot.use_local, model_role=f"reviewer:{slot.slot_id}",
             credential_profile_id=slot.session_profile, model_route=model_route, allow_fetch=False))
+        self._window.pop("capability_route", None)
         for key in ("window_tokens", "asserted_window_tokens"):
             self._window[key] = self._window[key] or None
         self._window["status"] = self._window["status"] or "unknown"
@@ -494,7 +496,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
     def _apply_working_view(self, messages: list, schemas: list, round_idx: int) -> bool:
         from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
         from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
-        from ouroboros.tools.compact_context import residue_by_kind
+        from ouroboros.tools.compact_context import FOLD_FACT_KEYS, fold_receipt_facts, residue_by_kind
 
         pending = getattr(self._inspection_ctx, "_pending_compaction", None)
         if pending is None:
@@ -519,10 +521,10 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                     "output_reserve_tokens": int(self.assignment.request.max_tokens or self.assignment.slot.max_tokens),
                     "measurement_basis": "canonical_serialized_characters", "strict_bound_proven": False}
         candidate, receipt = compact_tool_history_llm(
-            messages, request=request, observed_messages=observed["messages"],
-            observed_tool_schemas=observed["tool_schemas"], tool_schemas=schemas,
-            fit_candidate=fit, drive_root=root, task_id=self.assignment.request.task_id or "review")
-        self._view_receipt = asdict(receipt)
+            messages, request=request, observed_messages=observed["messages"], tool_schemas=schemas, fit_candidate=fit,
+            observed_tool_schemas=observed["tool_schemas"], written_at=pending.get("written_at"),
+            drive_root=root, task_id=self.assignment.request.task_id or "review")
+        self._view_receipt = (view := asdict(receipt)) | fold_receipt_facts(observed["messages"], candidate, view)
         ref = self._store_source(f"view-{round_idx}", self._view_receipt)
         if receipt.status == "applied":
             from ouroboros.transcript_prefix import sanction_rewrite
@@ -533,7 +535,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             notice = {"role": "user", "content": json.dumps({"context_view_status": receipt.status,
                        "receipt_source": ref, "reclaimed_tokens": receipt.reclaimed_tokens,
                        **({"residue": residue_by_kind(messages), "basis": "host estimates"} if receipt.status == "applied" else {}),
-                       **({"replaced_notes": receipt.replaced_notes} if receipt.replaced_notes else {})},
+                       **{key: self._view_receipt[key] for key in FOLD_FACT_KEYS if self._view_receipt.get(key)}},
                        ensure_ascii=False)}
             messages.append(notice)
         return receipt.status == "applied"
@@ -812,7 +814,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                             self._rounds_used, last_send_chars = round_idx, transcript_chars  # a dispatched send IS the last one
                             self._observe_sent_view(messages, schemas, confirmed=False)
                             stamp_failed = invoke_late_review_paid_stamp(self.assignment.dispatch_stamp)
-                        observe_failed_review_send(self.usage_observer, exc)
+                        self.attempt_costs.failed(observe_failed_review_send(self.usage_observer, exc))
                         if not stamp_failed and self._images.refuse_send(exc, self.assignment.slot, round_idx, transcript_chars):
                             end_reason = "running"
                             continue  # Same episode, explicit gap; no estimate suppresses an image send.
@@ -848,17 +850,14 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 wire_validation = pop_custom_validation_receipts(usage, tool_calls)
                 validation_by_id = custom_validation_by_call_id(wire_validation)
                 add_usage(total_usage, usage)
-                # add_usage accumulates only token/cost keys: carry the ledger
-                # linkage and provenance facts the substrate's actor records
-                # consume, or the episode rollup would echo the REQUESTED model
-                # dressed as resolved and lose its physical attempt ids.
-                for _attempt_id in (usage.get("ledger_attempt_ids") or []):
-                    total_usage.setdefault("ledger_attempt_ids", []).append(_attempt_id)
                 for _fact in ("resolved_model", "provider", "claudexor", "model_role_route"):
                     if usage.get(_fact):
                         total_usage[_fact] = usage[_fact]
                 content = str(msg.get("content") or "") if isinstance(msg, dict) else ""
-                if content:
+                usability = usage_reply_usability(usage, msg)  # the reply's terminal facts, never its words
+                # A cut the provider left unfinished joins the unusable: no draft, no verdict, however it parses.
+                usability = "unfinished" if usability == "usable" and usage_reply_unfinished(usage) else usability
+                if content and usability == "usable":  # commentary is progress, an unusable reply no result: no draft
                     last_content = content
                 # The envelope joins the record BEFORE any terminal branch, so
                 # the terminal-round fact describes the decision-ending output
@@ -869,6 +868,11 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 assistant.setdefault("role", "assistant")
                 messages.append(assistant)
                 self._round_messages = [copy.deepcopy(assistant)]
+                if usability in {"unusable", "unfinished"}:  # a provider-stated non-result: no verdict, no call, no draft
+                    end_reason = f"{usability}_answer"
+                    break
+                if not tool_calls and usability == "intermediate":
+                    continue  # healthy commentary: this episode continues within its own deadline and budget
                 if not tool_calls:
                     # The reviewer's answer — or an empty round, which is the
                     # episode's honest end: the empty answer rides the ordinary
@@ -939,7 +943,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 "native_end_reason": end_reason,
             })
             episode["native_custody_row"] = self._emit_episode_fact(episode)
-            self._episode_usage = dict(total_usage)
+            self._episode_usage = dict(self.attempt_costs.project(total_usage))
             self._episode_usage.update({
                 "provider": str(total_usage.get("provider") or ""),
                 # The slot model stands in for an unreported resolved model ONLY
@@ -954,6 +958,11 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 "host_file_read_attestation": "host_observed",
                 "delivery": "native_tool_rounds",
             })
+        if final_answer is None and end_reason in {"unusable_answer", "unfinished_answer"}:
+            raise ReviewRouteUnavailable(
+                f"native review episode round {self._rounds_used} ended as a provider-stated "
+                f"{'unfinished reply' if end_reason == 'unfinished_answer' else 'non-result'} (reply_usability); "
+                "the episode fails closed with no verdict", code=f"native_round_{end_reason.split('_')[0]}")
         if final_answer is None:
             raise ReviewRouteUnavailable(
                 f"native review episode round {self._rounds_used} carried neither "
@@ -1021,6 +1030,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         kwargs: Dict[str, Any] = {
             "messages": self._images.prepare(messages, slot),
             "model": slot.model,
+            "chat_conversation_id": self.assignment.call_id,
             "model_role": f"reviewer:{slot.slot_id}",
             "model_account_override": slot.session_profile,
             "tools": schemas,

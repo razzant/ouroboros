@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.16
+version: 1.4.21
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -15,7 +15,7 @@ subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.docu
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
-  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never routing instructions. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
+  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never instructions to running work; a Reply to any message of a Project opens its own turn in that Project. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
   token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
 timeout_sec: 60
 companion_processes:
@@ -35,7 +35,9 @@ this integration's 10 MiB download cap) can be sent to Ouroboros, with or withou
 caption; replies, photos, videos, documents, typing state, subagent cards, quiz
 cards, and opt-in notifications are mirrored back to that owner. A helper's own final report
 stays in the app, where its card shows it; Ouroboros's answer speaks for it, while a helper's
-message to you, question or file still comes here. Telegram's typing
+message to you, question or file still comes here. A helper's card and its notices for work begun
+from this chat also come in Telegram-only mode, from a Project room too, but only through the bot and
+chat that took the message that began it; the card quotes nothing. Telegram's typing
 indicator stays on while a reply you asked for, mirrored to this chat, is actively
 being prepared by Ouroboros or a working helper; it stops for Pause, Stop now and
 after the answer, and a question waiting for you, a model-access wait or background work
@@ -57,16 +59,29 @@ renamed Project updates its worker bubble. Long messages repeat the label on eac
 part; a caption that no longer fits goes out as full text before its media.
 Quizzes keep the label through answers and edits.
 
-The bridge remembers every mirrored part, including media and completion
-notices, in a bounded durable message map. Replying passes its host row or work
-reference through normal chat; Ouroboros decides what it means. Unknown or
-evicted ids add nothing. Answers to an earlier owner message from this Telegram
-chat use a native reply; answers to its latest owner message stay unquoted.
+The bridge remembers every mirrored part, including media, completion notices
+and helper cards (also after an edit), in a bounded durable message map. A Reply
+to any message of a Project opens its own turn in that Project; one whose Project
+is gone or retired is refused and never lands in Main. Every other Reply stays an
+ordinary turn here: to the owner's own words, Main or this conversation, a question's
+earlier parts, a row the store cannot read now, quoted as a reference Ouroboros
+interprets; to a bot message no map knows (evicted, older, /help), unquoted. Answers to
+an earlier owner message from this Telegram chat use a native reply; answers to its
+latest owner message stay unquoted. A Project Reply's turn (its answer, questions,
+media, cards, progress, typing and completion notice) and its helpers stay with
+the bot and chat that took the Reply, without replacing the room's binding.
+Refusals use that same address. A new Project work retains it; Continue and helpers
+do not reuse the anchor. The turn answers with a strict native reply on the card the owner pressed,
+however old, else on the card of the helper the replied notice is about, else on his
+message; its parts keep that anchor, and only when Telegram definitely says the card
+is gone before any part arrived does the owner's own message take its place, once.
+A deferred update keeps its original quote and card for that bot, even if the server URL changes.
 Relay success stays silent; a host-reported failure arrives as one line. A relayed row quotes the owner's words verbatim as
 plain text, under where he wrote them and with the file names, above the note; a
 note between works that quotes none of his words stays in its room.
 Quiz buttons and replies keep their decision path; earlier parts of a long
-question carry ordinary references.
+question carry ordinary references. A late answer's own turn replies through the
+bot and chat the answer came from.
 
 Mirrored messages, files, cards and their updates leave through one outbox that
 survives restarts (`outbox/` in this skill's state): each is saved before it is sent
@@ -222,7 +237,11 @@ The bridge speaks the install's interface language (Settings → Appearance → 
 one writer, and the bridge's own menu, buttons, card hints and notifications are
 English source read through the install's translation memory (a line it lacks is
 generated like a browser miss), so the bot ships no dictionary and follows any
-chosen language. The retired bridge-only `TELEGRAM_LANGUAGE` setting is migrated once.
+chosen language. A host notice arrives as the host's one line (`ouroboros/host_notice.py`): its
+phrase and its next step, each translated before they are joined; its raw details stay behind
+Details in the web. A notice's one-line instruction (the Git command that puts kept local
+changes back after an update) comes under the line, after a blank line, as plain text; the
+details never do. The retired bridge-only `TELEGRAM_LANGUAGE` setting is migrated once.
 
 The bridge starts the Mini App when the Ouroboros server is a container's
 PID 1 without an init. PID 1 counts as the server only when the host named
@@ -242,7 +261,10 @@ the host's compact cause projection retain their original reason text when On.
 
 The Mini App exposes the Ouroboros SPA through the owner-authenticated sidecar
 and a pinned Cloudflare Quick Tunnel. The sidecar relays WebSocket failure codes
-without private exception text, within its 8 MiB message limit. Requests wait
+without private exception text, within its 8 MiB message limit. Every answer is
+`no-store` except a builtin `/static` file fetched by GET in the owner's session, which
+keeps the core's `private, no-cache` revalidation (ETag, 304), so reopening the
+app downloads only what changed; bodies, gzip included, pass raw. Requests wait
 for an upstream socket with no pool timeout (32 connections, 8 kept alive). An
 upstream response closes however delivery ends; a stream stops
 once its phone leaves, which uvicorn tells only `receive()`. A request whose phone

@@ -16,7 +16,7 @@ import inspect
 import logging
 import pathlib
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import ouroboros.tools.extension_dispatch as extension_dispatch
 import ouroboros.tools.registry_guard_process as registry_guard_process
@@ -28,19 +28,16 @@ from ouroboros.runtime_mode_policy import (
     core_patch_notice,
     mode_allows_protected_write,
     mode_has_unrestricted_agency,
-    runtime_mode_at_least,
     protected_paths_in,
     protected_write_block_message,
 )
-from ouroboros.tool_policy import name_miss_guidance, tool_namespace, usable_selectors
+from ouroboros.tool_policy import BUILTIN_NAMESPACE, name_miss_guidance, tool_namespace, usable_selectors
 from ouroboros.tool_capabilities import (
     ACTING_SUBAGENT_MODE,
     acting_tool_names_for_context,
     schema_selection_tools_for_context,
-    CORE_TOOL_NAMES,
     LOCAL_READONLY_SUBAGENT_MODE,
     LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
-    META_TOOL_NAMES,
 )
 from ouroboros.tool_access import (
     active_tool_profile,
@@ -308,6 +305,26 @@ def _append_shell_core_notice(
     return str(result) + "\n\n" + notice
 
 
+# What policy_hidden_reason says for each cause the one built-in visibility rule names; an alias says
+# nothing (callable, never advertised: discovery answers as for any non-public name).
+_HIDDEN_REASON_TEXT = {
+    "disabled": "disabled by this task's contract (disabled_tools)",
+    "presence": "outside this presence task's positive capability ceiling",
+    "network": "resource_blocked (network=false)",
+    "readonly": "hidden by the read-only subagent profile",
+    "acting": "hidden by the acting subagent profile",
+}
+
+
+class _BuiltinView(NamedTuple):
+    """The task facts the built-in visibility rule reads, taken once per reader call."""
+
+    disabled: frozenset
+    readonly: bool
+    acting_names: Optional[frozenset]
+    for_dispatch: bool
+
+
 class ToolRegistry:
     """Tool registry; modules export ``get_tools()``."""
 
@@ -380,6 +397,34 @@ class ToolRegistry:
 
     def set_context(self, ctx: ToolContext) -> None:
         self._ctx = ctx
+        self._bind_schedule_door()
+
+    def _bind_schedule_door(self) -> None:
+        """Each task binding drops this registry's own adapter and binds it again only for a run of an older schedule
+        its receipt confirms (``loop_completion_schema.schedule_door``). A frozen registry's door keeps its name."""
+        from ouroboros.loop_completion_schema import SCHEDULE_DOOR, schedule_door_entry, schedule_finish
+
+        entry = self._scoped_entries.get(SCHEDULE_DOOR)
+        if entry is not None and entry.handler is schedule_finish:
+            for table in (self._entries, self._scoped_entries, self._entry_origins):
+                table.pop(SCHEDULE_DOOR, None)
+        if SCHEDULE_DOOR not in self._entries and (door := schedule_door_entry(self._ctx)) is not None:
+            self.register(door, origin="ouroboros.loop_completion_schema.schedule_door_entry")
+
+    def _retry_schedule_door(self) -> bool:
+        """A busy first receipt read is not a lifetime unbind: catalog reads and dispatch read it again (no-op once bound,
+        and for any task without a frozen ceiling). True when the adapter is bound now."""
+        from ouroboros.loop_completion_schema import SCHEDULE_DOOR, schedule_door_entry
+
+        ctx = getattr(self, "_ctx", None)
+        if SCHEDULE_DOOR in self._entries:
+            return bool(getattr(ctx, "_schedule_door", None))
+        if ctx is None or not (getattr(ctx, "task_contract", {}) or {}).get("capability_ceiling"):
+            return False
+        if (door := schedule_door_entry(ctx)) is None:
+            return False
+        self.register(door, origin="ouroboros.loop_completion_schema.schedule_door_entry")
+        return True
 
     def copy_for(self, ctx: ToolContext) -> "ToolRegistry":
         """This catalog bound to ``ctx``; handlers the copy rebinds (``override_handler``) stay its own."""
@@ -476,31 +521,59 @@ class ToolRegistry:
             and not bool(bootstrap.get("zero_run_receipt_recorded"))
         )
 
-    def initial_tool_names(self) -> frozenset[str]:
-        if self._is_local_readonly_subagent():
-            names = set(LOCAL_READONLY_SUBAGENT_TOOL_NAMES | schema_selection_tools_for_context(self._ctx))
-            if self._readonly_tool_allowed("verify_and_record"):
-                names.add("verify_and_record")
-            return frozenset(names)
-        if self._is_acting_subagent():
-            return acting_tool_names_for_context(self._ctx, self._entries)
-        return frozenset(set(self.available_tools()) | set(META_TOOL_NAMES))
+    def _builtin_view(self, *, for_dispatch: bool = False) -> _BuiltinView:
+        """``for_dispatch``: whether it can be CALLED. A consciousness-origin task is shown an owner
+        turn's tools (its disabled_tools bind at dispatch only, В31=B), and the web resource gate binds
+        the call, not the schema."""
+        dispatch_only = registry_guards.disabled_tools_dispatch_only(self._ctx)
+        acting = self._is_acting_subagent()
+        return _BuiltinView(
+            disabled=_disabled_tools(self._ctx) if for_dispatch or not dispatch_only else frozenset(),
+            readonly=self._is_local_readonly_subagent(),
+            acting_names=acting_tool_names_for_context(self._ctx, self._entries) if acting else None,
+            for_dispatch=for_dispatch,
+        )
+
+    def _builtin_hidden(self, entry: ToolEntry, view: _BuiltinView,
+                        availability: Optional[tuple] = None) -> Optional[str]:
+        """The ONE visibility rule of a registered built-in: None when this task is shown it (or, for
+        dispatch, may call it), else the first cause (``_builtin_verdict``). schemas(), available_tools,
+        policy_hidden_reason, get_schema_by_name and callable_rows all read it; dispatch keeps its own
+        argument-aware admission."""
+        return self._builtin_verdict(entry, view, availability)[0]
+
+    def _builtin_verdict(self, entry: ToolEntry, view: _BuiltinView,
+                         availability: Optional[tuple] = None) -> tuple:
+        """``(cause, availability)`` in one order: contract, Presence ceiling, alias, network, local
+        availability, web (dispatch only), child profile. Availability (a key, a backend, the GitHub CLI's
+        settings) is read only when no earlier cause decided, unless the caller already holds it."""
+        name = entry.name
+        if name in view.disabled:
+            return "disabled", availability
+        if not _presence_tool_allowed(self._ctx, name):
+            return "presence", availability
+        if _alias_hidden(self._ctx, entry):
+            return "alias", availability
+        if not registry_guards._builtin_network_allowed(self._ctx, name):
+            return "network", availability
+        availability = availability or _builtin_tool_availability(name, self._ctx)
+        if not availability[0]:
+            return "unavailable", availability
+        if view.for_dispatch and name in registry_guards._WEB_TOOLS and not _resource_allowed(self._ctx, "web"):
+            return "web", availability
+        if view.readonly and not self._readonly_tool_allowed(name):
+            return "readonly", availability
+        if view.acting_names is not None and name not in view.acting_names:
+            return "acting", availability
+        return None, availability
+
+    def is_builtin(self, name: str) -> bool:
+        """Whether ``name`` is a registered built-in of this catalog (aliases included), shown or not."""
+        return str(name or "").strip() in self._entries
 
     def available_tools(self) -> List[str]:
-        acting_subagent = self._is_acting_subagent()
-        local_readonly_subagent = self._is_local_readonly_subagent()
-        # A consciousness-origin task keeps its full schema set (dispatch-only policy, В31=B).
-        disabled = frozenset() if registry_guards.disabled_tools_dispatch_only(self._ctx) else _disabled_tools(self._ctx)
-        return [
-            e.name
-            for e in self._entries.values()
-            if not _alias_hidden(self._ctx, e)
-            if e.name not in disabled  # declarative tool policy (task_contract.disabled_tools)
-            if _presence_tool_allowed(self._ctx, e.name)
-            if _builtin_tool_availability(e.name, self._ctx)[0]
-            if not local_readonly_subagent or self._readonly_tool_allowed(e.name)
-            if not acting_subagent or e.name in acting_tool_names_for_context(self._ctx, self._entries)
-        ]
+        view = self._builtin_view()
+        return [entry.name for entry in self._entries.values() if self._builtin_hidden(entry, view) is None]
 
     def _schema_for_entry(self, entry: ToolEntry) -> Dict[str, Any]:
         schema = entry.schema
@@ -728,32 +801,23 @@ class ToolRegistry:
                                               "error": f"{notice['id']}: {notice['detail']}"})
         return rows
 
-    def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
-        acting_subagent = self._is_acting_subagent()
-        local_readonly_subagent = self._is_local_readonly_subagent()
+    def schemas(self) -> List[Dict[str, Any]]:
+        self._retry_schedule_door()
         # Dispatch-only policy (В31=B): a consciousness-origin task is filtered by nothing here and
         # records no disabled_by_contract omission, so its prefix matches an owner turn's exactly.
-        disabled_tools = frozenset() if registry_guards.disabled_tools_dispatch_only(self._ctx) else _disabled_tools(self._ctx)
+        view = self._builtin_view()
+        disabled_tools = view.disabled
         # Rebuild from the load-time facts, never from empty: a rebuilt schema
         # list must not erase module_load_failed omissions (H3, capinv-447).
         self._capability_omissions = [dict(item) for item in self._module_load_omissions]
+        availability = {entry.name: _builtin_tool_availability(entry.name, self._ctx) for entry in self._entries.values()}
         # Every locally unavailable built-in is withheld under its own cause, not only a missing key.
-        unavailable_tools = {
-            entry.name: (reason, detail)
-            for entry in self._entries.values()
-            for available, reason, detail in [_builtin_tool_availability(entry.name, self._ctx)]
-            if not available and entry.name not in disabled_tools
-        }
+        unavailable_tools = {name: (reason, detail) for name, (available, reason, detail) in availability.items()
+                             if not available and name not in disabled_tools}
         built_in = [
             schema
             for entry in self._entries.values()
-            if not _alias_hidden(self._ctx, entry)
-            if entry.name not in disabled_tools  # declarative tool policy (task_contract.disabled_tools)
-            if _presence_tool_allowed(self._ctx, entry.name)
-            if entry.name not in unavailable_tools
-            if registry_guards._builtin_network_allowed(self._ctx, entry.name)
-            if not local_readonly_subagent or self._readonly_tool_allowed(entry.name)
-            if not acting_subagent or entry.name in acting_tool_names_for_context(self._ctx, self._entries)
+            if self._builtin_hidden(entry, view, availability[entry.name]) is None
             for schema in self._schemas_for_entry(entry)
         ]
         if disabled_tools:
@@ -778,51 +842,24 @@ class ToolRegistry:
             except Exception as exc:
                 self._capability_omissions.append({"surface": "extensions", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
 
-        if not core_only:
-            mcp_schemas = []
-            # Owner-configured MCP tools retain the network resource gate.
-            if not _resource_allowed(self._ctx, "network"):
-                self._capability_omissions.append({"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"})
-            else:
-                try:
-                    mcp_schemas = [_dynamic_tool_schema(tool) for tool in self._mcp_rows(record=True)]
-                except Exception as exc:
-                    self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
-            combined = built_in + extension_schemas + mcp_schemas
-            if disabled_tools:
-                # Apply the declarative tool policy to dynamic extension/MCP schemas too, not just
-                # built-ins, so a disabled name can never surface from any discovery source.
-                combined = [
-                    s for s in combined
-                    if (s.get("function", {}) or {}).get("name") not in disabled_tools
-                ]
-            return combined
-        # Core tools plus meta-tools for enabling extended tools.
-        result = []
-        for e in self._entries.values():
-            if _alias_hidden(self._ctx, e):
-                continue
-            if e.name in disabled_tools:  # declarative tool policy (task_contract.disabled_tools)
-                continue
-            if not _presence_tool_allowed(self._ctx, e.name):
-                continue
-            if e.name in unavailable_tools or not registry_guards._builtin_network_allowed(self._ctx, e.name):
-                continue
-            if local_readonly_subagent and not self._readonly_tool_allowed(e.name):
-                continue
-            if acting_subagent and e.name not in acting_tool_names_for_context(self._ctx, self._entries):
-                continue
-            if (
-                (local_readonly_subagent and self._readonly_tool_allowed(e.name))
-                or (acting_subagent and e.name in acting_tool_names_for_context(self._ctx, self._entries))
-                or e.name in CORE_TOOL_NAMES
-                or e.name in ("list_available_tools", "enable_tools")
-            ):
-                result.extend(self._schemas_for_entry(e))
-        ext = extension_schemas
+        mcp_schemas = []
+        # Owner-configured MCP tools retain the network resource gate.
+        if not _resource_allowed(self._ctx, "network"):
+            self._capability_omissions.append({"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"})
+        else:
+            try:
+                mcp_schemas = [_dynamic_tool_schema(tool) for tool in self._mcp_rows(record=True)]
+            except Exception as exc:
+                self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
+        combined = built_in + extension_schemas + mcp_schemas
         if disabled_tools:
-            ext = [s for s in ext if (s.get("function", {}) or {}).get("name") not in disabled_tools]
-        return result + ext
+            # Apply the declarative tool policy to dynamic extension/MCP schemas too, not just
+            # built-ins, so a disabled name can never surface from any discovery source.
+            combined = [
+                s for s in combined
+                if (s.get("function", {}) or {}).get("name") not in disabled_tools
+            ]
+        return combined
 
     def capability_omissions(self) -> List[Dict[str, Any]]:
         return [dict(item) for item in self._capability_omissions]
@@ -830,78 +867,53 @@ class ToolRegistry:
     def policy_hidden_reason(self, name: str) -> Optional[str]:
         """Why a REGISTERED built-in tool is invisible to THIS task, or None.
 
-        Read-only companion to get_schema_by_name (same predicates, same order):
-        it distinguishes "hidden by policy" from "does not exist" so discovery
-        answers can stop reporting a policy-filtered tool as nonexistent (F3,
-        2026-08-10 saga). None means visible OR unknown name — callers that got
-        no schema and no reason may honestly say "not found".
+        The one visibility rule's cause, in words: it distinguishes "hidden by policy" from "does
+        not exist" so discovery answers can stop reporting a policy-filtered tool as nonexistent
+        (F3, 2026-08-10 saga). None means visible OR unknown name — callers that got no schema
+        and no reason may honestly say "not found". The contract and the Presence ceiling also
+        answer for a name that is not a built-in (2026-08-10 amendments), so a contract-disabled
+        extension/MCP name says why; deeper extension/MCP reasons (grants, network) would need
+        new plumbing — disclosed residual, not built.
         """
         requested = str(name or "").strip()
         if not requested:
             return None
-        # BEFORE the registration check: the declarative contract policy applies
-        # across ALL discovery sources (get_schema_by_name checks it first for the
-        # same reason), so a contract-disabled extension/MCP name answers with its
-        # reason instead of "not found" (2026-08-10 amendments). Deeper extension/
-        # MCP policy reasons (grants, network) would need new plumbing — disclosed
-        # residual, not built.
-        if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
-            return "disabled by this task's contract (disabled_tools)"
-        if not _presence_tool_allowed(self._ctx, requested):
-            return "outside this presence task's positive capability ceiling"
-        if requested not in self._entries:
-            return None
-        if not registry_guards._builtin_network_allowed(self._ctx, requested):
-            return "resource_blocked (network=false)"
-        if _alias_hidden(self._ctx, self._entries[requested]):
-            # Mirrors get_schema_by_name: a compat alias is callable but never
-            # advertised — discovery answers as for any non-public name.
-            return None
-        available, reason, _detail = _builtin_tool_availability(requested, self._ctx)
-        if not available:
-            return f"unavailable ({reason})"
-        acting_subagent = self._is_acting_subagent()
-        if self._is_local_readonly_subagent() and not self._readonly_tool_allowed(requested):
-            return "hidden by the read-only subagent profile"
-        if acting_subagent and requested not in acting_tool_names_for_context(self._ctx, self._entries):
-            return "hidden by the acting subagent profile"
-        return None
+        entry = self._entries.get(requested)
+        if entry is None:
+            if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
+                return _HIDDEN_REASON_TEXT["disabled"]
+            # A Presence ceiling hides tools; a built-in-shaped name no catalog holds (a skill's name, a
+            # typo) is no tool at all, so it is not reported as hidden by it.
+            if tool_namespace(requested) == BUILTIN_NAMESPACE:
+                return None
+            return None if _presence_tool_allowed(self._ctx, requested) else _HIDDEN_REASON_TEXT["presence"]
+        cause, availability = self._builtin_verdict(entry, self._builtin_view())
+        return f"unavailable ({availability[1]})" if cause == "unavailable" else _HIDDEN_REASON_TEXT.get(cause or "")
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         requested = str(name or "").strip()
-        acting_subagent = self._is_acting_subagent()
-        acting_grants = self._acting_tool_grants() if acting_subagent else set()
-        local_readonly_subagent = self._is_local_readonly_subagent()
+        if requested == "presence_finish":
+            self._retry_schedule_door()
+        entry = self._entries.get(requested)
+        if entry:  # a built-in answers by the one rule, which holds the contract and the Presence ceiling
+            cause, availability = self._builtin_verdict(entry, self._builtin_view())
+            if cause == "unavailable" and availability[1]:
+                self._capability_omissions.append({
+                    "surface": "tools",
+                    "reason": availability[1],
+                    "tools": [requested],
+                    "details": {requested: availability[2]},
+                })
+            return None if cause else self._schema_for_entry(entry)
         # Declarative tool policy applies across ALL discovery sources (built-in, extension, MCP),
         # so enable_tools/discovery can never surface a disabled name — consistent with schemas()/execute().
         if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
             return None
         if not _presence_tool_allowed(self._ctx, requested):
             return None
-        entry = self._entries.get(requested)
-        if entry and _alias_hidden(self._ctx, entry):
-            # Compat aliases are callable, never advertised — discovery answers
-            # as it does for any non-public name.
-            return None
-        if entry:
-            if not registry_guards._builtin_network_allowed(self._ctx, requested):
-                return None
-            available, reason, detail = _builtin_tool_availability(requested, self._ctx)
-            if not available:
-                if reason:
-                    self._capability_omissions.append({
-                        "surface": "tools",
-                        "reason": reason,
-                        "tools": [requested],
-                        "details": {requested: detail},
-                    })
-                return None
-            if local_readonly_subagent and not self._readonly_tool_allowed(requested):
-                return None
-            if acting_subagent and requested not in acting_tool_names_for_context(self._ctx, self._entries):
-                return None
-            return self._schema_for_entry(entry)
+        acting_subagent = self._is_acting_subagent()
+        acting_grants = self._acting_tool_grants() if acting_subagent else set()
         try:
             from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
         except Exception:
@@ -963,11 +975,9 @@ class ToolRegistry:
         from ouroboros.mcp_schema import annotation_marks
 
         disabled = _disabled_tools(self._ctx)
-        rows: List[Dict[str, Any]] = [
-            {"name": name} for name in self.available_tools()
-            if name not in registry_guards._WEB_TOOLS or _resource_allowed(self._ctx, "web")
-            if registry_guards._builtin_network_allowed(self._ctx, name)
-        ]
+        view = self._builtin_view(for_dispatch=True)
+        rows: List[Dict[str, Any]] = [{"name": entry.name} for entry in self._entries.values()
+                                      if self._builtin_hidden(entry, view) is None]
         for surface in ("ext_", "mcp_"):
             if namespace and not namespace.startswith(surface) or not _resource_allowed(self._ctx, "network"):
                 continue
@@ -1199,6 +1209,10 @@ class ToolRegistry:
     def _execute_admitted_text(self, name: str, args: Dict[str, Any],
                                handoff: Optional[Dict[str, Any]] = None) -> str | ToolResult:
         name = str(name or "").strip()
+        if name == "presence_finish" and (getattr(self._ctx, "_schedule_door", None) or self._retry_schedule_door()):
+            from ouroboros.loop_completion_schema import fixed_refusal
+            if (refusal := fixed_refusal(self._ctx)) is not None:  # a frozen outcome is applied below, never refused
+                return refusal
         args, presence_arg_error = _presence_bound_args(self._ctx, name, args)
         if presence_arg_error:
             return presence_arg_error
@@ -1207,7 +1221,7 @@ class ToolRegistry:
         local_readonly_subagent = self._is_local_readonly_subagent()
         acting_subagent = self._is_acting_subagent()
         acting_self_worktree = acting_subagent and str(getattr(task_constraint, "surface", "") or "") == "self_worktree"
-        from ouroboros.workspace_copies import is_system_copy
+        from ouroboros.workspace_copies import is_system_copy, protected_write_admitted
 
         acting_system_worktree = acting_self_worktree and is_system_copy(self._ctx)
         acting_protected_grant = acting_subagent and bool(getattr(task_constraint, "protected_paths_grant", False))
@@ -1396,11 +1410,9 @@ class ToolRegistry:
             protected_matches = protected_paths_in(tool_resolution.protected_repo_write_paths(
                 self._ctx, name, args, resolved_binding,
                 workspace_mode=workspace_mode, acting_system_worktree=acting_system_worktree))
-            allow_protected = registry_guards._authorized_managed_update_resolver(self._ctx) or (
-                mode_allows_protected_write(_runtime_mode)
-                and (acting_protected_grant or not acting_subagent
-                     or runtime_mode_at_least(_runtime_mode, "cyber_pro"))
-            )
+            # The one protected-path rule, shared with the three integration doors (owner decision 6A).
+            allow_protected = registry_guards._authorized_managed_update_resolver(self._ctx) or protected_write_admitted(
+                _runtime_mode, acting=acting_subagent, grant=acting_protected_grant)
             if protected_matches and not allow_protected:
                 first = protected_matches[0]
                 return _protected_write_block_result(

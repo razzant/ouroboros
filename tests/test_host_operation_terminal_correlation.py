@@ -145,7 +145,9 @@ def test_restart_acknowledgement_does_not_claim_the_operation_finished(tmp_path,
     assert acknowledgement["text"] == "♻️ Restarting."
     assert acknowledgement["origin_message_ref"] == refused["origin_message_ref"]
     assert "task_terminal_status" not in acknowledgement
-    assert refused["task_terminal_status"] == "failed" and "controlled refusal" in refused["text"]
+    assert refused["task_terminal_status"] == "failed" and refused["text"] == "The restart was cancelled."
+    # The cancellation's own cause is the notice's detail, never the phrase's words (DESIGN principle 7).
+    assert refused["notice"] == {"code": "restart_cancelled", "details": "controlled refusal"}
     assert not acknowledgement.get("is_progress") and not refused.get("is_progress")
     view = client.get("/chat/operations/42:restart-refused", headers=_headers()).json()
     assert view["status"] == "failed" and view["text"] == refused["text"]

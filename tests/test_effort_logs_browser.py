@@ -114,7 +114,7 @@ def _open_logs(page):
     # Shown, Logs reads its recent history (logs.js): a reloaded page has no task card until that read has landed.
     page.wait_for_function("""() => !document.querySelector('.logs-history-status')?.textContent.includes('Loading')
         && Boolean(document.querySelector('#log-entries .log-task-card'))""")
-    for details in page.locator('#log-entries .log-task-details').all():
+    for details in page.locator('#log-entries .log-task-card').all():
         if details.get_attribute('open') is None:
             details.locator(':scope > summary').click()
 

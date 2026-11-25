@@ -41,6 +41,7 @@ from ouroboros.llm_attempt import (
 from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.llm_stream import consume_stream
 from ouroboros.llm_capability_policy import normalize_reasoning_effort
+from ouroboros.provider_models import anthropic_thinking_off_type
 from ouroboros.reasoning_artifacts import note_replay_omission, pop_replay_omission
 from ouroboros.request_wire_recovery import (
     finalize_wire_response,
@@ -51,8 +52,11 @@ from ouroboros.request_wire_recovery import (
 )
 
 from ouroboros.usage_accounting import UsageAccountingError, last_physical_attempt_capture, UsageScope, usage_scope
-from ouroboros._usage_response import observed_processing_mode
-from ouroboros.event_usage import REPORTED_TOKENS_KEY, anthropic_token_counts
+from ouroboros._usage_response import (
+    cache_pricing_usage, cache_write_split, cache_write_total, malformed_token_counts, native_prompt_tokens,
+    observed_processing_mode, reported_price, text_token_counts,
+)
+from ouroboros.event_usage import REPORTED_TOKENS_KEY, anthropic_token_counts, token_count
 
 
 log = logging.getLogger("ouroboros.llm")
@@ -327,29 +331,9 @@ class _AnthropicLaneMixin:
         return {"type": "tool", "name": tool_choice}
 
     @staticmethod
-    def _cache_write_split(raw_usage: Dict[str, Any]) -> Dict[str, int]:
-        """Anthropic's per-tier cache-write counters, when the provider reports them.
-
-        With the extended (1h) tier live, ``usage.cache_creation`` splits
-        ``cache_creation_input_tokens`` into ``ephemeral_5m_input_tokens`` /
-        ``ephemeral_1h_input_tokens`` — a 1h request can legitimately produce BOTH
-        (e.g. a server-tool block cached at the default tier beside the 1h prefix),
-        and pricing must bill only the genuine 1h share at the extended ratio.
-        Empty dict when the provider reported no split (older shapes) — the caller
-        then bills every write at the reported tier, never a loosened ratio.
-        """
-        split = raw_usage.get("cache_creation") if isinstance(raw_usage, dict) else None
-        if not isinstance(split, dict):
-            return {}
-        out: Dict[str, int] = {}
-        for tier, key in (("5m", "ephemeral_5m_input_tokens"), ("1h", "ephemeral_1h_input_tokens")):
-            try:
-                value = int(split.get(key) or 0)
-            except (TypeError, ValueError):
-                value = 0
-            if value > 0:
-                out[tier] = value
-        return out
+    def _cache_write_split(raw_usage: Dict[str, Any]) -> Dict[str, Optional[int]]:
+        """The native write bins exposed by both native and OpenRouter replies."""
+        return cache_write_split(raw_usage) if isinstance(raw_usage, dict) else {}
 
     def _normalize_anthropic_response(
         self,
@@ -379,24 +363,37 @@ class _AnthropicLaneMixin:
                 })
 
         raw_usage = resp_dict.get("usage") or {}
+        write_split = self._cache_write_split(raw_usage)
+        written, invalid_write = cache_write_total(raw_usage, write_split)
+        # The one write total the ledger reads (any valid alias, or both lifetime bins); unknown stays unknown.
+        reported_written = None if invalid_write else written
+        # v6.77.0: Anthropic EXCLUDES cache reads/writes from `input_tokens`, while
+        # `prompt_tokens` is the OpenAI-semantics TOTAL input every consumer assumes —
+        # `pricing.regular_input = prompt_tokens - cached - cache_write` clamped fresh
+        # input to 0 on a cache-heavy call (and cache_hit_rate could exceed 1.0).
+        inclusive = native_prompt_tokens(raw_usage, write_split, written, invalid_write)
+        # With no reported writes the historical billing default is zero.
+        if written is None and not (write_split or invalid_write):
+            written = 0
+        # An invalid counter is never laundered into a measured one: ``token_count`` keeps a
+        # reported zero, keeps an unreported count unknown and never raises, so a malformed
+        # count neither zeroes the row nor costs it its healthy neighbours or the reported
+        # bill below. The read counter keeps the unreported-adds-nothing billing zero cache
+        # routing reads (#1580); only a count that was reported may measure zero.
+        cache_read = token_count(raw_usage.get("cache_read_input_tokens"))
+        if raw_usage.get("cache_read_input_tokens") is None:
+            cache_read = 0
         usage: Dict[str, Any] = {
-            # v6.77.0: Anthropic EXCLUDES cache reads/writes from `input_tokens`, while
-            # `prompt_tokens` is the OpenAI-semantics TOTAL input every consumer assumes —
-            # `pricing.regular_input = prompt_tokens - cached - cache_write` clamped fresh
-            # input to 0 on a cache-heavy call (and cache_hit_rate could exceed 1.0).
-            "prompt_tokens": (
-                int(raw_usage.get("input_tokens") or 0)
-                + int(raw_usage.get("cache_read_input_tokens") or 0)
-                + int(raw_usage.get("cache_creation_input_tokens") or 0)
-            ),
-            "completion_tokens": int(raw_usage.get("output_tokens") or 0),
-            "cached_tokens": int(raw_usage.get("cache_read_input_tokens") or 0),
-            "cache_write_tokens": int(raw_usage.get("cache_creation_input_tokens") or 0),
+            "prompt_tokens": inclusive,
+            "completion_tokens": token_count(raw_usage.get("output_tokens")),
+            "cached_tokens": cache_read,
+            "cache_write_tokens": written,
+            **({"cache_write_tokens_invalid": True} if invalid_write else {}),
             "provider": "anthropic",
             "resolved_model": str(target.get("usage_model") or target.get("resolved_model") or ""),
         }
         # The counters above keep their billing shape; events read what was REPORTED (#1578).
-        usage[REPORTED_TOKENS_KEY] = anthropic_token_counts(raw_usage)
+        usage[REPORTED_TOKENS_KEY] = anthropic_token_counts({**raw_usage, "cache_creation_input_tokens": reported_written})
         for key in ("speed", "service_tier", "processing"):
             if key in raw_usage:
                 usage[key] = raw_usage[key]
@@ -405,22 +402,24 @@ class _AnthropicLaneMixin:
             usage["stream_receipt"] = dict(resp_dict["_stream_receipt"])
         if prompt_cache_ttl:
             usage["prompt_cache_ttl"] = prompt_cache_ttl
-        write_split = self._cache_write_split(raw_usage)
         if write_split:
             usage["cache_write_tokens_by_ttl"] = write_split
-        if usage["prompt_tokens"] or usage["completion_tokens"]:
+        amount, invalid, basis = reported_price(raw_usage, resp_dict.get("total_cost_usd"))
+        if basis:
+            usage["cost_basis"] = basis
+        if amount is not None:
+            usage["cost"] = amount
+        elif invalid:
+            usage["cost_invalid"] = True
+        elif (not usage.get("provider_reported_cost_only")
+                and not malformed_token_counts(raw_usage) and any(counts := (inclusive, text_token_counts(raw_usage)[1]))):
+            # The ledger's reading: a malformed count prices nothing; an unreported output count is no observed zero.
             from ouroboros.pricing import estimate_cost_optional
 
             estimated_cost = estimate_cost_optional(
                 usage["resolved_model"],
-                usage["prompt_tokens"],
-                usage["completion_tokens"],
-                cache_usage={
-                    "cached_tokens": usage["cached_tokens"],
-                    "cache_write_tokens": usage["cache_write_tokens"],
-                    "prompt_cache_ttl": usage.get("prompt_cache_ttl"),
-                    "cache_write_tokens_by_ttl": write_split or None,
-                },
+                *counts,
+                cache_usage=cache_pricing_usage(usage, written, write_split),
                 provider="anthropic",
                 **({"processing_mode": observed_processing_mode("anthropic", usage)}
                    if usage.get("processing") else {}),
@@ -430,6 +429,10 @@ class _AnthropicLaneMixin:
                 usage["cost_estimated"] = True
         if usage.get("cost") is None:
             usage["cost"] = None
+            if malformed_token_counts(raw_usage):
+                # The row keeps its projection; the partial fact that settlement already
+                # refuses keeps the loop's estimator off a malformed count as well.
+                usage["cost_coverage"] = "partial"
         usage["cost_final"] = bool(
             usage.get("cost") is not None and not usage.get("cost_estimated")
         )
@@ -480,7 +483,8 @@ class _AnthropicLaneMixin:
         }
         effort = normalize_reasoning_effort(reasoning_effort)
         if effort == "none":
-            payload["thinking"] = {"type": "disabled"}
+            # The exact model's own off state; its signed between-tool notes replay through custody.
+            payload["thinking"] = {"type": anthropic_thinking_off_type(payload["model"])}
         elif effort:
             payload["thinking"] = {"type": "adaptive"}
             payload["output_config"] = {"effort": "low" if effort == "minimal" else effort}
@@ -527,7 +531,7 @@ class _AnthropicLaneMixin:
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
             stream=stream,
         )
-        prompt_cache_ttl = self._normalize_payload_cache_ttl(target, payload)
+        self._normalize_payload_cache_ttl(target, payload)
 
         url = f"{str(target.get('base_url') or '').rstrip('/')}/messages"
         headers = {
@@ -576,9 +580,9 @@ class _AnthropicLaneMixin:
                     limit_physical_send(target, _post),
                     _candidate_before_dispatch(candidate, request),
                 )
-                note_wire_send_succeeded(last_physical_attempt_capture())
+                note_wire_send_succeeded(last_physical_attempt_capture(), target)
                 prior_capture = strongest_dispatch_capture(prior_capture, last_physical_attempt_capture())
-                return result
+                return result, request.prompt_cache_ttl
             except UsageAccountingError as exc:
                 self._pop_effort_clamp_disclosure()
                 note_wire_send_failed()
@@ -590,7 +594,7 @@ class _AnthropicLaneMixin:
                 raise
 
         try:
-            response = _send(payload)
+            response, prompt_cache_ttl = _send(payload)
         except UsageAccountingError:
             raise
         except Exception as exc:
@@ -606,14 +610,14 @@ class _AnthropicLaneMixin:
                     target, self._strip_openrouter_roundtrip_metadata(messages, keep_reasoning_content=True),
                     reasoning_effort, max_tokens, tool_choice, temperature, tools, stream=stream,
                 )
-                prompt_cache_ttl = self._normalize_payload_cache_ttl(target, retry_payload)
+                self._normalize_payload_cache_ttl(target, retry_payload)
                 reasoning_omitted = True
             if retry_payload is None:
                 self._pop_effort_clamp_disclosure()
                 raise
             for _ in range(8):
                 try:
-                    response = _send(retry_payload)
+                    response, prompt_cache_ttl = _send(retry_payload)
                     break
                 except UsageAccountingError:
                     raise
@@ -648,31 +652,39 @@ def anthropic_web_search_server_tool(
     accounting_scope: Optional[UsageScope] = None,
     timeout: Optional[float] = None,
     processing_preference: str | None = None,
+    target: Optional[Dict[str, Any]] = None,
     _recovery: Any,
 ) -> Any:
     """Run Anthropic's provider-owned web_search server tool."""
 
     import anthropic
+    import os
     from ouroboros.model_slots import resolve_processing_preference
     from ouroboros.usage_accounting import current_usage_scope
     from dataclasses import replace
 
-    target = {"provider": "anthropic", "usage_model": model, "resolved_model": model,
-              "processing_preference": resolve_processing_preference("websearch", override=processing_preference)}
-
-    client_kwargs: Dict[str, Any] = {"api_key": api_key, "max_retries": 0}
+    if target is None:
+        base_url = os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
+        target = {"provider": "anthropic", "usage_model": model, "resolved_model": model,
+                  "api_key": api_key, "base_url": base_url.rstrip("/") + "/v1"}
+    target = {**target, "processing_preference": resolve_processing_preference("websearch", override=processing_preference)}
+    # Messages.create adds /v1/messages; keep any prefix on the chosen endpoint.
+    messages_base = target["base_url"].rstrip("/")
+    if not messages_base.endswith("/v1"):
+        raise ValueError("Anthropic Messages search needs a resolved /v1 base")
+    client_kwargs: Dict[str, Any] = {"api_key": target["api_key"], "base_url": messages_base.removesuffix("/v1"),
+                                     "max_retries": 0}
+    if target.get("default_headers"):
+        client_kwargs["default_headers"] = dict(target["default_headers"])
     if timeout is not None:
         client_kwargs["timeout"] = float(timeout)
     payload = dict(
-        model=model,
+        model=target["resolved_model"],
         max_tokens=2048,
         tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
         messages=[{"role": "user", "content": query}],
     )
     apply_processing_preference(target, payload)
-    headers = processing_contract_headers(target, payload)
-    if headers:
-        client_kwargs["default_headers"] = headers
     from ouroboros.net_transport import trust_ssl_context
     trust = trust_ssl_context()
     http_cls = getattr(anthropic, "DefaultHttpxClient", None)
@@ -686,9 +698,11 @@ def anthropic_web_search_server_tool(
         kwargs = {key: value for key, value in candidate.items() if key != "speed"}
         if "speed" in candidate:
             kwargs["extra_body"] = {"speed": candidate["speed"]}
+        if headers := processing_contract_headers(target, candidate):
+            kwargs["extra_headers"] = headers
         return client.messages.create(**kwargs)
     if timeout is not None:
         payload["timeout"] = float(timeout)  # the leg's own bound: each send narrows it, never replaces it (#572)
     scope = replace(accounting_scope or current_usage_scope() or UsageScope(), source="web_search.anthropic")
     with usage_scope(scope):
-        return _recovery(send, payload, target)
+        return _recovery(send, payload, target, search_server_tool=True)

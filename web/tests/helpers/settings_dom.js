@@ -1,11 +1,15 @@
 // A DOM and a server for the node tests of Settings: the dashboard fixture's document with an element that parses
 // markup as a browser nests it, the home's passive reads answered, and the reads that start something left out.
 import { forgetSettingRows } from '../../modules/settings_controls.js';
+import { createLayerStack } from '../../modules/layers.js';
+import { bindPageBack } from '../../modules/page_header.js';
 import { NodeStub, setup } from '../dashboard_dom_fixture.js';
 
 // The fixture's element, reading a self-closed tag (an SVG `<path … />` of a glyph) as childless, so a row drawn
 // after a glyph is that glyph's sibling here as it is in a browser.
 export class Stub extends NodeStub {
+    // No layout in this fixture; a geometry test supplies its own boxes.
+    getBoundingClientRect() { return { x: 0, y: 0, top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 }; }
     toggleAttribute(name, force = !this.hasAttribute(name)) {
         if (force) this.setAttribute(name, ''); else this.removeAttribute(name);
         return force;
@@ -43,7 +47,7 @@ export const STARTS = ['/api/model-catalog', '/api/review-pool', '/api/claudexor
     '/api/update/check', '/api/storage/measure'];
 export const settle = async () => { for (let round = 0; round < 12; round += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-export function world(t) {
+export function world(t, { history } = {}) {
     forgetSettingRows();
     // A Settings shell mounted in this world is put away after its test (its `pagehide`, with the globals it was mounted
     // with, which a second world of the same test may have replaced): a shell left mounted keeps the module-wide
@@ -68,7 +72,21 @@ export function world(t) {
     env.document.body.appendChild(content);
     const state = { activePage: 'chat' };
     const shown = [];
-    const showPage = async (name, ...rest) => { shown.push([name, ...rest]); state.activePage = name; return true; };
-    return { env, posts, content, state, shown, showPage };
+    const layers = createLayerStack({ doc: env.document, win: env.window, history });
+    const off = bindPageBack({ layers, doc: env.document, win: env.window,
+        currentHeader: () => content.querySelector(`#page-${state.activePage}`)?.querySelector('.app-page-header') });
+    t.after(() => { off(); layers.destroy(); });
+    const showPage = async (name, options = {}) => {
+        shown.push([name, options]);
+        layers.batch(() => {
+            if (state.activePage !== name) {
+                state.activePage = name;
+                env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
+            }
+            options.enter?.();
+        });
+        return true;
+    };
+    return { env, posts, content, state, shown, showPage, layers };
 }
 

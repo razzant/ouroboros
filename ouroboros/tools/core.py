@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read, publish_no_effect
 
-from ouroboros.tools.arg_feedback import payload_item_feedback, with_argument_notes
+from ouroboros.tools.arg_feedback import (
+    ABSENT, argument_refusal, ignored_argument_note, payload_item_feedback, with_argument_notes,
+)
 
 import copy
 import json
@@ -738,9 +740,24 @@ def _edit_text(
     force: bool = False,
     edits: List[Dict[str, str]] | None = None,
     _resolved_binding: ResolvedResourceBinding | None = None,
+    count: object = ABSENT,
 ) -> str:
     from ouroboros.tools.tool_resolution import inferred_file_root
 
+    if count is not ABSENT:  # outside the schema (DEVELOPMENT 02): only count=1, or a null, has one meaning here
+        if count is None or type(count) is int and count == 1 and edits is None:
+            return with_argument_notes(ctx, _edit_text(
+                ctx, path, old_str, new_str, root, bucket, skill_name, force, edits, _resolved_binding,
+            ), [ignored_argument_note("count", count, "empty optional value" if count is None
+                                      else "one replacement is edit_text's default")])
+        kept = "".join(f", {key}={json.dumps(value)}" for key, value in (
+            ("root", root), ("bucket", bucket), ("skill_name", skill_name), ("force", force)) if value)
+        repair = ("count belongs inside each edit: edits=[{old_str, new_str, count}]" if edits is not None else
+                  f"edit_text replaces exactly one occurrence; for counted replacements call edit_text(path="
+                  f"{json.dumps(path)}{kept}, edits=[{{\"old_str\": <this call's old_str>, \"new_str\": <this call's "
+                  f"new_str>, \"count\": {count if type(count) is int and count > 1 else '<occurrences>'}}}])")
+        return publish_no_effect(ctx, argument_refusal(ctx, "TOOL_ARG_ERROR", [f"count={count!r}: {repair}"],
+                                                       effect="Nothing was written."), tool_name="edit_text")
     root, root_error = inferred_file_root(ctx, "edit_text", root, [path])
     if root_error:
         return publish_no_effect(ctx, root_error, tool_name="edit_text")
@@ -887,6 +904,8 @@ def _edit_text(
     except Exception as exc:
         return f"⚠️ EDIT_TEXT_ERROR: {type(exc).__name__}: {exc}"
 
+
+setattr(_edit_text, "_hidden_legacy_params", ("count",))
 _MAX_SEARCH_RESULTS = 200
 # Search file-skip helper and caps live in ouroboros.code_search_rg (the search
 # module SSOT); imported with the historical private names used by call sites.
@@ -1208,7 +1227,15 @@ def _forward_to_worker(
     if not data:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ TASK_NOT_FOUND: task {tid} is not registered.")))
     if status in FINAL_STATUSES:
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}.")))
+        # The record is on the caller's status root, so get_task_result reads it where the caller may call it
+        # (a not-started promotion answers with its own notice instead, so no read is named for it).
+        from ouroboros.promotion_intent import promotion_intent_notice
+        from ouroboros.tools.arg_feedback import repair_call_available
+
+        read = (f" get_task_result(task_id={tid!r}) reads its result."
+                if repair_call_available(ctx, "get_task_result") and not promotion_intent_notice(tid, data) else "")
+        return _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(
+            f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}; the message was not delivered.{read}")))
     # A requested child's mailbox exists in its recorded drive from the request on: its words are
     # read when it starts, or stay in its result as unread mail, the same receipt a queued one gives.
     if status not in (STATUS_RUNNING, STATUS_SCHEDULED, STATUS_REQUESTED):
@@ -1318,9 +1345,9 @@ def _forward_to_worker(
         as_from = (f" as a message from a peer task ({as_peer}; never owner text or an ancestor's steering)"
                    if provenance == PROVENANCE_PEER_TASK else " as a message from this task (never owner text)"
                    if listed_root is not None else "")
-        return (f"Message forwarded to task {tid}: written to its mailbox{as_from} ({MAIL_QUEUED}); task {tid} has not "
-                "started, so nothing has read it: it reads it when it starts, and if it ends unstarted its result keeps "
-                f"it as unread mail.{observed} Files cannot be attached to messages between tasks.")
+        return (f"Message forwarded to task {tid}: written to its mailbox{as_from} ({MAIL_QUEUED}). "
+                "Read status is unconfirmed. If the task ends before reading the message, its result keeps it "
+                f"as unread mail.{observed} Files cannot be attached to messages between tasks.")
     if provenance == PROVENANCE_PEER_TASK:
         # A Presence turn may already be over: persistence is proven, a read is not.
         read_note = ("This proves persistence, not that its model read it; if the turn continues, "
@@ -1521,10 +1548,9 @@ def get_tools() -> List[ToolEntry]:
                 "inline Presence turn (a message from an independent task). Presence observation gaps "
                 "are disclosed, also when the Presence root is in your own tree; a write never "
                 "proves a read. It is never labelled owner dialogue, files cannot be attached, the body "
-                "is limited to 8000 chars (longer is refused, never truncated), and the "
-                "result says written, not read: a running task drains it at its next checkpoint, a queued "
-                "one when it starts, and a task that ends without reading it keeps it as unread mail in its "
-                "result. To wait for a reply without spending model rounds, call await_messages."
+                "is limited to 8000 chars (longer is refused, never truncated). The task can read it on its "
+                "next mailbox check. If it ends before reading it, its result keeps it as unread mail. "
+                "To wait for a reply without spending model rounds, call await_messages."
             ),
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string", "description": "ID of the running, queued or requested task to forward to"},

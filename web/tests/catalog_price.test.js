@@ -88,22 +88,29 @@ test('the Settings chooser shows the price beside the name, never in it: not in 
     assert.deepEqual(matchingModelOptions(items, '4').map((item) => item.value), ['vendor/y']);
 
     // The bound chooser reads its options back from its own markup, as a page does.
-    const { doc } = domDouble();
+    const { doc } = domDouble({ parseHtml: true });
     appendHtml(doc.body, html);
     const input = doc.body.querySelector('[data-model-chooser]');
     const list = doc.getElementById('models');
     const dispose = bindModelChooser(input);
-    const typed = (text) => { input.value = text; input.emit('input'); return list.innerHTML; };
-    assert.doesNotMatch(typed('4'), /vendor\/x/, 'a figure of the price finds no model');
-    assert.match(typed('4'), /data-model-value="vendor\/y"/);
-    assert.match(typed('model'), priced('$4 in / $20 out'));
+    const typed = (text) => { input.value = text; input.emit('input'); };
+    const option = (id) => list.querySelector(`[data-model-value="${id}"]`);
+    typed('4');
+    assert.equal(option('vendor/x'), null, 'a figure of the price finds no model');
+    assert.equal(option('vendor/y').textContent, 'Model 4o');
+    typed('model');
+    assert.equal(option('vendor/x').querySelector('.ui-model-option-name').textContent, 'Model X');
+    assert.equal(option('vendor/x').querySelector('.ui-model-option-meta').textContent, '$4 in / $20 out');
     // A catalog refresh repaints from new markup: its price, the same name.
     const desired = appendHtml(doc.createElement('div'), modelChooserHtml('aria-label="Main"', '', 'models',
         [{ ...items[0], meta: '$5 in / $25 out' }, items[1]]));
     updateModelChooserOptions(doc.body, desired);
-    assert.match(list.innerHTML, priced('$5 in / $25 out'));
-    assert.match(list.innerHTML, /aria-selected="false">Model 4o<\/div>/);
-    assert.doesNotMatch(typed('25'), /vendor\/x/);
+    assert.equal(option('vendor/x').querySelector('.ui-model-option-name').textContent, 'Model X');
+    assert.equal(option('vendor/x').querySelector('.ui-model-option-meta').textContent, '$5 in / $25 out');
+    assert.equal(option('vendor/y').textContent, 'Model 4o');
+    assert.equal(option('vendor/y').querySelector('.ui-model-option-meta'), null);
+    typed('25');
+    assert.equal(option('vendor/x'), null);
     dispose();
 });
 
@@ -145,6 +152,10 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     assert.equal(direct, 'Price unknown', 'a direct key names no price of its own, though OpenRouter prices the same id');
     assert.match(gone, /Accounts/, 'a key that cannot send says so first');
     assert.doesNotMatch(gone, /\$/);
+    editor.adoptSources({ read_state: 'transport', errors: [{ error: 'Engine offline' }], model_sources: sources });
+    assert.deepEqual(said('main'), ['Subscription sources could not be read. $4 in / $20 out per 1M tokens · 1M window']);
+    editor.adoptSources({ read_state: 'ok', errors: [], model_sources: sources });
+    assert.deepEqual(said('main'), ['$4 in / $20 out per 1M tokens · 1M window']);
     editor.destroy();
 });
 
@@ -269,7 +280,7 @@ test('in the composer list two catalog rows of one model that disagree on its pr
 // The Settings role editor over one OpenRouter Main, as a page builds it; `settings` adds processing preferences.
 async function mainRole(settings = {}) {
     const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
-    const { doc } = domDouble();
+    const { doc } = domDouble({ parseHtml: true });
     const host = doc.createElement('div');
     host.id = 'roles';
     doc.body.append(host);
@@ -283,7 +294,7 @@ async function mainRole(settings = {}) {
     const status = host.querySelector('[data-model-role-group="main"] [data-model-role-status]');
     const input = host.querySelector('[data-model-role-group="main"] [data-model-role-model]');
     input.emit('click');  // opens the chooser without changing the role: it paints its suggestions
-    const suggestions = doc.getElementById(input.getAttribute('aria-controls')).innerHTML;
+    const suggestions = doc.getElementById(input.getAttribute('aria-controls'));
     return { editor, status, suggestions, input, host };
 }
 
@@ -292,7 +303,7 @@ test('a role on Fast or Economy names no catalog price: its tier is priced by it
         const { editor, status, suggestions, input } = await mainRole(settings);
         assert.equal(status.textContent, '$4 in / $20 out per 1M tokens', JSON.stringify(settings));
         assert.equal(status.dataset.i18nFmt, 'model price', 'composed words: the overlay leaves them alone');
-        assert.match(suggestions, /ui-model-option-meta/);
+        assert.equal(suggestions.querySelector('.ui-model-option-meta').textContent, '$4 in / $20 out');
         input.value = '';
         input.emit('input');  // the role loses its model: the line is a sentence again, which the overlay reads
         assert.equal(status.textContent, 'Choose a model to continue.');
@@ -304,8 +315,8 @@ test('a role on Fast or Economy names no catalog price: its tier is priced by it
         const { editor, status, suggestions } = await mainRole(settings);
         assert.equal(status.textContent, 'Price unknown', JSON.stringify(settings));
         assert.equal(status.dataset.i18nFmt, undefined, 'no composed price: the overlay reads the line again');
-        assert.match(suggestions, /data-model-value="anthropic\/claude-opus-5\.5"/, 'the model is still offered');
-        assert.doesNotMatch(suggestions, /ui-model-option-meta/);
+        assert.ok([...suggestions.querySelectorAll('[data-model-value]')].some(row => row.dataset.modelValue === OPUS.value), 'the model is still offered');
+        assert.equal(suggestions.querySelector('.ui-model-option-meta'), null);
         editor.destroy();
     }
 });
@@ -375,9 +386,9 @@ test('the capsule strip and the Change Main sheet say the price where "paid by k
     const cached = { ...OPUS, price: { ...OPUS.price, cache_write: 6.4, cache_write_ttl: '1h' } };
     const sheet = (options, tier = '') => describeRoute(buildModelIndex({ catalog: { items: [cached] }, ...options }), { model: OPUS.value },
         { tier }).cacheWrite;
-    assert.equal(sheet({ cacheTier: '1h' }), 'Cache write: $6.40 per 1M tokens.');
+    assert.equal(sheet({ cacheTier: '1h' }), '', 'without a requested tier, the workspace may apply another rate');
     assert.equal(sheet({ cacheTier: '1h' }, 'standard'), 'Cache write: $6.40 per 1M tokens.');
-    assert.deepEqual([sheet({ cacheTier: '5m' }), sheet({ cacheTier: 'default' }), sheet({}), sheet({ cacheTier: '1h' }, 'fast'),
+    assert.deepEqual([sheet({ cacheTier: '5m' }, 'standard'), sheet({ cacheTier: 'default' }, 'standard'), sheet({}, 'standard'), sheet({ cacheTier: '1h' }, 'fast'),
         sheet({ cacheTier: '1h' }, 'economy'), sheet({ cacheTier: '1h' }, 'ultrafast')], ['', '', '', '', '', '']);
     for (const none of [undefined, {}, { cache_write: 0, cache_write_ttl: '1h' }, { cache_write: 0.00001, cache_write_ttl: '1h' },
         { cache_write: -1, cache_write_ttl: '1h' }, { cache_write: '6.4', cache_write_ttl: '1h' }, { cache_write: 6.4 }]) {
@@ -438,7 +449,7 @@ test('where a row\'s context runs on Fast, Ultrafast or Economy the composer lis
     // The catalog's price is Standard's: the context's tier decides (model_list.js asks it per row, `tierOf`).
     const index = buildModelIndex({ catalog: { items: [OPUS] } });
     const price = (tier) => describeRoute(index, { model: OPUS.value }, { tier }).price;
-    assert.deepEqual(['', 'standard', 'fast', 'ultrafast', 'economy'].map(price), ['$4 in / $20 out', '$4 in / $20 out', '', '', '']);
+    assert.deepEqual(['', 'standard', 'fast', 'ultrafast', 'economy'].map(price), ['Catalog rate · $4 in / $20 out', '$4 in / $20 out', '', '', '']);
     const { createModelCatalogStore } = await import('../modules/model_catalog_store.js');
     const read = async (settings) => {
         const store = createModelCatalogStore({ readCatalog: async () => ({ items: [OPUS] }), readPreferences: async () => ({}),

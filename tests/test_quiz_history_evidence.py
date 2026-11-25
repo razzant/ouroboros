@@ -16,8 +16,18 @@ from ouroboros.gateway.task_decision import answer_decision
 from ouroboros.memory import Memory
 from ouroboros.owner_mailbox import cleanup_task_mailbox, drain_owner_entries
 from ouroboros.owner_quiz import quiz_states, record_asked
+from ouroboros.question_answers import MAILBOX_ROUTE_FACT
 from supervisor import message_bus, queue, state
 
+
+
+def _letter(fact):
+    """The live letter for this history row: its frame told to the asking task ("your text" for a pressed label, where
+    the room's row names the task), then the route fact only the letter states."""
+    from ouroboros.owner_quiz import recorded_answer_frame
+
+    assert fact["text"] == recorded_answer_frame(fact["quiz"], asker="task-quiz")
+    return recorded_answer_frame(fact["quiz"], asker="task-quiz", reader="task-quiz") + "\n" + MAILBOX_ROUTE_FACT
 
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
@@ -139,7 +149,7 @@ def test_answers_survive_eighteen_quizzes_mailbox_gc_and_rotation(runtime):
                 "answered in their own words without choosing an offered option" in row["text"])
             assert "rejected" not in row["text"]
         else:
-            assert quiz["answered_index"] == 0 and "chose option 1: First" in row["text"]
+            assert quiz["answered_index"] == 0 and "pressed option 1 («First», the text of task task-quiz)" in row["text"]
     assert len([frame for frame in runtime.frames if frame.get("type") == "quiz"]) == 18
     assert len([frame for frame in runtime.frames if frame.get("type") == "quiz_state"]) == 18
     assert not [frame for frame in runtime.frames if frame.get("type") == "chat"]
@@ -171,13 +181,13 @@ def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, 
                if row.get("client_message_id") == "quiz_late_answer:task-quiz:late"]
     assert len(inbound) == 1 and inbound[0]["direction"] == "in"
     assert inbound[0]["chat_id"] == 1 and inbound[0]["source"] == "web"
-    # The owner's row is the owner's words (the ingress strips edge whitespace
-    # of every owner row), never the host frame; the frame is for the model.
-    assert inbound[0]["text"] == "After the fact"
+    # The accepted comment keeps its edge spaces in the room, at broadcast and on replay.
+    comment = fact["quiz"]["comment"]
+    assert inbound[0]["text"] == comment
     assert "[Owner quiz answer]" not in inbound[0]["text"]
     chats = [frame for frame in runtime.frames if frame.get("type") == "chat"]
     assert [frame["role"] for frame in chats] == ["user"]
-    assert chats[0]["content"] == "After the fact"
+    assert chats[0]["content"] == comment
 
     # Reload: history replays the late answer as an ordinary user row carrying
     # the owner's words; no path re-injects the frame into the bubble.
@@ -190,7 +200,7 @@ def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, 
     replayed = [row for row in messages
                 if row.get("client_message_id") == "quiz_late_answer:task-quiz:late"]
     assert len(replayed) == 1 and replayed[0]["role"] == "user"
-    assert replayed[0]["text"] == "After the fact"
+    assert replayed[0]["text"] == comment
     assert not [row for row in messages if row.get("role") == "user"
                 and "[Owner quiz answer]" in str(row.get("text") or "")]
 
@@ -258,7 +268,33 @@ def test_competing_answers_preserve_only_the_recorded_winner(runtime, monkeypatc
     assert not [row for row in messages if row.get("system_type") == "quiz_answer"]
     assert len([frame for frame in runtime.frames if frame.get("type") == "quiz_state"]) == 1
     [delivery] = drain_owner_entries(runtime.root, runtime.task["id"], include_acknowledged=True)
-    assert delivery["text"] == fact["text"]
+    assert delivery["text"] == _letter(fact)  # only the letter states its route
+    assert MAILBOX_ROUTE_FACT not in fact["text"]
+
+
+def test_history_reconciles_only_rewrites_of_the_same_immutable_quiz_answer(runtime):
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.dialogue_evidence import read_room_source
+    from ouroboros.owner_quiz import recorded_answer_frame
+
+    _ask(runtime, "evidence")
+    assert _answer(runtime, "evidence", request_id="winner", comment="  Keep these words.  ")[0] == 200
+    [winner] = _facts(runtime)
+    block = winner["quiz"]
+    # Old history can hold distinct physical records under a reused client id. Same words are not proof
+    # of sameness: a different recorded request or a different immutable choice must still be shown.
+    replay, other_request, other_choice = [
+        message_bus.log_chat("system", 1, 0, recorded_answer_frame(answer, asker=runtime.task["id"]),
+                             ts=block["answered_at"], source="owner_quiz_answer", task_id=runtime.task["id"],
+                             client_message_id=winner["client_message_id"], record_type="quiz_answer", quiz=answer,
+                             require_write=True)
+        for answer in ({**block, "delivery": {**block["delivery"], "attempts": 100}},
+                       {**block, "request_id": "another"}, {**block, "answered_index": 1})]
+    address = lambda row: format_address(row_address(row))
+    assert len({address(row) for row in (winner, replay, other_request, other_choice)}) == len(_facts(runtime)) == 4
+    facts = [row for row in read_room_source(runtime.root, 1)["rows"] if row.get("type") == "quiz_answer"]
+    assert [row["row_address"] for row in facts] == [address(row) for row in (winner, other_request, other_choice)]
+    assert [row["quiz"]["comment"] for row in facts] == [block["comment"]] * 3
 
 
 def test_retry_heals_history_write_failure_from_the_winning_block(runtime, monkeypatch):
@@ -281,7 +317,7 @@ def test_retry_heals_history_write_failure_from_the_winning_block(runtime, monke
     [fact] = _facts(runtime)
     assert fact["quiz"]["answered_index"] == 0 and fact["quiz"]["comment"] == "Accepted"
     [mailbox] = drain_owner_entries(runtime.root, runtime.task["id"], include_acknowledged=True)
-    assert mailbox["text"] == fact["text"]
+    assert mailbox["text"] == _letter(fact) and MAILBOX_ROUTE_FACT not in fact["text"]
 
 
 def test_answer_history_uses_canonical_root_and_project_binding(runtime):
@@ -297,7 +333,7 @@ def test_answer_history_uses_canonical_root_and_project_binding(runtime):
     assert fact["chat_id"] == project["chat_id"]
     assert not dialogue_test.log_rows(child / "logs" / "chat.jsonl")
     [mailbox] = drain_owner_entries(child, runtime.task["id"], include_acknowledged=True)
-    assert mailbox["text"] == fact["text"]
+    assert mailbox["text"] == _letter(fact) and MAILBOX_ROUTE_FACT not in fact["text"]
 
 
 def test_history_recovers_evicted_answer_without_an_extra_bubble(runtime):
@@ -425,6 +461,35 @@ def test_new_request_delivery_failure_keeps_retryable_winning_answer(runtime, mo
     assert 'Only this answer' in message['text']
 
 
+def test_questions_by_one_asker_share_one_display_load_per_page(runtime, monkeypatch):
+    from ouroboros.gateway.history import _collect_chat_rows
+    from ouroboros.task_reads import TaskReads
+
+    _ask(runtime, "first")
+    _ask(runtime, "second")
+    loads = []
+    original = TaskReads.load
+
+    def counted(reader, root, task_id):
+        loads.append(task_id)
+        return original(reader, root, task_id)
+
+    def page():
+        rows, _quota, gaps = _collect_chat_rows(
+            runtime.root / "logs/chat.jsonl", runtime.root / "archive", 10, lambda *_: True, {},
+            selected_entries=dialogue_test.chat_rows(runtime.root), replay_evidence=[], include_gaps=True)
+        assert not gaps
+        return {row["quiz"]["quiz_id"]: row["quiz"]["state"] for row in rows if row.get("msg_type") == "quiz"}
+
+    monkeypatch.setattr(TaskReads, "load", counted)
+    assert page() == {"first": "open", "second": "open"}
+    assert loads == [runtime.task["id"]]
+    assert _answer(runtime, "first", request_id="first-choice")[0] == 200
+    loads.clear()
+    assert page() == {"first": "answered", "second": "open"}
+    assert loads == [runtime.task["id"]]
+
+
 def test_an_answer_arriving_after_its_question_carries_its_delivery_as_it_is_now(runtime):
     """A room that already shows the question learns the answer from the arrival read alone (its live state frame
     missed): the evidence row is the recorded answer with the question's current delivery, never the answer-time
@@ -449,3 +514,104 @@ def test_an_answer_arriving_after_its_question_carries_its_delivery_as_it_is_now
     assert now["state"] == "answered" and now["question_delivery"] == {"kind": "answer", "state": "delivered"}
     assert [row for row in chat_rows(runtime.root) if row.get("type") == "quiz_answer"] == _facts(runtime)
     assert _facts(runtime)[-1] == stored  # the source row is unchanged
+
+
+@pytest.mark.parametrize("block", [True, False], ids=["retained", "evicted"])
+@pytest.mark.parametrize("selected", [False, True], ids=["home", "selected_project"])
+def test_far_answer_navigation_keeps_exact_evidence_outside_page_coverage(runtime, block, selected):
+    """An exact C answer stays readable after lifecycle eviction and after C starts another Project.
+    Its question lives only at home; replay keeps C's evidence without claiming the intervening 200 rows."""
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.chat_references import resolve_history_row
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    home = create_project(runtime.root, "question-home", name="Question home")
+    _ask(runtime, "far", chat_id=home["chat_id"])
+    for index in range(200):
+        message_bus.log_chat("in", home["chat_id"], 0, f"Intervening {index}", drive_root=runtime.root)
+    assert _answer(runtime, "far", request_id="far", index=1, comment="Keep this exact comment")[0] == 200
+    _read(runtime, "far")
+    [answer] = _facts(runtime)
+    address = format_address(row_address(answer))
+    answer_seq = resolve_history_row(runtime.root, address)[1]["seq"]
+    if not block:
+        for index in range(17):
+            qid = f"evict-{index}"
+            _ask(runtime, qid, chat_id=home["chat_id"])
+            assert _answer(runtime, qid, request_id=qid)[0] == 200
+            _read(runtime, qid)
+        assert "far" not in quiz_states(runtime.root, runtime.task["id"])
+    requested = home["chat_id"]
+    if selected:
+        project = create_project(runtime.root, "selected-answer", name="Selected answer")
+        ref, words = owner_row_source(answer)
+        bind_task_to_project(runtime.root, "new-work", project["id"], origin={"ref": ref, "text": words})
+        requested = project["chat_id"]
+
+    def read(chat, **params):
+        response = asyncio.run(make_chat_history_endpoint(runtime.root)(SimpleNamespace(
+            query_params={"chat_id": str(chat), "n_human": "20", "n_progress": "0", **params})))
+        assert response.status_code == 200, response.body
+        return json.loads(response.body)
+
+    page = read(requested, around=address)
+    if selected:
+        assert page["anchor"] == {"state": "moved", "chat_id": home["chat_id"], "row_address": address}
+        page = read(home["chat_id"], around=address)
+    assert page["anchor"]["state"] == "found" and page["anchor"]["row_address"] == address
+    replay = read(home["chat_id"], cursor=page["page_cursor"])
+    for result in (page, replay):
+        [card] = [row["quiz"] for row in result["messages"] if row.get("msg_type") == "quiz"
+                  and row["quiz"]["quiz_id"] == "far"]
+        assert card["state"] == "answered" and card["answered_index"] == 1
+        assert card["comment"] == "Keep this exact comment" and card["answer_row_address"] == address
+        assert not any(row.get("system_type") == "quiz_answer" for row in result["messages"])
+        assert result["coverage"]["spans"]["chat"]["to"] <= answer_seq
+    assert page["coverage"] == replay["coverage"]
+    # The opaque cursor may name only one frozen, readable answer of this room, never an arbitrary row.
+    from ouroboros.gateway.history_paging import decode_cursor, encode_cursor
+    cursor = decode_cursor(page["page_cursor"], home["chat_id"], page["coverage"]["view"])
+    for invalid in (-1, True, cursor["upper"]["chat"], str(answer_seq), answer_seq - 1):
+        response = asyncio.run(make_chat_history_endpoint(runtime.root)(SimpleNamespace(query_params={
+            "chat_id": str(home["chat_id"]), "cursor": encode_cursor({**cursor, "answer_seq": invalid})})))
+        assert response.status_code == 400 and json.loads(response.body)["error"] == "history_cursor_invalid"
+
+
+def test_selected_garden_answer_and_its_comment_survive_a_competing_page_row(runtime):
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.owner_quiz import quiz_answer_frame
+    from ouroboros.projects_registry import create_project
+    from ouroboros.utils import utc_now_iso
+
+    room = create_project(runtime.root, "garden", name="Garden")["chat_id"]
+    _ask(runtime, "garden-legend", chat_id=room)
+    assert _answer(runtime, "garden-legend", request_id="garden", index=0, comment="Blue for peas")[0] == 200
+    _read(runtime, "garden-legend")
+    [nearby] = _facts(runtime)
+    for index in range(20):
+        message_bus.log_chat("in", room, 0, f"Garden bed {index}", drive_root=runtime.root)
+    quiz = {**nearby["quiz"], "answered_index": 1, "comment": "Gold for beans"}
+    selected = {**nearby, "ts": utc_now_iso(), "quiz": quiz, "text": quiz_answer_frame(quiz, 1, quiz["comment"])}
+    entry = ds.append(runtime.root, "chat", selected)
+    address = format_address(row_address(entry.row))
+
+    def read(**params):
+        response = asyncio.run(make_chat_history_endpoint(runtime.root)(SimpleNamespace(
+            query_params={"chat_id": str(room), "n_human": "4", "n_progress": "0", **params})))
+        assert response.status_code == 200, response.body
+        return json.loads(response.body)
+
+    page = read(around=address)
+    assert page["anchor"]["state"] == "found"
+    replay = read(cursor=page["page_cursor"])
+    assert replay["coverage"] == page["coverage"]
+    for result in (page, replay):
+        [card] = [m["quiz"] for m in result["messages"] if m.get("msg_type") == "quiz"]
+        assert (card["state"], card["answer_row_address"], card["answered_index"], card["comment"]) == (
+            "answered", address, 1, "Gold for beans")
+        assert result["coverage"]["spans"]["chat"]["to"] < entry.seq
+        assert not any(m.get("system_type") == "quiz_answer" for m in result["messages"])

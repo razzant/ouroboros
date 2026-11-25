@@ -19,7 +19,7 @@ from ouroboros.config import (
     SAVED_CHOICE_SETTINGS,
     SETTINGS_DEFAULTS as _SETTINGS_DEFAULTS,
     apply_settings_to_env as _apply_settings_to_env,
-    coerce_settings_raw, load_settings, resolve_port_file,
+    coerce_settings_raw, resolve_port_file,
 )
 from ouroboros.config import ENDPOINT_AUTHORED_SETTINGS as _ENDPOINT_AUTHORED_SETTINGS
 from ouroboros.config import ENDPOINT_WRITTEN_SETTINGS as _ENDPOINT_WRITTEN_SETTINGS, ENDPOINT_WRITERS as _ENDPOINT_WRITERS
@@ -32,23 +32,24 @@ from ouroboros.gateway.owner_settings import (
     SettingsPreconditionFailed, settings_write_refusal,
     OWNER_SETTING_WRITERS, fields_on_saved_document,
     settings_receipt, merged_changes, settings_read_view, settings_in_place_of, setting_tokens, settings_unset_keys,
-    settings_roster_error,
+    connection_revisions, settings_roster_error, persisted_settings,
     _CONTEXT_MODE_KEYS,
     _owner_audit,
     _owner_read_settings_raw,
-    _owner_settings_document,
     _owner_update_settings,
     _owner_write_settings,
     settings_document_mutation,
     owner_write_guard,
     post_commit_failure_response,
-    record_settings_change,
+    record_context_mode_change, record_settings_change,
     settings_document_digest,
     unsaved_error,
 )
 from ouroboros.onboarding_wizard import render_onboarding_html
 from ouroboros.platform_layer import is_container_env
-from ouroboros.provider_connections import connection_references, connections_meta, normalize_connections
+from ouroboros.provider_connections import (
+    connection_references, connections_meta, normalize_connections, seed_new_api_surfaces,
+)
 from ouroboros.provider_models import CONNECTIONS_KEY, normalize_builtin_choices
 from ouroboros.gateway.secret_rows import (
     ConnectionSecretIdentityAmbiguous, MCPSecretIdentityAmbiguous, mask_connections, rehydrate_connections,
@@ -691,6 +692,7 @@ async def api_owner_context_mode(request: Request) -> JSONResponse:
 def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
     from ouroboros import config as _config
     from ouroboros.composer_cognition import main_cognition, request_project_id, update_project_cognition
+    from ouroboros.utils import utc_now_iso
 
     if not isinstance(body, dict):
         return unsaved_error("JSON body must be an object.", 400)
@@ -730,11 +732,8 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
             os.environ["OUROBOROS_CONTEXT_MODE"] = next_mode
             os.environ["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
             cognition = main_cognition()
-    _owner_audit(
-        request,
-        "context_mode",
-        {"project_id": project_id, "context_mode": next_mode, "previous_context_mode": previous_mode},
-    )
+        committed_at = utc_now_iso()  # the receipt is dated by its commit, inside the lock, not by its later send
+    record_context_mode_change(request, project_id, next_mode, previous_mode, cognition["context_mode"], at=committed_at)
     return JSONResponse({"ok": True, "project_id": project_id, "context_mode": next_mode, "cognition": cognition, **receipt})
 
 
@@ -893,7 +892,7 @@ async def api_settings_get(request: Request) -> JSONResponse:
         ),
         "automatic": automatic_catalog(document),
     }
-    meta["connections"] = connections_meta(settings, document)
+    meta["connections"] = connection_revisions(connections_meta(settings, document), document)  # each with its revision
     meta["main_connection_choice"] = main_connection_choice(settings, document)  # Main waits for the owner's pick
     try:  # what the limits cannot count, said under them on Dashboard › Costs
         from ouroboros.pricing import spend_coverage
@@ -1026,46 +1025,52 @@ def _api_settings_post_sync(request: Request, body: Any) -> JSONResponse:
         return _api_settings_post_locked(request, body)
 
 
-def _network_settings_error(request: Request, current: dict, old_settings: dict) -> JSONResponse | None:
-    """Validate the existing save-time bind/password contract before persistence."""
+_NETWORK_FIELDS = ("OUROBOROS_SERVER_HOST", "OUROBOROS_NETWORK_PASSWORD")
+
+
+def _network_settings_error(request: Request, current: dict, old_settings: dict, *,
+                            document: dict, proposed: dict) -> JSONResponse | None:
+    """Validate changes to the saved bind and password, including the password of the running listener. The address
+    rule judges only a bind this save newly writes to the document (``proposed``); a bind in effect from the operator's
+    environment, such as the launch address an Undo of the saved one leaves, is not written and stays theirs."""
     try:
         from ouroboros.server_auth import is_loopback_host
         from ouroboros.config import get_runtime_mode
         from ouroboros.runtime_mode_policy import runtime_mode_at_least
 
-        desired_host = str(current.get("OUROBOROS_SERVER_HOST") or "").strip()
-        desired_password = str(current.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
+        host_key, password_key = _NETWORK_FIELDS
+
+        def has_password(values: dict) -> bool:
+            return bool(str(values.get(password_key) or "").strip())
+
         trust_unauth = (_trust_nonlocal_bind_without_password_enabled()
                         or runtime_mode_at_least(get_runtime_mode(), "cyber_pro"))
         allowed_saved_hosts = {"", "127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0", "::", "[::]"}
-        if desired_host and desired_host not in allowed_saved_hosts:
-            return unsaved_error(
-                "Server Bind Host in Settings supports localhost or wildcard "
-                "binds only (127.0.0.1 or 0.0.0.0). Specific LAN IP binds "
-                "are manual/env-only so the desktop launcher can keep using "
-                "a reliable loopback health check.",
-                400,
-            )
-        if desired_host and not is_loopback_host(desired_host) and not desired_password and not trust_unauth:
-            return unsaved_error(
-                "Setting a non-localhost Server Bind Host through the web UI "
-                "requires a Network Password in the same save. For manual "
-                "trusted-lab/Docker setups, stop Ouroboros and edit "
-                "settings.json or environment variables directly.",
-                400,
-            )
-        current_effective_host = (
-            str(_current_bind_host(request) or "").strip()
-            or str(os.environ.get("OUROBOROS_SERVER_HOST") or "").strip()
-        )
-        old_password = str(old_settings.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
-        if (
-            current_effective_host
-            and not is_loopback_host(current_effective_host)
-            and old_password
-            and not desired_password
-            and not trust_unauth
-        ):
+        # A launch password can protect the running process without protecting a newly saved bind on a later boot.
+        for before, after, written in ((document, proposed, True), (old_settings, current, False)):
+            host = str(after.get(host_key) or "").strip()
+            host_changed = host != str(before.get(host_key) or "").strip()
+            if written and host_changed and host not in allowed_saved_hosts:
+                return unsaved_error(
+                    "Server Bind Host in Settings supports localhost or wildcard "
+                    "binds only (127.0.0.1 or 0.0.0.0). Specific LAN IP binds "
+                    "are manual/env-only so the desktop launcher can keep using "
+                    "a reliable loopback health check.",
+                    400,
+                )
+            if (not trust_unauth and host and not is_loopback_host(host) and not has_password(after)
+                    and (host_changed or has_password(before))):
+                return unsaved_error(
+                    "Setting a non-localhost Server Bind Host through the web UI "
+                    "requires a Network Password in the same save. For manual "
+                    "trusted-lab/Docker setups, stop Ouroboros and edit "
+                    "settings.json or environment variables directly.",
+                    400,
+                )
+        current_effective_host = (str(_current_bind_host(request) or "").strip()
+                                  or str(os.environ.get("OUROBOROS_SERVER_HOST") or "").strip())
+        if (current_effective_host and not is_loopback_host(current_effective_host)
+                and has_password(old_settings) and not has_password(current) and not trust_unauth):
             return unsaved_error(
                 "Cannot clear Network Password while the running server is "
                 "still bound to a non-localhost interface. First save a "
@@ -1171,6 +1176,7 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
         body, effort_error = _effort_range_tiers(body)
         if effort_error:
             return unsaved_error(effort_error, 400)
+        old_settings, document = settings_read_view(strict=True)
         # The catalog is judged as THIS save produces it: twins, then the review pool.
         subagents_key = "OUROBOROS_SUBAGENTS"
         catalog_saved = subagents_key in body and body.get(subagents_key) not in (None, "")
@@ -1184,12 +1190,11 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
                 )
             except ValueError as exc:
                 return unsaved_error(str(exc), 400)
-            stored_for_rules = load_settings()
             # Twins are refused only when THIS save changes the roster.
-            twin_error = settings_roster_error(canonical_subagents, stored_for_rules, body)
+            twin_error = settings_roster_error(canonical_subagents, old_settings, body)
             if twin_error:
                 return unsaved_error(twin_error, 400)
-            pool_error = review_pool_save_judgement(canonical_subagents, stored_for_rules, allow_empty=allow_empty_pool)
+            pool_error = review_pool_save_judgement(canonical_subagents, old_settings, allow_empty=allow_empty_pool)
             if pool_error:
                 return unsaved_error(pool_error, 400, code="empty_review_pool")
             body[subagents_key] = canonical_subagents
@@ -1204,13 +1209,10 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
                 parsed_budget[budget_key] = budget_value
         if parsed_budget:
             body.update(parsed_budget)
-        old_settings = load_settings()
         from ouroboros.config import get_runtime_mode, normalize_runtime_mode as _norm_runtime_mode
 
-        raw_old_settings = _owner_read_settings_raw()
-        pending_runtime_mode = _norm_runtime_mode(
-            raw_old_settings.get("OUROBOROS_RUNTIME_MODE", old_settings.get("OUROBOROS_RUNTIME_MODE"))
-        )
+        mode_key = "OUROBOROS_RUNTIME_MODE"
+        pending_runtime_mode = _norm_runtime_mode(document.get(mode_key, old_settings.get(mode_key)))
         current_runtime_mode = get_runtime_mode()
         old_effective_settings = dict(old_settings)
         old_effective_settings["OUROBOROS_RUNTIME_MODE"] = current_runtime_mode
@@ -1236,7 +1238,7 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
                 return unsaved_error(str(exc), 409, code=exc.code)
         current = _merge_settings_payload(old_effective_settings, body)
         if unset:
-            without = settings_in_place_of({k: v for k, v in _owner_settings_document().items() if k not in unset})
+            without = settings_in_place_of({k: v for k, v in document.items() if k not in unset})
             current.update({key: without[key] for key in unset})
         from ouroboros.runtime_mode_policy import runtime_mode_at_least
 
@@ -1245,9 +1247,9 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
         runtime_changed = runtime_authored and requested_runtime_mode != pending_runtime_mode
         if runtime_authored:
             pending_runtime_mode = requested_runtime_mode
-        choice_error = normalize_builtin_choices(current)
-        if choice_error:
+        if choice_error := normalize_builtin_choices(current):
             return unsaved_error(choice_error, 400)
+        seed_new_api_surfaces(current, old_effective_settings)  # a key new to this install starts on Responses
         # Generic settings saves operate on the current boot baseline. A pending
         # next-boot mode written by /api/owner/runtime-mode is preserved on disk
         # below, but never hot-applied to this process/env.
@@ -1256,10 +1258,7 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
         current["OUROBOROS_SKILLS_REPO_PATH"] = str(
             current.get("OUROBOROS_SKILLS_REPO_PATH") or ""
         ).strip()
-        network_error = _network_settings_error(request, current, old_settings)
-        if network_error is not None:
-            return network_error
-        document, shown = _owner_settings_document(), apply_runtime_provider_defaults(dict(old_effective_settings))[0]
+        shown = apply_runtime_provider_defaults(dict(old_effective_settings))[0]
         unauthored = (repropose_unedited_slots(current, document, body, shown)
                       | repropose_unedited_catalog(current, document, body, shown))
         current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
@@ -1294,8 +1293,14 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
         # Linearizing properly would need a settings-generation handshake —
         # machinery a warning string does not justify.
         started_before_save = _has_started_agent_tasks()
-        settings_to_save = {key: value for key, value in current.items() if key not in unauthored}
-        settings_to_save["OUROBOROS_RUNTIME_MODE"] = pending_runtime_mode
+        restart_settings = {key: value for key, value in current.items() if key not in unauthored}
+        restart_settings[mode_key] = pending_runtime_mode
+        settings_to_save = persisted_settings(restart_settings, document, body, unset, _NETWORK_FIELDS)
+        if mode_key not in document and not runtime_authored:
+            settings_to_save.pop(mode_key, None)  # Inherited at launch, not an explicit choice for the next boot.
+        network_error = _network_settings_error(request, current, old_settings, document=document, proposed=settings_to_save)
+        if network_error is not None:
+            return network_error
         # Only an explicit Cyber context choice authors the pair; an unrelated save
         # preserves omission and cannot change a running task's captured settings.
         authored_keys = tuple(key for key in ("OUROBOROS_SAFETY_MODE",) if key in all_changed)
@@ -1332,9 +1337,7 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
             get_bridge().configure_from_settings(current)
         except Exception:
             pass
-        network_warning = _network_exposure_warning(current)
-        if network_warning:
-            warnings.append(network_warning)
+        warnings.extend(filter(None, [_network_exposure_warning(current)]))
         _repo_slug = current.get("GITHUB_REPO", "")
         _gh_token = current.get("GITHUB_TOKEN", "")
         if _gh_token and any(k in all_changed for k in ("GITHUB_REPO", "GITHUB_TOKEN")):
@@ -1380,7 +1383,7 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
             resp["agent_task_running"] = True
         if not all_changed:
             resp["no_changes"] = True
-        restart_state = _build_restart_state(settings_to_save)
+        restart_state = _build_restart_state(restart_settings)
         resp["restart_state"] = restart_state
         if restart_state["restart_required"]:
             resp["restart_required"] = True

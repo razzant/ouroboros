@@ -335,6 +335,59 @@ def test_delegate_start_retry_and_continuation_preserve_ttl_intent_without_setti
     }
 
 
+def test_delegate_start_sends_held_heads_and_its_retry_replays_them_from_their_custody_references(tmp_path, monkeypatch):
+    """A nanny whose carried names a note claims sends that head whole; custody keeps the head by address and
+    revision (a token in the stored request, the text a shared blob) and ``retry_of`` posts the exact same bytes."""
+    import json
+
+    from ouroboros import delegate_custody as custody, knowledge
+    from ouroboros.gateways import claudexor as gw
+    from ouroboros.memory_view_events import CARRIED_NAMES
+    from ouroboros.observability import read_blob_ref
+    from ouroboros.tools import delegate
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    _select_transport_access(monkeypatch, "readonly")
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "claude=claude-opus-5-5:high")
+    posts, fail_next = [], [True]
+
+    class _Stub:
+        engine_version = "4.5.0"
+        def handshake(self, **_kw): return {}
+        def agent_capabilities(self, **_kw):
+            return {"runControlKeys": ["continueFrom"], "harnesses": [{
+                "id": "claude", "enabled": True, "status": "ok", "accessProfilesSupported": ["readonly", "workspace_write"]}]}
+        def quota_snapshots(self): return []
+        def find_project_id(self, root): return "prj-1"
+        def register_project(self, root): return "prj-1"
+        def remove_project(self, project_id): return {}
+        def start_run(self, request, *, idempotency_key=""):
+            posts.append(dict(request))
+            if fail_next[0]:
+                raise gw.ClaudexorUnavailable("daemon_unreachable", "lost response", status_code=503)
+            return {"runId": f"run-{len(posts)}", "runDir": str(tmp_path / f"run-{len(posts)}")}
+        def close(self): pass
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
+    head = "The Main page's working fact.\n"
+    note = knowledge.write_knowledge_note(knowledge.resolve_knowledge_address(tmp_path, "main-page", "global"),
+                                          "---\nclaims: ['room:1']\n---\n" + head + "## Below\nNot sent.\n", writer="turn")
+    delegate._CUSTODY.clear()
+    ctx = _delegating_ctx(tmp_path, acting=False, task_id="t-held")
+    ctx.task_metadata[CARRIED_NAMES] = ["room:1"]
+
+    pending = json.loads(delegate._delegate_start(ctx, "inspect repo").text)["pending_invocation_id"]
+    assert head in posts[0]["instructions"] and "Not sent." not in posts[0]["instructions"]
+    (row,) = [row for row in custody.custody_rows(tmp_path)
+              if row.get("type") == custody.START_REQUESTED and row.get("invocation_id") == pending]
+    assert row["held_heads"] == [{"topic": "main-page", "revision": note.current.revision, "chars": len(head)}]
+    stored = read_blob_ref(tmp_path, row["request_ref"], expected_kind="json")
+    assert head not in stored["instructions"] and f"\x00held head main-page@{note.current.revision} sha256=" in stored["instructions"]
+    fail_next[0] = False
+    retried = json.loads(delegate._delegate_start(ctx, "inspect repo", retry_of=pending).text)
+    assert retried["status"] == "started" and posts[1] == posts[0]
+
+
 def test_review_thread_and_continuation_carry_ttl_on_turns_and_keep_exact_continue_from_body(
     tmp_path, monkeypatch, fake_route,
 ):

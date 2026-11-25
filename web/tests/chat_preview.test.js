@@ -372,3 +372,12 @@ test('known limit: card structure is not rebuilt; a completion mirror and a chil
         { id: 'chat:2', role: 'assistant', text: 'The child found the cause.', speaker: 'Ouroboros' }]);
     assert.doesNotMatch(f.values.get(PREVIEW_KEY), /completion_answer|Done: PR|parent_task_id|child-1/);
 });
+
+test('a host notice is saved as the line its bubble draws, never only its stored phrase (RV4 23)', t => {
+    const f = fixture(t), preview = f.make();
+    const line = 'The total budget is spent, so this turn did not start. Raise Total budget in Dashboard → Costs.';
+    preview.save([row('chat:1', 'The total budget is spent, so this turn did not start.', { role: 'system',
+        system_type: 'task_not_started', notice: { code: 'budget_exhausted', step: 'raise_total_budget', line } })]);
+    assert.equal(f.record().rooms[0].rows[0].text, line);
+    preview.destroy();
+});

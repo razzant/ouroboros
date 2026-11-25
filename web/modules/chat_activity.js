@@ -4,21 +4,22 @@
 import { META_PART_SEPARATOR, executorIdentityMarkup, executorModelText, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
 import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
+import { modelHandoverFact } from './model_handover.js';
 import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
-import { compactModel, formatLogDuration, modelExecutionView } from './log_events.js';
+import { childLineCause, compactModel, formatLogDuration, modelExecutionView, serviceOutputLinksHtml } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
 import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
 import { fmt, tr } from './i18n.js';
-import { formatMsgTime, formatUsdKnown } from './utils.js';
+import { ownerMessageBubble } from './chat_history_replay.js';
 import { placeIngressNote } from './chat_attachments.js';
-import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
+import { hostRowDisplayText, hostSentenceText, noticeBody } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
 import {
     projectMarkdownLines, MARKDOWN_FENCED_CODE, accountedUpperBound,
-    accountedUpperBoundWithChildren,
+    accountedUpperBoundWithChildren, formatMsgTime, formatUsdKnown,
     escapeHtmlAttr,
     escapeHtmlText as escapeHtml,
     renderMarkdown,
@@ -104,7 +105,7 @@ export function cardRowSummary(msg, phase, rawTs = '') {
     return {
         phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,
         cardRowRevision: msg.card_row_revision, evidenceRef: cardRowEvidenceRef(msg),
-        cardReview: msg?.late_evidence?.kind === 'merge_review' ? msg.late_evidence : null,
+        cardReview: msg?.late_evidence?.kind === 'merge_review' ? msg.late_evidence : null, ...noticeBody(msg),
     };
 }
 
@@ -118,15 +119,16 @@ export function buildTimelineItemHtml(item, record) {
     const expanded = expandable && record.expandedLineKeys.has(item.lineKey);
     const displayHeadline = delegated ? delegatedHeadline(delegated)
         : expanded && item.fullHeadline ? item.fullHeadline : item.headline;
-    // P3: when expanded, prefer the genuinely-full fetched output, then the capped
-    // fullBody, then the preview body. A server-truncated line shows the fetched full
-    // text in a bounded-scroll box so a huge research output never grows the chat.
-    const displayBody = expanded ? (item.fullReadError || item.fetchedFull || item.fullBody || item.body) : item.body;
+    // The full read fills gaps; a later accepted frame owns any fact it states, including an empty debt list.
     const showingFetched = expanded && Boolean(item.fetchedFull);
+    const facts = showingFetched && item.fetchedCause && (item.childCause === item.fetchedCauseBasis
+        ? item.fetchedCause : { ...item.fetchedCause, ...item.childCause });
+    const fetched = facts ? [item.fetchedFull, childLineCause(facts).detail].filter(Boolean).join('\n\n') : item.fetchedFull;
+    const displayBody = expanded ? (item.fullReadError || fetched || item.fullBody || item.body) : item.body;
     const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull && !item.fullReadError);
     // A late-review row offers its exact applied review record (`cardRowSummary`).
-    const evidenceHtml = evidenceLinkHtml(item.evidenceRef);
-    const plainBody = item.bodyFormat === 'text' || item.cardReview?.kind === 'merge_review';
+    const evidenceHtml = item.serviceStop ? serviceOutputLinksHtml(item.serviceStop.links) : evidenceLinkHtml(item.evidenceRef);
+    const plainBody = item.bodyFormat === 'text' || item.cardReview?.kind === 'merge_review' || Boolean(item.serviceStop);
     const bodyHtml = !displayBody ? '' : plainBody
         ? escapeHtml(displayBody) : renderMarkdown(displayBody, { inlineHeadingBreaks: true });
     const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
@@ -152,7 +154,7 @@ export function buildTimelineItemHtml(item, record) {
         : `<div class="chat-live-line-head">${headContent}</div>`;
     return `
         <div
-            class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}"
+            class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}${item.serviceStop ? ' service-stop-result' : ''}"
             data-live-line-key="${escapeHtmlAttr(item.lineKey || '')}"
             ${item.historyId ? `data-history-id="${escapeHtmlAttr(item.historyId)}"`
         : item.sourceHistoryId ? `data-source-history-id="${escapeHtmlAttr(item.sourceHistoryId)}"` : ''}
@@ -871,6 +873,7 @@ export function clearStickyCardState(record) {
     record.effort = null;
     record.toolCalls = null;
     record.rounds = null;
+    record.roundsRecorded = false;  // a recycled slot inherits no recorded count
     record.toolErrors = null;
     // The folded evidence is cycle state too: a recycled slot must not count
     // the previous cycle's invocations.
@@ -880,6 +883,8 @@ export function clearStickyCardState(record) {
     record.historicalUnavailable = false;
     record.historicalUnconfirmed = false;
     record.historicalTerminal = null;
+    record.replayedEnding = null;
+    record.cardAttempt = record.attemptMetrics = record.quietEffective = undefined;
     record.lastLiveObservedAt = 0;
     return record;
 }
@@ -976,19 +981,15 @@ export function isTerminalTaskPhase(phase = '', terminal = false) {
 // The page's single-flight state read lives in state_snapshots.js; its sequencer keeps this public name.
 export { createStateSnapshotSequencer } from './state_snapshots.js';
 
-/**
- * Main-thread fan-out gate for a live WS frame.
- *
- * Main adopts a frame only when the server did NOT stamp it as a Project
- * thread AND its chat_id is not a project the client already knows. The
- * server stamp (`project_thread`, set at the message_bus broadcast choke from
- * the registry) closes the race where a fresh project's frames arrive before
- * `projectChatIds` learns the project — previously Main adopted them and
- * minted an empty "Working..." card. Frames without the stamp (main, legacy
- * missing, external transports such as Telegram) route exactly as before;
- * explicit chat_id=0 remains the internal Skill Review partition. No
- * numeric-range heuristic is involved.
- */
+// A saved row's primary chat and the other rooms the host explicitly shows it in.
+function addressedToRoom(msg, chatId) {
+    return Number(msg?.chat_id ?? 1) === chatId
+        || (Array.isArray(msg?.also_rooms) && msg.also_rooms.map(Number).includes(chatId));
+}
+
+/** Main excludes known Project rooms. The bus's registry stamp covers rooms the page has yet
+ * to learn. An addressed web echo also keeps its accepted destination through a registry outage.
+ * Other positive external chats, including Telegram, retain their implicit Main mirror. */
 export function mainThreadAccepts(msg, projectChatIds) {
     if (msg && msg.project_thread) return false;
     const cid = Number(msg?.chat_id ?? 1);
@@ -998,6 +999,8 @@ export function mainThreadAccepts(msg, projectChatIds) {
     // Negative ids are reserved for synthetic A2A traffic and never enter a
     // human-facing browser stream.
     if (cid <= 0) return false;
+    if (msg?.kind === 'room_echo' && msg.type === 'chat' && msg.role === 'user' && msg.source === 'web'
+        && msg.ingress_accepted === true && !addressedToRoom(msg, 1)) return false;
     return !(projectChatIds instanceof Set && projectChatIds.has(cid));
 }
 
@@ -1016,8 +1019,7 @@ export function mainLogFrameAccepts(msg, projectChatIds) {
 /** Route one ordinary Chat frame to the current Main or Project instance. */
 export function chatThreadAccepts(msg, isMain, chatId, projectChatIds) {
     if (isMain) return mainThreadAccepts(msg, projectChatIds);
-    // One row a Project also shows (its work's notice to Main, the owner's Reply to it): `also_rooms`.
-    return Number(msg?.chat_id ?? 1) === chatId || (Array.isArray(msg?.also_rooms) && msg.also_rooms.map(Number).includes(chatId));
+    return addressedToRoom(msg, chatId);
 }
 
 /**
@@ -1039,7 +1041,7 @@ export function chatLogThreadAccepts(msg, isMain, chatId, projectChatIds) {
 export const TERMINAL_TASK_STATUSES = new Set([
     'completed', 'failed', 'cancelled', 'rejected_duplicate',
 ]);
-const TERMINAL_SUBAGENT_EVENTS = new Set([
+export const TERMINAL_SUBAGENT_EVENTS = new Set([
     'completed', 'completed_warn', 'failed', 'cancelled', 'rejected',
 ]);
 
@@ -1087,14 +1089,12 @@ export function partitionLocalEchoJournal(journal, serverClientMessageIds) {
     return { confirmed, unconfirmed };
 }
 
-// ---------------------------------------------------------------------------
-// Pure message-presentation helpers (moved verbatim from chat.js — that
-// module sits at its byte ceiling).
-// ---------------------------------------------------------------------------
-
-/** Dedupe key for one rendered chat row; client_message_id wins when present. */
+/** Legacy delivery correlation; client ids are scoped to the room the owner wrote in. */
 export function buildMessageKey(role, text, timestamp, opts = {}) {
-    if (opts.clientMessageId) return `client|${opts.clientMessageId}`;
+    if (opts.clientMessageId) {
+        const room = role === 'user' && opts.ownerChatId !== opts.chatId ? `room:${opts.ownerChatId}|` : '';
+        return `${room}client|${opts.clientMessageId}`;
+    }
     if (role !== 'user' && !opts.isProgress && opts.taskId) {
         return [
             'task',
@@ -1227,25 +1227,20 @@ export function reconcileHydratedDirectActivities(
 }
 
 /**
- * Card-set durable-truth reconcile (stuck "Working..." card class). A card
- * minted by a replayed frame whose own terminal row never reached this client
- * (lost task_done, lineage-only subagent final re-minting a finished parent)
- * kept its chip on "Working..." forever: every existing terminal path keys on
- * the card's OWN id reaching a snapshot or frame first, and such a card never
- * sets the room's status (the server's work projection does). This selector
- * closes the gap from the card side: given the
- * compact card projection `{id, finished, isSubagent, connected}` and the set
- * of ids the GLOBAL /api/state snapshot confirms live, it returns the mounted
- * unfinished foreground card ids the snapshot does NOT vouch for. Each one is
- * handed to observeMissingManagedTask, whose durable task-detail read finishes
- * the card ONLY on a proven terminal status (`log_events.js::isTerminalTaskDetail`); a 404 or
- * nonterminal detail keeps the id and retries on the next snapshot (owner
- * Q3=A: no timers, no id-shape heuristics, no fabricated terminal).
+ * Card-set durable-truth reconcile (stuck "Working..." card class). A card minted by a replayed frame whose own
+ * terminal row never reached this client (lost task_done, lineage-only subagent final re-minting a finished parent)
+ * kept its chip on "Working..." forever: every existing terminal path keys on the card's OWN id reaching a snapshot
+ * or frame first, and such a card never sets the room's status (the server's work projection does). This selector
+ * closes the gap from the card side: given the compact card projection `{id, finished, isSubagent, connected}` and
+ * the set of ids the GLOBAL /api/state snapshot confirms live, it returns the mounted unfinished foreground card
+ * ids the snapshot does NOT vouch for. Each one is handed to observeMissingManagedTask, whose durable task-detail
+ * read finishes the card ONLY on a proven terminal status (`log_events.js::isTerminalTaskDetail`); a 404 or
+ * nonterminal detail keeps the id and retries on the next snapshot (owner Q3=A: no timers, no id-shape heuristics,
+ * no fabricated terminal).
  *
- * Skipped here: finished cards, detached roots (not part of the reducer's
- * scan), subagent cards (their parent owns the lineage; observe filters them
- * too), reusable slots ('active' — many cycles per id, no single durable
- * result) and the 'chat' fallback group id. Pure for node tests.
+ * Skipped here: finished cards, detached roots (not part of the reducer's scan), subagent cards (their parent owns
+ * the lineage; observe filters them too), reusable slots ('active' — many cycles per id, no single durable result)
+ * and the 'chat' fallback group id. Pure for node tests.
  */
 export function unconfirmedForegroundCardIds(cards, activeIds) {
     const out = [];
@@ -1262,12 +1257,13 @@ export function unconfirmedForegroundCardIds(cards, activeIds) {
 // В9: the host stamps a typed `ingress_accepted: true` on an owner echo only after the durable chat write, so that
 // client_message_id's bubble carries `Input saved` (a tick by its time) — never read or begun. `ingress_pending` keeps that note
 // provisional until dispatch is confirmed or the ended host's delivery becomes unknown.
-export function markIngressSaved(root, row) {
+export function markIngressSaved(root, row, bubble = ownerMessageBubble(root, row, 1)) {
     const cmid = String(row?.client_message_id || ''), state = row?.ingress_pending === true ? 'pending' : '';
     if (row?.role !== 'user' || row.ingress_accepted !== true || !cmid) return false;
-    const bubble = [...root.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
-        .find((node) => node.dataset.clientMessageId === cmid), prior = bubble?.querySelector('[data-ingress-saved]');
-    if (!bubble || (prior && (prior.dataset.ingressSaved !== 'pending' || prior.dataset.ingressSaved === state))) return false;  // `Input saved` and a kept send's delivery doubt are final
+    const prior = bubble?.querySelector('[data-ingress-saved]');
+    const level = prior?.dataset.ingressSaved;  // `Input saved` and a kept send's delivery doubt are final: only a running host's own fact (dispatched, pending) ends that doubt
+    const ended = level === 'unconfirmed' && (row.ingress_dispatched === true || state === 'pending');
+    if (!bubble || (prior && !ended && (level !== 'pending' || level === state))) return false;
     const note = Object.assign(document.createElement('div'), { className: 'msg-pending', textContent: 'Input saved' });
     note.dataset.ingressSaved = state;
     for (const doubt of [prior, bubble.querySelector('[data-ingress-unconfirmed]')]) doubt?.remove();  // the saved row settles a "Send again" doubt
@@ -1386,7 +1382,7 @@ export function costMetaKeys(src) {
 const CARD_META_KEYS = [
     ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
     'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'continue_requester', 'cancel_origin',
-    'delegated_activity', 'outcome_axes', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning',
+    'delegated_activity', 'outcome_axes', 'delegated_runs_unreconciled', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning', 'place_origin', 'notice',
 ];
 export function cardMetaKeys(src) {
     return Object.fromEntries(CARD_META_KEYS.map((key) => [key, src?.[key]]));
@@ -1444,9 +1440,9 @@ function metaLineHtml(parts) {
 function paintLiveFacts(record, rows) {
     const el = ownLiveDetail(record, 'liveFacts');
     if (!el) return false;
-    if (record.wakeSummary && (record.initiator === 'consciousness' || record.scheduleName || record.causeHeld)) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
-    const html = rows.filter(([, value]) => value).map(([label, value]) =>
-        `<div class="chat-live-fact"><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`).join('');
+    if (record.wakeSummary && (record.initiator === 'consciousness' || record.scheduleName || record.causeHeld) && !record.episodeHeadingWords?.includes(record.wakeSummary)) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
+    const html = rows.filter(([, value]) => value).map(([label, value, translated]) =>
+        `<div class="chat-live-fact"${translated ? ' data-i18n-fmt=""' : ''}><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`).join('');
     if (el.innerHTML === html && el.hidden === !html) return false;
     if (el.innerHTML !== html) el.innerHTML = html;
     el.hidden = !html;
@@ -1455,7 +1451,8 @@ function paintLiveFacts(record, rows) {
 
 export function renderLiveCardMeta(record, { agentModel = record?.agentModel || '' } = {}) {
     if (!record?.metaEl) return false;
-    const toolCalls = Number.isInteger(record.toolCalls) ? `${record.toolCalls} tool ${record.toolCalls === 1 ? "call" : "calls"}` : '';
+    const { toolCalls: count = record.toolCalls, toolErrors = record.toolErrors } = record.attemptMetrics || record;
+    const toolCalls = Number.isInteger(count) ? `${count} tool ${count === 1 ? 'call' : 'calls'}` : '';
     const rounds = Number.isInteger(record.rounds) && record.rounds >= 0 ? `${record.rounds} round${record.rounds === 1 ? '' : 's'}` : '';
     const cost = (record.costMeta && Array.isArray(record.costMeta.meta)) ? record.costMeta.meta : [];
     // A Main portal is the collapsed form of a work that lives in its Project room: tool calls ·
@@ -1507,10 +1504,10 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
             record.historyRetentionProblem || '',
             record.reviewGateLine || '',
             // Under a Done chip the block's own rows name the errors; this line does not repeat them (DESIGN principle 7).
-            record.toolErrors > 0 && !(record.finished && record.phaseEl?.dataset?.phase === 'done')
-                ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
+            toolErrors > 0 && !(record.finished && record.phaseEl?.dataset?.phase === 'done')
+                ? `${toolErrors} error${toolErrors === 1 ? '' : 's'}` : '',
             Number.isFinite(record.durationSec) ? formatLogDuration(record.durationSec) : '',
-            !supervision && record.toolCalls > 0 ? toolCalls : '',
+            !supervision && count > 0 ? toolCalls : '',
             ...(Array.isArray(record._lastFrameMeta) ? record._lastFrameMeta : []),
             ...cost,
             headClock ? '' : clock,
@@ -1523,9 +1520,11 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         [chip ? 'Coordinator' : 'Agent model', coordinator ? escapeHtml(provenance ? `${coordinator} (${provenance})` : coordinator) : ''],
         // An unobserved execution of a card without an executor is its compact model fact already.
         [execution?.label || 'Model execution', execution && (chip || execution.observed) ? escapeHtml(execution.value) : ''],
+        ...(record.handoverRows?.length ? [modelHandoverFact(record.handoverRows)] : []),
         ['Started by', record.scheduleName ? `${tr('task.fact.started_by.schedule', 'Schedule')} · <span data-i18n-authored>${escapeHtml(record.scheduleName)}</span>` : record.initiator === 'consciousness' ? 'Consciousness' : ''],
+        ...(!record.isSubagent && record.originRows || []),  // the place that called it, what called it and who (task_origin.js)
         ['Continued by', { owner: 'You', ouroboros: 'Ouroboros', unknown: 'Not recorded' }[record.continueRequester] || ''],
-        ['Tool calls', !supervision && record.toolCalls === 0 ? '0' : ''],
+        ['Tool calls', !supervision && count === 0 ? '0' : ''],
         ['Rounds', !supervision && rounds ? `${record.rounds} · usable solve response${record.rounds === 1 ? '' : 's'}` : ''],
         ['Supervision', supervision && (rounds || toolCalls)
             ? `${[rounds, toolCalls].filter(Boolean).join(META_PART_SEPARATOR)} (supervising agent; executor session counts are not reported)` : ''],
@@ -1586,14 +1585,11 @@ export function ensureLiveActionsEl(record) {
         actions = document.createElement('div');
         actions.className = 'chat-live-actions';
         const end = ownFootEnd(record);
-        if (end) {
-            end.appendChild(actions);
-        } else {
-            const timeline = record.timelineEl && record.timelineEl.parentElement === record.root
-                ? record.timelineEl
-                : null;
-            record.root.insertBefore(actions, timeline);
-        }
+        // The row lives in the card's own foot; without one it stands in the card's own root,
+        // before the card's OWN timeline — never before a child's.
+        const container = end || record.root;
+        const anchor = !end && record.timelineEl?.parentElement === record.root ? record.timelineEl : null;
+        container.insertBefore(actions, anchor);
     }
     return actions;
 }

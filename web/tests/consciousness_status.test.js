@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { allowanceText, chipView, createConsciousnessStatus, wakeRows } from '../modules/consciousness_status.js';
 import { normalizeConsciousness } from '../modules/consciousness_api.js';
+import { turnConsciousness } from '../modules/consciousness_switch.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 test.beforeEach((t) => {
@@ -62,7 +63,6 @@ test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an 
         detail: 'Daily allowance spent ($20.00 of $20.00 in the last 24 h); next check due since 13:05.' }));
     assert.deepEqual([expired.word, shapeOf(expired)], ['', 'dot/owner']);
     assert.equal(expired.said, 'Consciousness: Daily allowance spent ($20.00 of $20.00 in the last 24 h); next check due since 13:05. · waits for you');
-    assert.equal(shapeOf(chipView(answer({ status: 'waiting_for_first_conversation' }))), 'dot/owner');
     // A campaign that waits for the owner is the owner's move too, whatever consciousness does.
     const campaign = answer({ status: 'disabled' }, { bg_consciousness_enabled: false, evolution_enabled: true,
         evolution_state: { status: 'budget_stopped' } });
@@ -73,7 +73,10 @@ test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an 
         assert.deepEqual([shapeOf(view), view.word], ['dot/failed', '14:20'], status);
         assert.equal(chipView(answer({ status, next_wake_at: at(13, 20) })).word, '');
     }
-    for (const status of ['wake_outcome_unknown', 'allowance_unknown']) assert.equal(shapeOf(chipView(answer({ status }))), 'ring/ink', status);
+    // An owner chat that could not be read is unconfirmed, never the owner's move (a known empty one wakes in Main).
+    for (const status of ['wake_outcome_unknown', 'allowance_unknown', 'owner_chat_unknown']) {
+        assert.equal(shapeOf(chipView(answer({ status }))), 'ring/ink', status);
+    }
     assert.equal(shapeOf(chipView(answer({ status: 'wake_paused' }))), 'pause/ink');
     // A wake held at the allowance it started with, proven by its records, is the owner's move; the chip keeps no time.
     const held = { status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true,
@@ -127,6 +130,7 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         const tabs = [];
         let reads = 0;
         let refreshed = 0;
+        let releaseRead = () => {};
         const status = createConsciousnessStatus({
             bar, ws: { send: (frame) => { sent.push(frame); return { status: 'sent' }; }, isConnected: () => true },
             openDashboardTab: (tab) => tabs.push(tab), refreshState: () => { refreshed += 1; },
@@ -136,6 +140,11 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
                     { started_at: at(13, 52), summary: 'Reminded about the Swarm question', phase: 'done', ended_at: at(13, 53) },
                 ] });
             },
+            // The one switch with an install that has no place to name: no question, the same /bg (owner 15.11, 5A).
+            // Its read is held open once, to see the button say so while it reads.
+            turn: (to, options) => turnConsciousness(to, { ...options, read: () => new Promise((resolve) => {
+                releaseRead = () => resolve({ lines: [], places: [] });
+            }) }),
         });
         assert.equal(status.chip.hidden, true, 'nothing is said before the first answer');
         status.update({ accounting: { available: false } });
@@ -159,19 +168,24 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         assert.deepEqual(shade.querySelectorAll('.cx-wake').map((row) => row.children.map((cell) => cell.textContent)),
             [['13:52', 'Reminded about the Swarm question', 'Done']]);
         const toggle = shade.querySelector('.cx-toggle');
-        assert.equal(toggle.textContent, 'Stop');
+        assert.equal(toggle.textContent, 'Turn off');
         const doors = shade.querySelectorAll('.cx-door');
         assert.deepEqual(doors.map((door) => [door.textContent, door.hidden]),
             [['Dashboard ›', false], ['Costs ›', true], ['Evolution ›', true]], 'Costs › only while the allowance is the next step');
 
         toggle.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));  // the switch reads what it would change first
+        assert.deepEqual([toggle.textContent, toggle.disabled, sent.length], ['Reading…', true, 0],
+            'a read that takes seconds is never a silent pause');
+        releaseRead();
+        await new Promise((resolve) => setTimeout(resolve, 0));
         assert.deepEqual(sent, [{ type: 'command', cmd: '/bg stop', ui_control: { name: 'consciousness_toggle' } }],
-            'Stop is the Dashboard\'s own command, not typed owner text');
+            'Turn off is the Dashboard\'s own command, not typed owner text');
         assert.equal(toggle.disabled, true, 'it waits for the readback');
         await new Promise((resolve) => setTimeout(resolve, 450));
         assert.equal(refreshed, 1, 'the room\'s state clock is asked again');
         status.update(answer({ status: 'disabled' }, { bg_consciousness_enabled: false, evolution_enabled: true }));
-        assert.deepEqual([toggle.textContent, toggle.disabled], ['Start', false]);
+        assert.deepEqual([toggle.textContent, toggle.disabled], ['Turn on', false]);
         assert.equal(status.chip.querySelector('.cx-chip-word').textContent, 'Evolving');
         assert.equal(doors[2].hidden, false, 'Evolution › while a campaign runs');
 

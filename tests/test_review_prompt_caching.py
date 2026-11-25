@@ -518,11 +518,13 @@ def test_global_ttl_docstrings_name_every_consumer():
         for p in (repo / "ouroboros").rglob("*.py")
         if p.name not in definition_sites and call.search(p.read_text(encoding="utf-8"))
     )
+    # ``_usage_cache_splits.reservation_cache_ttl`` holds the literal call for the payload-free
+    # admission fallback; ``usage_accounting._reservation_cost`` reaches it through that helper.
     assert consumers == [
+        "ouroboros/_usage_cache_splits.py",
         "ouroboros/effort_evidence.py",
         "ouroboros/llm_attempt.py",
         "ouroboros/tools/review_helpers.py",
-        "ouroboros/usage_accounting.py",
     ], consumers
 
     finalizer_doc = LLMClient._normalize_payload_cache_ttl.__doc__ or ""
@@ -545,7 +547,7 @@ def test_global_ttl_docstrings_name_every_consumer():
 def test_cache_write_split_harvested_and_priced_per_tier(monkeypatch):
     """Anthropic reports SEPARATE 5m/1h write counters (`usage.cache_creation`);
     a 1h request whose payload also produced 5m writes must bill only the genuine
-    1h share at the extended ratio — never a loosened ratio, never 2x on the 5m share."""
+    1h share at the catalog's hourly rate."""
     import requests
     from types import SimpleNamespace
 
@@ -583,10 +585,7 @@ def test_cache_write_split_harvested_and_priced_per_tier(monkeypatch):
     assert usage["prompt_cache_ttl"] == "1h"
     assert usage["cache_write_tokens_by_ttl"] == {"5m": 400, "1h": 600}
 
-    class _P(tuple):
-        tiers = ()
-
-    table = {"anthropic/claude-fable-5": _P((10.0, 1.0, 12.5, 50.0))}
+    table = {"anthropic/claude-fable-5": pricing_mod.PricingSchedule((10.0, 1.0, 12.5, 50.0), cache_write_1h=23.0)}
     monkeypatch.setattr(pricing_mod, "get_pricing", lambda **k: table)
     split_cost = pricing_mod.estimate_cost_optional(
         "anthropic/claude-fable-5", 1000, 0,
@@ -596,8 +595,7 @@ def test_cache_write_split_harvested_and_priced_per_tier(monkeypatch):
         },
         allow_live_fetch=False,
     )
-    # 400 tokens at the catalog (5m) write price + 600 at the 2x/1.25 extended ratio.
-    expected = (400 * 12.5 + 600 * 12.5 * 2.0 / 1.25) / 1_000_000
+    expected = (400 * 12.5 + 600 * 23.0) / 1_000_000
     assert split_cost == pytest.approx(expected, abs=1e-9)
     # Absent split: every write bills the reported tier (the pre-split behavior).
     full_cost = pricing_mod.estimate_cost_optional(
@@ -605,7 +603,7 @@ def test_cache_write_split_harvested_and_priced_per_tier(monkeypatch):
         cache_usage={"cache_write_tokens": 1000, "prompt_cache_ttl": "1h"},
         allow_live_fetch=False,
     )
-    assert full_cost == pytest.approx(1000 * 12.5 * 2.0 / 1.25 / 1_000_000, abs=1e-9)
+    assert full_cost == pytest.approx(0.023, abs=1e-9)
 
 
 def test_cache_write_split_on_the_openrouter_lane_is_passthrough_dependent(monkeypatch):
@@ -631,13 +629,14 @@ def test_cache_write_split_on_the_openrouter_lane_is_passthrough_dependent(monke
         }
 
     forwarded = {
-        "prompt_tokens": 100, "completion_tokens": 10, "cost": 0.01,
+        "prompt_tokens": 1000, "completion_tokens": 10, "cost": 0.01,
         "cache_creation": {"ephemeral_5m_input_tokens": 400, "ephemeral_1h_input_tokens": 600},
     }
     _msg, usage = client._normalize_remote_response(
         _resp(forwarded), target, skip_cost_fetch=True, prompt_cache_ttl="1h",
     )
     assert usage["cache_write_tokens_by_ttl"] == {"5m": 400, "1h": 600}
+    assert usage["cache_write_tokens"] == 1000 and usage["cost"] == 0.01 and usage["cost_final"]
 
     # No passthrough (the OpenAI-shaped body OpenRouter documents): silence, and the
     # caller's pricing then bills all writes at the reported tier — never a guess.
@@ -650,6 +649,56 @@ def test_cache_write_split_on_the_openrouter_lane_is_passthrough_dependent(monke
     )
     assert "cache_write_tokens_by_ttl" not in usage2
     assert usage2["prompt_cache_ttl"] == "1h"
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "anthropic"])
+@pytest.mark.parametrize("write,creation,reported,expected", [
+    (None, {"ephemeral_5m_input_tokens": 10, "ephemeral_1h_input_tokens": 0}, None, 0.00001),
+    (10, {"ephemeral_5m_input_tokens": 7}, None, None),
+    (10, {"ephemeral_5m_input_tokens": True}, None, None),
+    (10, {"ephemeral_5m_input_tokens": "10"}, None, None),
+    (10, ["unexpected"], None, None),
+    (None, {"ephemeral_5m_input_tokens": 7}, 0, 0),
+    (None, {"ephemeral_5m_input_tokens": 7}, 0.031, 0.031),
+])
+def test_reply_and_loop_agree_on_reported_or_estimated_cache_spend(monkeypatch, provider, write, creation, reported, expected):
+    from ouroboros import pricing
+
+    model = "anthropic/claude-fable-5"
+    tariff = pricing.PricingSchedule((2, 0, 1, 0), cache_write_1h=8)
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {model: tariff})
+    client = LLMClient(api_key="unused")
+    # These fixtures exercise public catalog estimates; other origins require a reported price.
+    raw = {"cache_creation": creation}
+    if reported is not None:
+        raw["cost"] = reported
+    if provider == "anthropic":
+        raw.update(input_tokens=0, output_tokens=1, cache_read_input_tokens=0)
+        if write is not None:
+            raw["cache_creation_input_tokens"] = write
+        _, usage = client._normalize_anthropic_response(
+            {"type": "message", "content": [], "usage": raw},
+            {"provider": provider, "usage_model": model, "base_url": "https://api.anthropic.com/v1"},
+            "1h",
+        )
+        if write is None:
+            assert usage["prompt_tokens"] == (10 if reported is None else None)
+    else:
+        raw.update(prompt_tokens=10, completion_tokens=1, cached_tokens=0)
+        if write is not None:
+            raw["cache_write_tokens"] = write
+        _, usage = client._normalize_remote_response(
+            {"choices": [{"message": {"content": "ok"}}], "usage": raw},
+            {**_openrouter_target(model), "base_url": "https://openrouter.ai/api/v1"},
+            skip_cost_fetch=True, prompt_cache_ttl="1h",
+        )
+    loop_cost, _, _, estimated = pricing.normalize_usage_cost(usage, model=model, provider=provider, use_local=False)
+    assert usage["cost_final"] is (reported is not None)
+    assert estimated is (reported is None and expected is not None)
+    if expected is None:
+        assert loop_cost is None
+    else:
+        assert loop_cost == pytest.approx(expected, rel=1e-12, abs=0)
 
 
 def test_finalizer_reduces_over_cap_breakpoints_and_discloses_the_reduction(monkeypatch):
@@ -1284,14 +1333,14 @@ def test_review_wave_admission_decides_on_known_spend_not_the_wave_estimate(tmp_
     from ouroboros import pricing as pricing_mod
     from ouroboros import usage_accounting as ua
 
-    # Deterministic catalog: no live pricing fetch in the default test lane.
-    class _P(tuple):
-        tiers = ()
-
-    monkeypatch.setattr(
-        pricing_mod, "get_pricing",
-        lambda **k: {"anthropic/claude-fable-5": _P((10.0, 1.0, 12.5, 50.0))},
-    )
+    # Deterministic catalog: no live pricing fetch in the default test lane. A seat that names no tier is priced on
+    # its model's endpoint list (``pricing._ordinary_bound``), so the one endpoint states the tier it serves and the
+    # catalog's hourly write rate it bills.
+    model = "anthropic/claude-fable-5"
+    source = {"provider": "openrouter", "model": model, "endpoint_tag": "fixture", "service_tier": None,
+              "processing": "standard"}
+    tariff = pricing_mod.PricingSchedule((10.0, 1.0, 12.5, 50.0), cache_write_1h=23.0, source=source)
+    monkeypatch.setattr(pricing_mod, "get_pricing", lambda **k: {"fixture" if k.get("model") else model: tariff})
 
     # Seed the ledger with a settled row carrying a root limit.
     request = ua.AttemptRequest(
@@ -1429,13 +1478,10 @@ def test_plan_review_messages_builder_blocks():
     assert flat[1]["content"] == "ALLDYNAMIC"
 
 
-def test_extended_ttl_scales_cache_write_estimate(monkeypatch):
+def test_extended_ttl_uses_the_catalogs_hourly_rate(monkeypatch):
     from ouroboros import pricing as pricing_mod
 
-    class _P(tuple):
-        tiers = ()
-
-    table = {"anthropic/claude-fable-5": _P((10.0, 1.0, 12.5, 50.0))}
+    table = {"anthropic/claude-fable-5": pricing_mod.PricingSchedule((10.0, 1.0, 12.5, 50.0), cache_write_1h=23.0)}
     monkeypatch.setattr(pricing_mod, "get_pricing", lambda **k: table)
     base = pricing_mod.estimate_cost_optional(
         "anthropic/claude-fable-5", 1_000_000, 0,
@@ -1448,7 +1494,7 @@ def test_extended_ttl_scales_cache_write_estimate(monkeypatch):
         allow_live_fetch=False,
     )
     assert base == pytest.approx(12.5)
-    assert extended == pytest.approx(12.5 * 2.0 / 1.25)
+    assert extended == pytest.approx(23.0)
 
 
 def test_supervisor_handles_review_wave_budget_event(monkeypatch):
@@ -1473,7 +1519,7 @@ def test_supervisor_handles_review_wave_budget_event(monkeypatch):
     assert captured.get("surface") == "skill_review"
 
 
-def test_review_seat_usage_flows_through_substrate_once():
+def test_review_seat_usage_flows_through_substrate_once(tmp_path):
     """Behavioral pin for the v6.69.0 dedup: one seat call → exactly one
     llm_usage event, emitted by the review substrate per-slot path (the former
     job-level re-emit of the scope role is gone with the role)."""
@@ -1488,7 +1534,7 @@ def test_review_seat_usage_flows_through_substrate_once():
         task_id = "seat-task"
         event_queue = None
         pending_events = events
-        drive_root = "/tmp"
+        drive_root = tmp_path
 
     class _StubLLM:
         def chat(self, **kwargs):

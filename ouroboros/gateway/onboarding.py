@@ -50,6 +50,7 @@ from ouroboros.configured_subagents import (
 )
 
 from ouroboros.gateway.owner_settings import (
+    BindingRefused,
     CommitBoundary,
     SettingsDocumentUnreadable,
     SettingsLockUnavailable,
@@ -68,7 +69,7 @@ from ouroboros.gateway.onboarding_host import recorded_attempt
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
 from ouroboros.skill_starter import after_onboarding, onboarding_skill_choices
 from ouroboros.settings_setup_contract import (
-    ONBOARDING_ATTEMPT_KEY, ONBOARDING_COMPLETED_KEY,
+    ONBOARDING_COMPLETED_KEY, completion_facts,
     parse_completion_attempt, parse_subscription_intent,
 )
 from ouroboros.subscription_install_presets import (
@@ -662,9 +663,9 @@ def preset_saving(preset: SubscriptionInstallPreset, catalog: Mapping[str, Any])
 
 
 def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any]) -> Dict[str, Any]:
-    """Finishing without agent defaults while subscriptions are connected: every marked row runs
-    on Main, the count kept, keeping its identity and effort (a session's compound effort becomes the
-    row effort; a model-named Main keeps its name's level), with Main's pin and processing."""
+    """With subscriptions but no agent defaults, move each marked row to Main's model and pin. Keep its identity
+    and effort (compound session effort becomes row effort; a model-named Main keeps its level). Rows take Main's
+    tier unless it is Ultrafast, in which case they keep their own tier or use the global default."""
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, resolve_processing_preference
     from ouroboros.provider_models import provider_for_model
     from ouroboros.route_spec import ROUTE_KIND_AGENT_SESSION, RouteSpec, api_model_named_effort, compound_session_effort
@@ -684,43 +685,47 @@ def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any])
         effort = "" if main_named else (item.get("effort") or (compound_session_effort(RouteSpec(
             ROUTE_KIND_AGENT_SESSION, str(old.get("target_id") or ""))) if old.get("kind") == ROUTE_KIND_AGENT_SESSION else ""))
         kept = ("subagent_id", "recommended_use", "enabled", "review_eligible", "minted_from")
+        row_tier = item.get("processing_preference") if processing == "ultrafast" else processing
         return {**{key: item[key] for key in kept if key in item},
                 "route": {"kind": "api_model", "target_id": main, **({"credential_profile_id": profile} if profile else {})},
-                **({"effort": effort} if effort else {}), **({"processing_preference": processing} if processing else {})}
+                **({"effort": effort} if effort else {}), **({"processing_preference": row_tier} if row_tier else {})}
 
     return {**catalog, "items": [on_main(item) if item.get("review_eligible") is True else item
                                  for item in catalog.get("items") or []]}
 
 
+async def _draft_body(request: Request):
+    try:
+        return await request.json()
+    except Exception:
+        return None
+
+
 async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
-    """The model catalog of an unsaved setup draft: the access it names (keys, connection rows, local model) over
-    the saved settings, asked as ``GET /api/model-catalog`` asks the saved one. Only the access fields are read,
-    never the whole-draft validator: Main is picked from this list, so it answers while Main is blank."""
+    """List models for draft access (keys, connections and local model) while Main is still unchosen."""
     from ouroboros.config import load_settings
     from ouroboros.gateway.models import draft_catalog
     from ouroboros.provider_models import CONNECTIONS_KEY
     from ouroboros.settings_setup_contract import draft_access
 
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
+    body = await _draft_body(request)
     if not isinstance(body, dict):
         return unsaved_error("JSON body must be an object.", 400)
+    provider_id = request.query_params.get("provider_id")
+    if provider_id is not None and not provider_id.strip():
+        return unsaved_error("provider_id must name one connection.", 400)
     saved = load_settings()
     connections, keys, typed, error = draft_access(body, saved)
     if error:
         return unsaved_error(error, 400, code="invalid_onboarding_settings")
     local = {key: body[key] for key in ("LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME", "LOCAL_MODEL_CONTEXT_LENGTH") if key in body}
-    return JSONResponse(await draft_catalog(saved, {**saved, **keys, CONNECTIONS_KEY: connections, **local}, typed))
+    return JSONResponse(await draft_catalog(saved, {**saved, **keys, CONNECTIONS_KEY: connections, **local}, typed,
+                                             provider_id=provider_id))
 
 
 async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
     """Read-only canonical preview for the wizard; never persists or projects env."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
+    body = await _draft_body(request)
     if not isinstance(body, dict):
         return unsaved_error("JSON body must be an object.", 400)
 
@@ -832,12 +837,9 @@ def _persist(request: Request, old_settings: Dict[str, Any], current: Dict[str, 
 async def api_onboarding_complete(request: Request) -> JSONResponse:
     """POST /api/onboarding/complete — finish onboarding in ONE transaction."""
     from ouroboros.config import get_runtime_mode, normalize_runtime_mode
-    from ouroboros.utils import utc_now_iso
+    from supervisor.state_initialization import first_state_pending as first_state_due
 
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
+    body = await _draft_body(request)
     attempt_id, attempt_error = parse_completion_attempt(body)
     if not isinstance(body, dict) or attempt_error:
         return unsaved_error(attempt_error or "JSON body must be an object.", 400)
@@ -894,10 +896,10 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
         install_preset_applied = True
         # R8: provider normalization already ran over `current`; the preset keys land on top of it.
         current.update(preset.settings_keys())
-        # Only omitted fields (or an empty Main awaiting its first proposal) are authored here: a
-        # visible draft value, even one equal to a shipped default, is explicit owner intent.
-        current.update({key: value for key, value in preset.model_settings.items()
-                        if key not in body or (key == "OUROBOROS_MODEL" and not body[key])})
+        # Only omitted fields (or an empty Main, and Light beside it, awaiting proposals) are authored here:
+        # a visible draft value, even one equal to a shipped default, is explicit owner intent.
+        current.update({key: value for key, value in preset.model_settings.items() if key not in body or (
+            key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT") and not body[key] and not body.get("OUROBOROS_MODEL"))})
 
     if not has_startup_ready_provider(current):
         return unsaved_error("The connected accounts do not provide a Main model. Connect Codex, an API provider, or a local model.",
@@ -913,9 +915,9 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
     if current.get(SUBAGENTS_SETTING):
         current.pop(REVIEW_LANES_KEY, None)
 
-    # The durable completion fact, with the client's attempt id ("" for none), rides in the
-    # SAME write, whatever the preset did: a completion that connected nothing must still close the window.
-    current.update({ONBOARDING_COMPLETED_KEY: utc_now_iso(), ONBOARDING_ATTEMPT_KEY: attempt_id})
+    # The completion facts ride in the SAME write, whatever the preset did (a completion that connected nothing still
+    # closes the window); whether a first state is to come is read before this write and the supervisor it starts.
+    current.update(completion_facts(body, attempt_id, first_state_pending=first_state_due(request_drive_root(request))))
     pending_mode = normalize_runtime_mode(current.get("OUROBOROS_RUNTIME_MODE"))
     active_mode = get_runtime_mode()
     boundary = CommitBoundary()
@@ -949,13 +951,10 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
             if isinstance(exc, SettingsPreconditionFailed):
                 return unsaved_error(str(exc), 409, code="onboarding_state_changed")
             if isinstance(exc, SettingsLockUnavailable):
-                # NO `can_skip`. That flag means "there is a different button that
-                # WILL work", and the skip is the same request to the same endpoint,
-                # which takes the same lock — offering it under contention promises
-                # an escape that leads straight back here. `can_skip` belongs to the
-                # preset-verification failures, where finishing without agent
-                # defaults genuinely bypasses the thing that failed.
+                # Skipping presets still needs this lock; do not offer can_skip here.
                 return unsaved_error(str(exc), 503, code="settings_locked")
+            if isinstance(exc, BindingRefused):
+                return unsaved_error(str(exc), 400, code="invalid_onboarding_settings")
             if isinstance(exc, PermissionError):
                 from ouroboros.deployment_policy import DeploymentPolicyRefusal
                 from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT

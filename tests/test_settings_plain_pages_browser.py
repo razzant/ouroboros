@@ -147,31 +147,56 @@ def _settled(page, path):
     return level
 
 
+_FITS = """level => {
+    const wide = (el) => el.scrollWidth - el.clientWidth;
+    const out = [...level.querySelectorAll('.ui-segment-group, .settings-choices, .settings-slider, .ui-row-actions')]
+        .filter((el) => el.getClientRects().length)
+        .filter((el) => { const row = el.closest('.ui-row, .settings-card'); const a = el.getBoundingClientRect();
+            const b = row.getBoundingClientRect(); return a.left < b.left - 0.5 || a.right > b.right + 0.5; })
+        .map((el) => el.className);
+    return { page: wide(level), doc: wide(document.documentElement), out };
+}"""
+_CAP = "OUROBOROS_REVIEW_MAX_CYCLES"
+
+
+def _cap_options(page):
+    return setting_row(page, _CAP).locator("[data-setting-value]").evaluate_all("nodes => nodes.map((node) => node.dataset.settingValue)")
+
+
 @pytest.mark.parametrize("width,height", SIZES)
 @pytest.mark.parametrize("theme", ["dark", "light"])
 def test_every_plain_page_fits_its_window_without_sideways_scroll(subscription_ui, width, height, theme):
-    page, _server = _page(subscription_ui, width, height, theme, OUROBOROS_RUNTIME_MODE="cyber_pro")
+    page, server = _page(subscription_ui, width, height, theme, OUROBOROS_RUNTIME_MODE="cyber_pro")
     for path in PAGES:
         open_settings(page, path)
         level = _settled(page, path)
         if path == "permissions":  # a restart waits: the Access row says both values
             page.wait_for_function("() => /Running: Pro/.test(document.querySelector("
                                    "'[data-setting-row=\"OUROBOROS_RUNTIME_MODE\"] [data-setting-meta]')?.textContent || '')")
-        fits = level.evaluate("""level => {
-            const wide = (el) => el.scrollWidth - el.clientWidth;
-            const out = [...level.querySelectorAll('.ui-segment-group, .settings-choices, .settings-slider, .ui-row-actions')]
-                .filter((el) => el.getClientRects().length)
-                .filter((el) => { const row = el.closest('.ui-row, .settings-card'); const a = el.getBoundingClientRect();
-                    const b = row.getBoundingClientRect(); return a.left < b.left - 0.5 || a.right > b.right + 0.5; })
-                .map((el) => el.className);
-            return { page: wide(level), doc: wide(document.documentElement), out };
-        }""")
+        fits = level.evaluate(_FITS)
         assert fits == {"page": 0, "doc": 0, "out": []}, f"{path} at {width}x{height} {theme}: {fits}"
         setup_browser.capture(page, f"c2-{path.replace('/', '-')}-{width}x{height}-{theme}")
         if path == "permissions":
-            level.locator("details[data-settings-fold] > summary").click()
+            # The review cap stands in the card of what it limits, in sight: this page folds nothing away.
+            assert level.locator("details[data-settings-fold]").count() == 0
+            assert setting_row(page, _CAP).evaluate(
+                "row => [row.closest('.settings-card').querySelector('.settings-card-title').textContent,"
+                " Boolean(row.closest('details'))]") == ["Who checks its results", False]
+            assert _cap_options(page) == ["1", "2", "3", "5", "unlimited"]
             level.evaluate("level => { level.scrollTop = level.scrollHeight; }")
             setup_browser.capture(page, f"c2-permissions-end-{width}x{height}-{theme}")
+            # A stored cap its strip does not offer is one more option, chosen: six options, the strip's widest form,
+            # still fit the row when the page is opened again.
+            server.values[_CAP] = "40"
+            open_settings(page, "rules")
+            open_settings(page, "permissions")
+            level = _settled(page, "permissions")
+            setting_row(page, _CAP).locator('[data-setting-value="40"][aria-pressed="true"]').wait_for(state="visible")
+            assert _cap_options(page) == ["1", "2", "3", "5", "40", "unlimited"]
+            fits = level.evaluate(_FITS)
+            assert fits == {"page": 0, "doc": 0, "out": []}, f"permissions with a stored 40 at {width}x{height} {theme}: {fits}"
+            level.evaluate("level => { level.scrollTop = level.scrollHeight; }")
+            setup_browser.capture(page, f"c2-permissions-end-stored-40-{width}x{height}-{theme}")
 
 
 def test_raising_access_asks_first_and_then_says_both_values(subscription_ui):
@@ -374,10 +399,12 @@ def test_voice_and_calls_says_the_saved_choices_and_opens_the_form_of_the_skill_
     assert door.locator(".ui-row-title").inner_text() == "Calls (beta)", "the door is named by the form's own title"
     setup_browser.capture(page, "c2-voice-with-calls-1087x740-dark")
     door.click()
+    # The skill's form is a page of Extensions (over Skills): the door leaves Settings, and its Back leads to Settings,
+    # to the page the door stood on (DESIGN "Settings").
     opened = settings_page(page, "skill/live_conversation")
     opened.wait_for(state="visible")
-    assert page.locator("#page-settings > .app-page-header [data-settings-back]").get_attribute("aria-label") == "Back to Voice and calls"
-    assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "Calls (beta)"
+    assert page.locator("#page-skills > .app-page-header [data-shell-back]").get_attribute("aria-label") == "Back to Settings › Voice and calls"
+    assert page.locator("#page-skills [data-extensions-lead-name]").inner_text().strip() == "Calls (beta)"
     form = opened.locator('[data-extension-settings-form][data-skill="live_conversation"]')
     form.wait_for(state="visible")
     assert form.locator('[name="enabled"]').count() == 1 and form.locator('button[type="submit"]').count() == 1

@@ -456,6 +456,7 @@ async def _api_identity(request: Request) -> JSONResponse:
                          "presence_wake_signals": 1,
                          "presence_explicit_completion": 1,
                          "presence_reaction_context": 1,
+                         "presence_change_context": 1,
                          "presence_identity": 1,
                          "presence_place_binding_version": PLACE_BINDING_VERSION,
                          "notify_version": NOTIFY_VERSION})
@@ -532,8 +533,13 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
     try:
         from ouroboros.task_status import SETTLED_STATUSES
 
-        if not isinstance(payload.get("reply_to", ""), str):
-            return _json_error("reply_to must be an address string", 400)
+        from ouroboros.chat_references import (ReplyExcerptNotAuthored, ReplyExcerptUnavailable, ingress_reply,
+                                               reply_identity, same_reply)
+
+        try:
+            requested_reply = reply_identity(payload)
+        except ValueError as exc:
+            return _json_error(str(exc), 400)
         text = str(payload.get("text") or "")
         image_caption = str(payload.get("image_caption") or "")
         client_message_id = str(payload.get("client_message_id") or "").strip()[:128]
@@ -555,7 +561,19 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         correlated = {"operation_ref": operation_ref(chat_id, client_message_id)} if client_message_id else {}
         rejoined = False
         if client_message_id:
-            accepted = await asyncio.to_thread(_accepted_inbound, ctx, chat_id, client_message_id)
+            from ouroboros.store import StoreBusy, StoreMigrating
+
+            try:
+                accepted = await asyncio.to_thread(_accepted_inbound, ctx, chat_id, client_message_id)
+            except (StoreBusy, StoreMigrating):
+                from ouroboros.chat_references import exact_reply_ingress
+
+                if not (payload.get("reply_to") and exact_reply_ingress(
+                    ctx.data_dir, f"skill:{skill_name}", chat_id, client_message_id, payload.get("transport")
+                )):
+                    raise
+                return JSONResponse({"ok": False, "error": "the store was busy before this attempt was accepted",
+                                     "code": "not_accepted", **correlated}, status_code=503)
             inbound = accepted.row if accepted is not None else None
             if inbound is not None:
                 if str(inbound.get("source") or "") != f"skill:{skill_name}":
@@ -568,7 +586,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                 logged = text.strip() or image_caption.strip() or chat_uploads.attachment_placeholder(
                     inline_image, {"chat_attachments": inbound.get("attachments"), "chat_attachment_uploads": incoming})
                 if (not chat_uploads.same_message(inbound, logged, incoming)
-                        or (inbound.get("reply_to") or {}).get("address", "") != payload.get("reply_to", "")):
+                        or not await asyncio.to_thread(same_reply, ctx.data_dir, inbound.get("reply_to") or {}, requested_reply)):
                     return _json_error("client_message_id was already used for a different message", 409)
                 state = await asyncio.to_thread(_operation_state, ctx, accepted)
                 if state["status"] in SETTLED_STATUSES:
@@ -598,6 +616,13 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                         **({"chat_attachments": refs} if refs else {})}
         if payload.get("reply_to"):  # no reference adds nothing to a plain inject's kwargs
             metadata["reply_to"] = payload["reply_to"]
+        if "excerpt" in requested_reply:
+            metadata["reply_excerpt"] = requested_reply["excerpt"]
+            if not client_message_id:  # unnamed injections enter the queue before their chat row is written
+                try:
+                    metadata["reply_reference"] = await asyncio.to_thread(ingress_reply, ctx.data_dir, metadata)
+                except ValueError as exc:
+                    return _json_error(str(exc), 400)
         from supervisor.message_ingress import ui_control_fact
 
         try:  # a skill's control (an inline button) composed this text: the press is the owner's, not the words
@@ -634,6 +659,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
             )
             if client_message_id:
                 from supervisor.message_bus import accept_local_message
+                from supervisor.message_ingress import NotAccepted
 
                 try:
                     _, rejoined = await run_sync_to_completion(
@@ -641,12 +667,19 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                         retain_inputs=pending_uploads.pop_all,
                         dispatch=functools.partial(dispatch_accepted_restart, bridge), **message,
                     )
+                except (ReplyExcerptNotAuthored, ReplyExcerptUnavailable) as exc:
+                    return _json_error(str(exc), 400)  # the unnamed path's answer; 409 stays an id conflict
                 except ValueError as exc:
                     return _json_error(str(exc), 409)
+                except NotAccepted as exc:  # this attempt wrote nothing: the caller may send it again
+                    return JSONResponse({"ok": False, "error": str(exc), "code": "not_accepted", **correlated},
+                                        status_code=503)
             else:
                 # Custody passes BEFORE the handoff: dispatch may enqueue and then raise, so from
                 # here a failure is unknown. The copies stay (an orphan at worst), never deleted
                 # under queued work; the error still answers the skill, nothing is re-dispatched.
+                if "reply_reference" in metadata:
+                    message["accepted_reply"] = metadata["reply_reference"]
                 pending_uploads.pop_all()
                 dispatch_accepted_restart(bridge, text, **message)
         if not wait_for_response:
@@ -1031,7 +1064,9 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
     indexed under that origin, a turn's own record told apart by its origin; no room history or routing
     annotation is read. A managed root (a promoted or detached task) answers before the direct turn
     that handed it off; children and retry successors fold into their root, unless a record its
-    retry-aware read went through cannot be read (``task_record_unreadable``). Otherwise ``pending``,
+    retry-aware read went through cannot be read (``task_record_unreadable``). A message the owner router refused
+    before any work began is ``failed`` with the sentence its notice said (``dialogue_store.refuse_dispatch``).
+    Otherwise ``pending``,
     or ``lost`` when the host process or session that accepted the message is gone and nothing else
     answers; a record linked to the message that cannot be read (``task_record_unreadable``) or a
     dialogue range still importing after it (``history_importing``) keeps it ``pending`` with that
@@ -1040,6 +1075,7 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
     task is disclosed, not cancelled.
     """
     from ouroboros import dialogue_store
+    from ouroboros.host_notice import view as notice_view
     from ouroboros.project_dialogue import entry_matches_source_ref, owner_message_ref_is_valid
     from ouroboros.task_carrier import conversation_origin
     from ouroboros.task_status import SETTLED_STATUSES, load_effective_task_result
@@ -1133,7 +1169,8 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
         row = entry.row
         terminal = str(row.get("task_terminal_status") or "")
         if row.get("direction") in {"out", "system"} and terminal in SETTLED_STATUSES and owns(row):
-            state.update({"status": terminal, "text": str(row.get("text") or "")})
+            # A host notice answers with its phrase, and its notice (step, raw details, line) beside it; a read.
+            state.update({"status": terminal, "text": str(row.get("text") or ""), **notice_view(row, drive_root=ctx.data_dir)})
             turn = str(row.get("task_id") or "")
             if turn in direct:  # the turn's own record: its post-task work may still spend
                 state["task_id"] = turn
@@ -1144,10 +1181,14 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
         stored = load_effective_task_result(ctx.data_dir, target, materialize_artifacts=False) or {}
         if str(stored.get("status") or "") in SETTLED_STATUSES:
             return _task_view(state, target, stored, cancel_owner_matches)
+    from supervisor.message_ingress import dispatch_facts, dispatch_lost, dispatch_taken_over_here
+
+    if refused := (dispatch_facts(inbound, ctx.data_dir) or {}).get("refused"):
+        state.update(status="failed", text=refused)  # the router refused it before any work began, and said so
+        return state
     if not dialogue_store.range_coverage(ctx.data_dir, "chat", lower=accepted.seq)["imported"]:
         state["reason"] = "history_importing"  # an answer may sit in the rows still importing
         return state
-    from supervisor.message_ingress import dispatch_lost, dispatch_taken_over_here
 
     accepted_session = str(inbound.get("session_id") or "")
     live_session = str((read_json_dict(ctx.data_dir / "state" / "state.json") or {}).get("session_id") or "")

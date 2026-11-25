@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
 from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
-from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
+from ouroboros.gateway.reference_contracts import ChatReferenceFields, HostNoticeField, ReplyExcerpt, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageCount, StorageCounting, StorageError, StoragePart, StoragePlace, StorageResponse, StorageRest,
     StorageVolume, StorageRemover,
@@ -48,7 +48,7 @@ from ouroboros.gateway.card_contracts import CardOutbound, CardStateOutbound  # 
 from ouroboros.gateway.cost_breakdown import TaskCostBreakdown, TaskCostSlice  # noqa: F401 -- public re-exports
 from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-exports
     UpdateApplyErrorResponse, UpdateApplyRequest, UpdateApplySuccessResponse, UpdateDescriptionErrorResponse,
-    UpdateDescriptionRequest, UpdateDescriptionResponse, UpdateMergePlan,
+    UpdateDescriptionLatestResponse, UpdateDescriptionRequest, UpdateDescriptionResponse, UpdateMergePlan,
     UpdatePreflightRequest, UpdatePreflightResponse, UpdateProgressChangedOutbound, UpdateStatusReadyOutbound,
 )
 from ouroboros.gateway.management_contracts import (  # noqa: F401 -- public re-exports
@@ -86,6 +86,7 @@ class ChatInbound(TypedDict):
     # Multi-project chat routing: the owner stays user_id 1; chat_id selects the thread, project_id scopes memory.
     chat_id: NotRequired[int]
     project_id: NotRequired[str]
+    reply_excerpt: NotRequired[ReplyExcerpt]
     reply_to: NotRequired[str]  # Host resolves the selected row/card at acceptance.
     client_surface: NotRequired[dict]
 
@@ -134,7 +135,7 @@ class TransportMetadata(TypedDict, total=False):
     sender_label: str
 
 
-class ChatOutbound(ChatReferenceFields, SharedRowFrame):
+class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     """Outbound WS chat frame."""
 
     presence_contact: NotRequired[PresenceContact]
@@ -147,6 +148,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     ingress_pending: NotRequired[bool]  # This live host process accepted the row and has entered or refused neither yet.
     attachments: NotRequired[List[ChatAttachmentView]]  # owner message's attachments (same views as history)
     text_placeholder: NotRequired[bool]  # owner row whose text the host wrote (no words were sent); shown as no caption
+    reply_excerpt_disabled: NotRequired[bool]  # a wordless or mixed card display; whole-row Reply still works
     markdown: NotRequired[bool]
     is_progress: NotRequired[bool]
     task_id: NotRequired[str]
@@ -210,7 +212,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     subagent_role: NotRequired[str]
     accepted: NotRequired[bool]
     active_subagent_count: NotRequired[int]
-    max_active_subagents: NotRequired[int]
+    max_active_subagents: NotRequired[int]  # the owner's number per root; absent: no number
     queued_behind_active_cap: NotRequired[bool]
     required_capabilities: NotRequired[list[str]]
     write_surface: NotRequired[str]
@@ -260,6 +262,9 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     spoken: NotRequired[Dict[str, Any]]  # call_id, item_id, played_ms, status: played/generated/interrupted
     initiator: NotRequired[str]  # origin label: "consciousness" on a wake-up's frames/rows (and its roots); absent on an owner's turn
     continue_requester: NotRequired[str]  # who asked for this Continue, read from its admission: owner|ouroboros|unknown; absent elsewhere
+    # A place's work (and what it starts): {place_id, place_label?, provider?, actor?: {id?, label?, owner?, bot?}, wakes,
+    # labels?, routed?}, by value from its admission's focus (``subagent_messages.place_origin``); absent on other work.
+    place_origin: NotRequired[Dict[str, Any]]
     # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is distinct from a
     # confirmed $0. The honest names (accounted upper bounds, not settled receipts), the only outbound spellings since
     # ABI 7.0 dropped the ``cost_usd[_with_children]`` aliases; cost_projection.py is the one author.
@@ -422,8 +427,8 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
 
     Optional questions continue under ``assumption``; ``wait_for_answer`` marks
     required waiting without an implied answer. ``state`` carries lifecycle.
-    Replay merges the stored ``answered_index`` and verbatim ``comment``; a
-    comment without an index is the owner's whole answer, not an option choice.
+    Replay merges the stored ``answered_index``, verbatim ``comment`` (without an index,
+    the owner's whole answer) and ``answer_row_address``, the answer row its card shows.
     A private Presence question's one frame names its work's Project in ``also_rooms``."""
 
     type: Literal["quiz"]
@@ -440,6 +445,7 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     ts: str
     answered_index: NotRequired[int]
     comment: NotRequired[str]
+    answer_row_address: NotRequired[str]  # replay only, never the live quiz_state frame
     host_facts: NotRequired[str]  # host-written, never the model's: asking task, run start, owner's last message
     materials: NotRequired[List[Dict[str, Any]]]
     question_delivery: NotRequired[Dict[str, Any]]
@@ -559,6 +565,7 @@ class MessageAnnotationOutbound(TypedDict):
     status: str
     suppress_bubble: bool
     chat_id: NotRequired[int]
+    source_row_address: NotRequired[str]
     target: NotRequired[str]
     project_name: NotRequired[str]
     target_task_ids: NotRequired[list[str]]
@@ -720,6 +727,7 @@ class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also pre
     last_line_at: NotRequired[str]
     tool_calls: NotRequired[int]
     detached: NotRequired[bool]  # durable detached_at, independent of carrier/phase
+    place_origin: NotRequired[Dict[str, Any]]  # ChatOutbound.place_origin's shape: a Main portal's only carrier of it
     project_name: NotRequired[str]
     status: NotRequired[str]
     outcome_axes: NotRequired[Dict[str, Any]]
@@ -874,7 +882,7 @@ class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):
     available_subagents: AvailableSubagentsSettingsMeta
     policy_state: SettingsPolicyState
     restart_state: SettingsRestartState
-    connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
+    connections: list[Dict[str, Any]]  # every API connection as the picker shows it, with its opaque ``revision`` (owner_settings)
     main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
     known_spend_gaps: list[str]  # what spends money the limits cannot count: no known price (pricing.spend_coverage)
     partly_counted_spend: list[Dict[str, str]]  # {name, condition}: counted only under a price condition (the same)
@@ -946,14 +954,15 @@ class SkillGrantResponse(TypedDict, total=False):
     granted_permissions: list[str]
     turn_on_when_ready: str
     setup_error: str  # grants succeeded; the requested setup did not
-    enabled: bool  # present when this grant also carried the owner's Enable
-    extension_action: str
-    extension_reason: str
-    load_error: str
+    enabled: bool  # present with the owner's Enable, except a grants refusal over an unreadable enabled.json
+    extension_action: Optional[str]  # null, as live_loaded, when no reconcile answered (an Enable refused first)
+    extension_reason: Optional[str]
+    load_error: Optional[str]
     grants: Dict[str, Any]
     process: str
     server_reconcile: str
-    live_loaded: bool
+    live_loaded: Optional[bool]
+    retained_companions: Dict[str, str]  # as SkillToggleResponse: registered names awaiting confirmed exit
     error: str
 
 
@@ -1186,6 +1195,10 @@ class TaskDetailResponse(TypedDict, total=False):
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
     review_overrides: Dict[str, Any]  # a root's review trace: {count?, latest?, continued?, landed?, skills?} (review_overrides.py)
+    # Host switches after tool use: {from_model, to_model, status, selection?, work_observed?, reply_observed?}.
+    # reply_observed=true confirms a reply; legacy rows may not say. Absent list means history unavailable.
+    authoring_handovers: List[Dict[str, Any]]
+    place_origin: Dict[str, Any]  # ChatOutbound.place_origin's shape, from the task's own admitted focus; absent elsewhere
     error: str
 
 
@@ -1395,6 +1408,7 @@ class OnboardingCompleteRequest(TypedDict, total=False):
     starter_skills: List[str]  # catalog ids installed once after completion; absent: the default starter list
     skill_source_trust: Dict[str, str]  # {hub row id: trusted|review}; marks those rows confirmed
     attempt_id: str  # client-made per save (16-128 of A-Z a-z 0-9 _ -); read back by GET with ?attempt=
+    consciousness: bool  # setup's Consciousness switch: true turns it on (owner's start); false and absent change nothing
 
 
 class OnboardingSubagentsPreviewResponse(TypedDict):
@@ -1486,6 +1500,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "log",
     "heartbeat",
     "extension_lifecycle",
+    "extension_health_changed",
     "message_annotation",
     "projects_changed",
     "ui_preferences_changed",
@@ -1512,7 +1527,8 @@ __all__ = [
     "ProjectsChangedOutbound", "UiPreferencesChangedOutbound", "MessageAnnotationOutbound",
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
     "UpdateApplySuccessResponse", "UpdateApplyErrorResponse",
-    "UpdateDescriptionRequest", "UpdateDescriptionResponse", "UpdateDescriptionErrorResponse",
+    "UpdateDescriptionRequest", "UpdateDescriptionResponse", "UpdateDescriptionLatestResponse",
+    "UpdateDescriptionErrorResponse",
     "UpdateStatusReadyOutbound", "UpdateProgressChangedOutbound",
     "ProjectCreateRequest", "ProjectEntry", "ProjectClosure", "ProjectDeleteResponse", "ProjectCognition",
     "FsDirsEntry", "FsDirsResponse",

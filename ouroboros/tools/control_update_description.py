@@ -36,9 +36,9 @@ _DESCRIPTION = (
     "action='show'|'diff') "
     "where a message does not say what changed. text is Markdown in your human's language, as long and as "
     "structured as the change needs; text_file={path, root} saves instead a Markdown file you wrote, trimmed "
-    "like text (addressed as in read_file). base_sha/target_sha name the exact range the text describes: the range "
-    "the last check offered, the saved description's own range, or the range of your human's request "
-    "(query_data(op='json', kind='update_letter'): checked_key, key, request.key). expected_revision is that "
+    "like text (addressed as in read_file). For a requested description, including retry or Continue, base_sha/target_sha "
+    "must match the original request. An independent writer can use a range offered in "
+    "query_data(op='json', kind='update_letter'): checked_key, material.key, key or request.key. expected_revision is that "
     "record's revision (0 when it has none); a newer save is refused, never overwritten, so read it and decide."
 )
 
@@ -46,9 +46,11 @@ _DESCRIPTION = (
 def _record_update_description(ctx: ToolContext, text: str = "", base_sha: str = "", target_sha: str = "",
                                expected_revision: Any = None, text_file: Any = None, **_ignored: Any) -> str:
     from ouroboros.tool_access import canonical_data_root
-    from ouroboros.update_letter import RecordBusy, save_description
+    from ouroboros.update_letter import RecordBusy, RecordUnreadable, save_description
 
-    author = {"task_id": str(getattr(ctx, "task_id", "") or ""), "model": str(getattr(ctx, "active_model", "") or "")}
+    meta = ctx.task_metadata or {}
+    author = {"task_id": str(ctx.task_id or ""), "model": str(getattr(ctx, "active_model", "") or ""),
+              "expect_lineage": any(meta.get(k) for k in ("update_description", "continuation", "timeout_retry_from"))}
     source = None
     if text_file:
         if text:
@@ -67,9 +69,10 @@ def _record_update_description(ctx: ToolContext, text: str = "", base_sha: str =
                                    expected_revision, author=author, drive_root=canonical_data_root(ctx))
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=f"ERROR: {exc}"))
-    except RecordBusy as exc:
+    except (RecordBusy, RecordUnreadable) as exc:
+        retry = " Try again after the lock is released." if isinstance(exc, RecordBusy) else ""
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR",
-                                                    text=f"ERROR: {exc}; nothing was saved. Try again."))
+                                                    text=f"ERROR: {exc}; nothing was saved.{retry}"))
     if outcome["outcome"] == "revision_conflict":
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=(
             f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: revision conflict — the saved description is at revision "
@@ -77,8 +80,8 @@ def _record_update_description(ctx: ToolContext, text: str = "", base_sha: str =
             + json.dumps(outcome, ensure_ascii=False))))
     if outcome["outcome"] == "range_not_offered":
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=(
-            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: range not offered — no check, saved description or request names "
-            "this range; nothing was saved.\n" + json.dumps(outcome, ensure_ascii=False))))
+            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: range not offered to this writer; nothing was saved.\n"
+            + json.dumps(outcome, ensure_ascii=False))))
     if source:
         outcome["text_file"] = source
     outcome["window_refresh"] = _hand_on_refresh(ctx)
@@ -148,7 +151,7 @@ def update_description_tool_entries() -> List[ToolEntry]:
                           "path": {"type": "string", "description": "The file: absolute, or relative to root."},
                           "root": {"type": "string", "description": "As in read_file; omitted, the root holding an "
                                                                     "absolute path, else your workspace."}}},
-        "base_sha": {"type": "string", "description": "Full SHA of the range's base (the running source)."},
+        "base_sha": {"type": "string", "description": "Full SHA of the range's base, not always the running source."},
         "target_sha": {"type": "string", "description": "Full SHA of the range's official target."},
         "expected_revision": {"type": "integer", "minimum": 0,
                               "description": "The revision of the record you read; 0 when it has none."},

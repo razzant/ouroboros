@@ -36,7 +36,7 @@ import logging
 import math
 import pathlib
 from dataclasses import replace
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 from ouroboros.task_store import patch_document
 
 log = logging.getLogger(__name__)
@@ -283,6 +283,82 @@ def _per_slot(value: Any, count: int) -> list:
     return [value] * count
 
 
+def projected_pricing_request(model, preference, resolve_target_for_model, *, review=False, use_local=None, **sizes):
+    """Price the adapter's projected carrier on its resolved connection, before a physical request exists.
+
+    ``use_local`` is the seat's own locality: True prices the local lane's own request (``llm_local``), False the
+    remote route; None (no seat fact) leaves a review route the resolver reads as local unpriced. The projected
+    carrier bounds the adapter's routing without a transcript; a review projection reads only cached tariffs."""
+    from ouroboros.llm_attempt import ConnectionUnavailable
+    from ouroboros.llm_routing import (
+        _resolver_route, apply_processing_preference, attempt_pricing_fields, openrouter_chat_routing,
+        processing_transport_modes, submitted_processing_mode,
+    )
+    from ouroboros.provider_models import provider_for_model, review_model_uses_local
+    from ouroboros.usage_accounting import AttemptRequest
+
+    if use_local:
+        return AttemptRequest(model="local-model", provider="local", processing_preference=preference,
+                              allow_live_fetch=not review, **sizes)
+    unbound_local = review and use_local is None and review_model_uses_local(model)
+    provider = provider_for_model(model) if unbound_local else _resolver_route(model).kind
+    request = AttemptRequest(model=model, provider=provider, processing_preference=preference,
+                             allow_live_fetch=not review, **sizes)
+    try:
+        target = resolve_target_for_model(model) if callable(resolve_target_for_model) and not unbound_local else None
+    except ConnectionUnavailable:
+        target = None
+    if not target or target.get("provider") != provider or not target.get("base_url") or not target.get("usage_model"):
+        return replace(request, force_unknown_reservation=True)
+    tier = preference.strip().lower()
+    target = {**target, "processing_preference": tier}
+    payload = {"model": target.get("resolved_model")}
+    if provider == "openrouter":
+        routing = openrouter_chat_routing(target, messages=None)
+        if routing:
+            payload["extra_body"] = {"provider": routing}
+    apply_processing_preference(target, payload)
+    submitted = submitted_processing_mode(target, payload)
+    if review and tier and not submitted:
+        # An ordinary-only adapter sends Standard by omitting the field.
+        if tier != "standard" or processing_transport_modes(target) != ("standard",):
+            return replace(request, model=target["usage_model"], force_unknown_reservation=True)
+    return replace(request, model=target["usage_model"], submitted_processing_mode=submitted,
+                   **attempt_pricing_fields(target, payload))
+
+
+def review_seat_envelope(slot_id: str, model: str, *, use_local: Optional[bool],
+                         processing_preference: Optional[str]) -> Dict[str, Any]:
+    """The locality and tier ONE api review seat's send carries, for its wave admission.
+
+    The same reads its send makes: an unbound locality follows ``review_model_uses_local``
+    (``review_multi_model._query_model``) and the tier resolves its ``reviewer:<slot>`` role as every send does
+    (``model_wait.model_waitable``), an explicit empty value kept. A tier the send would refuse stays as written:
+    the projection then prices it unknown, never as another tier."""
+    from ouroboros.model_slots import resolve_processing_preference
+    from ouroboros.provider_models import review_model_uses_local
+
+    try:
+        tier = resolve_processing_preference(f"reviewer:{slot_id}", override=processing_preference)
+    except ValueError:
+        tier = str(processing_preference or "")
+    return {"use_local": review_model_uses_local(model) if use_local is None else bool(use_local),
+            "processing_preference": tier}
+
+
+def review_slot_wave_fields(slots: Sequence) -> dict:
+    """Aligned API send choices and the separate subscription count from one review panel."""
+    from ouroboros.review_execution import ReviewRouteKind
+
+    api = [slot for slot in slots if slot.route != ReviewRouteKind.AGENT_SESSION]
+    sends = [review_seat_envelope(slot.slot_id, slot.model, use_local=slot.use_local,
+                                  processing_preference=slot.processing_preference) for slot in api]
+    return {"models": [slot.model for slot in api], "slot_ids": [slot.slot_id for slot in api],
+            "use_local": [send["use_local"] for send in sends],
+            "processing_preferences": [send["processing_preference"] for send in sends],
+            "session_slots": len(slots) - len(api)}
+
+
 def review_wave_admission(
     drive_root: pathlib.Path | str | None = None,
     *,
@@ -298,7 +374,10 @@ def review_wave_admission(
     categories: str | Sequence[str] = "",
     slot_ids: str | Sequence[str] = "",
     processing_preferences: str | Sequence[str] = "",
-    allow_live_fetch: bool = True,
+    allow_live_fetch: bool = False,
+    resolve_target_for_model: Optional[Callable[[str], Optional[dict]]] = None,
+    use_local: Optional[bool] | Sequence[Optional[bool]] = None,
+    session_slots: int = 0,
 ) -> Dict[str, Any]:
     """Read-only wave admission on the reservation's own known-spend rule.
 
@@ -313,11 +392,16 @@ def review_wave_admission(
     non-positive configured limit is unbounded. Open holds are disclosed beside
     the known spend; unknown prices stay unknown.
 
-    Input sizes, outputs, categories, slots and processing can be scalar or
-    aligned per-slot values. Price each seat under its own sending scope, so the
+    Input sizes, outputs, categories, slots, processing and locality (``use_local``:
+    None leaves the legacy model-only read) can be scalar or aligned per-slot
+    values. Price each seat under its own sending scope, so the
     caller's warm cache split cannot stand in for a reviewer's cold prefix.
     Returned per-slot bounds and both remainders disclose the binding axis.
-    ``allow_live_fetch=False`` prices from tariffs already cached in this process.
+    ``session_slots`` counts additional session seats separately from the API price vectors. A session-only wave
+    has no API estimate but still checks the root and original-group limits; an empty wave checks nothing.
+    Review API seats use the default LLMClient's resolver. A caller using a different client
+    supplies its bound resolver. Preflight reads only cached tariffs; the older
+    ``allow_live_fetch`` argument remains accepted for existing callers.
     """
     from ouroboros import usage_accounting as ua
 
@@ -327,6 +411,7 @@ def review_wave_admission(
         "remaining_usd": None,
         "limit_usd": None,
         "slots": len(list(models or [])),
+        **({"session_slots": session_slots} if session_slots else {}),
         "unpriced_slots": 0,
         "known_usd": None,
         "accounted_usd": None,
@@ -337,10 +422,10 @@ def review_wave_admission(
                                  "global_reserved_usd", "global_unresolved_upper_bound_usd", "binding_axis")},
     }
     root_task_id = str(root_task_id or "").strip()
-    if not root_task_id or not models:
+    if not root_task_id or not (models or session_slots):
         return result
     try:
-        from ouroboros.pricing import infer_provider_from_model
+        from ouroboros.llm_routing import resolve_target
 
         if remaining_usd_override is not None:
             remaining = float(remaining_usd_override)
@@ -398,8 +483,16 @@ def review_wave_admission(
         seat_categories = _per_slot(categories, len(models))
         seat_slot_ids = _per_slot(slot_ids, len(models))
         seat_processing = _per_slot(processing_preferences, len(models))
+        seat_local = _per_slot(use_local, len(models))
         base_scope = ua.current_usage_scope() or ua.UsageScope()
         total = 0.0
+
+        # Disclosed values only (the decision reads the unrounded bound): six decimals as before, except that a
+        # positive estimate under 1e-6 stays exact, so the formatter can show it as `<$0.000001` instead of 0.
+        def disclosed_usd(amount: float) -> float:
+            return amount if 0.0 < amount < 1e-6 else round(amount, 6)
+        needs_paid = False
+        unpriced_seats = []
         for index, model in enumerate(models):
             seat_scope = base_scope
             if str(seat_categories[index] or ""):
@@ -408,38 +501,35 @@ def review_wave_admission(
                     review_slot_id=str(seat_slot_ids[index] or ""),
                 )
             with ua.usage_scope(seat_scope):
-                bound = ua._reservation_cost(
-                    ua.AttemptRequest(
-                        model=str(model or ""),
-                        provider=infer_provider_from_model(str(model or "")),
-                        prompt_tokens_estimate=max(0, int(chars[index] or 0)) // 4,
-                        max_completion_tokens=max(0, int(outputs[index] or 0)),
-                        task_id=str(task_id or ""),
-                        processing_preference=str(seat_processing[index] or ""),
-                        # The captured preference projected onto the provider-neutral reservation mode.
-                        submitted_processing_mode={"standard": "default", "fast": "priority", "economy": "flex"}.get(
-                            str(seat_processing[index] or "").strip().lower(), ""),
-                        # A tier no price table knows (Ultrafast) is unknown, never priced as Standard.
-                        force_unknown_reservation=str(seat_processing[index] or "").strip().lower()
-                        not in {"", "standard", "fast", "economy"},
-                        allow_live_fetch=allow_live_fetch,
-                    )
+                request = projected_pricing_request(
+                    str(model or ""), str(seat_processing[index] or ""), resolve_target_for_model or resolve_target,
+                    review=True, use_local=seat_local[index],
+                    prompt_tokens_estimate=max(0, int(chars[index] or 0)) // 4,
+                    max_completion_tokens=max(0, int(outputs[index] or 0)), task_id=str(task_id or ""),
                 )
-            result["slot_bounds"].append(None if bound is None else round(float(bound), 6))
+                bound = ua._reservation_cost(request)
+            needs_paid = needs_paid or ua.paid_admission(request.provider, bound)
+            result["slot_bounds"].append(None if bound is None else disclosed_usd(float(bound)))
             if bound is None:
                 # Unknown contributes no invented price and remains explicitly counted.
-                result["unpriced_slots"] = int(result.get("unpriced_slots") or 0) + 1
+                unpriced_seats.append((request.provider, request.model))
+                result["unpriced_slots"] = len(unpriced_seats)
                 continue
             total += float(bound)
-        result["estimated_wave_usd"] = round(total, 6)
+        if result["unpriced_slots"] < len(models):
+            result["estimated_wave_usd"] = disclosed_usd(total)
         # The reservation's equality: no room once known spend reached the limit. A reached GLOBAL limit
         # refuses paid admission only (``usage_accounting.paid_admission``): a wave none of whose seats
         # needs it still fits; a root or group cap binds every seat.
-        from ouroboros.provider_models import provider_for_model
+        at_global_limit = result["binding_axis"] == "global" and remaining <= 1e-9
+        if at_global_limit and not needs_paid and unpriced_seats:
+            from ouroboros import usage_store
 
-        result["fits"] = remaining > 1e-9 or (result["binding_axis"] == "global" and not any(
-            ua.paid_admission(provider_for_model(str(model or "")), bound)
-            for model, bound in zip(models, result["slot_bounds"])))
+            # Only unknown-priced seats on otherwise free routes can still change this decision.
+            # Read their indexed cash after pricing, using the same predicate as reserve and dispatch.
+            with usage_store.read(ua._drive_root(drive_root)) as view:
+                needs_paid = any(ua._paid_at_limit(view, provider, None, model) for provider, model in unpriced_seats)
+        result["fits"] = remaining > 1e-9 or (at_global_limit and not needs_paid)
         return result
     except BillingAuthorityUnavailable as exc:
         # Not money: no seat could reserve. The kind says whether rereading can help.

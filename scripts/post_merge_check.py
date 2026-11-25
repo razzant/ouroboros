@@ -11,17 +11,17 @@
 `.github/workflows/post-merge.yml` runs these steps after pushes to `ouroboros` in the official
 repository (owner decision 3A, 2026-10-21), on a Linux and a Windows leg (owner decision 3A,
 2026-10-28). Nobody waits before a merge; merges that land while a check runs are checked
-together by the next one. A test that fails is run once more: passing then makes it FLAKY
-(reported, not handed over), anything else makes it FAILED. On the Linux leg two deterministic
+together by the next one. A confirmed failure followed by a pass is FLAKY (reported, not handed
+over); an unconfirmed first failure stays RED even if its retry passes. On Linux two deterministic
 gates are FAILED with no retry: each finding of the release's lint gate (`ruff check --select F`,
 owner decision 2A, 2026-10-22) and each red test of its size check (`pytest -m size_ratchet`,
 measured against the check's base; the window's book-growth mode comes from the `growth` step).
-Each FAILED test or finding is bisected over the first-parent commits since the base to the merge
-that broke it; that pull request's author gets one comment and Ouroboros an issue labelled
-`post-merge-red` for that leg's system (scripts/post_merge_routing.py), which the check narrows as
-its tests pass and its findings go, and closes once none is left. It blocks nothing, reverts
-nothing, runs on no schedule and talks to GitHub only with the workflow's own GITHUB_TOKEN. Its
-subprocesses are git, ruff and `scripts/run_tests.py`; everything else is stdlib.
+First-parent bisection needs comparable evidence for blame, not for RED. Historical probes omit
+an incomparable protected path and require fresh, coherent Python exports. A proved culprit PR
+gets one comment; `post-merge-red` issues track reds per system, including unattributed reds
+(scripts/post_merge_routing.py), and narrow or close as checks pass or vanish. No block, revert
+or schedule; GitHub uses only the workflow's GITHUB_TOKEN. Imports are stdlib-based; subprocesses
+are Git, Ruff and `scripts/run_tests.py`.
 
 DIR is the evidence root of `scripts/run_tests.py --selected --keep-going --evidence-dir DIR`
 (selection.json, parallel/, serial/: tests/ci_evidence.py's results.json and events.jsonl). Each
@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections import Counter
+from functools import cache
 import json
 import os
 from pathlib import Path
@@ -49,7 +51,10 @@ if str(REPO_ROOT) not in sys.path:  # run as a script, only scripts/ is on sys.p
 from scripts.post_merge_routing import (  # noqa: E402  -- stdlib only, as is this module
     BRANCH, LINT_PREFIX, NODE_LANE, SIZE_PREFIX, SYSTEMS, GitHub, _reason, route,
 )
-from tests.ci_verdicts import expected_failures, platform_name  # noqa: E402  -- stdlib only
+from scripts.post_merge_bisect import (  # noqa: E402
+    MAX_PROBES, PROTECTED, bisect, comparable, fresh_pytest_export, grep_names, node_blocker, probe_files, protected_projection,
+)
+from tests.ci_verdicts import expected_failures, final, platform_name, valid  # noqa: E402  -- stdlib only
 
 WORKFLOW_FILE = "post-merge.yml"
 LINT_ARGS = ("check", "--select", "F", "--output-format", "json", "--exit-zero")  # the release lint gate
@@ -57,7 +62,6 @@ LINT_ARGS = ("check", "--select", "F", "--output-format", "json", "--exit-zero")
 # A line that only mentions it (a fixture string, a comment) declares nothing. POSIX classes: git grep -E.
 SIZE_DECLARATIONS = (r"^[[:space:]]*@pytest\.mark\.size_ratchet([^[:alnum:]_]|$)",
                      r"^[[:space:]]*pytestmark[[:space:]]*[:=].*pytest\.mark\.size_ratchet([^[:alnum:]_]|$)")
-MAX_PROBES = 16
 ZERO_SHA = "0" * 40
 # Retry, probe and re-check sessions keep the per-test bound of both selected passes
 # (ouroboros/preflight_runner.py SERIAL_PASS_FLAGS). On Linux SIGALRM fails only the hung test;
@@ -149,11 +153,6 @@ def _write_json(path: Path, value) -> None:
     temporary.replace(path)
 
 
-def _report(row) -> bool:
-    return (isinstance(row, dict) and isinstance(row.get("nodeid"), str)
-            and isinstance(row.get("phase"), str) and row.get("outcome") in {"passed", "failed", "skipped"})
-
-
 def read_session(directory: Path) -> dict:
     """One pytest session as tests/ci_evidence.py recorded it in `directory`.
 
@@ -180,14 +179,13 @@ def read_session(directory: Path) -> dict:
             running[row["nodeid"]] = None
         elif row.get("event") == "finish" or (row.get("event") == "report" and row.get("phase") == "crash"):
             running.pop(row["nodeid"], None)  # a crashed worker never sends finish
-        if row.get("event") == "report" and _report(row):
+        if row.get("event") == "report" and valid(row):
             journal_rows.append(row)
-    data = _read_json(directory / "results.json")
-    reports = data.get("reports") if isinstance(data, dict) else None
-    if isinstance(reports, list):
+    data, error = final(directory)
+    if not error:
         status, environment = data.get("session_exit_code"), data.get("environment")
         selected = data.get("selected_nodeids")
-        return {"final": True, "evidence": True, "rows": [row for row in reports if _report(row)],
+        return {"final": True, "evidence": True, "rows": data["reports"],
                 "collection": [row["nodeid"] for row in data.get("collection_failures") or []
                                if isinstance(row, dict) and isinstance(row.get("nodeid"), str)],
                 "collection_skips": [node for node in data.get("collection_skips") or [] if isinstance(node, str)],
@@ -235,10 +233,10 @@ def _ran_whole(session: dict) -> tuple[set[str], set[str]]:
     return {node for node, seen in phases.items() if seen >= {"setup", "call", "teardown"}} - spoiled, spoiled
 
 
-def outcomes(session: dict, ids) -> dict[str, str]:
+def outcomes(session: dict, ids, *, whole=False) -> dict[str, str]:
     """Classify ids within the selected lane: failures/hangs fail, test/collector skips never pass, executed xfails stay
     xfailed (ci_verdicts). Aggregates need every selected member to run whole; excluded exact ids stay unknown.
-    Without selection, exact calls and completed (exit 0/1) aggregate exports retain legacy semantics.
+    Without selection retain legacy semantics, unless this reader requires whole tests even then.
     Only check_ids/recheck_ids establish absence; a filtered member is not missing."""
     failed = set(session["running"]) | {row["nodeid"] for row in session["rows"]
                                         if row["outcome"] == "failed" or row["phase"] == "crash"}
@@ -247,7 +245,8 @@ def outcomes(session: dict, ids) -> dict[str, str]:
     skipped |= set(session["collection_skips"])
     called = {row["nodeid"] for row in session["rows"] if row["phase"] == "call" and row["outcome"] == "passed"}
     seen, ended = failed | expected | skipped | called, session["final"] and session["exit"] in (0, 1)
-    selected, done = session["selected"], (seen if session["selected"] is None else _ran_whole(session)[0] | expected)
+    selected = session["selected"]
+    done = _ran_whole(session)[0] | expected if whole or selected is not None else seen
     result = {}
     for nodeid in ids:
         members = {node for node in seen if _inside(node, nodeid)}
@@ -323,20 +322,70 @@ def run_pytest(args, directory: Path, *, cwd: Path | None = None, env: dict | No
 
 
 def run_node_lane(cwd: Path | None = None) -> int:
+    """Read a receipt from the revision's own runner; an older wrapper's bare exit is ambiguous."""
     cwd = Path(cwd or REPO_ROOT)
     try:
-        return subprocess.call([sys.executable, str(cwd / "scripts" / "run_tests.py"), "--node"], cwd=str(cwd))
+        with tempfile.TemporaryDirectory(prefix="post-merge-node-") as evidence:
+            code = subprocess.call([sys.executable, str(cwd / "scripts" / "run_tests.py"), "--node",
+                                    "--evidence-dir", evidence], cwd=str(cwd))
+            if code not in (0, 1):
+                return code
+            result = _read_json(Path(evidence) / "node.json")
+            if isinstance(result, dict) and type(result.get("exit")) is int and result["exit"] == code:
+                return code
+            print(f"=== post-merge: Node left no matching terminal result (launcher exit {code})", flush=True)
+            return 2
     except OSError:
         return 127
 
 
-def check_ids(ids, directory: Path, *, read_source, run=run_pytest) -> dict[str, str]:
-    """`outcomes` of exactly `ids` after one session of the deepest node each still has."""
-    args, absent = container_args(ids, read_source)
-    result = {nodeid: "absent" for nodeid in absent}
+def _confirmed_probe_session(session: dict | None) -> bool:
+    """A retry or probe needs a complete export and a matching normal exit, not a journal."""
+    return bool(session and session["final"] and not session["running"] and session["exit"] in (0, 1)
+                and type(session.get("runner_exit")) is int and session["runner_exit"] == session["exit"]
+                and bool(candidates(session)) == (session["exit"] == 1) and _complete_test_reports(session))
+
+
+def _complete_test_reports(session: dict) -> bool:
+    """A passed setup owes a call; every setup owes a teardown, including skips and failures."""
+    phases = {phase: Counter() for phase in ("setup", "call", "teardown")}
+    ready = Counter()
+    for row in session["rows"]:
+        phase, nodeid = row["phase"], row["nodeid"]
+        if phase == "crash":
+            return False
+        if not row.get("is_subtest"):
+            phases[phase][nodeid] += 1
+            if phase == "setup" and row["outcome"] == "passed":
+                ready[nodeid] += 1
+    setup, collected, selected = phases["setup"], session["collected"], session["selected"]
+    return (type(collected) is int and setup.total() == collected and setup == phases["teardown"]
+            and ready == phases["call"] and (selected is None or setup == Counter(selected)))
+
+
+def _confirmed_outcomes(session: dict | None, ids) -> dict[str, str]:
+    return outcomes(session, ids, whole=True) if _confirmed_probe_session(session) else dict.fromkeys(ids, "unknown")
+
+
+def check_ids(ids, directory: Path, *, read_source, run=run_pytest, historical=False) -> dict[str, str]:
+    """Try the deepest defined nodes; both historical probes and the current retry read fresh exports."""
+    unreadable = set()
+
+    @cache
+    def source(path):
+        try:
+            return read_source(path)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            unreadable.add(path)
+            return None  # Keep it out of argv without treating it as a removal.
+
+    ids = list(ids)
+    args, unrunnable = container_args(ids, source if historical else read_source)
+    result = {nodeid: "unknown" if nodeid.split("::", 1)[0] in unreadable else "absent" for nodeid in unrunnable}
     if args:
-        run(args, directory)
-        result.update(outcomes(read_session(directory), [nodeid for nodeid in ids if nodeid not in absent]))
+        pending = [nodeid for nodeid in ids if nodeid not in result]
+        session = fresh_pytest_export(directory, lambda: run(args, directory), read_session)
+        result.update(_confirmed_outcomes(session, pending))
     return result
 
 
@@ -458,30 +507,39 @@ def lint_findings(cwd: Path | None = None, paths=()) -> dict[str, str] | None:
     return found
 
 
-def size_modules(root: Path) -> list[str]:
-    """The test modules of the size check in the checkout `root`: those that declare a `size_ratchet` test.
+def size_modules(root: Path, *, rev: str = "", exclude=()) -> list[str] | None:
+    """The test modules of the size check in the checkout `root` (or in `rev`'s tree when it is named).
 
     The same tests as the release's `pytest tests/ -m size_ratchet`, without collecting the suite, and
     no module that merely mentions the marker: its collection is no business of the size check.
     """
+    args = ["grep", "-l", "-z", "-E", *(arg for pattern in SIZE_DECLARATIONS for arg in ("-e", pattern))]
+    args += [rev, "--", "tests"] if rev else ["--", "tests"]
+    args.extend(f":(exclude,literal){path}" for path in sorted(exclude))
     try:
-        listed = _git("grep", "-l", "-E", *(arg for pattern in SIZE_DECLARATIONS for arg in ("-e", pattern)),
-                      "--", "tests", cwd=Path(root))
-    except (OSError, subprocess.SubprocessError):
-        return []  # git grep exits 1 when nothing matches
-    return sorted(path for path in listed.splitlines() if Path(path).name.startswith("test_") and path.endswith(".py"))
+        listed = _git(*args, cwd=REPO_ROOT if rev else Path(root))
+    except (OSError, subprocess.SubprocessError) as error:
+        return [] if getattr(error, "returncode", None) == 1 else None  # no match is an answer; another failure is not
+    return None if (names := grep_names(rev, listed)) is None else sorted(
+        p for p in names if p not in exclude and Path(p).name.startswith("test_") and p.endswith(".py"))
 
 
 def size_session(directory: Path, *, base: str, mode: str = "block", cwd: Path | None = None,
-                 run=run_pytest) -> dict | None:
-    """One session of the size check in `cwd`, measured against `base` with the book-growth `mode`;
-    None when no module of that tree marks a size test."""
+                 run=run_pytest, modules=None) -> dict | None:
+    """Measure the whole current lane, or exactly the modules admitted for a historical probe."""
     root = Path(cwd or REPO_ROOT)
-    modules = size_modules(root)
+    projected = modules is not None
+    modules = list(modules) if projected else size_modules(root)
     if not modules:
         return None
-    run(["-m", "size_ratchet", *modules], directory, cwd=root,
-        env={"OURO_SIZE_RATCHET_BASE_REF": base, "OURO_BOOK_GROWTH_MODE": mode})
+
+    def start():
+        return run(["-m", "size_ratchet", *modules], directory, cwd=root,
+                   env={"OURO_SIZE_RATCHET_BASE_REF": base, "OURO_BOOK_GROWTH_MODE": mode})
+
+    if projected:
+        return fresh_pytest_export(directory, start, read_session)
+    start()
     return read_session(directory)
 
 
@@ -524,12 +582,14 @@ def classify(evidence: Path, *, run=run_pytest, node=run_node_lane, lint=None, s
     record["base"] = selection.get("base")
     record["selection"] = {key: selection.get(key) for key in ("tier", "file_count", "available", "node", "outcomes",
                                                                "deferred_full")}
-    found = {}  # id -> (pass, why)
+    found, confirmed = {}, set()  # a journal locates the retry, not a repeatable failure
     for label, outcome in (selection.get("outcomes") or {}).items():
         session = read_session(evidence / label)
         red = candidates(session)
         for nodeid, why in red.items():
             found.setdefault(nodeid, (label, why))
+        if outcome == "failure" and session["final"] and session["exit"] == 1 and _complete_test_reports(session):
+            confirmed.update(red.keys() - set(session["running"]))
         inventory = (selection.get("inventory") or {}).get(label) or {}
         if missing := set(inventory.get("expected") or []) - set(inventory.get("executed") or []) - set(red):
             record["not_run"][label] = sorted(missing)
@@ -540,7 +600,11 @@ def classify(evidence: Path, *, run=run_pytest, node=run_node_lane, lint=None, s
             record["problems"].append(f"the {label} pass was red without a failing test (read its log)"
                                       if session["evidence"] else f"the {label} pass left no evidence")
     if selection.get("node") == "failure":
-        found[NODE_LANE] = ("node", "the Node lane was red")
+        node_exit = selection.get("node_exit")
+        found[NODE_LANE] = ("node", f"the Node lane was red (exit {node_exit})" if type(node_exit) is int
+                           else "the Node lane was red without a recorded exit")
+        if type(node_exit) is int and node_exit == 1:
+            confirmed.add(NODE_LANE)
     if (selection.get("outcome") == "failure" and selection.get("node") == "success"
             and all(value == "success" for value in (selection.get("outcomes") or {}).values())):
         record["problems"].append("the selected runner failed after its passes (read the inventory/floor diagnostics)")
@@ -560,19 +624,26 @@ def classify(evidence: Path, *, run=run_pytest, node=run_node_lane, lint=None, s
     ids = sorted(nodeid for nodeid in found if nodeid != NODE_LANE and not nodeid.startswith((LINT_PREFIX, SIZE_PREFIX)))
     status = {}
     if ids:
-        run(ids, evidence / "retry")
-        session = read_session(evidence / "retry")
-        status = outcomes(session, ids)
-        if session["exit"] == _USAGE_ERROR and not session["rows"]:
+        directory = evidence / "retry"
+        session = fresh_pytest_export(directory, lambda: run(ids, directory), read_session)
+        if session and session["exit"] == session["runner_exit"] == _USAGE_ERROR and not session["rows"]:
             # One id pytest cannot find (a redacted parameter) refuses the whole session.
-            status = check_ids(ids, evidence / "retry" / "nodes", read_source=read_source, run=run)
+            status = check_ids(ids, directory / "nodes", read_source=read_source, run=run)
+        else:
+            status = _confirmed_outcomes(session, ids)
     if NODE_LANE in found:
-        status[NODE_LANE] = "passed" if node() == 0 else "failed"
+        status[NODE_LANE] = {0: "passed", 1: "failed"}.get(node(), "unknown")
+    for nodeid in status.keys() - confirmed:
+        if status[nodeid] == "failed":
+            status[nodeid] = "first confirmed on retry"
     status.update({nodeid: "failed" for nodeid in found if nodeid.startswith((LINT_PREFIX, SIZE_PREFIX))})  # deterministic
     for nodeid in sorted(found):
         label, why = found[nodeid]
         row = {"id": nodeid, "pass": label, "why": why, "retry": status.get(nodeid, "unknown")}
-        record["flaky" if row["retry"] == "passed" else "failed"].append(row)  # only a pass is a pass
+        if row["retry"] == "passed" and nodeid not in confirmed:
+            record["problems"].append(f"the first {label} failure was not confirmed for `{nodeid}` ({why}); retry passed")
+        else:
+            record["flaky" if row["retry"] == "passed" else "failed"].append(row)
     return record
 
 
@@ -597,105 +668,91 @@ def command_classify(args) -> int:
 
 # --- attribute -------------------------------------------------------------------------------
 
-def bisect(chain: list[str], ids, probe, *, max_probes: int = MAX_PROBES) -> list[dict]:
-    """The first commit of `chain` at which each id fails; chain[0] is the base, chain[-1] the head.
-
-    Every id fails at the head. The base is probed first: an id failing there is pre-existing.
-    The others share bisection intervals, and a probe at a midpoint runs every unresolved id whose
-    interval contains it, so ids broken by one merge cost one bisection. `probe(sha, ids)` answers
-    {id: "fail" | "pass" | "error"}. Past `max_probes` probes the rest stays unattributed.
-    """
-    ids, verdicts, pending, used = sorted(set(ids)), {}, {}, 0
-    if len(chain) < 2:
-        return [{"id": nodeid, "verdict": "pre-existing", "why": "no commit since the base"} for nodeid in ids]
-    if ids:
-        used += 1
-        answers = probe(chain[0], ids)
-        for nodeid in ids:
-            answer = answers.get(nodeid, "error")
-            if answer == "fail":
-                verdicts[nodeid] = {"verdict": "pre-existing", "why": f"already fails at the base {chain[0][:12]}"}
-            elif answer == "pass":
-                pending[nodeid] = (0, len(chain) - 1)
-            else:
-                verdicts[nodeid] = {"verdict": "unattributed", "why": f"the probe at {chain[0][:12]} could not run it"}
-    while pending:
-        for nodeid, (good, bad) in list(pending.items()):
-            if bad - good == 1:
-                verdicts[nodeid] = {"verdict": "culprit", "culprit": chain[bad], "last_good": chain[good]}
-                del pending[nodeid]
-        if pending and used >= max_probes:
-            for nodeid, (good, bad) in pending.items():
-                verdicts[nodeid] = {"verdict": "unattributed", "why": f"the probe budget ({max_probes}) ran out; "
-                                    f"first bad after {chain[good][:12]}, at or before {chain[bad][:12]}"}
-            pending = {}
-        if not pending:
-            break
-        good, bad = min(pending.values(), key=lambda interval: (interval[0] - interval[1], interval))
-        middle = (good + bad) // 2
-        targets = sorted(nodeid for nodeid, (low, high) in pending.items() if low < middle < high)
-        used += 1
-        answers = probe(chain[middle], targets)
-        for nodeid in targets:
-            low, high = pending[nodeid]
-            answer = answers.get(nodeid, "error")
-            if answer in ("fail", "pass"):
-                pending[nodeid] = (low, middle) if answer == "fail" else (middle, high)
-            else:
-                verdicts[nodeid] = {"verdict": "unattributed", "why": f"the probe at {chain[middle][:12]} could not run it"}
-                del pending[nodeid]
-    return [{"id": nodeid, **verdicts[nodeid]} for nodeid in ids]
-
-
 class Prober:
-    """`probe(sha, ids)` for `bisect`: a detached worktree of `sha` runs the ids with its own runner.
+    """Detached probes use the revision's runner (CI installs dependencies, not the project).
 
-    post-merge.yml installs the dependencies but not the project, so every process of a probe
-    imports the worktree's tree; nothing can fall back to the head checkout's code. `size(tree,
-    directory)` answers one size session of the tree (`size_session`, against the check's base).
+    All lanes use the same projection; size measures allowed modules against the check's base.
     """
 
     def __init__(self, evidence: Path, work: Path, head: str, *, run=None, node=None, lint=None, size=None):
         self.evidence, self.work = Path(evidence), Path(work)
         self.run, self.node, self.lint = run or run_pytest, node or run_node_lane, lint or lint_findings
-        self.size = size or (lambda tree, directory: None)
-        self.lock, self.records = _blob(head, "uv.lock"), []
+        self.size = size or (lambda tree, directory, modules: None)
+        self.head, self.lock, self.records = head, _blob(head, "uv.lock"), []
 
-    def __call__(self, sha: str, ids) -> dict[str, str]:
+    def __call__(self, sha: str, ids) -> dict[str, str | tuple[str, str]]:
         label = f"{len(self.records) + 1:02d}-{sha[:12]}"
         record = {"sha": sha, "ids": sorted(ids), "dependencies_differ": _blob(sha, "uv.lock") != self.lock}
         self.records.append(record)
+        # What this revision may answer, decided before the worktree is built.
+        linted = [nodeid for nodeid in ids if nodeid.startswith(LINT_PREFIX)]
+        pairs = probe_files((nodeid for nodeid in ids if nodeid != NODE_LANE and not nodeid.startswith(LINT_PREFIX)),
+                            SIZE_PREFIX)
+        protection = protected_projection(self.head, sha, _git)
+        state, reason = protection
+        kept, excluded, family = comparable(pairs, revision=sha, protection=protection, git=_git)
+        node = NODE_LANE in ids
+        if node and reason and (problem := node_blocker(_git, sha, reason, family)):
+            excluded[NODE_LANE] = problem
+            node = False
+        sized = [nodeid for nodeid in kept if nodeid.startswith(SIZE_PREFIX)]
+        tests = [nodeid for nodeid in kept if not nodeid.startswith(SIZE_PREFIX)]
+        modules = size_modules(REPO_ROOT, rev=sha, exclude=family) if sized else []
+        if excluded:
+            record["incomparable"] = excluded
+        if not (kept or linted or node):
+            record["answers"] = dict.fromkeys(ids, "error")
+            return {nodeid: ("error", excluded.get(nodeid, "this revision could not answer it")) for nodeid in ids}
         tree = self.work / f"pmc-{label}"
+        partial = ("--no-checkout",) if reason else ()
+        added = False
         try:
-            _git("worktree", "add", "--detach", "--quiet", str(tree), sha)
+            _git("worktree", "add", "--detach", "--quiet", *partial, str(tree), sha)
+            added = True
+            if partial:
+                _git("read-tree", sha, cwd=tree)
+                _git("restore", f"--source={sha}", "--worktree", "--", ".", f":(exclude,literal){PROTECTED}", cwd=tree)
+                if omitted := _git("ls-files", "--", PROTECTED, cwd=tree):
+                    if omitted != PROTECTED:
+                        raise OSError(f"`{PROTECTED}` is not a single index entry")
+                    _git("update-index", "--skip-worktree", "--", PROTECTED, cwd=tree)
+                try:
+                    (tree / PROTECTED).lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise OSError(f"`{PROTECTED}` exists in the projected worktree")
         except (OSError, subprocess.SubprocessError) as error:
+            if added:
+                remove_worktree(tree)
             record["error"] = f"the worktree failed: {error}"
-            return {nodeid: "error" for nodeid in ids}
+            return dict.fromkeys(ids, "error")
         try:
-            answers = lint_answers(tree, [nodeid for nodeid in ids if nodeid.startswith(LINT_PREFIX)], self.lint)
-            sized = [nodeid for nodeid in ids if nodeid.startswith(SIZE_PREFIX)]
-            found = size_status(self.size(tree, self.evidence / "probes" / f"{label}-size"), sized) if sized else {}
-            tests = [nodeid for nodeid in ids if nodeid != NODE_LANE and not nodeid.startswith((LINT_PREFIX, SIZE_PREFIX))]
+            answers = lint_answers(tree, linted, self.lint, omitted=PROTECTED if reason and state != "absent" else "")
+            session = self.size(tree, self.evidence / "probes" / f"{label}-size", modules) if modules else None
+            found = size_status(session if _confirmed_probe_session(session) else None, sized)
             if tests:
-                found.update(check_ids(tests, self.evidence / "probes" / label, read_source=tree_source(sha),
+                found.update(check_ids(tests, self.evidence / "probes" / label, read_source=tree_source(sha), historical=True,
                                        run=lambda args, directory: self.run(args, directory, cwd=tree)))
             answers.update({nodeid: {"failed": "fail", "passed": "pass", "absent": "pass"}.get(value, "error")
                             for nodeid, value in found.items()})
-            if NODE_LANE in ids:
-                answers[NODE_LANE] = "pass" if self.node(tree) == 0 else "fail"
-            record["answers"] = answers
+            if node:
+                answers[NODE_LANE] = {0: "pass", 1: "fail"}.get(self.node(tree), "error")
+            answers.update({nodeid: ("error", why) for nodeid, why in excluded.items()})
+            record["answers"] = {nodeid: answer[0] if isinstance(answer, tuple) else answer
+                                 for nodeid, answer in answers.items()}
             return answers
         finally:
             remove_worktree(tree)
 
 
-def lint_answers(tree: Path, findings, lint) -> dict[str, str]:
-    """`probe` answers for lint findings: ruff over their files as `tree` has them (absent = pass)."""
-    if not findings:
-        return {}
-    paths = sorted({path for path in (finding.split(" ", 3)[2] for finding in findings) if (Path(tree) / path).is_file()})
+def lint_answers(tree: Path, findings, lint, *, omitted: str = "") -> dict[str, str]:
+    """Ruff over the revision's files. True absence is a pass; a deliberately omitted file is not evidence."""
+    files = {finding: finding.split(" ", 3)[2] for finding in findings}
+    paths = sorted({path for path in files.values() if path != omitted and (Path(tree) / path).is_file()})
     present = lint(tree, paths) if paths else {}
-    return {finding: "error" if present is None else "fail" if finding in present else "pass" for finding in findings}
+    return {finding: ("error" if path == omitted or (present is None and path in paths)
+                      else "fail" if present and finding in present else "pass") for finding, path in files.items()}
 
 
 def remove_worktree(tree: Path) -> None:
@@ -713,10 +770,13 @@ def remove_worktree(tree: Path) -> None:
 def command_attribute(args) -> int:
     evidence = Path(args.evidence_dir)
     classification = _read_json(evidence / "classification.json") or {}
-    ids = [row["id"] for row in classification.get("failed", [])]
+    failed = classification.get("failed", [])
+    ids = [row["id"] for row in failed if row.get("retry") == "failed"]
+    unresolved = [{"id": row["id"], "verdict": "unattributed", "why": f"retry: {row.get('retry', 'unknown')}"}
+                  for row in failed if row.get("retry") != "failed"]
     sized = classification.get("size") or {}  # each probe measures as the check did: same base, same mode
     record = {"format": 1, "base": args.base, "head": args.head, "max_probes": args.max_probes, "notes": [],
-              "probes": [], "verdicts": [{"id": nodeid, "verdict": "unattributed",
+              "probes": [], "verdicts": unresolved + [{"id": nodeid, "verdict": "unattributed",
                                           "why": "the attribution did not finish"} for nodeid in ids]}
     _write_json(evidence / "attribution.json", record)  # what a killed step leaves behind
     if not ids:
@@ -724,10 +784,11 @@ def command_attribute(args) -> int:
     chain = first_parent_chain(args.base, args.head)
     record["commits"] = chain[1:]
     work = Path(tempfile.mkdtemp(prefix="pmc-", dir=args.work_dir or os.environ.get("RUNNER_TEMP") or None))
-    prober = Prober(evidence, work, args.head, size=lambda tree, directory: size_session(
-        directory, base=sized.get("base") or args.base, mode=sized.get("mode") or "block", cwd=tree))
+    prober = Prober(evidence, work, args.head, size=lambda tree, directory, modules: size_session(
+        directory, base=sized.get("base") or args.base, mode=sized.get("mode") or "block", cwd=tree,
+        modules=modules))
     try:
-        record["verdicts"] = bisect(chain, ids, prober, max_probes=args.max_probes)
+        record["verdicts"] = unresolved + bisect(chain, ids, prober, max_probes=args.max_probes)
     finally:
         record["probes"] = prober.records
         shutil.rmtree(work, ignore_errors=True)
@@ -981,7 +1042,7 @@ def main(argv: list[str] | None = None) -> int:
     step.add_argument("--lint", action="store_true", help="run the lint gate (ruff F) on this leg")
     step.add_argument("--size", action="store_true", help="run the size check on this leg, against --base")
     step.add_argument("--base", help="the check's base, which the size check measures against")
-    step = commands.add_parser("attribute", help="bisect each FAILED test to its first bad merge")
+    step = commands.add_parser("attribute", help="bisect confirmed failures where the probes can answer")
     step.add_argument("--evidence-dir", type=Path, required=True)
     step.add_argument("--base", required=True)
     step.add_argument("--head", required=True)

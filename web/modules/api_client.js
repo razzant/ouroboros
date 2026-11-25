@@ -279,8 +279,9 @@ export function cancelTask(taskId, { cascade = false, stopPolicy = '', stopActio
 }
 
 const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
 const plainSegments = (text) => typeof text === 'string' && !!text && !text.includes('\\') && !text.includes('\0')
-    && text.split('/').every((part) => part && part !== '.' && part !== '..');
+    && !LONE_SURROGATE.test(text) && text.split('/').every((part) => part && part !== '.' && part !== '..');
 // Python quote(safe='') spelling of one path segment.
 const encodeSegment = (text) => encodeURIComponent(text).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 
@@ -291,7 +292,8 @@ const encodeSegment = (text) => encodeURIComponent(text).replace(/[!'()*]/g, cha
  */
 export function taskArtifactDownloadUrl(taskId, name, relpath = '') {
     if (!TASK_ID_RE.test(String(taskId || ''))
-        || typeof name !== 'string' || !name || name.startsWith('.') || /[/\\]/.test(name)) return '';
+        || typeof name !== 'string' || !name || name.startsWith('.') || /[/\\]/.test(name)
+        || LONE_SURROGATE.test(name)) return '';
     const url = `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeSegment(name)}`;
     if (!relpath || relpath === name) return url;
     if (!plainSegments(relpath) || relpath.split('/').at(-1) !== name) return '';
@@ -332,8 +334,8 @@ export function taskSourceDownloadUrl(taskId, ref) {
 }
 
 /**
- * Owner Resume. A refusal may list `acceptable_unknown`: held calls whose outcome is unknown; naming
- * them in `body` goes on without their results (recorded on the task, never run again).
+ * Owner Resume can name a refusal's exact `acceptable_unknown` IDs with a reason. A delegated
+ * start stays open for lookup and its original request cannot be sent again.
  * @param {string} taskId
  * @param {import('./client_contract_types.js').TaskResumeRequest|null} [body]
  */
@@ -537,6 +539,32 @@ export function updateStrategyForPlan(plan = {}) {
 /** Storage actions may have started when the answer is cut: an unreadable OK body is an error, not a reply. */
 const STORAGE_READ = { requireBody: true };
 
+// One fetching check in flight per declared channel selection: callers that believe the same selection share a
+// running answer; another selection (the channel just changed) fetches its own, so no answer for an old selection is
+// attributed to the new one.
+const updateCheckInFlight = new Map();
+
+function hasUpdateStatus(body) {
+    return typeof body?.available === 'boolean' || body?.managed === false || typeof body?.check_ok === 'boolean'
+        || body?.update_tx?.active === true || body?.update_progress?.active === true;
+}
+
+function readUpdateStatus(body) {
+    if (hasUpdateStatus(body)) return body;
+    throw Object.assign(new Error('No update status in the response'), { unreadable: true });
+}
+
+function descriptionReply(body, latest) {
+    const hasTask = typeof body?.task_id === 'string' && body.task_id.trim();
+    if (hasTask && (body.status === 'queued' || (latest && body.status === 'writing'))) {
+        // The task receipt stands on its own even if the accompanying status cannot refresh the page.
+        return latest && !hasUpdateStatus(body.update) ? { ...body, update: null } : body;
+    } else if (latest && ['check_failed', 'current', 'no_update'].includes(body?.status) && hasUpdateStatus(body.update)) {
+        return body;
+    }
+    throw Object.assign(new Error('No usable description outcome in the response'), { unreadable: true });
+}
+
 export const apiClient = {
     harnessMaintenanceInventory,
     startHarnessMaintenance,
@@ -623,6 +651,11 @@ export const apiClient = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(payload),
+    }, { requireBody: true, rejectOkFalse: true }).then(data => {
+        if (data?.saved === false) throw Object.assign(new Error(data.error || 'Settings were not saved.'), { body: data });
+        if (data?.status === 'saved' || data?.ok === true || data?.no_changes === true || data?.receipt === 'unavailable'
+                || (data?.changes && typeof data.changes === 'object' && !Array.isArray(data.changes))) return data;
+        throw new Error('Unrecognized settings save reply.');
     }),
     /**
      * Finish first-run onboarding in ONE atomic owner-scoped save (D-8):
@@ -642,7 +675,7 @@ export const apiClient = {
     previewOnboardingSubagents: (payload) => jsonPost('/api/onboarding/subagents/preview', payload),
     ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
     ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
-    ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
+    ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }, { headers: APP_SETTINGS_ORIGIN }),
     /** Save room primary effort and ordered helper bounds. @param {import('./client_contract_types.js').OwnerEffortRangeRequest} range */
     ownerEffortRange: (range) => jsonPost('/api/owner/effort-range', range),
     /** @param {import('./client_contract_types.js').OwnerSubagentsModeRequest} choice
@@ -651,7 +684,7 @@ export const apiClient = {
     /** The room's model for new owner work. @param {import('./client_contract_types.js').OwnerChatModelRequest} choice
      * @returns {Promise<import('./client_contract_types.js').OwnerChatModelResponse>} */
     ownerChatModel: (choice) => jsonPost('/api/owner/chat-model', choice, { headers: APP_SETTINGS_ORIGIN }),
-    /** The room's processing tier for new owner work ('' = Default); Main's own without project_id.
+    /** Save the room's tier, or Main's own. Forward Main Ultrafast's confirmation-time read tokens with the tier.
      * @param {import('./client_contract_types.js').OwnerChatProcessingRequest} choice
      * @returns {Promise<import('./client_contract_types.js').OwnerChatProcessingResponse>} */
     ownerChatProcessing: (choice) => jsonPost('/api/owner/chat-processing', choice, { headers: APP_SETTINGS_ORIGIN }),
@@ -678,7 +711,8 @@ export const apiClient = {
     widgets: (init = {}) => fetchJson('/api/widgets', { cache: 'no-store', ...init }),
     skillPublishPreflight,
     createTask,
-    skillLifecycleQueue: () => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store' }),
+    skillLifecycleQueue: ({ signal } = {}) => withinRequestLifetime(
+        (transport) => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store', signal: transport }), { signal }),
     /** @returns {Promise<import('./api_types.js').SkillDeleteResponse>} */
     deleteSkill: (skill, payloadRoot, expectedContentHash = '') => jsonPost(`/api/skills/${encodeURIComponent(skill)}/delete`, {
         payload_root: payloadRoot,
@@ -778,19 +812,46 @@ export const apiClient = {
      */
     cancelStorageFree: () => jsonPost('/api/storage/free/cancel', {}, STORAGE_READ),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
-    updateStatus: (init = {}) => fetchJson('/api/update/status', { cache: 'no-store', ...init }),
-    /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
-    updateCheck: () => jsonPost('/api/update/check', {}),
+    updateStatus: (init = {}) => fetchJson('/api/update/status', { cache: 'no-store', ...init }, { requireBody: true }).then(readUpdateStatus),
+    /**
+     * One fetching check for every surface (Dashboard → Updates, the sidebar's version), coalesced per declared
+     * channel `selection` (the caller's latest status's `update_channel`, '' when it knows none): a call while one
+     * runs for the same selection shares its answer instead of fetching again; one for another selection fetches its
+     * own, so an answer for an old selection is never attributed to the new one.
+     * @param {string} [selection]
+     * @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>}
+     */
+    updateCheck: (selection = '') => {
+        const key = String(selection || '');
+        let pending = updateCheckInFlight.get(key);
+        if (!pending) {
+            pending = jsonPost('/api/update/check', {}, { requireBody: true })
+                .then(readUpdateStatus).finally(() => updateCheckInFlight.delete(key));
+            updateCheckInFlight.set(key, pending);
+        }
+        return pending;
+    },
     /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
     updatePreflight: () => jsonPost('/api/update/preflight', {}),
     /**
      * The owner's Write/Rewrite: one ordinary Main task describes this exact range.
+     * An answer that arrives unreadable is an unknown outcome (no HTTP status), never a reply: the server may
+     * already have admitted that writer, so the press says the outcome is unknown instead of returning in
+     * silence.
      * @param {'write'|'rewrite'} mode
      * @returns {Promise<import('./api_types.js').UpdateDescriptionResponse>}
      */
     updateDescription: (mode, key = {}) => jsonPost('/api/update/description', {
         mode, base_sha: String(key.base_sha || ''), target_sha: String(key.target_sha || ''),
-    }),
+    }, { requireBody: true }).then(body => descriptionReply(body, false)),
+    /**
+     * Check and describe: the server checks the channel, then asks for the range that check found at most once.
+     * An answer that arrives unreadable is an unknown outcome (no HTTP status), never a reply.
+     * A usable task receipt survives an unreadable update snapshot; only its update field becomes null.
+     * @returns {Promise<Omit<import('./api_types.js').UpdateDescriptionLatestResponse, 'update'> & {update: Object|null}>}
+     */
+    updateDescribeLatest: () => jsonPost('/api/update/description', { mode: 'latest' }, { requireBody: true })
+        .then(body => descriptionReply(body, true)),
     /** @returns {Promise<import('./api_types.js').UpdateApplySuccessResponse>} */
     updateApply: (strategy, plan = {}, { confirmRecovery = false } = {}) => jsonPost('/api/update/apply', {
         strategy,

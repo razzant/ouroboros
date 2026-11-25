@@ -1,0 +1,85 @@
+# Real-kernel check of per-command memory leaves (#3792); keyless, no secrets. It drives real OOM kills, so it runs only
+# on this disposable, exclusive hosted runner: the isolation it proves holds when nothing else of value shares the host.
+name: Linux command memory (cgroup v2)
+
+on:
+  pull_request:
+    paths:
+      - 'ouroboros/command_memory.py'
+      - 'ouroboros/tools/shell_process.py'
+      - 'ouroboros/tools/process_facts.py'
+      - 'ouroboros/host_memory.py'
+      - 'ouroboros/platform_layer.py'
+      - 'ouroboros/workspace_executor.py'
+      - 'scripts/download_python_standalone.sh'
+      - 'scripts/verify_command_memory_linux.py'
+      - 'packaging/systemd/**'
+      - '.github/workflows/linux-command-memory.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-command-memory-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cgroup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Synthetic OOM scenarios in an owned subtree of a delegated scope
+        run: >
+          sudo python3 scripts/verify_command_memory_linux.py
+          --require leaf_oom_kills_only_its_group,parent_pressure_selects_among_leaves,multi_process_build_is_the_victim
+          --json-out "$RUNNER_TEMP/command-memory.json"
+      - name: Packaged unit layout under a test user (the product's real probe decides)
+        run: |
+          set -euo pipefail
+          sudo useradd --create-home cmtest
+          sudo loginctl enable-linger cmtest
+          uid=$(id -u cmtest)
+          for _ in $(seq 60); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          as_user() { sudo -u cmtest env XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"; }
+          mkdir -p "$RUNNER_TEMP/command-memory-bundle/_internal"
+          (cd "$RUNNER_TEMP/command-memory-bundle" && PYTHON_STANDALONE_DEST=_internal/python-standalone \
+            PYTHON_STANDALONE_INTERPRETER_ONLY=1 bash "$GITHUB_WORKSPACE/scripts/download_python_standalone.sh")
+          sudo cp -r "$GITHUB_WORKSPACE" /home/cmtest/src
+          sudo cp -r "$RUNNER_TEMP/command-memory-bundle/_internal" /home/cmtest/src/
+          sudo chown -R cmtest:cmtest /home/cmtest/src
+          unit=/home/cmtest/.config/systemd/user
+          sudo -u cmtest mkdir -p "$unit/ouroboros.service.d"
+          # the packaged unit as shipped, with only its ExecStart replaced and the memory bounded for this run
+          sed 's#^ExecStart=.*#ExecStart=/home/cmtest/src/_internal/python-standalone/bin/python3 /home/cmtest/src/scripts/verify_command_memory_linux.py --in-unit --require packaged_probe_is_enabled,packaged_gate_without_system_python,leaf_oom_kills_only_its_group,parent_pressure_selects_among_leaves,multi_process_build_is_the_victim,two_healthy_commands_start,tiny_remainder_still_starts --json-out /home/cmtest/command-memory-unit.json#' \
+            packaging/systemd/ouroboros.service.in | sudo -u cmtest tee "$unit/ouroboros.service" >/dev/null
+          # Diagnostic: which bus the packaged service can reach, and the socket owners.
+          sudo -u cmtest tee /home/cmtest/busdiag.sh >/dev/null <<'DIAG'
+          id
+          echo "XDG=$XDG_RUNTIME_DIR DBUS=$DBUS_SESSION_BUS_ADDRESS"
+          ls -ln /run/user/$(id -u)/bus /run/dbus/system_bus_socket
+          systemctl --user show ouroboros.service --property=LoadState; echo "user_rc=$?"
+          systemctl show user@$(id -u).service --property=LoadState; echo "sys_rc=$?"
+          DIAG
+          printf '[Service]\nMemoryMax=512M\nMemorySwapMax=0\nExecStartPre=/bin/sh /home/cmtest/busdiag.sh\n' | sudo -u cmtest tee "$unit/ouroboros.service.d/verify.conf" >/dev/null
+          # Pin the service's own runtime dir: a user manager started through
+          # sudo can inherit an XDG_RUNTIME_DIR of the calling session, which
+          # belongs to another uid and is not writable by the service user.
+          printf 'Environment=XDG_RUNTIME_DIR=/run/user/%s\nEnvironment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%s/bus\n' "$uid" "$uid" | sudo -u cmtest tee -a "$unit/ouroboros.service.d/verify.conf" >/dev/null
+          as_user systemctl --user daemon-reload
+          as_user systemctl --user start --wait ouroboros.service || status=$?
+          sudo cp /home/cmtest/command-memory-unit.json "$RUNNER_TEMP/command-memory-unit.json" || true
+          as_user journalctl --user -u ouroboros.service --no-pager | tail -40 || true
+          exit "${status:-0}"
+      - name: Upload JSON summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: command-memory-summary
+          path: |
+            ${{ runner.temp }}/command-memory.json
+            ${{ runner.temp }}/command-memory-unit.json
+          if-no-files-found: warn

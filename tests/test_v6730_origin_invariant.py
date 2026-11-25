@@ -113,8 +113,76 @@ def test_rebind_enriches_refless_binding_one_way(tmp_path):
 
 # ---------------------------------------------------------------- producers
 
+def test_legacy_seed_origin_requires_a_valid_digest_before_creating_the_room(tmp_path):
+    from ouroboros.projects_registry import get_reserved_project
+
+    ref = _ref(cmid="", ts="2024-04-08T13:45:00Z", text="Check seed totals")
+    with pytest.raises(ValueError, match="integrity"):
+        bind_task_to_project(tmp_path, "seed-root", "seed-table", origin={"ref": ref, "text": "Diagram"})
+    assert get_reserved_project(tmp_path, "seed-table") is None
+
+
+@pytest.mark.parametrize("private", [True, False])
+def test_saved_seed_row_keeps_its_projection_policy_after_the_source_is_gone(tmp_path, monkeypatch, private):
+    from ouroboros import dialogue_store, project_dialogue
+    from ouroboros.gateway.history import _origin_fallback_rows
+    from ouroboros.owner_relay import owner_row_source
+
+    row = {"direction": "in", "chat_id": 1, "task_id": "seed-root", "ts": "2024-04-08T13:45:00Z",
+           "client_message_id": "", "text": "Check seed totals"}
+    if private:
+        row["presence_contact"] = {"task_id": "seed-root", "binding_id": "diagram", "source_event_id": "seed"}
+    dialogue_store.append(tmp_path, "chat", row)
+    ref, text = owner_row_source(row)
+    bound = bind_task_to_project(tmp_path, "new-work", "seed-table", origin={"ref": ref, "text": text})
+    assert bound["source_projectable"] is (not private)
+    room = bound["project_chat_id"]
+    legacy = {key: value for key, value in bound.items() if key != "source_projectable"}
+    assert bool(project_dialogue.project_origin_rows(tmp_path, room, bindings=[legacy])) is (not private)
+    monkeypatch.setattr(project_dialogue, "resolve_owner_message_source", lambda *_: None)
+    assert project_dialogue.project_origin_rows(tmp_path, room, bindings=[legacy]) == []
+    assert [item["text"] for item in _origin_fallback_rows(tmp_path, room, [])] == ([] if private else [text])
+
+
+def test_retained_copy_needs_the_same_words_and_one_identifiable_legacy_source(tmp_path):
+    from ouroboros import dialogue_store
+    from ouroboros.project_dialogue import project_origin_rows
+
+    text = "Count seedlings"
+    ref = _ref(cmid="", text=text)
+    row = {"direction": "in", "chat_id": 1, "ts": ref["ts"], "text": text}
+    binding = {"project_chat_id": 7, "source_text": text, "source_ref": ref, "source_channel": "web"}
+    dialogue_store.append(tmp_path, "chat", row)
+    [shown] = project_origin_rows(tmp_path, 7, bindings=[binding])
+    assert shown["text"] == text and shown["channel"] == "web"
+    assert not project_origin_rows(tmp_path, 7, bindings=[{**binding, "source_text": "Different words"}])
+    dialogue_store.append(tmp_path, "chat", {**row, "client_message_id": "another",
+                                              "presence_contact": {"task_id": "contact", "binding_id": "private"}})
+    assert not project_origin_rows(tmp_path, 7, bindings=[binding])
+
 
 # ---------------------------------------------------------------- lens fallback
+
+def test_selected_table_file_identifies_one_physical_origin_across_replays(tmp_path):
+    from ouroboros import dialogue_store as ds
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.project_dialogue import resolve_owner_message_source
+
+    base = {"direction": "in", "chat_id": 1, "ts": "2024-04-08T13:45:00Z", "text": "Table legend"}
+    selected = {**base, "attachments": [{"name": "legend.csv", "unavailable": "missing"}]}
+    other = {**base, "attachments": [{"name": "totals.csv", "unavailable": "missing"}]}
+    for row in [selected, other, selected]:
+        ds.append(tmp_path, "chat", row)
+    ref, text = owner_row_source(selected)
+    assert ref["row_sha256"] != owner_row_source(other)[0]["row_sha256"]
+    assert resolve_owner_message_source(tmp_path, ref)["attachments"] == selected["attachments"]
+    weak = {key: value for key, value in ref.items() if key != "row_sha256"}
+    assert resolve_owner_message_source(tmp_path, weak) is None
+    bound = bind_task_to_project(tmp_path, "legend", "table", origin={"ref": ref, "text": text})
+    [message] = _history(tmp_path, bound["project_chat_id"])
+    assert message["history_id"] and not message.get("origin_projected")
+    assert [(file["name"], file["available"]) for file in message["attachments"]] == [("legend.csv", False)]
+
 
 def _history(tmp_path, chat_id, n_human=None):
     from ouroboros.gateway.history import make_chat_history_endpoint
@@ -226,6 +294,7 @@ def test_lens_over_cap_origins_emit_disclosed_omission_note(tmp_path):
             origin={
                 "ref": _ref(cmid=f"owner-{index}", ts=f"2026-07-19T21:{index:02d}:00Z", text=text),
                 "text": text,
+                "snapshot": {"projectable": True},
             },
         )
     view = _history(tmp_path, int(project["chat_id"]))
@@ -234,7 +303,9 @@ def test_lens_over_cap_origins_emit_disclosed_omission_note(tmp_path):
     notes = [m for m in view if m.get("system_type") == "origin_omission"]
     assert len(notes) == 1
     assert "2 more" in notes[0]["text"]
-    assert "project_task_bindings.json" in notes[0]["text"]
+    # Where the copies are kept is the notice's detail, not a word of its line (DESIGN principle 7).
+    assert "project_task_bindings.json" not in notes[0]["text"]
+    assert "project_task_bindings.json" in notes[0]["notice"]["details"] and notes[0]["notice"]["line"] == notes[0]["text"]
 
 
 # ---------------------------------------------------------------- attachment-bearing origins

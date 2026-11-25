@@ -386,6 +386,77 @@ def test_restart_census_refuses_a_maintenance_exit_until_confirmed(tmp_path, mon
         assert outcome["status"] == "switched" and len(switches) == 1
 
 
+def _background_owners(monkeypatch, tmp_path, order, armed):
+    """Fresh doubles bound at the three owners' own exports, each by name, so a list that points elsewhere misses
+    one (a stop latches its owner for the process). Each stop is recorded in ``order``, the restart adoption's
+    census in ``armed``; the cleanup's other owners do nothing."""
+    import server
+    from ouroboros import maintenance, startup_historical_audit, storage, storage_free
+
+    owners = {"maintenance": maintenance.MaintenanceChild(), "count": storage.StorageCounter(),
+              "free": storage_free.FreeSpace()}
+    for module, name, key in ((maintenance, "child", "maintenance"), (storage, "count", "count"),
+                              (storage_free, "free", "free")):
+        owners[key].stop = lambda stop=owners[key].stop, key=key: (order.append(key), stop())[1]
+        monkeypatch.setattr(module, name, owners[key])
+    assert len(startup_historical_audit.BACKGROUND_CHILDREN) == len(owners)
+    monkeypatch.setattr("ouroboros.local_model._manager", None)
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: None)
+    monkeypatch.setattr(server, "stop_owned_work", lambda *_: {"state": "completed"})
+    monkeypatch.setattr(server, "_stop_owned_daemon_for_new_pin", lambda: None)
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **_: None)
+    monkeypatch.setattr("supervisor.workers.last_worker_exit_census", lambda: {"unconfirmed": []})
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+    monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
+    monkeypatch.setattr("ouroboros.body_adoption.arm", lambda *_, live_children, **__: armed.append(live_children))
+    monkeypatch.setattr(server, "_restart_requested", threading.Event())
+    server._restart_requested.set()  # a restart: the adoption's census runs too
+    return owners
+
+
+@pytest.mark.parametrize("row", ["maintenance", "count", "free"])
+def test_the_restart_cleanup_stops_and_counts_each_background_child(tmp_path, monkeypatch, row):
+    """Each of the three is asked to stop, maintenance child, Storage count, Free in that order, and its live child
+    holds both of the cleanup's censuses, the body adoption's and the returned one (the store switch then
+    refuses); once that child and its owner thread are done both are empty. A row dropped, pointed at another
+    owner or moved fails here."""
+    import server
+
+    order, armed = [], []
+    owners = _background_owners(monkeypatch, tmp_path, order, armed)
+    owner, signals, release = owners[row], [], threading.Event()
+    child = SimpleNamespace(poll=lambda: None, kill=lambda: signals.append("kill"))
+    owner._process, owner._thread = child, threading.Thread(target=release.wait, daemon=True)
+    owner._thread.start()
+    try:
+        assert server._emergency_process_cleanup()["live_children"] == [child] and armed == [[child]]
+        assert order == ["maintenance", "count", "free"] and signals == ["kill"]
+    finally:
+        release.set()
+        owner._thread.join(5)
+    owner._process = None  # its owner thread returned and dropped the finished child
+    assert server._emergency_process_cleanup()["live_children"] == [] and armed[-1] == []
+
+
+def test_a_background_child_that_cannot_be_read_stops_none_and_raises(tmp_path, monkeypatch):
+    """All three are read before the first stop: an owner whose module is gone raises before any owner is
+    stopped (the restart exit then refuses, never a switch on an empty census), and a readable list stops all."""
+    import server
+    from ouroboros import startup_historical_audit
+
+    order = []
+    _background_owners(monkeypatch, tmp_path, order, [])
+    server._emergency_process_cleanup()
+    assert order == ["maintenance", "count", "free"]
+    order.clear()
+    rows = (*startup_historical_audit.BACKGROUND_CHILDREN, ("ouroboros.no_such_background_owner", "child"))
+    monkeypatch.setattr(startup_historical_audit, "BACKGROUND_CHILDREN", rows)  # the unreadable one comes last
+    with pytest.raises(ModuleNotFoundError):
+        server._emergency_process_cleanup()
+    assert order == []
+
+
 def test_maintenance_census_covers_a_spawn_before_the_child_handle_is_published():
     from ouroboros.maintenance import MaintenanceChild
 
@@ -626,8 +697,8 @@ def test_rollback_request_handler_runs_the_door_and_tells_the_owner(monkeypatch)
 
     def door(target, *, door, request_restart):
         doors.append((target, door))
-        assert request_restart() is True
-        return 200, {"status": "ok", "message": "authority switch recorded", "switch_deferred": True}
+        restarting = request_restart()  # the real door's payload says whether its restart was requested
+        return 200, {"status": "ok", "message": "authority switch recorded", "restarting": restarting, "switch_deferred": True}
 
     monkeypatch.setattr(control, "rollback_through_door", door)
     ctx = SimpleNamespace(request_restart=lambda: restarts.append(1), load_state=lambda: {"owner_chat_id": 7},
@@ -635,7 +706,10 @@ def test_rollback_request_handler_runs_the_door_and_tells_the_owner(monkeypatch)
     _handle_rollback_request({"type": "rollback_request", "target": "v7.6.0", "target_sha": "abc"}, ctx)
     assert done.wait(10)
     assert doors == [("v7.6.0", "vcs_rollback")] and restarts == [1]
-    assert sent[0][0] == 7 and "authority switch" in sent[0][1] and sent[0][2]["system_type"] == "rollback_notice"
+    # The phrase says what happened; the door's own message is the notice's detail (host notice, RV4 20).
+    assert sent[0][0] == 7 and sent[0][2]["system_type"] == "rollback_notice"
+    assert sent[0][1] == "Ouroboros recorded a rollback at its own request; the code switches as it restarts."
+    assert "authority switch recorded" in sent[0][2]["progress_meta"]["notice"]["details"]
 
 
 def test_rollback_request_handler_reports_a_fence_refusal_with_its_blockers(monkeypatch):
@@ -647,10 +721,11 @@ def test_rollback_request_handler_reports_a_fence_refusal_with_its_blockers(monk
                         lambda target, *, door, request_restart: (409, {"error": "writers active", "blockers": ["active:x"]}))
     ctx = SimpleNamespace(request_restart=lambda: pytest.fail("no restart on a refusal"),
                           load_state=lambda: {"owner_chat_id": 7},
-                          send_with_budget=lambda chat_id, text, **kw: sent.append(text) or done.set())
+                          send_with_budget=lambda chat_id, text, **kw: sent.append((text, kw)) or done.set())
     _handle_rollback_request({"type": "rollback_request", "target": "v7.6.0"}, ctx)
     assert done.wait(10)
-    assert "refused" in sent[0] and "active:x" in sent[0]
+    [(text, kw)] = sent
+    assert "refused" in text and "active:x" in kw["progress_meta"]["notice"]["details"]
 
 
 def test_rollback_request_is_registered_as_a_supervisor_event():
@@ -673,16 +748,17 @@ def test_boot_smoke_rollback_records_the_switch_for_a_store_less_pre_update_tree
     monkeypatch.setattr(update_merge, "rollback_managed_update",
                         lambda reason, *, reopen_writer_admission: resets.append((reason, reopen_writer_admission)) or (True, "reset"))
     tx = {"phase": "pending_boot_smoke", "pre_update_sha": old, "pre_update_branch": "ouroboros"}
-    assert update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")[0] is True
+    # Only the intent is recorded: the door says so, and the checkout moves at the restart exit.
+    assert update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")[::2] == (True, {"rollback_deferred": True})
     intent = store_switch.read_switch_intent(root)
     assert intent["door"] == "boot_smoke_rollback" and intent["target_sha"] == old and intent["target_ref"] == "ouroboros"
     assert intent["reason"] == "post_boot_smoke_failed" and resets == []
     # The second failure before the restart is a refusal, not a second intent.
-    ok, message = update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")
-    assert ok is False and "intent" in message
+    ok, message, facts = update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")
+    assert ok is False and "intent" in message and facts == {}
     # A store-bearing pre-update tree resets now, as before the store; a missing SHA is the owner's own refusal.
-    assert update_merge._boot_smoke_rollback({"pre_update_sha": new}, "x") == (True, "reset")
-    assert update_merge._boot_smoke_rollback({}, "y") == (True, "reset")
+    assert update_merge._boot_smoke_rollback({"pre_update_sha": new}, "x") == (True, "reset", {})
+    assert update_merge._boot_smoke_rollback({}, "y") == (True, "reset", {})
     assert resets == [("x", False), ("y", False)]
 
 

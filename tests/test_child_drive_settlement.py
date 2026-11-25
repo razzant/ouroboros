@@ -10,6 +10,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -232,6 +233,206 @@ def test_a_settled_drive_leaves_only_unserved_trash_for_the_maintenance_child(tm
     assert not staging.exists()
     assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "holds": []}
     assert list(trash.iterdir()) == []
+
+
+_CLOSED_LOG = b"READY\r\nsynthetic output\xff\n"
+
+
+def _closed_child_log(tmp_path, kind="task_drives"):
+    data, drive, _record = _cancelled_with_capture(tmp_path, kind)
+    log = drive / "services" / TASK / "devserver.log"
+    log.parent.mkdir(parents=True)
+    log.write_bytes(_CLOSED_LOG)
+    private = data / "observability" / "service_logs" / f"{sha256(_CLOSED_LOG).hexdigest()}.log"
+    return data, drive, log, private
+
+
+@pytest.mark.parametrize("kind", ["headless", "task_drives"])
+def test_a_leftover_service_log_leaves_with_its_drive_only_as_the_canonical_private_copy(tmp_path, monkeypatch, kind):
+    """A refused copy retains the source in place; a successful retry moves the original with the drive."""
+    data, drive, log, private = _closed_child_log(tmp_path, kind)
+    real_copy = artifacts.copy_artifact_file
+
+    def refuse_the_private_copy(source, destination, **kwargs):
+        if Path(destination).parent.name == "service_logs":
+            raise OSError("no space left for the copy")
+        return real_copy(source, destination, **kwargs)
+
+    monkeypatch.setattr(artifacts, "copy_artifact_file", refuse_the_private_copy)
+    outcome = _settle(data, drive)
+    assert outcome == {"status": "retained", "reason": "service_logs_uncustodied", "published": 0}
+    assert log.read_bytes() == _CLOSED_LOG and not private.exists()
+    rested = {}
+    base = drive.parent if kind == "headless" else drive
+    task_custody.record_rest(rested, kind, data, TASK, base, drive, outcome)
+    assert rested == {}, "the next ordinary pass tries the copy again"
+
+    monkeypatch.undo()
+    assert _settle(data, drive) == {"status": "removed", "reason": "", "published": 1}
+    assert not drive.exists() and private.read_bytes() == _CLOSED_LOG
+    [trash] = (data / "state" / "custody_trash").iterdir()
+    assert (trash / log.relative_to(base)).read_bytes() == _CLOSED_LOG
+    events = (data / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    [preserved] = [row for line in events if (row := json.loads(line)).get("type") == "service_log_preserved"]
+    assert preserved["launch_id"] is None  # task-owned, not attributed to a guessed launch
+    assert "full_log_ref" not in preserved and "source_ref" not in preserved
+    assert task_custody.remove_custody_trash(data)["removed"] == 1
+    assert private.read_bytes() == _CLOSED_LOG, "the verified private copy survives actual trash removal"
+
+
+@pytest.mark.parametrize("failure", ["directory-stat", "list", "file-stat", "unknown-owner"])
+def test_uncertain_child_service_log_inventory_retains_the_original(tmp_path, monkeypatch, failure):
+    data, drive, log, private = _closed_child_log(tmp_path)
+    if failure == "unknown-owner":
+        unknown = log.parent.with_name("unattributed")
+        unknown.mkdir()
+        log = log.rename(unknown / log.name)
+    else:
+        method = "iterdir" if failure == "list" else "lstat"
+        target = {"directory-stat": log.parent.parent, "list": log.parent, "file-stat": log}[failure]
+        actual = getattr(Path, method)
+
+        def denied(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError("synthetic read refused")
+            return actual(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, method, denied)
+    assert _settle(data, drive)["reason"] == "service_logs_uncustodied"
+    assert log.read_bytes() == _CLOSED_LOG and not private.exists()
+
+
+@pytest.mark.parametrize("hold", ["keep", "move", "late-log"])
+def test_verified_child_log_stays_in_place_until_the_guarded_move(tmp_path, monkeypatch, hold):
+    from ouroboros.owner_keep import set_owner_keep
+
+    data, drive, log, private = _closed_child_log(tmp_path)
+    late = log.with_name("late.log")
+
+    @contextmanager
+    def guard():
+        assert private.read_bytes() == _CLOSED_LOG and log.read_bytes() == _CLOSED_LOG
+        if hold == "keep":
+            assert set_owner_keep(data, TASK, keep=True, source={"basis": "test"})["keep"]
+        elif hold == "late-log":
+            late.write_bytes(b"another closed log")
+        yield True
+
+    if hold == "move":
+        actual = os.replace
+
+        def refused_move(source, target):
+            if Path(source) == drive.resolve():
+                raise OSError("synthetic drive rename refused")
+            return actual(source, target)
+
+        monkeypatch.setattr(task_custody.os, "replace", refused_move)
+    outcome = _settle(data, drive, guard=guard)
+    assert outcome["status"] == "retained", outcome
+    assert outcome["reason"] == {"keep": "owner_keep", "move": "custody_error: OSError",
+                                 "late-log": "service_logs_uncustodied"}[hold]
+    assert log.read_bytes() == private.read_bytes() == _CLOSED_LOG
+    if hold == "late-log":
+        assert late.read_bytes() == b"another closed log"
+
+
+@pytest.mark.parametrize("executor", [False, True])
+def test_two_launches_with_one_service_name_keep_their_own_logs(tmp_path, monkeypatch, executor):
+    from ouroboros import launch_custody
+    from ouroboros.process_census import LAUNCH_SCOPE_PREFIX
+
+    data, drive, _record = _cancelled_with_capture(tmp_path)
+    name = "devserver"
+    # A previous task-scoped launch left the bare name. A kept launch must never read those bytes as its own.
+    previous, stream = launch_custody.open_local_service_log(drive, TASK, name, LAUNCH_SCOPE_PREFIX + "b" * 32,
+                                                            keep_alive=False, executor=executor)
+    with stream:
+        stream.write(_CLOSED_LOG)
+    marker = LAUNCH_SCOPE_PREFIX + "a" * 32
+    payload = b"current http://127.0.0.1:8123/\r\n"
+    path, stream = launch_custody.open_local_service_log(drive, TASK, name, marker, keep_alive=True, executor=executor)
+    with stream:
+        stream.write(payload)
+    assert previous != path and previous.read_bytes() == _CLOSED_LOG
+
+    launch_id = "launch-" + "a" * 32
+    purpose = ("workspace_service:" if executor else "service:") + name
+    row = {"purpose": purpose, "scope_marker": marker, "scope": "session", "owner_task": TASK, "pid": 1}
+    record = {"record_id": launch_id, "drive_root": str(drive), "ledger_entry": row}
+    with monkeypatch.context() as observed:
+        observed.setattr(launch_custody, "read_custody", lambda *a, **kw: launch_custody.LaunchCustody(
+            True, [row], {}, set(), "", b"", [record]))
+        observed.setattr(launch_custody, "unsettled_selection", lambda *a: [(row, "live")])
+        [kept] = launch_custody.kept_services(data)["services"]
+        assert (kept["log_path"], kept["address"]) == (str(path), "http://127.0.0.1:8123")
+        parked = path.rename(tmp_path / "parked.log")
+        [kept] = launch_custody.kept_services(data)["services"]
+        assert (kept["log_path"], kept["address"]) == ("", ""), "the missing launch never borrows the bare log"
+        parked.rename(path)
+
+    assert _settle(data, drive)["status"] == "removed"
+    archive = data / "observability" / "service_logs"
+    assert {file.read_bytes() for file in archive.iterdir()} == {_CLOSED_LOG, payload}
+
+
+def test_the_moves_steps_under_the_interlock_reach_the_passs_report(tmp_path):
+    """Phase B runs under the supervisor's queue lock (the ``guard``): the pass's report carries its steps' seconds
+    (``under_q_sec``), all three for a drive that moved, as far as it got for one kept inside it, none for one kept
+    before it; nothing else is written for them."""
+    import contextlib
+
+    data, drive, _record = _cancelled_with_capture(tmp_path)
+    moved = {}
+    assert _settle(data, drive, report=moved, guard=lambda: contextlib.nullcontext(True))["status"] == "removed"
+    [row] = moved["under_q_sec"]
+    assert set(row) == {"task_id", "rechecks", "locks", "move"} and row["task_id"] == TASK
+    assert all(seconds >= 0 for key, seconds in row.items() if key != "task_id")
+    (tmp_path / "kept").mkdir()
+    data, drive, _record = _cancelled_with_capture(tmp_path / "kept")
+    inside, before = {}, {}
+    assert _settle(data, drive, report=inside, guard=lambda: contextlib.nullcontext(False))["reason"] == "generation_closed"
+    assert [set(row) for row in inside["under_q_sec"]] == [{"task_id", "rechecks"}]
+    assert _settle(data, drive, report=before, live=lambda _task: None)["reason"] == "liveness_unknown"
+    assert "under_q_sec" not in before
+
+
+def test_a_steps_seconds_under_the_interlock_end_where_the_interlock_ends(tmp_path, monkeypatch):
+    """The move's seconds are those spent under the guard, on success and on failure alike: a move that fails counts
+    the time it took inside the guard, never the warning logged after the guard released the queue lock."""
+    import contextlib
+
+    clock, active, busy, real_replace = [0.0], [], [], os.replace
+
+    @contextlib.contextmanager
+    def guard():
+        active.append(True)
+        try:
+            yield True
+        finally:
+            active.pop()
+
+    def replace(old, new):
+        if active:
+            clock[0] += 3  # the move's own time, under the guard
+        if Path(old) in busy:
+            raise OSError("drive in use")
+        return real_replace(old, new)
+
+    def warning(*_args, **_kwargs):
+        assert not active, "the warning comes after the guard released Q"
+        clock[0] += 12
+
+    monkeypatch.setattr(task_custody, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(task_custody.os, "replace", replace)
+    monkeypatch.setattr(task_custody.log, "warning", warning)
+    for name, fails in (("moved", False), ("in_use", True)):
+        (tmp_path / name).mkdir()
+        data, drive, _record = _cancelled_with_capture(tmp_path / name, "task_drives")
+        busy[:] = [drive] if fails else []
+        report = {}
+        outcome = _settle(data, drive, report=report, guard=guard)
+        assert outcome["status"] == ("retained" if fails else "removed"), outcome
+        assert report["under_q_sec"][0]["move"] == 3, report["under_q_sec"]
 
 
 def test_read_only_folders_in_custody_leftovers_never_strand_them(tmp_path):

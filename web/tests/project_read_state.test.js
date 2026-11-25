@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { historyNodeIsProtected } from '../modules/chat_history_replay.js';
-import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset } from '../modules/project_read_state.js';
+import { createProjectReadReceipt, feedScale, isAtNewestMessage, newestMessageOffset } from '../modules/project_read_state.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { TS, row, late, room, placeAtTop, until, quiet } from './project_read_state_fixture.js';
 
@@ -223,6 +223,37 @@ test('a room reopened without unread keeps its bottom', async (t) => {
     const plain = await r.instance.refreshHistory({ revision: 3 });
     assert.equal(plain.read, false, 'reopened at its bottom, as before');
     assert.notEqual(r.messages.scrollTop, 0);
+});
+
+test('↓ reaches retained rows during catch-up without reading a missing or offscreen newest arrival', async (t) => {
+    let arrivals = 0;
+    const r = room(t, { onReadingLatest: () => { arrivals += 1; } });
+    placeAtTop(t, r, 'chat:9');
+    r.server.rows = [row(1), row(2)];
+    r.server.window = { complete: true, truncated_by: [], latest_message: { history_id: 'chat:2' } };
+    await r.instance.refreshHistory({ revision: 1 });
+    r.readUp();
+    arrivals = 0;
+    r.server.rows = [late(9), row(1), row(2)];
+    r.server.window = { complete: true, truncated_by: [], latest_message: { history_id: 'chat:9', out_of_order: true } };
+    const release = r.gate();
+    r.reconnect();
+    await until(() => r.reads.length === 2);
+    void r.instance.showLatest();
+    await quiet();
+    assert.equal(r.messages.scrollTop, r.messages.scrollHeight, 'retained rows are reached before the read settles');
+    assert.equal(arrivals, 0, 'the old bottom cannot acknowledge the missing arrival');
+    const receipt = r.instance.refreshHistory({ revision: 1 });
+    release('fail');
+    assert.equal((await receipt).painted, false, 'the failed catch-up still owes freshness');
+    await r.instance.showLatest(); // Retry is a new physical return.
+    const repaired = await r.instance.refreshHistory({ revision: 2 });
+    assert.equal(repaired.read, false, 'the new message exists, but is above the physical bottom');
+    assert.equal(arrivals, 0);
+    await r.instance.showLatest({ arrive: true });
+    const opened = await r.instance.refreshHistory({ revision: 2 });
+    assert.equal(opened.read, true, 'arrival-based navigation still reaches the actual newest message');
+    assert.equal(r.messages.scrollTop, 0);
 });
 
 test('an unread opening whose newest message is on screen at the bottom moves nothing', async (t) => {
@@ -482,6 +513,43 @@ test('the read band is the viewport less the header above and the composer below
     assert.equal(at(100, chrome), true);
     assert.equal(at(250, { header: el(0, 40), composer: el(220, 300, false) }), true, 'a hidden composer covers nothing');
     assert.equal(at(250, {}), true, 'a feed without chrome is its viewport');
+    // The bar's frosted edge reaches 32 px below it (style.css "A room's edges"): a row under it is not read yet.
+    const frosted = Object.assign(el(0, 40), { ownerDocument: { defaultView: { getComputedStyle: () => ({
+        getPropertyValue: (name) => (name === '--edge-reach' ? '32px' : '') }) } } });
+    assert.equal(at(50, { ...chrome, header: frosted }), false, 'under the bar\'s edge');
+    assert.equal(at(50, chrome), true, 'the same row under a bar without an edge is read');
+    assert.equal(at(80, { ...chrome, header: frosted }), true, 'below the edge');
+    // A phone's drawer scales the room to 0.96 (the bar 40 px tall drawn 38.4): the edge is drawn 30.72 px, so the band
+    // starts at 38.4 + 30.72 = 69.12. A row ending at 69.5 shows; with the edge unscaled (38.4 + 32 = 70.4) it would not.
+    const scaled = Object.assign(el(0, 38.4), { offsetHeight: 40, getBoundingClientRect: () => ({ top: 0, bottom: 38.4, height: 38.4 }),
+        ownerDocument: frosted.ownerDocument });
+    const ends = (bottom, facts) => isAtNewestMessage({ history_id: 'chat:9', out_of_order: true }, {
+        delivered: () => true, nodes: () => [el(bottom - 20, bottom)], viewport: el(0, 300), atBottom: () => true, ...facts });
+    assert.equal(ends(69.5, { ...chrome, header: scaled }), true, 'the edge is measured in the page\'s scale');
+    assert.equal(ends(69, { ...chrome, header: scaled }), false, 'and still hides what lies under it');
+    // WebKit before 16.4 has no @property: the typing reach (style.css, a clamp over --vvh) reads back as its tokens. The
+    // edge material's own box (`::before`, the bar's padding box plus the reach) is measured instead.
+    const drawn = (height) => ({ getComputedStyle: (node, pseudo) => (pseudo === '::before' ? { height } : {
+        getPropertyValue: (name) => (name === '--edge-reach' ? 'clamp(0px, 508px - 47px - 250px, 32px)' : '') }) });
+    const typing = (height) => Object.assign(el(0, 40), { clientHeight: 40, ownerDocument: { defaultView: drawn(height) } });
+    assert.equal(at(50, { ...chrome, header: typing('72px') }), false, 'under the drawn edge, its reach unresolved');
+    assert.equal(at(80, { ...chrome, header: typing('72px') }), true, 'below it');
+    assert.equal(at(50, { ...chrome, header: typing('40px') }), true, 'a low typing room gives the edge up');
+    assert.equal(at(50, { ...chrome, header: typing('auto') }), true, 'no drawn edge and no resolved reach: the bar alone');
+    const scaledTyping = { ...scaled, clientHeight: 40, ownerDocument: { defaultView: drawn('72px') } };
+    assert.deepEqual([ends(69.5, { ...chrome, header: scaledTyping }), ends(69, { ...chrome, header: scaledTyping })],
+        [true, false], 'the drawn edge in the drawer\'s scale');
+});
+
+// A correction measured on screen moves the feed in its own pixels: a question card centred while the phone's drawer
+// hands the room back (chat_decision.js) must not land under the bar once the room is drawn whole again.
+test('a feed drawn scaled converts what is measured on screen into its own pixels; drawn whole or unmeasured it is 1', () => {
+    const feed = (screen, own) => ({ offsetHeight: Math.round(own), getBoundingClientRect: () => ({ height: screen }),
+        ownerDocument: { defaultView: { getComputedStyle: () => ({ height: `${own}px` }) } } });
+    assert.equal(feedScale(feed(480, 500)), 0.96, 'scaled to 0.96 by the drawer');
+    assert.equal(feedScale(feed(500, 500)), 1, 'drawn whole');
+    assert.equal(feedScale(feed(0, 0)), 1, 'not laid out: nothing to convert');
+    assert.equal(feedScale({ offsetHeight: 400, getBoundingClientRect: () => ({ height: 380 }) }), 0.95, 'no computed style: its offset height');
 });
 
 // Chrome can cover the whole feed (a tall draft in a short window): nothing is

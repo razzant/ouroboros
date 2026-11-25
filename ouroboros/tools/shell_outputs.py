@@ -564,11 +564,13 @@ def _register_process_outputs(
     binding: ResolvedResourceBinding | None = None,
     output_context: DockerOutputContext | None = None,
     changed_only: bool = False,
+    reports: list[dict] | None = None,
 ) -> tuple[str, bool, bool]:
     """Capture declared command outputs in the task artifact store; the third value is True only
     when this call created or repaired a canonical record (``artifact_registered``). ``changed_only``
     is a failed command's view: only an output this run demonstrably created or changed (against its
-    pre-run baseline) is its partial result; a missing, unchanged or unbaselined one is only noted."""
+    pre-run baseline) is its partial result; a missing, unchanged or unbaselined one is only noted.
+    Optional ``reports`` receives one capture observation per declaration, with only admitted records."""
 
     if not outputs:
         return "", False, False
@@ -577,6 +579,9 @@ def _register_process_outputs(
     registered = False  # at least one canonical artifact record was actually created or repaired
     for raw_item in outputs:
         text = str(raw_item or "").strip()
+        report = {"requested": text, "status": "failed", "records": []}
+        if reports is not None:
+            reports.append(report)
         try:
             previous = output_context.paths.get(text) if output_context else None
             resolved = resolve_docker_output(output_context.executor, previous.requested, must_exist=True) if previous else None
@@ -624,6 +629,7 @@ def _register_process_outputs(
         if source.is_file():
             capture = _current_file_capture(ctx, source, after) if unchanged else None
             if capture:
+                report.update(status="saved", records=[capture])
                 notes.append(f"unchanged output (cosmetic): {text}; current capture artifact_store:{capture['name']} "
                              f"sha256={capture['sha256'][:12]}")
                 continue
@@ -636,6 +642,7 @@ def _register_process_outputs(
                 continue
             if record:
                 registered = True
+                report.update(status="saved", records=[record])
                 notes.append(
                     f"registered output {source} -> artifact_store:{record.get('name')} "
                     f"sha256={str(record.get('sha256') or '')[:12]}{since}"
@@ -683,6 +690,7 @@ def _register_process_outputs(
             # registration note claims no pre-run content.
             capture = current_directory_capture(ctx, source, kind="process_output_directory", **members) if unchanged else []
             if capture:
+                report.update(status="partial" if skipped_members else "saved", records=capture)
                 notes.append(f"unchanged output (cosmetic): {text}; current capture artifact_store:"
                              + ", ".join(str(record.get("name") or "") for record in capture))
                 continue
@@ -694,6 +702,7 @@ def _register_process_outputs(
                 continue
             if records:
                 registered = True
+                report.update(status="partial" if skipped_members else "saved", records=records)
                 names = ", ".join(str(record.get("name") or "") for record in records)
                 notes.append(f"registered directory output {source} -> artifact_store:{names}")
             else:

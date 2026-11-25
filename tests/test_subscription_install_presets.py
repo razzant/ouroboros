@@ -20,6 +20,10 @@ from ouroboros.subscription_install_presets import (
     compile_install_preset,
     factory_review_rows,
 )
+from ouroboros.settings_defaults import OPENROUTER_HELPER_DEFAULTS
+
+ROUTER_HELPER_IDS = [row_id for row_id, _model, _use in OPENROUTER_HELPER_DEFAULTS]
+ROUTER_HELPERS = [model for _row_id, model, _use in OPENROUTER_HELPER_DEFAULTS]
 
 
 def _pool(preset):
@@ -269,15 +273,33 @@ def test_cursor_without_grok_refuses_instead_of_using_a_costlier_model():
     models = dict(LIVE_MODELS)
     models["cursor"] = tuple(
         model for model in LIVE_MODELS["cursor"]
-        if not model.startswith(("cursor-grok-4.6", "grok-4.6"))
+        if not model.startswith(("cursor-grok-4.6", "grok-4.6", "grok-4.7"))
     )
 
     refused = compile_install_preset(_discoveries("cursor", models=models))
 
     assert not refused.ok
     assert refused.refusal.code == "model_not_in_discovery"
-    assert refused.refusal.seat.preference == "grok-4.6"
+    assert refused.refusal.seat.preference == "grok-4.7"
+    assert refused.refusal.candidates == ("grok-4.7-high", "cursor-grok-4.6-high", "grok-4.6-high")
     assert any(model.startswith("gpt-5.6") for model in models["cursor"])
+
+
+# Cursor's account inventory (GET models?view=accounts, read 2026-11-16): Grok 4.7 at four levels, standard and -fast.
+CURSOR_GROK_47 = tuple(f"grok-4.7-{level}{tier}" for level in ("low", "medium", "high", "xhigh") for tier in ("", "-fast"))
+
+
+def test_cursor_prefers_the_standard_grok_47_at_each_seats_level_and_keeps_46_as_its_successor():
+    newest = compile_install_preset([HarnessDiscovery("cursor", (*LIVE_MODELS["cursor"], *CURSOR_GROK_47))])
+    assert newest.ok, newest.refusal
+    surfaces = newest.receipt["surfaces"]
+    assert [(name, row["model"], row["effort"]) for name in ("subagent", "triad", "scope") for row in surfaces[name]] == [
+        ("subagent", "grok-4.7-high", "high"), ("triad", "grok-4.7-medium", "medium"), ("scope", "grok-4.7-high", "high")]
+    assert not any(note["code"] == "model_preference_successor" for note in newest.diagnostics)
+    older = compile_install_preset(_discoveries("cursor"))  # this historical inventory has no Grok 4.7
+    notes = [note for note in older.diagnostics if note["code"] == "model_preference_successor"]
+    assert {(note["preference"], note["chosen_preference"], note["model"]) for note in notes} == {
+        ("grok-4.7", "grok-4.6", "cursor-grok-4.6-high"), ("grok-4.7", "grok-4.6", "cursor-grok-4.6-medium")}
 
 
 def test_cursor_effort_rides_the_slug_and_the_row_field_together():
@@ -432,6 +454,62 @@ def _catalog_with_agy():
     return {**LIVE_MODELS, "agy": AGY_LIVE_MODELS}
 
 
+# Exact Hydrogen ids from `agy 1.5.0 models`, read by the parent on 2026-11-16.
+# This is vendor CLI evidence, not a claim about every engine account's catalog.
+AGY_HYDROGEN_MODELS = tuple(f"gemini-4-hydrogen-{level}" for level in ("high", "xhigh", "medium", "low"))
+
+
+@pytest.mark.parametrize("connected", AGY_COMBINATIONS)
+def test_agy_prefers_hydrogen_high_without_adding_reviewers(connected):
+    catalog = {**LIVE_MODELS, "agy": (*AGY_LIVE_MODELS, *AGY_HYDROGEN_MODELS)}
+    preset = compile_install_preset(_discoveries(*connected, models=catalog))
+
+    assert preset.ok, preset.refusal
+    [seat] = [row for row in preset.receipt["surfaces"]["subagent"] if row["harness"] == "agy"]
+    assert (seat["preference"], seat["model"], seat["effort"]) == (
+        "gemini-4-hydrogen", "gemini-4-hydrogen-high", "high")
+    assert seat["effort_in_model_id"] is True
+    [actor] = [row for row in json.loads(preset.available_subagents)["items"]
+               if row["route"]["target_id"].startswith("agy=")]
+    assert actor["route"]["target_id"] == "agy=gemini-4-hydrogen-high"
+    assert actor["effort"] == "high" and not actor.get("review_eligible")
+    assert not any(note["code"] == "model_preference_successor" and note["harness"] == "agy"
+                   for note in preset.diagnostics)
+    core = tuple(harness for harness in connected if harness in CORE_HARNESSES)
+    assert _pool_rows(preset) == (_pool_rows(compile_install_preset(_discoveries(*core))) if core else [])
+
+
+def test_agy_old_catalog_takes_flash_high_with_its_successor_reason_receipted():
+    preset = compile_install_preset(_discoveries("agy"))
+
+    assert preset.ok, preset.refusal
+    [seat] = preset.receipt["surfaces"]["subagent"]
+    [note] = [note for note in preset.diagnostics if note["code"] == "model_preference_successor"]
+    assert (note["harness"], note["preference"], note["chosen_preference"], note["model"]) == (
+        "agy", "gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.8-flash-high")
+    assert note["message"] == (
+        "agy discovery has no 'gemini-4-hydrogen'; this seat uses the next preference, 'gemini-3.8-flash-high'.")
+    assert seat["reason"] == note["message"] and note in preset.receipt["diagnostics"]
+    [actor] = json.loads(preset.available_subagents)["items"]
+    assert (actor["route"]["target_id"], actor["effort"]) == ("agy=gemini-3.8-flash-high", "high")
+    assert _pool_rows(preset) == []
+
+
+@pytest.mark.parametrize("models", [
+    ("gemini-4-hydrogen-medium", "gemini-3.8-flash-medium"),  # never substitute a different effort
+    ("gemini-3.7-flash-high", "gemini-3.1-pro-high"),
+])
+def test_agy_neither_exact_preference_refuses_without_partial_output(models):
+    preset = compile_install_preset([HarnessDiscovery("agy", models)])
+
+    assert not preset.ok
+    assert preset.refusal is not None and preset.refusal.code == "model_not_in_discovery"
+    assert preset.refusal.seat.preference == "gemini-4-hydrogen"
+    assert preset.refusal.candidates == ("gemini-4-hydrogen-high", "gemini-3.8-flash-high")
+    assert preset.available_subagents == "" and preset.settings_keys() == {}
+    assert preset.receipt == {}
+
+
 def test_agy_missing_required_flash_is_typed_discovery_failure():
     preset = compile_install_preset([HarnessDiscovery(harness_id="agy", model_ids=())])
     assert preset.refusal is not None
@@ -461,8 +539,10 @@ def test_agy_alias_table_spells_effort_inside_the_id():
 
     assert HARNESS_AGY in _EFFORT_IN_MODEL_ID
     aliases = _MODEL_ALIASES[HARNESS_AGY]
-    # Every alias candidate formats to an id the pinned vendor CLI really
-    # publishes, so automatic and manually selected rows resolve exact ids.
+    assert aliases["gemini-4-hydrogen"] == ("gemini-4-hydrogen-{effort}",)
+    assert {aliases["gemini-4-hydrogen"][0].format(effort=level) for level in ("high", "xhigh", "medium", "low")} == set(
+        AGY_HYDROGEN_MODELS)
+    # Historical aliases keep the pinned CLI's exact spellings and effort limits.
     assert aliases["gemini-3.8-flash"][0].format(effort="high") in AGY_LIVE_MODELS
     assert aliases["gemini-3.1-pro"][0].format(effort="high") in AGY_LIVE_MODELS
     assert aliases["gemini-3.1-pro"][0].format(effort="low") in AGY_LIVE_MODELS
@@ -494,7 +574,9 @@ def test_api_only_identical_main_and_light_deduplicate_without_fake_diversity():
         "OUROBOROS_MODEL_LIGHT": "openai/gpt-5.6-luna",
     })
 
-    assert len(json.loads(preset.available_subagents)["items"]) == 1
+    # One row for the Main/Light twin; the configured router adds its own distinct helpers.
+    assert [row["route"]["target_id"] for row in json.loads(preset.available_subagents)["items"]] == [
+        "openai/gpt-5.6-luna", *ROUTER_HELPERS]
     assert [row["code"] for row in preset.diagnostics] == [
         "duplicate_api_routes_omitted",
     ]
@@ -539,15 +621,15 @@ def test_one_harness_plus_distinct_main_and_light_normally_yields_three_real_act
     # One list: the actors are Auto rows (no effort), so the one triad seat mints its
     # own pinned reviewer row and the scope seat merges into it.
     assert [row["subagent_id"] for row in items] == [
-        "primary-builder", "fast-scout", "independent-perspective", "review-claude",
+        "primary-builder", "fast-scout", "independent-perspective", *ROUTER_HELPER_IDS, "review-claude",
     ]
-    assert all("name" not in row and "effort" not in row for row in items[:3])  # retired field; Auto actors
+    assert all("name" not in row and "effort" not in row for row in items[:-1])  # retired field; Auto actors
     assert [row.slot_id for row in _pool(preset)] == ["review-claude"]
     assert [row.effort for row in _pool(preset)] == ["medium"]
     assert [row["route"]["target_id"] for row in items] == [
-        "claude=claude-opus-5-5", "openai/gpt-5.6-luna", "openai/gpt-5.6-sol", "claude=claude-opus-5-5",
+        "claude=claude-opus-5-5", "openai/gpt-5.6-luna", "openai/gpt-5.6-sol", *ROUTER_HELPERS, "claude=claude-opus-5-5",
     ]
-    assert [row.get("minted_from") for row in items] == [None, None, None, "factory_default"]
+    assert [row.get("minted_from") for row in items] == [None] * 6 + ["factory_default"]
 
 
 def test_roster_cap_overflow_omits_the_seat_with_a_diagnostic():
@@ -736,3 +818,63 @@ def test_valid_owner_draft_is_validated_not_recompiled_from_missing_agy_default(
     assert json.loads(preset.available_subagents)["items"][0]["subagent_id"] == "owner"
     assert preset.source == "configured"
     assert preset.receipt["source"] == "configured"
+
+
+def _catalog_row(model_id, *, source="codex", default=False, availability=None):
+    row = {"value": f"claudexor::{source}={model_id}", "id": model_id, "source_id": source,
+           "is_default": default, "input_modalities": ["text"]}
+    return {**row, "availability": availability} if availability else row
+
+
+LIGHT_CASES = {
+    # A Codex account lists Luna 6: Light is that row, not the heavy default (owner decision 2026-11-20).
+    "luna-6": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-5.6-luna"), _catalog_row("gpt-6-luna")],
+               "claudexor::codex=gpt-6-luna"),
+    "luna-5.6-only": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-5.6-luna")],
+                      "claudexor::codex=gpt-5.6-luna"),
+    "neither": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-6.1-terra")],
+                "claudexor::codex=gpt-6.1-sol"),
+    # The account reports Luna 6 unavailable: the next candidate; another account that has it still counts.
+    "luna-6-unavailable": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-6-luna", availability="unavailable"),
+                            _catalog_row("gpt-5.6-luna", availability="available")], "claudexor::codex=gpt-5.6-luna"),
+    "luna-6-on-another-account": ([_catalog_row("gpt-6.1-sol", default=True),
+                                   _catalog_row("gpt-6-luna", availability="unavailable"),
+                                   _catalog_row("gpt-6-luna", availability="available")], "claudexor::codex=gpt-6-luna"),
+    # A row of another source with the same id is not the default source's model.
+    "other-source": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-6-luna", source="cursor")],
+                     "claudexor::codex=gpt-6.1-sol"),
+}
+
+
+@pytest.mark.parametrize("case", LIGHT_CASES)
+def test_light_is_proposed_from_the_subscription_source_luna_then_the_default(case):
+    from ouroboros.subscription_install_presets import compile_model_settings
+
+    catalog, light = LIGHT_CASES[case]
+    proposed = compile_model_settings(catalog, {})
+    assert proposed["OUROBOROS_MODEL_LIGHT"] == light
+    # Only Light moves: Main and Consciousness keep the default, Safety stays blank to inherit Light.
+    assert proposed["OUROBOROS_MODEL"] == proposed["OUROBOROS_MODEL_CONSCIOUSNESS"] == "claudexor::codex=gpt-6.1-sol"
+    assert proposed["OUROBOROS_MODEL_SAFETY"] == "" and proposed["OUROBOROS_MODEL_FALLBACKS"] == ""
+
+
+def test_an_api_install_gets_no_light_proposal_from_a_subscription_catalog():
+    from ouroboros.subscription_install_presets import compile_model_settings
+
+    catalog = LIGHT_CASES["luna-6"][0]
+    assert compile_model_settings(catalog, {"OPENAI_API_KEY": "configured", "OUROBOROS_MODEL": "openai::gpt-6.1-terra"}) == {}
+
+
+@pytest.mark.parametrize("case, expected", [
+    # Light differs from Main: the fast scout runs on Luna and Main gains its own independent row.
+    ("luna-6", [("primary-builder", "codex=gpt-5.6-sol"), ("fast-scout", "claudexor::codex=gpt-6-luna"),
+                ("independent-perspective", "claudexor::codex=gpt-6.1-sol"), ("review-codex", "codex=gpt-5.6-sol")]),
+    # No Luna listed: Light is Main, and the twin route is one row, as before.
+    ("neither", [("primary-builder", "codex=gpt-5.6-sol"), ("fast-scout", "claudexor::codex=gpt-6.1-sol"),
+                 ("review-codex", "codex=gpt-5.6-sol")]),
+])
+def test_a_subscription_light_puts_the_fast_scout_on_light(case, expected):
+    preset = compile_install_preset(_discoveries("codex"), settings={}, model_catalog=LIGHT_CASES[case][0])
+    assert preset.ok, preset.refusal
+    items = json.loads(preset.available_subagents)["items"]
+    assert [(row["subagent_id"], row["route"]["target_id"]) for row in items] == expected

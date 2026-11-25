@@ -58,6 +58,25 @@ function costsPage(t, values = {}, meta = {}) {
     };
 }
 
+test('return refresh keeps the known budget in place while reading, but a failed answer becomes unavailable', async (t) => {
+    const page = costsPage(t);
+    const lead = page.mount.querySelector('#cost-spent');
+    assert.equal(lead.textContent, 'Loading…', 'the first read has no known amount');
+    page.routes.set('/api/cost-breakdown', response({ total_calls: 1, accounting: {
+        settled_usd: 12, confirmed_usd: 12, estimated_usd: 0, reserved_usd: 0,
+        unresolved_upper_bound_usd: 0, unknown_unmetered: 0, limit_usd: 200 } }));
+    await page.refresh();
+    const known = lead.textContent;
+    assert.match(known, /12/);
+    let answer;
+    page.routes.set('/api/cost-breakdown', () => new Promise(resolve => { answer = resolve; }));
+    await page.refresh();
+    assert.equal(lead.textContent, known, 'a return never collapses its known budget into a loading placeholder');
+    answer(response({}, 503));
+    await settle();
+    assert.equal(lead.textContent, 'Unavailable');
+});
+
 test('the limits card is the data module\'s Costs rows, each with its name, its meta and the notes that describe it', async (t) => {
     const page = costsPage(t);
     // Drawn before any read, a limit is no value yet: its meta line says so until the tab's read answers.
@@ -91,7 +110,9 @@ test('the limits card is the data module\'s Costs rows, each with its name, its 
 test('one writer: Costs posts nothing to /api/settings itself and reads nothing of a save\'s answer', () => {
     assert.ok(privateWrites(OLD_COSTS_EXCERPT).length >= 3, 'the check sees the private writer Costs used to be');
     assert.deepEqual(privateWrites(costsJs), []);
-    assert.match(costsJs, /import \{ bindSettingRows, readSettings, settingsRow \} from '\.\/settings_controls\.js'/);
+    // What Costs takes from the one writer's module: the rows it draws and binds, a read, and the painting of what the
+    // newest accepted document says (`paintWithRow`, `settingsSnapshot`); no function of it writes.
+    assert.match(costsJs, /import \{ bindSettingRows, paintWithRow, readSettings, settingsRow, settingsSnapshot \} from '\.\/settings_controls\.js'/);
     assert.doesNotMatch(costsJs, /budgetSavePresentation|btn-save-budget|budget-save-status|Saving…/);
 });
 

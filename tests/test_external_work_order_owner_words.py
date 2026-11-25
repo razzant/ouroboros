@@ -374,6 +374,138 @@ def test_a_session_start_carries_the_marks_in_force_and_the_outline_outside_the_
     assert compile_external_work_order(SNAPSHOT_TASK) == SNAPSHOT_TEXT and work_order_fingerprint(SNAPSHOT_TASK) == SNAPSHOT_SHA
 
 
+def test_a_session_start_holds_the_heads_its_names_claim_whole_and_a_declared_one_names_their_omission(tmp_path, monkeypatch):
+    """Both directions of the held heads in a session's memory delivery. With no recorded claim nothing is carried
+    and the delivery is the one without heads. A note claiming the room: the session holds its head whole after the
+    outline, its reader named unavailable to an external session, then the one host sentence, and the heads sent
+    are kept by address and revision for the start's custody. The launcher's own capture (restored from a wait)
+    never stands in for the head as it stands now. A declared session holds none and names the omission, the linked
+    heads' too, only once a note claims the room. The work order and its fingerprint never move."""
+    from ouroboros import held_notes
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+    from ouroboros.memory_view_events import CARRIED_NAMES
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.subagent_work_order import session_host_references
+    from ouroboros.tools import control
+    from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
+
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row(), _session_row()))
+    room = create_project(tmp_path, "quotas", name="Quotas")["chat_id"]
+    bind_task_to_project(tmp_path, "root", "quotas", room, origin={"absent": "system"})
+    head = "\n\nMEMORY DELIVERY (host instructions, separate from canonical work order)\n"
+
+    def started(session):
+        nanny = _child(tmp_path, session)
+        nanny.project_id = "quotas"
+        return nanny, session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path))
+
+    _event, _stored, plain = _schedule(_root(tmp_path), subagent_id="session-builder")
+    assert CARRIED_NAMES not in plain["metadata"]
+    nanny, quiet = started(plain)
+    with monkeypatch.context() as patch:
+        patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
+        assert started(plain)[1] == quiet and nanny._session_held_heads is None
+    _event, _stored, early = _schedule(_root(tmp_path), subagent_id="session-builder", input_sources="declared",
+                                       context="Judge the quotas.")
+    assert "because its input is declared" not in started(early)[1]  # no note claims the room: nothing to name
+
+    address = resolve_knowledge_address(tmp_path, "quotas-page", "global")
+    written = write_knowledge_note(address, f"---\ntitle: Quotas page\nclaims: ['room:{room}']\n---\nQuota head.\n## Detail\nBelow.\n",
+                                   writer="turn")
+    _event, _stored, session = _schedule(_root(tmp_path), subagent_id="session-builder")
+    assert session["metadata"][CARRIED_NAMES] == [f"room:{room}"]
+    launched, fingerprint = compile_external_work_order(session), work_order_fingerprint(session)
+    nanny, references = started(session)
+    memory = references.split(head, 1)[1]
+    held = memory.split("## Held knowledge notes\n\n", 1)[1]
+    assert memory.index("## Knowledge outline") < memory.index("## Held knowledge notes")
+    assert held.startswith("### Quotas page\n\nGlobal note: memory/knowledge/quotas-page.md\n")
+    assert f"Revision: {written.current.revision}\nExact reader unavailable: {held_notes.EXTERNAL_READER}\n\nQuota head.\n" in held
+    assert "Below." not in held and "Exact reader: knowledge_read" not in held
+    assert held.split("Quota head.\n", 1)[1].startswith("\n\n" + held_notes.HELPER_NOTE)
+    assert nanny._session_held_heads == [{"topic": "quotas-page", "revision": written.current.revision,
+                                          "chars": len("Quota head.\n"), "text": "Quota head.\n"}]
+    assert compile_external_work_order(session) == launched and work_order_fingerprint(session) == fingerprint
+
+    # A launcher restored from a wait holds its old capture; its session reads the head as it stands now.
+    nanny.task_metadata = dict(session["metadata"])
+    nanny._held_note_capture = held_notes.restored_capture({held_notes.CAPTURE_KEY: {"entries": [{
+        "section_id": "held_note:quotas-page", "full_text": "### Quotas page\n\nOLD CAPTURED HEAD",
+        "topic": "quotas-page", "revision": written.current.revision}]}})
+    edited = write_knowledge_note(address, f"---\ntitle: Quotas page\nclaims: ['room:{room}']\n---\nQuota head, edited.\n",
+                                  expected_revision=written.current.revision, writer="turn")
+    again = session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path))
+    assert "Quota head, edited." in again and edited.current.revision in again and "OLD CAPTURED HEAD" not in again
+
+    _event, _stored, declared = _schedule(_root(tmp_path), subagent_id="session-builder", input_sources="declared",
+                                          context="Judge the quotas.")
+    assert declared["metadata"][CARRIED_NAMES] == [f"room:{room}"]
+    nanny, closed = started(declared)
+    assert "## Held knowledge notes" not in closed and "Quota head" not in closed and nanny._session_held_heads is None
+    assert ("\n\n[Host: the heads of the knowledge notes that claim this work's room, and of the notes their heads "
+            "link, are not in this start, because its input is declared: quotas-page.]") in closed.split(head, 1)[1]
+    assert "because its input is declared" not in compile_external_work_order(declared)
+
+
+def test_a_presence_roots_direct_session_reads_the_room_its_heads_come_from_once_a_claim_is_recorded(tmp_path, monkeypatch):
+    """Both directions of the marks room of a Presence root's own session start. With no recorded claim its delivery
+    is byte for byte the one the same start without the Presence fact receives: Main's marks, as before. Once the
+    install records a claim (on Main, none on the place) the marks are the place room's, the bytes a session child of
+    that root holds; with a note claiming the place the session holds the place's head and marks, and neither Main's
+    head nor Main's marks. The same start without the Presence fact, carrying the focus by value, keeps Main's
+    marks beside Main's head."""
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+    from ouroboros.memory_view_events import CARRIED_NAMES
+    from ouroboros.subagent_work_order import session_host_references
+    from ouroboros.tools import control
+    from tests._memory_inventory_shared import MIND
+    from tests._memory_view_context import section
+    from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
+
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row(), _session_row()))
+    route = {"provider": "chat", "account_id": "team", "conversation_id": "nova", "thread_id": ""}
+    focus = {"place_id": "team-place", "room_chat_id": 789, "transport": route}
+    turn = _root(tmp_path, metadata={"presence": {"place_id": "team-place", "event": route}, "focus": focus})
+    carried = _root(tmp_path, metadata={"focus": focus})  # the same start without the Presence fact
+    store = ChronicleStore(tmp_path)
+    assert store.ensure_activated()["kind"] == "activation"
+    store.mark({"kind": "task", "task_id": "x"}, "Mark of the place room", MIND, room_id="789")
+    store.mark({"kind": "task", "task_id": "y"}, "Mark of Main", MIND, room_id="1")
+    head = "\n\nMEMORY DELIVERY (host instructions, separate from canonical work order)\n"
+
+    def memory(ctx):
+        return session_host_references(ctx, target_root=str(tmp_path), source_root=str(tmp_path)).split(head, 1)[1]
+
+    def marks(text):
+        return section(text, "## Marks I keep in view")
+
+    def note(topic, title, room, fact):
+        written = write_knowledge_note(resolve_knowledge_address(tmp_path, topic, "global"),
+                                       f"---\ntitle: {title}\nclaims: ['room:{room}']\n---\n{fact}\n", writer="turn")
+        assert written.ok, written.status
+
+    quiet = memory(turn)
+    assert "Mark of Main" in marks(quiet) and "Mark of the place room" not in quiet and "## Held knowledge" not in quiet
+    assert quiet == memory(carried)  # no claim: the bytes a start without the Presence fact has always received
+
+    note("main-page", "Main page", 1, "Main's working fact.")  # a claim elsewhere, none on the place
+    elsewhere = memory(turn)
+    assert "Mark of the place room" in marks(elsewhere) and "Mark of Main" not in elsewhere
+    assert "## Held knowledge" not in elsewhere and "Main's working fact." not in elsewhere
+    _event, _stored, session = _schedule(turn, subagent_id="session-builder")
+    assert session["metadata"][CARRIED_NAMES][0] == "room:789"
+    assert marks(memory(_child(tmp_path, session))) == marks(elsewhere)  # what a session child of that root holds
+
+    note("place-page", "Place page", 789, "The place's working fact.")
+    claimed = memory(turn)
+    assert "Mark of the place room" in marks(claimed) and "The place's working fact." in claimed
+    assert "Mark of Main" not in claimed and "Main's working fact." not in claimed
+    other = memory(carried)  # its heads come from Main, and so do its marks
+    assert "Mark of Main" in marks(other) and "Main's working fact." in other
+    assert "Mark of the place room" not in other and "The place's working fact." not in other
+
+
 def test_the_authority_fingerprint_does_not_move_with_the_words(tmp_path):
     from ouroboros.delegate_recovery import authority_fingerprint_from_context
 
@@ -395,17 +527,68 @@ def test_the_parent_is_told_what_a_child_and_a_session_start_with():
     start = next(tool for tool in delegate.get_tools() if tool.name == "delegate_start")
     prompt = start.schema["parameters"]["properties"]["prompt"]["description"]
     context, selection = schedule["context"]["description"], schedule["input_sources"]["description"]
-    for text in (context, selection, prompt):
-        assert "my human's words" in text and "the marks and the knowledge outline" in text.replace("in force ", "")
+    for text in (context, prompt):  # a session's start: the heads of the notes that claim its room, unless declared
+        assert "my human's words" in text and "the marks, the knowledge outline and, unless " in text
+        assert "declared, the heads of the notes that claim " in text
+    assert "my human's words" in selection and "the marks in force and the knowledge outline" in selection
     assert "input_sources says what it starts with" in context
     assert "write the orientation it lacks" in context and "none of my other memory" in context
     assert "why the work exists" in prompt and "the host supplies the canonical work order" in prompt
     assert "none of my other memory; the host appends those words verbatim" in prompt
+    assert "claim its room and of the notes their heads link, but none of my other memory" in context
+    assert "claim this work's room and of the notes their heads link, none of my other memory;" in prompt
     assert selection.startswith("Every child starts with my human's words for the work verbatim and dated, ")
-    assert "other knowledge stays one read away. Omit or shared: it also starts with " in selection
+    assert ("other knowledge stays one read away. Omit or shared: it also starts with the heads of the notes that "
+            "claim its room and of the notes their heads link, SYSTEM/BIBLE, " in selection)
     # The declared half keeps its own contract: the rest of shared memory, dialogue, parent context and attachments
     # are not its inputs; the assignment governs exchange.
     shared, declared = selection.split("declared selects only the authored ", 1)
     assert "my identity, life's top-level account" in shared and "originating words" not in selection
     assert ("excludes the rest of shared memory (identity, life account, room page), dialogue, inherited parent "
             "context and attachments" in " ".join(declared.split()))
+
+
+def test_the_receipt_counts_exactly_the_rows_of_my_human_the_work_order_carries():
+    """Owner item 50: the receipt counts the rows the session work order renders (one per identity, never a reply
+    target: another author's words), with no date beside them, and for a native child says the room's,
+    origin and marked rows are read at its own start instead of claiming none."""
+    from ouroboros.helper_receipt import owner_words_text
+    from ouroboros.owner_relay import _stamp_blocks
+    from ouroboros.owner_words import (ABSENT_FIELD, FIELD, OWNER_CARD_INPUT, OWNER_PRESS, REPLY_TARGET, ROOM_FIELD,
+                                       _row)
+    from ouroboros.subagent_work_order import _owner_words_section
+
+    mine = _row("Do it", source="room_message", carrier="room", ts="2026-11-21T10:00:00Z", ref="chat 1 / a")
+    target = _row("I said", source=REPLY_TARGET, carrier="room", ts="2026-11-21T09:00:00Z", ref="chat 1 / b")
+    late = _row("Also", source="room_message", carrier="room", ts="received 2026-11-01T00:00:00Z", ref="chat 1 / c")
+    task = {FIELD: [mine], ROOM_FIELD: [mine, target, late]}
+    told = owner_words_text(task, session=True)
+    assert told == "2 rows by value"
+    assert len(_stamp_blocks(_owner_words_section(task))) == 2, "the same set the work order renders"
+    assert owner_words_text({ABSENT_FIELD: "none_recorded"}, session=True) == "none by value"
+    native = owner_words_text({ABSENT_FIELD: "none_recorded"}, session=False)
+    assert native == "none by value; room, origin and marked rows read at its start"
+    # A press without words and a card input whose words are unknown are their acts: carried, never counted as words.
+    press = _row("Publish it", source=OWNER_PRESS, carrier="room", ts="2026-11-21T11:00:00Z", ref="chat 1 / d")
+    lost = _row("Card input received. Its submission is unavailable.", source=OWNER_CARD_INPUT, carrier="room",
+                ts="2026-11-21T11:01:00Z", ref="chat 1 / e")
+    typed = _row("Publish it, but shorter", source="owner_quiz_answer", carrier="room", ts="2026-11-21T11:02:00Z",
+                 ref="chat 1 / f")
+    acts = {FIELD: [press, lost]}
+    assert len(_stamp_blocks(_owner_words_section(acts))) == 2, "the work order still carries both acts"
+    assert owner_words_text(acts, session=True) == "none by value"
+    assert owner_words_text(acts, session=False).startswith("none by value;")
+    assert owner_words_text({FIELD: [press, typed]}, session=True) == "1 row by value", "a typed answer is words"
+
+
+def test_a_direct_start_never_counts_stamps_found_in_its_own_text():
+    """A direct start's receipt names no count of my human's rows: nothing ties one to this invocation's own tail
+    cheaply, and stamps the prompt itself quotes are no proof of what the host appended."""
+    from ouroboros.helper_receipt import start_facts
+    from ouroboros.owner_words import _row, render_owner_words
+    from ouroboros.subagent_work_order import START_TAIL_FACT
+
+    rows = [_row("Do it", source="room_message", carrier="room", ts="2026-11-21T10:00:00Z", ref="chat 1 / a")]
+    quoted = render_owner_words(rows, audience="session", root_task_id="r", gaps=[START_TAIL_FACT])
+    facts = start_facts({"prompt": "Check this old order:\n" + quoted, "instructions": "HOST\n\n" + quoted})
+    assert "owner_words" not in facts and set(facts) == {"assignment"}

@@ -8,10 +8,13 @@ holder's end releases the scratch, through the custody trash, whose remover dele
 serving process; nothing scans the temp root, follows a link or sweeps by age. A scratch its
 producer marked retained (``test_environment.RETENTION_MARKER``) keeps its record as a visible
 hold, ``producer_retained``, in its own trash entry until the marker is gone; a kept service's
-declared outputs there no complete capture consumed hold it the same way (``kept_service_capture_owed``);
-a valid record whose real ``obs-*`` directory has another device/inode (a reboot can renumber a device)
-is held there as ``identity_unverified``, never deleted or repaired. This module reads, judges and releases
-records; allocation and the custody pass over finished tasks stay in ``workspace_preflight``.
+declared outputs there no complete capture consumed hold it the same way (``kept_service_capture_owed``),
+and so does a finished child's own scratch while its parent line still waits on its result (``parent_hold``);
+new records name an ``obs-*`` container with an ordinary nonce marker beside its empty ``w/`` workspace.
+The exact recorded address and marker identify it across reboot or whole-folder restoration, not device/inode;
+restored contents inherit its holder and cleanup. Legacy records keep their original device/inode check and
+are never upgraded. Unverified identity is held, never repaired. This module owns allocation and identity;
+``workspace_preflight`` serializes preparation and runs the custody pass over finished tasks.
 """
 from __future__ import annotations
 
@@ -21,19 +24,29 @@ import logging
 import os
 import pathlib
 import stat
+import tempfile
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import work_domain
+from ouroboros.test_environment import SCRATCH_CONTAINER_MARKER as SCRATCH_MARKER, SCRATCH_WORKSPACE
 
 log = logging.getLogger(__name__)
 
 # The hold a producer's retention marker puts on a scratch: the marker's own words are its example.
 PRODUCER_RETAINED = "producer_retained"
-# The hold on a record whose scratch is a real directory under another device/inode (``ScratchIdentityMismatch``).
+# A real container whose nonce (or legacy device/inode) cannot be confirmed (``ScratchIdentityMismatch``).
 IDENTITY_UNVERIFIED = "identity_unverified"
 # A seat-keyed record (``review_session_preparation.seat_service_directories``) is held by its seat's copy.
 SEAT_OPEN = "seat_open"
+# A finished child's scratch while its recorded parent line lives without deciding its current result (``parent_hold``).
+PARENT_DECISION_PENDING = "parent_decision_pending"
+# Whether that parent line still lives could not be read: held, never presumed over.
+PARENT_UNREADABLE = "parent_unreadable"
+# A visible acceptance time alone is pending. The second field attests the intent was synced.
+RELEASE_ACCEPTED = "release_accepted_at"
+RELEASE_SYNCED = "release_synced"
+OWNER_UNPROVEN = "owner_unproven"
 # The holders a record may sit beside; ``trash`` and ``staging`` are the handoff on its way out.
 HOLDERS = ("task", "seat", "trash", "staging")
 
@@ -62,13 +75,15 @@ def work_session_scratch(execution: pathlib.Path) -> pathlib.Path:
     import secrets
 
     parent = pathlib.Path(work_domain.staging_path("scratch"))
-    work_domain.make_dirs(parent)
+    work_domain.make_dirs(parent, mode=0o755)
     for _attempt in range(8):
         path = parent / f"obs-{secrets.token_hex(4)}"
         if _overlaps(path, execution):
             raise ValueError(f"{path} overlaps the execution tree {execution}")
         try:
-            work_domain.make_dir(path)
+            work_domain.make_dir(path, mode=0o755)
+        except work_domain.WorkDomainUnsettled:
+            raise  # an unconfirmed allocation is not an available name to retry
         except OSError:
             continue
         if work_domain.kind(path) != "dir":
@@ -93,53 +108,186 @@ def work_download_caches(execution: pathlib.Path) -> List[pathlib.Path]:
 
 
 class ScratchIdentityMismatch(ValueError):
-    """A valid record names an allowed ``obs-*`` path that is a real directory, but under another
-    device/inode than recorded (a reboot can renumber a device): ownership unverified, never repaired."""
+    """A valid record names a real allowed container, but its identity cannot be confirmed.
 
-    def __init__(self, record: pathlib.Path, path: pathlib.Path, recorded: List[int], found: List[int]):
+    Legacy records compare device/inode; schema 2 requires its nonce marker, with no inode fallback.
+    """
+
+    def __init__(self, record: pathlib.Path, path: pathlib.Path, recorded: Any, found: Any, *, basis: str = "dev, ino"):
         self.record, self.path, self.recorded, self.found = record, path, recorded, found
-        super().__init__(f"{path} is not the recorded scratch directory: recorded identity {recorded}, found {found}"
+        self.basis = basis
+        kind = "" if basis == "dev, ino" else f"{basis} "
+        super().__init__(f"{path} is not the recorded scratch directory: recorded {kind}identity {recorded}, found {found}"
                          f" ({record})")
 
 
-def recorded_scratch(record: pathlib.Path) -> pathlib.Path:
-    """Resolve only this host-created short directory, never a link or a replacement inode.
-
-    ``ValueError`` for a record that is a link, malformed (its path or ``[dev, ino]`` included), names a
-    path outside the scratch parents or not an ``obs-*`` directory, or not a real directory;
-    ``ScratchIdentityMismatch`` (a ``ValueError``) only when all of that holds but the directory's
-    device/inode differs from the recorded ones; ``FileNotFoundError`` only when the recorded directory
-    is gone. A record that cannot be read is ``OSError``, a vanished one included: it proves nothing of
-    its scratch."""
+def _scratch_record(record: pathlib.Path) -> Dict[str, Any]:
     if record.is_symlink():
         raise ValueError(f"{record} is not a real ownership record")
     try:
-        row = json.loads(record.read_text(encoding="utf-8"))
+        return json.loads(record.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise OSError(f"scratch ownership record vanished before it was read: {record}") from None
-    path, recorded = pathlib.Path(row["path"]), row["identity"]
-    if not (isinstance(row["path"], str) and isinstance(recorded, list) and len(recorded) == 2
-            and all(type(part) is int for part in recorded)):
+
+
+def _marker_matches(path: pathlib.Path, nonce: str) -> str:
+    """Empty when the regular nofollow marker contains exactly this nonce, else the observed problem.
+
+    Both paths use existing confined opens: a work path descends from its mapping's anchor, never the
+    link/permission fallback of ``work_domain.read_bytes``. Size and read are bounded to the marker's 33 bytes.
+    """
+    from ouroboros.confined_files import open_regular_file
+
+    expected = (nonce + "\n").encode("ascii")
+    marker = path / SCRATCH_MARKER
+    try:
+        with contextlib.ExitStack() as held:
+            spelling = work_domain.work_spelling(marker)
+            if spelling:
+                directory, name = held.enter_context(work_domain._confined_parent(spelling))
+                stream, seen = directory.open(name)
+            else:
+                stream, seen = open_regular_file(path, SCRATCH_MARKER)
+            with stream:
+                if seen.st_size != len(expected):
+                    return "wrong size"
+                return "" if stream.read(len(expected) + 1) == expected else "different nonce"
+    except OSError as exc:
+        return f"unreadable ({type(exc).__name__})"
+
+
+def _recorded_scratch(record: pathlib.Path, row: Dict[str, Any]) -> pathlib.Path:
+    if not isinstance(row["path"], str):
+        raise ValueError(f"{record} records no scratch path")
+    path = pathlib.Path(row["path"])
+    version = row.get("schema_version", 1)
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError(f"{record} has an unknown scratch schema")
+    recorded = row.get("nonce") if version == 2 else row["identity"]
+    if version == 2:
+        if not (isinstance(recorded, str) and len(recorded) == 32
+                and all(part in "0123456789abcdef" for part in recorded)):
+            raise ValueError(f"{record} records no scratch nonce")
+    elif not (isinstance(recorded, list) and len(recorded) == 2 and all(type(part) is int for part in recorded)):
         raise ValueError(f"{record} records no scratch path and device/inode identity")
     if path.parent not in scratch_parents() or not path.name.startswith("obs-"):
         raise ValueError(f"{record} does not name a session scratch directory")
     seen = work_domain.lstat(path)  # a missing temporary directory is a gap, never silently re-created
-    if not stat.S_ISDIR(seen.st_mode):
+    if not stat.S_ISDIR(seen.st_mode) or (version == 2 and getattr(seen, "st_file_attributes", 0) & 0x400):
         raise ValueError(f"{path} is not the recorded scratch directory")
-    if [seen.st_dev, seen.st_ino] != recorded:
+    if version == 2:
+        problem = _marker_matches(path, recorded)
+        if problem:
+            raise ScratchIdentityMismatch(record, path, recorded, problem, basis="marker")
+    elif not _legacy_identity_matches(seen, recorded):
         raise ScratchIdentityMismatch(record, path, recorded, [seen.st_dev, seen.st_ino])
     return path
 
 
+def _legacy_identity_matches(seen: Any, recorded: List[int], *, windows: bool = os.name == "nt") -> bool:
+    """A schema-1 ``[st_dev, st_ino]``. On Windows CPython 3.12+ reports the volume's 64-bit serial and 3.10 its
+    low 32 bits, and a record may come from either side of the move: there the low halves are compared."""
+    if [seen.st_dev, seen.st_ino] == recorded:
+        return True
+    return windows and [seen.st_dev & 0xFFFFFFFF, seen.st_ino] == [recorded[0] & 0xFFFFFFFF, recorded[1]]
+
+
+def recorded_scratch(record: pathlib.Path) -> pathlib.Path:
+    """Read-only identity check returning the recorded container, never its granted workspace.
+
+    Invalid records/paths raise ``ValueError``, unreadable records ``OSError``, a real container with
+    unverified identity ``ScratchIdentityMismatch``. Only a missing container raises ``FileNotFoundError``:
+    a missing/linked/special/oversized nonce marker never means the container is absent. No record or marker
+    is repaired, touched or upgraded, even when a legacy record still matches.
+    """
+    return _recorded_scratch(record, _scratch_record(record))
+
+
+def _workspace(container: pathlib.Path) -> pathlib.Path:
+    """The empty workspace on allocation, or the same real workspace on reuse; no link/junction is granted."""
+    path = container / SCRATCH_WORKSPACE
+    try:
+        seen = work_domain.lstat(path)
+    except FileNotFoundError:
+        if work_domain.is_work(path):
+            work_domain.make_dir(path)
+        else:
+            path.mkdir()
+        seen = work_domain.lstat(path)
+    if not stat.S_ISDIR(seen.st_mode) or getattr(seen, "st_file_attributes", 0) & 0x400:
+        raise ValueError(f"{path} is not a real scratch workspace")
+    return path
+
+
+def prepare_session_scratch(record: pathlib.Path, execution: pathlib.Path) -> pathlib.Path:
+    """Under the caller's preparation lock: reuse its recorded workspace or allocate a schema-2 container.
+
+    Publish only after container -> marker -> empty workspace. Failed preparation rolls back only those
+    known names of this fresh, ungranted allocation, never a previous container. A missing legacy directory
+    may allocate anew, but a mismatch never upgrades or adopts it. Restoration with the same nonce at the
+    same address deliberately inherits the old holder and cleanup, including files added after restoration.
+    """
+    from ouroboros.test_environment import git_ancestor, new_scratch_identity, session_scratch_parent, write_scratch_marker
+    from ouroboros.utils import atomic_write_json
+    from ouroboros.workspace_preflight import _owned_directory
+
+    if os.path.lexists(record):
+        row = _scratch_record(record)
+        try:
+            path = _recorded_scratch(record, row)
+        except FileNotFoundError:
+            pass  # OS aging may have removed it; a literal retry never prepares again
+        else:
+            if git_ancestor(path) is not None or _overlaps(path, execution):
+                raise ValueError(f"{path} overlaps a Git working tree or the execution root")
+            return _workspace(path) if row.get("schema_version") == 2 else path
+    managed = work_domain.managed()
+    parent = pathlib.Path(work_domain.staging_path("scratch")) if managed else session_scratch_parent().resolve()
+    if not managed and git_ancestor(parent) is not None:
+        raise ValueError(f"{parent} is inside a Git working tree")
+    path = work_session_scratch(execution) if managed else pathlib.Path(tempfile.mkdtemp(prefix="obs-", dir=parent))
+    row = new_scratch_identity(path)
+    marker, nonce = path / SCRATCH_MARKER, row["nonce"]
+    try:
+        if managed:
+            # A work user may differ from the service UID. This new, non-secret marker must be readable
+            # through the service's confined open too, without a work-domain cat/link fallback.
+            work_domain.write_file(marker, (nonce + "\n").encode("ascii"), mode=0o644)
+        else:
+            _owned_directory(parent, (path.name,), execution)
+            write_scratch_marker(path, nonce)
+        workspace = _workspace(path)
+        if managed and (problem := _marker_matches(path, nonce)):
+            raise ValueError(f"new scratch marker is not readable by its owner: {problem}")
+        atomic_write_json(record, row, fsync=True)
+    except work_domain.WorkDomainUnsettled:
+        raise  # its writer may still be using this new container; custody must settle it, not a rollback
+    except Exception:
+        # No session received this new allocation: remove only our two known children, then the empty container.
+        if managed:
+            if work_domain.kind(path / SCRATCH_WORKSPACE) == "dir":
+                work_domain.remove_empty_dir(path / SCRATCH_WORKSPACE)
+            work_domain.remove(marker)
+            work_domain.remove_empty_dir(path)
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                (path / SCRATCH_WORKSPACE).rmdir()
+            with contextlib.suppress(FileNotFoundError):
+                marker.unlink()
+            path.rmdir()
+        raise
+    return workspace
+
+
 def identity_hold(record: pathlib.Path, exc: ScratchIdentityMismatch) -> Dict[str, Any]:
-    """The ``identity_unverified`` hold on a record whose scratch has another device/inode: the scratch
+    """The ``identity_unverified`` hold on an unconfirmed marker or legacy device/inode: the scratch
     and its record stay as they are (another run may still use that directory), since the record's time.
     The example leads with what a bounded hold note must keep: the scratch, both identities, then the
     record's key (its holder entry is renamed by the handoff; ``scratch_records`` names the file)."""
     since = None
     with contextlib.suppress(OSError):
         since = record.lstat().st_mtime
-    example = f"{exc.path} [dev, ino] {exc.recorded} != {exc.found}; record {record.parent.name}"
+    example = f"{exc.path} [{exc.basis}] {exc.recorded} != {exc.found}; record {record.parent.name}"
     return {"class": IDENTITY_UNVERIFIED, "example": example, "since": since,
             "recorded_identity": exc.recorded, "found_identity": exc.found}
 
@@ -242,36 +390,49 @@ def scratch_capture_owed(owner: pathlib.Path, owed: Any) -> str:
     return owed_output_hold(None, path, owed=owed)
 
 
-def release_session_scratch(drive: pathlib.Path, *, owed: Any = ()) -> List[Dict[str, Any]]:
+def release_session_scratch(drive: pathlib.Path, *, owed: Any = (), task_id: str = "",
+                            accept: Optional[Callable[[str, pathlib.Path], str]] = None) -> List[Dict[str, Any]]:
     """Delete the scratch every ownership record under DRIVE (and its nested child layouts) names:
     the drive's custody retired (``task_custody.remove_custody_trash`` calls this on each trash entry,
     the handoff entries of single records included, always with its pass's ``owed`` selection).
 
     Returns the records whose scratch stays in place, each with ``owner`` (the record's folder) and
     ``path``: a kept service's outputs still owed a capture (``_capture_owed_hold``), a producer retention
-    marker's (``retention_hold``, #2708) and a real ``obs-*`` directory whose device/inode differs from its
-    valid record's (``identity_hold``; neither it nor its markers are touched). The caller keeps each as a
-    visible hold, never deleting its record with the entry; the other records are still released. An
-    unreadable or malformed record, a foreign, linked or non-directory path, or an incomplete removal is
-    ``OSError``: the entry and its pointer wait for the next pass. No temp-root scan, arbitrary symlink
-    following or independent sweeper."""
+    marker's (``retention_hold``, #2708), a task-keyed record whose holder's task (TASK_ID for DRIVE, each
+    nested layout's own) still holds (``accept(task, record)`` at the effect) and a real container whose record cannot confirm identity
+    (``identity_hold``; neither it nor its markers are touched). Every task-keyed row names that holder's
+    ``task_id``, whatever holds it, so its handoff entry carries its own task (a seat-keyed one's does
+    not). The caller keeps each as a visible hold, never deleting its record with the entry; the other records are still
+    released. An unreadable or malformed record, a foreign, linked or non-directory path, or an
+    incomplete removal is ``OSError``: the entry and its pointer wait for the next pass. No temp-root
+    scan, arbitrary symlink following or independent sweeper."""
     from ouroboros.force_remove import force_rmtree
+    from ouroboros.workspace_preflight import SEAT_SCRATCH_KEY_PREFIX
 
     retained: List[Dict[str, Any]] = []
     for owner in owner_records(drive):
+        since = None
         record = owner / "scratch.json"
+        keyed = {"task_id": task_id} if task_id and not owner.name.startswith(SEAT_SCRATCH_KEY_PREFIX) else {}
         try:
             path = recorded_scratch(record)
         except FileNotFoundError:  # a prior pass, or a person, already removed this scratch (never the record)
             continue
         except ScratchIdentityMismatch as exc:  # ownership unproven: kept, and so is its record, never deleted
-            retained.append({**identity_hold(record, exc), "owner": owner, "path": str(exc.path)})
+            retained.append({**identity_hold(record, exc), **keyed, "owner": owner, "path": str(exc.path)})
             continue
         except (ValueError, KeyError, TypeError) as exc:
             raise OSError(f"invalid scratch ownership record: {record}") from exc
         hold = _capture_owed_hold(record, path, owed) or retention_hold(path)
+        if hold is None and keyed and accept is not None:
+            why = accept(task_id, record)
+            if why:
+                with contextlib.suppress(OSError):
+                    since = record.lstat().st_mtime
+                hold = {"class": why, "example": f"{path}: scratch release held ({why})",
+                        "since": since}
         if hold is not None:
-            retained.append({**hold, "owner": owner, "path": str(path)})  # another's to keep: never deleted here
+            retained.append({**hold, **keyed, "owner": owner, "path": str(path)})  # another's to keep: never deleted here
             continue
         if work_domain.is_work(path):  # a work scratch is removed by the work domain, its identity checked above
             work_domain.remove_tree(path)
@@ -282,32 +443,67 @@ def release_session_scratch(drive: pathlib.Path, *, owed: Any = ()) -> List[Dict
         if os.path.lexists(path):
             raise OSError(f"session scratch removal incomplete: {path}")
     for nested in _nested_drives(drive):
-        retained += release_session_scratch(nested, owed=owed)
+        retained += release_session_scratch(nested, owed=owed, task_id=_layout_task(drive, nested), accept=accept)
     return retained
 
 
-def release_trash_entry(data_root: Any, entry: pathlib.Path, *, owed: Any = None) -> Tuple[bool, List[Dict[str, Any]]]:
+def _layout_task(drive: pathlib.Path, nested: pathlib.Path) -> str:
+    """The task a nested child layout belongs to: ``task_drives/<id>`` or ``state/headless_tasks/<id>/data``."""
+    return nested.name if nested.parent == drive / "task_drives" else nested.parent.name
+
+
+def entry_task_id(name: str) -> str:
+    """The task a custody trash or staging entry name carries: ``<id>+scratch-<token>`` (a released record's)
+    or ``<id>-<token>`` (a moved drive's; a seat home's carries its home name instead)."""
+    from ouroboros.workspace_preflight import _RELEASE_MARK
+
+    return name.split(_RELEASE_MARK, 1)[0] if _RELEASE_MARK in name else name.rsplit("-", 1)[0]
+
+
+def release_finalized(row: Dict[str, Any]) -> bool:
+    return bool(row.get(RELEASE_ACCEPTED)) and row.get(RELEASE_SYNCED) is True
+
+
+def release_trash_entry(data_root: Any, entry: pathlib.Path, *, owed: Any = None,
+                        reads: Any = None, live: Any = None, members: Any = None) -> Tuple[bool, List[Dict[str, Any]]]:
     """Release the scratch one custody trash ENTRY's records name (its ``data/`` and nested layouts too) and
-    hand each record whose scratch stays (owed a capture, a retention marker's, or an ``identity_unverified`` one:
-    only its record file moves, never the scratch) to an entry of its own (``workspace_preflight._retire_record``)
-    unless ENTRY is such a handoff already, which then stays: ``(stays, the retained rows)``. Every failure
-    raises, so ``task_custody.remove_custody_trash`` keeps the entry and every record still in it; a failed
-    handoff carries the retained rows (``retained``), whose scratch stands whether its record moved or not.
-    ``owed``: the pass's one selection (``owed_declarations``); read here when the caller passes none."""
+    hand each record whose scratch stays (owed a capture, a retention marker's, its parent line's, or an
+    ``identity_unverified`` one: only its record file moves, never the scratch) to an entry of its own
+    (``workspace_preflight._retire_record``; a task-keyed one's carries its own task) unless ENTRY is such
+    a handoff already, which then stays: ``(stays, the retained rows)``. Every failure raises, so
+    ``task_custody.remove_custody_trash`` keeps the entry and every record still in it; a failed handoff
+    carries the retained rows (``retained``), whose scratch stands whether its record moved or not.
+    ``owed``: the pass's one selection (``owed_declarations``); read here when the caller passes none. A
+    child’s deletion is accepted through ``_accept_child_release`` before bytes go. READS, LIVE and
+    MEMBERS share the pass’s queue snapshot and preliminary parent proofs; final checks are fresh.
+    This runs in the maintenance child, without the supervisor’s maps."""
     from ouroboros.tools.kept_service_outputs import owed_declarations
     from ouroboros.workspace_preflight import _RELEASE_MARK, _retire_record
 
     selection = owed_declarations(data_root) if owed is None else owed
-    retained: List[Dict[str, Any]] = []
+
+    reads, members, live = _trash_read_view(data_root, reads=reads, live=live, members=members)
+    task_id, retained = entry_task_id(entry.name), []
+
+    def accept(task: str, record: pathlib.Path) -> str:
+        return _accept_child_release(data_root, task, record, live, reads=reads, members=members)
+
     if entry.is_dir() and not entry.is_symlink():
-        retained = release_session_scratch(entry, owed=selection)
+        retained = release_session_scratch(entry, owed=selection, task_id=task_id, accept=accept)
         if (entry / "data").is_dir() and not (entry / "data").is_symlink():
-            retained += release_session_scratch(entry / "data", owed=selection)
+            retained += release_session_scratch(entry / "data", owed=selection, task_id=task_id, accept=accept)
     stays = bool(retained) and _RELEASE_MARK in entry.name
     try:
         for row in [] if stays else retained:
-            if not _retire_record(pathlib.Path(data_root), entry.name.split("+", 1)[0].rsplit("-", 1)[0], row["owner"]):
-                raise OSError(f"retained scratch record not handed on: {row['owner']}")
+            from ouroboros.task_custody import task_custody_lock
+
+            own = row.get("task_id") or task_id
+            # Handoff keeps ownership: serialize relocation with Keep's refreshed inventory.
+            lock = (task_custody_lock(data_root, own) if row.get("task_id") and child_parent(data_root, own)
+                    else contextlib.nullcontext(True))
+            with lock as locked:
+                if not locked or not _retire_record(pathlib.Path(data_root), own, row["owner"]):
+                    raise OSError(f"retained scratch record not handed on: {row['owner']}")
     except Exception as exc:
         exc.retained = retained  # an earlier record may already sit in its own entry, unseen by this pass
         raise
@@ -356,18 +552,28 @@ def seat_hold(data_root: Any, key: str) -> str:
     return SEAT_OPEN if _checking_area_present(unindexed(home, "area")) else ""
 
 
+def _run_hold(root: pathlib.Path, task_id: str, *, wait: bool = True) -> str:
+    """One task's canonical run and pending-start facts; an unknown read is not closure."""
+    from ouroboros.delegate_custody_current import task_snapshot
+    from ouroboros.store import STORE_WAIT_SEC
+
+    try:
+        held = task_snapshot(root, task_id, wait_sec=STORE_WAIT_SEC if wait else 0)
+        return "run_open" if held["pending"] or any(not run.settled for run in held["runs"].values()) else ""
+    except Exception:
+        return "custody_unreadable"
+
+
 def task_hold(data_root: Any, task_id: str, live: Any) -> str:
     """Why a task still holds its snapshot or in-place scratch, ``""`` when it is proven over and no
-    delegated run is open. The decision is ``subagent_worktrees._task_proven_over`` and
-    ``workspace_preflight._runs_still_open``; the typed word names which of their facts failed
+    delegated run or pending start is open. The decision is ``subagent_worktrees._task_proven_over`` and
+    ``_run_hold``; the typed word names which of their facts failed
     (the order they read them in): ``task_not_terminal``, ``task_live``, ``liveness_unknown``,
     ``store_busy`` (the probe met a contended store: this task's hold, never the pass's end),
     ``owner_processes_live``, ``run_open``, ``custody_unreadable``."""
     from ouroboros.body_candidate import _recorded_terminal
-    from ouroboros.delegate_custody_current import task_snapshot
     from ouroboros.store import StoreBusy
     from ouroboros.subagent_worktrees import _task_proven_over
-    from ouroboros.workspace_preflight import _runs_still_open
 
     root = pathlib.Path(data_root)
     if not _task_proven_over(task_id, root, live):
@@ -378,13 +584,195 @@ def task_hold(data_root: Any, task_id: str, live: Any) -> str:
         except StoreBusy:
             return "store_busy"
         return "task_live" if probe is True else "liveness_unknown" if probe is not False else "owner_processes_live"
-    if _runs_still_open(root, task_id):
-        try:
-            task_snapshot(root, task_id)
-        except Exception:
-            return "custody_unreadable"
-        return "run_open"
+    return _run_hold(root, task_id)
+
+
+def snapshot_probe(data_root: Any, *, reads: Any) -> Callable[[str], Optional[bool]]:
+    """A trash pass has no supervisor maps. Only a fresh published census proves absence."""
+    from ouroboros.task_status import _snapshot_is_stale
+
+    try:
+        snapshot = reads.queue_snapshot(data_root)
+        if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
+            return lambda _task: None
+        members = {str(row.get("id") or row.get("task_id") or (row.get("task") or {}).get("id") or "")
+                   for lane in ("running", "pending") for row in snapshot.get(lane) or () if isinstance(row, dict)}
+    except Exception:
+        return lambda _task: None
+    return lambda task: None if _snapshot_is_stale(snapshot) else task in members
+
+
+def _trash_read_view(data_root: Any, *, reads: Any = None, live: Any = None,
+                     members: Any = None) -> Tuple[Any, Any, Callable[[str], Optional[bool]]]:
+    """A trash pass's one shared read view ``(reads, members, live)``; supplied parts stay as given."""
+    from ouroboros.task_reads import TaskReads
+
+    reads = reads if reads is not None else TaskReads(data_root)
+    members = members if members is not None else {}
+    return reads, members, live if live is not None else snapshot_probe(data_root, reads=reads)
+
+
+def _line_member_open(root: pathlib.Path, member: str, live: Any, *, reads: Any = None,
+                      check_processes: bool = True) -> str:
+    """Why a line member is not over: terminal, local liveness and delegated custody must all close.
+
+    Open task, process, run or pending start: ``parent_decision_pending``. Absent/unreadable row
+    (including a verified successor not written yet), unknown liveness or unreadable custody: ``parent_unreadable``.
+    The locked recheck uses the prior process proof but rereads custody without waiting for the store."""
+    from ouroboros.body_candidate import _recorded_terminal
+    from ouroboros.subagent_worktrees import _task_proven_over
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import FINAL_STATUSES, effective_task_result
+
+    try:
+        record = load_task_result(root, member, strict=True)
+        if not record:
+            return PARENT_UNREADABLE  # a recorded parent the store does not hold proves no end
+        if live(member) is True:
+            return PARENT_DECISION_PENDING  # a positive census already holds; no queue projection needed
+        if effective_task_result(root, record, materialize_artifacts=False, reads=reads).get("status") not in FINAL_STATUSES:
+            return PARENT_DECISION_PENDING
+        over = _task_proven_over(member, root, live) if check_processes else False
+        probe = False if over else live(member)
+        if not check_processes and probe is False:
+            over = _recorded_terminal(member, root)  # process closure was proved before custody
+        if over:
+            why = _run_hold(root, member, wait=check_processes)
+            return {"": "", "run_open": PARENT_DECISION_PENDING, "custody_unreadable": PARENT_UNREADABLE}[why]
+    except Exception:
+        return PARENT_UNREADABLE
+    return PARENT_UNREADABLE if probe is None else PARENT_DECISION_PENDING
+
+
+def parent_hold(data_root: Any, task_id: str, live: Any, *, reads: Any = None,
+                members: Any = None, basis: Optional[List[str]] = None, _check_processes: bool = True) -> str:
+    """An exact disposition releases a child's scratch. Otherwise its parent and every Continue
+    successor must be proven over, including delegated runs and pending starts. Unreadable holds.
+    BASIS receives the authority for release: the physical deciding result, or the closed chain.
+    Acceptance compares the same basis under the child's and the deciding result or tail's locks.
+    Only preliminary process proofs can be reused there. The probe under custody must not take Q.
+    """
+    from ouroboros.review_thread_retention import _continued_roots
+    from ouroboros.task_results import load_task_result, validate_task_id
+    from ouroboros.task_status import effective_task_result
+    from ouroboros.tools.join_ledger import (
+        _child_disposition_lineage, _child_disposition_state, _current_child_result_disposition,
+    )
+
+    root = pathlib.Path(data_root)
+    try:
+        validate_task_id(task_id)
+    except ValueError:
+        return ""  # not a task (a seat home's trash entry): nothing records a parent
+    try:
+        record = load_task_result(root, task_id, strict=True)
+        parent = _child_disposition_lineage(record)[1] if record else ""
+        if not parent or parent == task_id:
+            return ""
+        # The full result includes the physical retry/replica bytes the deciding writer hashed.
+        result = effective_task_result(root, record)
+        exact = _current_child_result_disposition(result)
+        if (exact or _child_disposition_state(result)) in ("integrated", "irrelevant", "cancelled"):
+            physical = str(result.get("task_id") or result.get("id") or "")
+            if not physical:
+                return PARENT_UNREADABLE
+            if basis is not None:
+                basis.extend(("disposition", physical))
+            return ""
+        successors = _continued_roots(root, parent)
+    except Exception:
+        return PARENT_UNREADABLE
+    if successors is None:
+        return PARENT_UNREADABLE
+    chain = [parent, *(name for name, _document in successors)]
+    if basis is not None:
+        basis.extend(("line", *chain))
+    for member in chain:
+        if members is not None and member in members:
+            why = members[member]
+        else:
+            why = _line_member_open(root, member, live, reads=reads, check_processes=_check_processes)
+            if members is not None:
+                members[member] = why
+        if why:
+            return why
     return ""
+
+
+def child_parent(data_root: Any, task_id: str) -> str:
+    """The recorded parent only, no status projection or inferred root; unreadable raises."""
+    from ouroboros.task_results import load_task_result, validate_task_id
+    from ouroboros.tools.join_ledger import _child_disposition_lineage
+
+    try:
+        validate_task_id(task_id)
+    except ValueError:
+        return ""
+    row = load_task_result(data_root, task_id, strict=True)
+    parent = _child_disposition_lineage(row)[1] if row else ""
+    return parent if parent != task_id else ""
+
+
+def _sync_release_record(record: pathlib.Path) -> None:
+    """Sync a record rename, retrying a failed folder sync once. A lasting failure keeps the scratch.
+    ``utils.fsync_folder`` defines the file-only durability limit where directory sync is unsupported."""
+    from ouroboros.utils import fsync_folder
+
+    for attempt in (0, 1):
+        try:
+            fsync_folder(record.parent)
+            return
+        except OSError:
+            if attempt:
+                raise
+
+
+def _accept_child_release(root: Any, task: str, record: pathlib.Path, live: Any, *, reads: Any, members: Any) -> str:
+    """End child ownership under the locks shared with Keep, dispositions and Continue. Handoff
+    alone leaves it owned. Recheck the release basis under custody after the process census;
+    if it changed, retry with the new locks next pass. A failed intent sync never skips that recheck.
+    Once confirmed, the acceptance is irreversible; sync its record before off-lock deletion.
+    Root and seat handoffs otherwise keep their own retirement contracts.
+    """
+    from ouroboros.owner_keep import is_kept
+    from ouroboros.store import acquisition_budget
+    from ouroboros.task_custody import task_custody_lock
+    from ouroboros.utils import atomic_write_json, utc_now_iso
+    from ouroboros.workspace_preflight import handoff_owner_unproven
+
+    try:
+        row = _scratch_record(record)
+        if handoff_owner_unproven(record, task):
+            return OWNER_UNPROVEN
+        if release_finalized(row):
+            _sync_release_record(record)  # the proof's rename may not yet have reached disk
+            return ""
+        if not child_parent(root, task):
+            return ""
+        basis: List[str] = []
+        why = parent_hold(root, task, live, reads=reads, members=members, basis=basis)
+        if why:
+            return why
+        if not basis:
+            return PARENT_UNREADABLE
+        with acquisition_budget(0), contextlib.ExitStack() as held:
+            for member in sorted({task, basis[-1]}):
+                if not held.enter_context(task_custody_lock(root, member, timeout_sec=0)):
+                    return "busy"
+            if is_kept(root, task):
+                return "owner_keep"
+            current: List[str] = []
+            why = parent_hold(root, task, live, basis=current, _check_processes=False)
+            if why or current != basis:
+                return why or PARENT_DECISION_PENDING
+            intent = {**_scratch_record(record), RELEASE_ACCEPTED: utc_now_iso(), RELEASE_SYNCED: False}
+            atomic_write_json(record, intent, fsync=True)
+            _sync_release_record(record)
+            atomic_write_json(record, {**intent, RELEASE_SYNCED: True}, fsync=True)
+            _sync_release_record(record)  # neither rename can be lost before deletion starts
+        return ""
+    except Exception:
+        return PARENT_UNREADABLE
 
 
 def _iso(stamp: Optional[float]) -> str:
@@ -408,10 +796,49 @@ def aggregate_holds(rows: List[Tuple[str, str, Optional[float]]]) -> List[Dict[s
     return [{**hold, "since": _iso(hold["since"])} for _kind, hold in sorted(holds.items())]
 
 
-def _holders(root: pathlib.Path) -> Iterator[Tuple[str, str, pathlib.Path]]:
-    """``(holder kind, task id, drive or home)`` for every place a record may sit, through no link."""
+def _handoff_holders(root: pathlib.Path) -> Iterator[Tuple[str, str, pathlib.Path]]:
+    """Trash/staging records, including each nested drive's own task; unreadable listings raise."""
     from ouroboros.task_custody import _STAGING_DIR, _TRASH_DIR
 
+    def drives(holder: pathlib.Path, task: str) -> Iterator[Tuple[str, pathlib.Path]]:
+        yield task, holder
+        for nested in _nested_drives(holder):
+            yield from drives(nested, _layout_task(holder, nested))
+
+    for kind, folder in (("trash", root / _TRASH_DIR), ("staging", root / _STAGING_DIR)):
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        for entry in sorted(folder.iterdir()):
+            if entry.is_dir() and not entry.is_symlink():
+                for task, holder in drives(entry, entry_task_id(entry.name)):
+                    yield kind, task, holder
+                data = entry / "data"
+                if data.is_dir() and not data.is_symlink():
+                    for task, holder in drives(data, entry_task_id(entry.name)):
+                        yield kind, task, holder
+
+
+def child_handoff_records(root: pathlib.Path, task: str) -> Iterator[pathlib.Path]:
+    """A child's handoffs for Keep, no seats or roots and no inferred ancestry.
+
+    Read again under that child's custody lock: a handoff may move between inventory and Keep.
+    Only a confirmed acceptance ends ownership; do not attribute a direct handoff by name alone.
+    """
+    from ouroboros.workspace_preflight import SEAT_SCRATCH_KEY_PREFIX, handoff_owner_unproven
+
+    if not child_parent(root, task):
+        return
+    for _kind, own, holder in _handoff_holders(root):
+        if own == task:
+            for owner in owner_records(holder):
+                record = owner / "scratch.json"
+                if (not owner.name.startswith(SEAT_SCRATCH_KEY_PREFIX)
+                        and not handoff_owner_unproven(record, task)):
+                    yield record
+
+
+def _holders(root: pathlib.Path) -> Iterator[Tuple[str, str, pathlib.Path]]:
+    """``(holder kind, task id, drive or home)`` for every place a record may sit, through no link."""
     def listing(folder: pathlib.Path) -> List[pathlib.Path]:
         try:
             return sorted(entry for entry in folder.iterdir() if entry.is_dir() and not entry.is_symlink()) \
@@ -430,32 +857,29 @@ def _holders(root: pathlib.Path) -> Iterator[Tuple[str, str, pathlib.Path]]:
             with contextlib.suppress(OSError, ValueError, AttributeError):
                 marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
                 yield "seat", str(marker.get("task_id") or ""), home
-    for kind, folder in (("trash", root / _TRASH_DIR), ("staging", root / _STAGING_DIR)):
-        for entry in listing(folder):
-            task_id = entry.name.split("+", 1)[0].rsplit("-", 1)[0]
-            yield kind, task_id, entry
-            if (entry / "data").is_dir() and not (entry / "data").is_symlink():
-                yield kind, task_id, entry / "data"
-            for nested in _nested_drives(entry):
-                yield kind, nested.parent.name if nested.name == "data" else nested.name, nested
+    with contextlib.suppress(OSError):
+        yield from _handoff_holders(root)
 
 
 def scratch_records(data_root: Any, live: Any = None, *, include_holds: bool = True) -> List[Dict[str, Any]]:
     """Every session scratch ownership record of the install, for Storage's ``session_scratch`` place:
     ``holder`` (one of ``HOLDERS``), ``task_id``, ``key``, ``record`` (the file), ``path`` (the scratch,
     validated as ``recorded_scratch`` does: ``valid`` False and ``problem`` when it names a foreign
-    path, a replaced inode or a link; ``missing`` when the directory is gone), ``hold`` (the typed
-    reason it is kept: ``task_hold`` words, ``seat_open``, ``owner_keep``, ``producer_retained``,
+    path, an unconfirmed identity or a link; ``missing`` when the container is gone), ``hold`` (the typed
+    reason it is kept: ``task_hold`` then ``parent_hold`` words (all unaccepted trash/staging records:
+    its parent hold and child Keep), ``owner_unproven`` (unbound handoff), ``seat_open``, ``owner_keep``, ``producer_retained``,
     ``identity_unverified`` with ``recorded_identity``/``found_identity``, never ``valid``, any holder;
     ``""`` when its release is due or under way) and ``since`` (ISO, the record's time, or the
     marker's for a producer hold). ``live`` is the supervisor's liveness probe; without one a task's
     liveness reads unknown. Records only, no temp-root scan; an unreadable holder or record is one row.
     ``include_holds=False`` validates paths for counting without reading holder/retention proofs."""
     from ouroboros.owner_keep import is_kept
+    from ouroboros.task_reads import TaskReads
     from ouroboros.tools.kept_service_outputs import owed_declarations, owed_output_hold
-    from ouroboros.workspace_preflight import SEAT_SCRATCH_KEY_PREFIX
+    from ouroboros.workspace_preflight import SEAT_SCRATCH_KEY_PREFIX, handoff_owner_unproven
 
-    root, rows, task_holds = pathlib.Path(data_root), [], {}
+    root, rows, task_holds, queue, members = pathlib.Path(data_root), [], {}, [], {}
+    reads = TaskReads(root)
     owed = owed_declarations(root) if include_holds else ()  # one read for every record of this view
     for kind, task_id, holder in _holders(root):
         try:
@@ -503,8 +927,24 @@ def scratch_records(data_root: Any, live: Any = None, *, include_holds: bool = T
                     row["hold"] = seat_hold(root, owner.name)
                 else:
                     if task_id not in task_holds:
-                        task_holds[task_id] = task_hold(root, task_id, live)
+                        task_holds[task_id] = task_hold(root, task_id, live) or parent_hold(
+                            root, task_id, live, reads=reads, members=members)
                     row["hold"] = task_holds[task_id]
+            elif (kind in ("trash", "staging")
+                  and not owner.name.startswith(SEAT_SCRATCH_KEY_PREFIX)):
+                try:
+                    recorded = _scratch_record(record)
+                    if handoff_owner_unproven(record, task_id):
+                        row["hold"] = OWNER_UNPROVEN
+                    elif not release_finalized(recorded):
+                        if ("trash", task_id) not in task_holds:
+                            queue = queue or [snapshot_probe(root, reads=reads)]
+                            task_holds[("trash", task_id)] = (
+                                "owner_keep" if child_parent(root, task_id) and is_kept(root, task_id)
+                                else parent_hold(root, task_id, queue[0], reads=reads, members=members))
+                        row["hold"] = task_holds[("trash", task_id)]
+                except Exception:
+                    row["hold"] = PARENT_UNREADABLE
             if kind in ("task", "seat") and not row["hold"] and task_id and is_kept(root, task_id):
                 row["hold"] = "owner_keep"
             if owed and not row["hold"]:
@@ -516,14 +956,24 @@ def scratch_records(data_root: Any, live: Any = None, *, include_holds: bool = T
 __all__ = [
     "HOLDERS",
     "IDENTITY_UNVERIFIED",
+    "OWNER_UNPROVEN",
+    "PARENT_DECISION_PENDING",
+    "PARENT_UNREADABLE",
     "PRODUCER_RETAINED",
     "ScratchIdentityMismatch",
     "SEAT_OPEN",
     "aggregate_holds",
+    "entry_task_id",
+    "child_parent",
+    "child_handoff_records",
+    "RELEASE_ACCEPTED",
     "has_record",
     "identity_hold",
     "owner_records",
+    "parent_hold",
+    "prepare_session_scratch",
     "recorded_scratch",
+    "release_finalized",
     "release_seat_scratch",
     "release_session_scratch",
     "release_trash_entry",
@@ -531,6 +981,7 @@ __all__ = [
     "scratch_capture_owed",
     "scratch_records",
     "seat_hold",
+    "snapshot_probe",
     "task_hold",
 ]
 

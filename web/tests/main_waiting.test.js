@@ -6,9 +6,12 @@ import test from 'node:test';
 import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
 import { stampNodeTimestamp } from '../modules/chat_activity.js';
 import { createMainWaiting } from '../modules/main_waiting.js';
+import { createTaskResumeButton, resumeEligible, taskControlBusy } from '../modules/task_control_menu.js';
 import { resumeAttemptWords } from '../modules/work_status.js';
 
 const turn = () => new Promise(resolve => setTimeout(resolve, 0));
+// Nothing of the task pending: no request awaits its answer, no Resume the read that reconciles it (the one registry).
+const free = id => resumeEligible(id, () => true);
 const find = (node, predicate) => predicate(node) ? node : node.children.reduce((found, child) => found || find(child, predicate), null);
 const question = (id, patch = {}) => ({ task_id: 'task-1', quiz_id: id, project_id: 'project-1', project_chat_id: 12,
     project_name: 'Build', quiz_state: 'open', question: `Question ${id}?`, options: ['Yes', 'No'],
@@ -359,6 +362,23 @@ test('the reason names what the task needs from the owner', t => {
     assert.equal(reason('resume').textContent, '');
 });
 
+test('a native action keeps its source when it gains a Project or changes its required action', t => {
+    const main = mainPage(t);
+    const native = action('index', { project_id: '', project_name: '', task_name: '', suggested_name: 'Index the atlas' });
+    main.waiting.snapshot(census({ actions: [native] }));
+    const message = main.actionNode('index');
+    const pointer = () => find(message, node => node.dataset.intent === 'open-project');
+    const resume = find(message, node => node.dataset.resumeRun === '1');
+    assert.equal(message.children[1].children[0].children[0].textContent, 'Index the atlas');
+    assert.ok(!pointer() && !resume.disabled);
+    main.waiting.snapshot(census({ actions: [{ ...native, project_id: 'maps', project_name: 'Maps',
+        phase: 'working', can_resume: false, attention_reason: 'model_access' }] }));
+    assert.equal(main.actionNode('index'), message);
+    assert.equal(pointer().getAttribute('aria-label'), 'Open project Maps');
+    assert.ok(resume.hidden && resume.disabled);
+    assert.equal(find(message, node => node.classList.contains('owner-action-reason')).textContent, 'Needs you to restore model access.');
+});
+
 test('the pause row\'s Project reference does not repeat a title that already names the Project', t => {
     // A nameless work is titled by its Project; the capsule beside that title reads `Project` (audit 05.11, U014).
     const main = mainPage(t);
@@ -482,8 +502,10 @@ test('the pill goes to the oldest target off screen, then onward past what is on
     const step = async () => {
         await main.press();
         const node = [first, paused, last].find(candidate => candidate.getBoundingClientRect().top === 72);
+        // An action lands on its explicit Resume door (owner 18.11, A); a question, on its text.
+        const door = node === paused ? find(node, candidate => candidate.dataset?.resumeRun === '1') : null;
         landed.push([node === first ? 'first' : node === paused ? 'paused' : node === last ? 'last' : '?',
-            document.activeElement === (node.querySelector('.chat-quiz-question') || node)]);
+            document.activeElement === (door || node.querySelector('.chat-quiz-question') || node)]);
     };
     await step();
     assert.equal(main.shown().down, true, 'next: the action below');
@@ -494,10 +516,324 @@ test('the pill goes to the oldest target off screen, then onward past what is on
     await step();
     await step();
     assert.deepEqual(landed, [['first', true], ['last', true], ['first', true], ['paused', true]],
-        'each lands just under the header with focus on the question text (the message itself for an action)');
+        'each lands just under the header with focus on the question text (the action\'s own Resume door)');
     assert.equal(paused.tabIndex, -1, 'the action message is a programmatic focus target, not a tab stop');
     assert.equal(main.calls.reading, 4, 'every landing claims the reading position');
     assert.deepEqual([main.calls.mounted, main.calls.revealed], [[], []], 'loaded cards need no mounting');
+});
+
+test('the pill lands a target below the header\'s frosted edge, as every landing in the room does', async t => {
+    const main = mainPage(t);
+    // The header's edge reaches 32 px below it (style.css "A room's edges"); the test above pins the bar alone (72).
+    const doc = main.page.ownerDocument;
+    doc.defaultView = { getComputedStyle: node => ({
+        getPropertyValue: name => (name === '--edge-reach' && node.className === 'chat-page-header' ? '32px' : '') }) };
+    t.after(() => { delete doc.defaultView; });
+    main.filler('2020-01-01T08:00:00Z');
+    const first = main.card(question('first'));
+    main.filler('2020-01-01T10:00:00Z');
+    main.filler('2020-01-01T11:00:00Z');
+    main.feed.scrollTop = 2 * ROW - 72;  // reading below the question
+    main.waiting.snapshot(census({ questions: [question('first')] }));
+    await main.press();
+    assert.equal(first.getBoundingClientRect().top, 60 + 32 + 12, 'just under the header and its edge');
+});
+
+test('an action\'s landing focuses its explicit Resume door and sends nothing', async t => {
+    const posts = [];
+    const main = mainPage(t, { fetchImpl: async (url, init) => { posts.push({ url, init }); return { ok: true, json: async () => ({ ok: true }) }; } });
+    main.filler('2020-01-01T08:00:00Z');
+    main.waiting.snapshot(census({ actions: [action('paused')] }));
+    const message = main.actionNode('paused');
+    main.scrollTo(0);  // the System row stands at the live edge, off screen
+    assert.deepEqual(main.shown().text, '1 action');
+    await main.press();
+    const door = find(message, node => node.dataset.resumeRun === '1');
+    assert.ok(door, 'the row\'s explicit Resume stands in its controls');
+    assert.equal(message.getBoundingClientRect().top, 72, 'the System row lands under the header');
+    assert.equal(document.activeElement, door, 'the landing focuses the existing door itself (owner 18.11, A)');
+    assert.deepEqual(posts, [], 'focusing the door sends no operation');
+});
+
+test('an action without a Resume of its own lands on its message', async t => {
+    const main = mainPage(t);
+    main.filler('2020-01-01T08:00:00Z');
+    const wait = { wait_id: 'w', revision: 1, task_attempt: 1, state: 'waiting', reason: 'auth',
+        requires_owner_action: true };
+    main.waiting.snapshot(census({ actions: [action('access', { phase: 'working', pause_cause: undefined,
+        can_resume: false, attention_reason: 'model_access', model_waits: { w: wait } })] }));
+    const message = main.actionNode('access');
+    main.scrollTo(0);
+    await main.press();
+    assert.equal(message.getBoundingClientRect().top, 72);
+    assert.equal(document.activeElement, message, 'no explicit Resume: the message is the focus target');
+    assert.equal(message.tabIndex, -1);
+});
+
+test('a Resume press that settles after the connection dropped leaves its door withdrawn: the pill lands on the message, sends nothing', async t => {
+    const posts = [];
+    let release;
+    const main = mainPage(t, { fetchImpl: (url, init) => new Promise(resolve => {
+        posts.push([url, init.method]);
+        release = () => resolve({ ok: true, json: async () => ({ ok: true }) });
+    }) });
+    main.filler('2020-01-01T08:00:00Z');
+    main.waiting.snapshot(census({ actions: [action('paused')] }));
+    const message = main.actionNode('paused');
+    const door = find(message, node => node.dataset.resumeRun === '1');
+    const pressed = door.listeners.get('click')[0]({ stopPropagation() {} });  // the owner's own press, still in flight
+    assert.equal(door.disabled, true);
+    main.waiting.setConnected(false);  // the socket drops while the request is out
+    release();
+    await pressed;
+    assert.equal(door.disabled, true, 'settling restores the door\'s current eligibility, never an enabled mark');
+    main.waiting.setConnected(true);  // reconnecting alone restores no authority
+    main.scrollTo(0);
+    await main.press();
+    assert.equal(message.getBoundingClientRect().top, 72, 'the System row lands under the header');
+    assert.equal(document.activeElement, message, 'no door holds authority: the message takes focus');
+    // The next census restores it: the same landing then focuses the existing door itself.
+    main.waiting.snapshot(census({ actions: [action('paused')] }));
+    assert.equal(door.disabled, false);
+    main.scrollTo(0);
+    await main.press();
+    assert.equal(document.activeElement, door);
+    assert.deepEqual(posts, [['/api/tasks/paused/resume', 'POST']], 'only the owner\'s own press ever sent');
+});
+
+test('a partial census that withholds an action keeps its message and counts it; the door stays withdrawn and the pill lands on the message', async t => {
+    const posts = [];
+    const main = mainPage(t, { fetchImpl: async url => { posts.push(url); return { ok: true, json: async () => ({ ok: true }) }; } });
+    main.filler('2020-01-01T08:00:00Z');
+    main.waiting.snapshot(census({ actions: [action('helper')] }));
+    const message = main.actionNode('helper');
+    const door = find(message, node => node.dataset.resumeRun === '1');
+    main.waiting.snapshot(census({ complete: false }));  // the server could not prove the action's room: it names none
+    assert.equal(main.actionNode('helper'), message, 'what was read stays visible');
+    assert.equal(door.disabled, true, 'but its authority is not current');
+    main.scrollTo(0);
+    assert.deepEqual(main.shown().text, '1 action');
+    await main.press();
+    assert.equal(document.activeElement, message);
+    assert.deepEqual(posts, []);
+});
+
+test('while a confirmed Resume press still awaits its census read the pill lands on the message; once the door can be pressed again, on the door', async t => {
+    const posts = [];
+    let settle;  // the census read the press awaits after its confirmed POST
+    const main = mainPage(t, { fetchImpl: async (url, init) => { posts.push([url, init.method]); return { ok: true, json: async () => ({ ok: true }) }; },
+        refresh: () => new Promise(resolve => { settle = resolve; }) });
+    main.filler('2020-01-01T08:00:00Z');
+    main.waiting.snapshot(census({ actions: [action('paused')] }));
+    const message = main.actionNode('paused');
+    const door = find(message, node => node.dataset.resumeRun === '1');
+    const pressed = door.listeners.get('click')[0]({ stopPropagation() {} });  // the owner's press: its POST is confirmed
+    for (let waited = 0; !settle && waited < 50; waited += 1) await turn();
+    assert.ok(settle, 'the press reached the census read it awaits');
+    // The window: the POST has answered, the task is still pending until that read settles (the request owner's one
+    // registry, read by the repaint, the focus and the press alike), and a disabled button takes no focus in a browser.
+    assert.deepEqual([free('paused'), door.disabled], [false, true]);
+    main.scrollTo(0);
+    await main.press();
+    assert.equal(document.activeElement, message, 'no handle that can be pressed now: the message takes the landing');
+    settle();
+    await pressed;
+    assert.deepEqual([free('paused'), door.disabled], [true, false]);
+    main.scrollTo(0);
+    await main.press();
+    assert.equal(document.activeElement, door, 'the door can be pressed again: the landing focuses it');
+    assert.deepEqual(posts, [['/api/tasks/paused/resume', 'POST']], 'the owner\'s press sent once; no landing sent');
+});
+
+// A press whose POST and reconciling census read the test settles by hand (controlled promises): the synthetic POST
+// answers when `answer(i)` says how; `reads` are the reads the press awaits, each ended by calling it.
+function resumeRig(t, options = {}) {
+    const posts = [], answers = [], reads = [];
+    const main = mainPage(t, { fetchImpl: (url, init) => new Promise((resolve, reject) => {
+        posts.push([url, init.method]);
+        answers.push({ resolve, reject });
+    }), refresh: () => new Promise(resolve => { reads.push(resolve); }), ...options });
+    main.filler('2020-01-01T08:00:00Z');
+    const confirmed = { ok: true, json: async () => ({ ok: true }) };
+    const wait = async (ready) => { for (let waited = 0; !ready() && waited < 50; waited += 1) await turn(); assert.ok(ready()); };
+    return { ...main, posts, answers, reads, confirmed, wait };
+}
+
+test('a census read before the press and applied while its reconciling read is out lends no second Resume: one POST, then the door works', async t => {
+    const rig = resumeRig(t);
+    const row = action('paused');
+    rig.waiting.snapshot(census({ actions: [row] }));
+    const message = rig.actionNode('paused');
+    const door = find(message, node => node.dataset.resumeRun === '1');
+    // A second explicit Resume of the same task (a room bar's or a card's own button) shares the one request owner.
+    const other = createTaskResumeButton('paused', { canResume: () => true });
+    const click = button => button.listeners.get('click')[0]({ stopPropagation() {} });
+    const pressed = click(door);
+    assert.deepEqual(rig.posts, [['/api/tasks/paused/resume', 'POST']]);
+    rig.answers[0].resolve(rig.confirmed);  // the synthetic POST is confirmed
+    await rig.wait(() => rig.reads.length === 1);  // its reconciling read is out, deferred behind another
+    // The read a poll began before the press lands now: it still names the task resumable.
+    rig.waiting.snapshot(census({ actions: [row] }), 0);
+    assert.deepEqual([free('paused'), door.disabled], [false, true], 'the repaint reads the pending fact, not the census alone');
+    await click(door);
+    await click(other);
+    assert.equal(rig.posts.length, 1, 'neither explicit button sends a second POST');
+    rig.scrollTo(0);
+    await rig.press();
+    assert.equal(document.activeElement, message, 'the landing focuses no door that cannot be pressed');
+    assert.equal(rig.posts.length, 1, 'focus never sends');
+    rig.reads[0]();  // the read that follows the press settles: the confirmed return
+    await pressed;
+    rig.waiting.snapshot(census({ actions: [row] }));  // its census says the task can be resumed again (a refused Resume)
+    assert.deepEqual([free('paused'), door.disabled], [true, false]);
+    rig.scrollTo(0);
+    await rig.press();
+    assert.equal(document.activeElement, door, 'the legitimate door is the landing again');
+    const again = click(door);
+    assert.equal(rig.posts.length, 2, 'and it sends: the pending ended with its read, never before it');
+    rig.answers[1].resolve(rig.confirmed);
+    await rig.wait(() => rig.reads.length === 2);
+    rig.reads[1]();
+    await again;
+});
+
+// What no answer or read can leave behind: a pending that never ends would be a lock nobody can lift.
+for (const [name, answer] of [
+    ['a network failure', ({ reject }) => reject(new TypeError('Failed to fetch'))],
+    ['an acknowledgement that is not ok (a partial answer)', ({ resolve }) => resolve({ ok: true, json: async () => ({}) })],
+    ['a refusal the server words', ({ resolve }) => resolve({ ok: false, status: 409, json: async () => ({ error: 'replay_unsafe' }) })],
+]) {
+    test(`${name} keeps the task pending only until its reconciling read settles; the retry works after it`, async t => {
+        const rig = resumeRig(t);
+        const row = action('paused');
+        rig.waiting.snapshot(census({ actions: [row] }));
+        const door = find(rig.actionNode('paused'), node => node.dataset.resumeRun === '1');
+        const click = () => door.listeners.get('click')[0]({ stopPropagation() {} });
+        const pressed = click();
+        answer(rig.answers[0]);
+        await rig.wait(() => rig.reads.length === 1);
+        rig.waiting.snapshot(census({ actions: [row] }), 0);  // an older census, still resumable
+        assert.deepEqual([free('paused'), door.disabled], [false, true]);
+        await click();
+        assert.equal(rig.posts.length, 1, 'an unknown or refused answer is no leave to send again before the read settles');
+        rig.reads[0]();
+        await pressed;
+        rig.waiting.snapshot(census({ actions: [row] }));
+        assert.deepEqual([free('paused'), door.disabled], [true, false], 'the lock lifts with the read');
+        const retry = click();
+        assert.equal(rig.posts.length, 2, 'the owner\'s own retry sends');
+        rig.answers[1].resolve(rig.confirmed);
+        await rig.wait(() => rig.reads.length === 2);
+        rig.reads[1]();
+        await retry;
+    });
+}
+
+test('a connection that drops while the reconciling read is out withdraws the door; its authority returns only with a census', async t => {
+    const rig = resumeRig(t);
+    const row = action('paused');
+    rig.waiting.snapshot(census({ actions: [row] }));
+    const door = find(rig.actionNode('paused'), node => node.dataset.resumeRun === '1');
+    const click = () => door.listeners.get('click')[0]({ stopPropagation() {} });
+    const pressed = click();
+    rig.answers[0].resolve(rig.confirmed);
+    await rig.wait(() => rig.reads.length === 1);
+    rig.waiting.setConnected(false);  // the socket drops: the page retires the read in flight and releases its waiters
+    rig.reads[0]();
+    await pressed;
+    assert.deepEqual([free('paused'), door.disabled], [true, true], 'no pending is left, and no authority either');
+    await click();
+    assert.equal(rig.posts.length, 1, 'a withdrawn door sends nothing');
+    rig.waiting.setConnected(true);
+    assert.equal(door.disabled, true, 'reconnecting alone restores no authority');
+    rig.waiting.snapshot(census({ actions: [row] }));
+    assert.equal(door.disabled, false);
+    const retry = click();
+    assert.equal(rig.posts.length, 2);
+    rig.answers[1].resolve(rig.confirmed);
+    await rig.wait(() => rig.reads.length === 2);
+    rig.reads[1]();
+    await retry;
+});
+
+test('an action kept from an older partial read and named again by a fresh census regains its authority, not a second press', async t => {
+    const rig = resumeRig(t);
+    const row = action('paused');
+    rig.waiting.snapshot(census({ actions: [row] }));
+    const message = rig.actionNode('paused');
+    const door = find(message, node => node.dataset.resumeRun === '1');
+    const click = () => door.listeners.get('click')[0]({ stopPropagation() {} });
+    const pressed = click();
+    rig.answers[0].resolve(rig.confirmed);
+    await rig.wait(() => rig.reads.length === 1);
+    rig.waiting.snapshot(census({ complete: false }), 0);  // an older partial read: the row is kept, its authority withdrawn
+    assert.deepEqual([rig.actionNode('paused'), door.disabled, free('paused')], [message, true, false]);
+    rig.waiting.snapshot(census({ actions: [row] }));  // a fresh census names it again: the authority is back
+    assert.deepEqual([door.disabled, free('paused')], [true, false], 'but the press still awaits its read');
+    await click();
+    assert.equal(rig.posts.length, 1);
+    rig.reads[0]();
+    await pressed;
+    assert.deepEqual([door.disabled, free('paused')], [false, true], 'and the door is the legitimate one again');
+});
+
+test('the task control menu reads the same registry: a Resume it started keeps the task pending until its read settles, its Stop enabled', async t => {
+    const priorObserver = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class { observe() {} disconnect() {} takeRecords() { return []; } };
+    t.after(() => { globalThis.IntersectionObserver = priorObserver; });
+    const rig = resumeRig(t);
+    const row = action('owner', { pause_cause: 'owner' });  // the owner's own Pause: no Resume button, its menu carries it
+    rig.waiting.snapshot(census({ actions: [row] }));
+    const items = () => {
+        const found = [];
+        const walk = node => { if (node?.dataset?.taskControl) found.push(node); (node?.children || []).forEach(walk); };
+        walk(rig.env.mount);
+        return found;
+    };
+    const open = () => {
+        const control = find(rig.actionNode('owner'), node => node.textContent === 'Stop…');
+        for (const fn of control.listeners.get('click') || []) fn({ target: control, stopPropagation() {}, preventDefault() {} });
+        return items();
+    };
+    const item = open().find(node => node.dataset.taskControl === 'resume');
+    assert.ok(item, 'the menu carries Resume where no button of its own stands');
+    item.listeners.get('click')[0]({ stopPropagation() {} });
+    assert.deepEqual(rig.posts, [['/api/tasks/owner/resume', 'POST']]);
+    rig.answers[0].resolve(rig.confirmed);
+    await rig.wait(() => rig.reads.length === 1);
+    rig.waiting.snapshot(census({ actions: [row] }), 0);  // an older census, still naming the Resume
+    assert.deepEqual([free('owner'), taskControlBusy('owner')], [false, false], 'the Resume awaits its read; no request is out');
+    assert.deepEqual(open().map(node => [node.dataset.taskControl, node.disabled]), [['stop_now', false]],
+        'no Resume is offered while the task is pending; Stop now stays enabled');
+    rig.reads[0]();
+    await rig.wait(() => free('owner'));
+    assert.ok(open().some(node => node.dataset.taskControl === 'resume'), 'offered again once its read has settled');
+    assert.equal(rig.posts.length, 1, 'one POST throughout');
+});
+
+test('a row no census names now keeps its message but its Project reference leads nowhere; a named neighbour\'s still leads to its room', t => {
+    const main = mainPage(t);
+    const opened = [];
+    window.dispatchEvent = event => { opened.push(event.detail.project.id); };  // what `ouro:open-project` would open
+    const held = action('held', { project_id: 'atlas', project_name: 'Atlas' });
+    const neighbour = action('neighbour', { project_id: 'maps', project_name: 'Maps' });
+    const reference = id => find(main.actionNode(id), node => node.dataset.intent === 'open-project');
+    const title = id => find(main.actionNode(id), node => node.tagName === 'STRONG').textContent;
+    main.waiting.snapshot(census({ actions: [held, neighbour] }));
+    reference('held').click();
+    reference('neighbour').click();
+    assert.deepEqual(opened, ['atlas', 'maps'], 'both named: each reference leads to its own room');
+    opened.length = 0;
+    main.waiting.snapshot(census({ actions: [neighbour], complete: false }));  // a partial read names the neighbour only
+    assert.deepEqual([title('held'), reference('held').getAttribute('aria-label')], ['Task held', 'Open project Atlas'],
+        'the message and its words stay');
+    reference('held').click();
+    reference('neighbour').click();
+    assert.deepEqual(opened, ['maps'], 'only the row the read names still leads to its room');
+    opened.length = 0;
+    main.waiting.snapshot(census({ actions: [held, neighbour], complete: false }));  // named again: its place is confirmed
+    reference('held').click();
+    assert.deepEqual(opened, ['atlas']);
 });
 
 test('an off-window question mounts at its own date (Project) or opens through its canonical read (Main\'s own)', async t => {

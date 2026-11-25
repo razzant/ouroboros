@@ -1,4 +1,4 @@
-import { bindPageHeader, renderPageHeader } from './page_header.js';
+import { bindPageHeader, renderPageHeader, revealStripChoice } from './page_header.js';
 import { PAGE_ICONS, SHELL_ICONS, strokeIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
@@ -18,20 +18,13 @@ const CHOOSE_A_FILE = 'Choose a file to preview it.';
 // The preview's own sentences are prose in the reading face; a file's text keeps the code face (style.css).
 const previewNote = (text) => Object.assign(document.createElement('p'), { className: 'files-empty', textContent: text });
 
-export function initFiles({ state: appState, setBeforePageLeave, layers = null } = {}) {
-    const page = document.createElement('div');
-    page.id = 'page-files';
-    page.className = 'page app-page-glass';
-    page.innerHTML = `
+export function filesPageTemplate() {
+    return `
         ${renderPageHeader({
             page: 'files',
             actionsHtml: '<button class="btn btn-default" id="files-refresh">Refresh</button>',
         })}
-        <div class="files-layout" data-files-view="list">
-            <section class="files-sidebar">
-                <div class="files-toolbar">
-                    <input id="files-search" class="ui-control" name="files-filter" type="text" aria-label="Filter current folder" placeholder="Filter current folder...">
-                </div>
+        <div class="app-page-tabs files-band">
                 <div class="files-browser-header">
                     <div id="files-breadcrumb" class="files-breadcrumb"></div>
                     <div class="files-browser-actions">
@@ -40,12 +33,15 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                         <button class="btn btn-default" id="files-new-dir" title="Create folder">+ Folder</button>
                     </div>
                 </div>
-                <div id="files-list" class="files-list scroll-fade-y" tabindex="0" aria-label="Files in current folder"></div>
-            </section>
-            <section class="files-preview">
-                <div class="files-preview-back">
-                    <button type="button" class="btn btn-default files-back" data-files-back>Back to folder</button>
+        </div>
+        <div class="files-layout" data-files-view="list">
+            <section class="files-sidebar scroll-fade-y">
+                <div class="files-toolbar">
+                    <input id="files-search" class="ui-control" name="files-filter" type="search" aria-label="Filter current folder" placeholder="Filter current folder...">
                 </div>
+                <div id="files-list" class="files-list" tabindex="0" aria-label="Files in current folder"></div>
+            </section>
+            <section class="files-preview" tabindex="-1">
                 <div class="files-preview-header" hidden>
                     <div>
                         <div id="files-preview-path" class="files-preview-path"></div>
@@ -73,6 +69,13 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             </div>
         </div>
     `;
+}
+
+export function initFiles({ state: appState, setBeforePageLeave, layers = null } = {}) {
+    const page = document.createElement('div');
+    page.id = 'page-files';
+    page.className = 'page app-page-glass';
+    page.innerHTML = filesPageTemplate();
     document.getElementById('content').appendChild(page);
 
     const layoutEl = page.querySelector('.files-layout');
@@ -97,29 +100,21 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     const refreshBtn = page.querySelector('#files-refresh');
     const sidebarEl = page.querySelector('.files-sidebar');
     const previewEl = page.querySelector('.files-preview');
-    const backBtn = page.querySelector('[data-files-back]');
-    backBtn.insertAdjacentHTML('afterbegin', `<span aria-hidden="true">${SHELL_ICONS.back}</span>`);
-    // On a desk the folder's location starts the bar and its own actions join Refresh at the end; in the stack
-    // layout they stay over the list they act on (docs/DESIGN.md "Page header"). In the bar a long location scrolls
-    // inside it: it rests at its end, the folder you are in, after each path and whenever the bar gives it another
-    // width (the page shown, the layout switched, the window resized), and a folder the keyboard reaches comes
-    // wholly into view, where an engine would stop at partly. Only the strip scrolls. Files lives as long as the app
-    // (app.js builds it once and keeps no handle; its window and document listeners below have no destroy either),
-    // so these bindings live as long and keep no disposer.
+    // The location and actions share the page's band; the filter scrolls with the folder list. Moving the same
+    // controls keeps their listeners and focus. A long location reveals its current folder inside the strip alone.
     bindPageHeader(page.querySelector('.app-page-header'), {
         lead: breadcrumbEl, actions: page.querySelector('.files-browser-actions') });
-    const revealFolder = (crumb) => {
-        if (!crumb || !breadcrumbEl.clientWidth) return;
-        const view = breadcrumbEl.getBoundingClientRect();
-        const box = crumb.getBoundingClientRect();
-        const inset = Math.max(0, Math.min(parseFloat(getComputedStyle(breadcrumbEl).scrollPaddingInlineStart) || 0,
-            (view.width - box.width) / 2));
-        if (box.left < view.left + inset) breadcrumbEl.scrollLeft -= view.left + inset - box.left;
-        else if (box.right > view.right - inset) breadcrumbEl.scrollLeft += box.right - view.right + inset;
+    const revealFolder = (crumb) => revealStripChoice(breadcrumbEl, crumb);
+    const revealCurrentFolder = () => {
+        const band = page.querySelector('.app-page-header').offsetHeight + page.querySelector('.files-band').offsetHeight;
+        page.style.setProperty('--files-band-h', `${band}px`);
+        revealFolder(breadcrumbEl.lastElementChild);
     };
-    const revealCurrentFolder = () => revealFolder(breadcrumbEl.lastElementChild);
     bindScrollFade(breadcrumbEl, { axis: 'x' });
-    if (typeof ResizeObserver === 'function') new ResizeObserver(revealCurrentFolder).observe(breadcrumbEl);
+    if (typeof ResizeObserver === 'function') {
+        const bandSize = new ResizeObserver(revealCurrentFolder);
+        for (const node of [breadcrumbEl, page.querySelector('.app-page-header'), page.querySelector('.files-band')]) bandSize.observe(node);
+    }
     breadcrumbEl.addEventListener('focusin', (event) => revealFolder(event.target.closest?.('.files-crumb')));
 
     const state = {
@@ -176,18 +171,22 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     function showPane(view, focusTarget = null) {
         const focused = document.activeElement;
         const active = focused === document.body && lastFocus?.isConnected ? lastFocus : focused;
+        const inFiles = page.contains(active);  // Back is the shell's, in the header: asked before its layer goes
         const changed = layoutEl.dataset.filesView !== view;
         layoutEl.dataset.filesView = view;
         placeStatus();
         const single = singlePane();
         syncLayer(single && view === 'file');
-        if (single && changed && view === 'list') listEl.scrollTop = listScroll;
+        if (single && changed && view === 'list') sidebarEl.scrollTop = listScroll;
         // Focus never stays on what just left the screen (the pane put away, or Back once both panes fit): it goes
-        // to Back on a file shown alone, otherwise to the file's row.
-        const lost = layoutEl.contains(active) && !active.getClientRects().length;
+        // to Back on a file shown alone, otherwise to the file's row. A control the caller names (a new file's name)
+        // keeps it.
+        const lost = inFiles && !active.getClientRects().length;
         if (!(single && focusTarget) && !lost) return;
         const row = [...listEl.querySelectorAll('.files-entry.selected')].find((node) => node.getClientRects().length);
-        const target = (single && focusTarget) || (single && view === 'file' ? backBtn : row || listEl);
+        const back = page.querySelector('[data-shell-back]');
+        const named = focusTarget && focusTarget !== previewEl ? focusTarget : null;
+        const target = named || (single && view === 'file' && back?.getClientRects().length ? back : focusTarget || row || listEl);
         target.focus({ preventScroll: true });
     }
 
@@ -300,7 +299,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         return wrapper;
     }
 
-    async function showModal({ title, message, input = false, initialValue = '', confirmLabel = 'OK', cancelLabel = 'Cancel' }) {
+    async function showModal({ title, message, input = false, initialValue = '', confirmLabel = 'OK', cancelLabel = 'Cancel', danger = false }) {
         const result = await openConfirmDialog({
             title,
             body: message,
@@ -308,7 +307,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             initialValue,
             confirmLabel,
             cancelLabel,
-            danger: /delete|discard/i.test(confirmLabel),
+            danger,
         });
         return typeof result === 'boolean' ? { confirmed: result, value: '' } : result;
     }
@@ -318,7 +317,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         const result = await showModal({
             title: 'Discard changes?',
             message: 'You have unsaved edits in the current file. Leave without saving?',
-            confirmLabel: 'Discard',
+            confirmLabel: 'Discard', danger: true,
             cancelLabel: 'Stay',
         });
         return Boolean(result?.confirmed);
@@ -400,7 +399,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         button.type = 'button';
         button.className = 'files-entry is-draft selected';
         button.innerHTML = `${entryIcon('file')}${label}<span class="files-entry-meta"><span class="files-entry-unsaved">unsaved</span></span>`;
-        button.addEventListener('click', () => showPane('file', backBtn));
+        button.addEventListener('click', () => showPane('file', previewEl));
         return button;
     }
 
@@ -478,8 +477,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     }
 
     // The list's place survives the file shown in front of it: a list out of sight forgets its scroll.
-    listEl.addEventListener('scroll', () => {
-        if (listEl.getClientRects().length) listScroll = listEl.scrollTop;
+    sidebarEl.addEventListener('scroll', () => {
+        if (sidebarEl.getClientRects().length) listScroll = sidebarEl.scrollTop;
     }, { passive: true });
     // Back to folder, and the layer's own close (Escape, the system Back, Telegram's Back): the list again, the draft
     // kept for its row, focus on that row.
@@ -487,12 +486,13 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         renderList();
         showPane('list', listEl.querySelector('.files-entry.selected') || listEl);
     }
-    backBtn.addEventListener('click', closeFile);
 
     // Focus stays this module's (showPane), so the layer neither takes it nor hands it back.
     function syncLayer(open) {
         if (!layers) return;
-        if (open) layers.push({ id: FILE_LAYER, el: previewEl, page: true, modal: false, focus: false, opener: null, onClose: closeFile });
+        if (open) layers.push({ id: FILE_LAYER, el: previewEl, page: true, modal: false, focus: false, opener: null,
+            back: { label: state.path === '.' ? 'Files' : state.path.split('/').filter(Boolean).at(-1) || 'Files',
+                title: state.path === '.' ? 'Files' : `Files › ${state.path}` }, onClose: closeFile });
         else layers.remove(FILE_LAYER);
     }
 
@@ -565,7 +565,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             showPane('list');
         }
         state.rootPath = data.root_path || state.rootPath;
-        if ((data.path || '.') !== state.path) listEl.scrollTop = listScroll = 0;  // another folder: from its first row
+        if ((data.path || '.') !== state.path) sidebarEl.scrollTop = listScroll = 0;  // another folder: from its first row
         state.path = data.path || '.';
         state.parentPath = data.parent_path || '.';
         state.entries = Array.isArray(data.entries) ? data.entries : [];
@@ -584,7 +584,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     async function loadFile(path) {
         // The file already in the editor, its draft as it was (on the list alone, its row reopens it).
         if (state.selectedPath === path && state.editorPath === path) {
-            showPane('file', backBtn);
+            showPane('file', previewEl);
             return;
         }
         const request = ++viewRequest;
@@ -644,7 +644,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                 node: editable ? renderEditor(data.content || '', { isNew: false }) : document.createTextNode(data.content || ''),
             });
         }
-        showPane('file', backBtn);
+        showPane('file', previewEl);
     }
 
     function filenameFromPath(path) {
@@ -668,7 +668,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             title: 'New folder',
             message: 'Name',
             input: true,
-            confirmLabel: 'Create',
+            confirmLabel: 'Create', danger: false,
             cancelLabel: 'Cancel',
         });
         const name = (result?.value || '').trim();
@@ -733,7 +733,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             message: entry.type === 'dir'
                 ? `Delete "${entry.name}" and all its contents? This cannot be undone.`
                 : `Delete "${entry.name}"? This cannot be undone.`,
-            confirmLabel: 'Delete',
+            confirmLabel: 'Delete', danger: true,
             cancelLabel: 'Cancel',
         });
         if (!result?.confirmed) return;

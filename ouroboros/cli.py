@@ -18,6 +18,8 @@ import urllib.request
 from collections import OrderedDict
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
+from ouroboros.utils import json_dumps_utf8
+
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -89,10 +91,16 @@ class OuroborosHTTPClient:
         except json.JSONDecodeError:
             return raw
 
-    def get_bytes(self, path: str) -> bytes:
-        req = urllib.request.Request(self.base_url + path, headers={"Accept": "application/octet-stream"})
+    def get_bytes(self, path: str, *, verify_only: Optional[dict] = None) -> bytes:
+        req = urllib.request.Request(self.base_url + path, method="HEAD" if verify_only else "GET",
+                                     headers={"Accept": "application/octet-stream"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                if verify_only:
+                    if (resp.headers.get("x-ouroboros-artifact-sha256") != verify_only["sha256"]
+                            or resp.headers.get("Content-Length") != str(verify_only["size"])):
+                        raise PatchCLIError(f"{path} does not match its recorded capture identity")
+                    return b""
                 return resp.read()
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
@@ -261,7 +269,7 @@ def _run_command(args: argparse.Namespace) -> int:
         raise CLIError(f"task creation did not return task_id: {created}")
     if args.detach:
         if args.jsonl:
-            print(json.dumps({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
+            print(json_dumps_utf8({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
         else:
             print(task_id)
         return 0
@@ -269,7 +277,7 @@ def _run_command(args: argparse.Namespace) -> int:
     wait_timeout = _deadline_wait_timeout(timeout)
     if args.no_stream:
         if args.jsonl:
-            print(json.dumps({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
+            print(json_dumps_utf8({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
         result = _wait_task(client, task_id, timeout_sec=wait_timeout)
     else:
         _watch_task(client, task_id, jsonl=args.jsonl, quiet=args.quiet, timeout_sec=wait_timeout)
@@ -282,18 +290,21 @@ def _run_command(args: argparse.Namespace) -> int:
         notice = terminal_notice_text(result)
         if notice:
             print(provider_terminal_body("", notice), file=sys.stderr)
+    patch_bytes = None
     if args.patch_out:
-        patch = _patch_from_result(client, task_id, result, strict=True)
-        pathlib.Path(args.patch_out).expanduser().write_text(patch, encoding="utf-8")
+        patch_bytes = _patch_bytes_from_result(client, task_id, result, strict=True)
+        pathlib.Path(args.patch_out).expanduser().write_bytes(patch_bytes)
     if args.result_json_out:
         pathlib.Path(args.result_json_out).expanduser().write_text(
-            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            json_dumps_utf8(result, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
     if args.jsonl:
-        print(json.dumps({"type": "final", "task_id": task_id, "result": result}, ensure_ascii=False))
+        print(json_dumps_utf8({"type": "final", "task_id": task_id, "result": result}, ensure_ascii=False))
     elif args.patch:
-        patch = _patch_from_result(client, task_id, result, strict=True)
+        if patch_bytes is None:
+            patch_bytes = _patch_bytes_from_result(client, task_id, result, strict=True)
+        patch = patch_bytes.decode("utf-8", errors="replace")
         print(patch, end="" if patch.endswith("\n") else "\n")
     else:
         print(str(result.get("result") or ""))
@@ -350,7 +361,7 @@ def _logs_tail_command(args: argparse.Namespace) -> int:
         _print_json(data)
     else:
         for entry in data.get("entries", []):
-            print(json.dumps(entry, ensure_ascii=False))
+            print(json_dumps_utf8(entry, ensure_ascii=False))
     return 0
 
 
@@ -364,7 +375,7 @@ def _log_row_identity(entry: Dict[str, Any]) -> tuple:
     stable hash of the row with the positional fields stripped."""
     payload = {key: value for key, value in entry.items() if key not in ("_line", "_source_root")}
     digest = hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        json_dumps_utf8(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
     return (str(entry.get("_source_root") or ""), str(entry.get("ts") or ""), digest)
 
@@ -380,7 +391,7 @@ def _logs_follow_command(args: argparse.Namespace) -> int:
             if marker in seen:
                 continue
             seen.add(marker)
-            print(json.dumps(entry, ensure_ascii=False), flush=True)
+            print(json_dumps_utf8(entry, ensure_ascii=False), flush=True)
         time.sleep(max(0.5, float(args.interval)))
 
 
@@ -925,7 +936,7 @@ def _watch_task(
                 duplicate = bool(identity) and identity in seen
                 if not duplicate:
                     if jsonl:
-                        print(json.dumps(event, ensure_ascii=False), flush=True)
+                        print(json_dumps_utf8(event, ensure_ascii=False), flush=True)
                     elif not quiet:
                         rendered = _render_event_for_stderr(event)
                         if rendered:
@@ -1019,14 +1030,62 @@ def _render_event_for_stderr(event: Dict[str, Any]) -> str:
 
 
 def _patch_from_result(
+    client: OuroborosHTTPClient, task_id: str, result: Dict[str, Any], *, strict: bool,
+) -> str:
+    return _patch_bytes_from_result(client, task_id, result, strict=strict).decode("utf-8", errors="replace")
+
+
+def _patch_bytes_from_result(
     client: OuroborosHTTPClient,
     task_id: str,
     result: Dict[str, Any],
     *,
     strict: bool,
-) -> str:
+) -> bytes:
     bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
     artifact_status = str(bundle.get("status") or result.get("artifact_status") or "").lower()
+    def artifact_url(row):
+        name = row.get("name") or pathlib.Path(str(row.get("path") or "")).name
+        if not name:
+            name = "workspace_patch.json" if row.get("kind") == "workspace_patch_manifest" else "workspace.patch"
+        selector = "?" + urllib.parse.urlencode({"relpath": row["relpath"]}) if row.get("relpath") else ""
+        capture_id = result["task_id"] if result.get("retry_lineage") else task_id
+        return f"/api/tasks/{urllib.parse.quote(capture_id)}/artifacts/{urllib.parse.quote(name)}{selector}"
+
+    if "workspace_capture" in result:
+        from ouroboros.workspace_capture_result import checked_bytes, checked_capture, fault_text, legacy_patch_bytes
+
+        raw, manifest = b"", {}
+
+        def verify(row, is_patch):
+            nonlocal raw
+            if is_patch:
+                raw = checked_bytes(client.get_bytes(artifact_url(row)), row)
+            else:
+                client.get_bytes(artifact_url(row), verify_only=row)
+
+        try:
+            if "legacy_patch_size" in result["workspace_capture"]:
+                raw = legacy_patch_bytes(result, lambda row: client.get_bytes(artifact_url(row)), manifest)
+                if strict and not raw:
+                    raise PatchCLIError("workspace patch artifact is empty")
+                return raw
+            checked_capture(result, lambda row: client.get_bytes(artifact_url(row)), verify, manifest)
+        except (CLIError, ValueError, KeyError, TypeError, OSError) as exc:
+            raise PatchCLIError(f"workspace capture unavailable: {exc}") from exc
+        finally:
+            for row in manifest.get("other_artifact_faults", ()):
+                print(f"warning: artifact bundle {artifact_status}: {fault_text(row)}", file=sys.stderr)
+        if raw:
+            return raw
+        if strict:
+            if manifest["status"] == "ready_no_changes":
+                raise PatchCLIError("workspace patch artifact has no changes")
+            raise PatchCLIError("This result is delivered as complete files rather than a Git patch; inspect workspace_patch.json.")
+        return b""
+    if result.get("native_capture_pending") or any(
+            row.get("kind") == "workspace_capture_history" for row in result.get("artifacts") or [] if isinstance(row, dict)):
+        raise PatchCLIError("current workspace capture cannot be verified")
     if artifact_status == "failed":
         raise PatchCLIError(str(result.get("artifact_error") or "workspace patch artifact failed"))
     if artifact_status == "missing":
@@ -1034,7 +1093,7 @@ def _patch_from_result(
     if artifact_status == "ready_no_changes":
         if strict:
             raise PatchCLIError("workspace patch artifact has no changes")
-        return ""
+        return b""
     if artifact_status in {"pending", "finalizing"}:
         raise PatchCLIError(f"workspace patch artifact is not finalized (artifact_status={artifact_status})")
     artifacts = [artifact for artifact in result.get("artifacts") or [] if isinstance(artifact, dict)]
@@ -1043,7 +1102,7 @@ def _patch_from_result(
         patch_artifact = next((
             artifact
             for artifact in artifacts
-            if artifact.get("kind") != "workspace_capture_history"
+            if artifact.get("kind") != "workspace_capture_history" and "/" not in str(artifact.get("relpath") or "")
             and str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == "workspace.patch"
         ), None)
     if patch_artifact is not None:
@@ -1052,24 +1111,25 @@ def _patch_from_result(
             raise PatchCLIError("workspace patch artifact is missing")
         if patch_status == "failed":
             raise PatchCLIError("workspace patch artifact failed")
-        name = str(patch_artifact.get("name") or pathlib.Path(str(patch_artifact.get("path") or "")).name or "workspace.patch")
-        selector = "?" + urllib.parse.urlencode({"relpath": patch_artifact["relpath"]}) if "/" in str(patch_artifact.get("relpath", "")) else ""
-        raw = client.get_bytes(f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}{selector}")
+        raw = client.get_bytes(artifact_url(patch_artifact))
+        if patch_artifact.get("sha256"):
+            from ouroboros.workspace_capture_result import checked_bytes
+            try:
+                checked_bytes(raw, patch_artifact)
+            except ValueError as exc:
+                raise PatchCLIError(str(exc)) from exc
         if strict and not raw:
             raise PatchCLIError("workspace patch artifact is empty")
-        return raw.decode("utf-8", errors="replace")
+        return raw
     if strict:
         manifest_artifact = next((item for item in artifacts if item.get("kind") == "workspace_patch_manifest"), None)
         if manifest_artifact is not None:
-            name = str(manifest_artifact.get("name") or "workspace_patch.json")
-            selector = "?" + urllib.parse.urlencode({"relpath": manifest_artifact["relpath"]}) if "/" in str(manifest_artifact.get("relpath", "")) else ""
-            manifest = json.loads(client.get_bytes(
-                f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}{selector}"))
+            manifest = json.loads(client.get_bytes(artifact_url(manifest_artifact)))
             if manifest.get("capture_kind") in {"directory_direct", "engine_directory"} or manifest.get("file_outputs"):
                 raise PatchCLIError(
-                    f"This result is delivered as complete files rather than a Git patch; inspect {name} and its file references.")
+                    "This result is delivered as complete files. Inspect workspace_patch.json and its file references.")
         raise PatchCLIError("workspace patch artifact is missing")
-    return ""
+    return b""
 
 
 def _await_cost_finality(
@@ -1150,7 +1210,7 @@ def _is_terminal_success(result: Dict[str, Any]) -> bool:
 
 
 def _print_json(data: Any) -> None:
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    print(json_dumps_utf8(data, ensure_ascii=False, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:

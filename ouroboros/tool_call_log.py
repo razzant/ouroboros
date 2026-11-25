@@ -48,6 +48,7 @@ CALL_WAIT_ENDED = "tool_call_timeout"
 # a control that ended the call (Pause, Cancel, a deadline, the spend rail), named in the row's ``control_reason``.
 HOST_INTERRUPTED = "interrupted"
 HOST_SETTLED_STATUSES = frozenset({"host_error", HOST_INTERRUPTED})
+_HANDLED_TOOL_REFUSALS = frozenset({"git_error", "review_blocked"})
 # Words the interruption types also carry when the host itself failed and no control of the work ended the call: an
 # authority the send needs could not be read (the owner-Pause fence, the model-sleep authority, the launch lock) or the
 # accounting wait outlived the turn's window. The loop ends or parks such work on its technical rails
@@ -316,16 +317,62 @@ def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200, *, 
             if row is not None:
                 observations.append({**base, "fact": fact, "live": False,
                     "receipt": base["receipt"] or row.get("completion_control") is True,
-                    # the live step row's reading; a call a control ended is no failure of the call (#3211)
-                    "status": ("held" if row.get("status") in SAFETY_HELD_STATUSES else row["status"]
-                               if row.get("status") == HOST_INTERRUPTED else "error" if row.get("is_error")
-                               else "ok") if slot == "settled" else "unknown",
                     "hostError": row.get("status") == "host_error",
                     # The row's own recorded host time, as written; a row without one stays without
                     # (never reconstructed), so a reader can order a call by its first observation.
                     **({"ts": row["ts"]} if isinstance(row.get("ts"), str) and row["ts"] else {}),
-                    **(_check_verdict(row) if slot == "settled" else {})})
+                    **(_settled_evidence(row, call.get("started") or {}) if slot == "settled" else {"status": "unknown"})})
     return {"observations": observations, "legacy": legacy, "coverage": coverage}
+
+
+def has_refused_step(row: Dict[str, Any]) -> bool:
+    meta = row.get("tool_result_meta")
+    return isinstance(meta, dict) and meta.get("refused_step") is True
+
+
+def is_plain_step_refusal(row: Dict[str, Any]) -> bool:
+    """A non-error completion refused a further step; an independent error keeps its own recorded status."""
+    return row.get("status") == "blocked" and has_refused_step(row)
+
+
+def _refusal_evidence(row: Dict[str, Any]) -> Dict[str, Any]:
+    """History renders the host's refusal beside the sanitized producer preview, as the live card does."""
+    if not has_refused_step(row):
+        return {}
+    meta = row["tool_result_meta"]
+    return {"recorded_status": row.get("status"),
+            "tool_result_meta": {k: meta[k] for k in ("refused_step", "control_reason") if k in meta},
+            "result_preview": truncate_for_log(str(row.get("result_preview") or ""), 500)}
+
+
+def _settled_evidence(row: Dict[str, Any], started: Dict[str, Any]) -> Dict[str, Any]:
+    """The fold counts the call once. Its own diagnostic uses only the recorded, bounded fields."""
+    status = row.get("status")
+    held = status in SAFETY_HELD_STATUSES or is_plain_step_refusal(row)
+    failed = bool(row.get("is_error")) or status == "host_error"
+    if not held and status != HOST_INTERRUPTED and not failed and status not in _HANDLED_TOOL_REFUSALS:
+        return {"status": "ok", **_check_verdict(row)}
+    counted = "held" if held else status if status == HOST_INTERRUPTED or not failed else "error"
+    if refusal := _refusal_evidence(row):
+        return {"status": counted, **_check_verdict(row), **refusal}
+    command_failure = row.get("tool") in {"run_command", "run_script"} or status == "non_zero_exit"
+    if counted == "error" and not command_failure and status != "host_error":
+        return {"status": counted}
+    diagnostic = {"status": status or counted}
+    if type(row.get("exit_code")) is int:
+        diagnostic["exit_code"] = row["exit_code"]
+    if isinstance(row.get("control_reason"), str):
+        diagnostic["control_reason"] = truncate_for_log(row["control_reason"], 120)
+    args = row.get("args", started.get("args"))
+    cmd = args.get("cmd") if isinstance(args, dict) else None
+    if isinstance(cmd, list):
+        cmd = " ".join(str(part).strip() for part in cmd if isinstance(part, (str, int, float)))
+    if isinstance(cmd, str) and cmd:
+        diagnostic["args"] = {"cmd": truncate_for_log(cmd, 500)}
+    preview = row.get("result_preview")
+    if isinstance(preview, str) and preview:
+        diagnostic["result_preview"] = truncate_for_log(preview, 500)
+    return {"status": counted, "diagnostic": diagnostic}
 
 
 def _check_verdict(row: Dict[str, Any]) -> Dict[str, Any]:

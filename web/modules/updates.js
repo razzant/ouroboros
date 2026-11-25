@@ -4,7 +4,7 @@ import { mountVersionList } from './update_versions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, bindPreflightDescription, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, checkFailureReason, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, updateTarget, applyTitle, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
@@ -165,6 +165,11 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
     if (phase === 'preflighting') return { ...base, state: 'preflighting', tone: 'neutral', headline: 'Preparing the update…', hint: '', action: { id: 'update', label: 'Preparing…', disabled: true } };
     if (phase === 'updating') return { ...base, state: 'updating', tone: 'neutral', headline: 'Applying the update…', hint: '', action: { id: 'update', label: 'Updating…', disabled: true } };
     if (phase === 'restarting') return { ...base, state: 'restarting', tone: 'ok', headline: 'Restarting the server…', hint: 'This page updates itself when the server is back.', action: { id: 'restart', label: 'Restarting…', disabled: true } };
+    if (data.lastObservedAttempt?.guidance) {
+        return { ...base, state: 'status_unavailable', tone: 'neutral', codes: warnings, warnings: [],
+            headline: 'Could not refresh update status.', hint: '',
+            action: { id: 'check', label: 'Check again' } };
+    }
     if (phase === 'restart_required') return { ...base, state: 'restart_required', tone: 'warn', headline: 'The update needs a restart that could not be requested automatically.', hint: 'Restart Ouroboros to finish.', action: { id: 'restart', label: 'Restart now' } };
     // Distinct from restart_required (the update is applied, or recorded for the restart exit when
     // its target lacks the store, and only its restart is missing): here the operation did NOT
@@ -280,13 +285,11 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
         const unsafe = !data.safe_to_apply;
         if (data.latest_short_sha) chips.push({ label: 'Update commit', value: data.latest_short_sha });
         if (data.latest_message) chips.push({ label: 'Latest', value: data.latest_message });
-        const target = latestVersion !== currentVersion ? `${currentVersion} → ${latestVersion}`
-            : data.behind ? `${data.behind} new ${data.behind === 1 ? 'change' : 'changes'}` : latestVersion;
         return {
             ...base,
             state: unsafe ? 'available_unsafe' : 'available',
             tone: unsafe ? 'warn' : 'ok',
-            headline: `Update available: ${target}`,
+            headline: `Update available: ${updateTarget(data)}`,
             hint: unsafe ? unsafeUpdateHint(data) : '',
             action: { id: 'update', label: `Update to ${latestVersion}` },
         };
@@ -312,52 +315,28 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
     };
 }
 
-// --- The update description -------------------------------------------------
-//
-// Ouroboros writes the description of the update the panel is offering as
-// ordinary work: when the owner presses Write/Rewrite here (one ordinary Main
-// task, whose status the backend reads from its task result) or on its own
-// initiative. A check never writes it. The backend hands it to the client
-// inside the ordinary status payload as the additive `letter` key. It is never
-// deleted once the update lands: the same text, relabelled, becomes "What
-// changed in this version", and a text written for an older range keeps that
-// range's label when a newer target appears. Description work and its failures
-// stay separate from the primary installation action.
+// The description arrives with status as `letter`. Main can write it independently or at the owner's
+// request. A check alone records facts. After Apply, the same text becomes history with its own range.
 
-// Hidden where the description could only mislead: a checkout that managed
-// updates do not own (unmanaged), an unknown status, a target no fetching check
-// has named yet (unchecked), and the restart phase, whose served-SHA reload owns
-// the card. Loading and checking KEEP it: the text is still the last known fact,
-// and a passive refresh or a failed/running check must not blank it — that is
-// what the renderer's content key is for.
-const LETTER_HIDDEN_VERDICTS = new Set(['unmanaged', 'unknown', 'unchecked']);
+// Hide this section for unmanaged checkouts and during the served-SHA reload.
+// An unchecked or unreadable channel can still have a saved description: keep
+// its text and writer visible without labelling that text as current.
+const LETTER_HIDDEN_VERDICTS = new Set(['unmanaged']);
 const LETTER_HIDDEN_PHASES = new Set(['restarting']);
 const LETTER_BUSY_PHASES = new Set(['preflighting', 'updating', 'restarting']);
 const LETTER_RELATIONS = new Set(['pending', 'applied', 'superseded', 'other']);
-// The request's own ordinary task statuses during which it may still save.
-const LIVE_REQUEST_STATUSES = new Set(['requested', 'scheduled', 'running', 'interrupted', 'cancel_requested']);
-// `applied` is the one relation whose label changes: the running version IS
-// the description's target, so the text is history, not a preview.
-const LETTER_LABELS = {
-    pending: "What's new",
-    applied: 'What changed in this version',
-    superseded: "What's new",
-    other: "What's new",
-};
+// The request's own task statuses during which it may still save, and what each says: only `running` writes; the rest
+// wait to run (paused or held among them: the task's door shows which), were interrupted, or are asked to stop.
+const LIVE_REQUEST_STATUSES = new Map([['requested', 'is waiting to run'], ['scheduled', 'is waiting to run'],
+    ['running', 'is still running'], ['interrupted', 'was interrupted'], ['cancel_requested', 'has been asked to stop']]);
+// `applied` is the one relation whose label changes: the running version IS the description's target, so the text is
+// history, not a preview. Text of another range than the update the section concerns reads "Earlier update", of
+// that target from another base "Different range", whether or not an update is on offer.
+const LETTER_LABELS = { pending: "What's new", applied: 'What changed in this version', superseded: "What's new", other: "What's new" };
 
 function noLetterView() {
-    return {
-        state: 'none',
-        relation: '',
-        markdown: '',
-        meta: { authorVersion: '', targetVersion: '', writtenAt: '', ageText: '' },
-        failure: null,
-        label: '',
-        note: '',
-        covers: '',
-        write: null,
-        request: null,
-    };
+    return { state: 'none', relation: '', markdown: '', meta: { authorVersion: '', targetVersion: '', writtenAt: '', ageText: '' },
+        failure: null, label: '', note: '', covers: '', writeKey: null, action: null, rewrite: null, request: null };
 }
 
 const shortRange = (key) => (key?.base_sha && key?.target_sha
@@ -371,43 +350,128 @@ function requestView(letter) {
     const status = String(request.status || 'unknown');
     return { taskId: String(request.current_task_id || request.task_id), mode: String(request.mode || ''), key: request.key || {},
         requestedAt: String(request.requested_at || ''), status, saved: request.saved === true,
-        live: LIVE_REQUEST_STATUSES.has(status) };
+        live: LIVE_REQUEST_STATUSES.has(status), unknown: status === 'unknown',
+        stopping: request.cancel_state === 'pending' || status === 'cancel_requested',
+        held: LIVE_REQUEST_STATUSES.has(status) || status === 'unknown' };
+}
+
+// A failed letter projection still delivers current update and Apply facts. Only the previously
+// displayed prose, its provenance and its writer's identity can stand in for the unread record.
+export function retainUnreadLetter(status, previous) {
+    const prior = previous?.letter;
+    if (!status.letter_unavailable || !prior) return status;
+    const { text, key, revision, author, author_version, target_version, written_at, request } = prior;
+    return { ...status, letter: { text, key, revision, author, author_version, target_version, written_at,
+        request: requestView(prior)?.held ? { ...request, status: 'unknown' } : request } };
+}
+
+// A whole read failed. Keep the last attempt as presentation only: no live transaction,
+// available range or Restore target can be inferred from it.
+export function lastObservedAttempt(status) {
+    if (status?.lastObservedAttempt) return status.lastObservedAttempt;
+    if (!status?.update_tx?.active && !status?.update_progress?.operation_id) return null;
+    const verdict = updateVerdict(status);
+    const held = ['resolving', 'updating', 'restarting', 'restart_needed', 'restart_required'].includes(verdict.state);
+    const view = updateAttemptView(status.update_progress, status.update_tx,
+        { showRecoveryInstruction: !verdict.recoveryInstruction });
+    return { guidance: held ? [verdict.headline, verdict.hint].filter(Boolean).join(' ') : '',
+        view: view && { ...view, restoreTarget: '' }, afterUpdate: status.after_update };
 }
 
 // What a finished request that saved nothing leaves to say; a saved one says nothing.
 function endedRequestNote(request) {
-    if (!request || request.live || request.saved) return '';
+    if (!request || request.held || request.saved) return '';
     const how = { completed: 'finished', failed: 'failed', cancelled: 'was stopped' }[request.status];
-    return how ? `The last writing task ${how} without saving a description.`
-        : 'The last writing task left no readable result; nothing was saved.';
+    return how ? `The last description task ${how} without saving a description.`
+        : 'The last description task left no readable result; nothing was saved.';
 }
 
-/**
- * Description projector: durable server state × transient client phase → one
- * presentation descriptor, pure but for the clock `relativeAge` reads.
- *
- * `state: 'none'` hides the section; `'empty'` shows it without text, offering
- * Write for the update on offer. `write` is the one authoring control: Write
- * for a range nothing describes yet, Rewrite for the shown text's own range
- * (an applied one included), disabled while a requested task still runs.
+// Who writes for which range: the request's task in its own state, its range named unless it writes the update the
+// section concerns. Only a running task with no Stop being carried out (`cancel_state` pending, or a legacy
+// cancel_requested beside the honest status) writes; unknown is never running, a landed save prepares nothing.
+function writerNote(request, own, replacing) {
+    if (!request?.held) return '';
+    const range = own ? '' : shortRange(request.key), of = range ? ` of ${range}` : '', id = request.taskId;
+    if (request.unknown) return `The description task’s status is unknown (task ${id}); no new author will be `
+        + `requested until its status can be read.${range ? ` That task covers ${range}.` : ''}`;
+    const state = request.stopping ? 'has been asked to stop' : LIVE_REQUEST_STATUSES.get(request.status);
+    const asked = attemptTime(request.requestedAt), what = `description${of}${asked ? ` you asked for on ${asked}` : ''}`;
+    if (request.saved) return `Ouroboros saved the description${of}; its task (${id}) ${state}.`;
+    return `${request.status === 'running' && !request.stopping ? `Ouroboros is writing the ${what}` : `The ${what} is `
+        + `not saved yet; its task ${state}`} (task ${id}).${replacing ? ' The displayed text stays until its replacement is saved.' : ''}`;
+}
+
+// A press that got no usable answer. Only an answer that establishes the refusal says nothing was asked: a 400, or the
+// endpoint's own 409/503 facts (reason, legal_ranges, a running task). Any other failure (a 500, a gateway's error, an
+// unreadable or missing answer) may come after the admission, so its outcome stays unknown beside any writer the
+// status shows, and nothing is sent again.
+export function requestFailureText(err) {
+    const body = err?.body && typeof err.body === 'object' ? err.body : {};
+    const refused = err?.status === 400
+        || ([409, 503].includes(err?.status) && Boolean(body.reason || body.legal_ranges || body.task_id));
+    const detail = String(err?.message || (err?.status ? `HTTP ${err.status}` : 'no readable answer'));
+    return refused ? `Could not request a description: ${/[.!?…]$/.test(detail) ? detail : `${detail}.`}`
+        : `This press received no confirmation (${detail}); whether it requested a description is unknown.`;
+}
+
+// The transient record of an explicit check that did not complete: what failed, when, and the last good check it left
+// in place. The headline says it over that check's own answer; once a newer read replaced that answer, the hint keeps
+// saying it until a later check or a newer recorded one (render).
+export function checkFailure(answer, previous, error = null) {
+    return { at: new Date().toISOString(), checkedAt: String(previous?.checked_at || ''),
+        text: checkFailureReason(answer, error) };
+}
+
+// The headline's ordinary check (nothing applying, recovering or unread) is Check and describe: the server checks,
+// then asks for the update that check finds, so one press both finds an update and gets its description. While a
+// requested task can still save it stays the check that writes nothing; recovery and transaction states keep theirs.
+const DESCRIBING_CHECKS = new Set(['unchecked', 'current', 'unknown', 'check_failed']);
+function checkingDescription(pending) {
+    return pending === 'latest' || pending === 'check';
+}
+
+export function headlineAction(verdict, letter, { taskId, pending } = {}) {
+    const action = verdict?.action || null;
+    if (action?.id !== 'check' || action.disabled || !DESCRIBING_CHECKS.has(verdict.state)) {
+        return action;
+    }
+    const choice = (taskId || requestView(letter)?.held) ? action : { id: 'describe', label: 'Check and describe' };
+    if (!pending) return choice;
+    return { ...choice, disabled: true, label: checkingDescription(pending) ? 'Checking…' : choice.label };
+}
+
+/** Project the panel's description and one section action from status and the client phase.
+ * Check and describe follows the new offer; Write uses retained material after Apply. A held writer
+ * permits Check alone. Omit an action already in the headline, and keep Rewrite in Details bound to
+ * the shown text. A 'none' section is hidden; 'empty' can still show a request or a read failure.
  */
-export function updateLetterView(data = {}, phase = '') {
-    // No record yet still offers Write for an update on offer: the server checks the range.
+export function updateLetterView(data = {}, phase = '', operation = {}) {
+    // No record yet still offers Check and describe for an update on offer: the server checks the range.
     const letter = data?.letter && typeof data.letter === 'object' ? data.letter : {};
-    if (data.preflight_range && letter.text && (letter.key?.base_sha !== data.preflight_range.base_sha
-        || letter.key?.target_sha !== data.preflight_range.target_sha)) return noLetterView();
     if (LETTER_HIDDEN_PHASES.has(phase)) return noLetterView();
-    if (LETTER_HIDDEN_VERDICTS.has(updateVerdict(data, phase).state)) return noLetterView();
+    const verdict = updateVerdict(data, phase);
+    if (LETTER_HIDDEN_VERDICTS.has(verdict.state)) return noLetterView();
+    const unknownOffer = verdict.state === 'unchecked' || verdict.state === 'unknown';
 
     const markdown = String(letter.text || '').trim();
     const state = letter.state === 'failed' ? 'failed' : (markdown ? 'ready' : 'empty');
-    const runningBase = String(data.running_sha || data.current_sha || '');
+    const runningBase = String(data.running_sha ?? data.current_sha ?? '');
     const latestTarget = String(data.checked_target_sha || data.latest_sha || '');
-    const offered = data.available && runningBase && latestTarget && runningBase !== latestTarget
-        && (!letter.checked_key || sameRange(letter.checked_key, { base_sha: runningBase, target_sha: latestTarget }))
-        ? { ...(letter.checked_key || {}), base_sha: runningBase, target_sha: latestTarget } : null;
+    const checkedRange = { base_sha: runningBase, target_sha: latestTarget };
+    const canDescribe = data.available === true;
+    const offered = canDescribe && runningBase && latestTarget && runningBase !== latestTarget
+        && (!letter.checked_key || sameRange(letter.checked_key, checkedRange))
+        ? { ...(letter.checked_key || {}), ...checkedRange } : null;
+    // Two different checked SHAs do not prove an incoming change (a merge may already hold its target). With nothing
+    // on offer, Write follows the material retained for exactly the checked target: a check stores it only for a
+    // non-empty range and keeps it after apply. It names what to describe, not what the server adopted.
+    const materialKey = letter.material?.key;
+    const consumed = !data.available && materialKey?.base_sha && materialKey.base_sha !== materialKey.target_sha
+        && materialKey.target_sha === latestTarget
+        && (!data.update_channel || materialKey.update_channel === data.update_channel)
+        && (!data.target_ref || materialKey.target_ref === data.target_ref) ? materialKey : null;
     const request = requestView(letter);
-    if (!markdown && !offered && !request?.live && state !== 'failed') return noLetterView();
+    if (!data.letter_unavailable && !markdown && !canDescribe && !consumed && !request?.held && state !== 'failed') return noLetterView();
     // The host's own fact about the update on offer, whatever text is shown and whether or not one exists:
     // only the check facts of exactly that range speak for it.
     const over = offered && sameRange(letter.qualification, offered) ? updateOverReview(letter.qualification) : null;
@@ -427,36 +491,59 @@ export function updateLetterView(data = {}, phase = '') {
         || (failedKey.base_sha === runningBase && failedKey.target_sha === latestTarget))
         ? { kind: String(letter.error_kind || ''), text: String(letter.error_text || ''),
             failedAt: String(letter.failed_at || ''), key: failedKey || null } : null;
-    // Write targets the update on offer; with none, Rewrite rephrases the shown text's own range.
-    const writeKey = offered || (markdown && letter.key?.base_sha ? letter.key : null);
+    // The range the section concerns: the update on offer, else its retained material, else the shown text's own.
+    const writeKey = offered || consumed || (markdown && letter.key?.base_sha ? letter.key : null);
+    // Which text this is and who writes are two comparisons with the package found (the update on offer, also when only
+    // the status's own check names it, else the retained material); another start makes another range for one target.
+    // The host's description_current (the text's range is the running base to the checked target) settles the first.
+    const found = offered || consumed || (canDescribe && !unknownOffer && runningBase && latestTarget
+        && runningBase !== latestTarget ? checkedRange : null), subject = found || writeKey;
+    const otherRange = Boolean(markdown && !descriptionCurrent && subject && !sameRange(letter.key, subject));
+    const otherBase = Boolean(otherRange && letter.key?.target_sha === subject.target_sha);
+    const movedPast = Boolean(markdown && !found && !unknownOffer && !descriptionCurrent && relation !== 'applied');
     const rewriting = Boolean(writeKey && markdown && sameRange(letter.key, writeKey));
-    const write = writeKey ? {
-        mode: rewriting ? 'rewrite' : 'write',
-        key: writeKey,
-        label: request?.live ? 'Writing…' : (rewriting ? 'Rewrite' : 'Write description'),
-        disabled: Boolean(request?.live) || LETTER_BUSY_PHASES.has(phase),
-    } : null;
-    let note = '';
-    if (request?.live) {
-        // Once its own save landed, the shown text is no longer the one waiting to be replaced. The time
-        // is the owner's press, a fixed fact: the task's own card (the note's door) shows what it does.
-        const asked = attemptTime(request.requestedAt);
-        note = request.saved ? `Ouroboros saved the description; its task (${request.taskId}) is still running.`
-            : `Ouroboros is writing the description${asked ? ` you asked for on ${asked}` : ''} (task ${request.taskId}).${
-                markdown ? ' The current text stays until the new one is saved.' : ''}`;
+    const held = request?.held || operation.taskId;
+    const busy = Boolean(operation.pending) || !(DESCRIBING_CHECKS.has(verdict.state)
+        || verdict.state === 'available' || verdict.state === 'available_unsafe');
+    let action = null;
+    if (held) {
+        if (verdict.action?.id !== 'check') action = { id: 'check', label: 'Check', disabled: busy };
+    } else if (canDescribe && headlineAction(verdict, letter, operation)?.id !== 'describe') {
+        action = { id: 'describe', label: 'Check and describe', disabled: busy };
+    } else if (writeKey && !rewriting && !offered) {
+        action = { id: 'write', mode: 'write', key: writeKey, label: 'Write description', disabled: busy };
+    }
+    // Asking again for the shown text names its own range, an earlier update's included, whatever is on offer.
+    const rewrite = markdown && letter.key?.base_sha && letter.key?.target_sha && !held
+        ? { mode: 'rewrite', key: letter.key, label: 'Rewrite', disabled: busy } : null;
+    // A request writes the update the section concerns only for exactly its range; an ended one speaks only of that.
+    const samePackage = Boolean(request && sameRange(request.key, subject));
+    const ended = !data.letter_unavailable && samePackage ? endedRequestNote(request) : '';
+    let textNote = '';
+    if (data.letter_unavailable) {
+        textNote = markdown ? 'Showing the last readable description until the next successful refresh.'
+            : 'The next successful refresh will show whether a description is available.';
     } else if (failure) {
         const when = attemptTime(failure.failedAt);
-        note = `Refresh failed${when ? ` on ${when}` : ''}. ${markdown
-            ? 'Previous description kept.' : 'No description is available yet.'}`;
+        textNote = `Refresh failed${when ? ` on ${when}` : ''}. ${markdown ? 'Previous description kept.' : 'No description is available yet.'}`;
     } else if (!markdown) {
-        note = endedRequestNote(request) || 'No description of this update yet.';
-    } else if (offered && !descriptionCurrent) {
-        note = `This description covers an earlier update (${shortRange(letter.key)}).`;
-    } else if (!offered && !descriptionCurrent && relation !== 'applied') {
-        note = 'This description was written for an earlier update.';
-    }
-    const ended = request && sameRange(request.key, writeKey) ? endedRequestNote(request) : '';
-    if (ended && markdown && !request.live) note = note ? `${note} ${ended}` : ended;
+        textNote = request?.held ? '' : ended || 'No description of this update yet.';
+    } else if (otherRange) {
+        textNote = `This description covers ${otherBase ? 'the same target from another starting version'
+            : 'an earlier update'} (${shortRange(letter.key)}).`;
+    } else if (movedPast) {
+        textNote = 'This description was written for an earlier update.';
+    } else if (offered && request?.held && !samePackage) textNote = 'This description covers the available update.';
+    if (ended && markdown) textNote = textNote ? `${textNote} ${ended}` : ended;
+    // With no writer at all, an update on offer whose text is not the one shown is said to have none coming.
+    const writer = data.letter_unavailable ? '' : writerNote(request, samePackage && !unknownOffer,
+        Boolean(markdown && request && sameRange(letter.key, request.key))) || (offered && markdown
+        && !sameRange(letter.key, offered) ? 'No request to describe the available update is open.' : '');
+    // A writer of another range holds the door; the update on offer is asked for by a press once that task ends.
+    const after = offered && request?.live && !samePackage && !(markdown && sameRange(letter.key, offered))
+        ? `The available update (${shortRange(offered)}) can be described once that task ends.` : '';
+    const note = [textNote, writer, after, !unknownOffer ? '' : verdict.state === 'unchecked'
+        ? 'The selected channel has not been checked yet.' : 'The current update range is not known.'].filter(Boolean).join(' ');
 
     return {
         state,
@@ -465,10 +552,13 @@ export function updateLetterView(data = {}, phase = '') {
         meta,
         failure,
         descriptionCurrent,
-        label: LETTER_LABELS[relation] || "What's new",
+        label: (unknownOffer || data.letter_unavailable) && markdown ? 'Saved description' : otherBase ? 'Different range'
+            : (otherRange || movedPast ? 'Earlier update' : (LETTER_LABELS[relation] || "What's new")),
         note,
         covers: markdown ? shortRange(letter.key) : '',
-        write,
+        writeKey,
+        action,
+        rewrite,
         request,
         over: over?.line || '',
         overDetail: over?.detail || '',
@@ -503,10 +593,14 @@ export function restartStatusCanSettle(data, { afterBootNotice = false } = {}) {
     return afterBootNotice || !RESTART_BOOT_PHASES.has(txPhase);
 }
 
+// The live `log` frames of a task's own lifecycle: its start (agent.py), its end and a pause after it parked
+// (events_task_done.py, events_budget.py). A Pause or Stop request is a durable record only.
+const REQUEST_CUES = new Set(['task_started', 'task_done', 'budget_scope_paused']);
+
 // Updates is mounted for the SPA lifetime. Keep its reconnect episode local:
 // update_status_ready is transient and can arrive from the old generation, so
 // it may reconcile a restart only after the socket has actually reopened.
-export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadStatus, getRequestTaskId = () => '' }) {
+export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadStatus, getRequestTaskIds = () => [] }) {
     let restartReconnected = false;
     let continuedTaskId = ''; // Event correlation only; the status response owns liveness.
     const disposers = [];
@@ -531,21 +625,21 @@ export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadSt
             loadStatus({ fetchRemote: false, preservePhase: true });
         }
     });
-    // The requested description task ends through the ordinary task lifecycle;
-    // its own task_done (saved or not) is the one cue to read the status again.
-    // A host retry ends under its own id, naming the request as its root.
+    // The description task's own lifecycle frames cue a status read (its save sends update_progress_changed); a host
+    // retry's run under its own id with the request as root. The words follow that read, so a running task reads as
+    // running until it actually parks, and a Stop shows at the next status read (a frame, a reopen) as the host has it.
     listen('log', (msg) => {
         const evt = msg?.data;
-        const taskId = getRequestTaskId();
+        const ids = getRequestTaskIds();
         // Continue may be pressed in another window or through another owner interface.
         // Its existing host log reaches every socket; the status reader resolves the new author.
-        if (!evt || evt._historical || !taskId || getPhase() === 'restarting') return;
-        const matches = (id) => id === taskId || (continuedTaskId && id === continuedTaskId);
+        if (!evt || evt._historical || !ids.length || getPhase() === 'restarting') return;
+        const matches = (id) => Boolean(id && (ids.includes(id) || id === continuedTaskId));
         const continued = evt.type === 'owner_continue_admitted' && matches(evt.predecessor_task_id);
-        const ended = evt.type === 'task_done'
+        const lifecycle = REQUEST_CUES.has(evt.type)
             && (matches(evt.task_id) || (matches(evt.root_task_id) && !evt.parent_task_id));
         if (continued && typeof evt.task_id === 'string') continuedTaskId = evt.task_id;
-        if (continued || ended) loadStatus({ fetchRemote: false, preservePhase: true });
+        if (continued || lifecycle) loadStatus({ fetchRemote: false, preservePhase: true });
     });
     listen('update_status_ready', () => {
         const phase = getPhase();
@@ -614,11 +708,7 @@ export function initUpdates({ mount, state, ws }) {
                             <span class="updates-letter-meta"><time id="updates-letter-meta"></time></span>
                         </div>
                         <div class="updates-letter-actions">
-                            <button type="button" class="btn btn-ghost btn-sm updates-letter-refresh" id="updates-letter-refresh"
-                                aria-label="Check for updates" aria-describedby="updates-letter-resources">
-                                <span aria-hidden="true">↻</span><span id="updates-letter-refresh-label">Check</span>
-                            </button>
-                            <button type="button" class="btn btn-default btn-sm updates-letter-write" id="updates-letter-write"
+                            <button type="button" class="btn btn-default btn-sm updates-letter-action" id="updates-letter-action"
                                 aria-describedby="updates-letter-resources" hidden></button>
                         </div>
                     </div>
@@ -631,7 +721,9 @@ export function initUpdates({ mount, state, ws }) {
                         <p id="updates-letter-provenance"></p>
                         <p id="updates-letter-over-names" hidden></p>
                         <p id="updates-letter-error" hidden></p>
-                        <p id="updates-letter-resources">Check reads the official channel and never writes a description. Writing runs one ordinary Ouroboros task on your Main model, which can read the changes themselves; it may use subscription limits, local resources, or API budget.</p>
+                        <p id="updates-letter-resources">Check and describe reads the official channel, then asks Ouroboros to describe the update it finds unless a text for it is saved or being written; Check alone writes nothing. Writing runs one ordinary Ouroboros task on your Main model, which can read the changes themselves; it may use subscription limits, local resources, or API budget.</p>
+                        <button type="button" class="btn btn-default btn-sm updates-letter-rewrite" id="updates-letter-rewrite"
+                            aria-describedby="updates-letter-resources" hidden>Rewrite</button>
                     </details>
                 </section>
                 <details class="ui-disclosure updates-recovery">
@@ -689,21 +781,20 @@ export function initUpdates({ mount, state, ws }) {
     const letterLabel = page.querySelector('#updates-letter-label');
     const letterMeta = page.querySelector('#updates-letter-meta');
     const letterMore = page.querySelector('#updates-letter-more');
-    const letterWrite = page.querySelector('#updates-letter-write');
+    const letterAction = page.querySelector('#updates-letter-action');
+    const letterRewrite = page.querySelector('#updates-letter-rewrite');
     const letterNote = page.querySelector('#updates-letter-note');
     const letterNoteLine = page.querySelector('#updates-letter-note-line');
     const letterTask = page.querySelector('#updates-letter-task');
     const letterBody = page.querySelector('#updates-letter-body');
-    const letterRefresh = page.querySelector('#updates-letter-refresh');
-    const letterRefreshLabel = page.querySelector('#updates-letter-refresh-label');
     const letterProvenance = page.querySelector('#updates-letter-provenance');
     const letterOver = page.querySelector('#updates-letter-over');
     const letterOverNames = page.querySelector('#updates-letter-over-names');
     const letterError = page.querySelector('#updates-letter-error');
-    let letterRefreshing = false;
+    let pendingDescription = ''; // latest, check, write or rewrite, shared by both places a press can start
     let letterRefreshError = null;
-    let letterRequesting = false;
-    let letterRequestError = null;
+    let letterRequestNotice = null; // this press's refusal or uncertainty
+    let unrefreshedReceipt = null; // a confirmed reply stands until a successful status read
     let letterDisposer = null, letterKey = null;
     // "Read all" offers the rest only when the clamped body hides some. A body in a hidden tab or page measures 0 x 0,
     // which says nothing, so that measure stays owed until the body has a height (its tab or the Dashboard shown, or
@@ -769,12 +860,18 @@ export function initUpdates({ mount, state, ws }) {
         return () => (typeof dispose === 'function' ? dispose() : destroyChatMarkdown(body));
     }
 
-    // Called from render() on every phase change and status load. The head is
-    // cheap text, but the body is re-rendered ONLY when its content key moves:
-    // an unchanged letter keeps its DOM through a passive refresh and a running
-    // check, and with it the owner's selection and any mounted chart.
+    function descriptionOperation() {
+        return { pending: pendingDescription, taskId: unrefreshedReceipt?.taskId };
+    }
+
+    function letterView() {
+        return updateLetterView(latestStatus || {}, phase, descriptionOperation());
+    }
+
     function renderLetter() {
-        const view = updateLetterView(latestStatus || {}, phase);
+        const view = letterView();
+        const checking = checkingDescription(pendingDescription);
+        const receipt = unrefreshedReceipt;
         if (view.state === 'none') {
             if (letterKey !== null) {
                 releaseLetterBody();
@@ -786,29 +883,38 @@ export function initUpdates({ mount, state, ws }) {
             return;
         }
         letterSection.hidden = false;
-        letterSection.setAttribute('aria-busy', String(letterRefreshing || letterRequesting || Boolean(view.request?.live)));
-        letterLabel.textContent = view.label;
+        letterSection.setAttribute('aria-busy', String(Boolean(pendingDescription || view.request?.live)));
+        letterLabel.textContent = view.label || 'Update description';
         // When it was written is the heading's one fact; the range it covers is its provenance (Details).
         const written = view.markdown ? attemptTime(view.meta.writtenAt) : '';
         letterMeta.textContent = written ? `Written ${written}` : '';
         letterMeta.dateTime = view.meta.writtenAt;
         letterMeta.hidden = !written;
-        // One control per intent: when the primary action already checks, the section adds none.
-        letterRefresh.hidden = updateVerdict(latestStatus || {}, phase).action?.id === 'check';
-        letterRefresh.disabled = letterRefreshing || LETTER_BUSY_PHASES.has(phase);
-        letterRefreshLabel.textContent = letterRefreshing ? 'Checking…' : 'Check';
-        letterRefresh.setAttribute('aria-label', letterRefreshing ? 'Checking for updates' : 'Check for updates');
-        letterWrite.hidden = !view.write;
-        letterWrite.disabled = !view.write || view.write.disabled || letterRequesting || letterRefreshing;
-        letterWrite.textContent = letterRequesting ? 'Requesting…' : (view.write?.label || '');
-        // A failed check is said once, by the headline; the description it left alone needs no second line.
-        const note = letterRefreshing ? (view.markdown ? 'Checking the official channel; the description stays as it is.' : 'Checking the official channel…')
-            : letterRequestError ? `Could not request a description: ${letterRequestError.text}` : view.note;
+        // The section's one control; its words say what a press does now (updateLetterView).
+        letterAction.hidden = !view.action;
+        letterAction.disabled = !view.action || view.action.disabled;
+        letterAction.textContent = checking ? 'Checking…'
+            : (pendingDescription === 'write' ? 'Requesting…' : (view.action?.label || ''));
+        letterRewrite.hidden = !view.rewrite;
+        letterRewrite.disabled = !view.rewrite || view.rewrite.disabled;
+        letterRewrite.textContent = pendingDescription === 'rewrite' ? 'Requesting…' : 'Rewrite';
+        // A failed check is said once, by the headline; the description it left alone needs no second line. A writer
+        // the status shows keeps its note while a check runs (the button says Checking…), and a press that got no
+        // answer of its own says so beside it: that writer is not the press's answer.
+        const cachedTask = latestStatus?.letter_unavailable && view.request?.held && view.request.taskId !== receipt?.taskId
+            ? `Last known description task (${view.request.taskId}).` : '';
+        const receiptNote = receipt?.text && !pendingDescription
+            ? receipt.text + ' Current status could not be refreshed.' : '';
+        const note = checking && !view.request?.held
+            ? (view.markdown ? 'Checking the official channel; the description stays as it is.' : 'Checking the official channel…')
+            : [letterRequestNotice, receiptNote, view.note, cachedTask].filter(Boolean).join(' ');
         letterNote.textContent = note;
         letterNoteLine.hidden = !note;
         // A running request's own note opens its task's card in Main; rewritten only when the task changes,
         // so a passive refresh keeps focus on it.
-        const door = note === view.note && view.request?.live ? taskReferenceHtml(view.request.taskId) : '';
+        const taskId = view.request?.held && !latestStatus?.letter_unavailable ? view.request.taskId
+            : receipt?.taskId || (view.request?.held ? view.request.taskId : '');
+        const door = taskId ? taskReferenceHtml(taskId) : '';
         if (door !== letterDoor) {
             letterTask.innerHTML = door;
             letterDoor = door;
@@ -819,7 +925,7 @@ export function initUpdates({ mount, state, ws }) {
         letterProvenance.textContent = view.markdown ? `Written by Ouroboros${view.meta.authorVersion
             ? ` ${view.meta.authorVersion}` : ''}${author}${view.meta.targetVersion
             ? ` about ${view.meta.targetVersion}` : ''}.${view.covers ? ` Changes ${view.covers}.` : ''}`
-            : (view.write ? `The update on offer: changes ${shortRange(view.write.key)}.` : '');
+            : (view.writeKey ? `Changes ${shortRange(view.writeKey)}.` : '');
         letterProvenance.hidden = !letterProvenance.textContent;
         letterOver.textContent = view.over;
         letterOver.hidden = !view.over;
@@ -868,59 +974,117 @@ export function initUpdates({ mount, state, ws }) {
 
     letterTask.addEventListener('click', openTaskReference);
 
-    // Check is the ordinary fetching check: it records range facts and never
-    // writes prose, so an unchanged description stays exactly as it was.
-    letterRefresh.addEventListener('click', async () => {
-        if (letterRefreshing || letterRefresh.disabled) return;
-        letterRefreshing = true;
-        letterRefreshError = null;
-        letterRequestError = null;
-        renderLetter();
-        const previous = latestStatus?.letter;
-        const previousView = updateLetterView(latestStatus || {}, phase);
-        try {
-            await loadStatus({ fetchRemote: true, preservePhase: true });
-            const current = latestStatus?.letter;
-            if (!letterRefreshError && latestStatus?.check_ok === true && previousView.descriptionCurrent
-                && updateLetterView(latestStatus, phase).descriptionCurrent && previous?.text === current?.text
-                && previous?.written_at === current?.written_at
-                && ['base_sha', 'target_sha', 'update_channel', 'target_ref'].every(
-                    key => previous?.key?.[key] === current?.key?.[key])) {
-                showToast('Description is up to date.', 'info');
-            }
-        } finally {
-            letterRefreshing = false;
-            render();
-        }
+    letterAction.addEventListener('click', () => {
+        const action = letterView().action;
+        if (!action || action.disabled) return;
+        if (action.id === 'describe') describeUpdate();
+        else if (action.id === 'check') checkChannel();
+        else requestDescription(action);
+    });
+    letterRewrite.addEventListener('click', () => {
+        const rewrite = letterView().rewrite;
+        if (!rewrite || rewrite.disabled) return;
+        requestDescription(rewrite);
     });
 
-    // Write/Rewrite is the owner's explicit request: one ordinary Main task
-    // reads the range and saves a description; nothing repeats on its own.
-    letterWrite.addEventListener('click', async () => {
-        const view = updateLetterView(latestStatus || {}, phase);
-        if (letterRequesting || letterWrite.disabled || !view.write || view.write.disabled) return;
-        letterRequesting = true;
-        letterRequestError = null;
-        renderLetter();
+    // Check and describe is ONE request: the server checks, then asks for the range that check found at most once,
+    // in one worker thread, so leaving the page drops neither half. The status read after it shows what happened;
+    // an answer that does not establish the outcome is said, never taken for success because some writer exists.
+    async function describeUpdate() {
+        letterRefreshError = null;
+        letterRequestNotice = null;
+        const statusAtPress = latestStatus;
+        pendingDescription = 'latest';
+        render();
+        let reply = null;
         try {
-            await apiClient.updateDescription(view.write.mode, view.write.key);
+            reply = await apiClient.updateDescribeLatest();
+            if (reply?.update) versions.renderReleases(reply.update.official_tags || []); // the explicit check's own read
         } catch (err) {
-            // A request still running is shown by the status read below, not as an error.
-            if (!(err?.status === 409 && err?.body?.task_id)) {
-                letterRequestError = { text: String(err?.body?.error || err?.message || err) };
-            }
-        } finally {
-            letterRequesting = false;
+            recordDescriptionFailure(err);
         }
+        try {
+            if (reply?.status === 'check_failed') letterRefreshError = checkFailure(reply.update, statusAtPress);
+            // This press's answer may precede a status already read through WS. Only fill an unchanged view;
+            // a failed check is an attempt fact, never a replacement for durable text or another window's writer.
+            else if (reply?.update && latestStatus === statusAtPress && !LETTER_BUSY_PHASES.has(phase)) {
+                latestStatus = retainUnreadLetter(reply.update, latestStatus);
+            }
+            await reconcileDescriptionReply(reply);
+        } finally {
+            pendingDescription = '';
+            render();
+        }
+        // Where no description section shows, the press's own outcome is said once here.
+        if (letterRequestNotice && letterSection.hidden) showToast(letterRequestNotice, 'error');
+        if (unrefreshedReceipt?.text) {
+            if (letterSection.hidden) showToast(unrefreshedReceipt.text, 'info');
+            return;
+        }
+        if (reply?.status === 'current') showToast('Description is up to date.', 'info');
+        else if (reply?.status === 'no_update') showToast('No new update to describe.', 'info');
+    }
+
+    // While a requested task can still save, Check is the ordinary fetching check: it records range facts and
+    // never writes prose, so an unchanged description stays exactly as it was.
+    async function checkChannel() {
+        pendingDescription = 'check';
+        letterRefreshError = null;
+        render();
+        try {
+            await loadStatus({ fetchRemote: true, preservePhase: true });
+        } finally {
+            pendingDescription = '';
+            render();
+        }
+    }
+
+    // Write (the update just applied) and Rewrite (the shown text's range) are the owner's explicit requests for one
+    // named range: one ordinary Main task reads it and saves a description; nothing repeats on its own.
+    async function requestDescription(choice) {
+        pendingDescription = choice.mode;
+        letterRequestNotice = null;
+        render();
+        let reply = null;
+        try {
+            reply = await apiClient.updateDescription(choice.mode, choice.key);
+        } catch (err) {
+            if (err?.status === 409 && err?.body?.task_id) {
+                reply = { status: 'writing', task_id: err.body.task_id };
+            } else recordDescriptionFailure(err);
+        }
+        try {
+            await reconcileDescriptionReply(reply);
+        } finally {
+            pendingDescription = '';
+            render();
+        }
+    }
+
+    function recordDescriptionFailure(err) {
+        letterRequestNotice = requestFailureText(err);
+        if (err?.status === 503 && err.body?.reason === 'task_status_unknown' && err.body.task_id) {
+            unrefreshedReceipt = { taskId: err.body.task_id };
+        }
+    }
+
+    // All description doors retain a known receipt and the previous view when a passive read fails.
+    // A receipt identifies the task; only a later status read can establish whether it is still running.
+    async function reconcileDescriptionReply(reply) {
+        const text = { queued: 'Description requested', writing: 'The request found an existing description task',
+            current: 'This check found a saved description for its range', no_update: 'This check found no update to describe' }[reply?.status];
+        if (text) unrefreshedReceipt = { taskId: ['queued', 'writing'].includes(reply.status) ? reply.task_id : '',
+            text: `${text}${reply.task_id ? ` (task ${reply.task_id})` : ''}.` };
         await loadStatus({ fetchRemote: false, preservePhase: true });
-    });
+    }
 
     // The retained last attempt (#1818), apart from the primary action and kept until the next attempt.
     // While this server's attempt runs or awaits its restart, the headline above already names it.
     function renderAttempt(verdict) {
-        const view = updateAttemptView(latestStatus?.update_progress, latestStatus?.update_tx,
+        const previous = latestStatus?.lastObservedAttempt;
+        const view = previous ? previous.view : updateAttemptView(latestStatus?.update_progress, latestStatus?.update_tx,
             { showRecoveryInstruction: !verdict.recoveryInstruction });
-        const above = !view?.terminal && ['updating', 'restarting', 'restart_required'].includes(verdict.state);
+        const above = !previous && !view?.terminal && ['updating', 'restarting', 'restart_required'].includes(verdict.state);
         attemptSection.hidden = !view || (above && !view.text);
         if (attemptSection.hidden) return;
         // One quiet line of the record: when, and how it ended with its tone; the rest opens under it.
@@ -928,7 +1092,7 @@ export function initUpdates({ mount, state, ws }) {
         attemptHeadline.textContent = view.headline;
         attemptHeadline.hidden = above || view.headline === verdict.headline;
         const when = attemptTime(view.when);
-        attemptWhen.textContent = when ? `Last attempt · ${when}` : 'Last attempt';
+        attemptWhen.textContent = ['Last attempt', when, previous && 'last known status'].filter(Boolean).join(' · ');
         attemptWhen.dateTime = view.when;
         attemptText.textContent = view.text;
         attemptText.hidden = !view.text;
@@ -937,7 +1101,7 @@ export function initUpdates({ mount, state, ws }) {
         // The retained samples (after_update) join the rows only of the attempt they name, so they appear with this
         // section, which stays hidden while an update runs (owner 25.10: A). A record of another operation is never
         // read as this attempt's: it keeps only its exact text below, labelled so.
-        const observed = latestStatus?.after_update || null;
+        const observed = previous ? previous.afterUpdate : latestStatus?.after_update;
         const own = Boolean(observed) && String(observed.operation_id || '') === view.id;
         attemptFacts.innerHTML = [...view.details, ...(own ? afterUpdateRows(observed) : [])].map(factRowHtml).join('');
         attemptRaw.hidden = !observed;
@@ -961,7 +1125,14 @@ export function initUpdates({ mount, state, ws }) {
         page.querySelector('.updates-recovery').hidden = Boolean(managed);
         paintStatusMark(dot, { shape: TONE_MARKS[verdict.tone] ? 'dot' : 'none', hue: TONE_MARKS[verdict.tone] || 'ink' });
         summary.textContent = verdict.headline;
-        const hintText = [verdict.hint, ...(verdict.warnings || []).map((w) => `Warning: ${w}`)]
+        // An explicit check that failed stays said: by the headline over that check's own answer, else here, until a
+        // later check of this panel or a newer recorded check (the transient letterRefreshError).
+        const failedCheck = letterRefreshError && verdict.state !== 'check_failed'
+            && (statusReadFailed(latestStatus) || String(latestStatus?.checked_at || '') === letterRefreshError.checkedAt)
+            ? `The last check failed: ${letterRefreshError.text}` : '';
+        const lastGuidance = !managed && latestStatus?.lastObservedAttempt?.guidance;
+        const hintText = [verdict.hint, lastGuidance && `Last reported · ${lastGuidance}`, failedCheck,
+            ...(verdict.warnings || []).map((w) => `Warning: ${w}`)]
             .filter(Boolean).join(' · ');
         hint.textContent = hintText;
         hint.hidden = !hintText;
@@ -973,13 +1144,14 @@ export function initUpdates({ mount, state, ws }) {
         factsMore.hidden = !rows.length;
         actionNote.textContent = verdict.checkedAgo || '';
         actionNote.hidden = !verdict.checkedAgo;
-        if (verdict.action) {
+        const action = headlineAction(verdict, latestStatus?.letter, descriptionOperation());
+        if (action) {
             // The crimson is this place's own action, an update; a check or a restart is a neutral capsule.
-            primaryBtn.className = `btn ${verdict.action.id === 'update' ? 'btn-primary' : 'btn-default'}`;
+            primaryBtn.className = `btn ${action.id === 'update' ? 'btn-primary' : 'btn-default'}`;
             primaryBtn.hidden = false;
-            primaryBtn.disabled = Boolean(verdict.action.disabled);
-            primaryBtn.textContent = verdict.action.label;
-            primaryBtn.dataset.action = verdict.action.id;
+            primaryBtn.disabled = Boolean(action.disabled);
+            primaryBtn.textContent = action.label;
+            primaryBtn.dataset.action = action.id;
         } else {
             primaryBtn.hidden = true;
             primaryBtn.dataset.action = '';
@@ -1029,7 +1201,8 @@ export function initUpdates({ mount, state, ws }) {
                     continue;
                 }
                 if (phase !== 'restarting') return;
-                latestStatus = data;
+                latestStatus = retainUnreadLetter(data, latestStatus);
+                if (!data.letter_unavailable) unrefreshedReceipt = null;
                 if (restartStatusCanSettle(data, { afterBootNotice: currentAfterBootNotice })) {
                     restartNeeded = false;
                     setPhase('');
@@ -1057,29 +1230,39 @@ export function initUpdates({ mount, state, ws }) {
                 statusRefreshNext = null;
                 if (!options.preservePhase) setPhase(options.fetchRemote ? 'checking' : 'loading');
                 try {
-                    const data = await (options.fetchRemote ? apiClient.updateCheck() : apiClient.updateStatus());
-                    if (options.fetchRemote) letterRefreshError = null;
+                    const status = await (options.fetchRemote
+                        ? apiClient.updateCheck(latestStatus?.update_channel) : apiClient.updateStatus());
+                    const data = retainUnreadLetter(status, latestStatus);
+                    // The explicit check's own outcome: its failure outlives a newer read queued meanwhile (render).
+                    if (options.fetchRemote) letterRefreshError = data?.check_ok === false ? checkFailure(data, latestStatus) : null;
                     // The explicit check owns release discovery. A queued progress
                     // refresh has no tags and must not erase that successful read.
                     if (options.fetchRemote || officialTagsDiv.childElementCount === 0) {
                         versions.renderReleases(data.official_tags || []);
                     }
-                    if (statusRefreshNext) continue; // A newer notice owns the next read.
-                    latestStatus = options.preservePhase && phase === 'preflighting' && latestStatus?.preflight_range
-                        ? bindPreflightDescription(data, { merge_plan: latestStatus.preflight_range, letter: latestStatus.letter }) : data;
+                    // A newer notice owns the next read; an explicit check's own answer is shown before it.
+                    if (statusRefreshNext && !options.fetchRemote) continue;
+                    if (!statusRefreshNext && !data.letter_unavailable) unrefreshedReceipt = null;
+                    latestStatus = data;
                     // Keep an outstanding apply/restart await. Server progress refines
                     // its label; a fresh page starts with no old local phase.
                     if (!options.preservePhase || !['updating', 'restarting', 'preflighting'].includes(phase)) {
                         setPhase(restartNeeded && !data?.update_tx?.active ? 'restart_needed' : '');
                     } else render();
                 } catch (err) {
+                    if (options.fetchRemote) letterRefreshError = checkFailure(null, latestStatus, err);
                     if (statusRefreshNext) continue;
-                    if (options.fetchRemote) letterRefreshError = {
-                        at: new Date().toISOString(), text: String(err.message || err),
-                    };
-                    latestStatus = { ...latestStatus, managed: true, warnings: [`status_error:${err.message || err}`], check_ok: false };
-                    if (!options.preservePhase) setPhase(restartNeeded ? 'restart_needed' : '');
-                    else render();
+                    latestStatus = retainUnreadLetter({
+                        managed: latestStatus?.managed, managed_by_deployment: latestStatus?.managed_by_deployment,
+                        lastObservedAttempt: lastObservedAttempt(latestStatus),
+                        warnings: [`status_error:${err.message || err}`], letter_unavailable: true,
+                        check_ok: options.fetchRemote ? false : null,
+                        checked_at: options.fetchRemote ? latestStatus?.checked_at : null,
+                    }, latestStatus);
+                    // A queued notice may preserve an installation phase, but never a read that has now finished.
+                    if (!options.preservePhase || phase === 'loading' || phase === 'checking') {
+                        setPhase(restartNeeded ? 'restart_needed' : '');
+                    } else render();
                 }
             }
         })().finally(() => { statusRefreshPromise = null; });
@@ -1138,8 +1321,6 @@ export function initUpdates({ mount, state, ws }) {
                 throw new Error(preflight?.merge_plan?.error || 'The update plan could not be verified. No files were changed.');
             }
             const { plan, strategy } = verified;
-            latestStatus = bindPreflightDescription(latestStatus, preflight);
-            render();
             const conflictCount = (plan.code_conflict_paths || []).length + (plan.doc_conflict_paths || []).length;
             const assisted = strategy === 'assisted';
             const description = preflightDescription(preflight);
@@ -1149,7 +1330,7 @@ export function initUpdates({ mount, state, ws }) {
             // The description reads as rendered prose in its own region; the consequences of
             // applying stay plain text below it, and the per-commit evidence sits in Details.
             const proceed = await openConfirmDialog({
-                title: `Update ${String(plan.base_sha).slice(0, 8)} -> ${String(plan.target_sha).slice(0, 8)}`,
+                title: applyTitle(latestStatus || {}, plan),  // the pinned range's versions, else neutral; commits lead Details
                 content: description || over ? { label: "What's new", mount: (el) => mountDescription(el, description, over) } : null,
                 body: (description ? '' : 'No description is available for this exact preflight range.\n\n') + (assisted
                     ? `${conflictCount} conflict(s) need resolution. Ouroboros will resolve the merge as a reviewed task (model spend applies); progress lands in chat, and the server restarts after the reviewed commit.`
@@ -1192,6 +1373,7 @@ export function initUpdates({ mount, state, ws }) {
     }
 
     async function replaceWithOfficial() {
+        if (replaceBtn.disabled) return;
         // In-flight latch, not a bare .disabled: a tab reopen re-renders the
         // panel mid-request, and render() would otherwise re-enable Replace
         // while this destructive recovery is still pending (final-review
@@ -1254,8 +1436,12 @@ export function initUpdates({ mount, state, ws }) {
     }
 
     primaryBtn.addEventListener('click', () => {
+        if (primaryBtn.disabled || primaryBtn.hidden) return;
         const action = primaryBtn.dataset.action;
-        if (action === 'check') {
+        if (action === 'describe') {
+            describeUpdate();
+            versions.load();
+        } else if (action === 'check') {
             loadStatus({ fetchRemote: true });
             versions.load();
         } else if (action === 'update') {
@@ -1265,7 +1451,10 @@ export function initUpdates({ mount, state, ws }) {
         }
     });
     replaceBtn.addEventListener('click', replaceWithOfficial);
-    attemptRestore.addEventListener('click', () => rollback({ target: attemptRestore.dataset.target, label: 'the version before this update' }));
+    attemptRestore.addEventListener('click', () => {
+        if (attemptSection.hidden || attemptRestore.hidden || attemptRestore.disabled) return;
+        rollback({ target: attemptRestore.dataset.target, label: 'the version before this update' });
+    });
     letterMore.addEventListener('click', () => {
         letterMore.textContent = letterBody.classList.toggle('is-open') ? 'Show less' : 'Read all';
     });
@@ -1296,7 +1485,9 @@ export function initUpdates({ mount, state, ws }) {
         getPhase: () => phase,
         reconcileRestart: reconcileRestartStatus,
         loadStatus,
-        getRequestTaskId: () => requestView(latestStatus?.letter)?.taskId || '',
+        // A late receipt and the writer observed through WS can name different tasks.
+        // Either task's own event is a reason to read again.
+        getRequestTaskIds: () => [requestView(latestStatus?.letter)?.taskId, unrefreshedReceipt?.taskId].filter(Boolean),
     });
     bindAppVersionRender({ getStatus: () => latestStatus, render });  // same lifetime as the panel
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {

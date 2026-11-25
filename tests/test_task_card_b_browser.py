@@ -42,14 +42,16 @@ window.chat=createChatInstance({ws,state:{activePage:'chat',projectChatIds:new S
     apply(request,data){window.chat?.hydrateStateSnapshot(data);}}});
 </script>"""
 
-# A quiet feed in synthetic words with a real feed's geometry (Europe/Moscow clock). Its clock times are read on the
-# day the test runs, so a clock never reads `Yesterday`.
+# The feed's timestamps and the page's clock must not drift a day apart when collection and execution span midnight.
+# set_fixed_time leaves browser timers running. The next-day case checks both the longer clock label and its layout.
 MSK = ZoneInfo("Europe/Moscow")
-DAY = datetime.now(MSK).date()
+NOW = datetime(2026, 1, 15, 23, 30, tzinfo=MSK)
+NOW_NEXT_DAY = datetime(2026, 1, 16, 0, 20, tzinfo=MSK)
+DAY = NOW.date()
 
 
 def _at(clock):
-    """`HH:MM[:SS]` today in Moscow, as the host's UTC ISO stamp."""
+    """`HH:MM[:SS]` on the pinned DAY in Moscow, as the host's UTC ISO stamp."""
     parts = [int(part) for part in clock.split(":")] + [0]
     local = datetime(DAY.year, DAY.month, DAY.day, parts[0], parts[1], parts[2], tzinfo=MSK)
     return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -208,10 +210,12 @@ def _respond(chat):
 
 
 @contextmanager
-def card_room(pw, engine, theme, width, height, *, coarse=False, web=WEB, rows=None, state=None, details=None, chat_id=1):
+def card_room(pw, engine, theme, width, height, *, coarse=False, web=WEB, rows=None, state=None, details=None,
+              now=NOW, timezone="Europe/Moscow", chat_id=1):
     """A real chat instance in the real shell (`web`'s index.html and stylesheets), Main or the Project room `chat_id`:
     `rows` is the history it reads, `state` the census its `/api/state` answers, `details` its task reads; all three
-    stay mutable. A read of a task in `hold` waits in `held` until the test answers it."""
+    stay mutable. A read of a task in `hold` waits in `held` until the test answers it. The page's clock is pinned to
+    `now` for dated feeds; pass None for a producer emitting real timestamps."""
     chat = {"rows": list(rows or []), "details": dict(details or {}), "hold": set(), "held": [],
             "state": state or {"supervisor_ready": True, "active_chat_activities_complete": True, "active_chat_activities": []}}
     boot = BOOT.replace("chatId:1,", f"chatId:{chat_id},asPanel:{str(chat_id != 1).lower()},")
@@ -237,7 +241,10 @@ def card_room(pw, engine, theme, width, height, *, coarse=False, web=WEB, rows=N
     browser = getattr(pw, engine).launch(headless=True)
     try:
         page = browser.new_page(viewport={"width": width, "height": height}, has_touch=coarse,
-                                timezone_id="Europe/Moscow", device_scale_factor=2)
+                                timezone_id=timezone, device_scale_factor=2)
+        # Before any script runs: the page reads the fixtures' day, whichever day (and hour) the run itself falls on.
+        if now is not None:
+            page.clock.set_fixed_time(now)
         page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)});")
         page.route("**/api/**", _respond(chat))
         errors = PageErrors(page, engine)
@@ -321,29 +328,41 @@ def _assert_b_root(facts, *, clock=None, reviews="", buttons=()):
     assert not facts["hscroll"], facts
 
 
-@pytest.mark.parametrize("engine,theme,width,height,coarse", [
-    ("webkit", "light", 1100, 750, False), ("webkit", "dark", 1100, 750, False),
-    ("webkit", "dark", 390, 844, True), ("webkit", "light", 390, 844, True),
-    ("chromium", "dark", 1100, 750, False), ("chromium", "light", 390, 844, True),
+# One leg's day: the page's pinned clock, its timezone, and the three clocks the cards then read (q1 updated, q3
+# started, w-root updated). `NEXT_DAY` is the flake's own scene, pinned: across Moscow midnight every fixture clock
+# reads `Yesterday, HH:MM` and the head keeps its composition with the longer word (#3535).
+SAME_DAY = (NOW, "Europe/Moscow", ("updated 22:42", "started 22:43", "updated 22:47"))
+NEXT_DAY = (NOW_NEXT_DAY, "Europe/Moscow",
+            ("updated Yesterday, 22:42", "started Yesterday, 22:43", "updated Yesterday, 22:47"))
+
+
+@pytest.mark.parametrize("engine,theme,width,height,coarse,day", [
+    ("webkit", "light", 1100, 750, False, SAME_DAY), ("webkit", "dark", 1100, 750, False, SAME_DAY),
+    ("webkit", "dark", 390, 844, True, SAME_DAY), ("webkit", "light", 390, 844, True, SAME_DAY),
+    ("chromium", "dark", 1100, 750, False, SAME_DAY), ("chromium", "light", 390, 844, True, SAME_DAY),
+    ("webkit", "light", 1100, 750, False, NEXT_DAY),
 ], ids=["webkit-light-1100", "webkit-dark-1100", "webkit-dark-390", "webkit-light-390", "chromium-dark-1100",
-        "chromium-light-390"])
-def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, width, height, coarse):
+        "chromium-light-390", "webkit-light-1100-next-day"])
+def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, width, height, coarse, day):
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
         pytest.skip("Set OUROBOROS_RUN_UI_SMOKE=1 to run the browser flow")
     playwright = pytest.importorskip("playwright.sync_api")
+    now, timezone, (q1_clock, q3_clock, work_clock) = day
+    scene = f"{engine}-{theme}-{width}" + ("-next-day" if day == NEXT_DAY else "")
     state = {"supervisor_ready": True, "active_chat_activities_complete": True, "active_chat_activities": CENSUS}
-    with playwright.sync_playwright() as pw, card_room(pw, engine, theme, width, height, coarse=coarse, state=state) as room:
+    with playwright.sync_playwright() as pw, card_room(pw, engine, theme, width, height, coarse=coarse, state=state,
+                                                      now=now, timezone=timezone) as room:
         page = room["page"]
         room["emit"](QUIET)
         page.evaluate("s => chat.hydrateStateSnapshot(s)", with_work_fields(state))
         _settle(page)
-        shot = _evidence(f"quiet-{engine}-{theme}-{width}.png")
+        shot = _evidence(f"quiet-{scene}.png")
         if shot:
             page.screenshot(path=shot)
         q1, q2, q3 = (room["facts"](task_id) for task_id in ("q1", "q2", "q3"))
-        _assert_b_root(q1, clock="updated 22:42", buttons=("Turn into project", "Stop…"))
+        _assert_b_root(q1, clock=q1_clock, buttons=("Turn into project", "Stop…"))
         _assert_b_root(q2, clock="", buttons=("Turn into project",))
-        _assert_b_root(q3, clock="started 22:43", buttons=("Turn into project",))
+        _assert_b_root(q3, clock=q3_clock, buttons=("Turn into project",))
         # The words stand whole as the card's text; the facts keep their meta line.
         assert (q1["title"], q2["title"], q3["title"]) == (Q1, Q2, Q3)
         for facts, duration in ((q1, "3m 3s"), (q2, "2m 48s"), (q3, "2m 49s")):
@@ -354,7 +373,7 @@ def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, wid
         page.locator('#chat-messages > .chat-live-card[data-task-id="w-root"]').scroll_into_view_if_needed()
         _settle(page)
         work = room["facts"]("w-root")
-        _assert_b_root(work, clock="updated 22:47", reviews="Reviews 2", buttons=("Turn into project", "Stop…"))
+        _assert_b_root(work, clock=work_clock, reviews="Reviews 2", buttons=("Turn into project", "Stop…"))
         assert work["title"] == WORK_TITLE and work["line"] == WORK_LINE, work
         assert work["meta"] == "model-bravo-5.5 · 12m 0s · 18 tool calls · Tracked: $0.42", work
         # Children keep their identity row and carry no root control and no clock of a root.
@@ -365,7 +384,7 @@ def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, wid
         if coarse:  # before any screenshot: Chromium's element capture resets the touch emulation
             hits = page.evaluate(FINGER_TARGETS, "w-root")
             assert hits["coarse"] and hits["overlaps"] == [], hits
-        shot = _evidence(f"work-{engine}-{theme}-{width}.png")
+        shot = _evidence(f"work-{scene}.png")
         if shot:
             page.locator('#chat-messages > .chat-live-card[data-task-id="w-root"]').screenshot(path=shot)
 
@@ -387,7 +406,7 @@ def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, wid
         assert opened["kids"] >= opened["notesBottom"] - 1 and opened["kept"], opened
         assert card.locator(":scope > .chat-live-summary-button [data-live-review-summary]").get_attribute("aria-expanded") == "true"
         assert card.get_attribute("data-expanded") == "1"
-        shot = _evidence(f"work-open-{engine}-{theme}-{width}.png")
+        shot = _evidence(f"work-open-{scene}.png")
         if shot:
             card.screenshot(path=shot)
 
@@ -636,6 +655,12 @@ DOORS = """id => { const card = document.querySelector(`#chat-messages > .chat-l
         kid: door(card.querySelector(':scope > .chat-subagents > .chat-live-card.subagent'), '[data-live-disclosure]')}; }"""
 
 
+# A chevron turns by a 0.18s CSS transition; a fixed wait can end mid-turn on a loaded runner (WebKit, run
+# 44786693905). Wait for the turns themselves: getAnimations() flushes style, so a turn not yet started is included.
+CHEVRONS_STILL = """() => Promise.all([...document.querySelectorAll('#chat-messages .chat-live-chevron')]
+    .flatMap(el => el.getAnimations()).map(a => a.finished.catch(() => null))).then(() => true)"""
+
+
 @pytest.mark.parametrize("engine", ["webkit", "chromium"])
 def test_each_door_chevron_says_its_own_door_in_every_state(engine):
     """Reviews and Details open independently, so each chevron turns with its own door's `aria-expanded` alone, whichever
@@ -657,6 +682,7 @@ def test_each_door_chevron_says_its_own_door_in_every_state(engine):
             if door:
                 door.click()
                 _settle(page)
+                page.evaluate(CHEVRONS_STILL)
             facts = page.evaluate(DOORS, "w-root")
             assert facts == {"reviews": [reviews_open] * 2, "details": [details_open] * 2, "kid": [kid_open] * 2}, facts
             if details_open and not reviews_open and not kid_open:
@@ -877,3 +903,316 @@ def test_a_root_proven_solo_closes_its_foot_and_an_open_fact_reopens_it(engine, 
         read({**SOLO_BASE, "swarm_efficiency": {"subagent_count": 1}, "swarm_receipt": mixed},
              "Swarm · 1 subagent started · 1 subagent start unconfirmed · 1 model · $0.12 known")
         snap("4-started-and-open")
+
+
+# --- where a place's work came from: one meta line under the name, its Details rows and its Main portal ----------------
+# DESIGN "Conversation activity block"; `task_origin.js` reads the host's `place_origin` (CLIENT_CONTRACT). Every place,
+# account and line is invented.
+
+ORIGIN_SEP = chr(0xA0) + chr(0xB7) + " "  # a part's own separator (task_origin.js): a no-break space, the dot, a space
+ORIGIN_MATRIX = [(engine, width, height, theme) for engine in ("chromium", "webkit")
+                 for width, height in ((1100, 750), (390, 844)) for theme in ("light", "dark")]
+
+
+def _origin(**fields):
+    return {"place_id": "github:example-org/lanternworks", "place_label": "GitHub · Lanternworks", "provider": "github",
+            "actor": {"id": "4242", "label": "pike-meadow"}, "wakes": ["new_issue"], **fields}
+
+
+def _born(task_id, text, **fields):
+    return {"chat_id": 1, "task_id": task_id, "role": "assistant", "is_progress": True, "narration": True,
+            "text": f"💬 {text}", "content": f"💬 {text}", "initiator": "consciousness", "ts": _at("22:40"), **fields}
+
+
+def _born_end(task_id, **fields):
+    return {"chat_id": 1, "task_id": task_id, "role": "system", "system_type": "task_summary",
+            "summary_kind": "terminal_root_projection", "text": "Done", "status": "completed", "outcome_phase": "done",
+            "outcome_final": True, "outcome_authority": "canonical_task_result_after_finalization",
+            "initiator": "consciousness", "ts": _at("22:41"), **fields}
+
+
+# The longest shapes a line must hold: a label its connector stored doubled, two matched kinds, a long account name.
+LONG_ORIGIN = _origin(place_id="github:notifications", place_label="GitHub · GitHub · оповещения тестового стенда",
+                      actor={"id": "99887766", "label": "a-contributor-with-a-rather-long-login"},
+                      wakes=["mention", "review_requested"])
+TIDEPOOL = _origin(place_id="github:example-org/tidepool", place_label="GitHub · Tidepool",
+                   actor={"id": "7", "label": "tern-walker"}, wakes=["my_thread"])
+DIRECT = {"place_id": "telegram:dm", "place_label": "Telegram · Direct messages", "provider": "telegram",
+          "actor": {"id": "1", "label": "Rowan", "owner": True}, "wakes": ["direct_message"]}
+REVIEWED = "Checked the pull request the review asked about: the tests it adds pass and one comment is left for its author."
+FILED = "The export button stays disabled after an upload; I filed what I found."
+ORIGIN_HISTORY = [
+    _born("named", "Reading the issue and the upload code", suggested_name="Look at the export button report",
+          place_origin=_origin()),
+    _born_end("named", suggested_name="Look at the export button report", place_origin=_origin(), wake_summary=FILED),
+    # The host's admission title is the place's label: the line must not say the place again.
+    _born("titled", "Reading the thread", suggested_name="GitHub · Tidepool", place_origin=TIDEPOOL),
+    _born_end("titled", suggested_name="GitHub · Tidepool", wake_silent=True, quiet_effective=True,
+              text="Done · no message", place_origin=TIDEPOOL),
+    _born("long", "Reading the review request", suggested_name=REVIEWED, place_origin=LONG_ORIGIN),
+    _born_end("long", suggested_name=REVIEWED, wake_summary=REVIEWED, place_origin=LONG_ORIGIN),
+    # Work no place called: the card it always was.
+    {"chat_id": 1, "task_id": "owner", "role": "assistant", "is_progress": True, "narration": True, "ts": _at("22:40"),
+     "text": "💬 Comparing the two drafts", "content": "💬 Comparing the two drafts", "suggested_name": "Compare the two drafts"},
+    {"chat_id": 1, "task_id": "owner", "role": "system", "system_type": "task_summary",
+     "summary_kind": "terminal_root_projection", "text": "Done", "status": "completed", "outcome_phase": "done",
+     "outcome_final": True, "outcome_authority": "canonical_task_result_after_finalization", "ts": _at("22:41"),
+     "suggested_name": "Compare the two drafts"},
+]
+
+# One card's origin line beside its neighbours: words, box, type, ink over the card's own fill, and overflow.
+ORIGIN_CARD = """(id) => {
+    const card = document.querySelector(`.chat-live-card[data-task-id="${id}"]`);
+    const part = (name) => card.querySelector(`:scope > [data-live-summary-button] .${name}`);
+    const box = (node) => { if (!node || !node.getClientRects().length) return null; const r = node.getBoundingClientRect();
+        return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; };
+    const line = part('chat-live-origin'), title = part('chat-live-title'), activity = part('chat-live-activity');
+    const style = line ? getComputedStyle(line) : null;
+    return { lines: card.querySelectorAll(':scope > [data-live-summary-button] .chat-live-origin').length,
+        text: line && !line.hidden ? line.textContent : '', title: title.textContent, activity: activity.textContent,
+        spans: line ? [...line.children].map((span) => [span.textContent, span.hasAttribute('data-i18n-authored')]) : [],
+        line: box(line), titleBox: box(title), activityBox: box(activity), card: box(card),
+        size: style && style.fontSize, ink: style && style.color, fill: getComputedStyle(card).backgroundColor,
+        cut: line ? line.scrollWidth - line.clientWidth : 0, wide: document.documentElement.scrollWidth - innerWidth };
+}"""
+# The first Details value of a card, and each row as [label, value words, [each child span's words and whether authored]].
+ORIGIN_FIRST_FACT = "document.querySelector('.chat-live-card[data-task-id=\"%s\"] [data-live-facts] dd')"
+ORIGIN_FACTS = """(id) => [...document.querySelectorAll(`.chat-live-card[data-task-id="${id}"] > .chat-live-details [data-live-facts] > .chat-live-fact`)]
+    .map((row) => { const value = row.querySelector('dd');
+        return [row.querySelector('dt').textContent, value.textContent,
+            [...value.children].map((span) => [span.textContent, span.hasAttribute('data-i18n-authored')])]; })"""
+
+
+def _contrast(ink, fill):
+    """WCAG contrast of two computed colours; None over a translucent fill, where the screenshot is the evidence."""
+    import re
+
+    def channels(color):
+        numbers = [float(value) for value in re.findall(r"[\d.]+", color)]
+        return numbers[:3], (numbers[3] if len(numbers) > 3 else 1.0)
+
+    def luminance(rgb):
+        linear = [(c / 255) / 12.92 if c / 255 <= 0.03928 else ((c / 255 + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    (front, _), (back, alpha) = channels(ink), channels(fill)
+    if alpha < 1:
+        return None
+    high, low = sorted((luminance(front), luminance(back)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _open_origin_details(page, task):
+    card = page.locator(f'.chat-live-card[data-task-id="{task}"]')
+    card.locator(":scope > [data-live-summary-button] [data-live-toggle]").click()
+    card.locator(":scope > .chat-live-details [data-live-facts]").wait_for(state="visible")
+    return card
+
+
+def _shoot_card(page, name, task):
+    shot = _evidence(name)
+    if shot:  # centred first: a card at the feed's edge is photographed under the room's floating bar
+        card = page.locator(f'.chat-live-card[data-task-id="{task}"]')
+        card.evaluate('el => el.scrollIntoView({ block: "center" })')
+        card.screenshot(path=shot, animations="disabled")
+
+
+@pytest.mark.parametrize("engine,width,height,theme", ORIGIN_MATRIX)
+def test_a_place_born_card_says_the_place_what_called_it_and_who_under_its_name(engine, width, height, theme):
+    """Work a place started says under its name where it came from, what called it and whose event it was, from its
+    first live frame and after a reload; a name that already is the place does not repeat it; Details keep every fact
+    whole and a repeated frame rebuilds none of them; turned into a Project, its Main portal keeps the line. Work no
+    place started keeps the card it always was."""
+    playwright = _skip_without_smoke()
+    prefix = f"origin-{engine}-{width}-{theme}"
+    with playwright.sync_playwright() as pw, card_room(pw, engine, theme, width, height, rows=ORIGIN_HISTORY) as room:
+        page = room["page"]
+        writes = []
+        page.on("request", lambda request: writes.append(request.url) if request.method != "GET" else None)
+        page.locator('.chat-live-card[data-task-id="long"]').wait_for()
+        # A live frame of work the owner's own account called: the card names its origin from that first frame.
+        room["emit"]([("chat", _born("live", "Reading your message", suggested_name="Answer the direct message",
+                                     place_origin=DIRECT))])
+        page.locator('.chat-live-card[data-task-id="live"] .chat-live-origin').wait_for()
+        seen = {task: page.evaluate(ORIGIN_CARD, task) for task in ("named", "titled", "long", "owner", "live")}
+        assert seen["named"]["text"] == ORIGIN_SEP.join(["GitHub · Lanternworks", "new issue", "pike-meadow"]), seen["named"]
+        assert seen["titled"]["title"] == "GitHub · Tidepool"
+        assert seen["titled"]["text"] == ORIGIN_SEP.join(["in its thread", "tern-walker"]), "the name already says the place"
+        assert seen["long"]["text"] == ORIGIN_SEP.join(["GitHub · оповещения тестового стенда", "mentions it and review requested",
+                                                        "a-contributor-with-a-rather-long-login"]), seen["long"]
+        assert seen["live"]["text"] == ORIGIN_SEP.join(["Telegram · Direct messages", "addressed to it", "you"]), seen["live"]
+        assert seen["owner"]["lines"] == 0 and seen["owner"]["text"] == "", "work no place called keeps its card"
+        # What someone outside wrote carries its boundary; the reason and «you» are the host's own words.
+        assert [authored for _, authored in seen["named"]["spans"]] == [True, False, True], seen["named"]["spans"]
+        assert [authored for _, authored in seen["live"]["spans"]] == [True, False, False], seen["live"]["spans"]
+        for task in ("named", "titled", "long", "live"):
+            card = seen[task]
+            assert card["lines"] == 1 and card["size"] == "12px", (task, card)
+            # Under the name, on its left edge, above the latest line, inside the card, never clipped.
+            assert card["line"]["top"] >= card["titleBox"]["bottom"] - 0.5, (task, card)
+            assert abs(card["line"]["left"] - card["titleBox"]["left"]) <= 0.5, (task, card)
+            if card["activityBox"]:
+                assert card["activityBox"]["top"] >= card["line"]["bottom"] - 0.5, (task, card)
+            assert card["line"]["right"] <= card["card"]["right"] + 0.5 and card["cut"] <= 0, (task, card)
+            assert card["wide"] <= 0, (task, card["wide"])
+            ratio = _contrast(card["ink"], card["fill"])
+            assert ratio is None or ratio >= 4.5, (task, card["ink"], card["fill"], ratio)
+        shot = _evidence(f"{prefix}-cards.png")
+        if shot:
+            page.screenshot(path=shot)
+        _shoot_card(page, f"{prefix}-card-long.png", "long")
+        _shoot_card(page, f"{prefix}-card-titled.png", "titled")
+        # Details keep every fact whole.
+        _open_origin_details(page, "named")
+        rows = {label: (words, spans) for label, words, spans in page.evaluate(ORIGIN_FACTS, "named")}
+        assert rows["Started by"][0] == "Consciousness", rows
+        assert rows["Place"] == ("GitHub · Lanternworks", [["GitHub · Lanternworks", True]]), rows
+        assert rows["What called it"] == ("New issues", []), rows
+        assert rows["From"] == ("pike-meadow · 4242", [["pike-meadow", True], ["4242", True]]), rows
+        # The origin rows equal their own serialization, so a repeated frame rebuilds nothing under a reader.
+        live = _open_origin_details(page, "live")
+        held = ORIGIN_FIRST_FACT % "live"
+        page.evaluate(f"window.heldFact = {held}")
+        room["emit"]([("chat", _born("live", "Writing the answer", suggested_name="Answer the direct message",
+                                     place_origin=DIRECT))])
+        assert page.evaluate(f"window.heldFact === {held}"), "the facts list was rebuilt"
+        assert live.locator(".chat-live-origin").count() == 1
+        _shoot_card(page, f"{prefix}-card-details.png", "named")
+        # Turned into a Project, the same card is its Main portal and keeps saying where its work came from.
+        page.evaluate("s => chat.hydrateStateSnapshot(s)", with_work_fields({
+            "supervisor_ready": True, "active_chat_activities_complete": True,
+            "task_bindings": {"live": {"project_id": "alpha", "chat_id": 7}},
+            "projects": [{"id": "alpha", "name": "Project Alpha", "chat_id": 7}],
+            "active_chat_activities": [{"activity_id": "live", "project_id": "alpha", "project_name": "Project Alpha",
+                                        "chat_id": 7, "kind": "managed_task", "phase": "working", "started_at": _epoch("22:40"),
+                                        "last_line": "Writing the answer", "last_line_at": _at("22:42"), "tool_calls": 3,
+                                        "place_origin": DIRECT}]}))
+        page.locator('.chat-live-card[data-task-id="live"][data-portal="1"]').wait_for()
+        card = page.evaluate(ORIGIN_CARD, "live")
+        assert card["text"] == ORIGIN_SEP.join(["Telegram · Direct messages", "addressed to it", "you"]), card
+        assert card["lines"] == 1 and card["line"]["top"] >= card["titleBox"]["bottom"] - 0.5, card
+        assert card["line"]["right"] <= card["card"]["right"] + 0.5 and card["cut"] <= 0 and card["wide"] <= 0, card
+        _shoot_card(page, f"{prefix}-card-portal.png", "live")
+        assert not writes, writes
+
+
+# A memory in which the very words of the place, the service and the account below are translatable chrome.
+ORIGIN_FRENCH = {"language": "fr", "english": False, "entries": {
+    "code:places.heard.my_thread": {"text": "dans son fil"}, "code:places.wake.my_thread": {"text": "réponses dans ses fils"},
+    "code:task.fact.place": {"text": "Lieu"}, "code:task.fact.called_by": {"text": "Ce qui l’a appelé"},
+    "code:task.fact.from": {"text": "De"}, "code:task.origin.bot": {"text": "robot"},
+    "Settings": {"text": "Réglages"}, "Files": {"text": "Fichiers"}, "Settings-7": {"text": "Réglages-7"}}}
+ORIGIN_WORDS = {"place_id": "chat:words", "place_label": "Settings", "provider": "Files",
+                "actor": {"id": "Settings-7", "label": "Settings", "bot": True}, "wakes": ["my_thread"]}
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_the_translator_leaves_a_place_an_account_and_an_id_as_written_and_translates_the_hosts_words(engine):
+    """A place's label, its service and an account's name and id stay as written under any translation overlay; the
+    host's words beside them (the reason, the Details labels, «robot») translate, and an unchanged origin keeps its
+    Details nodes either way."""
+    playwright = _skip_without_smoke()
+    with playwright.sync_playwright() as pw, card_room(pw, engine, "light", 1100, 750) as room:
+        page = room["page"]
+        writes = []
+        page.on("request", lambda request: writes.append(request.url) if request.method != "GET" else None)
+        # The page's own translation module, with a memory and no miss reports (nothing is written).
+        page.evaluate("""async (payload) => {
+            window.i18n = await import('/static/modules/i18n.js');
+            window.i18n.setMissTransport(() => Promise.resolve(null));
+            window.i18n.applyPayload(payload);
+            const control = document.createElement('p');
+            control.id = 'plain-control';
+            control.textContent = 'Settings';
+            document.body.append(control);
+        }""", ORIGIN_FRENCH)
+        room["emit"]([("chat", _born("words", "Reading the thread", suggested_name="Compare the two drafts",
+                                     place_origin=ORIGIN_WORDS))])
+        page.locator('.chat-live-card[data-task-id="words"] .chat-live-origin').wait_for()
+        _open_origin_details(page, "words")
+        held = ORIGIN_FIRST_FACT % "words"
+        page.evaluate(f"window.heldFact = {held}")
+        facts = "document.querySelector('.chat-live-card[data-task-id=\"words\"] [data-live-facts]').innerHTML"
+        markup = page.evaluate(facts)
+        assert '<span data-i18n-authored="">Settings</span>' in markup, markup
+
+        def read():
+            rows = {label: (words, spans) for label, words, spans in page.evaluate(ORIGIN_FACTS, "words")}
+            return page.evaluate(ORIGIN_CARD, "words")["spans"], rows
+
+        expected_line = [["Settings" + ORIGIN_SEP, True], ["dans son fil" + ORIGIN_SEP, False], ["Settings", True]]
+        expected_rows = {"Lieu": ("Settings · Files", [["Settings", True], ["Files", True]]),
+                         "Ce qui l’a appelé": ("Réponses dans ses fils", []),
+                         "De": ("Settings · robot · Settings-7", [["Settings", True], ["Settings-7", True]])}
+        line, rows = read()
+        assert line == expected_line, line
+        assert {label: rows[label] for label in expected_rows} == expected_rows, rows
+        # The overlay as the app runs it never enters a card; one that enters everything but an authored boundary
+        # still leaves the three names alone. Both translate the same word outside a boundary.
+        page.evaluate("window.i18n.createTranslator().applyTo(document.body)")
+        assert page.locator("#plain-control").inner_text() == "Réglages"
+        assert read() == (line, rows)
+        page.evaluate("""() => window.i18n.createTranslator(
+            { skipRoots: '[data-i18n-authored]', userContent: '', excludeSelector: '' }).applyTo(document.body)""")
+        line, rows = read()
+        assert line == expected_line, line
+        assert {label: rows[label] for label in expected_rows} == expected_rows, rows
+        # Translated or not, an unchanged origin keeps its Details nodes: the markup equals its serialization.
+        room["emit"]([("chat", _born("words", "Writing the answer", suggested_name="Compare the two drafts",
+                                     place_origin=ORIGIN_WORDS))])
+        assert page.evaluate(f"window.heldFact === {held}"), "the facts list was rebuilt"
+        assert page.evaluate(facts) == markup
+        _shoot_card(page, f"origin-{engine}-1100-light-words.png", "words")
+        assert not writes, writes
+
+
+# A connector's own kind, as its declaration words it (`place_origin.labels`, frozen with the focus).
+DECLARED = _origin(wakes=["signal.new_discussion"], labels={"signal.new_discussion": "New discussion"})
+DECLARED_FRENCH = {"language": "fr", "english": False, "entries": {
+    "code:task.fact.called_by": {"text": "Ce qui l’a appelé"}, "New discussion": {"text": "Nouvelle discussion"}}}
+
+
+@pytest.mark.parametrize("engine,width,height,theme", [("chromium", 1100, 750, "light"), ("webkit", 390, 844, "dark")])
+def test_a_kind_its_connector_declared_reads_in_its_words_on_the_card_and_in_details_after_a_reload(engine, width, height, theme):
+    """Work a connector's own kind called says that kind in the words its declaration gave it, never its id: on the line
+    under the name and in Details, from history and again after a reload, kept as written under translation while the
+    host's words beside it translate."""
+    playwright = _skip_without_smoke()
+    prefix = f"declared-{engine}-{width}-{theme}"
+    rows = [_born("declared", "Reading the new discussion", suggested_name="Answer the new discussion", place_origin=DECLARED),
+            _born_end("declared", suggested_name="Answer the new discussion", place_origin=DECLARED, wake_summary=FILED)]
+    with playwright.sync_playwright() as pw, card_room(pw, engine, theme, width, height, rows=rows) as room:
+        page = room["page"]
+        writes = []
+        page.on("request", lambda request: writes.append(request.url) if request.method != "GET" else None)
+        for phase in ("history", "reload"):
+            if phase == "reload":
+                room["load"]()
+            page.locator('.chat-live-card[data-task-id="declared"] .chat-live-origin').wait_for()
+            _settle(page)
+            card = page.evaluate(ORIGIN_CARD, "declared")
+            assert card["text"] == ORIGIN_SEP.join(["GitHub · Lanternworks", "New discussion", "pike-meadow"]), (phase, card)
+            assert [authored for _, authored in card["spans"]] == [True, True, True], (phase, card["spans"])
+            assert card["lines"] == 1 and card["line"]["top"] >= card["titleBox"]["bottom"] - 0.5, (phase, card)
+            assert card["line"]["right"] <= card["card"]["right"] + 0.5 and card["cut"] <= 0 and card["wide"] <= 0, card
+            ratio = _contrast(card["ink"], card["fill"])
+            assert ratio is None or ratio >= 4.5, (phase, card["ink"], card["fill"], ratio)
+            _shoot_card(page, f"{prefix}-{phase}.png", "declared")
+            _open_origin_details(page, "declared")
+            facts = {label: (words, spans) for label, words, spans in page.evaluate(ORIGIN_FACTS, "declared")}
+            assert facts["What called it"] == ("New discussion", [["New discussion", True]]), (phase, facts)
+            assert "signal" not in page.locator('.chat-live-card[data-task-id="declared"]').inner_text()
+            _shoot_card(page, f"{prefix}-{phase}-details.png", "declared")
+        # Under translation the host's words change and the connector's words stay as written.
+        page.evaluate("""async (payload) => { window.i18n = await import('/static/modules/i18n.js');
+            window.i18n.setMissTransport(() => Promise.resolve(null)); window.i18n.applyPayload(payload); }""", DECLARED_FRENCH)
+        room["emit"]([("chat", _born("declared-fr", "Reading the new discussion", suggested_name="Answer it",
+                                     place_origin=DECLARED))])
+        page.locator('.chat-live-card[data-task-id="declared-fr"] .chat-live-origin').wait_for()
+        _open_origin_details(page, "declared-fr")
+        page.evaluate("""() => window.i18n.createTranslator(
+            { skipRoots: '[data-i18n-authored]', userContent: '', excludeSelector: '' }).applyTo(document.body)""")
+        facts = {label: (words, spans) for label, words, spans in page.evaluate(ORIGIN_FACTS, "declared-fr")}
+        assert facts["Ce qui l’a appelé"] == ("New discussion", [["New discussion", True]]), facts
+        assert page.evaluate(ORIGIN_CARD, "declared-fr")["spans"][1] == ["New discussion" + ORIGIN_SEP, True]
+        assert not writes, writes

@@ -17,6 +17,7 @@ import pytest
 from ouroboros import task_pacing, usage_accounting
 from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.loop import _check_budget_limits, _RoundLimitContext
+from ouroboros.llm import LLMClient
 from ouroboros.task_pacing import main_loop_wire_options
 
 # An explicit experiment profile: its authored early-stop math is kept verbatim.
@@ -27,16 +28,18 @@ EXPLICIT_50 = normalize_budget_profile({"cost_hard_stop_pct": 50})
 def _priced_anthropic_route(monkeypatch):
     """An isolated catalog, so the money numbers below are exact and offline."""
     from ouroboros import pricing
+    import time
 
-    monkeypatch.setattr(pricing, "_cached_pricing", {})
-    monkeypatch.setattr(pricing, "_pricing_fetched_at", {})
+    # An omitted tier on a resolved OpenRouter route needs its full, fresh endpoint pool.
+    slug = "anthropic/claude-test"
+    source = {"provider": "openrouter", "model": slug, "endpoint_tag": "fixture", "service_tier": None, "processing": "standard"}
+    endpoint = pricing.PricingSchedule((3.0, 0.3, 3.75, 15.0), cache_write_1h=6.0, source=source)
+    monkeypatch.setattr(pricing, "_cached_pricing", {("openrouter", slug): {"fixture": endpoint}})
+    monkeypatch.setattr(pricing, "_pricing_fetched_at", {("openrouter", slug): time.time()})
     monkeypatch.setattr(pricing, "_pricing_retry_after", {})
     monkeypatch.setattr(pricing, "_pricing_fetch_in_progress", set())
-    monkeypatch.setattr(
-        "ouroboros.llm.fetch_openrouter_pricing",
-        # (input, cached_read, cache_write(5m), output) per 1M tokens.
-        lambda **_kwargs: {"anthropic/claude-test": (3.0, 0.3, 3.75, 15.0)},
-    )
+    schedule = pricing.PricingSchedule((3.0, 0.3, 3.75, 15.0), cache_write_1h=6.0)
+    monkeypatch.setattr("ouroboros.llm.fetch_openrouter_pricing", lambda **_kwargs: {"anthropic/claude-test": schedule})
     usage_accounting._reset_task_cache_splits()
     yield
     usage_accounting._reset_task_cache_splits()
@@ -241,11 +244,55 @@ def _patch_execute_candidate(monkeypatch, llm_module, execute):
 class TestWrapupAffordability:
     """The graceful stop uses the fence's own reservation, and fails open."""
 
+    @pytest.mark.parametrize(("screen", "messages"), [(True, None), (False, None), (False, [{"role": "user", "content": "final answer"}])])
+    def test_private_router_never_uses_public_prices_in_either_probe(self, monkeypatch, screen, messages):
+        from ouroboros.llm import LLMClient
+
+        monkeypatch.setattr(usage_accounting, "estimate_cost_optional",
+                            lambda *a, **kw: pytest.fail("private model reached the public estimator"))
+        monkeypatch.setattr("ouroboros.pricing._fetch_live_rows", lambda *args: pytest.fail("private catalog lookup"))
+        client = LLMClient(api_key="fixture", base_url="https://private.invalid/v1")
+        with _scoped("wrapup", "wrapup"):
+            assert task_pacing.wrapup_reservation_fits(
+                llm=client, messages=messages, model="vendor/synthetic-wrapup", prompt_tokens=200,
+                root_cap_usd=1.0, deciding_usd=0.1, screen=screen,
+            ) is None
+
+    def test_priced_cloudru_screen_requires_the_exact_candidate(self, monkeypatch):
+        from ouroboros import pricing
+
+        model = "cloudru/vendor/new-model"
+        tariffs = {model: (1.0, None, None, 5.0)}
+        monkeypatch.setattr(pricing, "get_pricing", lambda **kw: tariffs if kw["provider"] == "cloudru" else {})
+        request = _request(provider="cloudru", model=model, task_id="wrapup", allow_live_fetch=False)
+        funds = {"root_cap_usd": 1.0, "deciding_usd": 0.0}
+        with _scoped("wrapup", "wrapup"):
+            # A small estimate fits, but only measuring the physical input can decide this input-priced route.
+            assert task_pacing.wrapup_reservation_fits(request=request, screen=True, **funds) is False
+            assert task_pacing.wrapup_reservation_fits(request=request, **funds) is True
+            large = replace(request, prompt_tokens_estimate=2_000_000)
+            assert task_pacing.wrapup_reservation_fits(request=large, **funds) is False
+
+    @pytest.mark.parametrize("field", ["reservation_usd", "max_budget_usd"])
+    def test_fixed_screen_needs_no_catalog_or_prompt_measurement(self, monkeypatch, field):
+        monkeypatch.setattr("ouroboros.pricing.get_pricing", lambda **kw: pytest.fail("fixed reservation used catalog"))
+        request = _request(**{field: 0.25})
+        with _scoped("wrapup", "wrapup"):
+            probe = {"request": request, "screen": True, "deciding_usd": 0}
+            assert task_pacing.wrapup_reservation_fits(**probe, root_cap_usd=0.5) is True
+            assert task_pacing.wrapup_reservation_fits(**probe, root_cap_usd=0.2) is False
+
     def test_no_bound_scope_fails_open(self):
         assert task_pacing.wrapup_reservation_fits(
             model="anthropic/claude-test", prompt_tokens=400_000,
             root_cap_usd=50.0, deciding_usd=49.0,
         ) is None
+
+    def test_an_unresolved_clients_model_name_has_no_public_tariff(self, monkeypatch):
+        monkeypatch.setattr("ouroboros.pricing._fetch_live_rows", lambda *_a: pytest.fail("public lookup"))
+        with _scoped("task", "task"):
+            assert task_pacing.wrapup_reservation_fits(model="vendor/private", prompt_tokens=100,
+                llm=SimpleNamespace(), root_cap_usd=1.0, deciding_usd=0.0) is None
 
     def test_no_root_cap_fails_open(self):
         with _scoped("t1", "t1"):
@@ -264,14 +311,14 @@ class TestWrapupAffordability:
     def test_a_wrap_up_that_no_longer_fits_reports_false(self):
         with _scoped("t1", "t1"):
             assert task_pacing.wrapup_reservation_fits(
-                model="anthropic/claude-test", prompt_tokens=400_000,
+                model="anthropic/claude-test", llm=LLMClient(api_key="fixture"), prompt_tokens=400_000,
                 root_cap_usd=50.0, deciding_usd=49.99,
             ) is False
 
     def test_a_wrap_up_that_still_fits_reports_true(self):
         with _scoped("t1", "t1"):
             assert task_pacing.wrapup_reservation_fits(
-                model="anthropic/claude-test", prompt_tokens=1_000,
+                model="anthropic/claude-test", llm=LLMClient(api_key="fixture"), prompt_tokens=1_000,
                 root_cap_usd=50.0, deciding_usd=0.0,
             ) is True
 
@@ -281,10 +328,10 @@ class TestWrapupAffordability:
 
             bound = usage_accounting._reservation_cost(_request(
                 task_id="t1", prompt_tokens_estimate=400_000,
-                max_completion_tokens=MAIN_LOOP_MAX_TOKENS,
+                max_completion_tokens=MAIN_LOOP_MAX_TOKENS, estimate_ordinary_pool=True,
             ))
             assert task_pacing.wrapup_reservation_fits(
-                model="anthropic/claude-test", prompt_tokens=400_000,
+                model="anthropic/claude-test", llm=LLMClient(api_key="fixture"), prompt_tokens=400_000,
                 root_cap_usd=bound + 1.0, deciding_usd=1.0 + 1e-6,
             ) is False
 
@@ -295,7 +342,7 @@ class TestWrapupAffordability:
         )
         with _scoped("t1", "t1"):
             assert task_pacing.wrapup_reservation_fits(
-                model="anthropic/claude-test", prompt_tokens=400_000,
+                model="anthropic/claude-test", llm=LLMClient(api_key="fixture"), prompt_tokens=400_000,
                 root_cap_usd=50.0, deciding_usd=49.99,
             ) is False
 
@@ -841,6 +888,68 @@ class TestWrapupAffordabilityRail:
 
     def _ceiling(self, root_cap):
         return task_pacing.resolve_cost_ceiling(None, EXPLICIT_50, root_cap_usd=root_cap)
+
+    @pytest.mark.parametrize(("tier", "resumed", "large_text", "last_call"), [
+        ("ultrafast", False, False, True), ("", False, False, True), ("ultrafast", True, False, False),
+        ("standard", False, False, False), ("standard", False, True, True),
+    ])
+    def test_text_last_fit_prices_the_acting_route_from_a_cold_catalog(
+        self, monkeypatch, tmp_path, tier, resumed, large_text, last_call,
+    ):
+        from ouroboros import loop, loop_budget, pricing
+        from ouroboros.model_wait import task_model_wait_scope
+
+        slug = "vendor/last-fit"
+        reads = []
+
+        def fetch(provider, model=""):
+            reads.append((provider, model))
+            return {mode: pricing.PricingSchedule((400. if large_text else 0., None, None, rate), source={"processing": mode})
+                    for mode, rate in [("standard", 1.), ("ultrafast", 50.)]}
+
+        monkeypatch.setattr(pricing, "_fetch_live_rows", fetch)
+        monkeypatch.setenv("OUROBOROS_OR_PROVIDER", "")
+        monkeypatch.setenv("OUROBOROS_PROCESSING_PREFERENCE", "")
+        monkeypatch.setenv("OUROBOROS_MODEL_PROCESSING_PREFERENCES", "{}")
+        metadata = {"processing": {"source": "owner", "tier": tier}} if tier else {}
+        owner = SimpleNamespace(task_metadata=metadata, _budget_resume_last_fit_relaxed=resumed)
+        task_pacing._remember_cost_stop_policy(owner, {"authority": task_pacing.COST_STOP_EXPLICIT})
+        ctx = _ctx(active_model=slug, llm=LLMClient(api_key="fixture"), tools=SimpleNamespace(_ctx=owner),
+                   messages=[{"role": "user", "content": "x" * 40_000 if large_text else "Answer in text."}], drive_root=tmp_path,
+                   drive_logs=tmp_path / "logs", accumulated_usage={"cost": 0., "_context_prompt_estimate": 100})
+        ctx.model_role = "fallback:0"
+        monkeypatch.setattr(loop, "_loop_tree_accounting", lambda **kwargs: {"settled_usd": 0.})
+        monkeypatch.setattr(loop_budget, "_wrapup_global_remaining", lambda: 5.)
+        monkeypatch.setattr(loop, "_prepare_forced_prompt", lambda ctx, prompt, trace: prompt)
+        monkeypatch.setattr("ouroboros.loop_forced_finalization._deliver_forced_late_results", lambda *args: False)
+        monkeypatch.setattr("ouroboros.budget_pause.request_pause", lambda *args, **kwargs: None)
+        monkeypatch.setattr(loop, "_forced_final_answer", lambda ctx, **kw: ("final", {}, kw))
+        builds = []
+        build = task_pacing.prospective_wrapup_attempt_request
+
+        def record(**kwargs):
+            request = build(**kwargs)
+            builds.append((kwargs["model_role"], kwargs["model_account_override"], kwargs["reasoning_effort"], request))
+            return request
+
+        monkeypatch.setattr(task_pacing, "prospective_wrapup_attempt_request", record)
+        with _scoped("task1", "task1", 5.), task_model_wait_scope(
+            task={"id": "task1"}, drive_root=tmp_path, event_queue=None, worker_slot_held=False,
+        ) as waiter:
+            waiter.overrides["fallback:0"] = {"model_account_override": "fixture-account"}
+            result = _check_budget_limits(ctx, None, self._ceiling(5.))
+        assert reads == [("openrouter", slug)]
+        assert (result is not None) is last_call
+        assert ("budget_resume_last_fit_admitted" in ctx.accumulated_usage) is resumed
+        if last_call:
+            assert len(builds) == 2
+            assert result[2]["_admitted_request"] is builds[-1][-1]
+        if tier == "standard" and not large_text:
+            assert builds == []  # two Standard calls fit without preparing the transcript
+        for role, account, effort, request in builds:
+            assert (role, account, effort, request.model) == ("fallback:0", "fixture-account", "high", slug)
+            assert request.estimate_ordinary_pool is (not tier)
+            assert request.submitted_processing_mode == ("default" if tier == "standard" else tier)
 
     def test_a_producer_allowance_never_arms_the_one_call_early_probe(self, monkeypatch):
         """A producer allowance stops when known spend reaches it (owner 2026-10-07):

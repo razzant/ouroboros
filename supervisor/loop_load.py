@@ -4,7 +4,8 @@ The supervisor has one consumer thread (the ``server.py`` loop) and one process-
 queue lock Q (``supervisor.queue._queue_lock``). These windows let the one compact
 ``supervisor_load`` row per busy minute (``ouroboros/server_liveness.py``) say where the
 consumer's time went: per event type, how many events its handlers served and their total
-and longest service time; per bus lane, the worst producer-stamp lag the drain saw; for Q,
+and longest service time; per bus lane, the worst lag the drain saw (an event's wait from the bus's put
+stamp to its service, never a producer's ``ts``); for Q,
 how long its outermost acquisitions waited and held it, from which code site the window's
 longest hold came, and per code site the count, total and longest hold (``hold_by_site``: the
 sites are the lexical acquisitions of Q, so the table is bounded by the code, and it is what

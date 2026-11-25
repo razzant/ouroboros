@@ -15,10 +15,11 @@ Two seams:
   of truth moved from an ``en``/``ru`` pair to one English table plus the memory.
 * ``language()`` — the install's tag (``""`` reads as English) and ``label(tag)``.
 
-A sentence the host composed and this transport merely relays (a task's reason line, a
-question's host facts) is sent as the host wrote it, in English: it carries ids, times,
-the task-control words that stay English by decision and sometimes the author's own
-rationale, and the bridge has no typed clauses to translate around.
+A host row reaches Telegram as one line from ``ouroboros.host_notice.notice_line``: a
+notice's phrase and its step, and the technical pause (a host-authored reason with no
+quoted user content), each part translated before they are joined. A host sentence a
+panel relays without a code (a work's reason, ``telegram_health``) is translated by its
+text (``host_sentence``). Other relays can include ids and the author's own words.
 
 The bridge's former private ``TELEGRAM_LANGUAGE`` setting is migrated once
 (``migration_target``): an install that chose Russian in the bridge before the install-wide
@@ -152,6 +153,15 @@ class Index:
     @property
     def en(self) -> Dict[str, str]:
         return self.rows
+
+
+def host_sentence(source: str, tag: str) -> str:
+    if english(tag):
+        return source
+    found = memory.tr(source, tag, drive_root=drive_root())
+    if found is None:
+        _report_miss(source, tag, {"source": source, "role": "telegram"})
+    return found or source
 
 
 def _report_miss(key: str, tag: str, context: Dict[str, Any]) -> None:

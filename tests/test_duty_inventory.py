@@ -21,7 +21,7 @@ from ouroboros import server_maintenance as sm
 
 def _started_by_one_tick(monkeypatch) -> List[str]:
     """Drive one maintenance tick with every due condition true; the names it starts, in order."""
-    from ouroboros import maintenance
+    from ouroboros import claudexor_daemon, maintenance, subscription_census
     from supervisor import continuation_admission, queue, schedule_time
 
     names: List[str] = []
@@ -35,7 +35,10 @@ def _started_by_one_tick(monkeypatch) -> List[str]:
     monkeypatch.setattr(sm, "_tick_maintenance_child", lambda: names.append("maintenance-child"))
     monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [0.0])
     monkeypatch.setattr(sm, "_LAST_COLD_CUSTODY_SWEEP", [0.0])
-    monkeypatch.setattr(queue, "RUNNING", {"cur-run": {"task": {"id": "cur-run"}}})  # an actor: cold custody is due
+    monkeypatch.setitem(subscription_census._PASS, "dispatched", 0.0)
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)  # an engine the census reads
+    # An actor: cold custody and the subscription census are due.
+    monkeypatch.setattr(queue, "RUNNING", {"cur-run": {"task": {"id": "cur-run"}}})
     # An owner Pause; the 20 s block owes its look: owner-pause settlement is due.
     monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {"cur-paused": {"cause": "owner_pause", "fence_id": "f"}})
     monkeypatch.setattr(continuation_admission, "held_continuation_predecessors", lambda pending: ["cur-pred"])

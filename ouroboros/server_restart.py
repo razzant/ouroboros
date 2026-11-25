@@ -644,17 +644,20 @@ def _noticed_bootstrap(safe_restart_fn):
         if not ok or fell_back:
             headline = (str(msg).splitlines() or ["no detail"])[0]
             kept = headline.partition(": ")[2]  # after "Failed checkout <branch>"
-            text = (f"Startup fell back to the recovery point ({headline.rpartition(' ')[2]}): the working branch "
-                    "did not pass its import test and keeps that code for repair" if fell_back
-                    else f"Startup kept the current files: {kept}" if kept.startswith("Reset blocked (")
-                    else f"Startup bootstrap failed: {headline}")
+            # One phrase; Git's headline (its commit, branch and blocked paths) is the notice's detail.
+            text = ("Startup fell back to the recovery point: the working branch did not pass its import test and "
+                    "keeps that code for repair." if fell_back
+                    else "Startup kept the current files to protect local changes." if kept.startswith("Reset blocked (")
+                    else "Startup could not prepare this code.")
             try:
+                from ouroboros.host_notice import fields
                 from supervisor.message_bus import notification_chat_route, send_with_budget
                 from supervisor.state import load_state
 
                 owner_chat = notification_chat_route(load_state().get("owner_chat_id"))
                 if owner_chat is not None:
-                    send_with_budget(owner_chat, text, role="system", system_type="startup_notice")
+                    send_with_budget(owner_chat, text, role="system", system_type="startup_notice",
+                                     progress_meta=fields("startup_bootstrap", details=headline))
             except Exception:
                 log.warning("Bootstrap failure notice was not delivered", exc_info=True)
         return ok, msg
@@ -671,28 +674,24 @@ def _begin_task_teardown(restart_requested: bool) -> tuple[str, str]:
     return _shutdown_task_cleanup_args(restart_requested)
 
 
-def _shutdown_task_cleanup_args(restart_requested: bool) -> tuple[str, str]:
-    """Return ``(terminal_status, result_reason)`` for tasks torn down by a
-    graceful server shutdown.
-
-    A graceful shutdown — a requested restart (exit 42) or an external
-    stop/restart signal (SIGTERM/SIGINT) — is not a worker death, so a
-    still-running task is finalized as ``cancelled`` with an honest reason
-    instead of the stopped-worker text the pool writes for a death it recovers;
-    its callers pass ``stop_source="server_shutdown"``, the typed cause that
-    makes it a technical interruption the owner may Continue.
+def _shutdown_task_cleanup_args(restart_requested: bool, stop_source: str | None = None) -> tuple[str, str]:
+    """Return ``(terminal_status, result_reason)`` for tasks torn down by a graceful server shutdown: a requested
+    restart (exit 42), the application's Quit, the launcher's end or an external SIGTERM/SIGINT is not a worker
+    death, so a still-running task is finalized as ``cancelled`` with a reason naming that stop (``stop_source``,
+    default the live ingress ``server_process.server_stop_source``), not the stopped-worker text the pool writes
+    for a death it recovers. Its callers pass ``stop_source="server_shutdown"``, the typed cause that makes it a
+    technical interruption the owner may Continue; the text never changes that source.
     """
     if restart_requested:
-        reason = (
-            "Server restarted before this task finished; the task was "
-            "interrupted by the restart, not a worker crash."
-        )
-    else:
-        reason = (
-            "Server shut down (external stop/restart signal) before this task "
-            "finished; the task was interrupted, not a worker crash."
-        )
-    return "cancelled", reason
+        return "cancelled", ("Server restarted before this task finished; the task was "
+                             "interrupted by the restart, not a worker crash.")
+    if stop_source is None:
+        from ouroboros.server_process import server_stop_source
+        stop_source = server_stop_source()
+    words = {"launcher_quit": "the application was quit", "launcher_gone": "the application that started it ended",
+             "external_signal": "external stop/restart signal"}.get(stop_source, "the server stopped")
+    return "cancelled", (f"Server shut down ({words}) before this task finished; "
+                         "the task was interrupted, not a worker crash.")
 
 
 def _shutdown_supervisor_event_bus() -> None:
@@ -990,7 +989,8 @@ def _perform_supervisor_restart(server,
             server.log.warning("Restart session id not rotated: runtime state unavailable", exc_info=True)
         from supervisor.queue import publish_queue_snapshot
 
-        publish_queue_snapshot(reason="pre_restart_exit")  # embedded rows: an older body restores it after a rollback
+        if publish_queue_snapshot(reason="pre_restart_exit") is False:
+            raise OSError("The final rollback-readable queue snapshot could not be saved")
     except BaseException:
         from supervisor.queue import reopen_queue_returns
 

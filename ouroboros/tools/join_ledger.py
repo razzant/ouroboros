@@ -38,7 +38,7 @@ from ouroboros.task_tree_ledger import (
     tree_ledger_append,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
 log = logging.getLogger("ouroboros.tools.join_ledger")
 
@@ -96,6 +96,10 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
                 identity.setdefault("relpath", artifact_path.as_posix())
             if "name" not in identity:
                 identity["name"] = Path(raw_path).name
+        if "status" in identity and isinstance(item.get("released"), dict):
+            from ouroboros.payload_release_state import hashed_status  # an owner's Storage release keeps the identity
+
+            identity["status"] = hashed_status(semantic_result, item)
         if not identity:
             continue
         encoded_identity = json.dumps(identity, ensure_ascii=False, sort_keys=True, default=str)
@@ -118,7 +122,7 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
     notice = terminal_host_notice_text(semantic_result, include_empty=True)
     if "terminal_host_notice" in semantic_result or notice:
         payload["terminal_host_notice"] = notice
-    encoded = json.dumps(
+    encoded = json_dumps_utf8(
         payload,
         ensure_ascii=False,
         sort_keys=True,
@@ -204,13 +208,17 @@ def _cancelled_result_facts(result: Dict[str, Any], manifest: Dict[str, Any]) ->
     and its manifest's recorded identity, ``unknown`` where unrecorded."""
     if not cancellation_blocks_child_result(result):
         return {}
-    capture = next((row for row in result.get("artifacts") or []
-                    if isinstance(row, dict) and row.get("kind") == "workspace_patch_manifest"), {})
+    publication = result.get("workspace_capture")
+    if publication is not None:
+        digest = publication["files"].get(publication["manifest"])
+    else:
+        digest = next((row.get("sha256") for row in result.get("artifacts") or []
+                       if isinstance(row, dict) and row.get("kind") == "workspace_patch_manifest"), None)
     origin = result.get("cancel_origin")
     return {"status": "cancelled", "cancel_origin": dict(origin) if isinstance(origin, dict) and origin else "unknown",
             "artifact_attribution": str(result.get("artifact_attribution") or "unknown"),
             "capture_created_at": str(manifest.get("created_at") or "unknown"),
-            "capture_manifest_sha256": str(capture.get("sha256") or "unknown")}
+            "capture_manifest_sha256": str(digest or "unknown")}
 
 
 def _cancelled_result_note(child_task_id: str, facts: Dict[str, Any]) -> str:
@@ -223,17 +231,19 @@ def _cancelled_result_note(child_task_id: str, facts: Dict[str, Any]) -> str:
 
 
 def _cancelled_result_refusal(ctx: ToolContext, child_task_id: str, result: Dict[str, Any], reason: str,
-                              target: str) -> str:
+                              target: str, manifest: Dict[str, Any]) -> str:
     """Why a cancelled child's retained result cannot be applied, verified or accepted now; "" when it can.
 
     Its capture must be ready with nothing owed, since a cancelled owner's capture is never
     completed later; the decider gives a reason; and a shared result waits while a direct
     run of its own in that folder may be live. Rejecting it is never refused here."""
-    status, owed = str(result.get("artifact_status") or ""), sorted(result.get("native_capture_pending") or {})
-    if status not in ARTIFACT_READY_STATUSES or owed:
+    status = (result.get("workspace_capture") or {}).get("status", result.get("artifact_status"))
+    owed = sorted(result.get("native_capture_pending") or {})
+    if status not in ARTIFACT_READY_STATUSES or manifest.get("status") not in ARTIFACT_READY_STATUSES or owed:
+        detail = ": ".join(filter(None, (manifest.get("capture_error_code"), manifest.get("note"))))
         return (f"⚠️ INTEGRATE_NATIVE_CANCELLED: {child_task_id} was cancelled and its retained capture is not ready "
-                f"(artifact status {status or 'unknown'!r}{f'; capture owed for {owed}' if owed else ''}). A cancelled "
-                "child's capture is never completed later, so nothing of it can be applied, verified or accepted; "
+                f"(artifact status {status or 'unknown'!r}{f'; capture owed for {owed}' if owed else ''}). {detail} "
+                "A cancelled child's capture is never completed later, so nothing of it can be applied, verified or accepted; "
                 "decision='reject' records a rejection, and a delegated run's own capture stays separate.")
     from ouroboros.tools.patch_verdict import decision_reason_refusal
 
@@ -256,8 +266,7 @@ def _record_child_result_disposition(
     payload: Dict[str, Any],
     rationale: str,
 ) -> str:
-    """Append the sole authoritative, exact-hash child disposition row."""
-
+    """Bind an exact-hash disposition under the physical child's scratch-acceptance lock."""
     # Aggregated diagnostics (W2): name EVERY violated constraint in ONE reply —
     # the old one-error-per-round shape cost a live parent 9 paid rounds. The
     # typed exact-hash authority is unchanged: no truncation on the caller's
@@ -289,91 +298,82 @@ def _record_child_result_disposition(
             f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} is not a direct child of this task; "
             "no disposition was recorded."
         )
-    data = load_effective_task_result(status_drive_root, tid) or {}
-    if not data:
-        return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ CHILD_RESULT_STALE: {tid} has no current result to bind.")))
-    actual = _child_result_sha256(data)
-    if actual != expected:
-        return (
-            _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ CHILD_RESULT_STALE: {tid} changed (expected {expected[:12]}, current "
-            f"{actual[:12]}); inspect it again and submit the current hash.")))
-        )
+    from ouroboros.task_custody import task_custody_lock
 
-    from ouroboros.tools.task_tree import tree_root_id
+    with task_custody_lock(status_drive_root, tid, timeout_sec=0) as locked:
+        if not locked:
+            return (
+                f"⚠️ CHILD_RESULT_DISPOSITION_BUSY: {tid}'s custody is held (scratch release "
+                "or copy-back); retry the same disposition once it is free. Nothing was recorded."
+            )
+        data = load_effective_task_result(status_drive_root, tid) or {}
+        if not data:
+            return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ CHILD_RESULT_STALE: {tid} has no current result to bind.")))
+        actual = _child_result_sha256(data)
+        if actual != expected:
+            return (
+                _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ CHILD_RESULT_STALE: {tid} changed (expected {expected[:12]}, current "
+                f"{actual[:12]}); inspect it again and submit the current hash.")))
+            )
 
-    root_task_id = tree_root_id(ctx)
-    parent_task_id = str(getattr(ctx, "task_id", "") or "").strip()
-    if _child_disposition_lineage(data) != (root_task_id, parent_task_id, tid):
-        return (
-            f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} does not carry the exact "
-            "root/parent lineage required for a tree-ledger disposition."
-        )
+        from ouroboros.tools.task_tree import tree_root_id
 
-    existing = child_result_disposition_row(
-        root_task_id,
-        parent_task_id,
-        tid,
-        expected,
-        data_root=status_drive_root,
-    )
-    if (
-        existing
-        and existing.get("payload") == normalized
-        and str(existing.get("text") or "") == reason_text
-    ):
-        return (
-            f"OK: child {tid} is already marked {disposition} for result "
-            f"{expected[:12]} (idempotent)."
-        )
+        root_task_id = tree_root_id(ctx)
+        parent_task_id = str(getattr(ctx, "task_id", "") or "").strip()
+        if _child_disposition_lineage(data) != (root_task_id, parent_task_id, tid):
+            return (
+                f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} does not carry the exact "
+                "root/parent lineage required for a tree-ledger disposition."
+            )
 
-    metadata = (
-        getattr(ctx, "task_metadata", {})
-        if isinstance(getattr(ctx, "task_metadata", {}), dict)
-        else {}
-    )
-    role = str(metadata.get("role") or getattr(ctx, "role", "") or "")
-    appended = tree_ledger_append(
-        root_task_id,
-        "decision",
-        reason_text,
-        task_id=parent_task_id,
-        role=role,
-        payload=normalized,
-        allow_child_result_disposition=True,
-        data_root=status_drive_root,
-    )
-    if not appended.startswith("OK:"):
-        return (
-            f"⚠️ CHILD_RESULT_DISPOSITION_WRITE_FAILED: failed to append the "
-            f"authoritative task-tree decision for {tid}."
-        )
+        def recorded() -> bool:
+            row = child_result_disposition_row(root_task_id, parent_task_id, tid, expected, data_root=status_drive_root)
+            return bool(row and row.get("payload") == normalized and str(row.get("text") or "") == reason_text)
 
-    current = load_effective_task_result(status_drive_root, tid) or {}
-    if _child_result_sha256(current) != expected:
-        return (
-            _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ CHILD_RESULT_STALE: {tid} changed while its disposition was recorded; "
-            "the old row remains audit evidence but does not close the new result.")))
+        if recorded():
+            return (
+                f"OK: child {tid} is already marked {disposition} for result "
+                f"{expected[:12]} (idempotent)."
+            )
+
+        metadata = (
+            getattr(ctx, "task_metadata", {})
+            if isinstance(getattr(ctx, "task_metadata", {}), dict)
+            else {}
         )
-    if _child_disposition_lineage(current) != (root_task_id, parent_task_id, tid):
-        return (
-            f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} lineage changed while its "
-            "disposition was recorded."
+        role = str(metadata.get("role") or getattr(ctx, "role", "") or "")
+        appended = tree_ledger_append(
+            root_task_id,
+            "decision",
+            reason_text,
+            task_id=parent_task_id,
+            role=role,
+            payload=normalized,
+            allow_child_result_disposition=True,
+            data_root=status_drive_root,
         )
-    authoritative = child_result_disposition_row(
-        root_task_id,
-        parent_task_id,
-        tid,
-        expected,
-        data_root=status_drive_root,
-    )
-    if (
-        authoritative.get("payload") != normalized
-        or str(authoritative.get("text") or "") != reason_text
-    ):
-        return (
-            f"⚠️ CHILD_RESULT_DISPOSITION_WRITE_FAILED: a later decision replaced "
-            f"the disposition for {tid}; this caller did not overwrite it."
-        )
+        if not appended.startswith("OK:"):
+            return (
+                f"⚠️ CHILD_RESULT_DISPOSITION_WRITE_FAILED: failed to append the "
+                f"authoritative task-tree decision for {tid}."
+            )
+
+        current = load_effective_task_result(status_drive_root, tid) or {}
+        if _child_result_sha256(current) != expected:
+            return (
+                _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ CHILD_RESULT_STALE: {tid} changed while its disposition was recorded; "
+                "the old row remains audit evidence but does not close the new result.")))
+            )
+        if _child_disposition_lineage(current) != (root_task_id, parent_task_id, tid):
+            return (
+                f"⚠️ CHILD_RESULT_LINEAGE_FORBIDDEN: {tid} lineage changed while its "
+                "disposition was recorded."
+            )
+        if not recorded():
+            return (
+                f"⚠️ CHILD_RESULT_DISPOSITION_WRITE_FAILED: a later decision replaced "
+                f"the disposition for {tid}; this caller did not overwrite it."
+            )
     return f"OK: child {tid} marked {disposition} for result {expected[:12]}."
 
 
@@ -584,7 +584,7 @@ def _peek_task(ctx: ToolContext, task_id: str, view: str = "summary") -> str:
     ]
     # A queued status is no permission to run: what holds the task now, and who may release it.
     if stop := stop_for_reader(data.get("current_stop") or {}, data, str(getattr(ctx, "task_id", "") or "")):
-        parts.append("current_stop=" + json.dumps(stop, ensure_ascii=False, sort_keys=True))
+        parts.append("current_stop=" + json_dumps_utf8(stop, ensure_ascii=False, sort_keys=True))
     # Latest beacons this child posted to the shared ledger (partial_finding / blocker /
     # question / milestone), newest last.
     try:
@@ -655,10 +655,10 @@ def _discard_child_result(ctx: ToolContext, task_id: str, reason: str) -> str:
     return f"Discarded child result {tid} (reason: {reason_text}). It will not block finalization."
 
 
-def _override_delegation_constraint(ctx: ToolContext, constraint_id: str, reason: str) -> str:
+def _override_delegation_constraint(ctx: ToolContext, constraint_id: str, reason: str, constraint_task_id: str = "") -> str:
     """Explicitly override an unresolved delegation constraint in this task tree."""
 
-    cid = " ".join(str(constraint_id or "").split())
+    cid = str(constraint_id or "").strip()
     if not cid:
         return "⚠️ TOOL_ARG_ERROR (override_delegation_constraint): constraint_id is required."
     reason_text = _clip(" ".join(str(reason or "").split()), 500)
@@ -666,55 +666,43 @@ def _override_delegation_constraint(ctx: ToolContext, constraint_id: str, reason
         return "⚠️ TOOL_ARG_ERROR (override_delegation_constraint): a non-empty reason is required."
     try:
         from ouroboros.tools.task_tree import tree_root_id
-        from ouroboros.task_tree_ledger import open_delegation_constraints, tree_ledger_append
+        from ouroboros.task_tree_ledger import delegation_constraint_emitters, tree_ledger_append
 
         rid = tree_root_id(ctx)
         if not rid:
             return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=("⚠️ override_delegation_constraint: no task-tree scope.")))
-        open_rows = open_delegation_constraints(rid)
-        target_row = next((
-            row for row in open_rows
-            if isinstance(row.get("payload"), dict)
-            and str(row["payload"].get("constraint_id") or "") == cid
-        ), None)
-        if target_row is None:
-            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ override_delegation_constraint: constraint {cid!r} is not open in this task tree.")))
-        emitter_task_id = str(target_row.get("task_id") or "").strip()
-        if emitter_task_id:
-            status_drive_root = _status_drive_root(ctx)
-            if not _is_own_child(ctx, status_drive_root, emitter_task_id):
-                return (
-                    _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=("⚠️ override_delegation_constraint: only the parent of the task that raised "
-                    f"constraint {cid!r} may override it.")))
-                )
-        meta = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
-        role = str(meta.get("role") or getattr(ctx, "role", "") or "")
-        return tree_ledger_append(
-            rid,
-            "decision",
-            f"overrode delegation constraint {cid}: {reason_text}",
-            task_id=str(getattr(ctx, "task_id", "") or ""),
-            role=role,
-            allow_constraint_override=True,
-            payload={
-                "constraint_id": cid,
-                "decision": "overridden",
-                "reason": reason_text,
-                "parent_task_id": str(getattr(ctx, "task_id", "") or ""),
-            },
-        )
+        caller = str(getattr(ctx, "task_id", "") or "").strip()
+        states = delegation_constraint_emitters(rid, cid)
+        requested = str(constraint_task_id or "").strip()
+        candidates = states.keys() & {requested} if requested else states.keys()
+        eligible = sorted(tid for tid in candidates
+                          if caller == rid == tid or _is_own_child(ctx, _status_drive_root(ctx), tid))
+        if not caller or (candidates and not eligible):
+            return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED",
+                text=f"⚠️ override_delegation_constraint: only the parent of the emitter, or the root for its own constraint, may override {cid!r}."))
+        if not requested and len(states) > 1:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text=f"Constraint {cid!r} has multiple emitters. Specify constraint_task_id from {', '.join(eligible)}."))
+        if not eligible or not states[eligible[0]]:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text=f"Constraint {cid!r} is not open for the selected emitter."))
+        emitter = eligible[0]
+        meta = getattr(ctx, "task_metadata", None)
+        role = (meta.get("role") if isinstance(meta, dict) else None) or getattr(ctx, "role", "")
+        return tree_ledger_append(rid, "decision", f"overrode delegation constraint {cid}: {reason_text}",
+            task_id=caller, role=str(role or ""), allow_constraint_override=True,
+            payload={"constraint_id": cid, "decision": "overridden", "reason": reason_text, "constraint_task_id": emitter,
+                     **({"parent_task_id": caller} if caller != emitter else {})})
     except Exception:
         log.debug("Failed to override delegation constraint %s", cid, exc_info=True)
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR", text=(f"⚠️ override_delegation_constraint: failed to record override for {cid}.")))
 
 
-def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
+def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "", accept_unknown=None) -> str:
     """Owner Q9: select ONE paused root descendant or intermediate parent's direct child.
 
-    The request rides the existing worker->supervisor control channel; the
-    supervisor validates lineage and grants through the ONE resume seam, and
-    records the typed outcome as a ``budget_resume_child_outcome`` event. This
-    tool therefore reports a REQUEST, never a completed resume.
+    The supervisor checks lineage and records the grant or refusal in
+    ``budget_resume_child_outcome``. This tool reports the request.
     """
     try:
         tid = validate_task_id(task_id)
@@ -735,6 +723,7 @@ def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
         "task_id": tid,
         "requested_by": requester,
         "reason": reason_text,
+        **({"accept_unknown": accept_unknown} if isinstance(accept_unknown, list) and accept_unknown else {}),
         "ts": utc_now_iso(),
     })
     _record_child_decision_beacon(
@@ -742,14 +731,10 @@ def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
     )
     note = " (live)" if emitted == "live" else " (deferred to round end)"
     return (
-        f"Resume requested for {tid}{note}. This is a REQUEST: the supervisor validates money, "
-        "Stop/cancel intent, deadline, finite lifetime and the child's checkpoint through the same "
-        "seam the owner's Resume uses, then records a budget_resume_child_outcome event. A grant "
-        "removes the child's current_stop: its SAME task id then waits in the queue for a worker "
-        "(status stays scheduled, execution_observation.dispatch=queued) and reads running once a "
-        "worker takes it. A refusal (budget_still_exhausted, cancel_intent_active, deadline_passed, "
-        "lifetime_exhausted, root_still_paused, pause_record_missing, ...) leaves its current_stop in "
-        "place. Check with peek_task or get_task_result."
+        f"Resume requested for {tid}{note}. The supervisor checks this REQUEST against the child's checkpoint, "
+        "Stop, deadline, lifetime and budget. A grant removes the child's current_stop and queues the same task ID. "
+        "A refusal keeps the hold. Read the child's status with peek_task or get_task_result. If the refusal offers "
+        "a choice, your task mailbox receives its acceptable_unknown IDs. Name the IDs you accept and give a reason."
     )
 
 
@@ -827,10 +812,10 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_i
         elif settled_status(status_drive_root, tid):
             # A settled root whose helpers or delegated runs still work is still
             # owned: the owner's Stop cascades over that tree, and so does this one.
-            from ouroboros.delegate_custody_reconcile import tree_open_runs
+            from ouroboros.delegate_custody_current import cascade_work_open
 
             live_helpers = (task_subtree_has_live_queue_rows(status_drive_root, tid)
-                            or bool(tree_open_runs(status_drive_root, tid)))
+                            or cascade_work_open(status_drive_root, tid))
             live_ownership = live_ownership or live_helpers
     except Exception:
         live_ownership = True
@@ -944,6 +929,9 @@ def get_tools() -> list[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"},
                 "reason": {"type": "string", "default": "", "description": "Why this child is still needed (recorded)."},
+                "accept_unknown": {"type": "array", "items": {"type": "string"},
+                                   "description": "Copy acceptable_unknown IDs from the refusal in your task mailbox. Give a reason. "
+                                                  "The start may still run and spend money. Its request becomes lookup-only."},
             }, "required": ["task_id"]},
         }, _resume_child_task),
         ToolEntry("cancel_task", {
@@ -989,9 +977,10 @@ def get_tools() -> list[ToolEntry]:
         }, _discard_child_result),
         ToolEntry("override_delegation_constraint", {
             "name": "override_delegation_constraint",
-            "description": "Explicitly override an unresolved delegation_constraint in this task tree. Requires a reason; records an append-only decision row so a future schedule_subagent call may proceed audibly.",
+            "description": "Release a direct child's delegation_constraint, or your own if you are the root. Requires a reason and records a decision for future admissions.",
             "parameters": {"type": "object", "properties": {
                 "constraint_id": {"type": "string"},
+                "constraint_task_id": {"type": "string", "description": "Emitting task ID when authors reuse a constraint_id."},
                 "reason": {"type": "string", "description": "Why overriding this constraint is correct."},
             }, "required": ["constraint_id", "reason"]},
         }, _override_delegation_constraint),

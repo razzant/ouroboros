@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from tests._work_life import CX, OPUS, OPUS_NAMED, Life, Place, breaches, run_life
+from tests._work_life import CX, MARKED_LOOKBACK, OPUS, OPUS_NAMED, WHOLE_REQUESTS, Life, Place, breaches, run_life
 from tests.test_llm_claudexor import setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
 from tests.test_subscription_main_wait import main_call as main_fixture
@@ -55,6 +55,72 @@ def test_build_llm_messages_marks_every_stable_block_before_the_changing_tail():
     from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
 
     assert system_msg[STABLE_PREFIX_BLOCKS_KEY] == len(stable)
+
+
+def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from ouroboros import context, knowledge
+    from ouroboros.context_fit import seal_task_transcript
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_claudexor import _request
+
+    env, memory = _make_env_and_memory(tmp_path)
+    monkeypatch.setattr(context, "utc_now_iso", lambda: "2026-11-18T20:00:00Z")
+    monkeypatch.setattr(context, "build_health_invariants", lambda *_a, **_kw: "")
+    monkeypatch.setattr(context, "_record_memory_view", lambda *_a, **_kw: {})
+    monkeypatch.setattr("ouroboros.context_runtime_facts.disk_view", lambda *_a, **_kw: {})
+    # The queue's dated observation is process-wide: its age must not differ between the two builds compared here.
+    monkeypatch.setattr(context, "_queue_context_fact", lambda _task: {"note": "Queue observation unavailable."})
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+    evidence = SimpleNamespace(route_fp="held-cache", status="asserted", stale=False, window_tokens=1_000_000)
+    task = {"id": "cache-held", "type": "task", "chat_id": 1, "text": "Newest owner words for the cache test."}
+    heading, head = "## Held knowledge notes", "One fact from the held head."
+    tools = [{"type": "function", "function": {"name": "read_fixture", "parameters": {"type": "object"}}}]
+
+    def build():
+        messages, _ = context.build_llm_messages(env, memory, task, tool_schemas=tools,
+            route_resolver=lambda *_a, **_kw: ({"model": "fixture", "provider": "test"}, evidence))
+        seal_task_transcript(messages)
+        return messages
+
+    address = knowledge.resolve_knowledge_address(env.drive_root, "work-note", "global")
+    held_source = "---\ntype: note\nclaims: ['room:1']\n---\n" + head
+    original = knowledge.write_knowledge_note(address, held_source)
+    assert original.ok
+    before = build()
+    adopted = knowledge.write_knowledge_note(address, held_source, writer="turn",
+                                             expected_revision=original.current.revision)
+    assert adopted.ok and adopted.current.revision == original.current.revision
+    after = build()
+    old_blocks, new_blocks = before[0]["content"], after[0]["content"]
+    assert len(old_blocks) == len(new_blocks) == 4
+    assert old_blocks[:3] == new_blocks[:3] and before[1:] == after[1:]
+    assert heading not in old_blocks[-1]["text"]
+    assert new_blocks[-1]["text"].count(head) == 1
+    assert new_blocks[-1]["text"].partition(heading)[0] == old_blocks[-1]["text"] + "\n\n"
+
+    client = LLMClient(api_key="unused")
+
+    def marked_wire(rows):
+        target = {"provider": "openrouter", "resolved_model": "anthropic/claude-fable-5",
+                  "supports_openrouter_extensions": True}
+        payload = client._build_remote_kwargs(target, rows, "high", 512, "auto", None, tools, skip_capability_fetch=True)
+        client._normalize_payload_cache_ttl(target, payload)
+        return payload
+
+    old_wire, new_wire = [marked_wire(rows) for rows in (before, after)]
+    old_system, new_system = [wire["messages"][0]["content"] for wire in (old_wire, new_wire)]
+    assert old_system[:3] == new_system[:3]
+    assert all("cache_control" in block for block in new_system[:3])
+    assert heading not in old_system[3]["text"] and head in new_system[3]["text"]
+    assert LLMClient._payload_cache_breakpoints(new_wire)[-1]["text"] == task["text"]
+
+    old_items, new_items = [_request({"source": "codex", "resolved_model": "gpt-6"}, rows, tools, {})["messages"]
+                            for rows in (before, after)]
+    assert old_items[:3] == new_items[:3] and all(row["role"] == "system" for row in new_items[:3])
+    assert heading not in str(old_items[3]) and head in str(new_items[3])
+    assert old_items[4:] == new_items[4:] and new_items[4]["content"] == task["text"]
 
 
 def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
@@ -393,10 +459,7 @@ def test_bare_marker_never_yields_an_invented_horizon():
     """The 'second TTL truth' guard: the finalizer reports 'default' for ANY payload
     with markers — including routes it never normalizes, where a 5-minute horizon was
     never established. A bare marker must therefore keep every reader silent."""
-    from types import SimpleNamespace
-
     from ouroboros.llm import LLMClient, _route_normalizes_cache_breakpoints, cache_ttl_seconds
-    from ouroboros.tools.control import cache_horizon_note
 
     client = LLMClient.__new__(LLMClient)
     gemini = {
@@ -416,37 +479,9 @@ def test_bare_marker_never_yields_an_invented_horizon():
     assert client._normalize_payload_cache_ttl(gemini, payload) == "default"
     assert cache_ttl_seconds("default") is None
 
-    ctx = SimpleNamespace(_accumulated_usage={"_last_prompt_cache_ttl": "default"})
-    assert cache_horizon_note(ctx, 10_000.0) == ""
 
-
-def test_cache_horizon_note_reads_recorded_ttl_only():
-    """W3 wait-tool disclosure: one factual line when the wait outlived the APPLIED
-    cache horizon; silent below the horizon, silent without a recorded fact, and
-    NO token-count predictions in the text."""
-    from types import SimpleNamespace
-
-    from ouroboros.tools.control import cache_horizon_note
-
-    ctx = SimpleNamespace(_accumulated_usage={"_last_prompt_cache_ttl": "5m"})
-    note = cache_horizon_note(ctx, 301.0)
-    assert "cache horizon" in note
-    assert "may be cold" in note
-    assert "token" not in note.lower()  # facts only, no re-write predictions
-    assert cache_horizon_note(ctx, 299.0) == ""
-
-    ctx_1h = SimpleNamespace(_accumulated_usage={"_last_prompt_cache_ttl": "1h"})
-    assert cache_horizon_note(ctx_1h, 900.0) == ""
-    assert "1h" in cache_horizon_note(ctx_1h, 3601.0)
-
-    # No recorded fact (no cached send yet / non-cache route) -> no invented horizon.
-    assert cache_horizon_note(SimpleNamespace(_accumulated_usage={}), 9999.0) == ""
-    assert cache_horizon_note(SimpleNamespace(), 9999.0) == ""
-    assert cache_horizon_note(ctx, None) == ""
-
-
-def test_wait_for_task_appends_cache_horizon_note(tmp_path, monkeypatch):
-    """The wait tools surface the disclosure through their real result paths."""
+def test_in_slot_task_waits_report_their_duration_not_cache_state(tmp_path, monkeypatch):
+    """Tool results measure their waits even past a recorded request TTL; neither owns response age."""
     import json
     from types import SimpleNamespace
 
@@ -464,38 +499,18 @@ def test_wait_for_task_appends_cache_horizon_note(tmp_path, monkeypatch):
         _accumulated_usage={"_last_prompt_cache_ttl": "5m"},
     )
     out = control_mod._wait_for_task(ctx, "child42", timeout_sec=0)
-    assert "cache horizon" in out and "may be cold" in out
+    assert "Task wait completed after 720.0s." in out
+    assert "cache horizon" not in out and "last model response" not in out
 
     batch = json.loads(control_mod._wait_for_tasks(ctx, ["child42"], timeout_sec=0))
-    assert "cache horizon" in str(batch.get("cache_horizon_note"))
-
-    # Below the horizon the line is absent on both paths.
-    def _fast_wait(*args, **kwargs):
-        return {"all_terminal": True, "elapsed_sec": 10.0, "tasks": {}}
-
-    monkeypatch.setattr(control_mod, "wait_for_effective_tasks", _fast_wait)
-    assert "cache horizon" not in control_mod._wait_for_task(ctx, "child42", timeout_sec=0)
-    assert "cache_horizon_note" not in json.loads(
-        control_mod._wait_for_tasks(ctx, ["child42"], timeout_sec=0)
-    )
+    assert batch["elapsed_sec"] == 720.0 and "cache_horizon_note" not in batch
 
 
-def test_cache_horizon_reachability_matches_the_wait_clamps(tmp_path, monkeypatch):
-    """Honest reachability of the wait disclosure, measured on BEHAVIOR.
-
-    The root waits measure their own elapsed window, so their line's availability is
-    per-tool and per-TTL and follows the window each one actually hands the poller: at
-    the shipped '1h' default only wait_tasks (7200s) can genuinely emit it and
-    wait_task sits exactly on the 3600s horizon; at '5m' both do. delegate_wait no
-    longer measures its 3 s tick: its wake measures the time since the task's last
-    model response, so it can emit at ANY tier (pinned in the supervising-wake test
-    below). Fails if a clamp, the ceiling or the tier scale moves without revisiting
-    the disclosure."""
+def test_wait_clamps_bound_the_requested_window_independent_of_cache():
+    """The old cache warning is gone; the two tool windows still have their own ceilings."""
     from types import SimpleNamespace
 
-    from ouroboros.llm import cache_ttl_seconds
     from ouroboros.tools import control_task_results as control_mod
-    from ouroboros.tools.control import cache_horizon_note
 
     def _clamp(ceiling):
         # The one window ladder both task waits use, probed without a deadline.
@@ -508,53 +523,6 @@ def test_cache_horizon_reachability_matches_the_wait_clamps(tmp_path, monkeypatc
         "wait_tasks": _clamp(control_mod._WAIT_TASKS_CLAMP_SEC),
     }
     assert ceilings == {"wait_task": 3600, "wait_tasks": 7200}
-
-    def _emits(tier, ceiling):
-        ctx = SimpleNamespace(_accumulated_usage={"_last_prompt_cache_ttl": tier})
-        return bool(cache_horizon_note(ctx, float(ceiling)))
-
-    assert cache_ttl_seconds("1h") == 3600 and cache_ttl_seconds("5m") == 300
-    assert {name: _emits("1h", sec) for name, sec in ceilings.items()} == {
-        "wait_task": False, "wait_tasks": True}
-    assert {name: _emits("5m", sec) for name, sec in ceilings.items()} == {
-        "wait_task": True, "wait_tasks": True}
-
-    doc = cache_horizon_note.__doc__ or ""
-    assert "REACHABILITY" in doc  # the limitation is stated where the note is built
-
-
-def _response_meta(seconds_ago):
-    import datetime as _dt
-
-    stamp = _dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(seconds=seconds_ago)
-    return {"ts": stamp.isoformat(), "provider": "anthropic", "model": "m"}
-
-
-def test_supervising_wake_horizon_fires_only_past_the_applied_ttl(tmp_path):
-    """delegate_wait's note is computed ONCE per wake from the task's last model
-    response (a lower bound on cache age): it fires past the APPLIED horizon, stays
-    silent below it and on an unknown tier, and a replay repeats the recorded wake."""
-    import json
-    from types import SimpleNamespace
-
-    from ouroboros.delegate_supervision import run_wait
-    from tests._run_wait_shared import wake_now
-
-    def _wake(ttl, seconds_ago):
-        ctx = SimpleNamespace(
-            task_id=f"t-{ttl or 'none'}-{seconds_ago}", task_attempt=1, drive_root=tmp_path,
-            _accumulated_usage={"_last_prompt_cache_ttl": ttl,
-                                "_last_llm_call_meta": _response_meta(seconds_ago)})
-        raw = wake_now(ctx, "run-h", wait_once=lambda *_a: json.dumps(
-            {"status": "completed", "run_id": "run-h", "last_seq": 1})).text
-        return ctx, json.loads(raw)
-
-    _ctx, past = _wake("1h", 3700)
-    assert "1h" in past["cache_horizon_note"] and "may be cold" in past["cache_horizon_note"]
-    assert "cache_horizon_note" not in _wake("1h", 3500)[1]
-    assert "cache_horizon_note" not in _wake("", 10_000)[1]
-    replay = json.loads(run_wait(_ctx, "run-h").text)  # replayed before any sleep is armed or the run read
-    assert replay.pop("replay_of")["fresh_observation"] is False and replay == past  # marked, else as recorded
 
 
 # --- a work's cache life --------------------------------------------------------------------------------------------
@@ -733,3 +701,32 @@ def test_a_works_life_writes_its_start_only_at_its_entries(name, main_call, monk
         assert all(second["narrowed"]), f"{name}: the row needs two narrowed stories, got {second['narrowed']}"
         assert second["common"] == 3, (f"{name}: the second work read {second['read']} of {second['tokens']} tokens "
                                        f"({second['common']} of {second['elements']} elements) from the first work's start")
+
+
+@pytest.mark.parametrize("rule", [MARKED_LOOKBACK, WHOLE_REQUESTS])
+def test_consecutive_full_folds_and_a_restore_read_what_their_cache_rule_holds(rule, main_call, monkeypatch, tmp_path):
+    """Test 2 of the C07 consilium, under each named cache rule, the clock row production sends read like any row: a
+    full fold whose own call follows its note leaves the request sent after it standing, so the request after the
+    next full fold reads that whole earlier request (on marked prefixes: its marked end lies within the lookback),
+    not only the start. Every row before the first answer stands, the start's untyped host row (the capability
+    omission notice) included, so the request after the first fold reads the whole first request. A restore reads
+    what its rewritten start leaves: the leading system group, or the marked stable part."""
+    place = (Place("opus", OPUS, density=1.4, marked=True, rule=rule) if rule == MARKED_LOOKBACK else _a(rule=rule))
+    life = Life(places=(place,), primary=place.name, reads=(_WIDE,) * 8,
+                acts=((3, ("fold",)), (5, ("fold",)), (7, ("fold",))), door=10)
+    record = run_life(life, main_call, monkeypatch, tmp_path)
+    answered = [entry for entry in record["log"] if entry["kind"] == "answered"]
+    after = [entry for before, entry in zip(answered, answered[1:]) if before["action"] == "fold"]
+    assert [entry["n"] for entry in after] == [4, 7, 10], [(entry["n"], entry["action"]) for entry in answered]
+    held, reading = after[1], after[2]  # the request after the second fold, and the one after the third
+    marked_end = sum(held["sizes"][:max(held["marks"]) + 1]) if held["marks"] else 0
+    assert reading["read"] >= (held["tokens"] if rule == WHOLE_REQUESTS else marked_end) > held["start_tokens"], (
+        held, reading)
+    if rule == WHOLE_REQUESTS:  # each whole earlier answered request, its clock row included
+        assert [entry["read"] for entry in after] == [answered[0]["tokens"], after[0]["tokens"], held["tokens"]]
+    restore, before = answered[11], answered[10]
+    # The marked stable part: the longest marked prefix of the start the request before it also ended a mark at.
+    stable = max((sum(restore["sizes"][:k + 1]) for k in restore["marks"] if k < restore["start_elements"]
+                  and k in before["marks"] and restore["digests"][:k + 1] == before["digests"][:k + 1]), default=0)
+    assert restore["read"] == (restore["start_tokens"] if rule == WHOLE_REQUESTS else stable) > 0, (restore, stable)
+    assert all(entry["clock"] for entry in [*after, restore])  # the clock row production sends is counted

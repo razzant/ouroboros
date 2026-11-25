@@ -470,22 +470,35 @@ def cognitive_route_billing_basis(
 ) -> tuple[str, str]:
     """Return ``(route_label, billing_basis)`` with ``billing_basis`` in
     ``subscription | measured | unknown`` (``reviewer_slot_config.review_cost_facts`` style,
-    never a price table)."""
+    never a price table).
+
+    An explicit ``cost`` is the caller's own receipt and is taken as given (a reported
+    zero included). Without one, only the last accepted call in ``ctx._accumulated_usage``
+    says ``measured``, for the route it answered on: ``_last_round_cache_usage`` is that
+    call's own cost, read through the ``reported_review_cost`` predicate reviewer seats use
+    (the cumulative's amount and flags describe other calls and routes). Its route is what
+    its own ``_last_llm_call_meta`` requested (configured id and locality; providers and
+    spellings share the served name), matched exactly while ``accepted_call`` gives that
+    record the call's id: a later unusable reply moves it and accepts nothing, a raised
+    send changes neither.
+    """
+    from ouroboros.primary_route_observation import accepted_call
+    from ouroboros.review_records import reported_review_cost
     from ouroboros.reviewer_slot_config import review_cost_facts
 
-    raw = str(route_model or "").strip()
-    local = bool(use_local or raw.endswith(" (local)"))
-    base = raw[: -len(" (local)")].strip() if raw.endswith(" (local)") else raw
+    def route(model: Any, local: Any) -> tuple[str, bool]:  # a display " (local)" suffix is locality, not id
+        raw = str(model or "").strip()
+        suffixed = raw.endswith(" (local)")
+        return (raw[: -len(" (local)")].strip() if suffixed else raw), bool(local or suffixed)
+
+    base, local = route(route_model, use_local)
     route_label = (f"{base} (local)" if local and base else base) or "unknown"
-    observed = cost
-    if observed is None and ctx is not None:
-        usage = getattr(ctx, "_accumulated_usage", None)
-        if isinstance(usage, Mapping):
-            last_meta = usage.get("_last_llm_call_meta")
-            last_model = str(last_meta.get("model") or "").strip() if isinstance(last_meta, Mapping) else ""
-            raw_cost = usage.get("cost")
-            if last_model and last_model in {raw, base, route_label} and isinstance(raw_cost, (int, float)) and not isinstance(raw_cost, bool):
-                observed = raw_cost
+    observed, usage = cost, getattr(ctx, "_accumulated_usage", None)
+    if observed is None and isinstance(usage, Mapping):
+        meta = usage.get("_last_llm_call_meta")
+        call = accepted_call(usage, (usage.get("_last_round_cache_usage") or {}).get("round"))
+        if call.get("llm_call_id") and base and route(meta.get("model"), meta.get("use_local")) == (base, local):
+            observed = reported_review_cost(call)
     return route_label, str(review_cost_facts(observed, model=route_label)["cost_kind"])
 
 
@@ -1312,7 +1325,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             raise SubagentSelectionError(exc.code, exc.detail) from exc
         from ouroboros.delegate_readonly_inputs import InputSelectionError, resolve_selection, selection_entries
 
-        try:  # every selected file is checked as read_file checks it, before the daemon is touched
+        try:  # ordinary sources are checked before the daemon; compare range trees once during retention
             if entries := selection_entries(options.get("input_files")):
                 resolve_selection(ctx, entries)
         except InputSelectionError as exc:

@@ -168,7 +168,13 @@ def test_inspect_reports_previous_request_not_accumulated_or_cache_added_input(t
     result = executor.execute()
     inspected = json.loads(_tool_result(llm.calls[-1], "inspect"))
     facts = inspected["context"]
-    assert facts["window"] == dataclasses.asdict(window)
+    assert inspected["selected_memory_mode"] is None
+    assert inspected["ordinary_memory"]["reason"] == "retained_snapshot_missing"
+    assert facts["window"] == {
+        "window_tokens": 200_000, "status": "asserted", "stale": True,
+        "observed_at": "2026-10-01T00:00:00Z", "model": "openai/fake-reviewer",
+        "asserted_window_tokens": 210_000, "model_route": {}, "window_record": None,
+    }
     assert facts["measurement_basis"] == "canonical_serialized_characters"
     assert facts["serialized_chars"] == native._wire_size(llm.calls[1]["messages"], llm.calls[1]["tools"])
     previous = facts["previous_request"]
@@ -234,8 +240,8 @@ def test_native_inspection_respects_reported_anthropic_input(tmp_path, monkeypat
     assert fact["prompt_tokens"] == expected
     assert fact["provider"] == "anthropic" and fact["model"] == model
     assert usage == before  # diagnostics never rewrite the billing counters
-    if expected is None:
-        assert usage["prompt_tokens"] in (0, 77)
+    if expected is None:  # the billing shape holds the fresh input alone when reported, and nothing without it
+        assert usage["prompt_tokens"] == (raw_usage or {}).get("input_tokens")
 
 
 def test_authored_note_without_inspect_applies_even_when_view_still_exceeds_old_limit(tmp_path, monkeypatch):

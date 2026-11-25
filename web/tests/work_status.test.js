@@ -11,12 +11,15 @@ import {
     ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_RESUME, ACTION_STOP_EARLIER, ACTION_STOP_NOW,
     TASK_CONTROL_LABELS, requestStopAll,
 } from '../modules/task_control_menu.js';
-import { censusTaskPhase, desiredLiveCardPhase, pausePhaseLabel, taskActivityPresentation } from '../modules/task_phase_chip.js';
+import {
+    censusTaskPhase, desiredLiveCardPhase, observeChildPhase, pausePhaseLabel, taskActivityPresentation,
+} from '../modules/task_phase_chip.js';
 import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
-    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
-    memberPaused, memberState, ownStopPress, reasonText, reconcileWorkState, resumeAttemptClause, resumeAttemptWords,
+    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, behindWords, cardControls, cardMenuActions, cardWorkView, clock,
+    emptyWorkState, memberPaused, memberState, ownStopPress, promoteChildCard, reasonText, reconcileWorkState, resumeAttemptClause,
+    resumeAttemptWords,
     resumeTargets, roomAmber, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
 import { SERVER_REASONS, SERVER_SLEEPS, room, serverMark, work as builtWork } from './work_fixture.js';
@@ -209,6 +212,8 @@ test('reasons read their code through the catalog; counts stay parameters; an un
             'Continue starts when {count} subagents of the earlier attempt finish':
                 { text: 'Продолжение начнётся, когда закончат {count} помощника прошлой попытки' },
             '{count} external runs may still be running': { text: 'Возможно, ещё работают внешние запуски: {count}' },
+            '{count} external runs are open': { text: 'Открыто внешних запусков: {count}' },
+            [CODE_PREFIX + 'work.because.external_runs_open']: { text: 'Открыт один внешний запуск' },
             'Ouroboros: {reason}': { text: 'Уроборос: {reason}' },
             [CODE_PREFIX + 'work.because.earlier_attempt_finishing']: { text: 'Продолжение начнётся, когда закончит помощник' },
             [CODE_PREFIX + 'work.because.model_access']: { text: 'Модели нужен вход' },
@@ -221,6 +226,8 @@ test('reasons read their code through the catalog; counts stay parameters; an un
             'Продолжение начнётся, когда закончат 18 помощника прошлой попытки');
         assert.equal(reasonText({ ...held.because[0], count: 1 }), 'Продолжение начнётся, когда закончит помощник');
         assert.equal(reasonText({ ...unconfirmed, count: 2, text: '2 external runs may still be running' }), 'Возможно, ещё работают внешние запуски: 2');
+        assert.equal(reasonText({ code: 'external_runs_open', count: 1 }), 'Открыт один внешний запуск');
+        assert.equal(reasonText({ code: 'external_runs_open', count: 4 }), 'Открыто внешних запусков: 4');
         assert.equal(reasonText(work('model_access').because[0]), 'Модели нужен вход');
         assert.equal(reasonText(work('paused_by_owner').because[0]), 'Вы поставили на паузу');
         // Ouroboros's sentence is its own prose: only the frame is translated, never its words, never by its code.
@@ -459,6 +466,38 @@ test('a sleep says every source it chose in the server\'s words, joined by "or",
     } finally { applyPayload(prior); }
 });
 
+test('a queued work says the work it stands behind by its name; its details give that id and the lane', () => {
+    // Owner 21.11.2026 («5A»): the queue stays as it is; beside Queued a quiet line says behind which work it stands.
+    const project = work('queued_behind_project', 1);
+    const folder = work('queued_behind_folder', 1);
+    for (const queued of [project, folder]) {
+        assert.equal(queued.activity, 'queued');
+        assert.equal(workRowView(queued).secondary, 'behind “Add Ollama support”');
+        assert.ok(!workRowView(queued).secondary.includes('qh'), 'never by its id');
+    }
+    assert.equal(behindWords(project), 'qh keeps its Project');
+    assert.equal(behindWords(folder), 'qh keeps the folder /work/shared');
+    // A retried holder and one whose queue row named nothing are named as their work reads in the list.
+    assert.equal(workRowView(work('queued_behind_retry', 1)).secondary, 'behind “Add Ollama support”');
+    assert.equal(workRowView(work('queued_behind_derived_name', 1)).secondary, 'behind “Add Ollama support”');
+    // The message card's chip says the same line; its details give the id and the lane (no new control or style).
+    assert.deepEqual([cardWorkView(project)?.secondary, cardWorkView(project)?.note],
+        ['behind “Add Ollama support”', 'qh keeps its Project']);
+    assert.equal(cardWorkView(work('queued_behind_unlisted'))?.note, undefined, 'no holder, no details line');
+    // A holder the census does not list, an older payload, a non-queued work: no claim, no details line.
+    const unlisted = work('queued_behind_unlisted');
+    assert.deepEqual([workRowView(unlisted).secondary, behindWords(unlisted)], ['', '']);
+    assert.equal(behindWords({ ...project, activity: 'waiting' }), '');
+    assert.equal(behindWords(null), '');
+    assert.equal(reasonText({ code: 'queued', text: '' }), '');
+    const prior = currentPayload();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: {
+            'behind “{name}”': { text: 'за «{name}»' } } });
+        assert.equal(workRowView(project).secondary, 'за «Add Ollama support»', 'a translation keeps the name as written');
+    } finally { applyPayload(prior); }
+});
+
 test('the words a Pause recorded follow its head for any declared author; only the head is translated', () => {
     const owner = { code: 'paused_by_owner', text: 'You paused it', since: '2026-10-17T15:00:00Z',
         by: { actor: 'owner', text: 'По прямому распоряжению Антона: stop the export', at: '2026-10-17T15:00:00Z' } };
@@ -535,6 +574,8 @@ test('Activity reads each member from the server, so only an executing helper sa
     const data = body('pausing_with_queued_helper');
     assert.equal(workRowView(memberState(data, 'pc-new')).word, 'Paused');
     assert.equal(workRowView(memberState(data, 'pc-run')).word, 'Pausing…');
+    const partial = { ...data, works: data.works.map(work => ({ ...work, confirmed: false })) };
+    assert.equal(workRowView(memberState(partial, 'pc-new')).word, 'Paused', 'the member itself was confirmed');
     assert.equal(memberState(data, 'absent'), null);
     const sleeping = memberState(body('sleeping'), work('sleeping').episode.task_id);
     assert.equal(workRowView(sleeping).word, 'Waiting');
@@ -594,9 +635,12 @@ test('an incomplete body keeps what it omitted, unconfirmed and without controls
     assert.equal(reconcileWorkState(seen, { ...body('held_continue'), works: [], rooms: {} }, 42, false).works.length, 1);
     const cleared = reconcileWorkState(partial, { supervisor_ready: true, works: [], rooms: {}, works_complete: true }, 42);
     assert.deepEqual([cleared.works.length, cleared.room.activity, roomStatusView(cleared).text], [0, 'idle', 'Online']);
-    // A failed read or a body without the projection changes nothing.
-    assert.equal(reconcileWorkState(seen, null, 42), seen);
-    assert.equal(reconcileWorkState(seen, { active_chat_activities: [] }, 42), seen);
+    for (const missing of [null, { active_chat_activities: [] }]) {
+        const gap = reconcileWorkState(seen, missing, 42);
+        assert.equal(gap.room, seen.room);
+        assert.equal(gap.episodes, seen.episodes);
+        assert.equal(gap.memberStates.size, 0);
+    }
     // Nothing seen before and nothing listed: the room is quiet, never invented work.
     assert.equal(roomStatusView(reconcileWorkState(emptyWorkState(), { works: [], works_complete: false }, 42)).text, 'Online');
 });
@@ -664,12 +708,84 @@ test('a work card says its work\'s word alone, its line beside it; plain running
     assert.deepEqual(['text', 'secondary', 'className'].map((key) => taskActivityPresentation({ phase: 'budget_paused', workView })[key]),
         ['Paused', `You paused it · ${PRESSED}`, 'chat-live-phase paused']);
     assert.equal(taskActivityPresentation({ phase: 'unknown', workView }).text, 'Activity unconfirmed');
-    const records = new Map([['o', { groupId: 'o' }], ['child', { groupId: 'o', isSubagent: true }]]);
+    const records = new Map([['o', { groupId: 'o' }], ['child', { groupId: 'child', isSubagent: true }]]);
     assert.equal(applyCardWorkViews(records, stateOf('paused_by_owner')), true);
     assert.equal(records.get('o').workView.text, 'Paused');
     assert.deepEqual(records.get('o').workLook, { mark: 'pause', owner: false }, 'the work\'s own shape, nobody\'s move');
-    assert.equal(records.get('child').workView, undefined, 'a helper card keeps its own presenter');
+    assert.equal(records.get('child').workView.text, 'Activity unconfirmed', 'the parent cannot speak for a missing member');
     assert.equal(applyCardWorkViews(records, stateOf('paused_by_owner')), false, 'an equal view is no change');
+});
+
+test('member confirmation, finalization and Stop each belong to the addressed card', () => {
+    const body = CASES.paused_by_owner;
+    const parent = body.works[0];
+    const { mark, ...legacy } = parent.members.states.o;
+    const record = { groupId: 'nested', isSubagent: true };
+    const read = (member, requestedAt = Infinity) => {
+        const work = { ...parent, confirmed: false, members: { ids: ['nested'], states: { nested: member } } };
+        const state = reconcileWorkState(emptyWorkState(), { works: [work], works_complete: false }, 42, true, requestedAt);
+        applyCardWorkViews([record], state);
+        return desiredLiveCardPhase(record);
+    };
+    assert.equal(read(legacy).mark, mark, 'older member states still name their own activity');
+    assert.equal(read(legacy).text, 'Paused', 'another member may make the work incomplete');
+    // An older read against a newer live frame: only a frame the card agreed with outranks it, and only its silence.
+    const silent = (requestedAt) => {
+        const work = { ...parent, confirmed: false, members: { ids: ['nested'], states: {} } };
+        applyCardWorkViews([record], reconcileWorkState(emptyWorkState(), { works: [work], works_complete: false }, 42, true, requestedAt));
+        return desiredLiveCardPhase(record).text;
+    };
+    const frame = (at) => { if (observeChildPhase(record, 'working')) record.livePhaseAt = at; };
+    record.lastLiveObservedAt = 20;  // any frame bars absence; it decides no phase
+    assert.equal(read({ ...legacy, activity: 'queued' }, 19).text, 'Queued', 'an older read\'s explicit state applies');
+    frame(20);
+    assert.equal(desiredLiveCardPhase(record).text, 'Queued', 'a recorded hold ignores a working frame');
+    assert.equal(silent(19), 'Activity unconfirmed', 'so that frame outranks no read');
+    frame(30);
+    assert.equal(desiredLiveCardPhase(record).text, 'Working', 'an unconfirmed card takes the frame\'s phase');
+    assert.equal(silent(29), 'Working', 'a read begun before that frame says nothing against it');
+    assert.equal(silent(31), 'Activity unconfirmed', 'a read begun after it speaks for the child');
+    frame(40);
+    const seen = reconcileWorkState(emptyWorkState(), { works: [{ ...parent, confirmed: false,
+        members: { ids: ['nested'], states: { nested: legacy } } }], works_complete: false }, 42, true, 35);
+    applyCardWorkViews([record], reconcileWorkState(seen, null, 42, true, 35));
+    assert.equal(desiredLiveCardPhase(record).text, 'Activity unconfirmed', 'a failed read is never outranked');
+    assert.deepEqual([read({ ...legacy, confirmed: false }).text, record.workLook.mark], ['Activity unconfirmed', 'ring']);
+    record.observedOutcome = 'error';
+    const closing = read({ ...legacy, activity: 'working', transition: 'finalizing', because: [], mark: 'moving' });
+    assert.deepEqual([closing.text, closing.secondary], ['Failed', 'Finalizing…']);
+    record.finalizingHold = true;
+    const finalizing = read(legacy);
+    assert.deepEqual([finalizing.text, finalizing.secondary], ['Failed', 'Finalizing…']);
+    record.cancelPendingPolicy = 'immediate';
+    assert.equal(read(legacy).text, 'Cancelling…');
+});
+
+test('a failed read speaks once a body spoke the member contract; a promoted shell follows the same rule', () => {
+    const parent = CASES.paused_by_owner.works[0];
+    const queued = { activity: 'queued', transition: 'none', call: '', release: 'self', live: false, confirmed: true,
+        turn: [], because: [], tails: [], mark: 'still' };
+    const read = (states, requestedAt) => reconcileWorkState(emptyWorkState(), { works: [{ ...parent, confirmed: false,
+        members: { ids: ['shell'], states } }], works_complete: false }, 42, true, requestedAt);
+    const before = emptyWorkState();
+    assert.equal(reconcileWorkState(before, null, 42, true, 5), before, 'before any body spoke the contract a failure changes nothing');
+    const failed = reconcileWorkState(read({}, 5), null, 42, true, 10);
+    assert.deepEqual([failed.memberReadFailed, failed.memberReadAt, failed.memberStates.size], [true, 10, 0],
+        'an empty member map is a body that spoke the contract');
+    // Frames reached a root-shaped card at 20, before its lineage; it kept a root's look.
+    const promoted = (state) => {
+        const record = { groupId: 'shell', isSubagent: true, livePhaseAt: 20, workView: { phase: 'paused', text: 'Paused' },
+            workLook: { mark: 'pause', owner: true } };
+        promoteChildCard(record, state);
+        return record;
+    };
+    const silent = promoted(read({}, 10));
+    assert.deepEqual([desiredLiveCardPhase(silent).text, silent.workView, silent.workLook], ['Working', null, null],
+        'an older silent read keeps the live phase and none of the root look');
+    assert.equal(desiredLiveCardPhase(promoted(read({ shell: queued }, 10))).text, 'Queued', 'a recorded hold applies');
+    assert.equal(desiredLiveCardPhase(promoted(read({}, 30))).text, 'Activity unconfirmed', 'a read begun after the frame speaks');
+    assert.equal(desiredLiveCardPhase(promoted(reconcileWorkState(read({ shell: queued }, 5), null, 42, true, 10))).text,
+        'Activity unconfirmed', 'a failed read applies');
 });
 
 // The work's look reaches its card apart from the word: a running parent whose helper waits for the owner keeps

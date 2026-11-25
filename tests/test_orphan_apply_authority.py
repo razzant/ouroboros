@@ -17,7 +17,7 @@ from ouroboros.tools.delegate import _capture_terminal_patch
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_delegated_directory import DirectoryEngine
 from tests.test_delegated_run_isolation import _git
-from tests.test_isolated_project_copies import repo
+from tests._workspace_git import seeded_repository as repo
 
 
 @pytest.fixture
@@ -387,3 +387,29 @@ def test_unreadable_directory_capture_is_not_an_unconfirmed_apply(recovery, monk
     assert "UNCONFIRMED" not in result.text and "submitted" in result.text
     assert not engine.applies and not current.run(ctx.drive_root, "run").patch_apply_pending
     assert (target / "content.txt").read_bytes() == b"base\n"
+
+
+def test_an_orphans_unrecorded_apply_names_the_ambiguity_not_a_receipt_retry(recovery, monkeypatch):
+    """Only the starter or its host-confirmed retry successor may complete a pending apply's record. An orphan
+    adopter whose disposition row did not land is told what its later call actually meets, and its provided exit."""
+    ctx = recovery[0]
+    target, _ = capture(recovery, monkeypatch)
+    emit = custody.emit
+    with monkeypatch.context() as store:
+        store.setattr(custody, "emit", lambda root, event, row, **kw: event != custody.PATCH_DISPOSED
+                      and emit(root, event, row, **kw))
+        first = apply_result(ctx)
+    assert (first.status, first.code) == ("blocked", "INTEGRATION_BLOCKED"), first.text
+    assert "INTEGRATE_DISPOSITION_UNWRITTEN" in first.text and first.meta["target_files_changed"] is True
+    assert "orphan's adopter cannot complete this record" in first.text, first.text
+    assert "records this apply without changing a file" not in first.text, first.text
+    assert "acknowledge_ambiguous=true" in first.text, first.text
+    assert (target / "content.txt").read_bytes() == b"accepted child result\n"
+    custody._CUSTODY.clear()
+    second = apply(ctx)
+    assert "INTEGRATE_DELEGATED_APPLY_AMBIGUOUS" in second, second
+    assert (target / "content.txt").read_bytes() == b"accepted child result\n"
+    third = apply(ctx, acknowledge_ambiguous=True)  # the named exit, under the adopter's own authority
+    assert "INTEGRATE_CONFLICT" in third and "CHANGED since run" in third, third  # drift is re-checked first
+    assert (target / "content.txt").read_bytes() == b"accepted child result\n"
+    assert not current.run(ctx.drive_root, "run").patch_disposed

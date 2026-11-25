@@ -68,6 +68,10 @@ from ouroboros.gateway.contracts import (
     UpdateApplyErrorResponse,
     UpdateApplyRequest,
     UpdateApplySuccessResponse,
+    UpdateDescriptionErrorResponse,
+    UpdateDescriptionLatestResponse,
+    UpdateDescriptionRequest,
+    UpdateDescriptionResponse,
     UpdateMergePlan,
     UpdatePreflightRequest,
     UpdatePreflightResponse,
@@ -248,8 +252,9 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         assert f"import('./evolution_types.js').{name}" in text
     text += "\n" + (modules / "evolution_types.js").read_text(encoding="utf-8")
     for name in ("UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
-                 "UpdateApplySuccessResponse", "UpdateApplyErrorResponse", "UpdateProgressChangedOutbound",
-                 "UpdateStatusReadyOutbound"):
+                 "UpdateApplySuccessResponse", "UpdateApplyErrorResponse", "UpdateDescriptionRequest",
+                 "UpdateDescriptionResponse", "UpdateDescriptionLatestResponse", "UpdateDescriptionErrorResponse",
+                 "UpdateProgressChangedOutbound", "UpdateStatusReadyOutbound"):
         assert f"import('./update_types.js').{name}" in text
     text += "\n" + (modules / "update_types.js").read_text(encoding="utf-8")
     version = (pathlib.Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
@@ -351,6 +356,9 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
                 StateResponse, UpdateMergePlan,
                 UpdatePreflightRequest, UpdatePreflightResponse, UpdateApplyRequest,
                 UpdateApplySuccessResponse, UpdateApplyErrorResponse,
+                # The owner's description request: Write/Rewrite name a range, Check and describe names none.
+                UpdateDescriptionRequest, UpdateDescriptionResponse, UpdateDescriptionLatestResponse,
+                UpdateDescriptionErrorResponse,
                 UpdateStatusReadyOutbound, TaskCostBreakdown, TaskCostSlice, TaskDetailResponse, QuestionRoom,
                 TaskCancelRequest, TaskPauseRequest, TaskPauseResponse,
                 TaskContinueRequest, TaskContinueResponse, ContinuationOffer,
@@ -472,7 +480,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
         "timeout_retry_from", "original_task_id", "finalization_recovery", "terminal_origin",
         "finishing_reviews", "late_work", "can_resume", "cancelable", "presence_pause",
-        "last_line", "last_line_at", "tool_calls", "detached", "project_name", "lead", "processing",
+        "last_line", "last_line_at", "tool_calls", "detached", "place_origin", "project_name", "lead", "processing",
     }, "ActiveChatActivity adds optional outcome/retry/review evidence without changing required activity facts"
     from ouroboros.physical_attempt_context import ContextAttemptFact
 
@@ -486,7 +494,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     question_keys |= {"status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
                       "timeout_retry_from", "original_task_id", "finalization_recovery", "terminal_origin"}
     question_keys |= {"finishing_reviews", "late_work", "can_resume", "cancelable", "presence_pause"}
-    question_keys |= {"last_line", "last_line_at", "tool_calls", "detached", "project_name"}
+    question_keys |= {"last_line", "last_line_at", "tool_calls", "detached", "place_origin", "project_name"}
     assert {key: value for key, value in activity_fields.items() if key not in question_keys} == get_type_hints(ActiveDirectTurn, include_extras=True), (
         "ActiveChatActivity must mirror ActiveDirectTurn's field shape so one client reducer hydrates both"
     )
@@ -509,7 +517,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     assert activity_schema["properties"].pop("finishing_reviews")["type"] == "boolean"
     assert activity_schema["properties"].pop("delegated_runs_unreconciled") == {"type": "array", "items": {"type": "string"}}
     for field, kind in {"last_line": "string", "last_line_at": "string", "tool_calls": "integer",
-                        "detached": "boolean", "project_name": "string"}.items():
+                        "detached": "boolean", "place_origin": "object", "project_name": "string"}.items():
         assert activity_schema["properties"].pop(field)["type"] == kind
     assert not question_keys & set(activity_schema["required"])
     assert activity_schema == json_schema_for(ActiveDirectTurn), (
@@ -595,6 +603,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "annotation_type",
         "chat_id",
         "client_message_id",
+        "source_row_address",
         "action",
         "target",
         "target_label",
@@ -611,6 +620,23 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "suppress_bubble",
         "ts", "project_name", "target_task_ids", "target_titles"
     }
+    # The host stamps the exact physical row of the annotated message so the browser can
+    # put the receipt on THAT message. The field is additive-optional in both mirrors
+    # (frames without it stay valid) and it is a string in both — the Python witness and
+    # the browser JSDoc mirror carry the same exact field set, neither widened nor filtered.
+    annotation_hints = get_type_hints(MessageAnnotationOutbound, include_extras=True)
+    assert set(annotation_hints) == _js_typedef_fields(text, "MessageAnnotationOutbound"), (
+        "MessageAnnotationOutbound Python and browser mirrors must carry the same exact fields"
+    )
+    assert "source_row_address" in _notrequired_fields(MessageAnnotationOutbound), (
+        "MessageAnnotationOutbound.source_row_address must stay optional"
+    )
+    source_row_annotation = MessageAnnotationOutbound.__annotations__["source_row_address"]
+    source_row_rendered = getattr(source_row_annotation, "__forward_arg__", None) or str(source_row_annotation)
+    assert "NotRequired[str]" in source_row_rendered, source_row_rendered
+    assert ("string=", "source_row_address") in _js_typedef_properties(text, "MessageAnnotationOutbound"), (
+        "api_types.js MessageAnnotationOutbound.source_row_address must stay an optional string"
+    )
     # The notice carrier is one literal pair in both mirrors: an ACK and the System row beside it read the same words.
     for cls in (MessageAnnotationOutbound, ChatOutbound):
         carrier = get_type_hints(cls, include_extras=True)["routing_notice_carrier"]
@@ -798,6 +824,11 @@ def test_decision_comment_limit_and_optional_index_pinned_across_python_and_js()
     assert quiz_decl
     assert "@property {number=} answered_index" in quiz_decl.group(1)
     assert "@property {string=} comment" in quiz_decl.group(1)
+    # Additive: replay names the answer row its card shows; the frozen live quiz_state frame does not grow.
+    assert "@property {string=} answer_row_address" in quiz_decl.group(1)
+    assert "answer_row_address" in QuizOutbound.__annotations__
+    assert "answer_row_address" not in QuizStateOutbound.__annotations__
+    assert "answer_row_address" not in _js_typedef_fields(text, "QuizStateOutbound")
 
 
 def test_max_link_actions_pinned_across_python_and_js():

@@ -15,11 +15,11 @@ import { paintCardModel } from './card_model.js';
 import { fmt, tr, tx } from './i18n.js';
 import { isTerminalTaskDetail, taskPresentation, taskTerminalPhase } from './log_events.js';
 import { startingStatus } from './host_starting_status.js';
-import { chipWord } from './task_phase_chip.js';
+import { chipWord, desiredLiveCardPhase, observeChildPhase, setLiveCardPhase } from './task_phase_chip.js';
 import {
     ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_RESUME, ACTION_STOP_EARLIER, ACTION_STOP_NOW, REUSABLE_TASK_IDS,
-    hurryTaskAction, openTaskControlMenu, openTaskControls, requestStop, requestStopAll, resumeTaskAction, taskControlActions,
-    taskControlBusy,
+    hurryTaskAction, openTaskControlMenu, openTaskControls, requestStop, requestStopAll, resumePending, resumeTaskAction,
+    taskControlActions, taskControlBusy,
 } from './task_control_menu.js';
 
 // A known outcome keeps its word's tone, its dot beside it (status_mark.js): Done and Done with warnings succeed (the
@@ -30,7 +30,25 @@ export const OUTCOME_TONES = { done: 'done', warn: 'done', cancelled: 'stopped',
 const IDLE_ROOM = Object.freeze({ activity: 'idle', transition: 'none', call: '', turn: [], amber: false, mark: 'none',
     confirmed: true, works: [] });
 const CALL_WORDS = { preparing: 'preparing', sending: 'sending', thinking: 'thinking' };
+const MEMBER_MARKS = { working: 'moving', waiting: 'still', queued: 'still', paused: 'pause' }; // before members had a mark
+const UNKNOWN_MEMBER = { activity: 'unknown', transition: 'none', mark: 'ring' };
 const list = (value) => (Array.isArray(value) ? value : []);
+
+// A run can be observed even when its supervisor's phase is unknown.
+function displayedMember(member) {
+    if (!member) return null;
+    if (member.confirmed === true && Object.hasOwn(MEMBER_MARKS, member.activity)) return member;
+    return { ...UNKNOWN_MEMBER, confirmed: false, tails: list(member.tails),
+        ...(Number.isSafeInteger(member.queue_attempt) ? { queue_attempt: member.queue_attempt } : {}) };
+}
+
+/** Whether one member state independently evidences the member's own current activity: its own phase is
+ *  confirmed, or its own external work is observed (`tails`) while the phase itself stays unknown. A nested
+ *  card this state speaks for is a current fact, never a quiet purely historical row (DESIGN "Room work
+ *  status": a nested card shows its own member and external work). */
+export function memberActivityEvidenced(member) {
+    return Boolean(member) && (member.confirmed === true || list(member.tails).length > 0);
+}
 // `question`: a task waits for the owner's answer (the work's own word says so). `open_question`: a question that is
 // still unanswered while its work goes on or after it ended: the owner's turn, never the work's word.
 const asked = (state) => list(state?.turn).some((item) => item?.kind === 'question');
@@ -39,7 +57,7 @@ const QUESTIONS = new Set(['question', 'open_question']);
 /** The state one chat instance shows before its first body: an idle room and no works. */
 export function emptyWorkState() {
     return { room: IDLE_ROOM, works: [], episodes: new Map(), members: new Set(), attempts: new Map(), complete: false,
-        main: null, tiers: null, leads: new Map(), processings: new Map(), questions: new Map() };
+        memberStates: null, main: null, tiers: null, leads: new Map(), processings: new Map(), questions: new Map() };
 }
 
 // One question's key across the turn, the census rows and the work list: its task and its quiz.
@@ -61,11 +79,13 @@ const unconfirmedWork = (work) => ({ ...work, activity: 'unknown', transition: '
  * while the turn still lists it: a question's row says its own words for exactly as long as its item makes the row.
  * Only a complete supervisor-ready
  * body read over an open socket proves absence; an incomplete one keeps the works it omitted, unconfirmed. A body
- * without the projection, or a failed read (null), changes nothing.
+ * without the projection, or a failed read (null), keeps the room but cannot confirm a member's last phase once a body
+ * spoke the per-member contract, an empty map included (`memberReadFailed`: no live frame outranks that).
  */
-export function reconcileWorkState(prior, data, chatId, connected = true) {
+export function reconcileWorkState(prior, data, chatId, connected = true, requestedAt = Infinity) {
     const before = prior || emptyWorkState();
-    if (!data || typeof data !== 'object' || !Array.isArray(data.works)) return before;
+    if (!Array.isArray(data?.works)) return before.memberStates
+        ? { ...before, memberStates: new Map(), memberReadAt: requestedAt, memberReadFailed: true } : before;
     const complete = Boolean(connected) && data.works_complete === true && data.supervisor_ready === true;
     const chat = String(chatId);
     const all = data.works.filter((work) => work && typeof work === 'object' && work.work_id);
@@ -78,9 +98,19 @@ export function reconcileWorkState(prior, data, chatId, connected = true) {
             : { ...IDLE_ROOM, confirmed: complete };
     const episodes = new Map();
     const members = new Set();
+    // null until a body speaks the per-member contract. An empty map thereafter is a gap in that contract.
+    let memberStates = before.memberStates ? new Map() : null;
     for (const work of all) {
         if (work.episode?.task_id) episodes.set(String(work.episode.task_id), work);
         for (const id of list(work.members?.ids)) members.add(String(id));
+        if (!work.members || !Object.hasOwn(work.members, 'states')) continue;
+        memberStates ??= new Map();
+        const states = work.members.states;
+        if (!states || typeof states !== 'object' || Array.isArray(states)) continue;
+        for (const [id, member] of Object.entries(states)) {
+            members.add(id);
+            if (connected && data.supervisor_ready !== false) memberStates.set(id, member);
+        }
     }
     const rows = list(data.active_chat_activities).filter((row) => row?.activity_id);
     const attempts = new Map(rows.map((row) => [String(row.activity_id), row.task_attempt ?? null]));
@@ -97,7 +127,8 @@ export function reconcileWorkState(prior, data, chatId, connected = true) {
         const said = carried.get(questionKey(item)) || before.questions?.get(questionKey(item));
         if (said) questions.set(questionKey(item), said);
     }
-    return { room, works: [...listed, ...kept], episodes, members, attempts, complete, main, tiers, leads, processings, questions };
+    return { room, works: [...listed, ...kept], episodes, members, memberStates, memberReadAt: requestedAt,
+        memberReadFailed: false, attempts, complete, main, tiers, leads, processings, questions };
 }
 
 /** A work's or a room's one short word, from its activity, transition and exact call (the cards' chip words). */
@@ -128,6 +159,8 @@ const COUNTED_REASONS = {
         : fmt('{count} subagents still working', { count: n, n })),
     delegated_running: (n) => (n === 1 ? tr('work.because.delegated_running', '1 external run still working')
         : fmt('{count} external runs still working', { count: n, n })),
+    external_runs_open: (n) => (n === 1 ? tr('work.because.external_runs_open', '1 external run is open')
+        : fmt('{count} external runs are open', { count: n, n })),
     external_runs_unconfirmed: (n) => (n === 1 ? tr('work.because.external_runs_unconfirmed', '1 external run may still be running')
         : fmt('{count} external runs may still be running', { count: n, n })),
     awaited_helpers_mind: (n) => (n === 1
@@ -192,10 +225,23 @@ export function reasonText(reason) {
     if (!code || !text) return text;
     if (Number.isInteger(reason.count)) return COUNTED_REASONS[code] ? COUNTED_REASONS[code](reason.count) : text;
     if (reason.by?.text) return `${tr(`work.because.${code}`, text)}: ${String(reason.by.text)}`;
+    if (code === 'technical_pause' && text !== 'After a technical problem') return tx(text);
     if (code === 'sleeping' && Array.isArray(reason.wake)) return sleepText(reason.wake) || text;
+    // The work a queued one stands behind, by its census name (gateway/work_status.py QUEUED_BEHIND; fixture pins both).
+    if (code === 'queued' && reason.behind?.name) return fmt('behind “{name}”', { name: String(reason.behind.name) });
     // A silence dated by the host reads with its time: the date is the fact (owner 09.11).
     if (code === 'no_progress' && clock(reason.since)) return fmt('No recorded progress since {time}', { time: clock(reason.since) });
     return tr(`work.because.${code}`, text);
+}
+
+/** For a queued work's details: the id of the work it stands behind and the lane the scheduler recorded, its Project
+ *  or a folder by its path; '' for any other work or one without a recorded holder. */
+export function behindWords(work = {}) {
+    const behind = work?.activity === 'queued' ? list(work.because)[0]?.behind : null;
+    if (!behind?.task_id) return '';
+    const lane = behind.lane === 'folder' && behind.folder ? fmt('the folder {path}', { path: String(behind.folder) })
+        : tr('work.behind.project', 'its Project');
+    return fmt('{id} keeps {lane}', { id: String(behind.task_id), lane });
 }
 
 /** A moment in the viewer's clock (epoch seconds or an ISO instant): its time today, its date as well on another day,
@@ -386,18 +432,24 @@ export function workQuestion(work) {
  */
 export function cardWorkView(work) {
     if (!work || !work.confirmed || !work.episode?.live || work.activity === 'unknown' || work.transition === 'finalizing') return null;
+    return projectedCardView(work, false);
+}
+
+function projectedCardView(work, member) {
     const word = activityWord(work);
     const line = workLine(work, word);
-    if (work.activity === 'working' && work.transition === 'none' && !line) return null;
+    if (!member && work.activity === 'working' && work.transition === 'none' && !line) return null;
     const running = work.activity === 'working';
-    const classes = list(work.turn).length ? 'warn' : running ? (work.transition === 'pausing' ? 'working waiting' : 'working')
-        : work.activity;
+    const finalizing = work.transition === 'finalizing';
+    const waiting = !running || (work.transition !== 'none' && !finalizing);
+    const classes = list(work.turn).length ? 'warn' : finalizing ? 'working finalizing'
+        : running && waiting ? 'working waiting' : work.activity;
     // The latest refused Resume in the door's own words explains the word in the card's details (its line keeps the
-    // dated clause alone).
-    const note = resumeAttemptWords(work.last_resume);
+    // dated clause alone); a queued work's details give the id and lane of the work it stands behind.
+    const note = resumeAttemptWords(work.last_resume) || behindWords(work);
     return {
         phase: running ? 'working' : work.activity, text: word, secondary: line, classes,
-        tone: running && work.transition === 'none' ? 'live' : 'neutral', waiting: !running || work.transition !== 'none',
+        tone: waiting ? 'neutral' : 'live', waiting, ...(finalizing ? { finalizing } : {}),
         ...(note ? { note } : {}),
     };
 }
@@ -409,15 +461,21 @@ export function cardWorkView(work) {
  * is a fact even when another member could not be confirmed; a work an incomplete body omitted keeps no look.
  * The card's model fact is painted from the same state (card_model.js): the work's published `lead`, or its
  * activity row's for a direct turn; a Main portal, the collapsed form of a work shown in its own room, has none.
+ * A nested card says its own member's state. A read can predate a child it never listed: a live frame the card agreed
+ * with since that read began (`livePhaseAt`, task_phase_chip.observeChildPhase) outranks only the read's silence. An
+ * explicit member state, a recorded hold included, and a failed read always apply.
  */
 export function applyCardWorkViews(records, state) {
     let changed = false;
     for (const record of records?.values?.() || []) {
-        if (record?.isSubagent) continue;
         const id = String(record.groupId || '');
-        const work = state?.episodes?.get(id);
+        const child = record.isSubagent;
+        if (child && record.cardModel) paintCardModel(record, null);
+        const silent = state?.memberStates && !state.memberReadFailed && !state.memberStates.has(id);
+        if (child && (record.finished || (silent && record.livePhaseAt >= state.memberReadAt))) continue;
+        const work = child ? null : state?.episodes?.get(id);
         const portal = record.root?.dataset?.portal === '1';
-        const lead = portal ? null : work?.lead || state?.leads?.get(id) || null;
+        const lead = portal || child ? null : work?.lead || state?.leads?.get(id) || null;
         // An unconfirmed work offers nothing (cardControls): its fact stays, as plain text. So does the fact of a work
         // an incomplete body did not list again: only a complete body proves it gone.
         if (lead) {
@@ -425,17 +483,37 @@ export function applyCardWorkViews(records, state) {
                 main: state.main, queued: work?.activity === 'queued', since: clock(lead.since),
                 processing: work?.processing || state?.processings?.get(id) || null, tiers: state.tiers || null });
         } else if (record.cardModel && !portal && !state?.complete) paintCardModel(record, { ...record.cardModel.view, target: '' });
-        else paintCardModel(record, null);
-        const view = cardWorkView(work);
+        else if (!child) paintCardModel(record, null);
+        let subject = work?.episode?.live ? work : null;
+        if (child && state?.memberStates) {
+            subject = displayedMember(state.memberStates.get(id)) || UNKNOWN_MEMBER;
+            if (subject.confirmed && record.censusPhase === 'unknown') record.parkedPhase = record.censusPhase = '';
+            record.livePhaseAt = 0;  // the member's state now speaks for the card
+        }
+        const view = child && subject ? projectedCardView(subject, true) : cardWorkView(work);
         // What waits in the work, said as the room says it: the chip's name names that, never only "something".
-        const note = amberNote(turnAmber(work?.turn));
-        const look = work?.episode?.live ? { mark: String(work.mark || 'none'), owner: list(work.turn).length > 0,
+        const note = amberNote(turnAmber(subject?.turn));
+        const mark = subject?.mark || (child && subject ? (subject.live ? 'moving' : MEMBER_MARKS[subject.activity]) : 'none');
+        const look = subject ? { mark, owner: list(subject.turn).length > 0,
             ...(note ? { note } : {}) } : null;
         if (JSON.stringify([view, look]) !== JSON.stringify([record.workView || null, record.workLook || null])) changed = true;
         record.workView = view;
         record.workLook = look;
+        if (child) {
+            const desired = desiredLiveCardPhase(record);
+            changed = setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary) || changed;
+        }
     }
     return changed;
+}
+
+/** A card a child's own frames made before its lineage arrived becomes that child's card: the look it had as a root
+ *  leaves it, and its live frame, when no read began after that frame, is the child's phase. Then the member's state
+ *  applies as on any child card (applyCardWorkViews): an explicit state or a failed read decides, an older silence not. */
+export function promoteChildCard(record, state) {
+    record.workView = record.workLook = null;
+    if (record.livePhaseAt && !(record.livePhaseAt < state?.memberReadAt)) observeChildPhase(record, 'working');
+    return applyCardWorkViews([record], state);
 }
 
 /**
@@ -477,8 +555,9 @@ export function memberPaused(state, taskId) {
 /** The server's state for an individual member, without interpreting queue carriers in the browser. */
 export function memberState(data, taskId) {
     const id = String(taskId || '');
-    return list(data?.works).find((work) => work?.confirmed !== false && work.members?.states?.[id])
-        ?.members.states[id] || null;
+    if (data?.memberStates instanceof Map) return displayedMember(data.memberStates.get(id));
+    const row = list(data?.works).find(work => work.members?.states?.[id]);
+    return displayedMember(row?.members.states[id]);
 }
 
 /** Every task a confirmed work's Resume control names in one body: where Activity may offer Resume. */
@@ -549,18 +628,23 @@ export function openCardControls(anchor, record, work, { activity = null, stop, 
  * Open the shared menu on a work's controls: each action reaches the existing request owner at its exact target;
  * Stop and Stop earlier attempt stop each of their targets in order and say one combined result. `stopOne` is the
  * caller's own stop path for a target (a loaded card keeps its optimistic chip); `canAct` re-checks the current
- * controls before any effect; `afterAction` re-reads the state once an effect settled.
+ * controls before any effect; `afterAction` re-reads the state once an effect settled. A Resume's re-read is part of
+ * its own request, which keeps the task pending until that read has settled (`resumeTaskAction`): it runs there, once.
+ * Through that read the menu keeps its Stop enabled and offers no second Resume (`resumePending`).
  */
 export function openWorkControls(anchor, work, { cancelPending = false, canAct = () => true, stopOne = requestStop,
     afterAction = null, withResume = false } = {}) {
     const grouped = workControls(work);
-    const actions = workMenuActions(grouped, { cancelPending, resume: withResume });
+    const actions = workMenuActions(grouped, { cancelPending,
+        resume: withResume && !resumePending(grouped.resume) });
     if (!actions.length) return null;
     const stopAll = (targets, action) => requestStopAll(targets, action, { stopOne });
+    const reconcile = afterAction ? () => afterAction(ACTION_RESUME) : null;
     return openTaskControlMenu(anchor, {
-        actions, pauseTarget: grouped.pause, busy: taskControlBusy(grouped.pause || work?.episode?.task_id), canAct, afterAction,
+        actions, pauseTarget: grouped.pause, busy: taskControlBusy(grouped.pause || work?.episode?.task_id), canAct,
+        afterAction: afterAction && ((action) => (action === ACTION_RESUME ? undefined : afterAction(action))),
         onAction: (action) => (action === ACTION_HURRY ? hurryTaskAction(grouped.hurry)
-            : action === ACTION_RESUME ? resumeTaskAction(grouped.resume)
+            : action === ACTION_RESUME ? resumeTaskAction(grouped.resume, { settle: reconcile })
                 : action === ACTION_FINALIZE ? stopAll([grouped.wrapUp], ACTION_FINALIZE)
                     : stopAll(action === ACTION_STOP_EARLIER ? grouped.stopEarlier : grouped.stop, ACTION_STOP_NOW)),
     });

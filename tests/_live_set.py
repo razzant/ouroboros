@@ -26,6 +26,7 @@ synthesis.
 from __future__ import annotations
 
 import pathlib
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -227,6 +228,9 @@ def tick_pass(sm: Any, name: str, stop: threading.Event) -> None:
     if name != "maintenance-child":
         sm._tick_maintenance_child = lambda: None
     sm._LAST_CANCEL_INTENT_SWEEP[0] = sm._LAST_COLD_CUSTODY_SWEEP[0] = 0.0
+    census = sys.modules.get("ouroboros.subscription_census")  # absent from an older measured body
+    if census is not None:
+        census._PASS["dispatched"] = 0.0
     try:
         sm._periodic_supervisor_maintenance([0.0], [0.0], stop_event=stop)
     finally:
@@ -377,44 +381,64 @@ def _published_change(meter: Any, root: pathlib.Path, stage: str, result: Dict[s
     return _measured_pass(meter, f"L:{stage}:publication-change", change, sm, root, stop, result)
 
 
-def _crash_after_each_replacement(root: pathlib.Path) -> List[Dict[str, Any]]:
-    """E4 under a kill: the publication dies after its n-th file replacement, for each n until one publishes whole. What is on
-    disk then (a kill leaves it so; here a refused replacement stops the rest) is what a restart and a reader meet."""
+def _crash_after_each_replacement(root: pathlib.Path) -> dict:
+    """E4 observes both readers after every interrupted replacement, starting each cut from a complete publication."""
     import os
 
-    from ouroboros.queue_observation import load_queue_document, queue_stamp
+    from ouroboros.queue_observation import dispatch_probe, load_queue_document, queue_stamp, valid_dispatch_facts
     from supervisor import queue
+    from supervisor.queue_publication import mark_dirty_locked
 
-    real, facts = os.replace, []
-    for allowed in range(0, 8):
-        done: List[str] = []
+    root_id = "live-crash-root"
+    member = _task("live-crash-member", root_task_id=root_id)
+    with queue._queue_lock:
+        queue.PENDING.append(member)
 
-        def replace(src, dst, *args, allowed=allowed, done=done, **kwargs):
-            if len(done) >= allowed and os.path.basename(os.fspath(dst)) in _QUEUE_FILES:
-                raise OSError("killed here")
-            if os.path.basename(os.fspath(dst)) in _QUEUE_FILES:
-                done.append(os.path.basename(os.fspath(dst)))
-            return real(src, dst, *args, **kwargs)
+    def fence(closed):
+        if closed:
+            queue.BUDGET_ROOT_FENCES[root_id] = {"root_task_id": root_id, "fence_id": "live-fence", "status": "paused"}
+        else:
+            queue.BUDGET_ROOT_FENCES.pop(root_id, None)
+        mark_dirty_locked("live_crash")
 
-        os.replace = replace
-        try:
+    def closed(document):
+        return any(row.get("root_task_id") == root_id for row in document.get("budget_root_fences", []))
+
+    real = os.replace
+    series = {}
+    for direction, tighten in (("tighten", True), ("relax", False)):
+        series[direction] = []
+        for allowed in range(len(_QUEUE_FILES) + 2):
             with queue._queue_lock:
-                queue.PENDING.append(_task(f"live-crash-{allowed}"))
-                queue.persist_queue_snapshot(reason="live_crash")
-            published = _publish_as_the_tick_does(queue)
-        except Exception:
-            published = False
-        finally:
-            os.replace = real
-        document = load_queue_document(root)
-        stamp = queue_stamp(document)
-        dispatch = load_queue_document(root, "queue_dispatch.json")
-        facts.append({"allowed": allowed, "replaced": done, "published": published, "certifies": bool(stamp),
-                      "documents_agree": bool(stamp) and bool(queue_stamp(dispatch))
-                      and f"live-crash-{allowed}" in str(document.get("pending"))})
-        if published:
-            break
-    return facts
+                fence(not tighten)
+            assert queue.publish_queue_snapshot(reason="live_crash_baseline")
+            done = []
+
+            def replace(src, dst, *args, **kwargs):
+                name = os.path.basename(os.fspath(dst))
+                if name in _QUEUE_FILES:
+                    if len(done) == allowed:
+                        raise OSError("publication interrupted")
+                    done.append(name)
+                return real(src, dst, *args, **kwargs)
+
+            with queue._queue_lock:
+                fence(tighten)
+            os.replace = replace
+            try:
+                published = _publish_as_the_tick_does(queue)
+            finally:
+                os.replace = real
+            snapshot = load_queue_document(root, fresh=True)
+            dispatch = dispatch_probe(root) or {}
+            series[direction].append({
+                "replaced": done, "published": published, "certified": bool(queue_stamp(snapshot)),
+                "snapshot_fenced": closed(snapshot), "dispatch_fenced": closed(dispatch),
+                "dispatch_readable": bool(dispatch.get("generation")) and valid_dispatch_facts(dispatch),
+            })
+            if published:
+                break
+    return series
 
 
 _QUEUE_FILES = frozenset({"queue_snapshot.json", "queue_dispatch.json", "queue.alive"})

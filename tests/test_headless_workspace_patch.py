@@ -32,11 +32,11 @@ from tests._headless_cli_shared import (  # noqa: F401  (autouse fixture applies
     _managed_worker_pool_available,
 )
 from tests._store_shared import read_result
+from tests._workspace_git import commit, git, repository
 
 
 def test_received_ignored_paths_use_original_basis_and_exactly_one_lane(tmp_path):
     from ouroboros.workspace_file_outputs import file_output_changes
-    from tests.test_workspace_file_outputs import git, repository, commit
 
     root = repository(tmp_path / "received")
     (root / ".gitignore").write_text("*.ignored\n")
@@ -74,7 +74,6 @@ def test_received_ignored_paths_use_original_basis_and_exactly_one_lane(tmp_path
 
 
 def test_received_paths_with_unavailable_original_base_are_named(tmp_path):
-    from tests.test_workspace_file_outputs import repository
     root = repository(tmp_path / "received")
     task = {"task_constraint": {"mode": "acting_subagent", "surface": "self_worktree", "write_root": str(root),
                                 "base_sha": "f" * 40}, "received_file_outputs": {"new.ignored": {"run_id": "late"}}}
@@ -84,8 +83,7 @@ def test_received_paths_with_unavailable_original_base_are_named(tmp_path):
 
 def test_workspace_patch_includes_tracked_and_untracked_files(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     (repo / "tracked.txt").write_text("old\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True)
     subprocess.run(
@@ -111,10 +109,137 @@ def test_workspace_patch_lockfile_without_manifest_is_incidental_only_with_code_
     assert _incidental_lockfile_excludes(["pkg/poetry.lock", "pkg/module.py"]) == {"pkg/poetry.lock"}
 
 
+@pytest.mark.parametrize("surface", ["self_worktree", "external_workspace"])
+@pytest.mark.parametrize("change,expected", [
+    ("member", {"pnpm-lock.yaml"}),
+    ("added_member", {"pnpm-lock.yaml"}),
+    ("received_member", {"pnpm-lock.yaml"}),
+    ("new_lockfile", {"pnpm-lock.yaml"}),
+    ("removed_member", {"pnpm-lock.yaml"}),
+    ("unrelated_package", {"examples/standalone/pnpm-lock.yaml"}),
+    ("incidental_churn", set()),
+    ("lockfile_only", {"pnpm-lock.yaml"}),
+    ("same_directory", {"pnpm-lock.yaml"}),
+])
+def test_workspace_patch_keeps_only_pnpm_locks_owned_by_changed_manifests(tmp_path, surface, change, expected):
+
+    repo = repository(tmp_path / "repo")
+    package = "no/package.json"
+    independent = "examples/standalone/package.json"
+    sub_lock = "examples/standalone/pnpm-lock.yaml"
+    lockfile = "pnpm-lock.yaml"
+    settings = "lockfileVersion: '9.0'\n"
+    workspace = settings + "importers:\n  .: {}\n"
+    member = "  no: {}\n"
+    for rel in (package, independent, "package.json", "app.js"):
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if rel != package or change not in {"added_member", "received_member"}:
+            path.write_text("{}\n", encoding="utf-8")
+    if change != "new_lockfile":
+        (repo / lockfile).write_text(workspace + (member if change != "added_member" else ""), encoding="utf-8")
+    # A standalone pnpm project can have its own lock, but the root lock doesn't own it.
+    (repo / sub_lock).write_text(settings, encoding="utf-8")
+    base = commit(repo)
+
+    (repo / lockfile).write_text(
+        workspace + (member if change != "removed_member" else "") + "settings: {}\n", encoding="utf-8")
+    changed_manifest = {"member": package, "added_member": package, "new_lockfile": package, "unrelated_package": independent,
+                        "same_directory": "package.json"}.get(change)
+    if changed_manifest:
+        (repo / changed_manifest).write_text('{"dependencies":{"fixture":"1.0.0"}}\n', encoding="utf-8")
+    if change == "unrelated_package":
+        (repo / sub_lock).write_text(settings + "dependencies: {}\n", encoding="utf-8")
+    elif change == "removed_member":
+        (repo / package).unlink()
+    elif change == "incidental_churn":
+        (repo / "app.js").write_text("export default 1;\n", encoding="utf-8")
+
+    constraint = {"mode": "acting_subagent", "surface": surface, "write_root": str(repo), "base_sha": base}
+    task = {"task_constraint": constraint}
+    if change == "received_member":
+        (repo / package).write_text('{"version":"2"}\n', encoding="utf-8")
+        (repo / "app.js").write_text("export default 2;\n", encoding="utf-8")
+        (repo / sub_lock).write_text(settings + "settings: {}\n", encoding="utf-8")
+        task["received_file_outputs"] = {package: {"run_id": "producer"}}
+    _artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "capture", task=task)
+    assert manifest["status"] == "ready_with_changes", manifest["errors"]
+    patch = (tmp_path / "capture" / "workspace.patch").read_text(encoding="utf-8")
+    for path in (lockfile, sub_lock):
+        assert (f"diff --git a/{path} b/{path}\n" in patch) == (path in expected)
+    excluded = {item["path"] for item in manifest["tracked_excluded"] if "incidental lockfile" in item["reason"]}
+    if change == "received_member":
+        from ouroboros.workspace_file_outputs import file_output_changes
+
+        assert [row["path"] for row in file_output_changes(manifest, tmp_path / "capture")] == [package]
+        assert package not in patch and excluded == {sub_lock}
+    else:
+        assert excluded == ({lockfile} if lockfile not in expected else set())
+    assert not any(item.get("reason") == "pnpm_membership_unknown" for item in manifest["diagnostics"])
+    if change == "new_lockfile":
+        assert lockfile in manifest["untracked_included"]
+
+
+@pytest.mark.parametrize("version", ["current", "baseline"])
+@pytest.mark.parametrize("fault,detail", [
+    ("oversize", "metadata limit"),
+    ("invalid_yaml", "YAML"),
+    ("unreadable", "read"),
+])
+def test_workspace_patch_retains_lock_when_pnpm_membership_is_unknown(tmp_path, monkeypatch, version, fault, detail):
+    from ouroboros import workspace_patch_capture as capture
+
+    root = repository(tmp_path / "repo")
+    lock = root / "pnpm-lock.yaml"
+    package = root / "client" / "package.json"
+    package.parent.mkdir()
+    package.write_text("{}\n")
+    complete = b"lockfileVersion: '9.0'\nimporters:\n  .: {}\n"
+    member = complete + b"  client: {}\n"
+    if fault == "oversize":
+        member += b"#" + b"x" * capture._LOCKFILE_METADATA_BYTES + b"\n"
+    elif fault == "invalid_yaml":
+        member += b"broken: [\n"
+    lock.write_bytes(member if version == "baseline" else complete)
+    base = commit(root)
+    lock.write_bytes(member if version == "current" else complete)
+    package.write_text('{"version":"2"}\n')
+
+    if fault == "unreadable" and version == "current":
+        read = capture.work_domain.read_bytes
+
+        def fail_metadata_read(path, *, limit=None):
+            if path == lock and limit == capture._LOCKFILE_METADATA_BYTES + 1:
+                raise OSError("could not read current lockfile")
+            return read(path, limit=limit)
+
+        monkeypatch.setattr(capture.work_domain, "read_bytes", fail_metadata_read)
+    elif fault == "unreadable":
+        git_bytes = capture._git_bytes
+
+        def fail_metadata_blob(cmd, cwd, **kwargs):
+            if cmd == ["git", "cat-file", "blob", f"{base}:pnpm-lock.yaml"]:
+                return b""  # _git_bytes returns empty bytes for a failed read.
+            return git_bytes(cmd, cwd, **kwargs)
+
+        monkeypatch.setattr(capture, "_git_bytes", fail_metadata_blob)
+
+    folder = tmp_path / "capture"
+    task = {"task_constraint": {"mode": "acting_subagent", "surface": "self_worktree",
+                                "write_root": str(root), "base_sha": base}}
+    _, manifest = write_workspace_patch_artifacts(root, folder, task=task)
+    assert manifest["status"] == "ready_with_changes", manifest["errors"]
+    assert not manifest["tracked_excluded"]
+    patch = (folder / "workspace.patch").read_bytes()
+    assert b"diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml\n" in patch
+    assert b"diff --git a/client/package.json b/client/package.json\n" in patch
+    notes = [row for row in manifest["diagnostics"] if row.get("reason") == "pnpm_membership_unknown"]
+    assert len(notes) == 1 and notes[0]["path"] == lock.name and detail in notes[0]["detail"]
+
+
 def test_workspace_patch_preserves_lockfile_when_other_changes_are_junk(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     # Version 3: generated output is excluded because the PROJECT declares it,
     # not because a host name rule guesses. Without the .gitignore the dist file
@@ -150,8 +275,7 @@ def test_workspace_patch_excludes_binary_junk_and_oversize(tmp_path, monkeypatch
     import ouroboros.workspace_patch_capture as workspace_patch_capture
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "seed.txt"], cwd=repo, check=True, capture_output=True)
     subprocess.run(
@@ -171,7 +295,7 @@ def test_workspace_patch_excludes_binary_junk_and_oversize(tmp_path, monkeypatch
 
     artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
 
-    assert manifest["exclude_rules_version"] == 3
+    assert manifest["exclude_rules_version"] == 4
     excluded = {item["path"]: item["reason"] for item in manifest["untracked_excluded"]}
     assert "binary file" in excluded.get("app", "")
     assert "binary file" in excluded.get("dump.rdb", "") or "junk artifact" in excluded.get("dump.rdb", "")
@@ -190,8 +314,7 @@ def test_workspace_patch_excludes_binary_junk_and_oversize(tmp_path, monkeypatch
 
 def test_workspace_patch_supports_unborn_git_worktree(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     (repo / "created.txt").write_text("hello\n", encoding="utf-8")
 
     artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
@@ -228,8 +351,7 @@ def test_workspace_patch_allows_external_workspace_first_commit(tmp_path):
     from ouroboros.workspace_preflight import _git_snapshot, summarize_workspace_preflight
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    repository(repo, unborn=True)
     admission = summarize_workspace_preflight({"git": _git_snapshot(repo)})
     assert admission["git"]["head_state"] == "unborn"
     (repo / "created.txt").write_text("hello\n", encoding="utf-8")
@@ -736,3 +858,73 @@ def test_a_direct_folders_evidence_folder_is_retained_once_beside_its_direct_cap
     finalize_task_artifacts(parent, later)
     mine = json.loads((task_artifacts_dir(parent, later["id"]) / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]
     assert _retained_files(mine["summary_path"]) == {".review-evidence/later.txt": b"mine\n"}, "the first task's evidence stays its own"
+
+
+def test_machine_patch_ignores_a_projects_textconv_driver(tmp_path):
+    """A project may render a binary type for people through ``diff.<driver>.textconv``; the patch
+    a parent applies must still carry the bytes, so `git apply --binary` restores the child's file."""
+    from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
+
+    project = tmp_path / "project"
+    repository(project, unborn=True)
+    table = project / "table.dat"
+    before, after = b"\0\x0a\x01abc", b"\0\x0b\x02def"
+    table.write_bytes(before)
+    (project / ".gitattributes").write_text("*.dat diff=octets\n", encoding="utf-8")
+    _git(project, "config", "diff.octets.textconv", "od -An -tx1")
+    _git(project, "add", ".")
+    _git(project, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+    table.write_bytes(after)
+    assert "00 0b 02" in " ".join(_git(project, "diff").split()), "the driver is live: a person's diff shows its rendering"
+    _, receipt = write_workspace_patch_artifacts(project, tmp_path / "result", task={"id": "child"})
+    assert receipt["status"] == "ready_with_changes"
+    table.write_bytes(before)
+    applied = subprocess.run(["git", "apply", "--binary", str(tmp_path / "result" / "workspace.patch")],
+                             cwd=project, capture_output=True, text=True)
+    assert applied.returncode == 0 and table.read_bytes() == after, applied.stderr
+
+
+@pytest.mark.parametrize("activity", ["quiet", "touch", "append"])
+def test_public_patch_survives_benign_build_activity(tmp_path, monkeypatch, activity):
+    import os
+    from ouroboros import config, workspace_patch_capture as capture
+
+    copy, task, _ = _evidence_copy(tmp_path)
+    public = copy / "feature.py"
+    before = public.stat()
+    classify = capture.untracked_binary_verdicts
+    monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": "unused-fixture-value"})
+
+    def during_capture(*args, **kwargs):
+        if activity == "touch":
+            os.utime(public, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+        elif activity == "append":
+            with public.open("a", encoding="utf-8") as stream:
+                stream.write("# build complete\\n")
+        return classify(*args, **kwargs)
+
+    monkeypatch.setattr(capture, "untracked_binary_verdicts", during_capture)
+    out = tmp_path / "out"
+    capture.write_workspace_patch_artifacts(copy, out, task=task)
+    assert b"feature.py" in (out / "workspace.patch").read_bytes()
+
+
+@pytest.mark.parametrize("directory", ["node_modules", "__pycache__"])
+def test_excluded_path_is_never_opened_for_a_product_patch(tmp_path, monkeypatch, directory):
+    from ouroboros import config, review_checking, workspace_patch_capture as capture
+
+    copy, task, _ = _evidence_copy(tmp_path)
+    path = copy / directory / "generated.data"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(b"build output")
+    monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": "unused-fixture-value"})
+    open_regular = review_checking._open_regular
+
+    def checked_open(candidate):
+        assert candidate != path, "excluded build output must never be scanned for credentials"
+        return open_regular(candidate)
+
+    monkeypatch.setattr(review_checking, "_open_regular", checked_open)
+    out = tmp_path / "out"
+    capture.write_workspace_patch_artifacts(copy, out, task=task)
+    assert b"feature.py" in (out / "workspace.patch").read_bytes()

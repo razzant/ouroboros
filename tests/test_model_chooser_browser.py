@@ -166,8 +166,13 @@ def test_chooser_scrolls_with_mobile_keyboard_boundary(role_ui):
         Object.assign(viewport, {width:390,height:844,offsetLeft:0,offsetTop:0,scale:1});
         Object.defineProperty(window,'visualViewport',{value:viewport,configurable:true});
         window.testViewport = viewport;
+        const realMatchMedia = window.matchMedia.bind(window);
+        window.matchMedia = (q) => q === '(pointer: coarse)'
+            ? {matches: true, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}}
+            : realMatchMedia(q);
     })();""")
     page, field = select_model_field(role_ui, 'Models')
+    page.evaluate("document.documentElement.dataset.pointer = 'coarse'")
     field.click()
     field.fill('choice')
     popup = page.locator('[id="' + field.get_attribute('aria-controls') + '"]')
@@ -213,8 +218,9 @@ def test_chooser_popup_reachable_in_narrow_short_view(role_ui, width, height):
 def vendor_scene(ui, count=1):
     """The real consumer catalog, including an empty-independent API source and six editors."""
     import copy
-    from urllib.parse import parse_qs, urlparse
+    from urllib.parse import urlparse
     from tests.test_harness_maintenance_browser import _inventory_row
+    from tests.test_subscription_setup_browser import scoped_catalog_answer
 
     roles.configure_mixed(ui)
     roles.api_lane(ui, "openai")
@@ -268,11 +274,7 @@ def vendor_scene(ui, count=1):
         if world["catalog_revision"] != world["version"]:
             catalogs()
             world["catalog_revision"] = world["version"]
-        payload = copy.deepcopy(ui["fixture"]["catalog"])
-        source = parse_qs(urlparse(route.request.url).query).get("source_id", [""])[0]
-        if source:
-            payload["items"] = [item for item in payload["items"] if item.get("source_id") == source]
-        route.fulfill(json=payload)
+        route.fulfill(json=scoped_catalog_answer(route.request.url, ui["fixture"]["catalog"], ui["fixture"]["status"]["harnesses"]))
 
     def maintenance(route):
         path = urlparse(route.request.url).path
@@ -717,14 +719,16 @@ def test_outside_update_then_chooser_open_renews_list_once_at_44_accounts(role_u
     assert world["catalogs"] == after
 
 
-@pytest.mark.parametrize("width", [1440, 390])
-def test_failed_catalog_refresh_recovers_on_next_open_at_44_accounts(role_ui, width):
+@pytest.mark.parametrize("width,consumer", [(1440, "Models"), (390, "Models"), (1440, "Agent")])
+def test_failed_catalog_refresh_recovers_on_next_open_at_44_accounts(role_ui, width, consumer):
     from playwright.sync_api import expect
     ui, page = role_ui, role_ui["page"]
     world = vendor_scene(ui, 44)
+    if consumer == "Agent":
+        ui["settings"]["OUROBOROS_SUBAGENTS"]["items"][1]["route"]["credential_profile_id"] = "personal"
     page.set_viewport_size({"width": width, "height": 950})
     roles.open_models(ui)
-    field = vendor_consumer(ui, "Models")
+    field = vendor_consumer(ui, consumer)
     field.fill("choice")
     footer = page.locator("[data-model-footer]:visible")
     expect(footer).to_contain_text("List from Codex 2.0.0")
@@ -733,15 +737,18 @@ def test_failed_catalog_refresh_recovers_on_next_open_at_44_accounts(role_ui, wi
     def refuse(route):
         failures.append(route.request.url)
         route.fulfill(status=503, json={"error": "Catalog temporarily unavailable"})
-    page.route("**/api/model-catalog?*", refuse)
+    requested = "**/api/model-catalog?harness_id=codex&credential_profile_id=personal" if consumer == "Agent" else "**/api/model-catalog?*"
+    page.route(requested, refuse)
     world.update(version="3.0.0", new=True)
     field.press("ArrowDown")
-    expect(page.locator('[data-model-role="main"] [data-model-role-status]')).to_contain_text("temporarily unavailable")
+    status = (page.locator('[data-settings-page="agents/worker1"] [data-subagents-read-problem]') if consumer == "Agent"
+              else page.locator('[data-model-role="main"] [data-model-role-status]'))
+    expect(status).to_contain_text("temporarily unavailable")
     expect(footer).to_contain_text("List from Codex 2.0.0")
     count = len(failures)
     page.wait_for_timeout(250)
     assert len(failures) == count and count > 0, "No retry loop while opened"
-    page.unroute("**/api/model-catalog?*", refuse)
+    page.unroute(requested, refuse)
     field.press("Escape"); field.press("ArrowDown")
     expect(footer).to_contain_text("List from Codex 3.0.0")
     expect(page.locator('[role="listbox"]:visible [role="option"]').filter(has_text="choice-new")).to_be_visible()
@@ -788,9 +795,118 @@ def test_two_chooser_openings_share_producer_refresh_at_44_accounts(role_ui, wid
     pending[0].fallback()
     expect(footer).to_contain_text("List from Codex 3.0.0")
     expect(page.locator('[role="listbox"]:visible [role="option"]').filter(has_text="choice-new")).to_be_visible()
-    full_catalogs = [url for url in requests if urlparse(url).path == "/api/model-catalog"
-                     and "source_id" not in parse_qs(urlparse(url).query)]
+    catalogs = [urlparse(url).query for url in requests if urlparse(url).path == "/api/model-catalog"]
     native_catalogs = [url for url in requests if urlparse(url).path == "/api/claudexor/status"
                        and parse_qs(urlparse(url).query).get("include") == ["models"]]
-    assert len(full_catalogs) == len(native_catalogs) == 1
+    assert sorted(catalogs) == ["", "harness_id=codex"], "one shared catalog and one exact inventory for the visible agent"
+    assert len(native_catalogs) == 1
     assert not world["posts"] and page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.parametrize("gesture", ["mouse-during", "mouse-after", "touch-during"])
+def test_refresh_preserves_pressed_model_suggestion(touch_role_ui, gesture):
+    """A newly returned exact account inventory inserts a model above the held row. The click belongs to its ID."""
+    from playwright.sync_api import expect
+
+    ui, page = touch_role_ui, touch_role_ui["page"]
+    roles.configure_mixed(ui)
+    roles.api_lane(ui, "openrouter")
+    ui["settings"]["OUROBOROS_MODEL"] = "vendor/old"
+    old_read, names = [], ["choice-b", "choice-c"]
+    page.route("**/api/model-catalog?provider_id=openrouter", lambda route: old_read.append(route))
+    pin_query = "source_id=opaque-source&credential_profile_id=personal"
+    page.route("**/api/model-catalog?" + pin_query, lambda route: route.fulfill(json={"errors": [], "items": [
+        {"value": "claudexor::opaque-source=" + name, "id": name, "name": name, "source_id": "opaque-source",
+         "credential_profile_id": "personal"} for name in names]}))
+    # A trusted WebKit tap cannot be split from the driver. Hold the received body until pointerdown (or mouseup),
+    # then exercise the same real fetch/merge path in both browsers.
+    page.add_init_script("""{
+        const fetch = window.fetch;
+        window.fetch = async (...args) => {
+            const response = await fetch(...args);
+            if (window.holdInventory && String(args[0]).includes('credential_profile_id=personal')) {
+                const body = await response.json();
+                response.json = () => new Promise(resolve => { window.releaseInventory = () => resolve(body); });
+            }
+            return response;
+        };
+    }""")
+    page.emulate_media(reduced_motion="reduce")
+    if gesture.startswith("touch"):
+        page.set_viewport_size({"width": 390, "height": 780})
+    roles.open_models(ui)
+    main = page.locator('[data-model-role="main"]')
+    main.locator('[data-source-picker]').click()
+    page.get_by_role("option", name="Codex (model)", exact=True).click()
+    main.locator('[data-model-role-account]').select_option('personal')
+    field = main.locator('[data-model-role-model]')
+    field.fill("choice")
+    listing = page.locator('[id="' + field.get_attribute("aria-controls") + '"]')
+    option = listing.locator('[data-model-value="choice-b"]')
+    expect(option).to_be_visible()
+    option.evaluate("row => { window.heldModelRow = row; }")
+    original_id = option.get_attribute("id")
+    # Accounts reports a changed roster, forcing the source-and-pin reader to refresh the visible lane.
+    names.insert(0, "choice-a")
+    names.extend(f"choice-z{i:02}" for i in range(24))
+    roster = ui["fixture"]["status"]["profiles"]
+    roster["profiles"] = [entry for entry in roster["profiles"] if entry["profile"]["profile_id"] == "personal"]
+    page.evaluate("""async () => { window.holdInventory = true;
+        await (await import('/static/modules/claudexor_status_store.js')).claudexorStatus.refresh({afterCurrent:true}); }""")
+    page.wait_for_function("typeof window.releaseInventory === 'function'")
+    expect(listing.locator('[data-model-value="choice-a"]')).to_have_count(0)
+    # Observe the row under the release, independently of the captured event target.
+    page.evaluate("""() => document.addEventListener('pointerup', e => {
+        window.atModelRelease = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-model-value]')?.dataset.modelValue;
+        window.heldStillMounted = window.heldModelRow.isConnected;
+    }, {once:true,capture:true})""")
+    assert old_read
+    if gesture == "touch-during":
+        for route in old_read:
+            route.fulfill(json={"items": [], "errors": []})
+        page.evaluate("""() => document.addEventListener('pointerdown', window.releaseInventory, {once:true,capture:true})""")
+        option.tap()
+    else:
+        option.hover()
+        page.mouse.down()
+        for route in old_read:
+            route.fulfill(json={"items": [{"id": "other", "value": "other"}], "errors": []})
+        if gesture == "mouse-during":
+            page.evaluate("window.releaseInventory()")
+            expect(listing.locator('[data-model-value="choice-a"]')).to_be_visible()
+        page.mouse.up()
+    if gesture == "mouse-after":
+        page.evaluate("window.releaseInventory()")
+    assert page.evaluate("window.heldStillMounted")
+    assert page.evaluate("window.atModelRelease") == ("choice-b" if gesture == "mouse-after" else "choice-a")
+    expect(field).to_have_value("choice-b")
+    expect(main.locator('[data-model-role-account]')).to_have_value('personal')
+    field.fill("choice")
+    expect(option).to_have_attribute("id", original_id)
+    if gesture == "mouse-after":
+        # Releasing over a different row by deliberately dragging leaves the free-typed draft unchanged.
+        option.hover()
+        page.mouse.down()
+        other = listing.locator('[data-model-value="choice-c"]').bounding_box()
+        page.mouse.move(other["x"] + other["width"] / 2, other["y"] + other["height"] / 2)
+        page.mouse.up()
+        expect(field).to_have_value("choice")
+        expect(listing).to_be_visible()
+        option.evaluate("el => el.click()")  # an AT click has no preceding pointerdown
+        expect(field).to_have_value("choice-b")
+    elif gesture == "touch-during" and page.context.browser.browser_type.name == "chromium":
+        from tests.test_chat_row_gestures_browser import Finger
+        lower = listing.locator('[data-model-value="choice-z10"]')
+        lower.scroll_into_view_if_needed()
+        rect = lower.bounding_box()
+        x, y = rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2
+        finger = Finger(page)
+        try:
+            finger.send("touchStart", x, y)
+            finger.path((x, y), (x, y - 100))
+            finger.send("touchEnd")
+            expect(field).to_have_value("choice")
+            expect(listing).to_be_visible()
+        finally:
+            finger.close()
+    assert not ui["posts"]

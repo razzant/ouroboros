@@ -83,17 +83,18 @@ export const ROWS = [
             { value: 'required', label: 'Required', note: 'Every result a task produced is reviewed.' }] },
         aliases: ['Task Result Review', 'Review of task results', 'acceptance'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
-    { id: 'permissions:reviewers', keys: [], page: 'permissions', fold: false,
-        name: 'Reviewers', meta: 'The agents that read finished work.', more: '',
-        control: { kind: 'door', to: 'agents', view: 'reviewers' }, aliases: ['review pool'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
-    { id: 'OUROBOROS_REVIEW_MAX_CYCLES', keys: ['OUROBOROS_REVIEW_MAX_CYCLES'], page: 'permissions', fold: true,
-        name: 'Paid review rounds for one change', meta: 'After the last one it may still correct its work.',
-        more: 'Counts paid review waves, a failed one included: result review and commit review per task, skill review per task or snapshot. '
+    { id: 'OUROBOROS_REVIEW_MAX_CYCLES', keys: ['OUROBOROS_REVIEW_MAX_CYCLES'], page: 'permissions', fold: false,
+        name: 'Max review cycles', meta: 'Paid cycles per task, for each kind of review.',
+        more: 'After the last one it may still correct its work. Counts paid review waves, a failed one included: result review and '
+            + 'commit review per task, skill review per task or snapshot. '
             + 'Collecting and replaying a review is free. ∞ removes the count; deadlines and budgets still apply.',
         control: { kind: 'strip', options: [{ value: '1', label: '1' }, { value: '2', label: '2' }, { value: '3', label: '3' },
             { value: '5', label: '5' }, { value: 'unlimited', label: '∞' }] },
-        aliases: ['Max Review Cycles', 'Paid review rounds', 'review cycles', 'no limit', 'unlimited'],
+        aliases: ['Paid review rounds for one change', 'no limit', 'unlimited'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'permissions:reviewers', keys: [], page: 'permissions', fold: false,
+        name: 'Reviewers', meta: 'The agents that read finished work.', more: '',
+        control: { kind: 'door', to: 'agents', view: 'reviewers' }, aliases: ['review pool'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS', keys: ['OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS'], page: 'permissions', fold: false,
         name: 'Give a reviewed skill its keys', meta: 'After a review of exactly that version. Off asks you for every key and permission.', more: '',
         control: { kind: 'switch' }, aliases: ['Auto-grant reviewed skills', 'auto-grant', 'grant', 'Skills'],
@@ -173,7 +174,7 @@ export const ROWS = [
         meta: 'Type it in a browser on the same network.', more: '',
         control: { kind: 'custom' }, aliases: ['LAN URL', 'Copy link'], writer: '', codec: '', confirm: '', hiddenWhen: 'noLanAddress' },
     { id: 'computer:advanced', keys: [], page: 'computer', fold: false, name: 'Advanced',
-        meta: 'Tasks at once, the interface folder, certificates.', more: '',
+        meta: 'Tasks at once, a tool\u2019s time, the interface folder, certificates.', more: '',
         control: { kind: 'door', to: 'computer/advanced' }, aliases: [], writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'computer:about', keys: [], page: 'computer', fold: false, name: 'About', meta: '', more: '',
         control: { kind: 'door', to: 'computer/about' }, aliases: ['version', 'licences'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
@@ -183,6 +184,11 @@ export const ROWS = [
             + 'and sleeps: a sleeping task yields its place, and one that returns warm can exceed the cap. Conversation runs separately.',
         control: { kind: 'number', min: 1, noLimit: true, empty: 'no limit' }, aliases: ['Max Workers', 'workers', 'acting tasks', 'memory'],
         writer: 'generic', codec: 'ownerCap', confirm: '', hiddenWhen: '' },
+    { id: 'OUROBOROS_TOOL_TIMEOUT_SEC', keys: ['OUROBOROS_TOOL_TIMEOUT_SEC'], page: 'computer/advanced', fold: false,
+        name: 'A built-in tool may take', meta: 'Seconds one call of a tool may run, unless the tool sets its own.', more: '',
+        control: { kind: 'number', unit: 's', min: 1 },
+        aliases: ['Tool Timeout (s)', 'Tool timeout'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_UI_DIR', keys: ['OUROBOROS_UI_DIR'], page: 'computer/advanced', fold: false,
         name: 'Interface folder', meta: 'Empty serves the built-in interface.',
         more: 'none: no main page, for an interface hosted separately behind the same address. Otherwise an absolute or ~ path, on the '
@@ -291,7 +297,7 @@ export const ROWS = [
         aliases: ['GC Retention (days)', 'retention'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
 
-    // Skill sources (settings_extension_forms.js), opened from the Skills page's sources view and from search.
+    // Extensions › Sources › Skill sources (settings_extension_forms.js), opened from the Sources page and from search.
     { id: 'OUROBOROS_SKILLS_REPO_PATH', keys: ['OUROBOROS_SKILLS_REPO_PATH'], page: 'skill-sources', fold: false,
         name: 'Skills folder', meta: 'One more folder of skills on this computer. Ouroboros reads it and never clones or pulls it.', more: '',
         control: { kind: 'text' },
@@ -303,18 +309,13 @@ export const ROWS = [
         aliases: ['ClawHub Marketplace', 'Registry URL', 'ClawHub Registry URL'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
 
-    // Settings › Tools (mcp_settings.js): the tool client's switch, where else outside abilities live, then the fold
-    // (two waits and two actions). The servers are a list the page draws (HAND_WRITTEN).
+    // Extensions › MCP servers (mcp_settings.js, page `tools`): the tool client's switch, where else outside abilities
+    // live, then the fold (the servers' wait and two actions). The servers are a list the page draws (HAND_WRITTEN).
     { id: 'MCP_ENABLED', keys: ['MCP_ENABLED'], page: 'tools', fold: false,
         name: 'Use MCP servers', meta: 'Off takes every server out of new requests at once.', more: '',
         control: { kind: 'switch' },
         aliases: ['Enable MCP client', 'MCP client', 'Use tool servers'],
         writer: 'generic', codec: 'bool', confirm: '', hiddenWhen: '' },
-    { id: 'tools:door:skills', keys: [], page: 'tools', fold: false,
-        name: 'Skills', meta: 'Abilities you install, with their own settings, sources and keys.', more: '',
-        control: { kind: 'door', to: 'page:skills' },
-        aliases: [],
-        writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'tools:door:circles', keys: [], page: 'tools', fold: false,
         name: 'Circles', meta: 'Chats and channels Ouroboros lives in.', more: '',
         control: { kind: 'door', to: 'page:circles' },
@@ -324,11 +325,6 @@ export const ROWS = [
         name: 'An MCP server may take', meta: 'Seconds one listing or one call of a server may wait for its answer.', more: '',
         control: { kind: 'number', unit: 's', min: 1 },
         aliases: ['Per-tool timeout (s)', 'Per-tool timeout', 'MCP timeout', 'A tool server may take'],
-        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
-    { id: 'OUROBOROS_TOOL_TIMEOUT_SEC', keys: ['OUROBOROS_TOOL_TIMEOUT_SEC'], page: 'tools', fold: true,
-        name: 'A built-in tool may take', meta: 'Seconds one call of a tool may run, unless the tool sets its own.', more: '',
-        control: { kind: 'number', unit: 's', min: 1 },
-        aliases: ['Tool Timeout (s)', 'Tool timeout'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'tools:import', keys: [], page: 'tools', fold: true,
         name: 'Import MCP servers', meta: 'An mcp.json, as in Claude Code, Cursor or Codex.', more: '',
@@ -379,7 +375,7 @@ export const ROWS = [
         aliases: ['Prompt Cache TTL', 'cache'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_MODEL_MAX_CONCURRENCY', keys: ['OUROBOROS_MODEL_MAX_CONCURRENCY'], page: 'models', fold: true,
-        name: 'Requests at once per model', meta: 'Direct API and local-model requests, counted per model, key and server. Not set: no limit for API models, 3 for the built-in local model. 0 or less: no limit for either.',
+        name: 'Requests at once per model', meta: 'Direct API and local-model requests, counted per model, key and server. Not set: no limit for API models, 1 for the built-in local model. 0 or less: no limit for either.',
         more: 'A request over the limit waits in line until a slot frees, the work is stopped, or its own deadline passes; it is never sent elsewhere for waiting. Routes your subscriptions serve are not limited here.',
         control: { kind: 'number', integer: true, empty: 'not set' },
         aliases: ['Concurrent Requests per Model', 'concurrency'],
@@ -430,10 +426,12 @@ export const ROWS = [
         aliases: ['Allow mutative subagents', 'write access', 'Helpers may change files'],
         writer: 'generic', codec: 'helperMutation', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT', keys: ['OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT'], page: 'agents', fold: true,
-        name: 'At once, for one task', meta: 'Subagents one task may run at the same time.', more: '',
-        control: { kind: 'number', min: 1, max: 500 },
+        name: 'At once, for one task',
+        meta: 'A number caps the subagents one task runs at once. No limit: Ouroboros decides; this computer\u2019s memory still limits.',
+        more: 'The number counts acting subagents: one that waits or sleeps yields its place. One task never has more than 500 waiting and running at once.',
+        control: { kind: 'number', min: 1, max: 500, noLimit: true, empty: 'no limit' },
         aliases: ['Active subagents per root', 'Active at once per task'],
-        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+        writer: 'generic', codec: 'ownerCap', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_MAX_SUBAGENT_DEPTH', keys: ['OUROBOROS_MAX_SUBAGENT_DEPTH'], page: 'agents', fold: true,
         name: 'Nested subagents', meta: 'How many levels deep. 0 turns subagents off.', more: '',
         control: { kind: 'number', min: 0, max: 10 },
@@ -479,7 +477,8 @@ export const HAND_WRITTEN = [
     { id: 'OUROBOROS_CONNECTIONS', keys: ['OUROBOROS_CONNECTIONS'], page: 'accounts', name: 'API keys',
         meta: 'Paid by use. A role or an agent names the key it uses.', aliases: ['Add key', 'Providers', 'API key'] },
     { id: 'accounts:key:openrouter', keys: ['OPENROUTER_API_KEY'], page: 'accounts/key/openrouter', name: 'OpenRouter key', aliases: ['OpenRouter'] },
-    { id: 'accounts:key:openai', keys: ['OPENAI_API_KEY'], page: 'accounts/key/openai', name: 'OpenAI key', aliases: ['OpenAI'] },
+    { id: 'accounts:key:openai', keys: ['OPENAI_API_KEY', 'OPENAI_API_SURFACE'], page: 'accounts/key/openai', name: 'OpenAI key',
+        aliases: ['OpenAI', 'Responses API', 'Chat Completions API'] },
     { id: 'accounts:key:anthropic', keys: ['ANTHROPIC_API_KEY'], page: 'accounts/key/anthropic', name: 'Anthropic key', aliases: ['Anthropic'] },
     { id: 'accounts:key:openai-compatible', keys: ['OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY'], page: 'accounts/key/openai-compatible',
         name: 'OpenAI Compatible key', aliases: ['OpenAI Compatible', 'Custom OpenAI-style endpoint', 'Base URL'] },
@@ -490,7 +489,7 @@ export const HAND_WRITTEN = [
     { id: 'accounts:key:zai', keys: ['ZAI_API_KEY', 'ZAI_PLAN'], page: 'accounts/key/zai', name: 'Z.ai key', aliases: ['Z.ai (GLM)', 'GLM', 'More providers'] },
     { id: 'accounts:key:gigachat', keys: ['GIGACHAT_CREDENTIALS', 'GIGACHAT_SCOPE', 'GIGACHAT_USER', 'GIGACHAT_PASSWORD', 'GIGACHAT_BASE_URL', 'GIGACHAT_VERIFY_SSL_CERTS'],
         page: 'accounts/key/gigachat', name: 'GigaChat key', aliases: ['GigaChat', 'More providers'] },
-    // Settings › Tools: the list of tool servers, a head each; a head's switch and a server's Save write one entry.
+    // Extensions › MCP servers: the list of tool servers, a head each; a head's switch and a server's Save write one entry.
     { id: 'MCP_SERVERS', keys: ['MCP_SERVERS'], page: 'tools', name: 'MCP servers', aliases: ['MCP Servers', 'Add server', 'Tool servers'], writer: 'generic' },
     // Settings › Models: a line per role, each opening its own page. The routes of Main, Light and the Safety
     // Supervisor, their Local flags and the three maps of per-role choices are the checker's keys.
@@ -527,8 +526,10 @@ export const HOME_ROWS = [
     { id: 'home:permissions', group: 'Limits', name: 'Permissions and checks', to: 'permissions', glyph: 'shield', aliases: ['Behavior', 'Access', 'Safety', 'Review'], reads: ['settings'] },
     { id: 'home:costs', group: 'Limits', name: 'Costs', to: 'dashboard:costs', glyph: 'wallet', aliases: ['Budget', 'Spending'] },
     { id: 'home:accounts', group: 'Connections', name: 'Accounts and keys', to: 'accounts', glyph: 'key', aliases: ['Providers', 'Accounts', 'Secrets', 'API keys'], reads: ['settings'] },
-    { id: 'home:tools', group: 'Connections', name: 'Tools', to: 'tools', glyph: 'plug', aliases: ['MCP servers', 'Tool servers'], reads: ['settings', 'tools'] },
-    { id: 'home:skills', group: 'Connections', name: 'Skills', to: 'page:skills', glyph: 'skills', aliases: ['Extensions'] },
+    // Extensions holds skills and MCP servers (extensions.js): Settings keeps one door to it, found by the names its
+    // pages and the Skills and Tools rows had.
+    { id: 'home:skills', group: 'Connections', name: 'Extensions', to: 'page:skills', glyph: 'skills',
+        aliases: ['Skills', 'Tools', 'MCP servers', 'Tool servers', 'Plugins'] },
     { id: 'home:appearance', group: 'Interface', name: 'Appearance', to: 'appearance', glyph: 'moon', aliases: ['Theme', 'Language', 'Interface size'], reads: [] },
     { id: 'home:notifications', group: 'Interface', name: 'Notifications', to: 'notifications', glyph: 'bell', aliases: ['Sound'], reads: [] },
     { id: 'home:voice', group: 'Interface', name: 'Voice and calls', to: 'voice', glyph: 'mic', aliases: ['Calls', 'Dictation'], reads: [] },
@@ -537,10 +538,10 @@ export const HOME_ROWS = [
     { id: 'home:computer', group: 'System', name: 'This computer', to: 'computer', glyph: 'monitor', aliases: ['Advanced', 'About', 'Network', 'Startup'], reads: ['settings', 'autostart'] },
 ];
 
-// Doors search offers to pages of Settings that no home row opens (settings_home.js searchEntries): the list of the
-// forms skills registered, which stood under Advanced as "Extension Settings".
+// Doors search offers to pages no home row opens (settings_home.js searchEntries): the list of the forms skills
+// registered, which stood under Advanced as "Extension Settings" (a page of Extensions over Skills now).
 export const SEARCH_DOORS = [
-    { id: 'door:skill', name: 'Skill settings', to: 'skill', glyph: 'skills', aliases: ['Extension Settings', 'Advanced', 'Settings of skills'] },
+    { id: 'door:skill', name: 'Skill settings', to: 'skills:skill', glyph: 'skills', aliases: ['Extension Settings', 'Advanced', 'Settings of skills'] },
 ];
 
 /** A page's rows in order; `fold` true or false keeps only the rows behind (or before) the page's fold. */

@@ -43,6 +43,15 @@ def _clock_of(iso_value: Any) -> str:
     return date + at.strftime("%H:%M")
 
 
+def _zone_of(iso_value: Any) -> str:
+    """`` (UTC+03:00)``: the zone ``_clock_of`` prints that instant in (the server's), so a UTC server's time is not
+    read as the reader's own; "" when there is no instant."""
+    from ouroboros.deadline_utils import parse_deadline_ts, utc_offset_text
+
+    parsed = parse_deadline_ts(str(iso_value or ""))
+    return f" ({utc_offset_text(parsed.astimezone(_DISPLAY_ZONE))})" if parsed is not None else ""
+
+
 def _when(iso_value: Any) -> str:
     """«at HH:MM» for a coming instant, «due since HH:MM» for a passed one: no line names a past time as next."""
     from ouroboros.deadline_utils import parse_deadline_ts
@@ -67,10 +76,9 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     if requested_enabled is None:
         status, detail = "unknown", "The stored consciousness control is unknown: runtime state is unavailable or recovering."
     elif not requested_enabled:  # the places it already read (a Paused one does not hear either); unread, as Stop says
-        hearing = sum(row.get("state") != "paused" for row in snapshot.get("places_brief") or [])
         unread = "places_brief" in snapshot and snapshot["places_brief"] is None
-        status, detail = "disabled", (f"Off: no own wakes; {_hearing(hearing)}." if hearing else
-                                      "Off: no own wakes; its places only hear." if unread else "Off: no own wakes.")
+        heard = heard_sentence(None if unread else snapshot.get("places_brief") or [])
+        status, detail = "disabled", (f"Panic turned it off. {heard}" if snapshot.get("stop_source") == "panic" else heard)
     elif not snapshot and supervisor_failed:
         status, detail = "stopped", "Cannot wake: Ouroboros did not finish starting. Restart Ouroboros."
     elif not snapshot:
@@ -79,8 +87,9 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         status, (detail, note) = "wake_paused", held_sentence(wake, snapshot.get("live_wake_hold"))
     elif wake:
         status, detail = "thinking", f"Wake-up {wake} is running."
-    elif outcome == "skipped:waiting_for_first_conversation":
-        status, detail = "waiting_for_first_conversation", "No owner chat is bound yet; the first conversation binds it."
+    elif outcome == "skipped:owner_chat_unknown":  # unknown, never empty: a known empty slot wakes in Main
+        why = snapshot.get("last_error") or "unknown error"
+        status, detail = "owner_chat_unknown", f"The owner chat could not be read ({why}); retry {next_at}."
     elif outcome == "skipped:allowance_exhausted":
         spent, daily = snapshot.get("spent_24h_usd"), snapshot.get("daily_usd")
         status = "allowance_exhausted"
@@ -111,13 +120,286 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         since = f" since {_clock_of(snapshot['appointment_at'])}" if snapshot.get("appointment_at") else ""
         status, detail = "due", f"Due{since}; the wake-up has not started yet."
     else:
-        status, detail = "sleeping", f"Sleeping until {_clock_of(snapshot.get('next_wake_at'))}."
+        wake_at = snapshot.get("next_wake_at")
+        status, detail = "sleeping", f"Sleeping until {_clock_of(wake_at)}{_zone_of(wake_at)}."
     return {**{key: value for key, value in snapshot.items() if key != "detail_note"},
-            "enabled": requested_enabled, "status": status, "detail": detail, **({"detail_note": note} if note else {})}
+            "enabled": requested_enabled, "status": status, "detail": detail, **({"detail_note": note} if note else {}),
+            "position": position_words(requested_enabled, snapshot.get("places_brief")), "gloss": SWITCH_GLOSS}
 
 
-def _hearing(n: int) -> str:
-    return f"{n} place only hears" if n == 1 else f"{n} places only hear"
+# ---- The switch's words (owner 15.11, decision 5A; SPEC §2.14). One switch, named Consciousness and glossed as what
+# Ouroboros does on its own, its two positions named by what they mean. This is their one home: the app shows them from
+# the server's answers (/api/consciousness, /api/state, /api/places, the setup bootstrap), and the /bg replies (every
+# surface, headless included) and the mind's own fact are written here. Before a turn the product names what changes
+# from this install's facts; a place says on its human's screens why it is quiet, never inside the place.
+SWITCH_GLOSS = "When Ouroboros acts"
+POSITION_WORDS = {False: "Only when you write to it", True: "Also on its own and in places"}
+# The owner's names of the stored levels (21.10); web/modules/consciousness_autonomy.js holds the same, a test keeps them equal.
+LEVEL_NAMES = {"observe": "Advises", "act": "Acts", "full": "Evolves"}
+PEOPLE_DAYS = 7  # "how many people wrote there lately": the week before the turn
+_NAMED = 3  # places named before «and N more»; the dialog's details list every one
+
+
+ON_WITHOUT_PLACES = "Also on its own"  # an install with no place says nothing of places (SPEC §2.17)
+
+
+def position_words(enabled: Any, places=None) -> str:
+    """The switch's position by meaning; ``""`` while the stored control is unknown (never Off). ``places`` is the
+    install's place read (``None``: not read): on, an install that holds no place at all is not told of places."""
+    if not isinstance(enabled, bool):
+        return ""
+    return ON_WITHOUT_PLACES if enabled and isinstance(places, list) and not places else POSITION_WORDS[enabled]
+
+
+def _count(n: int, one: str, many: str = "") -> str:
+    return f"{n} {one if n == 1 else many or one + 's'}"
+
+
+def _same(a: str, b: str) -> bool:
+    return "".join(str(a).lower().split()) == "".join(str(b).lower().split())
+
+
+def _place_fact(place, circle: str = "") -> dict:
+    """``{place_id, label, state}`` of a stored place or of a view row, its label as the Circles row names it (display
+    only): said once, without the service it is on and without its circle's name when more is left («Telegram · Lab chat ·
+    Research» in the circle Research reads «Lab chat»; «Slack» stays)."""
+    from ouroboros.place_projection import said_once
+
+    get = place.get if isinstance(place, dict) else lambda key, default="": getattr(place, key, default)
+    provider = str(get("provider", "") or "")
+    parts = said_once(str(get("label", "") or provider)).split(" · ")
+    if len(parts) > 1 and provider and _same(parts[0], provider):
+        parts = parts[1:]
+    if len(parts) > 1 and circle and _same(parts[-1], circle):
+        parts = parts[:-1]
+    return {"place_id": str(get("place_id", "") or ""), "state": str(get("state", "") or ""), "label": " · ".join(parts)}
+
+
+def _ranked(places, people=None, circles=None) -> list[dict]:
+    """Places with the people who wrote there lately (``recent_people``), the busiest first, then by name; ``circles``
+    maps a place id to its circle's name."""
+    counts, circles = (people or {}).get("by_place") or {}, circles or {}
+    capped = set((people or {}).get("capped_places") or ())
+    facts = [_place_fact(place, circles.get(_place_fact(place)["place_id"], "")) for place in places or ()]
+    facts = [{**fact, "people": counts.get(fact["place_id"]), **({"people_capped": True} if fact["place_id"] in capped else {})}
+             for fact in facts]
+    return sorted(facts, key=lambda fact: (-(fact["people"] or 0), fact["label"].lower()))
+
+
+def _named(facts: list[dict]) -> str:
+    """«A», «A and B», «A, B and C», «A, B, C and 28 more»."""
+    labels = [fact["label"] or fact["place_id"] for fact in facts]
+    if len(labels) > _NAMED:
+        return ", ".join(labels[:_NAMED]) + f" and {len(labels) - _NAMED} more"
+    return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def _people_line(people) -> str:
+    """«At least 284 people wrote there in the last 7 days.» from ``recent_people`` (at least: a busy place's newest rows
+    only); nothing when it was not read or is zero."""
+    total = int((people or {}).get("total") or 0)
+    if not total:
+        return ""
+    return (("At least " if people.get("capped") else "") + _count(total, "person", "people")
+            + f" wrote there in the last {PEOPLE_DAYS} days.")
+
+
+def heard_sentence(places) -> str:
+    """What Off leaves in the places, said beside the position: ``places`` is one read of the place store (stored places
+    or view rows), ``None`` when it could not be read. A Paused place does not hear either, so it is not counted."""
+    if places is None:
+        return "Its places are heard, not answered."
+    hearing = [fact for fact in map(_place_fact, places) if fact["state"] != "paused"]
+    if not hearing:
+        return "Nothing wakes it between your messages."
+    return f"{_count(len(hearing), 'place')} {'is' if len(hearing) == 1 else 'are'} heard, not answered."
+
+
+def _running_line(running) -> str:
+    """What a turn off ends at once, from the state line it reads (``describe_consciousness_state``): its wake running now
+    and the own tasks it started; nothing when neither runs or the read failed."""
+    wake = bool((running or {}).get("live_wake_task_id")) and not (running or {}).get("live_wake_held")
+    tasks = int((running or {}).get("tasks_running") or 0)
+    said = " and ".join((["the wake running now"] if wake else []) + ([f"its {_count(tasks, 'own task')}"] if tasks else []))
+    if not said:
+        return ""
+    # The stop asks (a graceful end where there is room for one), so the words promise neither an instant end nor a
+    # saved result (review r3).
+    one = (wake and not tasks) or (tasks == 1 and not wake)
+    return f"{said[0].upper()}{said[1:]} {'is' if one else 'are'} asked to stop now."
+
+
+def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str = "", daily_usd=None,
+                   running=None) -> dict:
+    """What turning the switch ``to`` ("on" | "off") changes, said before it happens, from this install's facts:
+    ``places`` (stored places or view rows; ``None`` unread), ``people`` (``recent_people``; ``None`` unread),
+    ``circles`` (place id → its circle's name), ``autonomy`` and ``daily_usd`` (turning on), ``running`` (turning off:
+    the state line's live wake and own tasks). ``{"to", "lines", "places"}``: one sentence a line and every place the
+    turn concerns with its people, for the dialog's details (``None`` when the places could not be read: the app still
+    asks, with these lines). A fact absent says nothing."""
+    if to == "off":
+        hearing = None if places is None else _ranked([p for p in places if _place_fact(p)["state"] != "paused"],
+                                                      people, circles)
+        lines = ["Ouroboros will act only when you write to it."]
+        if hearing is None:
+            lines.append("Its places will be heard, not answered; which ones could not be read.")
+        elif hearing:
+            lines += [f"{_count(len(hearing), 'place')} will be heard, not answered: {_named(hearing)}.",
+                      _people_line(people)]
+        lines += [_running_line(running), "Your chats, your tasks and the schedules you asked for keep working."]
+        return {"to": "off", "lines": [line for line in lines if line], "places": hearing}
+    facts = _ranked(places or (), people, circles)
+    active = [fact for fact in facts if fact["state"] == "active"]
+    silent = [fact for fact in facts if fact["state"] == "silent"]
+    if daily_usd == 0:
+        lines = ["Ouroboros will also act on its own, but its allowance is $0.00: it cannot wake until you raise it in Costs."]
+    else:
+        lines = ["Ouroboros will also wake between your messages."]
+        if active and autonomy == "observe":
+            lines.append(f"Advises: in {_count(len(active), 'place')} it reads and thinks; what it would say waits for you.")
+        elif active:
+            lines.append(f"It may answer in {_count(len(active), 'place')}: {_named(active)}.")
+    if silent and daily_usd != 0:
+        lines.append(f"In {_count(len(silent), 'Silent place')} it only reads.")
+    if places is None:
+        lines.append("Where it may answer could not be read.")
+    if active or silent:
+        lines.append("What arrived while it was off waits; at its first wake it sees what is unread there and decides what "
+                     "to read and answer.")
+    return {"to": "on", "lines": lines, "places": None if places is None else active + silent}
+
+
+def read_switch_preview(drive_root, to: str, running=None) -> dict:
+    """``switch_preview`` from this install's stores (``GET /api/consciousness?switch=on|off``, read at the press): one
+    place-store read with each place's circle and, turning off, the week's people of every hearing place; ``running``
+    is the caller's state line. A read that fails says less, never a guess: no place list says «its places», no people
+    count says nothing."""
+    from ouroboros.place_arrivals import recent_people
+    from ouroboros.places import place_records
+    from ouroboros.runtime_limits import get_consciousness_autonomy, get_consciousness_daily_usd
+
+    try:
+        records = place_records(drive_root)
+        places = list(records.places.values())
+        circles = {p.place_id: str((records.circle_context(p.place_id) or {}).get("name") or "") for p in places}
+    except Exception:
+        log.warning("Places unreadable for the switch preview", exc_info=True)
+        places, circles = None, {}
+    people = None
+    if places:
+        try:
+            people = recent_people(drive_root, [p.place_id for p in places if p.state != "paused"], days=PEOPLE_DAYS,
+                                   services={p.place_id: p.provider for p in places})
+        except Exception:
+            log.warning("Recent people unreadable for the switch preview", exc_info=True)
+    return switch_preview(to, places, people=people, circles=circles, autonomy=get_consciousness_autonomy(),
+                          daily_usd=get_consciousness_daily_usd(), running=running)
+
+
+def on_sentence(at: str, places, autonomy: str = "", daily_usd: Any = None, allowance: str = "") -> str:
+    """The switch's first words as it turns consciousness on (every surface's /bg start): when it wakes next, then the
+    sentences the app's dialog said before the turn (``switch_preview``), so Telegram and the CLI hear the same. A $0
+    allowance, or one spent for the last 24 hours (``allowance``: the window's status), names no wake."""
+    rest = switch_preview("on", places, autonomy=autonomy, daily_usd=daily_usd)["lines"][1:]
+    if daily_usd == 0:
+        head = "Consciousness on, but its allowance is $0.00: it cannot wake until you raise it in Costs."
+    elif allowance == "exhausted":
+        head = "Consciousness on, but its allowance for the last 24 hours is spent: it wakes once there is room in it again."
+    elif allowance == "allowance_unknown":
+        head = "Consciousness on, but its spending could not be read: it wakes once it can be read and there is room."
+    else:
+        head = f"Consciousness on: Ouroboros also acts on its own; next wake at {at}."
+    return " ".join([head, *rest])
+
+
+def status_reply(described: dict) -> str:
+    """The /bg status reply on every surface: the switch's position (with the level while on), the host's state line
+    and what follows from it."""
+    level = LEVEL_NAMES.get(str(described.get("level") or "")) if described.get("enabled") else ""
+    head = described.get("position") or described.get("status") or "state unknown"
+    note = f" {described['detail_note']}" if described.get("detail_note") else ""
+    return f"🧠 Consciousness: {head}{f' ({level})' if level else ''} — {described.get('detail', '')}{note}"
+
+
+# Why a place is quiet, by its one cause, first match wins (the Panic or the switch before the place's own word, the
+# allowance before the level): ``word`` for its row, ``note`` for its sheet, ``door`` where the cause is changed.
+# A note promises only waking (what turning it on, or room in the allowance, brings): a Silent or Advises place still
+# sends nothing then, so no note says it will answer.
+QUIET = {
+    "panic": ("Hears only · Panic", "Panic turned consciousness off: it only hears here, and nothing here wakes it until "
+              "you turn it on.", "consciousness"),
+    "off": ("Hears only · consciousness off", "Consciousness is off: it only hears here, and nothing here wakes it until "
+            "you turn it on.", "consciousness"),
+    "allowance": ("Waits · allowance spent", "Its allowance for the last 24 hours is spent: nothing here starts a new wake "
+                  "until there is room in it again.", "costs"),
+    "advises": ("Replies wait for you · Advises", "Advises: it reads and thinks here; what it would say waits for you in "
+                "its conversation here.", "consciousness"),
+}
+# A $0 allowance has no reset to wait for: only the owner's change opens it.
+ZERO_ALLOWANCE = "Its allowance is $0.00: nothing here starts a new wake until you raise it in Costs."
+
+
+def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str = "", limit_usd: Any = None) -> dict | None:
+    """``{cause, word, note, door}`` when a place that would speak is quiet for a cause beyond its own stored word, else
+    ``None``. ``switch``: "on" | "off" | "panic" | "unknown" (no claim); ``allowance``: the window's status and
+    ``limit_usd`` its daily limit. A Paused place says Paused and a Silent one Silent: their own words already say it."""
+    if state == "paused" or switch == "unknown":
+        return None
+    if switch in ("panic", "off"):
+        cause = switch
+    elif allowance == "exhausted":
+        cause = "allowance"
+    elif state == "active" and autonomy == "observe":
+        cause = "advises"
+    else:
+        return None
+    word, note, door = QUIET[cause]
+    if cause == "allowance" and isinstance(limit_usd, (int, float)) and limit_usd <= 0:
+        note = ZERO_ALLOWANCE
+    return {"cause": cause, "word": word, "door": door, "note": note}
+
+
+def connect_note(switch: str) -> str:
+    """The Add flow's words about where a new place lands (it starts Silent), true for the switch as it stands."""
+    if switch in ("off", "panic"):
+        return "It starts Silent: it sends nothing there until you make it Active. While consciousness is off, it only hears."
+    return "It starts Silent: it hears and thinks there and sends nothing until you make it Active."
+
+
+def first_run_words(autonomy: str = "act") -> dict:
+    """The setup step's words, true for the autonomy the offer names (Advises answers nowhere): the gloss, the two
+    positions (an install being set up holds no place yet), what they mean, what a subscription alone pays with (said
+    once: the step's limits leave it out there) and where to change it later. ``choice`` is the on position a page
+    built before the step names (kept for such pages)."""
+    places = ("reads and thinks in places you make Active; what it would say waits for you" if autonomy == "observe"
+              else "answers in places you make Active")
+    return {"gloss": SWITCH_GLOSS + ".", "choice": POSITION_WORDS[True], "off": POSITION_WORDS[False],
+            "on": ON_WITHOUT_PLACES,
+            # Start begins the first conversation either way (owner 21.11, 1C); on, the wakes go on before a reply.
+            "meaning": ("Off: it works when you write to it, and places you connect are heard, not answered. On: it also "
+                        f"keeps waking on its own within its daily allowance, even before your first reply, and {places}. "
+                        "Either way, Start begins your first conversation."),
+            "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages.",
+            "door": "Change it later in Dashboard › Consciousness; the allowance is in Dashboard › Costs."}
+
+
+FIRST_RUN = first_run_words()
+
+
+def mind_fact(places, *, enabled: Any, stop_source: str = "", panic: bool = False) -> str:
+    """The switch as a fact for the mind while its places only hear (the 7 Nov reading: places «work separately»):
+    facts only, never a rule of conduct; only when the switch is known off (or a Panic waits) and a place is not
+    Paused; else nothing."""
+    if not (panic or enabled is False):
+        return ""
+    hearing = [fact for fact in map(_place_fact, places or ()) if fact["state"] != "paused"]
+    if not hearing:
+        return ""
+    who = ("a Panic waits" if panic else {"owner": "my human turned it off", "panic": "my human pressed Panic",
+                                          "agent_tool": "I turned it off"}.get(stop_source, ""))
+    return (f"Consciousness is off{f' ({who})' if who else ''}: my own wakes and the schedules I set for myself have "
+            f"stopped; my human's chats and tasks, and the schedules my human asked for, still reach me. In my "
+            f"{_count(len(hearing), 'connected place')} what arrives is recorded and wakes nothing until it is on.")
 
 
 # A held wake the allowance it started with stopped: the owner's move (DESIGN "Status marks"), said in Costs too.
@@ -222,12 +504,15 @@ def held_wake_cause(drive_root, task_id: str) -> dict:
 
 
 def off_sentence(places) -> str:
-    """The switch's first words as it turns consciousness off (owner 09.11, variant A). ``places`` is one read of the
-    place store, None when it could not be read; a Paused place does not hear either, so it is not counted."""
+    """The switch's first words as it turns consciousness off (owner 09.11, variant A; words 15.11, 5A). ``places`` is
+    one read of the place store, None when it could not be read; a Paused place does not hear either."""
+    said = "Consciousness off: Ouroboros acts only when you write to it."
     if places is None:
-        return "Consciousness off: no own wakes, and its places only hear until Start."
-    hearing = sum(place.state != "paused" for place in places)
-    return f"Consciousness off: no own wakes, and {_hearing(hearing)} until Start." if hearing else "Consciousness off: no own wakes."
+        return said + " Its places are heard, not answered."
+    hearing = [fact for fact in map(_place_fact, places) if fact["state"] != "paused"]
+    if not hearing:
+        return said
+    return said + f" {heard_sentence(places)}"
 
 
 def stopping_words(task_ids, *, wake: str, rows: dict, authors, places) -> str:
@@ -273,16 +558,15 @@ def describe_consciousness(clock, *, supervisor_failed: bool = False) -> dict:
 
 
 def place_views(drive_root, allowance=None) -> list[dict]:
-    """Stored PlaceSummary facts with each place's circle (one store read), the caller's allowance and one read of the
-    switch, no connector discovery."""
+    """Stored PlaceSummary facts with each place's circle (one store read) and the caller's allowance, no connector
+    discovery and no switch read: a brief view says no quiet cause."""
     from ouroboros.place_arrivals import place_facts
-    from ouroboros.place_projection import consciousness_off, place_view
+    from ouroboros.place_projection import place_view
     from ouroboros.places import place_records
 
     records = place_records(drive_root)
-    off = consciousness_off(drive_root)
     facts = place_facts(drive_root, records.places.values(), full=False)
-    return [place_view(drive_root, place, allowance=allowance, brief=True, records=records, off=off, facts=facts)
+    return [place_view(drive_root, place, allowance=allowance, brief=True, records=records, facts=facts)
             for place in records.places.values()]
 
 

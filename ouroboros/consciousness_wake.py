@@ -6,16 +6,12 @@ priority, what happened since the last ACCEPTED wake: chat-chain positions in ap
 producer provenance, each row whole under its host-known author and exact address; runner failures; the rows that
 announce a transition), the transitions task results record, by identity, announced or not (a task's terminal, a
 card's closed state: an orphan sweep, a lost ``task_done``, an expired card), and the memory journal records after the
-accepted sequence (``memory_inventory.memory_changes``: one line, its author and an exact read each; what stands open
-is the view's), then every answerable owner card. The wake accepts a chain position, every observed task's transition
-identities (``_transitions_since``; kept as a chain of files, ``consciousness_transitions``) and the last journal
-sequence, never the alarm's finish time, so a fact written during a wake or late under an older stamp reaches the next
-one; a wake never activates the journal.
-``bind_wake_observation`` stores the whole observation as an exact source under the registered wake; a request that
-cannot fit it gets its composition, window, coverage and that pointer with my human's card answers whole (their other
-words are in my view), else the bare pointer (``overview_text``; first build: ``context_input_selection.rescued_start``;
-rounds: ``loop_model_call``).
-``wake_task_metadata`` is the wake's origin/authority envelope for ``handle_wake_direct`` (``consciousness_authority``).
+accepted sequence (``memory_inventory.memory_changes``), other foci's changed knowledge pages (``knowledge_versions``),
+each with author and exact read (open memory is the view's), then what stands in every wake: every answerable owner
+card and the standing sections (``consciousness_standing``). The wake accepts a chat position, task transition
+identities (``_transitions_since``, kept in ``consciousness_transitions``), memory sequence and knowledge byte
+positions, never the alarm's finish time, so facts written during a wake or backdated reach the next one; a wake never
+activates the journal.
 """
 
 from __future__ import annotations
@@ -33,12 +29,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.consciousness_authority import (CONSCIOUSNESS_CATEGORY, CONSCIOUSNESS_INITIATOR, WAKE_CAUSE_OWN_CLOCK,
                                                WORK_KIND_CONSCIOUSNESS, disabled_tools_for, is_consciousness_origin,
                                                normalize_level, runtime_mode_cap_for)
+from ouroboros.consciousness_standing import (StandingFacts, StandingSection, _answered_card_line, _card_line,
+                                              _clip_preview, _closed_card_line, _parse_iso, outstanding_cards,
+                                              standing_sections)
 from ouroboros.consciousness_transitions import (CHAT_BOUNDARY_KEYS, TRANSITIONS_VERSION, TransitionChain,
                                                  accepted_transitions, bind_link)
 from ouroboros.chat_chain import row_address, source_row_id
 from ouroboros.context_health import safe_read
 from ouroboros.deadline_utils import ago_text
-from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, memory_row_header, owner_speech,
+from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, owner_speech,
                                            reaction_note, render_memory_row, render_row_text, row_author,
                                            wordless_reaction)
 
@@ -90,13 +89,6 @@ def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Option
 
 def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).isoformat()
-
-
-def _parse_iso(value: Any) -> Optional[float]:
-    try:
-        return _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except (TypeError, ValueError, OverflowError):
-        return None
 
 
 def wake_authorship(row: Dict[str, Any]) -> str:
@@ -241,22 +233,15 @@ def previous_wake_text(drive_root: Any, task_id: str, *, now: float, last_author
     wake carries on (``WAKE_CONTINUITY_KEY``).
 
     An authored end stands alone however it ended and however empty its note: the mind's newest decision.
-    Any other shows beside it the notes it carried itself (its row's, else the clock's ``last_authored`` and
-    ``unattributed``): the newest attempt since the last note that no record attributes, read by its current
-    facts, and that note, dated. Resolving that one attempt as host-only cannot settle earlier uncertainty;
-    only a later authored end clears that span. At most three addressed reads; no history is walked."""
+    Any other shows its retained observation's reader and beside it the notes it carried itself (its row's, else the
+    clock's ``last_authored`` and ``unattributed``): the newest attempt since the last note that no record attributes,
+    read by its current facts, and that note, dated. Resolving that one attempt as host-only cannot settle earlier
+    uncertainty; only a later authored end clears that span. At most three addressed reads; no history is walked."""
     text, after = _previous_wake(drive_root, task_id, now, {"last_authored": last_authored, "unattributed": unattributed,
                                                         "earlier_unattributed": earlier_unattributed})
     if carried is not None:
         carried.update(after)
     return text
-
-
-def _clip_preview(value: Any, limit: int = 100) -> str:
-    text = " ".join(str(value or "").split())
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 18)].rstrip() + f" …[{len(text) - (limit - 18)} chars omitted]"
 
 
 def _trigger_line(reason: str) -> str:
@@ -270,67 +255,13 @@ def _trigger_line(reason: str) -> str:
     return f"- wake cause: {raw}"
 
 
-def _card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, now: float, owner_wait: Any = None,
-               closed: Optional[str] = None) -> str:
-    """One card's status line; ``closed`` (a transition's own stamp, or none) replaces its asked age and wait."""
-    from ouroboros.project_dialogue import owner_wait_projection, question_status
-
-    facts = owner_wait_projection(quiz_id, owner_wait, block)
-    waits = closed is None and bool(block.get("wait_for_answer"))
-    label = question_status(str(block.get("state") or "open"), facts, waits)
-    age = closed
-    if age is None:  # still open: its asked age
-        asked_ts = _parse_iso(str(block.get("asked_at") or ""))
-        age = f", {ago_text(now - asked_ts)}" if asked_ts is not None else ""
-    preview = _clip_preview(block.get("question") or "question text unavailable")
-    return f"- owner card {quiz_id} on task {task_id}: {label}{age}; {preview}"
-
-
-def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, now: float) -> str:
-    """One answered card of the window: stamps, the recorded answer whole (my human's own words, so in the fallback
-    form too), a named question preview and no verdict on what the answer meant. A secret request's answer is the
-    host's typed outcome: its event, plugin and field ids, never a value."""
-    from ouroboros.owner_quiz import secret_outcome_block, secret_outcome_summary
-
-    parts = []
-    for key, word in (("answered_at", "answered"), ("asked_at", "asked")):
-        stamp = _parse_iso(block.get(key))
-        parts.append(f"{word} {ago_text(now - stamp)}" if stamp is not None else f"{word} at an unknown time")
-    options = block.get("options") if isinstance(block.get("options"), list) else []
-    index = block.get("answered_index")
-    comment = str(block.get("comment") or "")
-    if secret_outcome_block(block) is block:
-        answer = f"host outcome {secret_outcome_summary(block)}"
-    elif isinstance(index, int) and not isinstance(index, bool):
-        label = str(options[index]) if 0 <= index < len(options) else "label unavailable"
-        answer = f"chose option {index + 1}: {label}"
-        if comment.strip():
-            answer += f"; with the words: {comment}"
-    elif comment.strip():
-        answer = f"answered in own words: {comment}"
-    else:
-        answer = "answer text unavailable"
-    preview = _clip_preview(block.get("question") or "question text unavailable")
-    return f"- owner card {quiz_id} on task {task_id}: {'; '.join(parts)}; {answer}; question: {preview}"
-
-
-def _closed_card_line(task_id, quiz_id, block, *, now):
-    stamp = _parse_iso(block.get("closed_at"))
-    when = ago_text(now - stamp) if stamp is not None else "at an unknown time"
-    actor = str(block.get("closed_actor") or "unknown actor")
-    if actor == "model" and block.get("closed_by_task_id"):
-        actor += f" task {block['closed_by_task_id']}"
-    return (f"- owner card {quiz_id} on task {task_id}: closed {when} by {actor}, without an owner answer; "
-            f"reason: {block.get('closed_reason') or 'unavailable'}; "
-            f"question: {_clip_preview(block.get('question') or 'question text unavailable')}")
-
-
 def _chat_window(drive_root: pathlib.Path, boundary: Any, since: float,
                  gaps: set) -> Tuple[List[Tuple[int, Dict[str, Any]]], Dict[str, Any]]:
     """Every row of all rooms after the accepted SQL/legacy byte boundary, late old timestamps included.
 
     Only the initial time bootstrap surveys their retained rows; later wakes query the accepted interval, which
-    imports must cover before its boundary advances; skipped intervals stay visible gaps."""
+    imports must cover before its boundary advances; skipped intervals stay visible gaps. An empty chain keeps the zero
+    boundary; a legacy segment's signature is checked against the import ledger (``generation_metadata``)."""
     from ouroboros import dialogue_store as ds, dialogue_positions as dp
 
     upper = ds.stream_end(drive_root, "chat")
@@ -427,6 +358,7 @@ _KIND_WORDS = {  # (one, many)
     "card_state": ("card closed unanswered", "cards closed unanswered"),
     "outstanding_card": ("outstanding card", "outstanding cards"),
     "memory_change": ("memory change", "memory changes"),
+    "knowledge_change": ("changed knowledge page", "changed knowledge pages"),
     "presence_observation": ("retained Presence observation", "retained Presence observations"),
     "history_import": ("imported earlier Presence message (counted, not listed: room history, not an arrival)",
                        "imported earlier Presence messages (counted, not listed: room history, not arrivals)"),
@@ -457,18 +389,17 @@ def _presence_failure(result: Dict[str, Any]) -> bool:
 
 def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any]],
                 rooms: Any, projects: Dict[str, str], now: float, *, when: str = "", accounts: Any = None,
-                whole: bool = True) -> str:
-    """One chat-row event, or (``when`` given) a task terminal read from its result."""
+                attention: Optional[Dict[str, Any]] = None) -> str:
+    """One chat-row event, or (``when`` given) a task terminal read from its result. ``attention``: a place arrival's
+    heard decision (``place_arrivals.heard_attention``), said beside it; absent says nothing."""
     stamp = _parse_iso(row.get("ts"))
     when = when or (ago_text(now - stamp) if stamp is not None else "at an unknown time")
     task_id = str(row.get("task_id") or "")
-    if kind in {"owner_message", "correspondent_message"}:  # under the author the host knows now, any author
-        address, author = row_address(row), row_author(row, owner_accounts=accounts)
-        if whole:  # the words themselves, never cut
-            words = render_memory_row(address, row, author=author, indent="  ")
-        else:  # the fallback form's pointer: author, size and exact address, no body
-            words = f"{memory_row_header(address, row, author=author)} {len(render_row_text(row))} chars, at the source"
-        return f"- {_KIND_WORDS[kind][0].split(' (counted', 1)[0]} in {rooms.label(row)}, {when}: {words}"
+    if kind in {"owner_message", "correspondent_message"}:  # under the author the host knows now, words never cut
+        heard = (f" (heard: {attention.get('reason') or 'reason not recorded'}"
+                 + (f"; given to {attention['recipient']}" if attention.get("recipient") else "") + ")") if attention else ""
+        words = render_memory_row(row_address(row), row, author=row_author(row, owner_accounts=accounts), indent="  ")
+        return f"- {_KIND_WORDS[kind][0].split(' (counted', 1)[0]} in {rooms.label(row)}, {when}{heard}: {words}"
     if kind == "correspondent_reaction":  # who acted, the gesture and its target, in the host's words
         transport = row.get("transport") if isinstance(row.get("transport"), dict) else {}
         actor = transport.get("actor") if isinstance(transport.get("actor"), dict) else {}
@@ -626,27 +557,33 @@ class WakeObservation:
 
     trigger: str
     # (kind, chat-chain offset or None, rendered line): chat-positioned events in append order, then transitions
-    # no chat row of this window announced, by their own stamps, then memory journal changes in publication order.
+    # no chat row announced, by their stamps, then memory and knowledge changes in each journal's publication order.
     events: Tuple[Tuple[str, Optional[int], str], ...]
     outstanding: Tuple[str, ...]
     window: Dict[str, Any]
     gaps: Tuple[str, ...]
     captured_at: str
-    # The chat position, transition state and memory sequence a wake that accepts this observation persists.
+    # The chat position, transition state, memory sequence and knowledge cursors an accepting wake persists.
     boundary: Optional[Dict[str, Any]] = None
     # The accepted transition chain this observation read; the link its acceptance writes extends it.
     chain: Optional[TransitionChain] = field(default=None, repr=False, compare=False)
+    # What stands after the outstanding cards in every wake, in ``consciousness_standing.STANDING_PRODUCERS`` order.
+    standing: Tuple[StandingSection, ...] = ()
 
     def counts(self) -> Dict[str, int]:
         counts = dict(Counter(kind for kind, _offset, _line in self.events))  # first-seen order
         if self.outstanding:
             counts["outstanding_card"] = len(self.outstanding)
+        counts.update((section.kind, len(section.lines)) for section in self.standing)
         return counts
 
     def composition(self) -> str:
-        counts = self.counts()
-        return ", ".join(f"{count} {_KIND_WORDS.get(kind, (kind, kind))[count != 1]}"
-                         for kind, count in counts.items()) or "no events"
+        words = {**_KIND_WORDS, **{section.kind: section.words for section in self.standing}}
+        return ", ".join(f"{count} {words.get(kind, (kind, kind))[count != 1]}"
+                         for kind, count in self.counts().items()) or "no events"
+
+    def _standing_lines(self) -> List[str]:
+        return [line for section in self.standing for line in (section.heading(), *section.lines)]
 
     def _coverage(self) -> str:
         window = self.window
@@ -670,14 +607,15 @@ class WakeObservation:
         lines = [self.trigger] if self.trigger else []
         if self.events:
             lines.append(f"Observed since the last accepted wake ({self.composition()}; {self._coverage()}):")
-            unannounced = memory = False
+            headers = {"memory_change": "Recorded in memory after the accepted sequence (source dates do not order publication):",
+                       "knowledge_change": "Knowledge changed by other foci after the accepted journal positions:"}
+            shown = set()
             for kind, offset, line in self.events:
-                if kind == "memory_change" and not memory:
-                    memory = True
-                    lines.append("Recorded in memory after the accepted sequence (source dates do not order publication):")
-                elif offset is None and kind != "memory_change" and not unannounced:
-                    unannounced = True
-                    lines.append("Recorded in task results with no chat row in this window (by their own stamps):")
+                header = headers.get(kind, "Recorded in task results with no chat row in this window (by their own stamps):"
+                                     if offset is None else "")
+                if header and header not in shown:
+                    shown.add(header)
+                    lines.append(header)
                 if kind not in _COUNTED_ONLY:
                     lines.append(line)
         elif self.gaps or (self.window.get("memory") or {}).get("basis") == "initial_baseline":
@@ -685,11 +623,13 @@ class WakeObservation:
         if self.outstanding:
             lines.append(f"Outstanding owner cards ({len(self.outstanding)}):")
             lines.extend(self.outstanding)
+        lines.extend(self._standing_lines())
         return ("\n" + "\n".join(lines)) if lines else "nothing new"
 
     def overview_text(self, source: Dict[str, Any], *, mine: bool = True) -> str:
         """Composition, window, coverage and the exact pointer; ``mine`` adds my human's card answers whole (their
-        other words are in my view). Nothing else."""
+        other words are in my view) and the standing sections whole, which the bare pointer folds to each section's
+        count and the kind of its rows at the source. Nothing else."""
         lines = [self.trigger] if self.trigger else []
         lines.append(
             "The complete observation of this wake does not fit this request beside the tools and the "
@@ -699,17 +639,21 @@ class WakeObservation:
         lines.append(
             f"Source: {json.dumps(read, ensure_ascii=False, sort_keys=True)} — "
             f"{source.get('lines')} JSON lines (a header, then one event per line: chat-positioned in append "
-            f"order, then transitions no chat row announced, then memory changes; then outstanding cards), sha256 "
+            f"order, then transitions no chat row announced, then memory "
+            f"{'and knowledge ' if self.counts().get('knowledge_change') else ''}changes; then outstanding cards"
+            f"{'; then the standing sections, one row per line under its kind' if self.standing else ''}), sha256 "
             f"{source.get('sha256')}. Read the ranges you need; this pointer is neither a summary nor a "
             "priority order.")
         own = [line for kind, _offset, line in self.events if kind == "card_answer"]
         if mine and own:
             lines += ["My human's card answers in this window, whole (every other event stays at the source):", *own]
+        lines += self._standing_lines() if mine else [
+            f"{section.title} ({len(section.lines)}): rows of kind {section.kind} at the source" for section in self.standing]
         return "\n" + "\n".join(lines)
 
     def source_bytes(self, chain: Optional[Dict[str, Any]] = None) -> bytes:
         """A header, then one row per event. The header's boundary is the compact one an accepting wake persists: chat
-        position, memory sequence and ``chain`` (the transition link it named; a later wake may remove that file)."""
+        position, memory sequence, knowledge cursors and ``chain`` (a later wake may remove that transition link)."""
         boundary = None if self.boundary is None else {
             **{key: value for key, value in self.boundary.items() if key != "transitions"},
             **({"transition_chain": chain} if chain else {})}
@@ -718,6 +662,7 @@ class WakeObservation:
                   "boundary": boundary}
         rows = [header] + [{"kind": kind, "chat_offset": offset, "line": line} for kind, offset, line in self.events]
         rows += [{"kind": "outstanding_card", "line": line} for line in self.outstanding]
+        rows += [{"kind": section.kind, "line": line} for section in self.standing for line in section.lines]
         return ("\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows) + "\n").encode("utf-8")
 
 
@@ -746,17 +691,18 @@ def _task_window(root, prior, chat_rows):
     return rows, signatures, retained
 
 
-def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, reason: str = "") -> WakeObservation:
+def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, reason: str = "",
+                 clock: Optional[Dict[str, Any]] = None) -> WakeObservation:
     """Capture every fact since the accepted boundary, plus outstanding cards, with no count cut or category order.
 
     Chat events keep their physical append order; a canonical transition takes the position of the chat row that
     announced it, and one no row of this window announced follows. Answerable cards (``open``/``expired_terminal``
-    — В17a) are an inventory of the whole store, listed separately and in full. ``now``, taken before this scan,
-    anchors the next wake's transition window. An unreadable source is a disclosed gap, and what the wake accepts
-    for it stays where it was.
+    — В17a) are an inventory of the whole store, listed separately and in full, then the standing sections
+    (``clock``: the own clock's facts the alarm admitted the wake with, ``StandingFacts.clock``).
+    ``now``, taken before this scan, anchors the next wake's transition window. An unreadable source is a disclosed
+    gap, and what the wake accepts for it stays where it was.
     """
     from ouroboros.dialogue_provenance import RoomLabelResolver
-    from ouroboros.owner_quiz import STATE_EXPIRED_TERMINAL, STATE_OPEN
     from ouroboros.places import PlaceError, place_owner_accounts  # D15->D20 is lazy-only
     from ouroboros.projects_registry import list_reserved_projects, PROJECT_ACTIVE
 
@@ -797,18 +743,24 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
     try:
         registry = list_reserved_projects(root)
     except Exception as exc:
-        registry = []
+        registry = None
         gaps.add(f"project names unreadable: {type(exc).__name__}")
-    rooms = RoomLabelResolver(root, projects=registry)
+    rooms = RoomLabelResolver(root, projects=registry or [])
     try:
         accounts = place_owner_accounts(root)  # one read: whose place rows are my human's, now
     except PlaceError as exc:
         accounts = {}
         gaps.add(f"place owner confirmations unreadable: {exc.code}")
-    projects = {str(row["id"]): str(row.get("name") or row["id"]) for row in registry
+    projects = {str(row["id"]): str(row.get("name") or row["id"]) for row in registry or []
                 if row.get("lifecycle") == PROJECT_ACTIVE}
     if basis == "partial_inventory_upgrade":
         gaps.add("previous_transition_inventory_incomplete")
+    try:  # why each arrival woke nothing, from its own dedup record, one read for the window
+        from ouroboros.place_arrivals import heard_attention  # D15->D20 is lazy-only
+        heard = heard_attention(root, (offset for offset, row in chat_rows if row.get("type") == "place_arrival"))
+    except Exception as exc:
+        heard = {}
+        gaps.add(f"place attention unreadable: {type(exc).__name__}")
     events, announced = [], set()
     for offset, row in chat_rows:
         kind = _row_kind(row, accounts)
@@ -836,35 +788,34 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
         if kind == "task_terminal" and result.get("_is_direct_chat") and not _presence_failure(result):
             listed = result.get("wake_summary") or _continue_open(result, str(row.get("task_id") or ""))
             kind = "direct_turn_summary" if listed else "direct_turn"
-        events.append((kind, offset, _event_line(kind, row, results, rooms, projects, now, accounts=accounts)))
+        events.append((kind, offset, _event_line(kind, row, results, rooms, projects, now, accounts=accounts,
+                                                 attention=heard.get(offset))))
     for key, fact in sorted(((key, fact) for key, fact in fresh.items() if key not in announced),
                             key=lambda item: (item[1]["stamp"] is None, item[1]["stamp"] or 0.0, item[0])):
         kind, line = _transition_line(fact, results, rooms, now, projects)
         events.append((kind, None, line))
     memory_boundary = accepted.get("memory")
+    knowledge_boundary = accepted.get("knowledge")
     if not source_unreadable:
         from ouroboros.memory_inventory import memory_changes
+        from ouroboros.knowledge_versions import knowledge_changes
 
         changes, memory_boundary, memory_window = memory_changes(root, memory_boundary, gaps)
         events.extend(changes)
         if memory_window:
             window["memory"] = memory_window
-    cards = []
-    for task_id, row in results.items():
-        quizzes = row.get("owner_quiz") if isinstance(row.get("owner_quiz"), dict) else {}
-        for quiz_id, block in quizzes.items():
-            if isinstance(block, dict) and not block.get("answered_at") and block.get("state") in (
-                    STATE_OPEN, STATE_EXPIRED_TERMINAL):
-                cards.append((str(block.get("asked_at") or ""), _card_line(
-                    task_id, str(quiz_id), block, now=now, owner_wait=row.get("owner_wait"))))
+        changes, knowledge_boundary = knowledge_changes(root, knowledge_boundary, gaps)
+        events.extend(changes)
+    standing = standing_sections(StandingFacts(root=root, now=now, registry=registry, clock=clock), gaps)
     trigger = _trigger_line(reason)
     chat_boundary = window.get("boundary") or {key: accepted[key] for key in CHAT_BOUNDARY_KEYS if key in accepted}
     state_to_accept = {**chat_boundary, **({"transitions": state} if isinstance(state, dict) else {}),
-                       **({"memory": memory_boundary} if memory_boundary is not None else {})}
-    return WakeObservation(trigger=trigger, events=tuple(events),
-                           outstanding=tuple(line for _stamp, line in sorted(cards, reverse=True)),
+                       **({"memory": memory_boundary} if memory_boundary is not None else {}),
+                       **({"knowledge": knowledge_boundary} if knowledge_boundary is not None else {})}
+    return WakeObservation(trigger=trigger, events=tuple(events), outstanding=outstanding_cards(results, now=now),
                            window=window, gaps=tuple(sorted(gaps)), captured_at=_iso(now),
-                           boundary=None if source_unreadable else state_to_accept or None, chain=chain)
+                           boundary=None if source_unreadable else state_to_accept or None, chain=chain,
+                           standing=standing)
 
 
 def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
@@ -872,7 +823,7 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
 
     The clock admitted the wake with the facts only its process holds (``_wake_prepare``:
     the accepted boundary, the bootstrap, the allowance window, the live roots, the
-    schedule); everything that reads history runs here, in the carrier (owner decision 1A,
+    schedule and its own clock); everything that reads history runs here, in the carrier (owner decision 1A,
     L7). The complete observation becomes the task's text, its exact source is stored under
     the wake, and the boundary it accepts rides the task metadata to the clock
     (``consciousness._settle_wake``), as do the notes it carries (``previous_wake_text``). A failure
@@ -894,7 +845,7 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
     reason = str(facts.get("reason") or "heartbeat")
     window = facts.get("window") if isinstance(facts.get("window"), dict) else {}
     observation = observe_wake(root, boundary=facts.get("boundary"), since=float(facts.get("since") or 0.0),
-                               now=now, reason=reason)
+                               now=now, reason=reason, clock=facts.get("clock"))
     try:
         places = place_views(root, window)
     except Exception:
@@ -950,7 +901,7 @@ def bind_wake_observation(drive_root: Any, task: Dict[str, Any], observation: Wa
         if pointer != projection:  # the start's and a real overflow's guarantee: the bare pointer
             facts["pointer_text"] = pointer
         if chain is not None:
-            accepted = {key: boundary[key] for key in (*CHAT_BOUNDARY_KEYS, "memory") if key in boundary}
+            accepted = {key: boundary[key] for key in (*CHAT_BOUNDARY_KEYS, "memory", "knowledge") if key in boundary}
             accepted.update(transition_chain=chain, task_id=str(task["id"]), captured_at=observation.captured_at)
     except Exception as exc:
         facts["source_error"] = f"{type(exc).__name__}: {exc}"
@@ -968,7 +919,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
     "On time" is lateness below ``ago_text``'s one-minute display granularity, not a new scheduling threshold.
     """
     template = safe_read(pathlib.Path(repo_dir) / PROMPT_REL) or _FALLBACK_TEMPLATE
-    from ouroboros.consciousness_view import places_text, roots_text, spend_text
+    from ouroboros.consciousness_view import LEVEL_NAMES, places_text, roots_text, spend_text
     normalized = normalize_level(level)
     spent = f"{float(spent_usd):.2f}" if isinstance(spent_usd, (int, float)) else "unknown"
     if spent_is_floor and spent != "unknown":
@@ -979,7 +930,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
     facts = {
         "reason": reason_text, "previous_wake": previous_wake, "events": events or "nothing new",
         "last_wake_ago": ago_text(now - last_wake_at) if last_wake_at else "no wake since this process started",
-        "level": {"observe": "Advises", "act": "Acts", "full": "Evolves"}[normalized],
+        "level": LEVEL_NAMES[normalized],
         "level_line": LEVEL_LINES[normalized], "places": places_text(drive_root, places),
         "withheld_tools": ", ".join(disabled_tools) if disabled_tools else "none",
         "spent_usd": spent, "daily_usd": f"{float(daily_usd):.2f}",

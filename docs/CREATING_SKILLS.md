@@ -695,46 +695,47 @@ or non-numeric one is silently dropped.
 
 ### Declaring MCP servers (Connect tools)
 
-A `script` or `extension` skill that ships an MCP stdio server declares it, and the
-owner connects it with one confirmation instead of copying settings by hand:
+A `script` or `extension` skill can ship stdio servers. Keep existing Node servers in
+`mcp_servers`. Put additions such as an `agent_python` server in `optional_mcp_servers`
+so older cores can ignore them and load the rest of the skill. Current cores append
+the second list to the first and validate every entry.
 
 ```yaml
 mcp_servers: [{"id": "chrome_browser", "title": "Chrome (shared tab)", "entry": "scripts/server.mjs", "task_session": true, "browser_policy": true}]
 ```
 
-Each item takes only these keys (anything else is a manifest error):
+Both lists use the same fields. Unknown keys or an ID repeated anywhere reject the manifest.
 
-- `id` (required): the MCP server id, lowercase letters and digits joined by single `_`,
-  at most 24 characters. Every tool is named `mcp_<id>__<tool>`, so keep it stable.
-- `entry` (required): a relative path of a file in the skill (no `..`, absolute path or
-  cache/dependency folder such as `node_modules` or `.ouroboros_env`); it is part of the
-  reviewed, hashed payload, and `skill_preflight` checks it by the rule a start applies.
-- `runtime`: currently `node` only; defaults to the manifest's `runtime`.
-- `title`: the Settings display name; defaults to `id`.
-- `task_session`, `browser_policy`: the MCP call-lifetime choices (DEVELOPMENT §12);
-  `browser_policy` needs `task_session: true`.
+- `id` (required) names every tool as `mcp_<id>__<tool>`. Use up to 24 lowercase
+  letters and digits joined by single underscores.
+- `entry` (required) is a relative file path within the reviewed, hashed payload.
+  Preflight and launch reject `..`, absolute paths and cache/dependency folders such
+  as `node_modules` or `.ouroboros_env`.
+- `runtime` is `node` or `agent_python` and defaults to the manifest runtime.
+  `agent_python` runs a usable `OUROBOROS_AGENT_PYTHON` or `sys.executable` with
+  `-I -B`. It uses that interpreter's packages, skips the skill's isolated Python
+  environment and ignores `PYTHONPATH` and user-site.
+  Managed domains refuse it. Ordinary Python scripts keep PATH-first resolution.
+- `title` names the server in Extensions (default `id`).
+- `task_session` and `browser_policy` control call lifetime (DEVELOPMENT §12).
+  `browser_policy` requires `task_session: true`.
 
-Once the skill is accepted for its current bytes, on, granted and its packages are
-installed, its Skills card offers **Connect tools**. The confirmation names what will run
-and, when MCP is off, every other server that turning MCP on starts. Confirming writes one
-MCP server row (`id`, `name`, `enabled`, `transport: stdio`, `skill`, the two flags) and turns
-MCP on; nothing else in settings changes, an identical state writes nothing, and a row of
-the same id that this skill did not write is never overwritten. An agent carries the same
-step with `skill_owner_action(action="connect_mcp")`: `preview: true` first, then the
+When the skill is accepted for its current bytes, enabled, granted and its packages
+ready, its card offers **Connect tools**. The owner confirms the listed servers and
+any others that turning MCP on would start. Connect sets `MCP_ENABLED` and writes
+one row per declaration (`id`, `name`, `enabled`, `transport: stdio`, `skill`, both flags).
+It preserves other settings, skips identical writes and refuses ID conflicts.
+For `skill_owner_action(action="connect_mcp")`, use `preview: true` first, then the
 owner's answer as `owner_source` with the preview's `settings_digest`.
 
-The row stores no command. Every listing, Settings Test and call
-derives the runtime binary, `<skill folder>/<entry>`, the skill folder as working directory and
-both flags from the installed skill (read-only in Settings), so a moved app or runtime
-needs no reconnect. The server gets your scripts' environment: granted settings, state
-folder, packages. Under a deployment's execution domain each start runs the verified work
-copy in its work container, on its runtime (not an extension's: its package stays on the
-service). While the skill is off, missing, edited and not re-accepted, short of grants or
-packages, or no longer declares the server, or the domain cannot start it, only that
-server is unavailable (`MCP_SKILL_UNAVAILABLE`) and nothing starts anywhere; the row
-stays. An accepted update or changed granted value is listed anew and running task
-sessions restart; a row the owner switched off stays off. Steps outside Ouroboros (a browser extension, a sign-in) belong
-in its instructions.
+The row stores no command. Listing, Test and calls derive binary, entry, cwd and flags from the installed
+skill. Moving it or the runtime needs no reconnect. Servers receive scripts' granted
+settings and state folder. Managed domains stage verified Node scripts in containers
+and refuse extension servers. An off, missing or unaccepted skill, missing grants or
+packages, an absent declaration or a domain refusal leaves that row saved and inert
+(`MCP_SKILL_UNAVAILABLE`). An accepted update or changed granted value triggers a new
+listing and retires old task sessions. A disabled row stays off. Document any external
+steps such as a browser extension or sign-in in the skill.
 
 ## The `skill_preflight` tool
 
@@ -886,7 +887,7 @@ calls and runtime behaviours:
 | `supervised_task` | The skill may register an in-process host-supervised async task. It runs on the shared host extension loop, not the HTTP loop. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
 | `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. An async subscriber runs on the shared host extension loop; a synchronous subscriber runs on the publisher's thread. Chat topics require owner permission grants; `skill.lifecycle` does not. |
-| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). Optional `reply_to` carries a host row or `task:<task_id>` address as a reference, never routing. Optional `ui_control` (`{name}`) marks text one of the skill's controls composed (an inline button's command): the press is the owner's and the words are not, so the host writes no owner message for it (it takes no `client_message_id`; `owner_text`, malformed or combined: `400`). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — the same words AND the same ordered attachment content (inline image and files, compared by bytes and name, not by the host's stored copy) — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
+| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). Optional `reply_to` names a row or `task:<task_id>` as a reference (routing only for the bundled [Telegram bridge](../skills/telegram/SKILL.md)'s Project Reply). For one authored row, sibling `reply_excerpt: {text, start_utf16}` is the sender’s rendered citation (CLIENT_CONTRACT §5). Optional `ui_control` (`{name}`) marks text one of the skill's controls composed (an inline button's command): the press is the owner's and the words are not, so the host writes no owner message for it (it takes no `client_message_id`; `owner_text`, malformed or combined: `400`). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract); only the bundled Telegram bridge may add `surface` (`{kind: "telegram", conversation_id, bot_id}`) to retain the reply address of a late answer (other skills: 400; malformed: ignored). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — matching words, ordered attachments (bytes and names), Reply address, and excerpt text and UTF-16 offset — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409; a `reply_excerpt` with no readable authored source with 400, named or not); `503` with `code: "not_accepted"` allows the same delivery to retry, not a delivery with unknown outcome; an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer (a host notice's is its phrase, with its `notice`: code, step, raw details and line), a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
 | `notify_owner` | The skill may tell the owner one thing through `POST /notify` after an explicit owner permission grant (see "Telling the owner something" below): one bounded plain sentence the host shows in the owner's chat as a System row signed with the skill's name. It wakes no model; narrower than `inject_chat`. |
 
@@ -945,6 +946,61 @@ answers from memory, reading no Settings, so you can confirm at each read that o
 after exhausted restarts) still carries it. A refused spawn raises `OSError`. Say in your SKILL.md which your
 skill does (Telegram applies saves itself). Chat transports receive such a request as a note saying where to
 enter it; a transport must not offer a reply as an answer to it.
+
+## A connection card in the setup wizard (`connection_card`)
+
+A skill that ships with the app (a built-in) may let the setup wizard connect it before Start: its Skills step then
+shows the skill as a card, first, with the skill's own steps to get a token, a token field, a check that names the
+account, a QR of a link with a one-time code, and options. Hub skills cannot: the host never runs a hub skill's code
+before its review. The card is one top-level manifest key beside `secret_fields`, which holds only the token:
+
+```yaml
+env_from_settings: [TELEGRAM_BOT_TOKEN]
+secret_fields: {botToken: TELEGRAM_BOT_TOKEN}
+connection_card:
+  title: "Phone via Telegram"          # the card's words; without them the catalog's title and pitch
+  pitch: "Chat with Ouroboros anywhere"
+  steps:                               # numbered; the token field stands under the last one
+    - {text: "Open @BotFather in Telegram", link: "https://t.me/BotFather", action: "Open @BotFather"}
+    - {text: "BotFather replies with a token: paste it here and press Check"}
+  token: botToken                      # the secret field holding the token, saved to Settings at Finish
+  pairing:
+    code: {key: TELEGRAM_PAIRING_CODE, store: skill_settings, route: settings/save}   # the skill's own settings
+    link: "https://t.me/{username}?start={code}"   # https, with both places; drawn as the QR
+    identity: "lib/telegram_pairing.py:bot_identity"   # stdlib-only function(token, timeout=) inside the skill
+    api_base: "lib/telegram_pairing.py:saved_api_base"   # optional: function(state_dir) naming the server to ask
+    hint: "Scan it with your phone’s camera, then press Start in Telegram."
+    note: "You can finish setup now; the bot answers once Ouroboros starts."
+  options:                             # the skill's own settings too
+    - {key: TELEGRAM_NOTIFY_TASKS, label: "Send results and errors of work here", "on": "on", "off": "off",
+       new_connection: true, store: skill_settings, route: settings/save}
+```
+
+`identity` answers `{"ok": True, "username": …}`, `{"ok": False, "cause": "refused"}` (the service rejected the
+token) or `{"ok": False, "cause": "unreachable"}`; the host calls it from the app's own copy of the skill, waits a
+little longer than `timeout`, and never passes on its errors' text. With `api_base` declared, the host first calls
+it with the skill's state directory and passes its answer as `identity`'s second argument; a reader that fails asks
+nobody. The page mints the code (24 random bytes,
+base64url, the form a skill's own minting gives) and sends it, with the options, only once it drew the QR and the
+link that hold it: a check that failed, is still running or never ran sends the token alone, so no code nobody saw is
+armed. A draft that is no token (a space or line break inside, more than 512 characters) is said so in the page and
+never checked or sent; the identity route answers it 400, never `refused`. Finish saves the token alone in its one
+settings write, never the code; the completion route refuses a card's values from the Telegram Mini App, since a code names the account's owner.
+Once that write is saved, the owner's consent (the code and the options) is noted in `state/skill_starter.json`
+(`connections`), never in Settings or a log. Once the skill serves, the host makes one post of every
+`store: skill_settings` value of the card that shares a route (here the code and the option) to
+`/api/extensions/<skill>/<route>` from the server itself over
+loopback, so the route's own guard (owner changes only from the owner's local session) reads it as local; no request
+can choose what it posts. It posts on events that already happen, never on a timer: the starter install's end, a
+saved completion for a skill already installed, the skill's extension finishing its load, and the next start; a route
+that does not serve yet (409) waits for the next of them. A route that answers 200 with `owner_ignored: true` left
+the owner's values unchanged: that is recorded as not saved, never as a success. Where reviewed skills are granted
+automatically, that policy covers the owner's consent too: a skill installed but not granted and on (its own install
+never granted it, e.g. a payload a Reset kept) gets the lifecycle's grant of every key and permission it asks, enable
+after grant, before the post (the record's `grant` says what happened). Where they are not, the card grants nothing:
+it says the skill starts after the owner allows it in Extensions, and that load is the event that posts. The code leaves
+the record once posted or refused; each outcome is recorded there and none blocks Start. A card missing any part the host needs is not shown, and the skill
+stays an ordinary row.
 
 ## Grants for protected keys and host permissions
 
@@ -1103,9 +1159,8 @@ contributes:
 - The connector carries the service name in its place `label`; the technical skill id stays in details.
   Skills cards prefer the optional top-level, one-line `title`, then the place contribution's `label`, then `name`.
   Catalog entries may carry `title`; it is display text, never a new skill identity. Place, instance, account and
-  signal labels are authored content, outside the host's translation overlay. Sentence composition lowercases only
-  a label's first character, when it is upper-case, the second is lower-case, and the first word has no further
-  capitals; mixed-case words and acronyms such as `GitHub` and `PR` keep their spelling.
+  signal labels are authored content, outside the host's translation overlay; a host sentence that composes one
+  keeps it exactly as written, case included.
 
 The optional `settings` member names the connector's registered Settings section (for example
 `api.register_settings_section("connection", ...)`); it is a section id, not an embedded form or a new
@@ -1221,7 +1276,9 @@ provider lets you tell them apart (GitHub does), do report the account's other a
 made by other tools acting as it): the host settles an event whose actor is `sends_as.id`, not reported
 unauthenticated, as heard with reason `own_account`; it stays in the room and the next own wake and never wakes a
 focus. Where `sends_as` is the owner's confirmed account, its posts are the owner's words and keep the ordinary path.
-Otherwise, other people who post from the sending account are heard as it, not woken on. Bot identities
+Otherwise, other people who post from the sending account are heard as it, not woken on. A change's `actor` is
+whoever made it (an editor, an assigner), never the original author; when the provider names nobody, it carries no
+id (`non_text` below). Bot identities
 never derive owner status or offer this confirmation. Only the human activates a place, through its sheet or an owner-door Main turn;
 consciousness may still set Silent or Paused.
 
@@ -1320,6 +1377,11 @@ Use the connector's ordinary content-hash-bound skill token for:
   `[{"kind": str, "description": str}]` (sticker, poll, location: neither words nor a file); past 4000 characters a
   description is cut and counted, naming where it stays whole. The focus (in its own block) and history state these
   as connector facts beside exact words, never quotable as speech. An event of only these facts is never empty.
+  Kind `state_change` marks a change, not new words: state-only action (empty `text`) or revision (exact current
+  words; another author's ride `forward_origin`); an older connector's `message.previous_source_event_id`
+  (the revised observation) reads the same, `edited_at` alone never does. With no actor id a change never wakes,
+  whatever the wake list says: background for a live author or sole reader (a bot's only under `from_bot`), else
+  heard (`change_actor_unknown`; `/identity` `presence_change_context: 1`).
 - Optional message facts: `reply_to_message` (`message_id`; author `from`/`sender_chat` with
   `first_name`/`last_name`/`title`/`display_name`/`name`, `username`, `id`; `text`/`caption`; `forward_origin`;
   `attachments[].file_name`), `reply_to_message_id`, `quote.text` (alone: author not recorded), `media_group_id`
@@ -1391,9 +1453,8 @@ clock. Before allowance, rate or capacity is consulted, the conversation's curre
 sole reader (a promoted or follow-up root of this place and conversation whose loop reads mail or
 is in an unheld cold sleep, or an author parked for its review or private question, whose wait
 wakes and retakes the conversation before any model call), receives later arrivals as typed
-context-only mail, whether or not they match a wake fact (one from the owner's confirmed account is stored as their
-words there by provenance: `place_confirmed`, carried, outside the owner sources that owe a reply; it becomes an order
-only by a verified cite); they never answer its question. An untagged message in the same thread, topic or direct message is a
+context-only mail, whether or not they match a wake fact (one from the owner's confirmed account is stored as
+`place_confirmed`, carried, outside the owner sources that owe a reply); they never answer its question. An untagged message in the same thread, topic or direct message is a
 wake: it ends an ordinary wait and reopens an unsent final. Other untagged group messages reach a
 current author as background and a root not at all; they stay readable in the room. Several
 readers receive nothing: the arrival takes an ordinary focus under the allowance, whose
@@ -1878,19 +1939,19 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.5; a payload declaring any 2.x minimum negotiates the host's 2.5, methods included; a tool row
-with `touches` needs "2.5", which an older host refuses before import):
+(PluginAPI 2.6; a payload declaring any 2.x minimum negotiates the host's 2.6, methods included; a tool row
+with `touches` needs "2.5" and a payload relying on `get_stop_state` "2.6", which an older host refuses before import):
 
 ```yaml
-plugin_api: "2.5"            # major strict; minor = required minimum
+plugin_api: "2.6"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.5"
+#   version: "2.6"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
 A payload without the field binds the legacy "1.3" generation by
-construction (2.4's `get_settings_state` and `refresh_companion_process` refuse it): an already-reviewed payload keeps loading on its existing
+construction (`get_settings_state`, `refresh_companion_process` and `get_stop_state` refuse it): an already-reviewed payload keeps loading on its existing
 hash-bound review PASS, but a NEW review PASS (LLM review, owner attestation,
 or an install-basis acceptance) is refused until the field is declared.
 
@@ -1939,7 +2000,11 @@ start, finish, status and usage axes, including interrupted/tool-only responses.
 time. For optional delivery evidence, shared `JsonSession.hold_context` and `hold_tool_call` record rows only after delivery, and `capture_response_context(response_id)` snapshots what that response held before queued updates are released. They also bound answers: an ordinary result or typed room request is answered only by a response begun after its rows are held (after a fresh switch, the pointer asking for its answer) that ends without `continues` and, where captured, held them at its end (without hooks, after the send returns). Older/external providers without these hooks keep exposure unknown; setup or queued results never prove exposure.
 The factory's `observe("usage", raw)` reports JSON
 `{"usage": {...}, "raw_usage": {...}}` for that physical connection; `close()` emits
-its final sample before returning. Samples and responses share one watermark. The host
+its final sample before returning. Samples and responses share one watermark. The call's
+own thread writes connection samples to the ledger, so the call loop never waits on those
+writes; a connection keeps one valid sample waiting, which takes in its next. A connection's close
+waits for its own samples and fails if one could not be written; the money check reads what
+is written. The host
 settles growth after Stop/budget exhaustion without admitting work or inventing responses;
 response IDs dedupe across the call, including resumed connections. Reservations
 survive reconnects; final call teardown abandons responses without a receipt.
@@ -1967,7 +2032,12 @@ native input/transcription work and open calls; the feature also waits for playb
 never for a running tool. Optional `input_pending` reports words said or awaiting recognition, apart from open calls:
 a forced switch waits for it, and a loss with it set gives a fresh session the hearing-gap fact (absent, VAD events decide).
 `input_started` may name a `response_id` already begun for its words when no VAD start preceded them, so that response
-answers them. A native resume needs a handle published after the open calls and last native result; one history outran
+answers them. History keeps speaking order: a spoken row follows the owner's words begun before its response and never
+waits for words begun after it; owner rows are never held. Words are counted by `input_started`, which may name the
+`item_id` their transcript will carry (transcripts of different utterances can land in any order). A final owner
+caption closes the words of its item; one whose item was never named closes the oldest open words that no item names;
+a converted batch that leaves nothing said or awaiting recognition closes them all. A provider that names an item owes
+it one final owner caption: when recognition fails, an empty one, which closes the words and writes no row. A native resume needs a handle published after the open calls and last native result; one history outran
 while opening continues fresh. OpenAI withholds `response.create` while its own call awaits output: speech on the issuing
 connection, or after a further call behind a running effect, is answered once that output is written.
 `final_captions()` returns received unfinished words at teardown without new wire work.
@@ -1979,7 +2049,9 @@ Companion framing and call doors: `CLIENT_CONTRACT.md`, “Live Conversation”.
 
 ```python
 def register(api):
-    # Tools — agent-callable, namespaced as ext_<len>_<token>_<name>.
+    # Tools — agent-callable, namespaced as ext_<len>_<token>_<name>. The Installed Skills
+    # catalog names all of them; enable_tools("<skill name>") loads, in one call, the member
+    # schemas this task can see that fit the request.
     api.register_tool(
         "search",
         handler=do_search,
@@ -2027,7 +2099,7 @@ def register(api):
     # the owner chooses Edit anyway, after which Save sends every field, so a
     # POST that replaces the whole document can erase what the owner never
     # saw. Implement GET for any form that edits stored settings. Any other
-    # failed read disables Save and tells the owner to reload. Password
+    # failed read locks fields and Save; reopen the form to retry. Password
     # fields are never pre-filled, so treat an empty password on save as
     # "unchanged". Reference: skills/telegram/plugin.py, GET+POST settings/save.
     # A form whose fields are all disabled is a status (Telegram's Connection):
@@ -2089,17 +2161,47 @@ objects are `ref`s whose `address` and `field` read the stored value whole; a lo
 (a title, a label) is a preview whose `derived_from` names its source. Search and inbound
 links are the skill's work over these reads, stating the coverage read.
 
+### Stop inside a multi-step tool call
+
+A Stop reaches a running call only when the call asks. `api.get_stop_state()` answers for the tool call running in this
+context, in both execution modes, with no permission or grant; the host names the call and its task. Ask it last before
+each new independent action of the call, after that action's preparation, the first one included: the next request of
+a message sent in parts, the next key chord. The answer is `{"status", "reason", "note"}`; only `continue` lets the
+action start (`reason` `no_task`: a call made for no task, which no Stop governs). `stop` names why it must not
+(`cancelled`, `task_cancelled`, `operation_already_returned`, `stop_unreadable`, each defined on the `PluginAPI`
+protocol), and `unbound` (no call of this skill is bound where it asks) permits nothing either. In process a call is
+bound to its context (its thread, its async task and contexts copied from them): a thread you start without that
+context, a route, a WebSocket handler or a companion reads `unbound`. Out of process a tool call's child binds that
+one call for all its threads until it returns.
+
+If not `continue`, start nothing more; return receipts (`observed_effect` only for actions that ran).
+Never retry or resume the rest. The first `stop` holds for the call. Host facts are `meta.control_reason` and
+`meta.refused_step`: only a non-error completion becomes `blocked` / `OWNER_OPERATION_REFUSED`. Errors and timeouts
+keep their status/code; `{"ok": false}` is an error even with `reason: stopped`. Result review
+reads your report unchanged; the host attests only its refusal. Return rather than raise: exceptions return no report
+of effects; only your state retains them. This reads immediate task Stop, not Wrap up, Pause, a deadline or the End of a live conversation.
+Stop after the read cannot reach an action already starting. Never split one action (key press/release, drag).
+The host checks between whole calls for extensions that never ask. Bundled `unix_computer_use` also checks before `key` can raise the target and before each chord.
+
+### Reporting a permission the skill lacks
+
+A failing result (`{"ok": false, ...}`) may name why with a string `reason` (a snake_case code) and an optional
+`refusal` object: `capability_unavailable` (bool), `permission` (an id such as `accessibility`), `repair` (`owner`,
+`retry` or `self`) and `where` (a short hint). The host copies the valid fields into `meta.extension_reason`, ignores any
+other type and keeps the code `TOOL_REPORTED_FAILURE`. With `capability_unavailable` true and a `permission`, the
+skill's health record, once it exists, keeps that permission open and dated, and every work that reaches extensions
+is told. Only a success that lists it in
+`permissions_available` (`{"ok": true, "permissions_available": ["accessibility"], ...}`) closes it: a skill that
+reports refusals but never what is available keeps the line open.
+
 ### Async tool handlers
 
-Tool handlers can be plain functions OR `async def` coroutines —
-the registry detects coroutines and runs them on a helper thread with
-a fresh event loop under `asyncio.wait_for(timeout_sec)`. They do not
-execute on the server's main event loop, so do not rely on loop-local
-state captured at registration time, as for HTTP routes and WS handlers.
-Supervised tasks and async event subscribers share the host extension loop
-instead; do not share loop-local objects between that loop and a route or
-WebSocket handler. Blocking I/O on the extension loop still delays other
-extensions.
+Tool handlers may be plain functions or `async def`. A coroutine runs on a helper thread's own loop or in the
+per-call child's loop. Returning or raising closes the handler's Stop reader before loop cleanup. Its report is
+distinct from runner shutdown. If a child exits or times out before handing over its result, neither its report nor its refusal is confirmed.
+Do not rely on loop-local state captured at registration. Supervised tasks and async event subscribers share
+the host extension loop; do not share its loop-local objects with routes or WebSocket handlers. Blocking I/O
+on that loop delays other extensions.
 
 ```python
 async def do_search(ctx, query: str = ""):
@@ -2300,8 +2402,10 @@ HEAD/Range behavior and background actions. There is no total or pre-header
 request timer: finish, abort, disconnect or unloading that skill instance ends
 its response. Slow consumption is backpressure, not a timeout. A body failure
 breaks the stream; cleanup failure after the complete body is logged separately.
-The incoming request body retains its 512 KiB cap, and one-shot tool/catalog/WS
-results retain their existing caps and timeouts.
+The incoming request body and one-shot tool/catalog/WS results each have a
+512 KiB cap. A tool child's Stop record has a separate byte allowance. When
+the result exceeds its cap, the host receives the size error and any recorded
+refusal. One-shot timeouts still apply.
 
 The out-of-process / companion WS push (`POST /ui/ws-message`) admits
 a 60-message burst per skill and then one message per second (the excess gets a
@@ -2744,7 +2848,9 @@ bundling is uninstalled on update when its copy is unchanged (its grants survive
 and stays as the owner's copy when edited or when another folder uses its name;
 `design_demo` was merged into `ui_design` this way. An owner's edited `ui_design`
 keeps its own text, which may still name `design_demo`.
-`unix_computer_use` and `windows_computer_use` are bundled extensions.
+`unix_computer_use`, `windows_computer_use` and `ui_look` are bundled extensions; `ui_look` adds one
+read-only tool that runs `ui_design`'s live stand, so `ui_design` stays an instruction that delegated
+sessions keep in their index.
 
 Non-declared delegated sessions receive an index of enabled, accepted or reviewed
 instruction skills from every installed bucket: bounded descriptions, triggers and
@@ -2771,7 +2877,7 @@ You can read their full source under
 
 ### Where installed skills come from
 
-An install reads skills from its **sources** (Skills → Sources; the settings key
+An install reads skills from its **sources** (Extensions › Sources; the settings key
 `OUROBOROS_SKILL_SOURCES`): the skills built into the app, the public hub
 `razzant/OuroborosHub` as two rows (**Ouroboros**, the maintainer's Official
 skills, installed without review by default; **Ouroboros Community**, every
@@ -2996,7 +3102,7 @@ scanner output.
 
 ClawHub is the broader OpenClaw registry. Publishing requires an
 OpenClaw publisher account; once your skill is on the registry, a search in
-Skills → Browse finds it and installs it via the `adapt_openclaw_skill`
+Browse finds it and installs it via the `adapt_openclaw_skill`
 translation pipeline. Note that the adapter
 preserves the original `SKILL.openclaw.md` next to the translated
 `SKILL.md` so reviewers can cross-check both manifests.

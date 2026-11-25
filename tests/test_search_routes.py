@@ -488,7 +488,7 @@ def _search_settings(monkeypatch, backend, **keys):
 def _withheld(registry):
     from ouroboros.tool_policy import format_capability_omissions
 
-    names = {schema['function']['name'] for schema in registry.schemas(core_only=True)}
+    names = {schema['function']['name'] for schema in registry.schemas()}
     rows = [row for row in registry.capability_omissions() if 'web_search' in row.get('tools', [])]
     return 'web_search' not in names, rows, format_capability_omissions(rows, header='')
 
@@ -705,26 +705,29 @@ def test_settings_keep_a_blank_search_model_blank_and_a_saved_one_saved(tmp_path
 # resolver sends for the target's own Source and Model, never as a chat route and never by Main's provider.
 
 @pytest.mark.parametrize(("search", "search_keys", "main"), [
-    pytest.param("", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}, "openrouter/model", id='-search_keys0-openrouter/model'),  # Blank: the recommended model of every source Auto tries, whatever Main is (owner decision, 1 Nov 2026).
-    pytest.param("gpt-5.2", {"OPENAI_API_KEY", "OPENROUTER_API_KEY"}, "anthropic::owner-main", id='gpt-5.2-search_keys1-anthropic::owner-main'),  # A bare native id is OpenAI's in search grammar: its OpenAI leg first, then the same model on OpenRouter.
+    pytest.param("", {"OPENAI_API_KEY", "OPENAI_API_SURFACE", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}, "openrouter/model", id='-search_keys0-openrouter/model'),  # Blank: the recommended model of every source Auto tries, whatever Main is (owner decision, 1 Nov 2026).
+    pytest.param("gpt-5.2", {"OPENAI_API_KEY", "OPENAI_API_SURFACE", "OPENROUTER_API_KEY"}, "anthropic::owner-main", id='gpt-5.2-search_keys1-anthropic::owner-main'),  # A bare native id is OpenAI's in search grammar: its OpenAI leg first, then the same model on OpenRouter.
     pytest.param("google/gemini-2.5-pro", {"OPENROUTER_API_KEY"}, "openrouter/model", id='google/gemini-2.5-pro-search_keys2-openrouter/model'),  # An OpenRouter catalog id (a single-model pin) plans that leg only, never Auto's other-model fallback.
-    pytest.param("openai@work::gpt-5.5", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "OUROBOROS_CONNECTIONS"}, "anthropic::owner-main", id='openai@work::gpt-5.5-search_keys3-anthropic::owner-main'),  # A named connection travels as its row; the saved route's same-model OpenRouter leg is kept too.
+    pytest.param("openai@work::gpt-5.5", {"OPENAI_API_KEY", "OPENAI_API_SURFACE", "OPENROUTER_API_KEY", "OUROBOROS_CONNECTIONS"}, "anthropic::owner-main", id='openai@work::gpt-5.5-search_keys3-anthropic::owner-main'),  # A named connection travels as its row; the saved route's same-model OpenRouter leg is kept too.
 ])
 def test_the_web_search_slot_plans_the_legs_its_configured_search_sends(main, search, search_keys):
     """The search Model is no chat route: the plan takes the legs ``search_routes`` resolves for the
     target's own Source and Model, so the isolated run searches in the target's order whatever Main is.
     A blank search is not pinned to the chat slots' provider: its recommended direct legs are planned
-    and their keys copied (a run that must stay on one provider pins its search, as the provenance `_LIVE` does)."""
+    and their keys copied (a run that must stay on one provider pins its search, as the provenance `_LIVE` does).
+    A key travels with its connection's other fields (OpenAI's API choice beside its key)."""
     from devtools.benchmarks.common.server_runner import build_isolated_settings
     from ouroboros.provider_models import provider_credential_plan
 
     live = {"OUROBOROS_MODEL": main, "OUROBOROS_MODEL_LIGHT": main, "OUROBOROS_WEBSEARCH_MODEL": search,
-            "OPENROUTER_API_KEY": "or-value", "OPENAI_API_KEY": "oa-value", "ANTHROPIC_API_KEY": "an-value",
+            "OPENROUTER_API_KEY": "or-value", "OPENAI_API_KEY": "oa-value", "OPENAI_API_SURFACE": "responses",
+            "ANTHROPIC_API_KEY": "an-value",
             "OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "work", "api_key": "work-value"}]}
     chat_only = provider_credential_plan({**live, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"})["planned_keys"]
     assert set(provider_credential_plan(live)["planned_keys"]) == set(chat_only) | search_keys
     out = build_isolated_settings(live, OUROBOROS_MODEL=main, OUROBOROS_MODEL_LIGHT=main)
-    assert {key for key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY") if key in out} >= (
+    assert {key for key in ("OPENAI_API_KEY", "OPENAI_API_SURFACE", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY")
+            if key in out} >= (
         search_keys - {"OUROBOROS_CONNECTIONS"})
     first = resolve_web_search_route(settings=out)["legs"][0]
     target = resolve_web_search_route(settings=live)["legs"][0]

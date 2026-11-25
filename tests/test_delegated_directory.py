@@ -14,11 +14,11 @@ from tests._delegated_transport_shared import _HealthStub, _owned_gateway_uses_e
 
 
 class DirectoryEngine(_HealthStub):
-    def __init__(self, target, strategy="copy", *, lost_apply=False):
+    def __init__(self, target, strategy="copy", *, lost_apply=False, body=b"\x00complete binary result\xff" * 1000):
         super().__init__(engine_version="99.0.0")
         self.target, self.strategy, self.lost_apply = target, strategy, lost_apply
         self.posts, self.applies, self.decisions = [], [], []
-        self.body = b"\x00complete binary result\xff" * 1000
+        self.body = body
         state = {"kind": "file", "sha256": "sha256:" + sha256(self.body).hexdigest(),
                  "sizeBytes": len(self.body), "mode": 420, "artifactPath": "final/files/output.bin"}
         self.manifest = {"version": 1, "sourceRoot": str(target),
@@ -153,6 +153,26 @@ def _git_workspace_start(tmp_path, monkeypatch, case, **options):
     return payload, engine
 
 
+@pytest.mark.parametrize("kind", ["investigation", "readonly", "writer"])
+def test_only_an_investigation_start_says_its_copy_is_evidence_only(tmp_path, monkeypatch, kind):
+    """Nothing an investigation's private copy holds can land, so its start's receipt says so in place of a write
+    root; a writing start keeps its write root and a plain read-only start says neither."""
+    from tests.test_investigation_start_roots import _consumer, _project
+
+    if kind == "writer":
+        note = _git_workspace_start(tmp_path, monkeypatch, "omit")[0]["note"]
+    else:
+        _root, folder = _project(tmp_path)
+        started = _consumer(tmp_path, monkeypatch, "workspace_write" if kind == "investigation" else "readonly",
+                            workspace=folder)[2]()
+        assert started["status"] == "started", started
+        note = started["note"]
+    said = ("investigation: evidence-only investigation in a private copy (execution_root) of authority_target_root: "
+            "its captured changes are kept as evidence and never applied") in note
+    assert said is (kind == "investigation"), note
+    assert ("write root: private snapshot" in note) is (kind == "writer"), note
+
+
 def test_a_git_workspace_treats_the_named_default_as_omission_and_still_refuses_real_geometry(
     tmp_path, monkeypatch,
 ):
@@ -171,7 +191,11 @@ def test_a_git_workspace_treats_the_named_default_as_omission_and_still_refuses_
     per_case = ("root", "execution_root", "snapshot_id", "baseline_sha", "baseline_id",
                 "baseline_manifest_read", "run_id", "invocation_id", "authority_target_root",
                 "snapshot")  # the receipt's provisioning facts carry wall-clock seconds (#1241)
-    compared = lambda payload: {key: ("<per-case identity>" if key in per_case else value)
+    import re
+
+    # The note's receipt measures the host text sent, which names each case's own folder: only that count varies.
+    compared = lambda payload: {key: ("<per-case identity>" if key in per_case else re.sub(
+        r"host instructions \d+ chars", "host instructions N chars", value) if key == "note" else value)
                                 for key, value in payload.items()}
     omitted, omitted_engine = _git_workspace_start(tmp_path, monkeypatch, "omit")
     assert omitted["status"] == "started" and omitted["baseline_id"], omitted
@@ -185,11 +209,16 @@ def test_a_git_workspace_treats_the_named_default_as_omission_and_still_refuses_
     for index, geometry in enumerate((
         {"directory_strategy": "copy", "scope_paths": ["."]},
         {"scope_paths": ["src"]},
+        {"directory_strategy": "snapshot"},  # a value outside the defaults, with no scope_paths passed
     )):
         refused, engine = _git_workspace_start(tmp_path, monkeypatch, f"geometry-{index}", **geometry)
         assert refused["status"] == "refused", geometry
         assert refused["reason"] == "directory_execution_unavailable"
         assert "Git workspaces keep their snapshot contract" in refused["detail"]
+        # The repair names exactly the options in the way, never a default the call did not ask for.
+        assert refused["detail"].endswith(("Omit directory_strategy and scope_paths for this Git workspace.",
+                                           "Omit scope_paths for this Git workspace.",
+                                           "Omit directory_strategy for this Git workspace.")[index])
         assert refused["definitely_unrun"] is True
         assert engine.posts == []
 
@@ -574,3 +603,50 @@ def test_failures_of_repeated_content_stay_failures_and_a_new_capture_refetches(
     captured = capture_directory_result(ctx.drive_root, held, engine)
     assert captured["status"] == "ready" and held.patch_captured
     assert engine.requests.count(shared) == 1 and len(engine.requests) == 4
+
+
+def test_folder_investigation_parent(tmp_path, monkeypatch):
+    from ouroboros.delegate_directory import capture_directory_result, directory_capture_block
+    from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
+
+    ctx, target = context(tmp_path, monkeypatch)
+    engine = DirectoryEngine(target, "copy")
+    engine.manifest["entries"][0]["path"] = ".review-evidence/out.bin"
+    engine.raw = json.dumps(engine.manifest).encode()
+    held = entry(ctx, target, "copy")
+    held.authority_source = INVESTIGATION_AUTHORITY
+    receipt = capture_directory_result(ctx.drive_root, held, engine)
+    result = directory_capture_block(ctx.drive_root, held, receipt)
+    assert result["retained_bytes"] == sum(
+        {f["path"]: f["size"] for f in result["file_outputs"] if f.get("side")}.values()
+    )
+
+
+@pytest.mark.parametrize("copied", [True, False], ids=["settings-copy", "mention"])
+def test_investigation_keeps_the_public_file_and_receipts_the_private_one(tmp_path, monkeypatch, copied):
+    from ouroboros import config, delegate_directory as directory
+    from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
+
+    settings = {"MCP_SERVERS": [{"headers": {"X-Api-Key": "binary result"}}]}
+    ctx, target = context(tmp_path, monkeypatch)
+    # A copy of the settings file is private; a file that only mentions the header's value is the child's result.
+    body = json.dumps(settings, indent=2).encode() if copied else b"\x00complete binary result\xff" * 1000
+    engine = DirectoryEngine(target, "copy", body=body)
+    held = entry(ctx, target, "copy")
+    held.authority_source = INVESTIGATION_AUTHORITY
+    monkeypatch.setattr(config, "load_settings", lambda **kw: settings)
+    manifest = directory.capture_directory_result(ctx.drive_root, held, engine)
+    if not copied:
+        assert manifest.get("gaps", []) == [] and directory.directory_capture_block(
+            ctx.drive_root, held, manifest)["retained_bytes"] == len(body)
+        return
+    assert manifest["gaps"] == [
+        {
+            "path": engine.manifest["entries"][0]["path"],
+            "side": "after",
+            "reason": "installation_settings",
+            "size": len(engine.body),
+        }
+    ]
+    assert all("side" not in f for f in manifest["file_outputs"])
+    assert directory.directory_capture_block(ctx.drive_root, held, manifest)["retained_bytes"] == 0

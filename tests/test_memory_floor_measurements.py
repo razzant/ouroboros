@@ -144,19 +144,31 @@ def test_a_start_s_request_is_serialized_once_per_form_at_every_row_count(tmp_pa
 
 
 def test_a_start_s_request_forms_do_not_follow_the_size_of_its_assignment(tmp_path, monkeypatch):
-    """Two assignments of different sizes walk the same frames: the same mode, the same number of request forms, each
-    serialized once. A form is a frame's shape, not a probe of the walk."""
+    """Assignment size does not multiply frame serializations, including a physical refusal.
+
+    The 50k assignment no longer fits beside Nano's standing read_file schema. Keep its full bytes and the
+    92k window: the refusal is honest, and its walk still serializes each frame only once.
+    """
     seen = {}
     for size in (5_000, 50_000):
         root = tmp_path / str(size)
         root.mkdir()
         captured = dataclasses.replace(scale.core(root), user_content_json=json.dumps('Assignment line. ' * (size // 17)))
         with measured_sections():
-            plan = scale.build(root, monkeypatch, captured=captured)
+            if size == 50_000:
+                with pytest.raises(cf.MinimumViewUnfit) as caught:
+                    scale.build(root, monkeypatch, captured=captured)
+                refusal = caught.value
+                assert refusal.physical and refusal.window_tokens == 92000
+                assert refusal.estimated_input_tokens + refusal.response_reserve_tokens > refusal.window_tokens
+            else:
+                plan = scale.build(root, monkeypatch, captured=captured)
+                assert plan.initial_mode == 'nano'
             work = section_spans()['work']
         assert work['request_serializations'] == work['request_forms']
-        seen[size] = (plan.initial_mode, work['request_serializations'])
-    assert seen[5_000] == seen[50_000], seen
+        seen[size] = work['request_serializations']
+    # A refusal exits before the accepted projections are built; it must do no more serializations.
+    assert seen[50_000] <= seen[5_000], seen
 
 
 def _drawn_prices(monkeypatch):
@@ -279,7 +291,7 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
 @pytest.mark.parametrize('window,probes,hosts', [
     # This boundary crosses the receipt's owner-only clause after host reduction:
     # the longer receipt needs another walk, then the index must outline too.
-    (11_398, ['walk', 're-price', 'walk', 're-price', 'walk'],
+    (11_394, ['walk', 're-price', 'walk', 're-price', 'walk'],
      [('runtime', False), ('installed_skills', False), ('knowledge_index', False)]),
     # With this larger window the second re-price fits and the index stays whole.
     (11_444, ['walk', 're-price', 're-price'], [('runtime', False), ('installed_skills', True)]),
@@ -301,9 +313,9 @@ def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_pa
 
 
 def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path, monkeypatch):
-    """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks; Nano walks once, then at
-    each of its next three host forms re-prices that level, misses the window (even its shortest view does not fit) and
-    walks again."""
+    """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks (Max prices its ordinary
+    memory and, for the gate's need it prints, its shortest telling); Nano walks once, then at each of its next three
+    host forms re-prices that level, misses the window (even its shortest view does not fit) and walks again."""
     render, probes = mf.render_view_for_mode, []
 
     def recorded(*args, **kwargs):
@@ -313,7 +325,7 @@ def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
-    assert probes == [('re-price', 'max'), ('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
+    assert probes == [('re-price', 'max')] * 2 + [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
 
 
 @pytest.mark.parametrize("step, target, outlined", [
@@ -406,8 +418,21 @@ def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp
                               task_id='scale-fit')
     assert {**retained, 'predicted': True} == predicted_section(sections[retained['section_id']])
     text = '\n'.join(mf.counterfactual_lines(fit))
-    assert f"- as captured: starts {plan.initial_mode.capitalize()}; Max room {shown['max_room']['cause']}: " in text
+    # Review round 1 (Astra 11): a lost room names its cause by its own numbers, and the arm keeps the tool schemas and
+    # the need without them beside the need with no memory.
+    room = shown['max_room']
+    said = 'held' if room['cause'] == 'held' else f"lost, cause {mf.lowered_cause(room)}"
+    assert f"- as captured: starts {plan.initial_mode.capitalize()}; Max room {said}: window " in text and 'crowded' not in text
+    assert (f"; with no memory {room['zero_need']:,}; tool schemas {room['schemas']:,}; without them "
+            f"{room['floor_need']:,}; my story ") in text
     assert f"This task started in {plan.initial_mode} (its start projection, a separate fact" in text
+    # The start is named by its own cause, never by the mode chosen now: a Low start resumed under the owner's Max stays
+    # Low; a Max start the window took to Low (a cause recorded) is Low, temporarily, for the window (21.11); a Max start
+    # whose route named no window says so, a held one does not (Astra 6).
+    for start, said in ((('low', ''), 'low'), (('low', 'memory'), 'Low, temporarily, for the window'),
+                        (('max', 'unmeasured'), 'Max, window not measured at the start'), (('max', ''), 'max')):
+        frame = mf.counterfactual_starts(dataclasses.replace(plan, start=start, preferred_mode='max'), {'as captured': captured})
+        assert f"This task started in {said} (its start projection" in '\n'.join(mf.counterfactual_lines(frame))
     # Without the inputs the frame needs, the fit is named as not measured, never guessed.
     for missing, bare in (('the tool schemas its start priced', dataclasses.replace(plan, start_tool_schemas_json=None)),
                           ('its window record', dataclasses.replace(plan, window_record=None)),
@@ -440,6 +465,11 @@ def test_a_lower_mode_names_its_cause_from_the_plans_own_start_facts(tmp_path, m
     assert held.initial_mode == 'max' and crowded is not None
     assert mode_cause(crowded, 'low') == 'memory' and mode_cause(held, 'max') == ''
     assert mode_cause(held, 'low') == 'after_start' and mode_cause(crowded, 'nano') == 'after_start'
+    # A Max start whose window was not known (``unmeasured``) lowered nothing: it is no cause the usage ledger accepts,
+    # even beside an owner's mode that differs from the start's (a carried plan), and a lower mode after it is after_start.
+    unmeasured = dataclasses.replace(held, start=('max', 'unmeasured'))
+    assert mode_cause(unmeasured, 'max') == '' and mode_cause(unmeasured, 'low') == 'after_start'
+    assert mode_cause(dataclasses.replace(unmeasured, preferred_mode='low'), 'max') == 'after_start'
     disposition = measure_main_fit(crowded, crowded.messages_for('low'), scale.tools(), profile='task_local_low',
                                    rendered_mode='low', round_id='e:round:1')
     physical = cf._physical_context_for_fit(disposition)
@@ -763,3 +793,224 @@ def test_physical_floor_reuses_equal_rungs_without_retaining_copies():
     assert facts.physical_floor(snapshot, physical, "low")
     assert not facts.physical_floor(snapshot, level, "low")
     assert len(snapshot.__dict__["_physical_rungs"]) == 2
+
+
+def _composition_snapshot():
+    """All ordinary contributors, including ones with no degradation address."""
+    snap = _snapshot()
+    body = 'BODY_ONLY Кириллица 😀\n"quotation"\\path\tend'
+    own = {**snap.room, "legacy": syn.room(legacy=1, legacy_chars=200)["legacy"],
+           "origins": [{"ts": "2026-11-17", "ref": "origin:one", "text": body}],
+           "project_words": [{"address": "row:1@origin#one", "line": body, "short": "origin reader"},
+                             {"line": "A captured gap.", "short": "Gap reader."}],
+           "sealed_by": [{"id": "sealed-page", "label": "Main"}]}
+    own["lane1"][0]["immune"] = True
+    gist = {"summary": body, "address": "row:7@gist#one", "room_id": "7", "ts": "2026-11-16"}
+    for row in own["lane1"][1:3]:
+        row.update(task_id="composed-work", work_id="composed-work", gist=gist)
+    own["lane2"][0].update(task="composed-work", gist=gist)
+    own["notes"][0].update(text=body, lead_rule=1)
+    story = list(snap.story)
+    story[0].update(text=body, lead_rule=1)
+    story[1].update(text=body, quotes=[{"speaker": "human", "address": "row:1@quote#one", "text": body}])
+    account = {**story[0], "id": "account-selected", "kind": "account", "selection": "selection-1", "signer": "me",
+               "sources": [{"id": story[2]["id"], "kind": "page", "revision": "v1", "revision_known": True,
+                            "status": "final", "status_now": "final", "text": body}]}
+    story[2]["told_by"] = account["id"]
+    late = {"id": "late-mark", "room": "Main", "date": "2026-11-17", "text": body,
+            "late_review": {"own_room": True, "sha256": "a" * 64, "source": "retained review reader"}}
+    own["told"] = [{"room_id": "1", "accounts": [account["id"]], "count": 1, "span": {}}]
+    return dataclasses.replace(snap, room=own, story=tuple([account, *story]), marks=(*snap.marks, late),
+                               owner_words=body, legacy_blocks={**snap.legacy_blocks, "accounts": 1, "accounts_shown": 1})
+
+
+def test_composition_matches_the_renderer_at_ordinary_and_every_selected_form():
+    from ouroboros.memory_form_facts import memory_composition, ordinary_composition
+
+    snapshot = _composition_snapshot()
+    before = mv.snapshot_json(snapshot)
+    for level in [mf.ordinary_level(snapshot), *_levels(snapshot)]:
+        emitted = []
+        def part(lines, *_args):
+            emitted.extend(lines)
+            return lines
+        traced = mv._story_text(snapshot, dict(mv._story_key(level)), part=part)
+        assert traced == "\n".join(emitted) == mv.render_story(snapshot, level)
+        pieces = mv._room_parts(snapshot, dict(level.addressed), lambda _key, make: make(), part=part)
+        assert "\n\n".join(p for p in pieces if p) == mv.render_room(snapshot, level)
+        result = memory_composition(snapshot, level)
+        for name, rendered in (("story", mv.render_story(snapshot, level)), ("room", mv.render_room(snapshot, level))):
+            block = result["blocks"][name]
+            assert block["json_chars"] == mv.json_chars(rendered)
+            assert block["estimated_tokens"] == mf.tokens_of(mv.json_chars(rendered))
+            cursor = 0
+            for part in block["parts"]:
+                assert part["json_chars"] == part["text_json_chars"] + part["separator_json_chars"]
+                assert part["span"] == [cursor, cursor + part["json_chars"]]
+                cursor = part["span"][1]
+                if part["kind"] != "separator":
+                    assert 0 <= part["piece"] < len(block["pieces"])
+            assert cursor == block["json_chars"]
+        assert result["estimated_tokens"] == sum(b["estimated_tokens"] for b in result["blocks"].values())
+        assert "BODY_ONLY" not in json.dumps(result, ensure_ascii=False)
+    ordinary = ordinary_composition(snapshot)
+    assert ordinary["ordinary_addressed"] == json.loads(json.dumps(mf.ordinary_level(snapshot).addressed))
+    parts = [p for block in ordinary["blocks"].values() for p in block["parts"]]
+    assert {"account", "mark", "late_review", "owner_words", "origin", "project_words", "room_row", "work",
+            "task_facts", "room_facts", "story_status", "framing", "separator"} <= {p["kind"] for p in parts}
+    assert any(p["kind"] == "room_row" and p["form"] == "whole" and p["sources"][0].get("immune") for p in parts)
+    represented = ordinary["represented_story_records"]
+    assert [(p["id"], p["told_by"]) for p in represented] == [("page-002", "account-selected")]
+    assert not any(s.get("id") == "page-002" for p in parts for s in p.get("sources", ()))
+    assert mv.snapshot_json(snapshot) == before
+
+
+def test_composition_draws_each_block_once_on_a_fresh_snapshot(monkeypatch):
+    from ouroboros.memory_form_facts import memory_composition
+
+    snapshot = _composition_snapshot()
+    calls = []
+    def counted(draw):
+        def render(*args, **kwargs):
+            calls.append(draw.__name__)
+            return draw(*args, **kwargs)
+        return render
+    monkeypatch.setattr(mv, "_story_text", counted(mv._story_text))
+    monkeypatch.setattr(mv, "_room_parts", counted(mv._room_parts))
+    memory_composition(snapshot, mv.FULL_VIEW)
+    assert calls == ["_story_text", "_room_parts"]
+
+
+def test_composition_counts_swallowed_conversations_and_work_replies_once():
+    from ouroboros.memory_form_facts import memory_composition
+
+    snapshot = _composition_snapshot()
+    group = snapshot.conversations[0]
+    level = mv.FloorLevel((("F6a", (group["key"],)), ("F6g", (group["key"], "last:" + group["key"])),
+                          ("F6w", tuple(w["id"] for r in group["rooms"] for w in r["words"])),
+                          ("F2", ("work:composed-work:progress", "work:composed-work:final"))))
+    result = memory_composition(snapshot, level)
+    parts = result["blocks"]["room"]["parts"]
+    containing = [p for p in parts if any(s.get("key") == group["key"] for s in p.get("sources", ()))]
+    assert len(containing) == 1 and containing[0]["form"] == "count"
+    work = [p for p in parts if p["kind"] == "work"]
+    assert len(work) == 1
+    assert [s["address"] for s in work[0]["sources"]] == [r["address"] for r in snapshot.room["lane1"][1:3]]
+    hidden = {s["address"] for s in work[0]["sources"]}
+    assert not any(s.get("address") in hidden for p in parts if p["kind"] == "room_row" for s in p["sources"])
+    assert result["blocks"]["room"]["json_chars"] == mv.json_chars(mv.render_room(snapshot, level))
+
+
+def test_composition_empty_blocks_and_two_rounding_boundaries():
+    from ouroboros.memory_form_facts import memory_composition
+
+    empty = syn.snapshot(role="nanny")
+    empty = dataclasses.replace(empty, spec=dataclasses.replace(empty.spec, story=False), marks=(), room=None)
+    result = memory_composition(empty, mv.FULL_VIEW)
+    assert result["estimated_tokens"] == 0
+    assert all(b == {"json_chars": 0, "estimated_tokens": 0, "pieces": [], "parts": []} for b in result["blocks"].values())
+    rounded_differently = False
+    for count in range(9):
+        snapshot = syn.snapshot(owner_words="x" * count)
+        result = memory_composition(snapshot, mv.FULL_VIEW)
+        story, room = (result["blocks"][name]["json_chars"] for name in ("story", "room"))
+        assert result["estimated_tokens"] == mf.tokens_of(story) + mf.tokens_of(room)
+        rounded_differently |= result["estimated_tokens"] != mf.tokens_of(story + room)
+        assert room == count
+    assert rounded_differently
+    inactive = dataclasses.replace(syn.snapshot(room_facts=syn.room()), store_status={"state": "waiting", "reason": "test"})
+    result = memory_composition(inactive, mv.FULL_VIEW)
+    assert result["blocks"]["story"]["json_chars"] == mv.json_chars(mv.render_story(inactive))
+    assert result["blocks"]["room"]["json_chars"] == mv.json_chars(mv.render_room(inactive, floor_note="NOT INCLUDED"))
+
+
+def _mixed_composition_group():
+    group = syn.place(1, [("ouroboros", "Ouroboros", "BODY_ONLY untold reply", 1),
+                          ("human", "Owner", "BODY_ONLY owner words", 1),
+                          ("human", "Reader", "BODY_ONLY unread question", 2)])
+    first = group["rooms"][0]
+    first["words"][1]["owner_side"] = True
+    first["notes"] = [{"id": "mixed-note", "role": "root", "date": "2026-11-17", "text": "BODY_ONLY note.", "lead_rule": 1}]
+    first["folded"] = {"from": "row:1@fold-first#one", "to": "row:1@fold-last#two",
+                       "task": "folded-work", "count": 3, "sentence": "BODY_ONLY fold."}
+    gist = {"address": "row:1@gist#one", "room_id": "7", "ts": "2026-11-17", "summary": "BODY_ONLY gist."}
+    first["tasks"] = [{**syn.task_line(1), "task": "work-with-gist", "gist": gist}]
+    second = syn.conversation(2, words=1)["rooms"][0]
+    second["words"][0].update(kind="ouroboros", rank=1, task_id="work-with-gist", gist=gist)
+    # A migrated row retains the written chat in its address, but reads through
+    # this captured room's membership, not that chat.
+    second["words"][0].update(address="row:1@moved#one", id=second["room_id"] + ":row:1@moved#one")
+    second["tasks"] = [{**syn.task_line(2), "task": "no-gist"}]
+    overheard = syn.conversation(3, words=1)["rooms"][0]
+    overheard["overheard"] = True
+    event = syn.conversation(4, engaged=False)["rooms"][0]
+    sample = {"address": "row:events@first#one", "pos": 1, "ts": "2026-11-17", "author": "bot",
+              "opening": "BODY_ONLY event opening"}
+    event["events"] = {"count": 2, "unknown_count": 0, "unknown_chars": 0, "unknown_last": "",
+                       "first": sample, "last": sample, "unknown_first": None}
+    first["running_tasks"] = ["live-work"]
+    group.update(rooms=[first, second, overheard, event],
+                 running=["get_task_result(task_id='live-work'): BODY_ONLY authored focus (now)"], catalogue_start=0)
+    return group
+
+
+def test_composition_other_conversations_names_each_actual_contributor_and_its_form():
+    from ouroboros.memory_form_facts import memory_composition
+
+    group = _mixed_composition_group()
+    snapshot = syn.snapshot(conversations=[group])
+    whole = memory_composition(snapshot, mv.FULL_VIEW)["blocks"]["room"]
+    rows = [p for p in whole["parts"] if p["kind"] == "conversation_row"]
+    assert len(rows) == 5 and all(p["form"] == "whole" for p in rows)
+    assert {s["address"] for p in rows for s in p["sources"]} == {
+        w["address"] for room in group["rooms"] for w in room["words"]}
+    moved = next(p for p in rows if p["sources"][0]["address"] == "row:1@moved#one")
+    assert moved["sources"][0]["read"]["arguments"] == {
+        "room_id": group["rooms"][1]["room_id"], "rows": True, "from": "row:1@moved#one", "to": "row:1@moved#one"}
+    note = next(p for p in whole["parts"] if p["kind"] == "conversation_note")
+    assert note["sources"][0]["navigation"]["arguments"] == {"node_id": "mixed-note"}
+    assert "read" not in note["sources"][0] and "revision" in note["sources"][0]["read_gap"]
+    fold = next(p for p in whole["parts"] if p["kind"] == "conversation_fold")
+    legacy_fold = fold["sources"][0]
+    assert legacy_fold["from"] == "row:1@fold-first#one" and legacy_fold["to"] == "row:1@fold-last#two"
+    assert "range_read" not in legacy_fold and "navigation only" in legacy_fold["row_membership_gap"]
+    assert legacy_fold["gist_source"]["read_gap"] and "read" not in legacy_fold["gist_source"]
+    task = next(p for p in whole["parts"] if p["kind"] == "conversation_task" and p["sources"][0]["task"] == "work-with-gist")
+    assert task["sources"][0]["gist_source"]["read"]["arguments"]["room_id"] == "7"
+    for selector, expected in ((group["key"], "lead"), ("all:" + group["key"], None), ("last:" + group["key"], None)):
+        result = memory_composition(snapshot, mv.FloorLevel((("F6g", (selector,)),)))
+        parts = result["blocks"]["room"]["parts"]
+        notes = [p for p in parts if p["kind"] == "conversation_note"]
+        assert [p["form"] for p in notes] == ([expected] if expected else [])
+        gist = next(p for p in parts if p["kind"] == "conversation_gist")
+        assert gist["form"] == "gist"
+        assert gist["sources"][0]["gist_source"]["address"] == "row:1@gist#one"
+        assert any(s.get("address") == "row:1@moved#one" for s in gist["sources"])
+        assert result["blocks"]["room"]["json_chars"] == mv.json_chars(mv.render_room(snapshot, mv.FloorLevel((("F6g", (selector,)),))))
+        assert "BODY_ONLY" not in json.dumps(result)
+    # Captured membership remains in the saved map after the current room grows.
+    retained = json.loads(json.dumps(whole))
+    group["rooms"][0]["words"].append({"address": "new row not captured"})
+    assert "new row not captured" not in json.dumps(retained)
+
+
+def test_counted_composition_keeps_exact_members_without_focus_or_false_origin_readers():
+    from ouroboros.memory_form_facts import memory_composition
+
+    group = _mixed_composition_group()
+    snapshot = syn.snapshot(conversations=[group], room_facts=syn.room(origins=1), owner_words="BODY_ONLY governing")
+    level = mv.FloorLevel((("F6a", (group["key"], "unread")),))
+    result = memory_composition(snapshot, level)
+    parts = result["blocks"]["room"]["parts"]
+    count = next(p for p in parts if p["kind"] == "conversation_count")
+    rooms = count["sources"][0]["rooms"]
+    assert [w["address"] for room in rooms for w in room["words"]] == [
+        w["address"] for room in group["rooms"] for w in room["words"]]
+    assert rooms[0]["running_tasks"] == ["live-work"]
+    assert rooms[-1]["events"]["samples"]["first"]["address"] == "row:events@first#one"
+    assert rooms[-1]["events"]["membership_gap"]
+    assert next(p for p in parts if p["kind"] == "owner_words")["source_gap"]
+    origin = next(p for p in parts if p["kind"] == "origin")["sources"][0]
+    assert "read" not in origin and origin["read_gap"] and origin["ref"] == "chat 1 / origin-a"
+    assert "BODY_ONLY" not in json.dumps(result)
+    assert result["blocks"]["room"]["json_chars"] == mv.json_chars(mv.render_room(snapshot, level))

@@ -5,7 +5,7 @@ import { failureText } from './consciousness_api.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { tr } from './i18n.js';
-import { sendsAsHtml, signalLabels, heardFactWord } from './consciousness_words.js';
+import { sendsAsHtml, signalLabels, heardFactWord, noKindChecked } from './consciousness_words.js';
 
 export const INDEX_NOTE = 'The list finds conversations with saved incoming Place events. Older records and conversations where it only wrote may not be listed.';
 const LOCAL_NOTE = 'Only records saved by Ouroboros are shown. Some events may never have reached it. Attention and delivery appear only when recorded; a saved reply alone does not confirm delivery.';
@@ -40,10 +40,20 @@ export function capturedWindowNote(page) {
     ].filter(Boolean).join(' ');
 }
 
+/** Whose row it is. A person's row that records neither a name nor an id says so in the host's own words
+ *  (`dialogue_speaker`), never as an invented participant. */
 export function historySpeaker(row) {
     if (row.role === 'assistant') return 'Ouroboros';
     if (row.role === 'system') return 'System';
-    return String(row.sender_label || row.sender_session_id || 'Participant');
+    return String(row.sender_label || row.sender_session_id || tr('places.author_unknown', 'Author not recorded'));
+}
+
+/** What a row carries without words of its own (`place_history.non_text`: a change someone made, a sticker, a
+ *  poll), as its connector described it; malformed entries are not this fact. */
+export function nonTextFacts(row) {
+    const items = row.place_history?.non_text;
+    return (Array.isArray(items) ? items : []).filter((item) => item && typeof item.kind === 'string' && item.kind
+        && typeof item.description === 'string' && item.description.trim());
 }
 
 export function historyFactWords(row) {
@@ -51,7 +61,7 @@ export function historyFactWords(row) {
     const attention = facts.attention;
     const heard = { paused: 'Heard while Paused', off: 'Heard while consciousness was off',
         no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection',
-        own_account: 'Heard; written by the account it sends as' };
+        own_account: 'Heard; written by the account it sends as', change_actor_unknown: 'Heard as background; who made this change is unknown' };
     return [attention?.decision === 'focus_started' ? 'Focus started' : attention?.decision === 'heard'
         ? (attention.reason === 'conversation_work' ? `Passed to work ${attention.recipient || 'in this conversation'}` : heard[attention.reason] || 'Heard') : '',
     { authored: 'Delivery not confirmed', accepted: 'Accepted by service; delivery not confirmed',
@@ -73,10 +83,13 @@ export function placeRoomsHtml({ rooms = null, coverage = null, error = '' } = {
 }
 
 export function placeHistoryState(place) {
-    // While consciousness is off a place that is not Paused only hears (the host's `only_hears`): nothing wakes it.
-    const off = place.onlyHears ? { silent: 'Silent, consciousness off: it only hears here.',
-        active: 'Active, consciousness off: it only hears here.' } : {};
-    return off[place.state] || { silent: 'Silent now: it still hears and wakes here; what it would say or change here is held.',
+    // Why it is quiet now, by its one cause, in the host's words (owner 15.11, 5A).
+    if (place.quiet?.note) return place.quiet.note;
+    // With no kind checked under "What calls it here" no event starts a new conversation at once, while an ongoing one
+    // can still wake its author: the card says the setting and promises neither a wake nor silence.
+    const unchecked = noKindChecked(place) ? { silent: 'Silent now, no wake kinds checked: it hears here, and an ongoing conversation can still wake it; what it would say or change here is held.',
+        active: 'Active now, no wake kinds checked: it hears, speaks and acts here; an ongoing conversation can still wake it.' } : {};
+    return unchecked[place.state] || { silent: 'Silent now: it still hears and wakes here; what it would say or change here is held.',
         paused: 'Paused now: it does not wake or act here; what the connector still reports is saved.',
         active: 'Active now: it hears, wakes, speaks and acts here.' }[place.state] || 'The current Place state is unavailable.';
 }
@@ -108,23 +121,30 @@ function messageNode(row, markdown, place) {
     const article = document.createElement('article'); article.className = `place-convo-row is-${voice}`;
     const meta = document.createElement('div'); meta.className = 'place-convo-meta';
     const time = shownTime(row);
-    meta.innerHTML = `<span class="place-convo-who"${row.role === 'user' ? ' data-i18n-authored' : ''}>${escapeHtml(historySpeaker(row))}</span>${voice === 'owner' ? '<span>(you)</span>' : ''}
+    meta.innerHTML = `<span class="place-convo-who"${row.role === 'user' && (row.sender_label || row.sender_session_id) ? ' data-i18n-authored' : ''}>${escapeHtml(historySpeaker(row))}</span>${voice === 'owner' ? '<span>(you)</span>' : ''}
         <time data-i18n-authored datetime="${escapeHtml(time.at)}" title="${escapeHtml(time.title)}">${escapeHtml(timeText(time.at))}</time>
         ${historyFactWords(row).map((fact) => `<span class="place-convo-fact">${escapeHtml(fact)}</span>`).join('')}${heard}${sender ? `<span class="place-convo-fact">${sender}</span>` : ''}`;
     updateHeardLabels(meta, place);
     article.append(meta);
-    const reaction = facts.reaction?.summary;
-    if (row.text || !reaction) { // a reaction row has no words of its own; words sent beside one stay speech
+    const reaction = facts.reaction?.summary, observed = nonTextFacts(row);
+    // A reaction, a change or content without words has no words of its own; words sent beside one stay speech.
+    if (row.text || !(reaction || observed.length)) {
         const text = document.createElement('div'); text.className = 'chat-markdown place-convo-text'; text.dataset.i18nAuthored = '';
         if (row.role === 'assistant' || row.markdown) { mountChatMarkdown(text, row.text, { softBreaks: true }); markdown.add(text); }
         else { text.classList.add('place-history-plain'); text.textContent = row.text; }
         article.append(text);
     }
-    if (reaction) {
-        const line = document.createElement('p'); line.className = 'place-sheet-note place-convo-reaction';
-        const summary = document.createElement('span'); summary.dataset.i18nAuthored = ''; summary.textContent = reaction;
-        line.append(`${tr('places.history.reaction', 'Reaction:')} `, summary);
+    // Each is one meta line: a translated prefix, then the recorded words, which stay as written.
+    const factLine = (className, prefix, words) => {
+        const line = document.createElement('p'); line.className = `place-sheet-note ${className}`;
+        const summary = document.createElement('span'); summary.dataset.i18nAuthored = ''; summary.textContent = words;
+        line.append(`${prefix} `, summary);
         article.append(line);
+    };
+    if (reaction) factLine('place-convo-reaction', tr('places.history.reaction', 'Reaction:'), reaction);
+    for (const item of observed) {
+        factLine('place-convo-nontext', item.kind === 'state_change' ? tr('places.history.change', 'Change:')
+            : tr('places.history.non_text', 'Without words:'), item.description.trim());
     }
     if (facts.held === true && facts.checked === false && typeof facts.held_text === 'string') {
         const label = document.createElement('p'); label.className = 'place-sheet-note';

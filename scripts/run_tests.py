@@ -5,7 +5,7 @@
     python scripts/run_tests.py --selected --base HEAD  commit/PR floor + affected tests, with both lanes
     python scripts/run_tests.py --selected --keep-going ...  the same, but a red lane does not skip the next
     python scripts/run_tests.py --node            only the complete Node lane (CI runs it as its own step)
-    python scripts/run_tests.py --evidence-dir DIR  pytest diagnostics in DIR/<phase>, passed by argv
+    python scripts/run_tests.py --evidence-dir DIR  pytest diagnostics in DIR/<phase>; with --node, terminal node.json
     python scripts/run_tests.py tests/test_x.py  focused run; every argument is forwarded to pytest
 
 A bare call always means the FULL battery — it never skips a test on the
@@ -40,6 +40,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 _PYTEST_EXIT_NO_TESTS = 5
+_NODE_INFRA_ERROR = 2  # Node exit 1 belongs to the test process, not its launcher.
 # xdist's worker identity of a session this script may be started FROM (a test of the runner under
 # `-n`): inherited, it would make the battery's own controller take itself for a worker.
 _OUTER_WORKER_KEYS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID", "PYTEST_XDIST_WORKER_COUNT")
@@ -157,8 +158,11 @@ def _run(label: str, argv, cwd: pathlib.Path, node: str = "") -> int:
         finally:
             container.close()
             lease.close()
-    if diagnostic and code in (0, _PYTEST_EXIT_NO_TESTS):
-        code = 1
+    if diagnostic:
+        if label == "node":
+            code = _NODE_INFRA_ERROR
+        elif code in (0, _PYTEST_EXIT_NO_TESTS):
+            code = 1
     print(f"=== {label}: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
     return code
 
@@ -210,7 +214,7 @@ def _node_lane() -> tuple[int, str]:
         found = f"{node} is v{version}" if version else (f"{node} did not answer --version" if node else "no node found")
         print(f"\n=== node: NOT_RUN — {found}; the web lane needs node >= {floor}, so this is not the full "
               "battery: install node or pass focused targets", flush=True)
-        return 1, ""
+        return _NODE_INFRA_ERROR, ""
     from ouroboros.claudexor_runtime import get_runtime_manager
     from ouroboros.preflight_node import NODE_TEST_TIMEOUT_FLAG
 
@@ -251,6 +255,7 @@ def _selected(args, evidence) -> int:
     code, node = _node_lane()
     carried = [node] if node else []  # the passes run the Node the lane ran
     record["node"] = "success" if code == 0 else "failure"
+    record["node_exit"] = code
     if code == 0 or args.keep_going:
         _warm_bytecode(selection.files, root)
     red = code  # with --keep-going a later lane runs on, but never hides an earlier red
@@ -347,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
                              "wants every failure of the run, not the first)")
     parser.add_argument("--node", action="store_true", help="only the complete Node lane, owned like every pass")
     parser.add_argument("--evidence-dir", type=pathlib.Path,
-                        help="write pytest diagnostics under DIR/<phase>; never inherited by nested pytest",
+                        help="write phase diagnostics under DIR, or node.json with --node",
                         metavar="DIR")
     args, pytest_args = parser.parse_known_args(argv)
     evidence = args.evidence_dir.resolve() if args.evidence_dir is not None else None
@@ -364,7 +369,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.node:
         if args.selected or pytest_args:
             parser.error("--node runs only the Node lane")
-        return _node_lane()[0]
+        code, node = _node_lane()
+        if args.evidence_dir is not None and node and code in (0, 1):
+            from tests.ci_verdicts import write_json
+
+            write_json(evidence / "node.json", {"exit": code})
+        return code
     if args.selected:
         if pytest_args:
             parser.error("--selected cannot be combined with arbitrary pytest arguments")

@@ -13,7 +13,7 @@ import typing
 
 import pytest
 
-from ouroboros import config, mcp_client, mcp_catalog, skill_mcp
+from ouroboros import config, mcp_catalog, mcp_client, skill_mcp
 from ouroboros.contracts.skill_manifest import SkillManifestError, parse_skill_manifest_text
 from ouroboros.skill_loader import load_skill
 
@@ -361,6 +361,44 @@ def test_a_managed_work_copy_needs_the_containers_runtime_not_the_services(world
     assert probed == ["node"] and len(copies) == 1  # only the unmanaged binding asked the service
 
 
+def test_agent_python_binding_and_start_refuse_a_managed_domain_for_script_skill(world, monkeypatch):
+    from ouroboros import work_domain, work_skill_payloads
+
+    (world.skill_dir / "SKILL.md").write_text(_manifest(
+        '[{"id": "chrome_browser", "entry": "scripts/server.py", "runtime": "agent_python"}]',
+        runtime="python3"))
+    (world.skill_dir / "scripts" / "server.py").write_text("pass\n")
+    monkeypatch.setattr(work_domain, "is_work", lambda _path: True)
+    monkeypatch.setattr(work_domain, "managed", lambda: False)
+    row = mcp_client.normalize_server_config(_bound_row())
+    bound = skill_mcp.bind_config(row)
+    assert bound.skill_error == "" and bound.command
+    assert bound.args[:2] == ["-I", "-B"]
+    monkeypatch.setattr(work_domain, "managed", lambda: True)
+    _write_settings(world, {"MCP_ENABLED": True, "MCP_SERVERS": []})
+    preview = skill_mcp.preview_connect(world.data, "chrome_browser")
+    assert not preview["ready"] and "agent_python MCP servers cannot start" in preview["blockers"][0]
+    connect = skill_mcp.connect(world.data, "chrome_browser", expected_content_hash=preview["content_hash"],
+                                settings_digest=preview["settings_digest"])
+    assert connect["code"] == "skill_not_ready" and not connect["saved"]
+    refused = skill_mcp.bind_config(row)
+    assert refused.command == "" and "agent_python MCP servers cannot start" in refused.skill_error
+    assert refused.skill_error.startswith("MCP_SKILL_UNAVAILABLE:")
+    monkeypatch.setattr(work_skill_payloads, "launch", lambda *_args: pytest.fail("must not enter work container"))
+    with pytest.raises(work_domain.WorkDomainRefused, match="MCP_SKILL_UNAVAILABLE.*agent_python"):
+        skill_mcp.work_start(bound, {})
+
+
+def test_unknown_mcp_runtime_never_becomes_a_container_command(tmp_path, monkeypatch):
+    from ouroboros import work_domain
+
+    (tmp_path / "server").write_text("pass\n")
+    monkeypatch.setattr(work_domain, "managed", lambda: True)
+    launch, reason = skill_mcp._derive_launch(types.SimpleNamespace(skill_dir=tmp_path),
+                                             {"entry": "server", "runtime": "unknown"})
+    assert launch is None and "unsupported skill MCP runtime" in reason
+
+
 _WITNESSED = ("WITNESS_VALUE", "WITNESS_SECRET", "UNDECLARED_SECRET", "ROW_VALUE", "OWNER_PICK", "OUROBOROS_SKILL_NAME",
               "OUROBOROS_SKILL_STATE_DIR", "NODE_PATH", "OUROBOROS_BROWSER_GUARD")
 
@@ -703,6 +741,7 @@ def test_accepted_update_relists_and_retires_sessions_while_a_disabled_row_stays
 def test_registry_worker_adopts_published_skill_catalog_before_admission(world, manager, monkeypatch, initial_state):
     """A long-lived worker must admit the lister's new revision without a direct-call rebind."""
     from unittest.mock import Mock
+
     from ouroboros.tools.registry import ToolRegistry
 
     manifest = _manifest('[{"id": "chrome_browser", "entry": "scripts/server.mjs"}]')
@@ -823,7 +862,7 @@ def test_registry_refuses_an_unready_skill_before_safety_and_keeps_every_other_f
     assert checked == [] and manager.listed_calls == []  # no Safety, no discovery for either refusal
     _write_settings(world, _settings(_bound_row(enabled=False, task_session=False, browser_policy=False), plain))
     code, text = outcome(skill_tool)
-    assert code == "MCP_UNAVAILABLE" and "is disabled in Settings" in text and "MCP_SKILL_UNAVAILABLE" not in text
+    assert code == "MCP_UNAVAILABLE" and "is disabled in Extensions → MCP servers" in text and "MCP_SKILL_UNAVAILABLE" not in text
     world.blockers = []
     _write_settings(world, _settings(_bound_row(task_session=False, browser_policy=False), plain))
     mcp_client.ensure_configured_from_settings()
@@ -873,6 +912,7 @@ def test_accepted_update_is_discovered_after_passive_skills_get(world, manager, 
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
+
     from ouroboros.gateway import extensions
 
     manager.become_lister()

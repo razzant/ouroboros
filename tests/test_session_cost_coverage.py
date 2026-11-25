@@ -349,7 +349,7 @@ def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatc
     """Joining a legacy successor records the stopped run's partial cost once, whether an older host left it
     unrecorded or already collected it. The current host creates no new continuation."""
     from tests._review_session_route_shared import FakeGateway
-    from tests.test_review_session_continuation import _engine, _run, legacy_successor
+    from tests.test_review_session_continuation import _engine, _run, accept_legacy_successor, legacy_successor
 
     posts = _engine(monkeypatch)
     get = FakeGateway.get_run
@@ -370,8 +370,10 @@ def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatc
     stopped = custody.lookup(tmp_path, "t-review", "run-1")[1]
     assert stopped.settled is cost_recorded
     assert len(usage.read_usage_records(tmp_path)) == int(cost_recorded)
+    accept_legacy_successor(monkeypatch, tmp_path, token)
     facts = _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, [], reconcile=True)
     assert [(request, key) for request, key in posts if "continueFrom" in request] == [({"continueFrom": "run-1"}, token)]
+    assert FakeGateway.lookup_requests == [({"continueFrom": "run-1"}, token)]
     assert facts["run_id"] == "run-2"
     assert facts["spend"] == 2 and facts["spend_estimated"] is False
     assert facts["usage"]["cost_partial"] is True and facts["usage"]["cost_final"] is False
@@ -735,7 +737,7 @@ def test_settled_money_reaches_the_rendered_card_and_survives_reload(tmp_path, m
         close = (lambda: _close_absent(tmp_path, entry)) if ending == "absent" else (lambda: _collect(tmp_path, entry, 0))
     pending, settled, stored = _terminal_frames(tmp_path, monkeypatch, close, parent=parent)
     assert pending["cost_presentation"]["accounting_open"]
-    with playwright.sync_playwright() as pw, card_room(pw, engine, "light", 1100, 750) as room:
+    with playwright.sync_playwright() as pw, card_room(pw, engine, "light", 1100, 750, now=None) as room:
         page = room["page"]
         anchors = ([_say(parent, "Parent work", old)] if parent else []) + [_say(task_id, "Cost settlement", old, **({
             "parent_task_id": parent, "root_task_id": parent, "delegation_role": "subagent",
@@ -779,3 +781,25 @@ def test_settled_money_reaches_the_rendered_card_and_survives_reload(tmp_path, m
             page.screenshot(path=replay_shot)
         print(json.dumps({"ending": ending, "engine": engine, "relation": relation, "live": live,
                           "reloaded": room["facts"](task_id)}, ensure_ascii=False))
+
+
+@pytest.mark.parametrize("state,code,asks", [
+    ("failed", "vendor_limit_rejected", True), ("failed", "subscription_window_exhausted", True),
+    ("failed", "credential_pool_exhausted", True), ("failed", "rate_limited", False),  # a plain rate limit
+    ("failed", "internal_error", False), ("succeeded", "", False),
+])
+def test_a_run_settled_on_a_limit_code_asks_the_subscription_census_for_a_read(tmp_path, monkeypatch, state, code,
+                                                                               asks):
+    """The settlement seam itself (``record_terminal_money``): each limit code leaves the census duty's request, an
+    ordinary failure or a success does not."""
+    from ouroboros import claudexor_daemon, config
+    from ouroboros import subscription_census as census
+    from ouroboros.delegate_collection import record_terminal_money
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    entry = start(tmp_path)
+    summary = {"state": state, "spendUsd": 0, **({"failure": {"code": code}} if code else {})}
+    record_terminal_money(tmp_path, entry, {"summary": summary})
+    assert entry.settled
+    assert (census.request_mtime() is not None) is asks

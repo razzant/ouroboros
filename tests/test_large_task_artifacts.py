@@ -10,6 +10,7 @@ import pytest
 
 from ouroboros import artifacts
 from tests._store_shared import read_result, result_signature
+from tests._workspace_git import git_repository
 
 
 def _large_file(path):
@@ -217,6 +218,32 @@ def test_missing_directory_member_is_not_silently_omitted(tmp_path):
     assert not list(root.iterdir())
 
 
+def test_directory_capture_keeps_every_source_when_a_zip_name_cannot_be_written(tmp_path):
+    directory = tmp_path / "output"
+    directory.mkdir()
+    source = directory / "summary.txt"
+    source.write_bytes(b"original report")
+    store = tmp_path / "artifacts"
+    saved = artifacts.copy_directory_to_task_artifacts(None, directory, artifact_dir=store)
+    ledger, archive = (Path(row["path"]) for row in saved)
+    before = {path: path.read_bytes() for path in store.iterdir()}
+
+    other = directory / "notes.txt"
+    other.write_bytes(b"keep these notes")
+    # A policy-checked member may have a different logical name from its host source (bind view).
+    logical = b"notes-\xff.txt".decode("utf-8", "surrogateescape")
+    with pytest.raises(OSError, match="member name cannot be stored in a ZIP"):
+        artifacts.copy_directory_to_task_artifacts(
+            None, directory, member_sources=[(source.name, source), (logical, other)], artifact_dir=store)
+
+    assert source.read_bytes() == b"original report" and other.read_bytes() == b"keep these notes"
+    assert set(store.iterdir()) == set(before)
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert json.loads(ledger.read_text(encoding="utf-8"))["file_count"] == 1
+    with zipfile.ZipFile(archive) as bundle:
+        assert bundle.namelist() == [source.name] and bundle.read(source.name) == b"original report"
+
+
 def test_copyback_failure_retains_child_until_existing_retry_finishes(tmp_path, monkeypatch):
     from ouroboros.headless import copy_child_task_result, prepare_task_drive, remove_subagent_task_drive
     from ouroboros.observability import retry_pending_child_ref_promotions
@@ -322,15 +349,9 @@ def test_full_inputs_survive_copyback_and_child_gc(tmp_path):
 
 
 def test_large_workspace_output_is_a_file_reference_not_a_git_patch(tmp_path):
-    import subprocess
     from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
 
-    repo = tmp_path / "workspace"
-    repo.mkdir()
-    def git(*args):
-        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-    git("init")
-    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "base")
+    repo = git_repository(tmp_path / "workspace")  # one empty commit "base" by Fixture
     expected = _large_file(repo / "dataset.bin")
     output, manifest = write_workspace_patch_artifacts(repo, tmp_path / "capture", task={})
     assert not manifest["errors"]
@@ -447,11 +468,9 @@ def test_large_tracked_symlink_replacement_is_not_misreported_as_deletion(tmp_pa
     import subprocess
     from ouroboros import workspace_patch_capture as capture
 
-    repo = tmp_path / "workspace"
-    repo.mkdir()
+    repo = git_repository(tmp_path / "workspace", unborn=True)
     def git(*args):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-    git("init")
     (repo / "dataset.bin").write_bytes(b"old large content")
     (repo / "target.txt").write_text("target")
     git("add", ".")
@@ -472,11 +491,9 @@ def test_large_staged_rename_keeps_both_paths_out_of_the_git_patch(tmp_path, mon
     import subprocess
     from ouroboros import workspace_patch_capture as capture
 
-    repo = tmp_path / "workspace"
-    repo.mkdir()
+    repo = git_repository(tmp_path / "workspace", unborn=True)
     def git(*args):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-    git("init")
     (repo / "dataset.bin").write_bytes(b"large captured contents")
     git("add", ".")
     git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "base")
@@ -602,6 +619,42 @@ def test_immutable_child_copy_back_retains_name_bytes_and_original_identity(tmp_
         artifacts.copy_file_to_task_artifacts(
             SimpleNamespace(drive_root=tmp_path / "other", task_id="capture"),
             record["path"], immutable=True, expected=record)
+
+
+def test_immutable_copy_name_keeps_every_ordinary_carrier_and_spells_a_raw_name_byte_in_the_suffix(tmp_path):
+    """The carrier is built from a source name's stem and suffix, never its identity: a name that had a carrier keeps
+    it, and a raw POSIX byte (no UTF-8 spelling) in the suffix is ``_`` as in the stem, so a registered or sent file
+    so named gets a copy instead of a refusal. Names are built without asking this volume to hold them (APFS refuses them)."""
+    from pathlib import PurePosixPath
+    from urllib.parse import quote
+
+    digest = sha256(b"bytes").hexdigest()
+
+    def carrier(name):
+        return artifacts.immutable_artifact_name(PurePosixPath(name), digest)
+
+    def raw(data):  # what POSIX os.fsdecode reads back
+        return data.decode("utf-8", "surrogateescape")
+
+    for name, expected in {
+        "report.pdf": f"report-{digest}.pdf",
+        "Q3 report (final).PDF": f"Q3_report__final_-{digest}.PDF",
+        "notes.tar.gz": f"notes.tar-{digest}.gz",
+        ".env": f"_.env-{digest}",
+        "архив-雪.txt": f"архив-雪-{digest}.txt",
+        "x." + "é" * 30: f"x-{digest}." + "é" * 9,  # the suffix stays bounded at 20 bytes, on a character
+        raw(b"report-\xff.txt"): f"report-_-{digest}.txt",  # a byte in the stem was already spelled
+        raw(b"report.t\xffxt"): f"report-{digest}.t_xt",
+        raw(b"archive.\xfe"): f"archive-{digest}._",
+    }.items():
+        assert carrier(name) == expected, name
+        # One plain, UTF-8 component the download route can address.
+        assert PurePosixPath(carrier(name)).name == carrier(name) and quote(carrier(name), safe="") and carrier(name).encode("utf-8")
+    # The copy a real call makes is that name: an ordinary file keeps the carrier it always had.
+    source = tmp_path / "Q3 report.final.pdf"
+    source.write_bytes(b"bytes")
+    record = artifacts.copy_file_to_task_artifacts(SimpleNamespace(drive_root=tmp_path / "data", task_id="carrier"), source, immutable=True)
+    assert record["name"] == f"Q3_report.final-{digest}.pdf" and Path(record["path"]).read_bytes() == b"bytes"
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])

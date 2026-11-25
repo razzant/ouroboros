@@ -969,7 +969,7 @@ def test_evolution_restart_uses_local_commit_not_origin_and_blocks_dirty_tree(tm
 def test_toggle_evolution_tool_accepts_objective(tmp_path, monkeypatch):
     from ouroboros.tools.control import _toggle_evolution
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     pending = []
     result = _toggle_evolution(SimpleNamespace(pending_events=pending), True, objective="Improve cron")
 
@@ -980,7 +980,7 @@ def test_toggle_evolution_tool_accepts_objective(tmp_path, monkeypatch):
 def test_toggle_evolution_tool_refuses_in_light_mode(monkeypatch):
     from ouroboros.tools.control import _toggle_evolution
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     pending = []
     result = _toggle_evolution(SimpleNamespace(pending_events=pending), True)
 
@@ -1025,14 +1025,14 @@ def test_memory_provenance_records_old_and_new_content(tmp_path):
 def test_evolution_block_reason_depends_on_runtime_mode(monkeypatch):
     from supervisor import queue
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     blocked = queue.evolution_block_reason()
     assert blocked
     assert "advanced" in blocked and "pro" in blocked
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     assert queue.evolution_block_reason() == ""
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     assert queue.evolution_block_reason() == ""
 
 
@@ -1044,7 +1044,7 @@ def test_enqueue_evolution_blocked_in_light_mode(tmp_path, monkeypatch):
     supervisor_state.save_state({})  # an initialized install (#1307)
     sent = []
     monkeypatch.setattr(queue, "send_with_budget", lambda chat_id, text, *a, **k: sent.append(text))
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     queue.init(tmp_path)
     pending = []
     queue.init_queue_refs(pending, {}, {"value": 0})
@@ -1071,7 +1071,7 @@ def test_enqueue_evolution_omits_duplicate_cycle_message(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 100.0)
     sent = []
     monkeypatch.setattr(queue, "send_with_budget", lambda chat_id, text, *a, **k: sent.append(text))
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     queue.init(tmp_path)
     pending = []
     queue.init_queue_refs(pending, {}, {"value": 0})
@@ -1144,12 +1144,67 @@ def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypa
     import supervisor.queue as queue
     from supervisor import state as supervisor_state
     from ouroboros.task_results import load_task_result
+    from ouroboros.terminal_time import terminal_time_fact
 
     supervisor_state.init(tmp_path)
     monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 100.0)
     st = supervisor_state.load_state()
     st["spent_usd"] = 0.0
     supervisor_state.save_state(st)
+
+    orig_drive = workers.DRIVE_ROOT
+    orig_q_drive = queue.DRIVE_ROOT
+    workers.DRIVE_ROOT = tmp_path
+    queue.DRIVE_ROOT = tmp_path
+    workers.WORKERS.clear()
+    workers.RUNNING.clear()
+    workers.PENDING[:] = [{"id": "evo1", "type": "evolution", "text": "x"}]
+    queue.PENDING = workers.PENDING
+    observed = "2026-10-10T10:00:00+00:00"
+    monkeypatch.setattr("ouroboros.task_results.utc_now_iso", lambda: observed)
+    monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "light blocked")
+    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
+
+    try:
+        workers.assign_tasks()
+    finally:
+        workers.DRIVE_ROOT = orig_drive
+        queue.DRIVE_ROOT = orig_q_drive
+        workers.PENDING[:] = []
+
+    assert all(t.get("type") != "evolution" for t in workers.PENDING)
+    stored = load_task_result(tmp_path, "evo1")
+    assert stored["status"] == "cancelled"
+    clock = terminal_time_fact(stored)
+    assert (clock["source"], clock["occurred_at"]) == ("supervisor_cancel", observed)
+    assert not stored.get("started_at") and "cancel_origin" not in stored
+    from ouroboros.project_dialogue import _completion_verdict
+
+    assert stored["outcome_axes"]["execution"]["cancel_policy_reason"] == "evolution_disabled_in_light_mode"
+    assert "Evolution is disabled in light runtime mode" in _completion_verdict(stored, {})
+
+
+def test_light_mode_cancel_states_its_own_cause_over_the_pause_a_row_still_carries(tmp_path, monkeypatch):
+    """#3212: a budget pause leaves its code and record on the evolution row; the cancel before assignment is the
+    light-mode policy, so no card or Continue refusal reads that pause as its cause."""
+    import supervisor.workers as workers
+    import supervisor.queue as queue
+    from supervisor import state as supervisor_state
+    from ouroboros.owner_continue import continuation_eligibility
+    from ouroboros.project_dialogue import _completion_verdict
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    supervisor_state.init(tmp_path)
+    monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 100.0)
+    st = supervisor_state.load_state()
+    st["spent_usd"] = 0.0
+    supervisor_state.save_state(st)
+    independent = {"objective": {"status": "not_evaluated", "source": "none"},
+                   "review": {"status": "skipped", "trigger": "not_evaluated"}}  # axes that are no part of the cause
+    write_task_result(tmp_path, "evo1", "scheduled", reason_code="budget_exhausted", outcome_axes=independent, resource_limit={
+        "status": "paused_before_dispatch", "scope": "global", "physical_calls": 0, "replay_safe": True,
+        "auto_resume": False, "resume_policy": "manual_same_generation", "paused_at": "2026-11-17T09:00:00+00:00"})
 
     orig_drive = workers.DRIVE_ROOT
     orig_q_drive = queue.DRIVE_ROOT
@@ -1170,14 +1225,19 @@ def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypa
         queue.DRIVE_ROOT = orig_q_drive
         workers.PENDING[:] = []
 
-    assert all(t.get("type") != "evolution" for t in workers.PENDING)
-    assert load_task_result(tmp_path, "evo1")["status"] == "cancelled"
+    stored = load_task_result(tmp_path, "evo1")
+    execution = stored["outcome_axes"]["execution"]
+    assert stored["status"] == stored["reason_code"] == execution["reason_code"] == "cancelled"
+    assert {key: stored["outcome_axes"][key] for key in independent} == independent, "its other axes stay"
+    assert execution["cancel_policy_reason"] == "evolution_disabled_in_light_mode" and "earlier_stop" not in execution
+    assert _completion_verdict(stored, {}) == "Evolution is disabled in light runtime mode."
+    assert continuation_eligibility(stored, "evo1")["refusal"] == "interruption_cause_unrecorded"
 
 
 def test_toggle_evolution_tool_blocked_in_light_mode(monkeypatch):
     from supervisor import events
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     state = {"owner_chat_id": 7}
     sent = []
     ctx = SimpleNamespace(

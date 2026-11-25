@@ -135,6 +135,170 @@ def test_disposable_recipe_recovers_index_live_untracked_modes_without_source(tm
         assert stat.S_IMODE((recovered / 'new-executable').stat().st_mode) == 0o751
 
 
+# Run as the command and again on the rebuilt tree: one reader for what was read and what the recipe rebuilds.
+_SEEN = '''import json, os, stat, sys
+def seen(path):
+    if not os.path.lexists(path):
+        return None
+    if os.path.islink(path):
+        return ["link", os.readlink(path)]
+    with open(path, "rb") as stream:
+        return ["file", stream.read().decode("latin-1"), bool(os.stat(path).st_mode & stat.S_IXUSR)]
+print("SEEN " + json.dumps({path: seen(path) for path in sys.argv[1:]}))
+'''
+
+
+def test_safe_test_recipe_rebuilds_what_the_command_read_through_index_flags(tmp_path, capsys):
+    """assume-unchanged and present skip-worktree trust the index over the disk; the command reads the disk.
+    The recipe's diff carries those live bytes, its entries the real staging, and an absent (sparse)
+    skip-worktree entry keeps its indexed blob; the real index's bytes and flags stay as they were."""
+    from ouroboros.safe_test_supervisor import main
+    envelope = tmp_path / 'ended-source'
+    envelope.mkdir()
+    declare_scratch(envelope, 'pytest-basetemp')
+    source = _repo(envelope / 'repo', 'def test_probe():\n    assert True\n')
+    links = os.name != 'nt'  # symlinks and the executable bit: POSIX checkouts
+    paths = ['assumed.txt', 'staged.txt', 'skipped.txt', 'sparse.txt', *(['link', 'tool.sh'] if links else [])]
+    for path in paths:
+        if path == 'link':
+            os.symlink('base-target', source / path)
+        else:  # NUL: Git's binary rule, so no line-ending conversion touches these bytes on any host
+            (source / path).write_bytes(f'base {path}\x00\n'.encode())
+    _git(source, 'add', '.')
+    _git(source, '-c', 'user.name=Fixture', '-c', 'user.email=f@example.invalid', 'commit', '-qm', 'base')
+    (source / 'staged.txt').write_bytes(b'staged only\x00\n')
+    _git(source, 'add', 'staged.txt')
+    _git(source, 'update-index', '--assume-unchanged', 'assumed.txt', 'staged.txt', *(['link'] if links else []))
+    _git(source, 'update-index', '--skip-worktree', 'skipped.txt', 'sparse.txt', *(['tool.sh'] if links else []))
+    for path in ('assumed.txt', 'staged.txt', 'skipped.txt'):
+        (source / path).write_bytes(f'live {path}\x00\xe9\n'.encode('latin-1'))
+    (source / 'sparse.txt').unlink()  # outside a sparse checkout the file is absent
+    if links:
+        (source / 'link').unlink()
+        os.symlink('live-target', source / 'link')
+        (source / 'tool.sh').write_bytes(b'#!/bin/sh\necho live\n')
+        (source / 'tool.sh').chmod(0o755)
+    assert _git(source, 'diff', 'HEAD', '--name-only') == b'staged.txt\n', 'Git itself shows only the staged blob'
+    index, entries = source / '.git/index', _git(source, 'ls-files', '--stage', '-z')
+    flags = _git(source, 'ls-files', '-v')
+    index_sha = hashlib.sha256(index.read_bytes()).hexdigest()  # Git's diff above may refresh it; nothing after
+    probe = tmp_path / 'seen.py'
+    probe.write_text(_SEEN, encoding='utf-8')
+    root = tmp_path / 'scratch'
+    root.mkdir()
+    evidence = test_evidence.diagnostic_directory(tmp_path / 'evidence', 'flags-' + tmp_path.name)
+    assert main(root, source, [sys.executable, str(probe), *paths], evidence_parent=evidence) == 0
+    run = Path(next(line.split(' ', 1)[1] for line in capsys.readouterr().err.splitlines()
+                    if line.startswith('SAFE_TEST_EVIDENCE ')))
+    read = json.loads(next(run.glob('command-*/stdout.bin')).read_bytes().decode().split('SEEN ', 1)[1])
+    record = json.loads((run / 'source/source.json').read_bytes())
+    assert (record['source_snapshot'], record['gaps'], record['index']['unmerged']) == ('complete', [], False)
+    assert hashlib.sha256(index.read_bytes()).hexdigest() == index_sha, 'the recipe never writes the real index'
+    assert _git(source, 'ls-files', '-v') == flags, 'the real flags stay'
+    assert (run / 'source/index.entries').read_bytes() == entries
+    force_rmtree(envelope)  # The only source/object owner was this test's stopped synthetic repo.
+    recovered = tmp_path / 'recovered'
+    recovered.mkdir()
+    _git(recovered, 'init', '-q')
+    with (run / 'source/base.pack').open('rb') as stream:
+        subprocess.run(['git', 'unpack-objects', '-q'], cwd=recovered, stdin=stream, check=True)
+    _git(recovered, 'read-tree', record['base']['tree'])
+    _git(recovered, 'checkout-index', '-a')
+    subprocess.run(['git', 'apply', '--binary', str(run / 'source/candidate.diff')], cwd=recovered, check=True)
+    rebuilt = json.loads(subprocess.run([sys.executable, str(probe), *paths], cwd=recovered, check=True,
+                                        capture_output=True).stdout.decode().split('SEEN ', 1)[1])
+    assert {path: rebuilt[path] for path in paths if path != 'sparse.txt'} == {
+        path: seen for path, seen in read.items() if path != 'sparse.txt'}
+    assert read['assumed.txt'] == ['file', 'live assumed.txt\x00\xe9\n', False]
+    assert read['skipped.txt'] == ['file', 'live skipped.txt\x00\xe9\n', False]
+    assert read['staged.txt'] == ['file', 'live staged.txt\x00\xe9\n', False]
+    if links:
+        assert (read['link'], read['tool.sh']) == (['link', 'live-target'], ['file', '#!/bin/sh\necho live\n', True])
+    # The run had no sparse.txt; the recipe keeps its indexed blob (never a deletion), which a restore
+    # materializes: the rebuilt tree is the run's Git view, not its filesystem byte for byte.
+    assert read['sparse.txt'] is None and rebuilt['sparse.txt'] == ['file', 'base sparse.txt\x00\n', False]
+    _git(recovered, 'read-tree', record['index']['tree'])  # Must NOT update live files.
+    assert _git(recovered, 'ls-files', '--stage', '-z') == entries
+    assert _git(recovered, 'show', ':staged.txt') == b'staged only\x00\n'
+
+
+def test_a_same_size_edit_in_the_index_tick_reaches_the_recipe(tmp_path, monkeypatch):
+    """Git re-reads an entry not older than its index ("racily clean"). The private copy keeps the real
+    index's time, so a same-size rewrite leaving every stat field Git trusts unchanged reaches the diff;
+    a fresh copy time would trust the stat cache and record the staged bytes instead."""
+    source = _repo(tmp_path / 'source', 'def test_probe():\n    assert True\n')
+    edited, moment = source / 'racy.txt', 1_700_000_000
+    edited.write_bytes(b'one\n')  # text: the diff shows the bytes themselves
+    _git(source, 'add', 'racy.txt')
+    _git(source, '-c', 'user.name=Fixture', '-c', 'user.email=f@example.invalid', 'commit', '-qm', 'racy')
+    _git(source, 'config', 'core.trustctime', 'false')  # with one fixed mtime the tick is exact on any clock
+    os.utime(edited, (moment, moment))
+    _git(source, 'update-index', '--refresh')  # the entry records that second
+    with edited.open('r+b') as stream:  # same size, same inode
+        stream.write(b'two\n')
+    os.utime(edited, (moment, moment))
+    os.utime(source / '.git/index', (moment, moment))  # and the index was written in that second
+    index = (source / '.git/index').read_bytes()
+    with monkeypatch.context() as fresh:
+        fresh.setattr(test_evidence.shutil, 'copy2', shutil.copyfile)
+        test_evidence.source_evidence(source, tmp_path / 'fresh-time')
+    assert b'two' not in (tmp_path / 'fresh-time/candidate.diff').read_bytes(), 'the distinguishing case'
+    record = test_evidence.source_evidence(source, tmp_path / 'kept-time')
+    assert b'two' in (tmp_path / 'kept-time/candidate.diff').read_bytes()
+    assert record['source_snapshot'] == 'complete'
+    assert (source / '.git/index').read_bytes() == index, 'the real index is never written'
+
+
+def test_flag_refresh_keeps_a_same_tick_edit_in_a_self_contained_recipe(tmp_path):
+    """Clearing another entry's flags rewrites the private index; Git must still smudge a racily clean
+    neighbour rather than trust its same-size stat cache after that write. Restore uses no source store."""
+    envelope = tmp_path / 'ended-source'
+    envelope.mkdir()
+    declare_scratch(envelope, 'pytest-basetemp')
+    source = _repo(envelope / 'repo', 'def test_probe():\n    assert True\n')
+    paths = ('assumed.txt', 'skipped.txt', 'racy.txt')
+    for path in paths:
+        (source / path).write_bytes(b'one\n')
+    _git(source, 'add', '.')
+    _git(source, '-c', 'user.name=Fixture', '-c', 'user.email=f@example.invalid', 'commit', '-qm', 'base')
+    _git(source, 'config', 'core.trustctime', 'false')
+    _git(source, 'update-index', '--assume-unchanged', 'assumed.txt')
+    _git(source, 'update-index', '--skip-worktree', 'skipped.txt')
+    edited, moment = source / 'racy.txt', 1_700_000_000
+    os.utime(edited, (moment, moment))
+    _git(source, 'update-index', '--refresh')
+    with edited.open('r+b') as stream:
+        stream.write(b'two\n')
+    os.utime(edited, (moment, moment))
+    (source / 'assumed.txt').write_bytes(b'live assumed\n')
+    (source / 'skipped.txt').write_bytes(b'live skipped\n')
+    index = source / '.git/index'
+    os.utime(index, (moment, moment))
+    original, stamp = index.read_bytes(), index.stat().st_mtime_ns
+    entries, flags = _git(source, 'ls-files', '--stage', '-z'), _git(source, 'ls-files', '-v')
+    destination = tmp_path / 'evidence'
+    record = test_evidence.source_evidence(source, destination)
+    assert (record['source_snapshot'], record['gaps'], record['index']['unmerged']) == ('complete', [], False)
+    assert record['base']['self_contained'] is True
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == (original, stamp)
+    assert _git(source, 'ls-files', '-v') == flags
+    assert (destination / 'index.entries').read_bytes() == entries
+    force_rmtree(envelope)  # all original files and Git objects are gone before reconstruction
+    assert not source.exists()
+    recovered = tmp_path / 'recovered'
+    recovered.mkdir()
+    _git(recovered, 'init', '-q')
+    with (destination / 'base.pack').open('rb') as stream:
+        subprocess.run(['git', 'unpack-objects', '-q'], cwd=recovered, stdin=stream, check=True)
+    _git(recovered, 'read-tree', record['base']['tree'])
+    _git(recovered, 'checkout-index', '-a')
+    subprocess.run(['git', 'apply', '--binary', str(destination / 'candidate.diff')], cwd=recovered, check=True)
+    assert [(recovered / path).read_bytes() for path in paths] == [b'live assumed\n', b'live skipped\n', b'two\n']
+    _git(recovered, 'read-tree', record['index']['tree'])  # restore staging without replacing the live bytes
+    assert _git(recovered, 'ls-files', '--stage', '-z') == entries
+    assert _git(recovered, 'show', ':racy.txt') == b'one\n'
+
+
 def test_non_git_source_still_executes_and_names_missing_recipe(tmp_path, capsys):
     from ouroboros.safe_test_supervisor import main
     root, source, evidence = tmp_path / 'scratch', tmp_path / 'no-git', test_evidence.diagnostic_directory(tmp_path / 'evidence', 'no-git-' + tmp_path.name)

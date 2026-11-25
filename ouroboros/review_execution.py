@@ -37,10 +37,10 @@ from ouroboros.review_slot_cancel import (  # noqa: F401 — re-exported seam su
     _natural_success_terminal,
     _slot_cancel_outcome,
 )
-from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp, invoke_review_paid_stamp
+from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp, invoke_review_paid_stamp, review_operation_binding
 from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES, BillingAuthorityUnavailable
 from ouroboros.delegate_custody_usage import (
-    model_identity_delta, observe_failed_review_send, observe_review_usage, observe_session_usage, run_names,
+    ReviewAttemptCosts, model_identity_delta, observe_failed_review_send, observe_session_usage, run_names,
 )
 from ouroboros.delegate_start_instructions import READONLY_SOURCE_SCOPE
 from ouroboros.triad_review import (
@@ -55,11 +55,11 @@ from ouroboros.deadline_utils import (
 )
 from ouroboros.config import get_finalization_grace_sec
 from ouroboros.review_session_custody import (
-    checkpoint_pending_invocation,
+    checkpoint_pending_invocation, failed_start_seat_evidence,
     owned_started_review_custody,
     recorded_review_shape,
     review_recovery_facts, continuation_send_admitted, rejoin_recorded_review,
-    continuation_send, join_recorded_review_continuation, stopped_review_failure,
+    join_recorded_review_continuation, stopped_review_failure, full_session_text as _full_session_text,
 )
 from ouroboros.review_session_preparation import prepare_review_session_request, render_review_session_prompt
 from ouroboros.review_session_usage import (review_event_identity, session_custody_attribution,
@@ -335,11 +335,12 @@ class ReviewSlotExecutor:
     def __init__(self, assignment: ReviewAssignment, *, llm: Any = None):
         self.assignment = assignment
         self.llm = llm
+        self.attempt_costs = ReviewAttemptCosts()
         self.usage_observer: Optional[Callable[[Dict[str, Any]], None]] = None
         self.answer_observer: Optional[Callable[[], None]] = None
 
     def _observe_usage(self, usage: Optional[Dict[str, Any]]) -> None:
-        observe_review_usage(self.usage_observer, usage)
+        self.attempt_costs.observe(usage, self.usage_observer)
 
     def _output_contract(self) -> str:
         contract = str((self.assignment.request.policy or {}).get("output_contract") or "")
@@ -400,6 +401,7 @@ class ApiChatReviewExecutor(ReviewSlotExecutor):
             self._chat_kwargs = {
                 "messages": self.messages,
                 "model": slot.model,
+                "chat_conversation_id": self.assignment.call_id,
                 "model_role": f"reviewer:{slot.slot_id}",
                 "model_account_override": slot.session_profile,
                 "reasoning_effort": slot.effort,
@@ -450,7 +452,7 @@ class ApiChatReviewExecutor(ReviewSlotExecutor):
                 capture = getattr(exc, "physical_attempt_capture", None)
                 if str(getattr(capture, "state", "") or "") in POSITIVE_PHYSICAL_ATTEMPT_STATES:
                     invoke_late_review_paid_stamp(self.assignment.dispatch_stamp)
-                observe_failed_review_send(self.usage_observer, exc)
+                self.attempt_costs.failed(observe_failed_review_send(self.usage_observer, exc))
                 raise
         # Null/non-object provider messages follow the caller's empty-response rail.
         raw_text = str(msg.get("content") or "") if isinstance(msg, dict) else ""
@@ -599,9 +601,9 @@ def _retire_orphaned_review_registration(
 
     Same semantics as the delegated-start path (ported from cxi/p34-converged
     ``tools/delegate._retire_orphaned_registration``, adapted to the custody-drive
-    signature this module has): only a proven unsent start or a definite negative
-    daemon answer permits retirement. A transport error, a 5xx, or a 2xx handle with
-    no run id all leave the POST's fate UNKNOWN, and a run may well be live against
+    signature this module has): only a proven unsent start permits retirement. Any
+    answer to an entered POST (a 4xx too), a transport error or a 2xx handle with
+    no run id leaves the POST's fate UNKNOWN, and a run may well be live against
     this very registration — an unverified outcome is never grounds for destroying
     state. The START_FAILED row is written either way, so every failing branch
     reaches ONE path instead of one retiring while its twin silently abandons.
@@ -662,6 +664,7 @@ class SessionInvocation:
     # #1609: the seat's configured technical access ('' = historical read-only) and its wave's frozen checking source.
     access: str = ""
     checking_source: Optional[Dict[str, Any]] = None
+    answer_binding: Optional[Dict[str, Any]] = None
 
 def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                                  invocation: SessionInvocation) -> Dict[str, Any]:
@@ -672,6 +675,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
     """
     from ouroboros import delegate_custody as custody
     from ouroboros.execution_domain import seat_gateway
+    from ouroboros.delegate_accepted import accepted_after_refusal
     from ouroboros.delegate_pending import store_facts
     from ouroboros.gateways.claudexor import ClaudexorUnavailable, final_attempt_facts
     from ouroboros.subagents import delegated_run_shape
@@ -694,7 +698,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
     attempt_execution = None
     delivery_facts = invocation.source_delivery if invocation.source_delivery is not None else {}
     continuations, stopped_details, session_usages = [], [], []
-    start_attempted, start_refused, engine_refused = False, False, False  # only submit witnesses POST entry
+    start_attempted = False  # only submit witnesses POST entry
     try:
         record = custody.invocation_record(custody_drive, retry_token) if retry_token else None
         if record is not None and record["state"] == "legacy_gap":
@@ -755,7 +759,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 route.route_id, shape.access, shape.mode, root, prompt,
             )
             if shape.investigation:  # a thread advances its own clone; a run gets a copy per operation
-                checking = session_checking(gateway, custody_drive=custody_drive, task_id=task_id,
+                checking = session_checking(gateway, facts=checking, custody_drive=custody_drive, task_id=task_id,
                     operation_id=str(invocation.operation_id or ""), root=root, source=invocation.checking_source,
                     shape=shape, thread_seat=f"{surface}:{slot_id}" if use_thread else "", thread_id=thread_id, route_id=route.route_id)
             if use_thread:
@@ -825,14 +829,13 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             try:
                 launch_source = SimpleNamespace(drive_root=custody_drive, task_id=task_id, root_task_id=root_task_id)
                 handle = run_operation(launch_source, submit)
-            except (ClaudexorUnavailable, OwnerPauseRefused) as exc:
-                code = getattr(exc, "code", str(exc))
-                status = int(getattr(exc, "status_code", 0) or 0)
-                start_refused = isinstance(exc, OwnerPauseRefused) or 400 <= status < 500
-                engine_refused = bool(status) and start_refused and code != "idempotency_conflict" and continuation_send(invocation)
-                if isinstance(exc, OwnerPauseRefused):
-                    raise ReviewRouteUnavailable("New delegated review start is fenced.", code=code) from exc
-                raise
+            except OwnerPauseRefused as exc:  # the launch fence, before any POST
+                raise ReviewRouteUnavailable("New delegated review start is fenced.", code=getattr(exc, "code", str(exc))) from exc
+            except ClaudexorUnavailable as exc:  # no answer proves the POST created nothing: read what it accepted
+                started_custody, exc.accepted_start_lookup = accepted_after_refusal(custody_drive, gateway, invocation_id, exc)
+                if started_custody is None:
+                    raise
+                handle = {"runId": started_custody.run_id}  # observed, captured and settled as every started run
             run_id = str(handle.get("runId") or handle.get("jobId") or "")
             turn_id = str(handle.get("turnId") or "")
             if not run_id:
@@ -870,7 +873,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             if str(summary.get("state") or "") == "succeeded":
                 break
             successor = join_recorded_review_continuation(gateway, custody_drive, entry, detail, invocation,
-                remaining=poll_deadline - time.monotonic(), seen=seen_runs)
+                seen=seen_runs, checking=checking)  # a copy gap rides checking: the successor is still observed
             if successor is None:
                 break
             continuations.append({"from_run_id": run_id, "run_id": successor.run_id,
@@ -889,14 +892,14 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
         late_success = time.monotonic() >= poll_deadline  # a terminal the deadline read discovered
         run_state = str(summary.get("state") or "")
         if shape.investigation:  # every terminal turn retains its outputs and delta; a continuable stop keeps its copy
-            checking["evidence"] = terminal_seat_evidence(custody_drive, task_id, str(invocation.operation_id or ""), detail,
-                hold=run_state != "succeeded" and bool(summary.get("resumable") or detail.get("resumable")))
+            checking["evidence"] = checking.get("legacy_capture_gap") or terminal_seat_evidence(custody_drive, task_id,  # a gap: never an old receipt
+                str(invocation.operation_id or ""), detail, hold=run_state != "succeeded" and bool(summary.get("resumable") or detail.get("resumable")))
         settlement = custody.settle_run(custody_drive, gateway, entry, detail)
         if run_state != "succeeded":
             state.pop("pending_invocation_id", None)
             state.pop("delegated_run_id", None)
             raise stopped_review_failure(gateway, run_id, detail, summary)
-        text = _full_session_text(gateway, run_id, detail)
+        text = _full_session_text(gateway, run_id, detail, checkpoint=(custody_drive, entry, invocation.answer_binding if custody_durable else None))
         spend, estimated, combined_summary = _combined_session_usage(custody, stopped_details, detail)
         thread_receipt: Dict[str, Any] = {}
         if use_thread:
@@ -929,8 +932,8 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
         if unrequested:  # fresh preparation only: no paid stamp or START_REQUESTED write
             exc.delegated_start_unrequested = True
         if gateway is not None and not run_id and (project_id or invocation_id):
-            # An explicit continuation's recorded start is first POSTed here: the engine's refusal of it is definite.
-            definite = not recovering and (not start_attempted or start_refused) or engine_refused
+            # Only a fresh start that never entered its POST is definite (``delegate_accepted.accepted_after_refusal``).
+            definite = not (recovering or start_attempted)
             try:
                 _retire_orphaned_review_registration(
                     custody, gateway, custody_drive, project_id if not existing_project else "",
@@ -944,8 +947,8 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             elif invocation_id:
                 state["pending_invocation_id"] = invocation_id
         if gateway is not None and shape.investigation and not checking.get("evidence"):
-            checking["evidence"] = terminal_seat_evidence(
-                custody_drive, task_id, str(invocation.operation_id or ""), getattr(exc, "checking_terminal_detail", None))
+            checking["evidence"] = failed_start_seat_evidence(custody_drive, task_id, str(invocation.operation_id or ""),
+                exc, checking, invocation_id, unrequested=unrequested, posted=start_attempted)
         if run_id and gateway is not None:
             exc.delegated_run_started, exc.delegated_run_id = True, run_id
             carried = getattr(exc, "checking_terminal_detail", None)
@@ -972,6 +975,8 @@ def _require_route_headroom(gateway: Any, route: Any, shape: Any) -> None:
     unavailable, reset_at = route_health(gateway, route.route_id, shape, route_model=route.model,
                                          pinned_profile=str(getattr(route, "profile_id", "") or ""))
     if unavailable in WINDOW_EXHAUSTED_CODES or reset_at:
+        from ouroboros.subscription_census import note_limit_failure
+        note_limit_failure(unavailable or "subscription_window_exhausted")  # a seat refused on a spent window: read again
         raise ClaudexorSubscriptionWindowExhausted(
             "delegated review route subscription window is exhausted"
             + (f" (resets {reset_at})" if reset_at else "")
@@ -1150,30 +1155,6 @@ def _poll_session_terminal(gateway: Any, custody: Any, custody_drive: Any, entry
         if unobserved is None and token is not None:
             seen = token  # acknowledged only once the rows it stands for were fetched
     return detail
-def _full_session_text(gateway: Any, run_id: str, detail: Dict[str, Any]) -> str:
-    """The session's final answer from the verified FULL primary output (D7).
-
-    The resolver fetches and verifies the full artifact when the engine reports
-    truncation; an unresolvable full text refuses rather than judging a
-    head-cut transcript."""
-    from ouroboros.delegate_output import _resolve_full_primary_output
-
-    primary = detail.get("primaryOutput")
-    primary, full_ok, disclosure = _resolve_full_primary_output(gateway, run_id, primary)
-    if not full_ok:
-        raise RuntimeError(
-            f"delegated review session {run_id} produced a truncated primary "
-            f"output whose full artifact could not be matched to the size or the "
-            f"preview the run reported ({(disclosure or {}).get('reason')}); a "
-            "verdict is never read from a preview"
-        )
-    text = str(primary.get("text") or "") if isinstance(primary, dict) else "" if primary is None else str(primary)
-    if not text.strip():
-        final_summary = detail.get("finalSummary")
-        text = final_summary if isinstance(final_summary, str) else ""
-    return text
-
-
 def session_identity_deltas(slot: Any, facts: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Disclose final-attempt identity versus the frozen request, also during pure collection."""
     deltas = []
@@ -1304,8 +1285,8 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
             started = bool(self._run_id or getattr(exc, "delegated_run_started", False))
             if started:
                 self._session_usage = dict(getattr(exc, "delegated_usage", None) or session_usage_facts(self._run_id))
-            if started:
                 observe_session_usage(self.usage_observer, {**self._session_usage, "cost": None})
+            self._session_usage["checking_evidence"] = getattr(exc, "checking_evidence", None) or {}  # this attempt's own
             if not self._retry_state.get("pending_invocation_id"):
                 self._settled_failure = exc
             raise
@@ -1319,10 +1300,10 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
         failure = self._settled_failure
         run_id = self._run_id or str(getattr(failure, "delegated_run_id", "") or "")
         pending = str(self._retry_state.get("pending_invocation_id") or "")
-        evidence = getattr(failure, "checking_evidence", None)
+        evidence = self._session_usage.get("checking_evidence")  # the last attempt's own, settled or pending
         return {**(session_failure_identity(self._session_usage) if run_id else {}),
                 "delegated_run_started": bool(run_id), "delegated_run_id": run_id,
-                "pending_invocation_id": pending, **({"checking_evidence": evidence} if evidence else {}),
+                "pending_invocation_id": pending, **({"checking_evidence": evidence} if isinstance(evidence, dict) and evidence else {}),
                 **({"review_continuations": self._session_usage["review_continuations"]}
                    if self._session_usage.get("review_continuations") else {}),
                 **({"delegated_start_unrequested": True} if getattr(failure, "delegated_start_unrequested", None) is True else {})}
@@ -1381,6 +1362,8 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
                 owner_deadline_at=str(getattr(request, "deadline_at", "") or ""),
                 access=str(getattr(slot, "session_access", "") or ""),
                 checking_source=getattr(request, "checking_source", None) or None,
+                answer_binding=(review_operation_binding(request, slot, self.assignment.call_id)
+                                if request.surface == "multi_model_review" else None),
             )
         except BaseException as exc:
             if not self._retry_state and not request.reconcile_only:

@@ -124,7 +124,7 @@ def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=
     result, usage, trace = loop.run_llm_loop(
         messages=[{"role": "user", "content": "Ship the export endpoint."}],
         tools=registry, llm=SimpleNamespace(default_model=lambda: "test-model"),
-        drive_logs=data / "logs", emit_progress=lambda _text, *, incident=None: None,
+        drive_logs=data / "logs", emit_progress=lambda _text, *, incident=None, narration=False, reasoning=False: None,
         incoming_messages=queue.Queue(), task_id=task_id, drive_root=data,
     )
     return SimpleNamespace(result=result, usage=usage, trace=trace, panels=panels,
@@ -237,6 +237,30 @@ def test_the_row_reason_slot_carries_the_stop_rationale():
     # No rationale recorded (a malformed or stale disposition): the typed sentence alone.
     record["outcome_axes"]["review"]["acceptance_decision"]["author_disposition"] = ""
     assert _completion_verdict(record, {}) == TASK_CAUSE_PHRASES["author_stop"]
+
+
+def test_an_author_stop_states_the_proven_first_attempt_independently():
+    """R6 (2): a settled first interruption before a later qualified success, then an explicit stop
+    with unfinished work. The author-stop clause and its rationale stay the primary cause; the first
+    attempt's PROVEN display-only fact states itself beside them instead of being swallowed by the stop."""
+    from ouroboros.project_dialogue import TASK_CAUSE_PHRASES, _completion_verdict
+
+    fact = {"status": "unknown", "reason": "initial_execution_display_only",
+            "initial_execution": {"state": "interrupted", "run_id": "run-1"},
+            "delegated_runs_succeeded": 1}
+    record = {"status": "completed", "reason_code": "final_message",
+              "task_completion": {"action": "stop", "rationale": "Stopped with the export unfinished."},
+              "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message",
+                                             "actor_first_terminal": fact}}}
+    verdict = _completion_verdict(record, {})
+    assert verdict.startswith(TASK_CAUSE_PHRASES["author_stop"][:-1] + " · First coding attempt interrupted · ")
+    assert "Stopped with the export unfinished" in verdict
+    assert _completion_verdict(record, {}, include_review_details=False) == verdict
+    # control: without the proven fact the stop says only itself and its rationale
+    record["outcome_axes"]["execution"].pop("actor_first_terminal")
+    stopped = _completion_verdict(record, {})
+    assert "First coding attempt" not in stopped
+    assert stopped.startswith(TASK_CAUSE_PHRASES["author_stop"][:-1] + " · ")  # the joiner is a middle dot
 
 
 def test_a_stop_after_an_earlier_review_finishes_without_a_keep_round(tmp_path, monkeypatch):

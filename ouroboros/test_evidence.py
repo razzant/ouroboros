@@ -17,6 +17,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+from ouroboros.git_observation import unhide_live_entries
 from ouroboros.utils import write_bytes_atomic
 
 EVIDENCE_ENV = "OUROBOROS_TEST_EVIDENCE_ROOT"
@@ -118,7 +119,10 @@ def source_evidence(repo, destination) -> dict:
     """Keep the Git candidate recipe, not arbitrary command inputs or runtime data.
 
     One private copy of the index answers entries, tree and diff alike, so they
-    agree and the live ``index.lock`` is never taken. A persistent Git owner keeps
+    agree and the live ``index.lock`` is never taken. Its assume-unchanged and
+    present skip-worktree flags are cleared (``git_observation.unhide_live_entries``):
+    the diff holds the bytes the command read, the entries what is staged, and an
+    absent sparse entry its indexed blob. A persistent Git owner keeps
     its base tree; only index objects missing from that tree are packed. A
     disposable owner may vanish, so its pack holds base and index trees/blobs
     (never history). Git archive is unsuitable: export-ignore/export-subst alter bytes.
@@ -147,7 +151,8 @@ def source_evidence(repo, destination) -> dict:
         live_index = repo / os.fsdecode(git("rev-parse", "--git-path", "index").strip())
         env["GIT_INDEX_FILE"] = str(Path(private) / "index")
         if live_index.is_file():
-            shutil.copyfile(live_index, env["GIT_INDEX_FILE"])
+            shutil.copy2(live_index, env["GIT_INDEX_FILE"])  # with its time: see unhide_live_entries
+            unhide_live_entries(git, lambda path: os.path.lexists(repo / path))
         return _source_record(repo, destination, git)
 
 
@@ -591,22 +596,46 @@ class CapturedPass(tuple):
         return result
 
 
-def record_kept_scratch(ctx, root, kept, tokens) -> None:
+def _gate_container(root, identity):
+    """Resolve only this fresh gate's issued identity, using the shared scratch predicate."""
+    from ouroboros.session_scratch import SCRATCH_WORKSPACE, _recorded_scratch
+    from ouroboros.test_environment import default_temp_parent
+
+    if identity is None:
+        if (root.name == SCRATCH_WORKSPACE and root.parent.name.startswith("obs-")
+                and root.parent.parent == default_temp_parent().resolve()):
+            raise ValueError("no identity issued by this gate's fresh allocator")
+        return root  # an older or nested gate: no new identity can be inferred for it
+    if (not isinstance(identity, dict) or identity.get("schema_version") != 2
+            or identity.get("path") != str(root.parent) or root.name != SCRATCH_WORKSPACE):
+        raise ValueError("scratch identity was not issued for this gate workspace")
+    return _recorded_scratch(root, identity)
+
+
+def record_kept_scratch(ctx, root, kept, tokens, *, identity=None) -> None:
     """One session-scratch record (``workspace_preflight``'s shape, with what is kept and why) for a
     run's task: the custody pass over finished tasks then holds and releases a kept root like any
-    task's scratch, with no reader, sweeper or age of its own. The root's ``obs-`` name is what
-    that shape requires. A run with no task records nothing, nor does a root an outer owner releases."""
+    task's scratch, with no reader, sweeper or age of its own. New identity comes from the fresh
+    allocator's per-run carrier, not the contents of an unknown directory. Existing records are read
+    and re-noted unchanged, v1 included. A run with no task or with an outer owner records nothing."""
+    from ouroboros.session_scratch import recorded_scratch
     from ouroboros.test_environment import default_temp_parent
     from ouroboros.tool_access_paths import canonical_data_root
     from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME, _note_open_scratch, _owned_directory
 
     task_id, drive = str(getattr(ctx, "task_id", "") or ""), getattr(ctx, "drive_root", "")
+    root = _gate_container(root, identity)
     if not task_id or not drive or root.parent != default_temp_parent().resolve():
         return
     owner = _owned_directory(drive, ("task_drives", task_id, SESSION_SCRATCH_DIRNAME, root.name), root)
-    seen = root.lstat()
-    write_record(owner / "scratch.json", {"schema_version": 1, "path": str(root), "identity": [seen.st_dev, seen.st_ino],
-                                          "kept": kept, "containment_tokens": tokens})
+    record = owner / "scratch.json"
+    if os.path.lexists(record):
+        if recorded_scratch(record) != root:
+            raise ValueError("existing scratch record names another gate")
+    else:
+        if identity is None:
+            raise ValueError("no identity issued by this gate's fresh allocator")
+        write_record(record, {**identity, "kept": kept, "containment_tokens": tokens})
     _note_open_scratch(canonical_data_root(ctx), task_id, root.name, owner)
 
 
@@ -626,14 +655,25 @@ def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
     if cleanup and cleanup[1] in kept:
         hold = marker_text(kept[cleanup[1]][0])
     reason = hold or next((marker_text(found_in[0]) for found_in in kept.values()), "")
+    container, release_allowed = cleanup[1] if cleanup else None, True
+    try:
+        if cleanup:
+            container = _gate_container(cleanup[1], evidence.get("scratch_ownership"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        reason = hold = f"gate scratch identity unconfirmed: {exc}"
+        release_allowed = False
+        report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {reason}")
+    errors = evidence.setdefault("evidence_errors", [])
+    if not release_allowed:
+        errors.append(reason)
     record = {"verdict": verdict, "phase": phase, "reused_from": evidence.get("reused_from"),
               "execution": evidence.get("reuse", evidence.get("execution", "not_run")),
-              "scratch": str(cleanup[1]) if cleanup else None,
+              "scratch": str(cleanup[1]) if cleanup else None, "scratch_ownership": evidence.get("scratch_ownership"),
               "containment_error": cleanup[4] if cleanup else None,
               "lanes": evidence.get("lanes", []), "workers": evidence.get("workers"),
               "budget_seconds": evidence.get("budget_seconds"), "elapsed_seconds": evidence.get("elapsed_seconds"),
-              "diagnostics_incomplete": bool(evidence.get("evidence_errors")),
-              "evidence_errors": evidence.get("evidence_errors", []),
+              "diagnostics_incomplete": bool(evidence.get("evidence_errors")) or not release_allowed,
+              "evidence_errors": errors,
               "retention_reason": reason, "cleanup": "pending" if cleanup else "not_created",
               "kept": [], "containment_tokens": []}
     try:
@@ -646,23 +686,42 @@ def finish_gate(evidence, verdict, phase, release, ctx=None) -> None:
     if cleanup:
         if hold:
             retain_tree(cleanup[1], hold)
+        cleanup_status = "unconfirmed"
+        held_root = cleanup[1]
         try:
-            release(*cleanup[:4], hold)
-        except OSError as exc:
+            if release_allowed:
+                release(*cleanup[:4], hold)
+                if container != cleanup[1] and not cleanup[1].exists():
+                    # The workspace owner proved release. Its outside marker still must match before
+                    # the enclosing allocation goes; partial/nested holds never reach this branch.
+                    _gate_container(cleanup[1], evidence["scratch_ownership"])
+                    remove_scratch_tree(container)
+                cleanup_status = "released"
+            if container.exists():
+                cleanup_status = "retained"
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
             reason = hold = f"scratch release failed: {exc}"
-            retain_tree(cleanup[1], reason)
-        remains = cleanup[1].exists()
-        record.update(cleanup="retained" if remains else "released", retention_reason=reason)
-        if remains:
-            report_diagnostic(f"PREFLIGHT_RETAINED {cleanup[1]}: {reason or 'release incomplete'}")
+            held_root = container
+            # The directory can disappear during removal, or survive without a writable marker.
+            if retain_tree(container, reason) and os.path.lexists(container):
+                cleanup_status = "retained"
+            else:
+                cleanup_status = "unconfirmed"
+        record.update(cleanup=cleanup_status, retention_reason=reason)
+        if cleanup_status == "retained":
+            report_diagnostic(f"PREFLIGHT_RETAINED {held_root}: {reason or 'release incomplete'}")
             facts = kept_facts(kept) if kept and not hold else [
-                {"path": str(cleanup[1]), "reasons": [(reason or "release incomplete").split("\n")[0]]}]
+                {"path": str(held_root), "reasons": [(reason or "release incomplete").split("\n")[0]]}]
             tokens = [token for token in evidence.get("containment_tokens", ()) if token]
             record.update(kept=facts, containment_tokens=tokens)
             try:
-                record_kept_scratch(ctx, cleanup[1], facts, tokens)
+                record_kept_scratch(ctx, cleanup[1], facts, tokens, identity=evidence.get("scratch_ownership"))
             except (OSError, ValueError, KeyError, TypeError) as exc:  # the tree stays either way; its record is a gap
+                record["diagnostics_incomplete"] = True
+                record["evidence_errors"].append(f"no scratch record: {exc}")
                 report_diagnostic(f"PREFLIGHT_EVIDENCE_INCOMPLETE {cleanup[1]}: no scratch record: {exc}")
+        elif cleanup_status == "unconfirmed":
+            report_diagnostic(f"PREFLIGHT_CLEANUP_UNCONFIRMED {container}: {reason}")
         try:
             write_record(evidence["path"] / "result.json", record)
         except OSError as exc:

@@ -1,6 +1,6 @@
 """Skill-declared MCP stdio servers: their derived launch, the Settings binding, and Connect tools.
 
-A skill declares servers in its manifest (``mcp_servers``, parsed by the manifest contract).
+The manifest contract combines a skill's stdio server declarations into ``manifest.mcp_servers``.
 Connecting is one owner decision (the Skills card, or ``skill_owner_action(action="connect_mcp")``
 carrying an owner source): it writes exactly one ``MCP_SERVERS`` row per declaration — id,
 title, ``enabled``, stdio, the declared call-lifetime flags and ``skill`` (the binding) — and
@@ -8,14 +8,14 @@ title, ``enabled``, stdio, the declared call-lifetime flags and ``skill`` (the b
 else in settings changes, nothing is written when the state already matches, and a row of the
 same id that is not bound to this skill is never overwritten.
 
-A bound row stores no command: ``bind_config`` derives the runtime binary (the skill runtime
-precedence of ``skill_exec``; a managed work copy's is the container's), the entry inside the
+A bound row stores no command: ``bind_config`` derives the runtime binary (Node uses the skill
+runtime precedence of ``skill_exec``; agent_python uses the agent interpreter), the entry inside the
 reviewed payload, the skill directory as cwd and the declared ``task_session``/``browser_policy``
 at every discovery, Settings Test and dispatch, and carries the payload revision into the config
 so catalog and task-session identities follow the accepted bytes. A row's ``enabled`` reads as the loader reads it
 (``mcp_client.setting_flag``; absent is off). Each real start (``work_start``) gets the environment skill_exec gives
-the skill's scripts; under a managed execution domain it runs the verified work copy of the reviewed payload in the
-work container, as skill scripts run; binding and preview stay passive. While the skill is missing, not accepted for
+the skill's scripts; a managed domain runs Node servers from verified work copies in its container and refuses
+agent_python servers; binding and preview stay passive. While the skill is missing, not accepted for
 its current bytes, off, short of grants or dependencies, in conflict, an extension the domain cannot
 start, or no longer declares the server, only that server is unavailable and no process starts
 anywhere; its Settings row stays as the owner left it. A deployment policy's refusal of the write is
@@ -28,7 +28,9 @@ import dataclasses
 import hashlib
 import json
 import logging
+import os
 import pathlib
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -69,20 +71,33 @@ def entry_problem(skill_dir: Any, entry: str) -> str:
 def _derive_launch(skill: Any, decl: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
     """``({command, args, cwd}, "")`` for one declaration, or ``(None, reason)``."""
     from ouroboros import work_domain
-    from ouroboros.tools.skill_exec import _resolve_runtime_binary
-
     if why := entry_problem(skill.skill_dir, decl["entry"]):
         return None, why
     root = pathlib.Path(skill.skill_dir).resolve()
     entry = (root / decl["entry"]).resolve()
+    runtime = decl["runtime"]
+    if runtime not in {"node", "agent_python"}:
+        return None, f"unsupported skill MCP runtime {runtime!r}"
+    if runtime == "agent_python":
+        if work_domain.managed():
+            return None, "agent_python MCP servers cannot start in this deployment's work container"
+        from ouroboros.process_interpreters import _usable_executable
+
+        binary = (_usable_executable(os.environ.get("OUROBOROS_AGENT_PYTHON", ""))
+                  or _usable_executable(sys.executable))
+        if not binary:
+            return None, "no usable agent_python runtime was found"
+        return {"command": binary, "args": ["-I", "-B", str(entry)], "cwd": str(root)}, ""
     if work_domain.managed():  # mapped or staged: the work container resolves its own runtime
         from ouroboros.work_skill_payloads import _CONTAINER_RUNTIMES
 
-        return {"command": _CONTAINER_RUNTIMES.get(decl["runtime"], decl["runtime"]), "args": [str(entry)],
+        return {"command": _CONTAINER_RUNTIMES[runtime], "args": [str(entry)],
                 "cwd": str(root)}, ""
-    binary, why = _resolve_runtime_binary(decl["runtime"])
+    from ouroboros.tools.skill_exec import _resolve_runtime_binary
+
+    binary, why = _resolve_runtime_binary(runtime)
     if not binary:
-        return None, f"no usable {decl['runtime']} runtime was found" + (f" ({why})" if why else "")
+        return None, f"no usable {runtime} runtime was found" + (f" ({why})" if why else "")
     return {"command": binary, "args": [str(entry)], "cwd": str(root)}, ""
 
 
@@ -90,8 +105,9 @@ def _work_copy(skill: Any) -> Tuple[Optional[pathlib.Path], str]:
     """Where a managed execution domain starts this skill's servers, read passively (a path, nothing copied):
     ``(home, "")`` for the work copy of its reviewed payload (``work_skill_payloads``), ``(None, "")`` where they start
     as installed (unmanaged, or a skill folder inside the domain's mappings), ``(None, why)`` where it cannot. That
-    domain starts every stdio MCP server in its work container (``execution_domain.attached_launch``), never on the
-    service, and an extension's package stays on the service, never copied there (``work_skill_payloads.deps_home``)."""
+    domain starts runnable stdio MCP servers in its work container (``execution_domain.attached_launch``), never on
+    the service, and an extension's package stays on the service, never copied there
+    (``work_skill_payloads.deps_home``)."""
     from ouroboros import work_domain
 
     if not work_domain.managed():
@@ -148,8 +164,9 @@ def work_start(cfg: Any, env: Dict[str, str]) -> Tuple[List[str], Optional[str],
     Test, calls and task sessions all start in ``mcp_client._transport_factory``). An unbound server starts as
     configured with ``env``. A skill-bound server starts with its skill's script environment (``_skill_env``) under
     ``env`` (the row's own env and settings references, then the host's task and guard entries), its name and state
-    folder kept; under a managed execution domain, the verified work copy of its reviewed payload with the
-    container's runtime and the copy's dependencies (``work_skill_payloads.launch``, as ``skill_exec`` does). The
+    folder kept; under a managed execution domain, Node uses the verified work copy of its reviewed payload with
+    the container's runtime and the copy's dependencies (``work_skill_payloads.launch``, as ``skill_exec`` does),
+    while agent_python refuses before launch. The
     copy is made or checked only here, never by a passive read; changed payload or granted settings, missing
     grants, or an unavailable domain refuse before launch. Changed settings need a fresh binding and catalog."""
     from ouroboros import work_domain
@@ -165,6 +182,8 @@ def work_start(cfg: Any, env: Dict[str, str]) -> Tuple[List[str], Optional[str],
     decl = next((item for item in skill.manifest.mcp_servers if item["id"] == cfg.id), None) if skill else None
     why = ("its skill changed since it was bound" if decl is None or skill.content_hash != cfg.skill_revision
            else "; ".join(_not_ready(root, skill)))  # what the binding checked, read again right before the start
+    if not why and work_domain.managed() and decl["runtime"] == "agent_python":
+        why = "agent_python MCP servers cannot start in this deployment's work container"
     try:
         if not why:
             own, _secrets, digest = _skill_env(root, skill, start=True)

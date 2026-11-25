@@ -7,7 +7,8 @@ automatic retry or an application stop costs at most the work since the last
 boundary instead of the whole line of thought:
 
 - ``ready`` — incorporated owner/peer mail and context changes, before the
-  model call (skipped when nothing changed since the last save);
+  model call (skipped only when its signature, the round number included,
+  equals the last save's: a repeat within one round);
 - ``pre_effect`` — the accepted assistant message and its tool batch, before
   the first tool: a write failure HOLDS the batch visibly (typed, interruptible
   by the task's own Stop/Panic/deadline); no unrecorded effect starts;
@@ -154,7 +155,8 @@ def save_resumed(tools: Any, state: Dict[str, Any], messages: list, trace: dict,
         round_idx=int(state["round_idx"]), tool_schemas=state["tool_schemas"],
         budget_tail=str((state.get("resume_point") or {}).get("budget_tail") or "tool"),
         context_model_role=str(state.get("context_model_role") or ""),
-        context_start=state.get("context_start")), RESUMED)
+        context_start=state.get("context_start")),
+        "candidate" if (state.get("resume_point") or {}).get("phase") == "candidate" else RESUMED)
 
 
 def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
@@ -217,9 +219,9 @@ def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
 
 
 def _encode_working(ctx: Any, state: Dict[str, Any], encode: Any) -> tuple:
-    """``(file bytes, whole bytes, parts written)``: the wrapper over a skeleton whose shareable
-    elements are CAS parts (written and listed before the file replaces the previous state), or
-    the whole state as before when nothing is shareable."""
+    """``(file bytes, whole bytes, parts written)``: the wrapper over a skeleton whose shareable elements are CAS parts
+    (written and listed before the file replaces the previous state), or the whole state as before when nothing is
+    shareable. The whole's length is its segments' (a repeated part at each place), never a hash of the whole state."""
     from ouroboros.shared_values import tokenize
 
     tokenized = tokenize(state, encode, part_bytes=lambda element: _shared_element(ctx, element))
@@ -228,7 +230,7 @@ def _encode_working(ctx: Any, state: Dict[str, Any], encode: Any) -> tuple:
         return data, len(data), 0
     written = _list_working_parts(ctx, tokenized.parts)
     data = encode({"format": WORKING_SHARED_FORMAT, "state": None}).replace(b"null", tokenized.skeleton, 1)
-    return data, tokenized.whole_digest()[1], written
+    return data, sum(map(len, tokenized.segments())), written
 
 
 def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -> None:
@@ -388,7 +390,10 @@ def save_terminal(limit_ctx: Any) -> None:
     if not getattr(ctx, "_pending_content_acks", None) or sys.exc_info()[0] is not None:
         return
     try:
-        save_ready(limit_ctx)
+        if not getattr(ctx, "_selected_answer_context", None):
+            save_ready(limit_ctx)
+        elif save_or_log(limit_ctx, "candidate"):  # a held answer keeps its own boundary; only this save ACKs
+            flush_content_acks(ctx)
     except Exception:
         log.warning("Final working state of %s unsaved; its drained mail stays unread",
                     getattr(ctx, "task_id", ""), exc_info=True)
@@ -405,11 +410,13 @@ def discard(root: Any, task_id: str) -> None:
 
 # --- recovery: supervisor freezes, the next start restores ---------------------------
 
-def expand_working(root: Any, wrapper: Dict[str, Any]) -> Dict[str, Any]:
-    """The whole state of a ``working_shared_v1`` file: its parts read from the CAS below ``root``.
+def expand_working(root: Any, wrapper: Dict[str, Any], task_id: Optional[str] = None) -> Dict[str, Any]:
+    """The whole state of a ``working_shared_v1`` file: its parts read from the CAS below ``root``
+    (``task_id``, the checkpoint's task, is the packs reader's cost hint).
 
     A part nothing holds is ``SharedValueMissing`` (a ``ValueError``, like an identity mismatch):
-    the caller keeps its original-prompt or terminal path, never a narrower continuation.
+    the caller keeps its original-prompt or terminal path, never a narrower continuation. A part
+    whose bytes cannot be located now raises ``EvidenceUnavailable`` (an ``OSError``), never missing.
     """
     from ouroboros.evidence_packs import blob_bytes
     from ouroboros.shared_values import SharedValueMissing, expand
@@ -417,7 +424,7 @@ def expand_working(root: Any, wrapper: Dict[str, Any]) -> Dict[str, Any]:
     def part(digest: str) -> Any:
         try:
             return json.loads(blob_bytes(root, {"sha256": digest, "kind": "json", "encoding": "gzip"},
-                                         expected_kind="json"))
+                                         expected_kind="json", task_id=task_id))
         except FileNotFoundError:
             raise SharedValueMissing(digest, "working checkpoint") from None
 
@@ -436,7 +443,7 @@ def read_working(root: Any, task_id: str, attempt: int) -> tuple:
         return b"", {}
     state = json.loads(data.decode("utf-8"))
     if isinstance(state, dict) and state.get("format") == WORKING_SHARED_FORMAT:
-        state = expand_working(root, state)
+        state = expand_working(root, state, str(task_id))
         data = json.dumps(state, ensure_ascii=False).encode("utf-8")
     if (not isinstance(state, dict) or state.get("task_id") != str(task_id)
             or int(state.get("task_attempt") or 0) != int(attempt) or not isinstance(state.get("working"), dict)):
@@ -529,7 +536,7 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
         rows = [row for row in (receipts.get(basis) or []) if isinstance(row, dict)]
         if rows:
             row = max(rows, key=lambda item: str(item.get("registered_at") or ""))
-            return {"basis": basis, "text": str(row.get("text") or ""), "delivery_id": str(row.get("delivery_id") or ""),
+            return {"basis": basis, "text": str(row.get("terminal_record") or row.get("text") or ""), "delivery_id": str(row.get("delivery_id") or ""),
                     "terminal_origin": str(row.get("terminal_origin") or ""), **carried(row),
                     **({"preserved_path": str(row["preserved_path"])} if row.get("preserved_path") else {})}
     delivered = [row for row in (receipts.get("delivered") or []) if isinstance(row, dict)]
@@ -541,7 +548,7 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
 
             record = json.loads(read_actor_source_bytes(root, task_id, receipt.get("source_ref")).decode("utf-8"))
             if isinstance(record, dict):
-                text, origin = str(record.get("text") or ""), str(record.get("terminal_origin") or "")
+                text, origin = str(record.get("terminal_record") or record.get("text") or ""), str(record.get("terminal_origin") or "")
         except Exception:
             log.debug("Retained terminal answer of %s could not be re-read", task_id, exc_info=True)
         return {"basis": "delivered", "text": text, "delivery_id": str(receipt.get("delivery_id") or ""),
@@ -730,17 +737,12 @@ def complete_pause_from_working(root: Any, task_id: str, row: Dict[str, Any], at
         episode_fields, observe_task_runs, set_budget_pause, task_owned_runs_open,
     )
     from ouroboros.model_wait import budget_paused_seconds
+    from ouroboros.owner_wait import working_resume_point
 
     _data, state = read_working(root, task_id, attempt)
     if not state or row.get("state") != STATE_PAUSING or row.get("source_ref"):
         return {}
-    working = state["working"]
-    pending = list(working.get("pending_tool_call_ids") or [])
-    point = {"round_idx": int(state.get("round_idx") or 0),
-             "phase": "partial_tool_batch_unknown" if pending else "boundary",
-             "unanswered_tool_call_ids": pending, "unanswered_policy": "not_re_executed_execution_unknown",
-             "abandoned_model_attempts": [], "budget_tail": str(working.get("budget_tail") or "tool"),
-             "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
+    point = working_resume_point(state)
     reason = str(row.get("reason") or "budget")
     policy = (STOP_POLICY_TASK_OWNED if reason == "owner" else STOP_POLICY_ALL if reason == "budget"
               else STOP_POLICY_OBSERVE)
@@ -761,7 +763,7 @@ def complete_pause_from_working(root: Any, task_id: str, row: Dict[str, Any], at
     completed = {**row, "source_ref": ref, "resume_point": point, "external_runs": external,
                  "local_producers": local, "paused_at": _time.time(), "execution_drive_root": str(root),
                  "cost_ceiling": state.get("cost_ceiling"), "physical_calls": None, "exact_continuation": True,
-                 "replay_safe": False, "auto_resume": False, "resume_policy": RESUME_POLICY,
+                 "replay_safe": False, "auto_resume": row.get("auto_resume", False), "resume_policy": row.get("resume_policy") or RESUME_POLICY,
                  "started_at": started, "paused_duration_sec": budget_paused_seconds(model_state),
                  "model_wait_quota_clock": model_state.get("quota_clock", {}),
                  # The seed keeps no list: stops its dead worker issued may have settled unseen (partial).
@@ -938,7 +940,8 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
             if isinstance(run, dict) and run.get("authority") == "host_root":
                 run.update(superseded_by_revision=True, superseded_reason="working_recovery_new_execution")
         # ``acceptance_decision`` is written no more; a pre-fold checkpoint's own does not carry over.
-        for key in ("acceptance_decision", "review_decision", "root_phase_checkpoint", "task_completion"):
+        for key in ("acceptance_decision", "review_decision", "root_phase_checkpoint", "task_completion",
+                    "authoring_handover_incomplete"):
             trace.pop(key, None)
     from ouroboros.task_pacing import restore_cost_ceiling
 

@@ -117,13 +117,13 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "    function noteToolMetrics(taskId, metrics, rawTs, { suppressDomInsert = false } = {}) {"
+    "value": "const projection = foldCardMetrics(record, metrics, facts, attempt, recorded);"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "            || record.items.some((item) => !item.receipt && !String(item.dedupeKey || '').startsWith('task_done|'))\n            || record.toolErrors > 0;"
+    "value": "            || record.items.some((item) => !item.receipt && (item.fullField === 'schedule_report'\n                || !String(item.dedupeKey || '').startsWith('task_done|')))\n            || record.toolErrors > 0;"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -159,7 +159,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs)"
+    "value": "            const changed = summary && placeReplayedEvidence(record, summary, facts.evidence, anchor, normalizeLogTs, summarizeChatLiveEvent)"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -243,18 +243,6 @@
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
     "path": "web/modules/log_events.js",
     "kind": "contains",
-    "value": "function extractCommandText(args) {"
-  },
-  {
-    "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
-    "path": "web/modules/log_events.js",
-    "kind": "contains",
-    "value": "evt.status === 'non_zero_exit'"
-  },
-  {
-    "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
-    "path": "web/modules/log_events.js",
-    "kind": "contains",
     "value": "phase: 'warn'"
   },
   {
@@ -262,12 +250,6 @@
     "path": "web/modules/task_reason_words.js",
     "kind": "contains",
     "value": "A command returned"
-  },
-  {
-    "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
-    "path": "web/modules/log_events.js",
-    "kind": "contains",
-    "value": "headline: failedStepHeadline(evt),"
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
@@ -727,12 +709,6 @@
   },
   {
     "id": "test_skill_lifecycle_terminal_progress_can_finish_live_card",
-    "path": "web/modules/log_events.js",
-    "kind": "contains",
-    "value": "lifecycleTerminal"
-  },
-  {
-    "id": "test_skill_lifecycle_terminal_progress_can_finish_live_card",
     "path": "web/modules/chat_activity.js",
     "kind": "contains",
     "value": "Boolean(terminal) || ['done', 'lifecycle_error', 'cancelled'].includes(phase)"
@@ -921,31 +897,13 @@
     "id": "test_history_replay_resyncs_after_reconnect",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "isReconnect ? syncHistory({ fromReconnect: true })"
+    "value": "isReconnect ? historyPager.read({ fromReconnect: true, whole: true,"
   },
   {
     "id": "test_history_replay_resyncs_after_reconnect",
     "path": "web/modules/chat.js",
     "kind": "contains",
     "value": "scheduleHistorySync"
-  },
-  {
-    "id": "test_history_replay_resyncs_after_reconnect",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "let pendingReconnectSync = false;"
-  },
-  {
-    "id": "test_history_replay_resyncs_after_reconnect",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "pendingReconnectSync = true;"
-  },
-  {
-    "id": "test_history_replay_resyncs_after_reconnect",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "if (pendingReconnectSync)"
   },
   {
     "id": "test_sync_history_sweep_rederives_block_presence",
@@ -1143,13 +1101,13 @@
     "id": "test_inflight_routing_receipt_retires_pending",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (receiptCid && pendingSubmissions.delete(receiptCid)) {"
+    "value": "if (own && receiptCid && Number(msg.chat_id ?? 1) === chatId &&\n                (msg.source_row_address ? msg.source_row_address === pendingSubmissions.get(receiptCid)?.rowAddress : msg.source_row_address !== '') &&\n                pendingSubmissions.delete(receiptCid)) {"
   },
   {
     "id": "test_inflight_history_annotation_retires_pending",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (msg.chat_annotation && msg.client_message_id) {"
+    "value": "if (msg.chat_annotation && localOwnerRow(msg) && msg.client_message_id &&\n                            (!msg.chat_annotation.source_row_address || msg.sender_session_id === chatSessionId)) {"
   },
   {
     "id": "test_inflight_history_annotation_retires_pending",
@@ -1173,7 +1131,7 @@
     "id": "test_inflight_reconnect_user_row_retires_pending",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (fromReconnect && msg.role === 'user' && msg.client_message_id) {"
+    "value": "if (fromReconnect && msg.role === 'user' && localOwnerRow(msg) && msg.client_message_id) {"
   },
   {
     "id": "test_inflight_queue_eviction_retires_pending",

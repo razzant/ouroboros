@@ -195,6 +195,129 @@ def _screenshot(page, tmp_path, name):
     page.screenshot(path=str(root / f"{name}.png"), full_page=False, animations="disabled")
 
 
+@pytest.mark.parametrize(("width", "live_first"), [(1240, False), (390, True)])
+def test_delivered_attempt_survives_older_pages_and_reload(direct_server_with_data, tmp_path, width, live_first):
+    from playwright.sync_api import expect, sync_playwright
+    from ouroboros.gateway.history_paging import _RECENT_WINDOW_BYTES
+    from ouroboros.terminal_projection import _project_row
+    from tests._store_shared import delete_result
+    from tests.ui_chat_viewport_smoke import _OBSERVE_STATE_READS, _wait_state_reads_quiescent
+
+    root, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    task, answer = "herb-survey", "The east bed contains sage."
+    ending = {"status": "failed", "task_attempt": 2, "reason_code": "finalization_incomplete",
+              "terminal_origin": "model_final", "finalization_recovery": {"answer": "delivered"},
+              "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed"}}}
+    summary = {"direction": "system", "type": "task_summary", "task_id": task}
+
+    def saved(second, **fields):
+        return _human(second, ts=f"2099-03-12T10:00:{second:02d}Z", **fields)
+
+    child = "herb-reader"
+    lineage = {"task_id": child, "subagent_task_id": child, "root_task_id": task,
+               "parent_task_id": task, "delegation_role": "subagent", "subagent_role": "Reader"}
+    stored = seed_result(root, child, {**lineage, **ending, "chat_id": 1, "result": "Private notes",
+                                      "outcome_axes": {"execution": {"status": "infra_failed"}}})
+    receipt = _project_row(child, stored, {}, {"chat_id": 1})
+    assert delete_result(root, child)
+    # Only the older summary retains the delivery receipt until the current result is available.
+    _append(root, "chat", [
+        saved(0, **summary, task_attempt=1, status="cancelled", text="First survey stopped."),
+        saved(1, text="Survey the east bed again."),
+        {**receipt, "ts": saved(2)["ts"]},
+        saved(2, **summary, task_attempt=2, task_outcome=ending, text="Delivery recorded."),
+        # Cross the real recent-page byte window; older evidence must first arrive through its cursor.
+        saved(3, text="Keep the plant names.", metadata={"source": "x" * _RECENT_WINDOW_BYTES}),
+        saved(5, **summary, task_attempt=2, status="failed", text="Processing ended."),
+        saved(7, direction="out", task_id=task, task_attempt=2, text=answer),
+    ])
+    _append(root, "progress", [_progress(i, task_id=task, task_attempt=2, narration=True,
+                                        ts=f"2099-03-12T10:00:0{i}Z", content=words)
+                               for i, words in [(4, "Reading the notes."), (6, "Checking the names.")]])
+    _append(root, "progress", [_progress(6, **lineage, subagent_event="progress", task_attempt=2,
+                                         ts="2099-03-12T10:00:06.5Z", content="Reading the field notes.")])
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": width, "height": 844})
+            # Limit newest-page reads. The gateway encodes its quotas into the real next cursor.
+            page.route("**/api/chat/history", lambda route: route.continue_(url=route.request.url + "?n_human=2"))
+            page.add_init_script(f"({_OBSERVE_STATE_READS})()")
+            _open(page, url)
+            phase = page.locator(f'{MAIN} .chat-live-card[data-task-id="{task}"] > [data-live-summary-button] [data-live-phase]')
+            child_card = page.locator(f'{MAIN} .chat-live-card[data-task-id="{child}"][data-parent-task-id="{task}"]')
+            words = page.locator(f"{MAIN} .chat-bubble.assistant .message").filter(has_text=answer)
+            expect(words).to_have_text([answer])
+            recent = next(r["body"] for r in _reads(page) if not r["cursor"] and r.get("body"))
+
+            def sparse(body):
+                rows = [r for r in body["messages"] if r.get("task_id") == task]
+                assert [r.get("status") for r in rows if r.get("system_type") == "task_summary"] == ["failed"]
+                assert '"delivered"' not in json.dumps(rows)
+
+            sparse(recent)
+            assert not any(r.get("summary_kind") == "terminal_result_projection" for r in recent["messages"])
+            expect(child_card).to_have_count(1)
+            child_phase = child_card.locator(':scope > [data-live-summary-button] [data-live-phase]')
+            expect(child_phase).not_to_have_text("Done")
+            if live_first:
+                _wait_state_reads_quiescent(page)
+                _emit_ws_frame(page, {"type": "log", "chat_id": 1, "data": {"type": "task_done", "task_id": task, **ending}})
+                expect(phase).to_have_text("Done")
+                before = len(_reads(page))
+                page.evaluate("() => window.__testSockets.at(-1).close()")
+                page.wait_for_function("""n => window.__testSockets.at(-1)?.readyState === WebSocket.OPEN
+                    && window.__testSockets.length > 1
+                    && window.__historyReads.slice(n).some(r => !r.cursor && r.done && r.status === 200)""", arg=before)
+                _idle(page, MAIN)
+                recent = next(r["body"] for r in _reads(page)[before:] if not r["cursor"] and r.get("body"))
+                sparse(recent)
+                expect(phase).to_have_text("Done")
+
+            def older(body):
+                assert body["has_more"] and body["next_cursor"]
+                _step(page, MAIN)
+                return next(r["body"] for r in _reads(page) if r["cursor"] == body["next_cursor"] and r.get("body"))
+
+            earlier = older(recent)
+            [hidden] = [r for r in earlier["messages"] if r.get("task_id") == child]
+            assert hidden["summary_kind"] == "terminal_result_projection" and not hidden["text"]
+            expect(child_phase).to_have_text("Done")
+            if not child_card.is_visible():
+                page.locator(f'{MAIN} [data-task-id="{task}"] > [data-live-summary-button] [data-live-disclosure]').click()
+            if child_card.get_attribute("data-expanded") != "1":
+                child_card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
+            detail = child_card.locator(':scope > [data-live-timeline] .chat-live-line.done [data-live-line-toggle][aria-expanded="false"]')
+            if detail.count():
+                detail.click()
+            expect(child_card).to_contain_text("The answer was delivered.")
+            assert any(r.get("task_outcome", {}).get("finalization_recovery") == {"answer": "delivered"}
+                       for r in earlier["messages"] if r.get("task_id") == task)
+            expect(phase).to_have_text("Done")
+            first = older(earlier)
+            assert any(r.get("task_attempt") == 1 and r.get("status") == "cancelled"
+                       for r in first["messages"] if r.get("task_id") == task)
+            expect(phase).to_have_text("Done")
+
+            _result(root, task, chat_id=1, result=answer, **ending)
+            page.reload(wait_until="domcontentloaded")
+            _idle(page, MAIN)
+            current = next(r["body"] for r in _reads(page) if not r["cursor"] and r.get("body"))
+            stamped = [r for r in current["messages"] if r.get("task_id") == task and r.get("task_terminal_status")]
+            assert [(r["is_progress"], r["task_terminal_status"]) for r in stamped] == [
+                (True, "failed"), (False, "failed"), (True, "failed")]
+            assert stamped[1]["task_attempt"] == 2 and stamped[1]["finalization_recovery"]["answer"] == "delivered"
+            expect(phase).to_have_text("Done")
+            expect(words).to_have_text([answer])
+            phase.scroll_into_view_if_needed()
+            expect(phase).to_be_in_viewport()
+            expect(words).to_be_in_viewport()
+            _screenshot(page, tmp_path, f"delivered-attempt-{width}")
+        finally:
+            browser.close()
+
+
 # A room shows its newest message (DESIGN "History edges"): the feed rests at its
 # end and its last row is on screen, clear of the composer drawn over the feed.
 _AT_NEWEST = """feed => {
@@ -622,8 +745,13 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                     # Opened again after reading back to its first message, the kept room is found as left, on
                     # that passage (owner 2026-11-03, DESIGN "History edges"), and reads no older page again;
                     # `Scroll to latest message` is the one return to its newest message (owner decision 2026-10-05).
-                    page.locator('#project-panel-close').click()
+                    # The destination was a jump from this room (DESIGN "Layers and dismissal"): its × returns
+                    # here, this room's × goes to Main, and the room opens again from its row.
                     seen = len(page.evaluate("() => window.__historyReads"))
+                    page.locator('#project-panel-close').click()
+                    page.locator(f'#pchat-{project["id"]}-messages').wait_for(state="visible", timeout=30_000)
+                    page.locator('#project-panel-close').click()
+                    page.wait_for_function("() => !document.body.classList.contains('project-panel-open')")
                     reopened = _open_project(page, project)
                     assert not [read["cursor"] for read in page.evaluate("n => window.__historyReads.slice(n)", seen)
                                 if read["cursor"]], "no older page is read again"

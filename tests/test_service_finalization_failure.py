@@ -131,6 +131,86 @@ def test_the_service_projection_appears_only_when_teardown_recorded_and_keeps_pr
     assert "report.html is missing" in rendered and "log_path" not in rendered
 
 
+def test_named_and_automatic_launch_facts_reach_the_final_subject_once(tmp_path, monkeypatch):
+    """A named Stop and the teardown of the next launch of the same name reach the final
+    subject with the facts the tool result and the card show: one row per real launch, its
+    declared file version openable, the journal only its state, and no second row for the
+    launch the automatic teardown already recorded. Reading the trace starts nothing."""
+    from ouroboros.loop_delivery import delivery_evidence_fingerprint
+    from ouroboros.tools import services
+
+    tool_ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path, task_id="task")
+    trace = {"tool_calls": [], "verification_events": []}
+    tool_ctx._execution_trace = trace
+    turn = SimpleNamespace(drive_root=tmp_path, task_id="task", tools=SimpleNamespace(_ctx=tool_ctx),
+                          drive_logs=tmp_path / "logs", event_queue=None, llm_trace=trace)
+
+    def launch(launch_id, marker, journal):
+        """One real launch's stop payload: a declared output and its log finalization."""
+        return {
+            "service_id": "task:demo", "name": "demo", "task_id": "task",
+            "launch_id": launch_id, "state": "exited", "returncode": 0,
+            "outputs": ["report.txt"],
+            "_output_facts": [{"name": "report.txt", "state": "saved", "files": [
+                {"name": "report.txt", "path": f"service-output-{marker}.txt", "sha256": marker * 64,
+                 "size": 5, "download_url": f"/api/tasks/task/artifacts/service-output-{marker}.txt"}]}],
+            "log_finalization": journal,
+        }
+
+    # The explicit Stop: the tool handler's own publication step, then the next launch is live.
+    named = launch("launch-a", "a", {"full_log_ref": {"kind": "txt", "sha256": "f" * 64, "size": 9}})
+    services.publish_stop(tool_ctx, named, confirmed=True)
+    automatic = launch("launch-b", "b", {"retained_live_log_path": str(tmp_path / "services/task/demo.log")})
+    monkeypatch.setattr(services, "_SERVICES", {"task:demo": SimpleNamespace(task_id="task", keep_alive=False)})
+    monkeypatch.setattr(services, "executor_stop_task_services", lambda _ctx: [])
+    monkeypatch.setattr(services, "_stop_service_launch",
+                        lambda _ctx, _name: services.ServiceStop(automatic, services.STOP_CONFIRMED))
+    assert loop_budget._finalize_task_services(turn) is True  # the real automatic teardown
+
+    evidence = loop_budget._service_finalization_evidence(trace)
+    assert [row["kind"] for row in evidence] == ["service_stop", "services_stopped"]
+    [named_event, automatic_event] = [event for event in trace["verification_events"]
+                                     if event["kind"] == "service_stop"]
+    [named_stop], [teardown] = [row["services"] for row in evidence]
+    assert named_stop["service_stop"] == named_event["service_stop"] == named["service_stop"]
+    assert teardown["service_stop"] == automatic_event["service_stop"]
+    assert named_stop["service_stop"]["process"] == {"state": "stopped", "returncode": 0}
+    assert named_stop["service_stop"]["journal"] == {"state": "saved"}
+    assert teardown["service_stop"]["journal"] == {"state": "retained"}
+    # The permitted file stays a file; the private journal is only its state, and the old
+    # teardown row keeps its own complete log_finalization (the private path included).
+    for facts in (named_stop["service_stop"], teardown["service_stop"]):
+        [output] = facts["outputs"]
+        assert output["state"] == "saved" and output["name"] == "report.txt"
+        [file] = output["files"]
+        assert file["download_url"].startswith("/api/tasks/task/artifacts/service-output-")
+        assert "demo.log" not in json.dumps(facts)
+    assert teardown["log_finalization"] == automatic["log_finalization"]
+    assert (named_stop["service_stop"]["outputs"][0]["files"][0]["download_url"]
+            != teardown["service_stop"]["outputs"][0]["files"][0]["download_url"])  # both versions openable
+
+    # The final subject names each real launch once, whatever the Stop that produced it.
+    rows = loop_forced_finalization._service_finalization_projection(trace, drive_root=tmp_path, task_id="task")
+    assert [service["service_stop"]["launch_id"] for row in rows for service in row["services"]] == [
+        "launch-a", "launch-b"]
+    shown = loop_forced_finalization._service_finalization_text(trace, drive_root=tmp_path, task_id="task")
+    for marker in ("launch-a", "launch-b", "service-output-a.txt", "service-output-b.txt"):
+        assert marker in shown
+
+    # The author's real disclosure shows the same rows, and the delivery evidence identity
+    # changes with a fact even when the tool text would not.
+    author = SimpleNamespace(messages=[], forced_service_evidence_fingerprint="",
+                            drive_root=tmp_path, task_id="task")
+    loop_forced_finalization._disclose_service_finalization(author, trace)
+    [message] = [item for item in author.messages if "[SERVICE_FINALIZATION_EVIDENCE]" in str(item.get("content"))]
+    assert "launch-a" in str(message["content"]) and "launch-b" in str(message["content"])
+    fingerprint = delivery_evidence_fingerprint(tool_ctx, trace)
+    changed = json.loads(json.dumps(trace))
+    changed["verification_events"][0]["service_stop"]["journal"]["state"] = "unknown"
+    assert delivery_evidence_fingerprint(tool_ctx, changed) != fingerprint
+    assert loop_budget._service_finalization_evidence(trace) == evidence  # reading decided nothing
+
+
 def test_only_a_host_attested_section_is_a_closure_edge():
     from ouroboros.review_source_closure import source_carrier
 
@@ -238,7 +318,12 @@ def _assert_retained_tails_by_ref(read, rows, size):
     oversized, failed = shown["parent1:oversized"]["log_finalization"], shown["parent1:failed"]["log_finalization"]
     assert "OVERSIZED-LAST" in oversized["tail"] and "blob cap" in oversized["full_log_omitted"]
     assert oversized["retained_live_log_path"] and not oversized["full_log_ref"] and "source_ref" not in oversized
-    assert "FAILED-LAST" in failed["tail"] and "blob store full" in failed["errors"][0] and "source_ref" not in failed
+    assert (
+        "FAILED-LAST" in failed["tail"]
+        and failed["errors"] == ["capture: OSError"]
+        and "blob store full" not in json.dumps(failed)
+        and "source_ref" not in failed
+    )
     assert "log_finalization" not in shown["parent1:docker"]  # an in-container path is no retained source
     assert "ouroboros-service-docker.log" not in json.dumps(rows)
     assert size < 40_000  # twelve 80k tails would be 960k
@@ -307,3 +392,64 @@ def test_display_drops_a_tail_only_for_a_readable_source_and_identity_sees_hidde
     assert shown["full_log_ref"] == {"kind": "txt", "sha256": log["full_log_ref"]["sha256"], "encoding": "gzip",
                                      "size": log["full_log_ref"]["size"], "availability": "unavailable",
                                      "reason": "FileNotFoundError"}
+
+
+def test_a_log_whose_place_cannot_be_learned_now_keeps_its_tail_and_address(tmp_path, monkeypatch):
+    """A retained log whose bytes cannot be located now (``EvidenceUnavailable``: the packs catalog cannot
+    answer) is neither missing nor unreadable: the display keeps the row as it is, tail and the complete log's
+    address included, so a later display makes it readable; a gone blob keeps its own marked gap (the test
+    above). The read names the task."""
+    from ouroboros import evidence_packs
+
+    log = _finalized_log(tmp_path, "svc", "HEAD\n" + "x" * 90_000 + "\nLAST\n")
+    trace = {"verification_events": [{"kind": "services_stopped", "services": [
+        {"service_id": "parent1:svc", "lifecycle": "stopped", "log_finalization": log}]}]}
+    display, store = loop_forced_finalization._service_finalization_text, {"drive_root": tmp_path, "task_id": "parent1"}
+    real, tasks = evidence_packs.blob_bytes, []
+
+    def unlocatable(root, ref, **kwargs):
+        tasks.append(kwargs.get("task_id"))
+        if ref.get("sha256") == log["full_log_ref"]["sha256"]:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        [row] = json.loads(display(trace, **store))
+    assert row["services"][0]["log_finalization"] == log and tasks == ["parent1"], tasks
+    [row] = json.loads(display(trace, **store))
+    shown = row["services"][0]["log_finalization"]
+    assert "tail" not in shown and shown["source_ref"]["sha256"] == log["full_log_ref"]["sha256"]
+
+
+def test_a_retried_stop_shows_one_current_outcome_and_the_trace_keeps_the_rest():
+    """One launch, one current outcome in the reader: a pending Stop the retry
+    confirmed is replaced by the confirmation, an older teardown row cannot
+    hide that later confirmation, and the trace keeps every observation."""
+
+    def stop_facts(launch_id, confirmed):
+        return {"launch_id": launch_id, "name": "demo",
+                "process": {"state": "stopped" if confirmed else "unconfirmed", "returncode": 0},
+                "journal": {"state": "saved"}, "outputs": []}
+
+    # stop_service published the unconfirmed stop; the retry confirmed the same launch.
+    trace = {"tool_calls": [], "verification_events": [
+        {"kind": "service_stop", "service_stop": stop_facts("launch-a", confirmed=False)},
+        {"kind": "service_stop", "service_stop": stop_facts("launch-a", confirmed=True)},
+    ]}
+    evidence = loop_budget._service_finalization_evidence(trace)
+    assert [row["kind"] for row in evidence] == ["service_stop"]
+    assert evidence[0]["services"][0]["service_stop"]["process"] == {"state": "stopped", "returncode": 0}
+    assert len(trace["verification_events"]) == 2  # the pending observation stays in the trace
+
+    # An older aggregate cannot hide a later confirmation of the launch it carried.
+    trace = {"tool_calls": [], "verification_events": [
+        {"kind": "services_stopped", "services": [
+            {"service_id": "task:demo", "lifecycle": "stopped",
+             "service_stop": stop_facts("launch-b", confirmed=False)}]},
+        {"kind": "service_stop", "service_stop": stop_facts("launch-b", confirmed=True)},
+    ]}
+    evidence = loop_budget._service_finalization_evidence(trace)
+    assert [row["kind"] for row in evidence] == ["service_stop"]
+    assert evidence[0]["services"][0]["service_stop"]["journal"] == {"state": "saved"}

@@ -1,4 +1,6 @@
-/** The Settings pages (docs/DESIGN.md "Settings"; the shell in settings.js draws every page's title and Back).
+/** The page registry (docs/DESIGN.md "Settings"): the pages of Settings and of Extensions, drawn by the shell that
+ * opens them (settings.js, extensions.js; their one level mechanism is section_levels.js), which draws every page's
+ * title and Back.
  *
  * A page module registers its family once, when it is imported: `prefix` is the first part of a Settings path
  * (`agents` serves `agents`, `agents/<id>` and `agents/new`), `title` a string or `(path) => string`, and
@@ -27,8 +29,27 @@ export function settingsPageFor(path) {
     return best;
 }
 
-/** A door that leaves Settings: a Dashboard tab, another page, Main (`dashboard:costs`, `page:skills`, `main:context`). */
-export const isDoorId = (path) => /^(dashboard|page|main):/.test(String(path || ''));
+/** A door that leaves Settings: a Dashboard tab, another page, Main, a page of Extensions (`dashboard:costs`, `page:skills`,
+ *  `main:context`, `skills:tools/<id>`). */
+export const isDoorId = (path) => /^(dashboard|page|main|skills):/.test(String(path || ''));
+
+/** The first-level page of Extensions (extensions.js) that `path` stands on, '' for a page of Settings. Extensions'
+ *  pages are `installed`, `tools` (MCP servers), `browse` and `sources`; `tools/<id>` and `tools/new` lie on MCP
+ *  servers, `skill` and `skill/<name>` on Skills, `skill-sources` on Sources. Settings opens these addresses there. */
+export function extensionsPageOf(path) {
+    const target = String(path || '');
+    const head = target.split('/')[0];
+    if (head === 'tools') return 'tools';
+    if (head === 'skill') return 'installed';
+    if (target === 'skill-sources') return 'sources';
+    return ['installed', 'browse', 'sources'].includes(target) ? target : '';
+}
+
+/** The arrow's destination in words for a reader; an internal row already names its own page. */
+export function settingsDoorName(name, to) {
+    const section = String(to).startsWith('dashboard:') ? 'Dashboard' : String(to).startsWith('main:') ? 'Main' : '';
+    return section ? `${name}, ${section}` : name;
+}
 
 /** The registered prefixes, for search and the tests that walk every page. */
 export function settingsPagePrefixes() {

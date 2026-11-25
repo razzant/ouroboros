@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 from typing import Any, Dict
 
 import pytest
@@ -43,14 +44,14 @@ def settings_client(tmp_path, monkeypatch):
 
     gateway = srv._gateway_settings
     defaults = lambda settings: (dict(settings), False, [])  # noqa: E731
+    # gateway.settings reads through settings_read_view; each request's sync copies server's binding.
+    monkeypatch.setattr(srv, "load_settings", load)
     for module in (gateway, srv):
-        monkeypatch.setattr(module, "load_settings", load)
         monkeypatch.setattr(module, "save_settings", save, raising=False)
         monkeypatch.setattr(module, "_apply_settings_to_env", lambda *a, **k: None)
         monkeypatch.setattr(module, "apply_runtime_provider_defaults", defaults)
     monkeypatch.setattr(gateway, "_owner_read_settings_raw", load)
-    monkeypatch.setattr(gateway, "_owner_settings_document", load)
-    monkeypatch.setattr(gateway, "settings_read_view", lambda: (load(), load()))
+    monkeypatch.setattr(gateway, "settings_read_view", lambda **_: (load(), load()))
     monkeypatch.setattr(gateway, "_owner_write_settings", save)
     app = Starlette(routes=[Route("/api/settings", endpoint=srv.api_settings_get, methods=["GET"]),
                             Route("/api/settings", endpoint=srv.api_settings_post, methods=["POST"])])
@@ -66,7 +67,11 @@ def test_get_masks_row_secrets_and_describes_every_connection(settings_client):
     assert BYOK["api_key"] not in json.dumps(body)
     assert body[CONNECTIONS_KEY] == [{**BYOK, "api_key": "sk-or-v1..."}]
     meta = {row["id"]: row for row in body["_meta"]["connections"]}
-    assert meta["openrouter@byok"] == {
+    byok = dict(meta["openrouter@byok"])
+    # ``connection_revisions`` adds ``<id>#<24 hex>`` per row (``owner_settings.connection_revision``): the row's own id
+    # plus a process-salted digest, never a bare token.
+    assert re.fullmatch(r"openrouter@byok#[0-9a-f]{24}", byok.pop("revision"))
+    assert byok == {
         "kind": "openrouter", "name": "byok", "label": "Claude credits", "builtin": False, "enabled": True,
         "configured": True, "source": "settings", "id": "openrouter@byok", "display": "OpenRouter · Claude credits"}
     assert meta["openrouter"]["display"] == "OpenRouter" and meta["openrouter"]["source"] == "settings"
@@ -373,3 +378,190 @@ def test_discovery_and_provider_test_bind_a_saved_key_to_one_endpoint_identity(m
         "openai-compatible", {"base_url" if connection else "OPENAI_COMPATIBLE_BASE_URL": requested},
         *((connection,) if connection else ()))
     assert (tested.get("code") != "masked_key_endpoint_changed", len(probed)) == (same, int(same))
+
+
+# --- OpenAI's API (``api_surface``, the owner's choice of 16.11.2026) ---------------------------------------
+# A key new to this install is saved on Responses; a key the settings read already sees, saved earlier or from
+# the environment, keeps what it reads (Chat Completions when never chosen); a value outside the closed set saves
+# nothing. The page's strip reads the flat value and the row's field. Provider Test sends its one probe through
+# the API its draft names. Keys are fixtures; only the physical client is fake.
+
+OPENAI_ROW = {"kind": "openai", "name": "work", "api_key": "sk-proj-work-0123456789"}
+
+
+def _post_ok(client, body):
+    response = client.post("/api/settings", json=body)
+    assert response.status_code == 200, response.text
+    return client.get("/api/settings").json()
+
+
+def test_a_new_openai_key_is_saved_on_responses_and_then_keeps_its_api(settings_client):
+    client, _on_disk, saved = settings_client
+    for body, surface in (({"OPENAI_API_KEY": "sk-proj-new-0123456789"}, "responses"),
+                          ({"OPENAI_API_KEY": "sk-proj-next-0123456789"}, "responses"),  # no longer new
+                          ({"OPENAI_API_SURFACE": " Chat_Completions "}, "chat_completions"),
+                          ({"OPENAI_API_KEY": "sk-proj-third-0123456789"}, "chat_completions")):
+        shown = _post_ok(client, body)
+        assert saved["OPENAI_API_SURFACE"] == surface and shown["OPENAI_API_SURFACE"] == surface
+
+
+@pytest.mark.parametrize("in_document", [True, False], ids=["saved", "environment"])
+def test_an_openai_key_already_read_stays_on_chat_completions(settings_client, monkeypatch, in_document):
+    import server as srv
+
+    client, on_disk, saved = settings_client
+    document = copy.deepcopy(on_disk)
+    view = {**document, "OPENAI_API_KEY": "sk-proj-old-0123456789"}  # what load_settings reads
+    if in_document:
+        document = copy.deepcopy(view)
+    gateway = srv._gateway_settings
+    monkeypatch.setattr(srv, "load_settings", lambda: copy.deepcopy(view))
+    monkeypatch.setattr(gateway, "_owner_read_settings_raw", lambda: copy.deepcopy(document))
+    monkeypatch.setattr(gateway, "settings_read_view", lambda **_: (copy.deepcopy(view), copy.deepcopy(document)))
+    response = client.post("/api/settings", json={"OPENAI_API_KEY": "sk-proj-typed-0123456789"})
+    assert response.status_code == 200, response.text
+    assert saved["OPENAI_API_KEY"] == "sk-proj-typed-0123456789" and saved["OPENAI_API_SURFACE"] == ""
+
+
+def test_a_new_named_openai_row_is_saved_on_responses_and_a_kept_row_keeps_its_api(settings_client):
+    client, on_disk, saved = settings_client
+    on_disk[CONNECTIONS_KEY] = [dict(BYOK), {"kind": "openai", "name": "old", "api_key": "sk-proj-old-0123456789"}]
+
+    def surfaces():
+        return {row["name"]: row.get("api_surface", "") for row in saved[CONNECTIONS_KEY] if row["kind"] == "openai"}
+
+    rows = client.get("/api/settings").json()[CONNECTIONS_KEY]  # masked, as the page reposts them
+    rows = _post_ok(client, {CONNECTIONS_KEY: rows + [dict(OPENAI_ROW)]})[CONNECTIONS_KEY]
+    assert surfaces() == {"old": "", "work": "responses"}
+    assert {row["name"]: row.get("api_surface", "") for row in rows if row["kind"] == "openai"} == surfaces()
+    chosen = {"old": "responses", "work": "chat_completions"}  # the strip writes the row's own field
+    _post_ok(client, {CONNECTIONS_KEY: [{**row, "api_surface": chosen[row["name"]]} if row["name"] in chosen else row
+                                        for row in rows]})
+    assert surfaces() == chosen and saved[CONNECTIONS_KEY][1]["api_key"] == "sk-proj-old-0123456789"
+
+
+@pytest.mark.parametrize("body,fragment", [
+    ({"OPENAI_API_KEY": "sk-proj-new-0123456789", "OPENAI_API_SURFACE": "auto"},
+     "OPENAI_API_SURFACE must be chat_completions or responses."),
+    ({CONNECTIONS_KEY: [dict(BYOK), {**OPENAI_ROW, "api_surface": "assistants"}]},
+     "api_surface must be chat_completions or responses."),
+])
+def test_an_openai_api_outside_the_closed_set_saves_nothing(settings_client, body, fragment):
+    client, on_disk, saved = settings_client
+    before = copy.deepcopy(on_disk)
+    response = client.post("/api/settings", json=body)
+    assert response.status_code == 400 and fragment in response.json()["error"]
+    assert saved == {} and on_disk == before
+
+
+class _Reply:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def model_dump(self, **_kwargs):
+        return copy.deepcopy(self.payload)
+
+
+class _OpenAIPeer:
+    """The physical OpenAI client: each send's API and payload, answered with one call of the test function."""
+
+    def __init__(self):
+        import types
+
+        self.sends = []
+        self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._chat))
+        self.responses = types.SimpleNamespace(create=self._responses)
+
+    def with_options(self, **_kwargs):
+        return self
+
+    def _chat(self, **payload):
+        self.sends.append(("chat.completions", payload))
+        return _Reply({"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": None,
+                                    "tool_calls": [{"id": "c1", "type": "custom", "custom": {
+                                        "name": "provider_test", "input": '{"ok":true}'}}]}}]})
+
+    def _responses(self, **payload):
+        self.sends.append(("responses", payload))
+        return _Reply({"status": "completed", "output": [{
+            "type": "function_call", "call_id": "c1", "name": "provider_test", "arguments": '{"ok":true}',
+            "status": "completed"}], "usage": {"input_tokens": 3, "output_tokens": 2}})
+
+
+@pytest.fixture()
+def openai_peer(monkeypatch):
+    import ouroboros.llm_attempt as llm_attempt
+
+    peer, targets = _OpenAIPeer(), []
+    monkeypatch.setattr(llm_attempt, "execute_physical_attempt", lambda _request, send: send())
+    monkeypatch.setattr(LLMClient, "_new_remote_client", lambda _self, target: targets.append(target) or peer)
+    return peer, targets
+
+
+def test_provider_test_probes_through_the_api_its_draft_names(monkeypatch, openai_peer):
+    peer, targets = openai_peer
+    saved = {"OPENAI_API_KEY": "sk-proj-builtin-0123456789", CONNECTIONS_KEY: [dict(OPENAI_ROW)]}
+    monkeypatch.setattr(models_api, "load_settings", lambda: copy.deepcopy(saved))
+    for payload, surface, model in (
+            ({"provider_id": "openai"}, "chat.completions", "gpt-5.6-terra"),  # never chosen: Chat, its own profile
+            ({"provider_id": "openai", "overrides": {"OPENAI_API_SURFACE": "responses"}}, "responses", "gpt-6.1-terra"),
+            ({"provider_id": "openai", "connection": "work", "overrides": {"api_surface": "responses"}},
+             "responses", "gpt-6.1-terra"),
+            ({"provider_id": "openai", "connection": "work"}, "chat.completions", "gpt-5.6-terra")):
+        assert _provider_test(payload) == (200, {"ok": True}), payload
+        api, sent = peer.sends.pop()
+        setting = {"chat.completions": "chat_completions"}.get(surface, surface)  # the target keeps the choice's spelling
+        assert (api, sent["model"], targets[-1]["api_surface"]) == (surface, model, setting)
+        assert ("input" in sent, sent["tool_choice"]) == (surface == "responses", "required")
+        assert [tool["type"] for tool in sent["tools"]] == ["function" if surface == "responses" else "custom"]
+        assert targets[-1]["api_key"] == (OPENAI_ROW["api_key"] if "connection" in payload else saved["OPENAI_API_KEY"])
+    assert peer.sends == [] and saved[CONNECTIONS_KEY] == [OPENAI_ROW]  # one send each; nothing is saved
+
+
+@pytest.mark.parametrize("payload", [
+    {"provider_id": "openai", "overrides": {"OPENAI_API_SURFACE": "auto"}},
+    {"provider_id": "openai", "connection": "work", "overrides": {"api_surface": "assistants"}},
+])
+def test_provider_test_refuses_an_openai_api_outside_the_closed_set(monkeypatch, openai_peer, payload):
+    peer, targets = openai_peer
+    monkeypatch.setattr(models_api, "load_settings", lambda: {"OPENAI_API_KEY": "sk-proj-builtin-0123456789",
+                                                              CONNECTIONS_KEY: [dict(OPENAI_ROW)]})
+    assert _provider_test(payload) == (400, {"error": "unknown OpenAI API"})
+    assert peer.sends == [] and targets == []
+
+
+def test_a_draft_not_saved_yet_is_tested_on_the_api_its_save_would_store(monkeypatch, openai_peer):
+    """Test and Save resolve a new draft by one rule (``seed_new_api_surfaces``): a named row or a built-in key the
+    install does not hold yet is tested on Responses, as its save stores it; a saved row or key that never chose
+    keeps Chat Completions in both, and an explicit choice stands as written."""
+    peer, targets = openai_peer
+    saved = {CONNECTIONS_KEY: [{"kind": "openai", "name": "old", "api_key": "sk-proj-old-0123456789"}]}
+    monkeypatch.setattr(models_api, "load_settings", lambda: copy.deepcopy(saved))
+    for payload, surface in (
+            ({"provider_id": "openai", "connection": "work", "overrides": {"api_key": "sk-proj-new-0123456789"}},
+             "responses"),
+            ({"provider_id": "openai", "overrides": {"OPENAI_API_KEY": "sk-proj-first-0123456789"}}, "responses"),
+            ({"provider_id": "openai", "connection": "old"}, "chat_completions"),
+            ({"provider_id": "openai", "connection": "work", "overrides": {
+                "api_key": "sk-proj-new-0123456789", "api_surface": "chat_completions"}}, "chat_completions")):
+        assert _provider_test(payload) == (200, {"ok": True}), payload
+        assert targets[-1]["api_surface"] == surface, payload
+    saved["OPENAI_API_KEY"] = "sk-proj-kept-0123456789"  # a key the install holds is no longer new
+    assert _provider_test({"provider_id": "openai", "overrides": {"OPENAI_API_KEY": "sk-proj-typed-0123456789"}})[0] == 200
+    assert targets[-1]["api_surface"] == "chat_completions" and len(peer.sends) == 5
+
+
+def test_provider_test_never_borrows_a_model_its_key_s_api_cannot_call(monkeypatch, openai_peer):
+    """A Chat key with no route of its own is tested on its own profile, not on the Sol 6.1 another key runs on
+    Responses; a key on the same API still lends its route, and a key's own route always wins."""
+    peer, targets = openai_peer
+    saved = {"OPENAI_API_KEY": "sk-proj-builtin-0123456789", "OUROBOROS_MODEL": "openai@work::gpt-6.1-sol",
+             CONNECTIONS_KEY: [{**OPENAI_ROW, "api_surface": "responses"},
+                               {"kind": "openai", "name": "twin", "api_key": "sk-proj-twin-0123456789",
+                                "api_surface": "responses"}]}
+    monkeypatch.setattr(models_api, "load_settings", lambda: copy.deepcopy(saved))
+    for payload, model in (({"provider_id": "openai"}, "gpt-5.6-terra"),
+                           ({"provider_id": "openai", "connection": "twin"}, "gpt-6.1-sol"),
+                           ({"provider_id": "openai", "connection": "work"}, "gpt-6.1-sol")):
+        assert _provider_test(payload) == (200, {"ok": True}), payload
+        assert peer.sends.pop()[1]["model"] == model, payload

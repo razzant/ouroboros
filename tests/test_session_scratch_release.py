@@ -21,7 +21,10 @@ import pytest
 
 from ouroboros import delegate_custody, headless, owner_keep, session_scratch, task_custody, test_environment
 from ouroboros.workspace_preflight import (
-    OPEN_SCRATCH_DIR, SESSION_SCRATCH_DIRNAME, release_finished_scratch, session_service_directories,
+    OPEN_SCRATCH_DIR,
+    SESSION_SCRATCH_DIRNAME,
+    release_finished_scratch,
+    session_service_directories,
 )
 from tests._shared import retire_synthetic_retention
 from tests._store_shared import seed_result
@@ -50,12 +53,17 @@ def _record(data, task_id="task-1", key="snap-1"):
     return data / "task_drives" / task_id / SESSION_SCRATCH_DIRNAME / key / "scratch.json"
 
 
+def _container(data, task_id="task-1", key="snap-1"):
+    return pathlib.Path(json.loads(_record(data, task_id, key).read_text(encoding="utf-8"))["path"])
+
+
 def _hold(data, reason, task_id="task-1", key="snap-1"):
     """The typed hold one kept record reports: its class, the record folder and since the note was written."""
+    from ouroboros.maintenance_jobs import HOLD_EXAMPLE_CHARS
     from ouroboros.session_scratch import _iso
 
     note = data / OPEN_SCRATCH_DIR / task_id / f"{key}.json"
-    return {"class": reason, "count": 1, "example": str(_record(data, task_id, key).parent),
+    return {"class": reason, "count": 1, "example": str(_record(data, task_id, key).parent)[:HOLD_EXAMPLE_CHARS],
             "since": _iso(note.lstat().st_mtime)}
 
 
@@ -192,6 +200,7 @@ def test_a_record_folder_that_outlives_its_release_names_no_scratch(tmp_path, mo
     from ouroboros import force_remove
 
     data, scratch = _started(tmp_path)
+    container = _container(data)
     stale = owner_keep.inventory(data, "task-1", {"status": "completed", "task_id": "task-1"})
     folder, original = _record(data).parent, force_remove.force_rmtree
     monkeypatch.setattr(force_remove, "force_rmtree",  # a Windows sharing violation keeps the folder
@@ -200,7 +209,7 @@ def test_a_record_folder_that_outlives_its_release_names_no_scratch(tmp_path, mo
     assert folder.is_dir() and not _record(data).exists()
     monkeypatch.setattr(owner_keep, "inventory", lambda *_args: stale)
     answer = owner_keep.set_owner_keep(data, "task-1", keep=True, source={"basis": "test"})
-    assert str(scratch) in answer["retired"] and str(scratch) not in answer["retained"]
+    assert str(container) in answer["retired"] and str(container) not in answer["retained"]
     assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
 
 
@@ -219,25 +228,27 @@ def test_an_unreadable_custody_store_keeps_the_scratch(tmp_path, monkeypatch):
 
 def test_an_unreadable_record_is_unknown_to_the_keep_never_kept_or_retired(tmp_path, monkeypatch):
     data, scratch = _started(tmp_path)
+    container = _container(data)
     stale = owner_keep.inventory(data, "task-1", {"status": "completed", "task_id": "task-1"})
     _record(data).write_text("{torn", encoding="utf-8")
     monkeypatch.setattr(owner_keep, "inventory", lambda *_args: stale)
     answer = owner_keep.set_owner_keep(data, "task-1", keep=True, source={"basis": "test"})
     assert answer["unknown"] == ["environments"]
-    assert str(scratch) not in answer["retained"] and str(scratch) not in answer["retired"]
+    assert str(container) not in answer["retained"] and str(container) not in answer["retired"] and scratch.is_dir()
 
 
 def test_a_keep_racing_the_release_never_reports_the_released_scratch_as_kept(tmp_path, monkeypatch):
     data, scratch = _started(tmp_path)
     row = {"status": "completed", "task_id": "task-1"}
+    container = _container(data)
     stale = owner_keep.inventory(data, "task-1", row)  # read before the release, as set_owner_keep does unlocked
     places, _unknown, pins = stale
-    assert str(scratch) in places and owner_keep._present(data, "task-1", str(scratch), pins) is True
+    assert str(container) in places and owner_keep._present(data, "task-1", str(container), pins) is True
     assert release_finished_scratch(data, OVER)["released"]  # accepted for deletion; the child has not run yet
-    assert scratch.is_dir() and owner_keep._present(data, "task-1", str(scratch), pins) is False
+    assert scratch.is_dir() and owner_keep._present(data, "task-1", str(container), pins) is False
     monkeypatch.setattr(owner_keep, "inventory", lambda *_args: stale)
     answer = owner_keep.set_owner_keep(data, "task-1", keep=True, source={"basis": "test"})
-    assert str(scratch) in answer["retired"] and str(scratch) not in answer["retained"]
+    assert str(container) in answer["retired"] and str(container) not in answer["retained"]
     assert answer["status"] == "partly_retired"
 
 
@@ -364,7 +375,7 @@ def test_counting_scratch_skips_hold_proofs_and_keeps_other_roots_after_an_unrea
         for name in ("task_hold", "seat_hold", "retention_hold"):
             patch.setattr(session_scratch, name, no_hold_reads)
         patch.setattr(owner_keep, "is_kept", no_hold_reads)
-        assert session_scratch.recorded_scratch_roots(data) == [str(good)]
+        assert session_scratch.recorded_scratch_roots(data) == [str(good.parent)]
         assert bad.is_dir()  # an unreadable record is not retirement authority
     rows = {row["task_id"]: row for row in session_scratch.scratch_records(data, live=lambda _: True)}
     assert rows["good"]["valid"] and rows["good"]["hold"] == "task_live"  # the full view still judges holds
@@ -432,7 +443,7 @@ def test_a_record_under_the_legacy_tmp_parent_still_releases_and_a_foreign_paren
     legacy.mkdir()
     monkeypatch.setattr(test_environment, "default_temp_parent", lambda: legacy)
     data, scratch = _started(tmp_path)
-    assert scratch.parent == test_environment.session_scratch_parent().resolve() != legacy.resolve()
+    assert scratch.parent.parent == test_environment.session_scratch_parent().resolve() != legacy.resolve()
     old = pathlib.Path(tempfile.mkdtemp(prefix="obs-", dir=legacy))
     (old / "env").mkdir()
     seen = old.lstat()
@@ -462,12 +473,13 @@ def test_a_retained_scratch_keeps_its_record_as_a_visible_hold_until_its_marker_
     from ouroboros.session_scratch import _iso
 
     data, scratch = _started(tmp_path)
+    container = _container(data)
     nested = scratch / "t" / "ob-run.noindex"  # a test run inside the scratch that could not prove its exit
     nested.mkdir(parents=True)
     assert test_environment.retain_tree(nested, reason)
     marker = nested / test_environment.RETENTION_MARKER
     assert release_finished_scratch(data, OVER)["released"]
-    hold = {"class": "producer_retained", "count": 1, "example": f"{scratch}: {reason}", "since": _iso(marker.lstat().st_mtime)}
+    hold = {"class": "producer_retained", "count": 1, "example": f"{container}: {reason}", "since": _iso(marker.lstat().st_mtime)}
     report = task_custody.remove_custody_trash(data)
     assert report["removed"] == 0 and report["stuck"] == {} and report["holds"] == [hold]
     assert (scratch / "env" / "pyvenv.cfg").is_file() and marker.is_file()
@@ -581,7 +593,9 @@ def test_a_failed_release_or_handoff_keeps_the_trash_entry_and_every_record_in_i
 @pytest.mark.parametrize("task,missing_note", [("long-parent", False), ("api_skill_review", True), ("marketplace_install", False)])
 def test_review_scratch_follows_finished_seat_not_parent_task(tmp_path, monkeypatch, task, missing_note):
     from types import SimpleNamespace
-    from ouroboros import review_checking as rc, review_checking_prune as rp
+
+    from ouroboros import review_checking as rc
+    from ouroboros import review_checking_prune as rp
     from ouroboros.review_session_preparation import seat_service_directories
     from tests.test_review_checkout_lifecycle import _frozen, _seat
     root, source = _frozen(tmp_path)
@@ -611,10 +625,13 @@ def test_review_scratch_follows_finished_seat_not_parent_task(tmp_path, monkeypa
 
 def test_continuation_keeps_original_environment_through_maintenance_then_releases(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from ouroboros import review_checking as rc, review_checking_prune as rp, review_continuation as continuation
+
+    from ouroboros import review_checking as rc
+    from ouroboros import review_checking_prune as rp
+    from ouroboros import review_continuation as continuation
     from ouroboros.review_session_preparation import seat_service_directories
-    from tests.test_review_checkout_lifecycle import _frozen, _seat
     from tests.test_review_checking_prune import _custody
+    from tests.test_review_checkout_lifecycle import _frozen, _seat
     root, source = _frozen(tmp_path)
     task = 'api_skill_review'  # the Skills page can continue without a live managed parent
     area = _seat(root, source, 'stopped', task=task)
@@ -642,10 +659,12 @@ def test_continuation_keeps_original_environment_through_maintenance_then_releas
 def test_finished_seat_scratch_release_survives_either_cleanup_order(tmp_path, monkeypatch, order):
     """Seat-home retirement and seat-owned scratch release are independent; neither may strand the other."""
     from types import SimpleNamespace
-    from ouroboros import review_checking as rc, review_checking_prune as rp
+
+    from ouroboros import review_checking as rc
+    from ouroboros import review_checking_prune as rp
     from ouroboros.review_session_preparation import seat_service_directories
-    from tests.test_review_checkout_lifecycle import _frozen, _seat
     from tests.test_review_checking_prune import _custody
+    from tests.test_review_checkout_lifecycle import _frozen, _seat
 
     root, source = _frozen(tmp_path)
     task, operation = "finished-parent", "review-operation"
@@ -679,7 +698,9 @@ def test_finished_seat_scratch_release_survives_either_cleanup_order(tmp_path, m
 @pytest.mark.parametrize('fault', ['keep', 'capture_failed', 'seat_in_trash', 'seat_retirement'])
 def test_seat_environment_survives_negative_proofs_and_drive_retirement(tmp_path, monkeypatch, fault):
     from types import SimpleNamespace
-    from ouroboros import review_checking as rc, review_checking_prune as rp
+
+    from ouroboros import review_checking as rc
+    from ouroboros import review_checking_prune as rp
     from ouroboros.review_session_preparation import seat_service_directories
     from tests.test_review_checkout_lifecycle import _frozen, _seat
     root, source = _frozen(tmp_path)

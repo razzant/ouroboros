@@ -32,6 +32,280 @@ def body(reply):
     return reply.split("\n\n", 1)[1]
 
 
+@pytest.mark.parametrize("scope", ["global", "project:river"])
+def test_exact_version_survives_rename_and_the_unversioned_address_reports_the_missing_note(tmp_path, scope):
+    target = store.resolve_knowledge_address(tmp_path, TOPIC, scope)
+    first = store.write_knowledge_note(target, RIVER.replace("\n", "\r\n")).current
+    second = store.write_knowledge_note(target, RIVER.replace("## Мост", "## Пристань"), expected_revision=first.revision).current
+    ctx = context(tmp_path)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ctx)
+    args = {"topic": target.topic, "scope": scope}
+    assert body(registry.execute("knowledge_read", args)) == second.text
+    start, end = second.text.index("## Пристань"), second.text.index("## Конец")
+    bounds = {"start_char": start, "end_char": end}
+    pin = {**args, "version": second.revision}
+    note = registry.execute_result("knowledge_read", pin)
+    page = registry.execute_result("knowledge_read", {**pin, **bounds})
+    outline = registry.execute_result("knowledge_read", {**pin, "view": "outline"})
+    assert body(note.text) == second.text and body(page.text) == second.text[start:end]
+    assert "an earlier version" not in body(outline.text) and "## Пристань" in body(outline.text)
+    assert f"default view and version={second.revision}." in body(outline.text)
+    readers = [note.meta["knowledge_source"]["read"], page.meta["knowledge_source"]["read"],
+               outline.meta["knowledge_view"]["read"]]
+    assert all(reader == {"tool": "knowledge_read", "arguments": pin} for reader in readers)
+    target.path.rename(target.path.with_name("new-name.md"))
+
+    exact = registry.execute_result("knowledge_read", {**args, "version": first.revision})
+    assert exact.status == "ok" and "The live note is absent at this address." in exact.text
+    assert exact.text[exact.meta["knowledge_body_start"]:].encode("utf-8") == first.raw
+    assert exact.meta["knowledge_source"]["read"]["arguments"] == {**args, "version": first.revision}
+    historical_outline = body(registry.execute("knowledge_read", {**args, "version": first.revision, "view": "outline"}))
+    assert "an earlier version, not the current note (live note absent at this address)" in historical_outline
+    assert "## Мост" in historical_outline and "## Пристань" not in historical_outline
+    assert f"Revision: {first.revision}" in historical_outline
+    missing = registry.execute_result("knowledge_read", args)
+    assert missing.meta["knowledge_missing"] is True and "Topic" in missing.text and "not found" in missing.text
+    unknown = registry.execute_result("knowledge_read", {**args, "version": "0" * 64})
+    assert unknown.status == "error" and "version_unavailable" in unknown.text
+
+    replacement = store.write_knowledge_note(target, "# Replacement\n\nCurrent contents.\n").current
+    current = registry.execute_result("knowledge_read", args)
+    assert body(current.text) == replacement.text and "version" not in current.meta["knowledge_source"]["read"]["arguments"]
+    assert "# Replacement" in registry.execute("knowledge_read", {**args, "view": "outline"})
+    for reader, options in zip(readers, ({}, bounds, bounds)):
+        recovered = registry.execute_result(reader["tool"], {**reader["arguments"], **options})
+        assert recovered.status == "ok" and f"The current revision is {replacement.revision}." in recovered.text
+        assert body(recovered.text) == (second.text[start:end] if options else second.text)
+
+
+@pytest.mark.parametrize("occupant", ["directory", "non-utf8"])
+def test_a_pinned_read_recovers_when_the_live_path_is_unreadable(tmp_path, occupant):
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target = address(tmp_path)
+    saved = store.write_knowledge_note(target, RIVER.replace("\n", "\r\n")).current
+    target.path.rename(target.path.with_name("moved.md"))
+    args = {"topic": target.topic, "scope": target.scope}
+    earlier = {**args, "version": saved.revision}
+    missing = registry.execute_result("knowledge_read", args)
+    assert missing.meta["knowledge_missing"] is True
+    assert "The live note is absent at this address." in registry.execute("knowledge_read", earlier)
+    if occupant == "directory":
+        target.path.mkdir()
+        expected_code = "TOOL_REPORTED_FAILURE"
+    else:
+        target.path.write_bytes(RIVER.encode("utf-16"))
+        expected_code = "TOOL_ARG_ERROR"
+    ordinary = registry.execute_result("knowledge_read", args)
+    assert ordinary.status == "error" and ordinary.code == expected_code
+    assert not ordinary.meta.get("knowledge_missing") and "The live note is" not in ordinary.text
+    exact = registry.execute_result("knowledge_read", earlier)
+    assert exact.status == "ok" and body(exact.text).encode() == saved.raw
+    assert "The live note is unreadable at this address." in exact.text
+    outline = registry.execute_result("knowledge_read", {**earlier, "view": "outline"})
+    assert "live note unreadable at this address" in body(outline.text)
+    assert body(registry.execute("knowledge_read", outline.meta["knowledge_view"]["read"]["arguments"])) == saved.text
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["on-disk-spelling", "legacy-case-alias"])
+def test_case_aliases_use_the_journal_address_for_pins_history_and_revert(tmp_path, monkeypatch, legacy):
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target, alias = address(tmp_path, "Field/CaseNote"), address(tmp_path, "field/casenote")
+    if legacy:
+        target.path.parent.mkdir(parents=True)
+        target.path.write_bytes(b"Handwritten seed.\n")
+        if not alias.path.exists():
+            pytest.skip("legacy alias writes require a case-insensitive volume")
+        seed = store.read_knowledge_note(target)
+        with monkeypatch.context() as patch:
+            # Older writers journaled the requested address even when the shelf spelled it differently.
+            patch.setattr(store, "shelf_spelling", lambda requested: requested)
+            first = store.write_knowledge_note(alias, RIVER, expected_revision=seed.revision).current
+            second = store.write_knowledge_note(alias, RIVER.replace("Мост", "Пристань"), expected_revision=first.revision).current
+    else:
+        first = store.write_knowledge_note(target, RIVER).current
+        second = store.write_knowledge_note(target, RIVER.replace("Мост", "Пристань"), expected_revision=first.revision).current
+
+    args = {"topic": alias.topic, "scope": alias.scope}
+    if not alias.path.exists():
+        separate = store.write_knowledge_note(alias, "Independent note.\n").current
+        listing = registry.execute("knowledge_read", {**args, "view": "history"})
+        assert "1 recorded version(s)" in listing and separate.revision in listing and first.revision not in listing
+        assert "version_unavailable" in registry.execute("knowledge_read", {**args, "version": first.revision})
+        return
+
+    history = registry.execute_result("knowledge_read", {**args, "view": "history"})
+    listing = body(history.text)
+    assert "2 recorded version(s)" in listing and all(note.revision in listing for note in (first, second))
+    cursor = history.meta["knowledge_view"]
+    page = registry.execute("knowledge_read", {**args, "topic": cursor["topic"], "view": "history",
+                                              "fingerprint": cursor["fingerprint"], "start_char": 40})
+    assert body(page) == listing[40:]
+    journal_topic = alias.topic if legacy else target.topic
+    assert body(registry.execute("knowledge_read", {**args, "topic": journal_topic, "version": first.revision})) == first.text
+    readers = []
+    for note in (first, second):
+        pin = {**args, "version": note.revision}
+        exact = registry.execute_result("knowledge_read", pin)
+        page = registry.execute_result("knowledge_read", {**pin, "start_char": 1, "end_char": 10})
+        outline = registry.execute_result("knowledge_read", {**pin, "view": "outline"})
+        assert body(exact.text) == note.text and body(page.text) == note.text[1:10]
+        assert f"version={note.revision}" in body(outline.text)
+        expected_reader = {"tool": "knowledge_read", "arguments": {**pin, "topic": journal_topic}}
+        assert exact.meta["knowledge_source"]["read"] == page.meta["knowledge_source"]["read"] == expected_reader
+        assert outline.meta["knowledge_view"]["read"] == expected_reader
+        readers.append((expected_reader, note.text))
+
+    target.path.write_bytes(b"\xff")
+    unreadable = registry.execute("knowledge_read", {**args, "version": first.revision})
+    assert "The live note is unreadable at this address." in unreadable and body(unreadable) == first.text
+    target.path.write_bytes(second.raw)
+    current = second
+    if legacy:
+        current = store.write_knowledge_note(alias, "Newly journaled under the on-disk spelling.\n", mode="append").current
+        listing = registry.execute("knowledge_read", {**args, "view": "history"})
+        assert "3 recorded version(s)" in listing
+        assert listing.index("current") > listing.index(current.revision)
+        assert all(note.revision in listing for note in (first, second))
+    reverted = registry.execute_result("knowledge_write", {**args, "mode": "revert", "version": first.revision,
+                                                           "expected_revision": current.revision})
+    assert reverted.status == "ok" and target.path.read_bytes() == first.raw
+
+    target.path.rename(target.path.with_name("Moved.md"))
+    for reader, expected in readers:
+        assert body(registry.execute(reader["tool"], reader["arguments"])) == expected
+
+
+def test_a_malformed_outline_names_the_pin_that_reads_its_complete_source(tmp_path):
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target = address(tmp_path)
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(b"---\nsummary: [\n---\n## Earlier body\n")
+    malformed = store.read_knowledge_note(target)
+    assert malformed.parse_error
+    revised = store.write_knowledge_note(target, RIVER, expected_revision=malformed.revision).current
+    args = {"topic": target.topic, "scope": target.scope, "view": "outline"}
+    assert "Headings: unknown" not in registry.execute("knowledge_read", args)
+    assert f"version={revised.revision}" not in registry.execute("knowledge_read", args)
+
+    old = registry.execute_result("knowledge_read", {**args, "version": malformed.revision})
+    assert f"the complete note is the default read with version={malformed.revision}" in body(old.text)
+    reader = old.meta["knowledge_view"]["read"]
+    assert body(registry.execute(reader["tool"], reader["arguments"])) == malformed.text
+
+
+def test_knowledge_changes_skip_unchanged_journals_and_read_only_the_appended_window(tmp_path, monkeypatch):
+    target = address(tmp_path)
+    first = store.write_knowledge_note(target, "# Earlier\n" + "old body\n" * 2000).current
+    journal = versions.journal_path(target)
+    gaps = set()
+    events, baseline = versions.knowledge_changes(tmp_path, None, gaps)
+    assert events == [] and not gaps and baseline["global"]["offset"] == journal.stat().st_size
+    original_open, original_parse, opened, parsed = type(journal).open, versions._parse, [], []
+
+    def opening(path, *args, **kwargs):
+        if path == journal:
+            opened.append(path)
+        return original_open(path, *args, **kwargs)
+
+    def parsing(line):
+        parsed.append(line)
+        return original_parse(line)
+
+    with monkeypatch.context() as spy:
+        spy.setattr(type(journal), "open", opening)
+        assert versions.knowledge_changes(tmp_path, baseline, gaps) == ([], baseline)
+        assert opened == []
+    # Appended later with an older stamp: publication position, never timestamp, orders this window.
+    later = {"topic": TOPIC, "publication": "source_capture", "mode": "edit", "ts": "2000-01-01T00:00:00Z",
+             "address": {"scope": "global"}, "focus": {"role": "main", "room_id": "fixture-room"},
+             "new_sha256": first.revision, "new_content": first.text}
+    with journal.open("ab") as stream:
+        stream.write((json.dumps(later) + "\n").encode("utf-8"))
+    with monkeypatch.context() as spy:
+        spy.setattr(type(journal), "open", opening)
+        spy.setattr(versions, "_parse", parsing)
+        changes, accepted = versions.knowledge_changes(tmp_path, baseline, gaps)
+    assert opened == [journal] and len(parsed) == len(changes) == 1 and not gaps
+    assert "1 write; by main room_id=fixture-room; first 2000-01-01T00:00:00Z; last 2000-01-01T00:00:00Z" in changes[0][2]
+    assert f"version={first.revision!r}" in changes[0][2]
+    assert accepted["global"]["offset"] == journal.stat().st_size
+    assert versions.knowledge_changes(tmp_path, accepted, gaps) == ([], accepted)
+
+
+def test_knowledge_changes_group_pages_in_first_write_order_and_keep_all_versions(tmp_path, monkeypatch):
+    target, other = address(tmp_path, "zeta"), address(tmp_path, "alpha")
+    first = store.write_knowledge_note(target, "Before this window.").current
+    gaps = set()
+    _, baseline = versions.knowledge_changes(tmp_path, None, gaps)
+    writers = ({"role": "root", "task_id": "fixture-z-writer"},
+               {"role": "presence", "room_id": "fixture-a-room"})
+    stamps = [f"2001-01-01T00:{index:02d}:00Z" for index in range(13)]
+    stamps[-1] = "1999-01-01T00:00:00Z"  # append order, not timestamp order, chooses the latest version
+    notes, revision = [], first.revision
+    for index, stamp in enumerate(stamps):
+        monkeypatch.setattr(store, "utc_now_iso", lambda: stamp)
+        written = store.write_knowledge_note(target, f"Write {index}.\n", expected_revision=revision,
+                                            focus=writers[index % 2])
+        assert written.ok, written.reason
+        notes.append(written.current)
+        revision = written.current.revision
+        if index == 0:
+            second_page = store.write_knowledge_note(other, "Another page.\n", focus=writers[1]).current
+    own = store.write_knowledge_note(target, "The wake's own later write.\n", expected_revision=revision,
+                                    focus={"role": "consciousness", "task_id": "fixture-own-wake"}).current
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    changes, accepted = versions.knowledge_changes(tmp_path, baseline, gaps)
+    assert len(changes) == 2 and not gaps
+    assert changes == [
+        ("knowledge_change", None,
+         f"- knowledge global/zeta: 13 writes; by root task_id=fixture-z-writer, presence room_id=fixture-a-room; "
+         f"first {stamps[0]}; last {stamps[-1]}; "
+         f"knowledge_read(topic='zeta', scope='global', version={revision!r})"),
+        ("knowledge_change", None,
+         f"- knowledge global/alpha: 1 write; by presence room_id=fixture-a-room; "
+         f"first {stamps[0]}; last {stamps[0]}; "
+         f"knowledge_read(topic='alpha', scope='global', version={second_page.revision!r})"),
+    ]
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    ctx = context(tmp_path)
+    for change, note in zip(changes, (notes[-1], second_page)):
+        tool, arguments = printed_call(change[2].split("; ")[-1])
+        assert tool == "knowledge_read" and tools._knowledge_read(ctx, **arguments).endswith(note.text)
+    for note in (first, *notes, own):
+        assert tools._knowledge_read(ctx, "zeta", version=note.revision).endswith(note.text)
+    assert versions.knowledge_changes(tmp_path, baseline, gaps)[0] == changes  # unaccepted: replay the same window
+    assert versions.knowledge_changes(tmp_path, accepted, gaps) == ([], accepted)
+    assert accepted["global"]["offset"] == versions.journal_path(target).stat().st_size
+
+
+@pytest.mark.parametrize("fault", ["ending_changed", "unfinished"])
+def test_knowledge_journal_gaps_keep_the_accepted_position_and_intact_journals_continue(tmp_path, fault):
+    target = address(tmp_path)
+    first = store.write_knowledge_note(target, "# First\n").current
+    journal = versions.journal_path(target)
+    gaps = set()
+    _, baseline = versions.knowledge_changes(tmp_path, None, gaps)
+    second = store.write_knowledge_note(target, "# Second\n", expected_revision=first.revision).current
+    good = journal.read_bytes()
+    if fault == "ending_changed":
+        end = baseline["global"]["offset"]
+        journal.write_bytes(good[:end - 2] + b" \n" + good[end:])
+    else:
+        journal.write_bytes(good[:-1])
+    changes, retained = versions.knowledge_changes(tmp_path, baseline, gaps)
+    assert changes == [] and retained == baseline
+    assert any("knowledge changes unreadable (global)" in gap for gap in gaps)
+    journal.write_bytes(good)
+    gaps.clear()
+    changes, accepted = versions.knowledge_changes(tmp_path, retained, gaps)
+    assert len(changes) == 1 and f"version={second.revision!r}" in changes[0][2] and not gaps
+    assert accepted["global"]["offset"] == len(good)
+
+
 def test_outline_ranges_read_back_exactly_their_sections(tmp_path):
     ctx = context(tmp_path)
     note = store.write_knowledge_note(address(tmp_path), RIVER).current
@@ -188,10 +462,15 @@ def test_a_digest_era_row_says_its_text_is_not_stored(tmp_path):
 def test_a_version_reads_back_exactly_in_ranges_and_as_its_outline(tmp_path):
     ctx = context(tmp_path)
     target = address(tmp_path)
-    first = store.write_knowledge_note(target, RIVER).current
+    first = store.write_knowledge_note(target, RIVER + "[Old gap](old-gap.md)\n").current
     second = store.write_knowledge_note(target, "", "edit", first.revision,
-                                        edits=[{"old_str": "## Мост\n\nСтарый мост.\n\n### Опоры\n\nДве.\n\n", "new_str": ""}]).current
+                                        edits=[{"old_str": "## Мост\n\nСтарый мост.\n\n### Опоры\n\nДве.\n\n", "new_str": ""},
+                                               {"old_str": "[Old gap](old-gap.md)", "new_str": "[New gap](new-gap.md)"}]).current
+    store.write_knowledge_note(address(tmp_path, "later-source"), "[Now](notes/река.md)\n")
     old = tools._knowledge_read(ctx, TOPIC, version=first.revision)
+    assert '[Knowledge links] {"unwritten": [{"scope": "global", "topic": "notes/old-gap"}]}' in old
+    assert '[Knowledge backlinks (readable shelves now)] [{"scope": "global", "topic": "later-source", "state": "active"}]' in old
+    assert '"topic": "notes/new-gap"' in tools._knowledge_read(ctx, TOPIC)
     assert old.endswith(first.text) and "Earlier version, not the current note" in old
     assert f"The current revision is {second.revision}" in old and "focus unknown (overwrite; reason: not recorded)" in old
     assert tools._knowledge_read(ctx, TOPIC, version=first.revision, start_char=3, end_char=40).endswith(first.text[3:40])
@@ -254,7 +533,7 @@ def test_an_emptied_plain_note_keeps_its_revision_and_its_calls_work(tmp_path):
     receipt = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "mode": "overwrite",
                                                    "content": "# Again\n", "expected_revision": empty})
     assert receipt.startswith("✅"), receipt
-    meta = json.loads(receipt.split("\n", 1)[1])
+    meta = json.loads(receipt.split("\n", 2)[1])
     assert meta["knowledge_previous"]["revision"] == empty
     assert json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])["old_sha256"] == empty
     stale = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "mode": "overwrite",
@@ -280,14 +559,18 @@ def test_a_version_lookup_that_misses_names_the_torn_lines_of_this_note(tmp_path
     store.write_knowledge_note(target, "# Река\n\nOne.\n")
     missing = "0" * 64
     clean = tools._knowledge_read(ctx, TOPIC, version=missing)
-    assert clean == f"⚠️ TOOL_ERROR: version_unavailable: no version {missing} of this note in its history"
+    error = f"⚠️ TOOL_ERROR: version_unavailable: no version {missing} of this note in its history"
+    situation = "This situation's names: room:1 (Main)"
+    assert clean.splitlines() == [error, situation]
     journal = target.shelf.parent / "knowledge_history.jsonl"
     offset = journal.stat().st_size
     with journal.open("a", encoding="utf-8") as stream:  # torn before its revision fields
         stream.write(json.dumps({"topic": TOPIC, "mode": "edit"}, ensure_ascii=False)[:-1] + ', "new_sh\n')
     torn = tools._knowledge_read(ctx, TOPIC, version=missing)
-    assert torn == (f"⚠️ TOOL_ERROR: version_unavailable: no version {missing} of this note in its history (1 journal "
-                    f"line(s) naming this note are not JSON and were skipped (the first at byte offset {offset}))")
+    assert torn.splitlines() == [
+        f"{error} (1 journal line(s) naming this note are not JSON and were skipped (the first at byte offset {offset}))",
+        situation,
+    ]
 
 
 def test_the_backward_scan_finds_every_row_across_block_edges(tmp_path, monkeypatch):
@@ -349,6 +632,54 @@ def test_the_changes_since_a_held_version_show_every_block_whole(tmp_path):
     assert rendered.count("\n@ yours: 1 line(s) from line ") == 7 and "not shown" not in rendered
     assert applied_blocks(held.text, rendered) == current.text
     assert rendered.endswith("The complete current text is knowledge_read(topic='notes/река', scope='global').\n")
+
+
+def test_stale_write_chooses_diff_or_source_before_attaching_the_names_line(tmp_path, monkeypatch):
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.tool_result_delivery import project_tool_result_batch
+
+    monkeypatch.setattr(store, "utc_now_iso", lambda: "2026-11-18T12:00:00+00:00")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    root = context(tmp_path)
+    child = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child",
+                        task_metadata={"delegation_role": "subagent"})
+    names_line = "This situation's names: room:1 (Main)\n"
+
+    def conflict(topic, reason):
+        target = address(tmp_path, topic)
+        old = "# Plan\n\nBefore.\n\n" + "Steady words.\n" * 1600
+        held = store.write_knowledge_note(target, old).current
+        current = store.write_knowledge_note(target, held.text.replace("Before.", "After."),
+                                             expected_revision=held.revision, reason=reason).current
+        args = {"topic": topic, "scope": "global", "mode": "overwrite", "content": "Stale edit.",
+                "expected_revision": held.revision}
+        registry.set_context(child)
+        control = registry.execute_result("knowledge_write", args)
+        registry.set_context(root)
+        reply = registry.execute_result("knowledge_write", args)
+        assert control.status == reply.status == "error" and target.path.read_bytes() == current.raw
+        assert reply.text.count(names_line) == 1 and reply.text.replace(names_line, "", 1) == control.text
+        return control, reply, held, current
+
+    limit = tools.tool_result_limit("knowledge_write")
+    probe, _, _, _ = conflict("probe", "r")
+    padding = limit - len(probe.text)
+    assert probe.meta["knowledge_changes_since"] and padding > 0
+    fit, diff, held, current = conflict("equal", "r" * (padding + 1))
+    assert len(fit.text) == limit and len(diff.text) > limit
+    assert diff.meta["knowledge_changes_since"] == held.revision
+    assert applied_blocks(held.text, diff.text) == current.text
+    _, source, _, large_current = conflict("large", "r" * (padding + 2))
+    assert "knowledge_changes_since" not in source.meta
+    assert source.text[source.meta["knowledge_body_start"]:] == large_current.text
+
+    for position, result in enumerate((diff, source)):
+        row = {"tool_call_id": f"stale-{position}", "fn_name": "knowledge_write", "result": result.text,
+               "result_meta": result.meta, "is_error": True}
+        projected, receipt = project_tool_result_batch([row], [], [], drive_root=tmp_path, task_id=root.task_id,
+                                                       fit_candidate=lambda messages, _: {"accepted": len(messages[-1]["content"]) <= 2500})
+        assert receipt["status"] == "projected" and projected[0]["result_partial"]
+        assert read_actor_source_bytes(tmp_path, root.task_id, projected[0]["result_source_ref"]) == result.text.encode()
 
 
 @pytest.mark.parametrize("eol", ["\n", "\r\n"])
@@ -565,9 +896,9 @@ def test_a_first_page_with_another_lists_fingerprint_is_told_to_read_without_one
     store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=a.revision)
     first = tools._knowledge_read(ctx, TOPIC, view="history", fingerprint="0" * 16)
     assert first.startswith("⚠️ TOOL_ERROR: position_mismatch: the fingerprint names another list of versions") and \
-        first.endswith("a first page takes none, so read it without the fingerprint") and "start_char=0" not in first, first
+        first.splitlines()[0].endswith("a first page takes none, so read it without the fingerprint") and "start_char=0" not in first, first
     later = tools._knowledge_read(ctx, TOPIC, view="history", start_char=40, fingerprint="0" * 16)
-    assert later.endswith("read it again from start_char=0"), later
+    assert later.splitlines()[0].endswith("read it again from start_char=0"), later
     assert tools._knowledge_read(ctx, TOPIC, view="history").startswith("[Knowledge history]")
 
 

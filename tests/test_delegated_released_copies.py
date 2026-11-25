@@ -7,13 +7,16 @@ work from the saved patch and the pinned B. An empty result (C equals B, HEAD un
 nothing retained beside it) closes itself as ``no_changes``; a Git repository made inside the
 copy or a folder Git cannot open keeps the checkout until disposition. A continuation gets the
 checkout back with the files and index of C and HEAD at B. A copy recorded before this update keeps
-its old capture and its checkout. A legacy 64 MiB-capped investigation receipt is retaken
+its old capture and its checkout. A saved ready capture that is not proven to be this run's own
+pinned attempt stays readable but is never published as ready and never captured over. A legacy
+64 MiB-capped investigation receipt is retaken
 whole once and then the copy goes. The patch never follows porcelain diff config, and a
 same-size edit inside the index's timestamp tick still reaches B and C.
 """
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import pathlib
@@ -103,18 +106,29 @@ def test_a_capture_row_that_did_not_land_keeps_the_checkout(tmp_path, monkeypatc
     """The in-memory capture flag follows the durable row, and only a durable row releases."""
     target, ctx, handle = _CaptureFixture()._provisioned(tmp_path, monkeypatch)
     copy = pathlib.Path(handle.path)
-    (copy / "tracked.txt").write_text("one\ntwo\nkept\n", encoding="utf-8")
+    edited = "one\ntwo\nkept\n"
+    (copy / "tracked.txt").write_text(edited, encoding="utf-8")
     entry = _isolated_entry(ctx, target, handle)
+    drive = custody.custody_root(ctx)
     emit = custody.emit
     try:
         with monkeypatch.context() as broken:
             broken.setattr(custody, "emit", lambda drive, kind, payload: (
                 False if kind == custody.PATCH_CAPTURED else emit(drive, kind, payload)))
             capture = _capture_terminal_patch(ctx, entry)
-        assert capture["status"] == "ready_with_changes" and entry.patch_captured is False
+        assert capture["status"] == "failed" and capture["retry"] == "transient", capture
+        assert entry.patch_captured is False
         assert "checkout_released" not in capture and copy.is_dir()  # the only proof of capture did not land
+        assert (copy / "tracked.txt").read_text(encoding="utf-8") == edited
+        assert not any(row["type"] == custody.PATCH_CAPTURED for row in custody.custody_rows(drive))
+
         healthy = _capture_terminal_patch(ctx, entry)
+        assert healthy["status"] == "ready_with_changes", healthy
         assert entry.patch_captured is True and healthy["checkout_released"] is True and not copy.exists()
+        receipt, = [row for row in custody.custody_rows(drive) if row["type"] == custody.PATCH_CAPTURED]
+        assert receipt["run_id"] == entry.run_id and receipt["status"] == healthy["status"]
+        assert receipt["sha256"] == healthy["sha256"] == capture["sha256"]
+        assert _git(target, "show", f"{healthy['result_commit']}:tracked.txt").stdout == edited
     finally:
         custody._CUSTODY.clear()
 
@@ -130,11 +144,30 @@ def test_a_lost_capture_row_heals_from_the_saved_result_when_the_checkout_is_gon
     healed = capture_terminal_patch_for_drive(drive, lost)
     assert healed["status"] == "ready_with_changes" and healed["result_commit"] == capture["result_commit"]
     assert lost.patch_captured is True and len(rows()) == before + 1 and not copy.exists()
-    # The other direction: a saved manifest that names another result is no proof; the run is "missing".
+    # The other direction: a saved manifest that names another result is no proof of this run's own
+    # pinned attempt. The bytes stay readable and unchanged, but the run is never handed a ready
+    # result it cannot prove: no capture row, no checkout, nothing applied.
+    manifest_bytes = pathlib.Path(capture["manifest_artifact"]).read_bytes()
+    patch_bytes = pathlib.Path(capture["patch_artifact"]).read_bytes()
     subagent_worktrees._update_record(handle.path, lambda row: {**row, "result_sha": "0" * 40}, op="test")
     stranger = dataclasses.replace(entry, patch_captured=False)
-    assert capture_terminal_patch_for_drive(drive, stranger)["status"] == "missing"
-    assert stranger.patch_captured is False
+    block = capture_terminal_patch_for_drive(drive, stranger)
+    assert block["status"] == "failed", block
+    assert "does not name the run's baseline and pinned result commit" in block["note"], block
+    assert "neither published nor captured over" in block["note"], block
+    assert not block.get("retry"), block  # a proven mismatch, not an unreadable fact to retry
+    assert stranger.patch_captured is False  # an unproven result is never captured
+    assert len(rows()) == before + 1  # and no second capture row is published for it
+    assert block["patch_artifact"] == capture["patch_artifact"]
+    assert block["manifest_artifact"] == capture["manifest_artifact"]
+    assert pathlib.Path(capture["manifest_artifact"]).read_bytes() == manifest_bytes
+    assert pathlib.Path(capture["patch_artifact"]).read_bytes() == patch_bytes
+    assert not copy.exists()  # the released checkout is not recreated for an unproven result
+    assert (target / "tracked.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+    assert not (target / "new.txt").exists()  # nothing reached the shared tree
+    record = find_execution_snapshot(handle.snapshot_id)
+    assert sorted(_pins(target)) == sorted([record["baseline_ref"], record["result_ref"]])
+    assert _ref(target, record["result_ref"]) == capture["result_commit"]  # the pins are kept
 
 
 # --------------------------------------------------------------------------- no changes
@@ -454,6 +487,88 @@ def test_a_copy_recorded_before_the_update_keeps_its_old_capture_and_checkout_un
         assert not copy.exists() and find_execution_snapshot(handle.snapshot_id) is None and _pins(target) == []
     finally:
         custody._CUSTODY.clear()
+
+
+@pytest.mark.parametrize("case", ["apply", "reject", "taken_over", "lineage_missing", "lineage_unreadable"])
+def test_a_legacy_continuation_without_its_capture_row_is_decided_only_while_its_hand_over_holds(
+        tmp_path, monkeypatch, case):
+    """A continuation in a copy recorded before the update (7.11's format: rules version 3) captured its work, but
+    its capture row did not land. Its predecessor's durable record naming it as the run that took this very copy
+    over makes the copy its own; a later continuation, or a predecessor record that is gone or unreadable, does not."""
+    from ouroboros import delegate_custody_current as current
+    from ouroboros import subagent_worktrees
+    from tests.test_delegate_continuation import _settle, _start
+
+    first, _payload, ctx, _calls = _start(tmp_path, monkeypatch, acting=True, run_id="run-first")
+    copy = pathlib.Path(first["execution"]["workspaceRoot"])
+    subagent_worktrees._update_record(str(copy), lambda row: {**row, "file_baseline": {}}, op="test")
+    (copy / "first.txt").write_text("from the first run\n", encoding="utf-8")
+    _settle(tmp_path, "run-first", ctx.task_id)
+    assert capture_terminal_patch_for_drive(tmp_path, custody.replay(tmp_path)["run-first"])["status"] == "ready_with_changes"
+    _request, payload, ctx, _calls = _start(tmp_path, monkeypatch, acting=True, run_id="run-next",
+                                            start_kwargs={"continue_from": "run-first"})
+    assert payload["continuation"]["workspace"] == "same_snapshot" and copy.is_dir(), payload
+    (copy / "second.txt").write_text("from the continuation\n", encoding="utf-8")
+    _settle(tmp_path, "run-next", ctx.task_id)
+    emit = custody.emit
+    with monkeypatch.context() as unavailable:  # the capture saves its files; its receipt row does not land
+        unavailable.setattr(custody, "emit", lambda root, event, row, **kw:
+                            event != custody.PATCH_CAPTURED and emit(root, event, row, **kw))
+        block = capture_terminal_patch_for_drive(tmp_path, custody.replay(tmp_path)["run-next"])
+    assert (block["status"], block["retry"]) == ("failed", "transient"), block
+    cap_dir = pathlib.Path(block["manifest_artifact"]).parent
+    manifest = json.loads((cap_dir / "workspace_patch.json").read_bytes())
+    assert "result_commit" not in manifest and {"first.txt", "second.txt"} <= set(manifest["untracked_included"])
+    manifest["exclude_rules_version"] = 3
+    (cap_dir / "workspace_patch.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    custody._CUSTODY.clear()
+    prior = current.run(tmp_path, "run-first")
+    assert (prior.superseded_by, prior.patch_disposed) == ("run-next", custody.SUPERSEDED)
+    target = pathlib.Path(current.run(tmp_path, "run-next").target_root)
+    if case == "taken_over":  # a later continuation now holds the copy
+        third = _start(tmp_path, monkeypatch, acting=True, run_id="run-third",
+                               start_kwargs={"continue_from": "run-next"})[1]
+        assert third["continuation"]["workspace"] == "same_snapshot", third
+    elif case.startswith("lineage_"):
+        read = current.run
+
+        def lineage(root, run_id):
+            if run_id != "run-first":
+                return read(root, run_id)
+            if case == "lineage_unreadable":
+                raise OSError("custody store unavailable")
+            return None
+
+        monkeypatch.setattr(current, "run", lineage)
+    saved = {path.name: path.read_bytes() for path in cap_dir.iterdir() if path.is_file()}
+    def receipts():
+        return [row for row in custody.custody_rows(tmp_path)
+                if row["type"] == custody.PATCH_CAPTURED and row["run_id"] == "run-next"]
+    out = _integrate_delegated_patch(ctx, "run-next", "reject" if case == "reject" else "apply", "decided")
+    if case == "apply":
+        assert "INTEGRATE_DELEGATED_INSPECT_CAPTURE" in out and not (target / "second.txt").exists(), out
+        receipt, = receipts()
+        assert receipt["manifest_sha256"] == hashlib.sha256(saved["workspace_patch.json"]).hexdigest()
+        out = _integrate_delegated_patch(ctx, "run-next", "apply", "decided")
+        assert "✅ Integrated" in out, out
+        assert (target / "first.txt").read_text(encoding="utf-8") == "from the first run\n"
+        assert (target / "second.txt").read_text(encoding="utf-8") == "from the continuation\n"
+    elif case == "reject":
+        assert "Rejected" in out and current.run(tmp_path, "run-next").patch_disposed == "rejected", out
+        assert not (target / "second.txt").exists()
+    else:
+        assert "✅" not in out and "Rejected" not in out and not receipts(), out
+        assert {"taken_over": "INTEGRATE_DELEGATED_SUPERSEDED", "lineage_missing": "not provably this run's own",
+                "lineage_unreadable": "predecessor's hand-over could not be read"}[case] in out, out
+        # A later continuation's start marks this run superseded; no decision of this call disposed it.
+        assert current.run(tmp_path, "run-next").patch_disposed == (custody.SUPERSEDED if case == "taken_over" else "")
+        assert not (target / "first.txt").exists() and not (target / "second.txt").exists()
+    if not case.startswith("lineage_"):  # the predecessor rides this run's capture and is never decided alone
+        prior_out = _integrate_delegated_patch(ctx, "run-first", "apply", "decided")
+        assert "INTEGRATE_DELEGATED_SUPERSEDED" in prior_out, prior_out
+        assert current.run(tmp_path, "run-first").patch_disposed == custody.SUPERSEDED
+    assert {name: (cap_dir / name).read_bytes() for name in saved} == saved  # advertised bytes are never replaced
+    custody._CUSTODY.clear()
 
 
 def test_a_legacy_capped_investigation_receipt_is_retaken_whole_once_then_released(tmp_path, monkeypatch):

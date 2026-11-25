@@ -17,6 +17,7 @@ import { renderMobileNavToggle } from './page_header.js';
 import { createComposerOwnerControls } from './composer_owner_controls.js';
 import { attachChatInputSizing } from './chat_input_sizing.js';
 import { showToast } from './toast.js';
+import { tr } from './i18n.js';
 import { bindComposerPlus } from './composer_plus.js';
 import { bindComposerChips } from './composer_chips.js';
 import { bindVoiceControls } from './voice_controls.js';
@@ -24,6 +25,7 @@ import { bindConversationControls } from './conversation_controls.js';
 import { draftPlace, flySent } from './send_flight.js';
 
 const CHAT_DRAFT_KEY = 'ouro_chat_draft';
+const CHAT_DRAFT_VERSION_KEY = 'ouro_chat_draft_version';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 // The host icons a "+" item may name (`icon`); other names draw from the control glyphs a skill may name.
 const PLUS_ICONS = {
@@ -183,10 +185,42 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     const plusBtn = byId('plus');
     const fileInput = byId('file-input');
     let destroyed = false, cognitionRead = false;
+    // A Panic attempt (chat_activity.js raises ouro:panic once its frame is sent) ends this page's own
+    // work: an ordinary send or retry begun before it stops at its next await and never resumes,
+    // whatever the socket does later. A Send the owner makes afterwards is a new submission. The
+    // branch below still sends Panic first — never delayed, never altered.
+    let panicGeneration = 0;
+    const onPanicStop = () => { panicGeneration += 1; };
+    globalThis.addEventListener?.('ouro:panic', onPanicStop);
+    const versionKey = storeKey(CHAT_DRAFT_VERSION_KEY);
+    const newVersion = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    let draftVersion = newVersion();
+    let savedUploads;
+    try {
+        const kept = sessionStorage.getItem(versionKey);
+        if (kept?.startsWith('{')) {
+            const { version, uploads } = JSON.parse(kept);
+            if (typeof version === 'string' && version && Array.isArray(uploads)) {
+                draftVersion = version;
+                savedUploads = uploads;
+            }
+        }
+    } catch {}
+    function keepDraftVersion(sent = false) {
+        try {
+            const uploads = attachments.uploads;
+            if (sent || uploads.length) sessionStorage.setItem(versionKey, JSON.stringify({ version: draftVersion, uploads }));
+            else sessionStorage.removeItem(versionKey);
+        } catch {}
+    }
+    function invalidateDraft() {
+        draftVersion = newVersion();
+        keepDraftVersion();
+    }
 
     // Staged files, their thumbnails and object URLs, and the upload on Send ("+" waits while it runs).
     const attachments = createComposerAttachments({ preview: byId('attachment-preview'), attachBtn: plusBtn, fileInput,
-        input, showToast, onLayout: () => requestAnimationFrame(() => onLayout()) });
+        input, showToast, onChange: invalidateDraft, onLayout: () => requestAnimationFrame(() => onLayout()) });
 
     // Search this chat is the pointer's way to the room's search (Ctrl+F or Cmd+F on a keyboard; chat_search.js).
     const plusMenu = createPlusMenu({ button: plusBtn, hostItems: [
@@ -234,7 +268,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     }
 
     // Text height is capped by chat_input_sizing.js.
-    const inputSizing = attachChatInputSizing(input);
+    const inputSizing = attachChatInputSizing(input, { followCaret: true });
     function resizeChatInput() {
         inputSizing.sync();
         onLayout();
@@ -252,17 +286,18 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             inputHistoryIndex = Math.min(inputHistory.length, inputHistoryIndex + 1);
             input.value = inputHistoryIndex === inputHistory.length ? inputDraft : (inputHistory[inputHistoryIndex] || '');
         }
-        resizeChatInput();
+        onInput();
         const cursor = input.value.length;
         input.setSelectionRange(cursor, cursor);
     }
 
     async function sendMessage() {
-        let text = input.value.trim();
+        const draftValue = input.value;
+        let text = draftValue.trim();
         if (isPanicFrame({ type: 'chat', content: text })) {
             // Emergency input precedes settings saves, uploads and their disabled Send state.
             const frame = { type: 'chat', content: text, ...clientSurfaceField() };
-            const sentDraft = input.value;
+            const sentDraft = draftValue;
             sendPanic({ ws, frame, onAccepted: () => {
                 // Only the accepted command text is consumed. Replies, files and
                 // any newer edit belong to the next message.
@@ -279,26 +314,33 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             return;
         }
         if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload
+        const generation = panicGeneration, stopped = () => destroyed || generation !== panicGeneration;
+        // Submit owns one draft, even if the next draft is made during a save or upload.
+        const version = draftVersion, reply = replies.echoRow();
+        const staged = replies.frameField(reply?.reply_to || null);
+        const files = attachments.snapshot(), hasAttachments = files.length > 0;
+        if (!text && !hasAttachments) return;
         if (ownerControls.hasPendingSave()) {  // the room's settings land before the next message
             setSendBusy(true, 'Saving');
             try { if (!(await ownerControls.pendingSave())) return; } finally { setSendBusy(false); }
         }
-        text = input.value.trim();
-        const hasAttachments = attachments.count > 0;
+        // Each await can be crossed by a Panic attempt or the room's end: the submitted message
+        // stops before further sending, and the newer draft made meanwhile stays untouched.
+        if (stopped()) return;
         let uploadedAttachments = [];
-        if (!text && !hasAttachments) return;
         if (hasAttachments) {
             // Upload at Send; offline queuing orphans files.
             if (ws.ws?.readyState !== WebSocket.OPEN) {
                 showToast('Cannot attach file while offline. Reconnect and try again.', 'error');
                 return;
             }
-            setSendBusy(true, attachments.count > 1 ? 'Uploading files' : 'Uploading');
+            setSendBusy(true, files.length > 1 ? 'Uploading files' : 'Uploading');
             try {
-                uploadedAttachments = await attachments.upload(() => ws.ws?.readyState === WebSocket.OPEN);
+                // A Panic attempt or the room's end stops the batch before its next file starts.
+                uploadedAttachments = await attachments.upload(() => !stopped() && ws.ws?.readyState === WebSocket.OPEN, files);
             } catch (e) {
                 await cleanupUploadedAttachments(e.uploaded || []);
-                showToast('Upload error: ' + e.message, 'error');
+                if (!stopped()) showToast('Upload error: ' + e.message, 'error');
                 return;  // staged files and their previews remain so the user can retry
             } finally {
                 setSendBusy(false);
@@ -307,6 +349,10 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             text = composerText(text, uploadedAttachments.map((item) => item.view?.name || item.display_name));
         }
         if (!text) return;
+        if (stopped()) {
+            await cleanupUploadedAttachments(uploadedAttachments.filter(item => !item.reused));
+            return;
+        }
         const frame = {
             type: 'chat',
             content: text,
@@ -315,22 +361,36 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             ...(projectId ? { project_id: projectId } : {}),
             // Structured metadata rides the frame: model staging and native image blocks.
             ...(hasAttachments ? { attachments: uploadedAttachments.map(({ filename, display_name, mime }) => ({ filename, display_name, mime })) } : {}),
-            ...replies.frameField(),
+            ...staged,
             ...clientSurfaceField(),
         };
-        const result = ws.send(frame, hasAttachments ? { queue: false } : undefined);
-        if (hasAttachments && result?.status !== 'sent') {
-            await cleanupUploadedAttachments(uploadedAttachments);
+        const requireConnection = hasAttachments;
+        const result = ws.send(frame, requireConnection ? { queue: false } : undefined);
+        if (requireConnection && result?.status !== 'sent') {
+            await cleanupUploadedAttachments(uploadedAttachments.filter(item => !item.reused));
             showToast('Connection lost before send. Reconnect and try again.', 'error');
             return;
         }
-        // Where the draft stands, read before the field empties: the sent bubble rises from here (send_flight.js).
-        const draft = draftPlace(input.closest('.chat-field'), input);
-        if (hasAttachments) attachments.clear();
+        // Fly from the sent draft, not the one that took its place during an await.
+        const current = !destroyed && version === draftVersion && input.value === draftValue;
+        const draft = current ? draftPlace(input.closest('.chat-field'), input) : null;
         rememberInput(text);
-        input.value = '';
-        clearInputDraft();
-        flySent({ from: draft, row: onSent({ text, frame, result, views: uploadedAttachments.map((item) => item.view) }) });
+        if (current) {
+            // The socket or its queue took the frame: the field is free for the next message. What was sent (words, quote,
+            // files, id) waits in its bubble's unconfirmed row (`onSent`), where Send again and Send as new find it.
+            if (hasAttachments) attachments.clear();
+            input.value = '';
+            clearInputDraft();
+            replies.clear();
+        } else if (hasAttachments) {
+            // The submitted message went out with the files it snapshotted; the newer draft
+            // keeps the badges the owner left in it. A badge the message just uploaded keeps
+            // exactly its own ref — matched by its staged identity, never by list index, so a
+            // removed or replaced badge cannot take another's — and so survives a reload.
+            attachments.keepUploads(files, uploadedAttachments);
+            keepDraftVersion(true);
+        }
+        flySent({ from: draft, row: onSent({ text, frame, reply, result, views: uploadedAttachments.map((item) => item.view) }) });
     }
 
     // Send mode lives on DOM so CSS and click/Enter share one source.
@@ -385,6 +445,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     }
 
     function clearInputDraft() {
+        invalidateDraft();
         try { sessionStorage.removeItem(storeKey(CHAT_DRAFT_KEY)); } catch {}
     }
 
@@ -396,10 +457,12 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             resizeChatInput();
         }
     } catch {}
+    attachments.restoreUploads(savedUploads);
 
     // Typing, and every change this module makes on another's behalf, keeps the recall's draft, the height and the
     // room's draft current.
     function onInput() {
+        invalidateDraft();
         if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
         resizeChatInput();
         saveInputDraft();
@@ -416,6 +479,18 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         chipsSlot: page.querySelector('[data-composer-chips]'),
         focus: () => input.focus({ preventScroll: true }),
         getDraft: () => input.value,
+        invalidateDraft,
+        prepareNewMessage(words, ref) {
+            // A delivery doubt never borrows a draft's quote or files, or appends typed words under its own quote.
+            if (sendBtn.disabled || attachments.count || replies.echoRow() || (ref?.excerpt && input.value)) {
+                showToast(tr('chat.send_as_new_draft', 'Finish or clear the current draft before using Send as new.'), 'info');
+                return;
+            }
+            if (ref?.excerpt) replies.start(ref);
+            const draft = input.value.trimEnd();
+            composer.setDraft(draft ? `${draft}\n\n${words}` : words);
+            composer.focus();
+        },
         /** Replace the draft (it is kept for the room like typed words). */
         setDraft(text) {
             input.value = String(text ?? '');
@@ -435,6 +510,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         },
         // After a send, once the feed shows it: the emptied field's height and the room's dock.
         resize: resizeChatInput,
+        remeasureInput: inputSizing.remeasureViewport,
         seedInputHistory,
         // The room's Model, Subagents, Context and Effort readback, from Main's state or the named Project.
         syncState(data) {
@@ -456,6 +532,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         hasPendingWork: () => attachments.count > 0 || attachments.busy,
         destroy() {
             destroyed = true;
+            globalThis.removeEventListener?.('ouro:panic', onPanicStop);
             for (const dispose of contributed) dispose();
             plusMenu.destroy();
             attachments.destroy();

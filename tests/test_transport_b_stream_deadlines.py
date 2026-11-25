@@ -20,6 +20,7 @@ from ouroboros.llm_stream import (
     AssembledResponse, IncompleteProviderStream, ProviderStreamError, RejectedProviderStream,
 )
 from ouroboros.loop_llm_call import classify_llm_exception
+from ouroboros.openrouter_attribution import OPENROUTER_BASE_URL
 from tests._usage_store_testing import ledger_rows
 
 WIRE_CORPUS = pathlib.Path(__file__).parent / "fixtures" / "llm_wire"
@@ -35,6 +36,13 @@ def target(provider="openrouter"):
     return {"provider": provider, "resolved_model": "vendor/test-stream", "usage_model": "vendor/test-stream",
             "base_url": "https://provider.invalid/v1", "supports_openrouter_extensions": provider == "openrouter",
             "supports_generation_cost": False, "api_key": "fixture"}
+
+
+def public_openrouter_target():
+    """Exercise a public tariff with the same in-memory transport."""
+    from ouroboros.openrouter_attribution import OPENROUTER_BASE_URL
+
+    return {**target(), "base_url": OPENROUTER_BASE_URL}
 
 
 def payload(**extra):
@@ -289,6 +297,327 @@ def test_rejected_terminal_body_settles_usage_and_classifies_provider_error(isol
     assert (classification.kind, classification.retry_same_request) == ("provider_error", False)
 
 
+@pytest.mark.parametrize("asynchronous,ttl,extra,expected", [
+    (False, "1h", {}, 5e-7), (True, "1h", {}, 5e-7), (False, "5m", {}, 2e-6),
+    (False, "1h", {"cache_creation": {"ephemeral_5m_input_tokens": 2}}, 2e-6),
+    (False, "1h", {"cache_creation": {"ephemeral_5m_input_tokens": 1}}, None),
+    (False, "", {}, None), (False, "default", {}, None),
+    (False, "1h", {"cost": 0}, 0), (True, "1h", {"cost": 0.031}, 0.031),
+    (False, "", {"cost_evidence": {"cache_write_ttl": {"source": "sent_candidate", "ttl": "1h"}}}, None),
+])
+def test_rejected_router_frame_can_price_from_its_exact_send_without_claiming_an_observed_ttl(
+    isolated, monkeypatch, asynchronous, ttl, extra, expected,
+):
+    from ouroboros import pricing
+    from ouroboros.llm_attempt import _applied_payload_cache_ttl
+
+    model = "anthropic/claude-fable-5"
+    rate = pricing.PricingSchedule((0, 0, 1, 0), cache_write_1h=0.25)
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {model: rate})
+    block = {"type": "text", "text": "cacheable"}
+    if ttl:
+        block["cache_control"] = {"type": "ephemeral"}
+        if ttl != "default":
+            block["cache_control"]["ttl"] = ttl
+    outgoing = payload(model=model, stream=True, messages=[{"role": "user", "content": [block]}])
+    frame = {"prompt_tokens": 2, "completion_tokens": 0, "cache_write_tokens": 2, **extra}
+    sent_ttls = []
+
+    def create(**sent):
+        sent_ttls.append(_applied_payload_cache_ttl(sent) or "")
+        return WireResponse(sse(chunk({"tool_calls": 1}, "stop", usage=frame)))
+
+    with pytest.raises(RejectedProviderStream) as caught:
+        run_driver(create, outgoing, {**public_openrouter_target(), "resolved_model": model, "usage_model": model}, asynchronous=asynchronous)
+    attempt, = rows(isolated)
+    assert sent_ttls == [ttl]
+    assert caught.value.stream_receipt["attempt_id"] == attempt["attempt_id"]
+    assert caught.value.stream_usage == frame and not attempt.get("prompt_cache_ttl")
+    assert attempt["state"] == "settled" and attempt["cost_final"] is ("cost" in frame)
+    if expected is None:
+        assert attempt["cost_usd"] is None
+    else:
+        assert attempt["cost_usd"] == pytest.approx(expected, rel=1e-12, abs=0)
+    basis = (attempt.get("cost_evidence") or {}).get("cache_write_ttl")
+    if ttl in ("1h", "5m") and not extra:
+        assert basis == {"source": "sent_candidate", "ttl": ttl}
+    else:
+        assert basis is None
+
+
+@pytest.mark.parametrize("hourly,cash_field,expected", [
+    (None, None, None), (0.25, None, None), (0.0, None, None), (None, "cost", 0.0),
+    (0.25, "total_cost_usd", 0.031),
+])
+def test_numeric_router_error_keeps_its_frame_tier_and_never_takes_the_base_hourly_rate(
+    isolated, monkeypatch, hourly, cash_field, expected,
+):
+    """The error frame that carries the usage also says it was served at priority: a model row without tier-tagged
+    rates has no applicable hourly price for it, so only reported cash settles an amount."""
+    from ouroboros import pricing
+
+    model = "anthropic/claude-fable-5"
+    tariff = pricing.PricingSchedule((0, 0, 1, 0), cache_write_1h=hourly)
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {model: tariff})
+    marker = {"type": "text", "text": "prefix", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    outgoing = payload(model=model, stream=True, messages=[{"role": "user", "content": [marker]}])
+    usage = {"prompt_tokens": 2, "completion_tokens": 0, "cache_write_tokens": 2}
+    error = {"error": {"code": 503, "message": "Service unavailable"}, "service_tier": "priority", "usage": usage}
+    if cash_field:
+        (usage if cash_field == "cost" else error)[cash_field] = expected
+    route = {**public_openrouter_target(), "resolved_model": model, "usage_model": model}
+    with pytest.raises(ProviderStreamError) as caught:
+        run_driver(lambda **_: WireResponse(sse(error, done=False)), outgoing, route)
+    row, = rows(isolated)
+    assert caught.value.status_code == 503 and caught.value.stream_receipt["attempt_id"] == row["attempt_id"]
+    if cash_field == "cost":
+        assert caught.value.body["usage"]["cost"] == 0.0
+        assert row["state"] == "unresolved" and row.get("cost_usd") is None
+        assert row.get("cost_final") is not True
+        return  # A bare usage zero does not attest a full bill after work.
+    assert row["state"] == "settled" and row["cache_write_tokens"] == 2 and not row.get("prompt_cache_ttl")
+    assert row["cost_final"] is (cash_field is not None)
+    assert row.get("service_tier") == "priority" and row["processing"]["observedNative"] == ["priority"]
+    assert row["cost_usd"] == (None if expected is None else pytest.approx(expected, rel=1e-12, abs=0))
+    assert (row.get("cost_evidence") or {}).get("cache_write_ttl") is None
+
+
+@pytest.mark.parametrize("shape,priority_hourly,expected", [
+    pytest.param("error-frame", 0.5, 1e-6, id="priority-pool-rates"),
+    pytest.param("error-frame", None, None, id="priority-hour-rate-unknown"),
+    pytest.param("earlier-frame", 0.5, 1e-6, id="tier-on-an-earlier-frame"),
+    pytest.param("rejected", 0.5, 1e-6, id="rejected-after-terminal"),
+])
+def test_router_failure_prices_by_its_tier_pool_at_the_sent_hourly_tier(isolated, monkeypatch, shape, priority_hourly, expected):
+    """A priority stream takes the explicit one-hour rates of every endpoint a priority request may reach, whichever
+    received frame named the tier; one unknown applicable rate leaves the amount unknown."""
+    from ouroboros import pricing
+
+    name = "anthropic/claude-fable-5"
+    endpoints = {"anthropic": pricing.PricingSchedule((0, 0, 1, 0), cache_write_1h=0.25, source={"service_tier": "default"}),
+                 "anthropic/fast": pricing.PricingSchedule((0, 0, 1, 0), cache_write_1h=priority_hourly,
+                                                           source={"service_tier": "priority"})}
+    base = pricing.PricingSchedule((0, 0, 1, 0), cache_write_1h=0.25)
+    monkeypatch.setattr(pricing, "get_pricing", lambda *, model="", **_: endpoints if model else {name: base})
+    marker = {"type": "text", "text": "prefix", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    outgoing = payload(model=name, stream=True, messages=[{"role": "user", "content": [marker]}])
+    usage = {"prompt_tokens": 2, "completion_tokens": 0, "cache_write_tokens": 2}
+    wire = {"error-frame": sse({"error": {"code": 503}, "service_tier": "priority", "usage": usage}, done=False),
+            "earlier-frame": sse(chunk({"content": "x"}, service_tier="priority", usage=usage), {"error": {"code": 503}},
+                                 done=False),
+            "rejected": sse(chunk({"tool_calls": 1}, "stop", usage=usage, service_tier="priority"))}[shape]
+    with pytest.raises(RejectedProviderStream if shape == "rejected" else ProviderStreamError):
+        run_driver(lambda **_: WireResponse(wire), outgoing, {**public_openrouter_target(), "resolved_model": name, "usage_model": name})
+    row, = rows(isolated)
+    assert row["state"] == "settled" and row["service_tier"] == "priority" and row["cost_final"] is False
+    assert row["cost_usd"] == (None if expected is None else pytest.approx(expected, rel=1e-12, abs=0))
+    basis = (row.get("cost_evidence") or {}).get("cache_write_ttl")
+    assert basis == ({"source": "sent_candidate", "ttl": "1h"} if expected is not None else None)
+
+
+@pytest.mark.parametrize("completion_count,envelopes,expected,final", [
+    pytest.param(None, (), None, False, id="missing-output"),
+    pytest.param(0, (), 5e-6, False, id="reported-zero-output"),
+    pytest.param(-1, (), None, False, id="malformed-output"),
+    pytest.param(None, (0.031,), 0.031, True, id="earlier-envelope-charge"),
+    pytest.param(None, (0,), None, False, id="pre-terminal-zero-after-text-stays-unconfirmed"),
+    pytest.param(None, (0.031, "invalid"), 0.031, True, id="unusable-later-total-keeps-reported-price"),
+    pytest.param(None, (0.031, 0), None, False, id="conflicting-pre-terminal-zero-keeps-custody"),
+    pytest.param(0, ("invalid",), None, False, id="invalid-envelope-with-complete-counts"),
+])
+def test_router_error_after_text_settles_only_reported_stream_facts(
+    isolated, monkeypatch, completion_count, envelopes, expected, final,
+):
+    from ouroboros import pricing
+
+    tariff = pricing.PricingSchedule((1, 1, 1, 2), cache_write_1h=0.25)
+    model = public_openrouter_target()["resolved_model"]
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {model: tariff})
+    usage = {"prompt_tokens": 20, "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 20}}
+    if completion_count is not None:
+        usage["completion_tokens"] = completion_count
+    frames = [chunk({"content": "partial answer"}, usage=usage)]
+    frames.extend({"total_cost_usd": amount} for amount in envelopes)
+    error = {"error": {"code": 503}, "usage": {"prompt_tokens_details": {"cached_tokens": 0}}}
+    wire = sse(*frames, error, done=False)
+
+    with pytest.raises(ProviderStreamError) as caught:
+        run_driver(lambda **_: WireResponse(wire), payload(stream=True), public_openrouter_target())
+    row, = rows(isolated)
+    receipt = caught.value.stream_receipt
+    assert caught.value.body == error and caught.value.status_code == 503
+    assert receipt["model_output_received"] and receipt["attempt_id"] == row["attempt_id"]
+    if envelopes and envelopes[-1] == 0:
+        assert caught.value.stream_usage["total_cost_usd"] == 0
+        assert row["state"] == "unresolved" and row.get("cost_usd") is None
+        assert row.get("cost_final") is not True
+        return  # A pre-terminal report does not confirm the cost of already observed work.
+    assert row["state"] == "settled" and row["cost_final"] is final
+    assert (row["prompt_tokens"], row["cached_tokens"], row["cache_write_tokens"]) == (20, 0, 20)
+    assert row["completion_tokens"] == (completion_count if (completion_count or 0) >= 0 else None)  # malformed: unknown
+    assert row["cost_estimated"] is (expected is not None and not final)
+    assert bool(row.get("cost_invalid")) is (envelopes == ("invalid",))
+    if final or expected is None:
+        assert row["cost_usd"] == expected
+    else:
+        assert row["cost_usd"] == pytest.approx(expected, rel=1e-12, abs=0)
+
+
+@pytest.mark.parametrize("body_cash,frame_cash,terminal_usage,expected,final", [
+    pytest.param("invalid", None, {}, None, False, id="invalid-body"),
+    pytest.param(None, "invalid", {}, None, False, id="invalid-frame"),
+    pytest.param("invalid", 0, {}, None, None, id="prior-zero-contradicted-by-explicit-failure"),
+    pytest.param(0, "invalid", {}, 0, True, id="zero-body"),
+    pytest.param(0.031, "invalid", {}, 0.031, True, id="paid-body"),
+    pytest.param(None, None, {}, 2e-6, False, id="no-price"),
+    pytest.param(None, None, {"total_cost_usd": 0.031}, 0.031, True, id="cash-only-terminal-usage"),
+    pytest.param(0.031, 0.027, {"total_cost_usd": 0, "completion_tokens": 3},
+                 None, None, id="conflicting-terminal-zero-keeps-custody"),
+    pytest.param(None, 0.027, {"cost": -1}, 0.027, True, id="negative-terminal-with-valid-earlier-price"),
+    pytest.param(None, None, {"total_cost_usd": -1}, None, False, id="negative-terminal-without-price"),
+    pytest.param(None, None, {"total_cost_usd": 0.031, "prompt_tokens_details": {"cache_write_tokens": -1}},
+                 0.031, True, id="paid-with-invalid-write"),
+    pytest.param(None, 0.027, {"is_byok": True, "cost": 0.01, "cost_details": {"upstream_inference_cost": 0.02}},
+                 0.03, True, id="latest-byok-charge-once"),
+])
+def test_failed_stream_estimates_only_when_both_cash_sources_are_absent(
+    isolated, monkeypatch, body_cash, frame_cash, terminal_usage, expected, final,
+):
+    from ouroboros import pricing
+
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {"vendor/test-stream": (1, None, None, 0)})
+    frame = {"prompt_tokens": 2, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}}
+    error = {"error": {"code": 503, "message": "Service unavailable"}, "usage": terminal_usage}
+    if frame_cash is not None:
+        frame["cost"] = frame_cash
+    if body_cash is not None:
+        error["total_cost_usd"] = body_cash
+    wire = sse(chunk(usage=frame), chunk(usage={"prompt_tokens": 2}), error, done=False)
+    with pytest.raises(ProviderStreamError) as caught:
+        run_driver(lambda **_: WireResponse(wire), payload(stream=True), public_openrouter_target())
+    row, = rows(isolated)
+    assert caught.value.body == error and caught.value.stream_receipt["attempt_id"] == row["attempt_id"]
+    if final is None:  # Conflicting reports retain custody, with no cost projection to price.
+        assert caught.value.stream_usage["prompt_tokens"] == 2
+        assert row["state"] == "unresolved" and row.get("cost_usd") is None
+        assert row.get("cost_final") is not True
+        return
+    raw_writes = terminal_usage.get("prompt_tokens_details", {}).get("cache_write_tokens", 0)
+    assert (row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"], row["cache_write_tokens"]) == (
+        2, terminal_usage.get("completion_tokens", 0), 0, 0 if raw_writes >= 0 else None)  # a malformed total is unknown
+    assert caught.value.stream_usage["prompt_tokens_details"] == {"cached_tokens": 0, "cache_write_tokens": raw_writes}
+    assert bool(row.get("cache_write_tokens_invalid")) is (raw_writes < 0)
+    assert row["cost_final"] is final
+    assert row["cost_usd"] == (None if expected is None else pytest.approx(expected, rel=1e-12, abs=0))
+    assert bool(row.get("cost_invalid")) is (expected is None)
+    assert row["cost_estimated"] is (expected is not None and not final)
+
+
+@pytest.mark.parametrize("later,amount,basis,keep_first", [
+    pytest.param({"cost": 0.02, "is_byok": True, "total_cost_usd": 0.05}, 0.05, None, False, id="consistent-explicit-total"),
+    pytest.param({"cost": 0.04, "is_byok": True, "total_cost_usd": 0.05}, None, None, False, id="total-below-wallet-bound"),
+    pytest.param({"cost": 0.04, "is_byok": True}, None, None, True, id="partial-report-conflicts-with-earlier-complete"),
+    pytest.param({"cost": 0}, 0.03, "byok_gateway_plus_upstream", False, id="unlabelled-zero-does-not-replace-complete-byok"),
+])
+@pytest.mark.parametrize("on_error", [True, False], ids=["terminal", "intermediate"])
+def test_failed_stream_keeps_one_whole_price_report(isolated, later, amount, basis, keep_first, on_error):
+    first = {"cost": 0.01, "is_byok": True, "cost_details": {"upstream_inference_cost": 0.02},
+             "cost_basis": "byok_gateway_plus_upstream"}
+    frames = [chunk(usage={"prompt_tokens": 2, **first})]
+    error = {"error": {"code": 503}, "usage": {"completion_tokens": 3}}
+    if on_error:
+        error["usage"].update(later)
+    else:
+        frames.append(chunk(usage=later))
+    with pytest.raises(ProviderStreamError) as caught:
+        run_driver(lambda **_: WireResponse(sse(*frames, error, done=False)), payload(stream=True), target())
+    row, = rows(isolated)
+    assert caught.value.body == error
+    assert caught.value.stream_usage == {"prompt_tokens": 2, "completion_tokens": 3, **(first if keep_first else later)}
+    assert caught.value.stream_receipt["attempt_id"] == row["attempt_id"]
+    if amount is None:
+        assert row["state"] == "unresolved" and row.get("cost_usd") is None
+        assert row.get("cost_final") is not True
+    else:
+        assert row["state"] == "settled"
+        assert (row["prompt_tokens"], row["completion_tokens"], row.get("cost_basis")) == (2, 3, basis)
+        assert row["cost_final"] and row["cost_usd"] == pytest.approx(amount, abs=0)
+
+
+@pytest.mark.parametrize("frame,amount,basis", [
+    pytest.param({"cost": 0.04, "is_byok": True, "total_cost_usd": 0.05}, 0.05, None, id="stream-total-wins"),
+    pytest.param({"cost": 0.04, "is_byok": True, "total_cost_usd": 0.05, "cost_basis": "byok_gateway_plus_upstream"},
+                 0.05, None, id="standalone-total-cannot-prove-byok-basis"),
+    pytest.param({"cost": -1, "cost_basis": "invalid-frame"}, 0.03, "byok_gateway_plus_upstream", id="body-byok-fallback"),
+])
+def test_failed_attempt_never_combines_stream_and_body_price_details(frame, amount, basis):
+    from ouroboros._usage_response import usage_from_failure
+
+    body = {"error": {"code": 503}, "usage": {"prompt_tokens": 2, "cost": 0.01, "is_byok": True,
+                                             "cost_details": {"upstream_inference_cost": 0.02}}}
+    facts, cost, final = usage_from_failure(body, {"completion_tokens": 3, **frame})
+    assert final and cost == pytest.approx(amount, abs=0)
+    assert (facts["prompt_tokens"], facts["completion_tokens"], facts.get("cost_basis")) == (2, 3, basis)
+    assert facts.get("cost_details") == (body["usage"]["cost_details"] if basis else None)
+
+
+def test_cash_only_error_after_another_attempt_keeps_its_own_unknown_tokens(isolated):
+    for evidence in ([chunk(usage={"prompt_tokens": 17})], []):
+        error = {"error": {"code": 503}, "usage": {"total_cost_usd": 0.031}}
+        with pytest.raises(ProviderStreamError):
+            run_driver(lambda **_: WireResponse(sse(*evidence, error, done=False)), payload(stream=True), target())
+    first, second = rows(isolated)
+    assert first["attempt_id"] != second["attempt_id"]
+    assert [row["prompt_tokens"] for row in (first, second)] == [17, None]
+    assert all(row["cost_final"] and row["cost_usd"] == 0.031 for row in (first, second))
+
+
+@pytest.mark.parametrize("measured,same_attempt,expected", [
+    pytest.param(False, True, None, id="opaque-request"),
+    pytest.param(True, False, None, id="foreign-receipt"),
+    pytest.param(True, True, 5e-6, id="measured-and-bound-control"),
+])
+def test_rejected_stream_aggregate_cannot_take_an_unbound_ttl(isolated, monkeypatch, measured, same_attempt, expected):
+    """Every trial sends a complete frame (prompt, an explicit zero output, one write), so only the request's tier
+    authority or the receipt's binding can leave its amount unknown. The measured, bound control prices that frame
+    at the sent 1h rate: the opaque trial's missing amount is the unbound tier, not an incomplete frame."""
+    from ouroboros import pricing
+
+    rate = pricing.PricingSchedule((1, 1, 1, 1), cache_write_1h=5)
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: {"vendor/test-stream": rate})
+    request = ua.AttemptRequest("vendor/test-stream", "openrouter", prompt_cache_ttl="1h",
+                                candidate_measurement_kind="canonical_json_v1" if measured else "opaque",
+                                candidate_raw_sha256="a" * 64 if measured else None,
+                                candidate_context_sha256="b" * 64 if measured else None,
+                                candidate_raw_size_bytes=10 if measured else None,
+                                candidate_context_size_bytes=8 if measured else None)
+
+    def send():
+        exc = RejectedProviderStream("unusable answer",
+                                     usage={"prompt_tokens": 1, "completion_tokens": 0, "cache_write_tokens": 1})
+        exc.stream_receipt = {"attempt_id": ua.last_physical_attempt_capture().attempt_id if same_attempt else "other-attempt"}
+        if not same_attempt:
+            exc.stream_usage["cost"] = 0.25
+        raise exc
+
+    with pytest.raises(RejectedProviderStream):
+        ua.execute_physical_attempt(request, send)
+    attempt, = rows(isolated)
+    assert not attempt.get("cost_final") and not attempt.get("prompt_cache_ttl")
+    if expected is None:
+        assert attempt.get("cost_usd") is None
+    else:
+        assert attempt["cost_usd"] == pytest.approx(expected, rel=1e-12, abs=0)
+    if same_attempt:
+        assert attempt["state"] == "settled"
+        assert (attempt["prompt_tokens"], attempt["completion_tokens"], attempt["cache_write_tokens"]) == (1, 0, 1)
+        assert attempt.get("cost_coverage") != "partial"  # a complete frame: only the tier can keep the amount unknown
+        basis = (attempt.get("cost_evidence") or {}).get("cache_write_ttl")
+        assert basis == (None if expected is None else {"source": "sent_candidate", "ttl": "1h"})
+    else:
+        assert attempt["state"] == "unresolved" and attempt.get("cache_write_tokens") is None
+
+
 def test_terminal_length_with_a_partial_tool_call_returns_like_non_stream(isolated):
     """``finish_reason=length`` after ``[DONE]`` is complete wire: the assembler returns
     the exhausted tool call exactly as the non-stream path would, and the loop owns it."""
@@ -415,6 +744,26 @@ def test_later_usage_snapshot_overrides_an_earlier_one(isolated):
     result = run_driver(lambda **kw: WireResponse(wire), payload(stream=True), target()).model_dump()
     assert result["usage"] == completion()["usage"]
     assert rows(isolated)[-1]["state"] == "settled" and rows(isolated)[-1]["cost_usd"] == 0.25
+
+
+@pytest.mark.parametrize("earlier", [
+    pytest.param({"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.25}, id="real"),
+    pytest.param({"prompt_tokens": 0, "completion_tokens": 0, "cost": 0}, id="explicit-zero"),
+])
+@pytest.mark.parametrize("later", [[], "UNREAD-FRAME-TEXT", 7], ids=["list", "text", "number"])
+def test_a_later_usage_frame_that_is_no_object_keeps_the_valid_report(isolated, earlier, later):
+    """A usage value that is not an object reports nothing: the earlier report, an explicit zero included, stays the
+    attempt's money, and the receipt names only the value's type, never the frame."""
+    tail = {"id": "gen-test", "object": "chat.completion.chunk", "model": "vendor/test-stream", "choices": [], "usage": later}
+    wire = sse(chunk({"role": "assistant", "content": "done"}, "stop", usage=earlier), tail)
+    result = run_driver(lambda **kw: WireResponse(wire), payload(stream=True), target()).model_dump()
+    assert result["usage"] == earlier
+    row, = rows(isolated)
+    assert row["state"] == "settled" and row["cost_final"] is True and row["cost_usd"] == earlier["cost"]
+    assert (row["prompt_tokens"], row["completion_tokens"]) == (earlier["prompt_tokens"], earlier["completion_tokens"])
+    notes = result["_stream_receipt"]["anomalies"]
+    assert notes == {"count": 1, "first": [f"usage is {type(later).__name__}, not an object; skipped"]}
+    assert "UNREAD-FRAME-TEXT" not in json.dumps(result["_stream_receipt"])
 
 
 def test_identity_conflict_is_forgiven_and_disclosed_in_the_receipt(isolated):
@@ -694,7 +1043,7 @@ def test_slow_recovery_preparation_keeps_both_attempt_receipts(isolated, monkeyp
     assert [row["state"] for row in rows(isolated)] == ["unresolved", "released"]
 
 
-def test_later_free_recovery_cannot_replace_earlier_unknown_custody(isolated, monkeypatch):
+def _later_router_refusal_after_deadline(isolated, monkeypatch, route):
     now, sent = [100], []
     monkeypatch.setattr(model_wait, "monotonic_now", lambda slot=None: now[0])
     def send(**kw):
@@ -704,10 +1053,24 @@ def test_later_free_recovery_cannot_replace_earlier_unknown_custody(isolated, mo
         now[0] = 111
         raise Rejected("No endpoints found; response_format unsupported", status=404)
     with model_wait.execution_deadline_scope(110), pytest.raises(PhysicalDispatchInterrupted) as caught:
-        run_driver(send, payload(temperature=0.2, response_format={"type": "json_object"}), target())
-    assert len(sent) == 2 and rows(isolated)[-1]["state"] == "settled"
-    assert caught.value.physical_attempt_capture.attempt_id == rows(isolated)[0]["attempt_id"]
+        run_driver(send, payload(temperature=0.2, response_format={"type": "json_object"}), route)
+    first, later = rows(isolated)
+    assert len(sent) == 2
+    assert caught.value.physical_attempt_capture.attempt_id == first["attempt_id"]
     assert caught.value.physical_attempt_capture.state == "unresolved"
+    return later
+
+
+def test_later_free_recovery_cannot_replace_earlier_unknown_custody(isolated, monkeypatch):
+    route = {**target(), "base_url": OPENROUTER_BASE_URL}
+    later = _later_router_refusal_after_deadline(isolated, monkeypatch, route)
+    assert (later["state"], later["cost_usd"], later["cost_final"]) == ("settled", 0.0, True)
+
+
+def test_router_refusal_at_a_compatible_origin_does_not_prove_zero(isolated, monkeypatch):
+    later = _later_router_refusal_after_deadline(isolated, monkeypatch, target())
+    # Unresolved has no settlement or finality fact. False would record a nonfinal settlement.
+    assert (later["state"], later.get("cost_usd"), later.get("cost_final")) == ("unresolved", None, None)
 
 
 def test_quota_pause_is_execution_only_and_network_wait_spends_time(isolated, monkeypatch):

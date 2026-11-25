@@ -63,11 +63,11 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import LEGACY_ROOM_ID, row_lineage
-from ouroboros.chronicle_quotes import SPEAKERS
+from ouroboros.chronicle_quotes import QuoteResolver, QuoteSource, SPEAKERS
 from ouroboros.chronicle_lead import LEAD_RULE
 from ouroboros.chronicle_store import (DELEGATED_FOCUS_ROLES, STORY_KINDS, ChronicleStore, PublishResult, capture,
                                        source_time_span, verify_quotes)
-from ouroboros.dialogue_provenance import (memory_row_header, quote_words, recorded_finality, render_row_text,
+from ouroboros.dialogue_provenance import (memory_row_header, quote_parts, quote_words, recorded_finality, render_row_text,
                                           row_author, stamp_summary, wordless_reaction)
 from ouroboros.knowledge import focus_signature
 from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
@@ -201,7 +201,8 @@ def _task_rows(root: Path, room: str, task_ids: Iterable[Any]) -> List[Tuple[Dic
     ``source_ref`` and the latest promote annotation naming the task. Owner messages
     no fact binds are not here; a ``from``/``to`` range covers them.
     """
-    from ouroboros.project_dialogue import entry_matches_source_ref, latest_chat_annotations
+    from ouroboros.project_dialogue import entry_matches_source_ref, owner_message_entries, owner_message_ref_is_valid
+    from ouroboros.chat_annotations import addressed_chat_annotations
     from ouroboros.projects_registry import project_task_bindings  # D15->D17 is lazy-only
 
     wanted = {str(task).strip() for task in task_ids if str(task or "").strip()}
@@ -209,8 +210,8 @@ def _task_rows(root: Path, room: str, task_ids: Iterable[Any]) -> List[Tuple[Dic
         raise ValueError("covers.task_ids names at least one task")
     refs = [row["source_ref"] for task, row in project_task_bindings(root).items()
             if task in wanted and isinstance(row.get("source_ref"), dict)]
-    messages = {message for message, row in latest_chat_annotations(root).items()
-                if str(row.get("target") or "") in wanted}
+    messages = {address for (_room, _message, address), row in addressed_chat_annotations(root).items()
+                if address and str(row.get("target") or "") in wanted}
     selected, owner = [], []
     for address, row, pos in chat_chain.iter_room_rows(root, room):
         if wanted & {str(row.get(field) or "") for field in _LINEAGE}:
@@ -219,8 +220,13 @@ def _task_rows(root: Path, room: str, task_ids: Iterable[Any]) -> List[Tuple[Dic
                 refs.append(row["origin_message_ref"])
         elif str(row.get("direction") or "") == "in":
             owner.append((address, row, pos))
-    selected += [entry for entry in owner if entry_matches_source_ref(entry[1], refs)
-                 or str(entry[1].get("client_message_id") or "") in messages]
+    exact = [ref for ref in refs if "row_sha256" in ref and owner_message_ref_is_valid(ref)]
+    partial = [ref for ref in refs if "row_sha256" not in ref]
+    found = owner_message_entries(root, partial) if partial else {}
+    legacy_rows = {chat_chain.source_row_id(hit.row) for hit in found.values() if hit is not None}
+    selected += [entry for entry in owner if entry[0].get("row_sha256") in legacy_rows
+                 or entry_matches_source_ref(entry[1], exact)
+                 or chat_chain.format_address(entry[0]) in messages]
     return sorted(selected, key=lambda entry: entry[2])
 
 
@@ -267,6 +273,16 @@ def _conversation_rows(root: Path, room: str, to_addr: Any) -> Tuple[str, List[T
                         for address, meta, pos, other in picked), key=lambda item: (item[2], item[3]))
 
 
+def _page_covers_hint(room: str) -> str:
+    if room == LEGACY_ROOM_ID:
+        return ("The legacy room has no chat rows. For a page about notes, use covers={note_ids} with the "
+                "exact note IDs; if available, memory_read(room_id='legacy') lists the room's records.")
+    return (f"If available, memory_read(room_id={room!r}, rows=true) prints row addresses; narrow by period or "
+            "task_id if needed. Use covers={from, to} only if your page retells the entire inclusive room range. "
+            "Use {task_ids} for selected tasks or {note_ids} for notes. {to} covers all open room rows up to "
+            "that address; {to, conversation: true} covers the conversation's open rows up to it.")
+
+
 def _expand(root: Path, room: str, lineage: Dict[str, Any], *, from_addr: Any = None, to_addr: Any = None,
             task_ids: Any = None, note_ids: Any = None,
             conversation: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any], List[Tuple[Dict[str, Any], Dict[str, Any], int]]]:
@@ -299,7 +315,7 @@ def _expand(root: Path, room: str, lineage: Dict[str, Any], *, from_addr: Any = 
         request, mode = {"to": to_addr}, "open_to"
     else:
         if not from_addr or not to_addr:
-            raise ValueError("covers is {from, to} (row addresses, inclusive), {to} (the open rows up to it) or {task_ids}")
+            raise ValueError(_page_covers_hint(room))
         found = list(chat_chain.iter_room_rows(root, room, from_addr=from_addr, to_addr=to_addr))
         request, mode = {"from": from_addr, "to": to_addr}, "range"
     seen, rows = set(), []
@@ -371,10 +387,10 @@ def host_stamp(root: Any, task_ids: Iterable[Any], *, rows: Iterable[Any] = ()) 
 
 
 def _quote_resolver(root: Path, lineage: Dict[str, Any],
-                    positions: Optional[Dict[str, int]] = None) -> Callable[[Any], Optional[Tuple[str, str]]]:
+                    positions: Optional[Dict[str, int]] = None) -> QuoteResolver:
     """``address -> (the row's quotable words, author kind)`` for ``verify_quotes``; reads chat, takes no lock.
     The words are ``quote_words``: never a host label rendered beside a typed reaction carrier's own text."""
-    def resolve(address: Any) -> Optional[Tuple[str, str]]:
+    def resolve(address: Any) -> Optional[Tuple[QuoteSource, str]]:
         try:
             row, found = chat_chain.resolve_row(root, address)
         except ValueError:
@@ -390,7 +406,7 @@ def _quote_resolver(root: Path, lineage: Dict[str, Any],
             if pos is None:
                 return None
             author = _author_of(row, pos, lineage)
-        return quote_words(row), author["kind"]
+        return quote_parts(row, root), author["kind"]
     return resolve
 
 
@@ -435,7 +451,8 @@ def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, An
     result = store.publish_page(room_id=room, text=text, covers=covers, author=author, quotes=quotes or (), host_stamp=stamp,
                                 metadata={"coverage_facts": facts, "room_label": label,
                                           **({"lead_rule": lead_rule} if lead_rule is not None else {}),
-                                          "terminal_after_pos": max((pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1),
+                                          "terminal_after_pos": (-1 if room == LEGACY_ROOM_ID else max(
+                                              (pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1)),
                                           **({"closes_project": closes_project, "closure_delivery": closure_delivery}
                                              if closes_project else {})},
                                 quote_resolver=resolver, expected_sequence=expected_sequence)
@@ -450,16 +467,18 @@ _STORY_MEASURE = ("My story's drawn size is not re-measured by a write: memory_r
 
 
 def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
+    room = _room(ctx, root, a["room_id"])
     covers_arg = a["covers"]
-    if not isinstance(covers_arg, dict):
-        return _arg_error(ctx, "a page needs covers: {from, to} row addresses, {to}, {task_ids} or {note_ids}")
+    if not isinstance(covers_arg, dict) or not covers_arg:
+        return _arg_error(ctx, "No page was written: supply covers. " + _page_covers_hint(room))
     try:
-        result, covers, facts, stamp = publish_covered_page(root, store, author, _room(ctx, root, a["room_id"]), a["text"],
+        result, covers, facts, stamp = publish_covered_page(root, store, author, room, a["text"],
                                                             covers_arg, quotes=a["quotes"] or (),
                                                             expected_sequence=a["expected_sequence"],
                                                             **chronicle_lead_metadata())
     except chat_chain.RowAddressError as exc:
-        return _refused(ctx, "target_missing", f"a covers bound does not resolve: {exc.resolution.get('status')}")
+        return _refused(ctx, "target_missing", f"a covers bound does not resolve: {exc.resolution.get('status')}. "
+                        + _page_covers_hint(room))
     if not result.ok:
         return _published(ctx, result)
     statuses = Counter(entry["status"] or "unknown" for entry in stamp["tasks"])
@@ -699,7 +718,8 @@ def _covers_summary(record: Dict[str, Any], period: Optional[memory_inventory.Pe
         moved = bool(meta.get("transfer"))  # the words a transfer brought are data here (memory_inventory.quoted)
         label, told = (memory_inventory.quoted(value) if moved and value else str(value or "") for value in (
             meta.get("label") or meta.get("legacy_type"), meta.get("legacy_range_text")))
-        stated = ("" if not moved else f"stated period {_span(meta['stated_period'])}"
+        # the period its source states in the view's minutes (memory_inventory.period_text); stored dates stay whole
+        stated = ("" if not moved else f"stated period {memory_inventory.period_text(meta['stated_period'])}"
                   if meta.get("stated_period") else "period not stated by its source")
         return "; ".join(part for part in (label, where, told, stated, memory_inventory.transfer_words(record)) if part)
     if kind == "note":
@@ -1378,7 +1398,7 @@ def _task_final_text(root: Path, task_id: str) -> str:
     for _address, row, _pos in chat_chain.iter_rows(root):
         if (str(row.get("task_id") or "") == task_id and str(row.get("direction") or "") in ("out", "outgoing")
                 and not wordless_reaction(row)):
-            final = quote_words(row)
+            final = quote_words(row, root)
     return final
 
 
@@ -1394,7 +1414,7 @@ def _mark_target(ctx: Any, root: Path, store: ChronicleStore, a: Dict[str, Any])
         row, found = chat_chain.resolve_row(root, a["address"])
         if row is None:
             return None, None, str(found.get("status") or "row_missing")
-        if quote and quote not in quote_words(row):
+        if quote and not any(quote in part for part in quote_parts(row, root)):
             return None, None, "quote_mismatch"
         return found["address"], None, ""
     if a["task_id"]:
@@ -1480,7 +1500,7 @@ def _memory_mark(ctx: Any, text: str = "", node_id: str = "", address: str = "",
 def chronicle_tools() -> List[ToolEntry]:
     string = {"type": "string"}
     room = {"type": "string", "description": "Room address: its chat id as text (1 is Main). Default: this task's own room."}
-    address = {"type": "string", "description": "Chat row address row:<chat_id>@<ts>#<sha12>, as memory_read prints it."}
+    address = {"type": "string", "description": "Chat row address row:<chat_id>@<ts>#<sha12>, as memory_read or owner_quote_handles prints it."}
     source = {"type": "object", "description": "A retained source reference exactly as a record or reader returned it."}
     quotes = {"type": "array", "description": "Optional decisive words you cite (page, part or account). Each must be an exact substring of the row at its address, spoken by that class; the host checks and never inserts words itself.",
               "items": {"type": "object", "additionalProperties": False, "required": ["address", "text", "speaker"],
@@ -1567,6 +1587,6 @@ def chronicle_tools() -> List[ToolEntry]:
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",
-            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. A room mark (the default scope) is in view of every integrating focus and of that room's helpers and session starts, a global one of every focus, helper and session start: each view, mine included, shows the mark's own text, its quote while visibility is full and its target's address; a mark adds nothing to my human's chat. A mark on a chat row of my human's own words also carries that row, verbatim and dated, among my human's words for the work to every helper, session, plan council and reviewer (never to a Safety check) of each work in the mark's room (a Main mark: each work outside the Projects; a global mark: every work). A mark, a change of its visible detail and its release also reach the works already running in its room (a global one: in every room) at their next round of the loop: roots, Main turns, wakes, Presence turns, helpers and nannies; the work that made one has it in its own result. An external session a nanny supervises and the realtime live conversation do not receive them. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
+            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. A room mark (the default scope) is in view of every integrating focus and of that room's helpers and session starts, a global one of every focus, helper and session start: each view, mine included, shows the mark's own text, its quote while visibility is full and its target's address; a mark adds nothing to my human's chat. A mark on a chat row of my human's own words also carries that row, verbatim and dated, among my human's words for the work to every helper, session, plan council and reviewer (never to a Safety check) of each work in the mark's room (a Main mark: each work outside the Projects; a global mark: every work). A mark, a change of its visible detail and its release also reach the works already running in its room (a global one: in every room) at their next round of the loop: roots, Main turns, wakes, Presence turns, helpers and nannies; the work that made one has it in its own result. A work parked in a wait reads it when it resumes; a mark wakes nobody. An external session a nanny supervises and the realtime live conversation do not receive them. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
             mark, []), _memory_mark),
     ]

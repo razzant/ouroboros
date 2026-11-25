@@ -60,9 +60,11 @@ def _page(browser, engine, *, width=1440, height=900, theme="light"):
 def _nav(page, target: str) -> None:
     """A page of the shell from its navigation, through the phone's drawer where the bar is narrow."""
     if page.evaluate("document.documentElement.dataset.layout === 'stack'"):
-        back = page.locator('.page.active [data-dashboard-list-back]:visible')
-        if back.count():
+        back = page.locator('.page.active [data-shell-back]:visible')
+        while back.count():
+            previous = page.evaluate("JSON.stringify(window.__ouroLayers.ids())")
             back.click()
+            page.wait_for_function("previous => JSON.stringify(window.__ouroLayers.ids()) !== previous", arg=previous)
     toggle = page.locator(".page.active [data-mobile-nav-toggle]:visible")
     if toggle.count():
         toggle.first.click()
@@ -107,17 +109,19 @@ def _write_unrelated(page, data_dir: Path, posts: list, days: int) -> dict:
 
 
 def _switch(page, url: str, on: bool) -> None:
-    """Consciousness on or off through the Consciousness tab's own Start/Stop (this isolated server's switch)."""
+    """Consciousness on or off through the Consciousness tab's own switch (this isolated server has no place, so the
+    turn asks nothing); the headline names the switch's position by meaning (owner 15.11, 5A)."""
     from playwright.sync_api import expect
 
     _costs(page, url)
     page.locator("[data-costs-consciousness]").click()
     summary = page.locator("[data-cx-summary]")
-    expect(summary).to_contain_text("Consciousness · o", timeout=30_000)
+    expect(summary).to_contain_text("Consciousness · when Ouroboros acts", timeout=30_000)
     toggle = page.locator('[data-cx-act="toggle"]')
-    if toggle.inner_text() == ("Start" if on else "Stop"):
+    if toggle.inner_text() == ("Turn on" if on else "Turn off"):
         toggle.click()
-    expect(summary).to_contain_text(f"Consciousness · {'on' if on else 'off'}", timeout=30_000)
+    expect(summary.locator(".consciousness-headline")).to_contain_text(
+        "Also on its own" if on else "Only when you write to it", timeout=30_000)
 
 
 def _fits(page) -> None:
@@ -156,7 +160,7 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             _switch(page, url, True)  # a fresh install starts it Off, which this card says first
             _costs(page, url)
             allowance = page.locator(FIELD)
-            expect(allowance).to_have_value("20")
+            expect(allowance).to_have_value("15")
             expect(page.locator(f"label[for=setting-{KEY}]")).to_have_text("Consciousness per 24 hours")
             # The keyboard reaches it after the per-task cap, as the card reads.
             page.focus("#setting-OUROBOROS_PER_TASK_COST_USD")
@@ -167,9 +171,9 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
                 allowance.press("Tab")  # leaving the field saves it
             status = page.locator(f"#setting-{KEY}-result")
             expect(status).to_contain_text("Saved", timeout=30_000)
-            # LANE A: with the server's receipt the line also says when it applies and "was 20", with Undo.
+            # LANE A: with the server's receipt the line also says when it applies and "was 15", with Undo.
             said = status.inner_text()
-            assert said == "Saved" or (said.startswith("Saved · ") and "was 20" in said), said
+            assert said == "Saved" or (said.startswith("Saved · ") and "was 15" in said), said
             assert posts[-1] == {KEY: 0}, posts
             assert float(_settings(data_dir)[KEY]) == 0
             expect(page.locator("#costs-allowance-state")).to_contain_text(
@@ -217,8 +221,10 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             expect(allowance).to_have_value("12.75")
             # Owner 14.11: a door from Settings keeps its return in the destination's header on every layout.
             _shoot(page, f"{engine}-settings-costs-return")
-            back = page.locator('#page-dashboard > .app-page-header').get_by_role('button', name='Back to Settings', exact=True)
+            back = page.locator('#page-dashboard > .app-page-header [data-shell-back]')
             expect(back).to_be_visible()
+            expect(back).to_have_attribute('title', back.get_attribute('aria-label'))
+            assert back.get_attribute('aria-label').startswith('Back to Settings')
             back.click()
             expect(home).to_be_visible()
             assert page.errors.unexpected() == [], page.errors.report()
@@ -321,6 +327,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
     server["stop_server"]()
     now = time.time()
     leaves = _seed_spend(data_dir, now)
+    settings = _settings(data_dir)  # this test's own limit: its numbers never follow the factory default
+    (data_dir / "settings.json").write_text(json.dumps({**settings, KEY: 20}), encoding="utf-8")
     server["start_server"]()
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()
@@ -387,9 +395,9 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             for (width, _height, theme), page in pages.items():
                 _costs(page, url)
                 page.locator("[data-costs-consciousness]").click()
-                headline = page.locator(".consciousness-headline")
-                expect(headline).to_contain_text("Wake-up wake-held stopped at the allowance it had left when it "
-                                                 "started ($2.99).", timeout=30_000)
+                headline = page.locator(".consciousness-headline")  # the switch's position and the owner's mark
+                expect(page.locator(".consciousness-headline-state")).to_contain_text(
+                    "Wake-up wake-held stopped at the allowance it had left when it started ($2.99).", timeout=30_000)
                 assert headline.locator(".status-mark").get_attribute("data-hue") == "owner"
                 expect(page.locator(".consciousness-headline-note")).to_have_text(
                     "Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance "
@@ -404,7 +412,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 expect(chip.locator(".cx-chip-mark")).to_have_attribute("data-hue", "owner", timeout=30_000)
                 chip.click()
                 shade = page.locator("#page-chat .cx-shade")
-                expect(shade.locator(".cx-state")).to_contain_text("stopped at the allowance it had left")
+                expect(shade.locator(".cx-state")).to_have_text("Also on its own")  # the switch's position
+                expect(shade.locator(".cx-state-note")).to_contain_text("stopped at the allowance it had left")
                 expect(shade.locator(".cx-state-note")).to_contain_text("Resume keeps that limit, so it pauses again")
                 costs = shade.locator(".cx-door", has_text="Costs ›")
                 expect(costs).to_be_visible()

@@ -110,9 +110,13 @@ def test_search_opens_a_row_where_it_lives_and_the_ask_line_leaves_a_draft(subsc
 
     # A tab Settings had still leads somewhere; an old label finds the row that replaced it.
     assert "home:permissions" in search_settings(page, "behavior")
+    home = page.locator(HOME)
+    assert "MCP_ENABLED" in search_settings(page, "Use MCP servers")
+    mcp = home.get_by_role("button", name="Use MCP servers Extensions › MCP servers", exact=True)
+    assert mcp.get_attribute("data-settings-result") == "MCP_ENABLED"
     assert search_settings(page, "REGISTRY URL") == ["OUROBOROS_CLAWHUB_REGISTRY_URL"]
     setup_browser.capture(page, f"settings-search-{width}x{height}")
-    page.locator(f'{HOME} [data-settings-result="OUROBOROS_CLAWHUB_REGISTRY_URL"]').click()
+    home.get_by_role("button", name="ClawHub address Extensions › Sources › Skill sources", exact=True).click()
     level = settings_page(page, "skill-sources")
     level.wait_for(state="visible")
     page.wait_for_function("() => document.activeElement?.id === 'setting-OUROBOROS_CLAWHUB_REGISTRY_URL'")
@@ -144,10 +148,13 @@ SKILLS = {"skills": [dict(name=f"gate_skill_{i}", description="An installed skil
 
 
 def test_a_skill_form_opened_from_skills_leads_back_to_skills(subscription_ui):
+    """Extensions: a skill's own form is a level over its Skills page, with Back to Skills."""
     ui = subscription_ui
     page = ui["new_page"](viewport={"width": 320, "height": 640}, has_touch=True)
     page.route("**/api/extensions", lambda route: route.fulfill(json=SKILLS))
     page.goto(ui["url"] + "/#skills")
+    # A phone opens Extensions as its list; its Skills row opens the installed skills.
+    page.locator('#page-skills [data-extensions-open="installed"]').click()
     card = page.locator('.skills-installed-card[data-skill="gate_skill_7"]')
     card.wait_for(state="visible")
     offered = page.locator('#page-skills [role="menuitem"][data-skill-action="open_settings"]').evaluate_all(
@@ -169,18 +176,21 @@ def test_a_skill_form_opened_from_skills_leads_back_to_skills(subscription_ui):
     # On a phone the page's one leading control is its Back, in the header before the page's name: the places
     # control gives way to it (docs/DESIGN.md "Page header").
     back = header_back(page)
-    assert back.is_visible() and back.get_attribute("aria-label") == "Back to Skills"
+    assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Skills"
     assert lead_name(page) == "Gate skill settings"
-    assert page.locator("#page-settings .app-page-header [data-mobile-nav-toggle]").is_hidden()
+    assert page.locator("#page-skills .app-page-header [data-mobile-nav-toggle]").is_hidden()
+    assert page.locator("#page-settings").is_hidden(), "the form stands in Extensions, not in Settings"
     assert page.locator("#extension-settings-sections").count() == 1
     # Only the opened skill's route was read for values.
     assert [path for path in _paths(ui) if path.startswith("api/extensions/")] == ["api/extensions/gate_skill_7/settings"]
     setup_browser.capture(page, "settings-skill-form-320x640")
     page.keyboard.press("Escape")
     page.locator("#page-skills").wait_for(state="visible")
-    assert top_path(page) == ""
+    assert page.locator("#page-settings").is_hidden()
+    level.wait_for(state="detached")
+    assert top_path(page) == "", "a local child closes back to the retained Skills view"
     assert page.evaluate("() => document.querySelector('#page-skills .skills-scroll').scrollTop") == kept
-    # The header's Back does the same.
+    # The named header Back does the same.
     open_form()
     level.wait_for(state="visible")
     header_back(page).click()

@@ -51,6 +51,50 @@ def _captured(tmp_path, monkeypatch, *, partial=False):
     return current.run(tmp_path, entry.run_id), area
 
 
+def test_unreadable_source_of_released_generation_does_not_republish(tmp_path, monkeypatch):
+    from ouroboros import payload_release_state
+
+    entry, _area = _captured(tmp_path, monkeypatch)
+    monkeypatch.setattr(payload_release_state, "states_under", lambda _directory: {"files/result.bin": {}})
+    monkeypatch.setattr(named, "named_evidence_witness", lambda _area: None)
+    monkeypatch.setattr(named, "publish_saved", lambda *_args: pytest.fail("unverified generation published"))
+    view = named.retain_named(tmp_path, entry)
+    assert view["status"] == "partial" and view["reason"] == "released_generation_unreadable"
+    assert view["released"] == ["files/result.bin"]
+
+
+@pytest.mark.parametrize("reason", ["release_state_unavailable", "payload_release_pending"])
+def test_unsettled_evidence_state_preserves_the_terminal_and_durable_output(tmp_path, monkeypatch, reason):
+    from ouroboros import payload_release_state
+    from ouroboros.store import StoreBusy
+    from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
+    from ouroboros.tools.registry import ToolContext
+
+    entry, _area = _captured(tmp_path, monkeypatch)
+    receipt, previous = body.saved_named_evidence(tmp_path, entry)
+    assert previous["files"] and entry.output_complete
+    durable = body.retained_payload(tmp_path, entry)["primary_output"]["text"]
+    original, generations = receipt.read_bytes(), set(receipt.parent.parent.iterdir())
+    written = entry.named_evidence.copy()
+    def unavailable(directory):
+        assert pathlib.Path(directory) == receipt.parent
+        if reason == "release_state_unavailable":
+            raise StoreBusy("synthetic contention")
+        return {"files/result.bin": None}
+    monkeypatch.setattr(payload_release_state, "states_under", unavailable)
+    monkeypatch.setattr(named, "named_evidence_witness", lambda *args: pytest.fail("unknown state initiated recapture"))
+    assert named.run_named_evidence(tmp_path, entry, recapture=True)["reason"] == reason
+    body.collect_terminal(tmp_path, entry.run_id)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
+    result = retained_terminal_result(ctx, entry.run_id)
+    assert result["status"] == "terminal" and result["primary_output"]["text"] == durable
+    gap = result["workspace_capture"]["named_evidence"]
+    assert gap["status"] == "partial" and gap["reason"] == reason and gap["files"] == []
+    assert "summary_read" not in gap and "inputs" not in gap
+    assert current.run(tmp_path, entry.run_id).named_evidence == written
+    assert receipt.read_bytes() == original and set(receipt.parent.parent.iterdir()) == generations
+
+
 def test_failed_generations_publish_receipts_without_unlisted_bytes(tmp_path, monkeypatch):
     entry, area = _captured(tmp_path, monkeypatch)
     original, receipt = body.saved_named_evidence(tmp_path, entry)

@@ -1,3 +1,5 @@
+import { backrefs } from './dom_backrefs.js';
+
 export class ClassList {
     constructor(node) { this.node = node; this.names = new Set(); }
     add(...names) { names.forEach((name) => this.names.add(name)); this.sync(); }
@@ -14,7 +16,10 @@ export class ClassList {
 }
 // A text node: a task chip keeps its words in one beside its status mark (task_phase_chip.paintTaskPhase).
 export class TextStub {
-    constructor(data = '') { this.nodeType = 3; this.data = String(data); this.children = []; this.dataset = {}; }
+    constructor(data = '') {
+        backrefs(this, ['parentNode', 'parentElement']);  // insertBefore/removeChild assign them on any node
+        this.nodeType = 3; this.data = String(data); this.children = []; this.dataset = {};
+    }
     get textContent() { return this.data; }
     set textContent(value) { this.data = String(value ?? ''); }
     get classList() { return { contains: () => false }; }
@@ -28,6 +33,7 @@ export class TextStub {
 }
 export class ElementStub {
     constructor(tag = 'div', doc = null) {
+        backrefs(this, ['ownerDocument', 'parentNode', 'parentElement']);
         this.tagName = tag.toUpperCase();
         this.ownerDocument = doc;
         this.dataset = {};
@@ -144,6 +150,7 @@ export class ElementStub {
     get firstChild() { return this.children[0] || null; }
     get lastChild() { return this.children.at(-1) || null; }
     replaceChild(next, current) { this.insertBefore(next, current); this.removeChild(current); return current; }
+    replaceWith(next) { this.parentNode?.replaceChild(next, this); }
     replaceChildren(...nodes) { this.children = []; nodes.forEach((node) => this.appendChild(node)); }
     contains(node) {
         if (node === this) return true;

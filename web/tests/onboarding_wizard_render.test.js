@@ -248,7 +248,7 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
     const catalogReads = [];
     const fetch = (url, init) => {
         // The Models step reads the catalog of the draft's own access: the key typed here, which no saved file holds.
-        if (String(url) === '/api/onboarding/model-catalog') {
+        if (String(url).startsWith('/api/onboarding/model-catalog')) {
             catalogReads.push(JSON.parse(init.body));
             const body = { items: [], model_sources: [], errors: [] };
             return Promise.resolve({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
@@ -272,7 +272,11 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
         const access = doc.getElementById('root').innerHTML;  // the access step in a person's words
         assert.match(access, /How far Ouroboros reaches into its own code and this computer\./);
         assert.match(access, /Folder of your own skills \(optional\)/);
-        doc.getElementById('next-btn').fire('click');   // Access → budget.
+        doc.getElementById('next-btn').fire('click');   // Access → Consciousness: the switch starts on (no state yet).
+        assert.match(doc.getElementById('root').innerHTML, /data-consciousness-choice="on" aria-pressed="true"/);
+        doc.getElementById('next-btn').fire('click');   // Consciousness → Skills: the step's own list (owner 2026-11-21).
+        assert.match(doc.getElementById('root').innerHTML, /<h2 class="step-title">Skills<\/h2>[\s\S]*data-starter-skills="step"/);
+        doc.getElementById('next-btn').fire('click');   // Skills → budget.
         for (const [id, value] of [['total-budget', '15.5'], ['per-task-budget', '5.25']]) {
             const input = doc.getElementById(id);
             input.value = value;
@@ -300,6 +304,7 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
             OUROBOROS_RUNTIME_MODE: 'advanced',
             subscriptionsConnected: false,
             skipSubscriptionPresets: false,
+            consciousness: true,  // the step's position rides the one completion request (owner decision 2026-11-20)
         };
         for (const [key, value] of Object.entries(expected)) assert.equal(requests[0].body[key], value, key);
         assert.equal('OUROBOROS_REVIEW_ENFORCEMENT' in requests[0].body, false, 'the retired setting is never written');
@@ -700,8 +705,7 @@ test('the summary step stages the language and applies it only after the complet
     assert.match(source, /stage: \(value\) => \{ state\.languageChoice = value; \} \}\)/);
     const complete = source.indexOf('const result = await completeOnboardingAtomically(payload);');
     const apply = source.indexOf('await applyStagedLanguage();', complete);
-    // The hand-off runs through the Consciousness row's afterSave (#1603), which announces last.
-    const announce = source.indexOf('announce: () => announceCompletion(result)', complete);
+    const announce = source.indexOf('announceCompletion(result);', complete);
     assert.ok(complete > 0 && apply > complete && announce > apply, 'complete → apply the staged language → announce');
     assert.match(source, /await saveLanguageChoice\(choice\)/, 'the shared writer, not a second path');
     // The other verified-success path — an unknown save whose own receipt the attempt read-back returned —
@@ -811,7 +815,7 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const fetch = async (url, init = {}) => {
         let body = {};
-        if (String(url) === '/api/onboarding/model-catalog') body = subscription.catalog;
+        if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) body = subscription.catalog;
         else if (String(url) === '/api/claudexor/status') body = subscription.status;
         else if (String(url) === '/api/onboarding/subagents/preview') {
             const payload = JSON.parse(init.body);
@@ -824,18 +828,19 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
     // Walk from Accounts (where the connected subscription is observed) to Summary.
     const summary = async (query, fallbackModel, mainModel = 'claudexor::codex=gpt-test', openrouterKey = '') => {
-        let html = '', budget = '';
+        let html = '', budget = '', mind = '';
         const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, openrouterKey, mainModel, fallbackModel, automaticModels: [] } };
         await withWizard(bootstrap, query, async ({ doc }) => {
             await settle();
-            for (let step = 0; step < 4; step += 1) {
+            for (const step of BOOTSTRAP.stepOrder.slice(1)) {
                 doc.getElementById('next-btn').fire('click');
                 await settle();
-                if (step === 2) budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
+                if (step === 'consciousness') mind = doc.getElementById('root').innerHTML;
+                if (step === 'budget') budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
             }
             html = doc.getElementById('root').innerHTML;
         }, { fetch });
-        return { html, budget };
+        return { html, budget, mind };
     };
     const waits = await summary('quota-without-fallback', '');
     assert.match(waits.html, /When quota runs out[\s\S]*?Waits for the reset, then continues/);
@@ -850,6 +855,11 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const api = await summary('quota-api-main', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
     assert.match(api.html, /Total API budget/, 'the walk reached Summary');
     assert.doesNotMatch(api.html, /When quota runs out/);
+    // The Consciousness step names the subscription's quota only where a subscription alone pays for its wakes.
+    const quota = BOOTSTRAP.consciousnessOffer.words.subscriptionCost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(waits.mind, new RegExp(quota.replace(/'/g, '&#39;')));
+    assert.doesNotMatch(api.mind, /subscription&#39;s quota/);
+    assert.match(api.mind, /data-consciousness-step/, 'the walk passed the Consciousness step');
     // The limits step says what its limits cannot count, as the preview of this draft names it (Dashboard › Costs'
     // line); with nothing named the line is hidden.
     assert.match(api.budget, /id="budget-gaps"[^>]* hidden><\/div>/);
@@ -863,12 +873,79 @@ test('Summary says what an exhausted subscription quota does, with and without a
     assert.match(partial.budget, /id="budget-gaps"[^>]*>Partly counted: all model roles \(text only, off-peak, USD only\); Web search \(USD only\)\.<\/div>/);
 });
 
-// A read in flight for another access is no longer wanted once the draft is back at an access already read: its late
-// answer (the list of a key since replaced) must not land. This stand-in DOM paints no model list, so the test reads
-// what a landed answer changes on the wire: the wizard would hold the replaced key's list as the one read whole and
-// ask again for the first key's when Models reopens. No account is connected until the end, so until then nothing
-// but the owner's own asks reads the catalog; the account that connects then reads with the key he last asked with.
-// And the limits line speaks only for an answered preview.
+// Review r1 (Astra M1): pressing Update on Accounts can bring a catalog row the first preview did not have (Luna). A
+// slot still holding what an earlier preview proposed is asked again, blank, so the next preview proposes from the new
+// catalog and Light moves to Luna; a Main the owner set is sent as set, and nothing is proposed beside it.
+// Review r2 (Carbon R2-MAJOR-1): slots are blanked only beside a Main that is itself asked again or blank (the server
+// proposes nothing beside the owner's Main, so the limits must be computed for the slots as held).
+// Review r3 (Astra R3-1): an adoption reloads the roles editor, so once the owner edits any role nothing is asked
+// again or adopted: the draft goes as held and an edit in progress is never reloaded away.
+test('a slot still holding a preview\'s proposal takes the proposal of a changed catalog; a Main the owner set is kept', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    const [TEST, LUNA] = ['claudexor::codex=gpt-test', 'claudexor::codex=gpt-6-luna'];
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const location = { origin: 'http://127.0.0.1:8765', href: 'http://127.0.0.1:8765/onboarding', search: '', hash: '', pathname: '/onboarding', replace() {} };
+    let catalogChanged = false;  // the catalog lists Luna (pressed Update) from the next preview on
+    const finish = async (query, initial, onModels = null) => {
+        const previews = [], posted = [];
+        catalogChanged = !onModels;
+        const fetch = async (url, init = {}) => {
+            let body = {};
+            if (String(url) === '/api/onboarding/complete') {
+                posted.push(JSON.parse(init.body));
+                body = { ok: true, runtime_mode: 'advanced', restart_required: false };
+            } else if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) body = subscription.catalog;
+            else if (String(url) === '/api/claudexor/status') body = subscription.status;
+            else if (String(url) === '/api/onboarding/subagents/preview') {
+                const payload = JSON.parse(init.body);
+                previews.push(payload);
+                // As compile_model_settings: proposals only beside a Main awaiting one; Luna once the catalog lists it.
+                const proposes = !payload.OUROBOROS_MODEL || payload.OUROBOROS_MODEL === BOOTSTRAP.initialState.mainModel;
+                body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: [], partly_counted_spend: [],
+                    model_settings: proposes ? { OUROBOROS_MODEL: TEST, OUROBOROS_MODEL_LIGHT: catalogChanged && previews.length > 1 ? LUNA : TEST } : {} };
+            }
+            return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+        };
+        const bootstrap = { ...BOOTSTRAP, freshInstall: true, initialState: { ...BOOTSTRAP.initialState, ...initial } };
+        await withWizard(bootstrap, query, async ({ doc }) => {
+            await settle();
+            for (let step = 0; step < BOOTSTRAP.stepOrder.length; step += 1) {  // every step's Continue, then Start
+                doc.getElementById('next-btn').fire('click'); await settle();
+                if (step === 0 && onModels) { await onModels(doc); catalogChanged = true; await settle(); }
+            }
+        }, { fetch, location });
+        assert.equal(posted.length, 1, 'the walk reached the completion POST');
+        return { body: posted[0], previews };
+    };
+    const proposed = await finish('light-reproposed', {});
+    assert.ok(proposed.previews.length > 1, 'a later preview was asked');
+    const last = proposed.previews.at(-1);
+    assert.deepEqual([last.OUROBOROS_MODEL, last.OUROBOROS_MODEL_LIGHT], ['', ''], 'the preview\'s own proposals are asked again');
+    assert.deepEqual([proposed.body.OUROBOROS_MODEL, proposed.body.OUROBOROS_MODEL_LIGHT], [TEST, LUNA]);
+    const automaticModels = BOOTSTRAP.initialState.automaticModels.filter((key) => key !== 'mainModel');
+    const kept = await finish('owner-main-kept', { mainModel: TEST, automaticModels });
+    assert.ok(kept.previews.length > 0 && kept.previews.every((draft) => draft.OUROBOROS_MODEL === TEST), 'a set Main is sent as set');
+    assert.equal(kept.body.OUROBOROS_MODEL, TEST);
+    assert.notEqual(kept.body.OUROBOROS_MODEL_LIGHT, LUNA, 'nothing is proposed beside a Main the owner set');
+    // The roles editor's own input: the stand-in keeps one element per id, so the listener it bound is the one fired.
+    const edit = (id, value) => async (doc) => { const input = doc.getElementById(id); input.value = value; input.fire('input'); };
+    const OWNER_MAIN = 'claudexor::codex=main-owner', OWNER_VISION = 'claudexor::codex=vision-owner';
+    const mainEdited = await finish('owner-main-edited', {}, edit('main-model', OWNER_MAIN));
+    const asked = mainEdited.previews.filter((draft) => draft.OUROBOROS_MODEL === OWNER_MAIN);
+    assert.ok(asked.length > 0, 'a preview was asked after Main was edited');
+    assert.ok(asked.every((draft) => draft.OUROBOROS_MODEL_LIGHT === TEST), 'beside the owner\'s Main, Light is asked as held');
+    assert.deepEqual([mainEdited.body.OUROBOROS_MODEL, mainEdited.body.OUROBOROS_MODEL_LIGHT], [OWNER_MAIN, TEST]);
+    const visionEdited = await finish('owner-vision-edited', {}, edit('vision-model', OWNER_VISION));
+    const held = visionEdited.previews.filter((draft) => draft.OUROBOROS_MODEL_VISION === OWNER_VISION);
+    assert.ok(held.length > 0, 'a preview was asked after Vision was edited');
+    assert.ok(held.every((draft) => draft.OUROBOROS_MODEL === TEST && draft.OUROBOROS_MODEL_LIGHT === TEST), 'after an edit the draft is asked as held');
+    assert.deepEqual([visionEdited.body.OUROBOROS_MODEL, visionEdited.body.OUROBOROS_MODEL_LIGHT, visionEdited.body.OUROBOROS_MODEL_VISION],
+        [TEST, TEST, OWNER_VISION], 'nothing is adopted over an edited Models step: Light stays as shown, Vision is the owner\'s');
+});
+
+// A full Retry with the second key is still in flight when Models reopens with the first key. Models reads only
+// that provider once under the restored key. Subsequent opens reuse it. A later account change reads descriptors
+// independently, and the limits line still speaks only for an answered preview.
 test('a replaced key\'s catalog never lands late, the key asked again stays the asked one, and a failed preview leaves the limits line unsaid', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const held = [];
@@ -878,12 +955,13 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
     const answer = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
     const listed = (id) => ({ items: [{ provider_id: 'openrouter', id, value: id, name: id }], model_sources: [], errors: [] });
     const fetch = async (url, init = {}) => {
-        if (String(url) === '/api/onboarding/model-catalog') {
+        if (String(url).startsWith('/api/onboarding/model-catalog')) {
             const typed = JSON.parse(init.body).OPENROUTER_API_KEY;
             reads.push(typed.split('-')[3]);
             if (typed !== 'sk-or-v1-second-not-a-secret') return answer(listed('first/model'));
             return new Promise((resolve) => held.push(() => resolve(answer(listed('late/from-replaced-key')))));
         }
+        if (String(url) === '/api/model-catalog?view=sources') return answer(subscription.catalog);
         if (String(url) === '/api/claudexor/status') {
             return answer({ ...subscription.status, profiles: { ...subscription.status.profiles,
                 profiles: subscription.status.profiles.profiles.slice(0, accounts) } });
@@ -901,20 +979,22 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
         const type = (value) => { const key = doc.getElementById('openrouter-key'); key.value = value; key.fire('input'); };
         const click = async (id) => { doc.getElementById(id).fire('click'); await settle(); };
         type('sk-or-v1-first-not-a-secret');
-        await click('next-btn');                                        // Accounts → Models: this access is read whole
+        await click('next-btn');                                        // Accounts → Models: this provider is read
         await click('back-btn');
         type('sk-or-v1-second-not-a-secret');
         await click('onboarding-access-retry');                         // the owner asks again: a read with the second key, held
         assert.equal(held.length, 1);
         type('sk-or-v1-first-not-a-secret');                            // back to the key already read
-        await click('next-btn');                                        // Models opens: nothing to read, the held read is dropped
+        await click('next-btn');                                        // Models opens: read the restored key, retire the held Retry
         held.forEach((release) => release());
         await settle();
         await click('back-btn');
-        await click('next-btn');                                        // Models again, same key: still the list read whole
-        assert.deepEqual(reads, ['first', 'second'], 'the late answer did not become the list read whole');
+        await click('next-btn');                                        // Models again: reuse the list for this key
+        assert.deepEqual(reads, ['first', 'second', 'first'], 'return to the changed access reads it once and discards the late answer');
         await click('next-btn');                                        // Models → Access
-        await click('next-btn');                                        // Access → limits: the answered preview's line
+        await click('next-btn');                                        // Access → Consciousness
+        await click('next-btn');                                        // Consciousness → Skills
+        await click('next-btn');                                        // Skills → limits: the answered preview's line
         assert.match(doc.getElementById('root').innerHTML, /id="budget-gaps"[^>]*>Not counted: Light \(price unknown\)\.</);
         // Its words are composed (data-i18n-fmt, which the page walker skips): a language change says them again.
         const { applyPayload } = await import('../modules/i18n.js');
@@ -935,27 +1015,27 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
         await click('next-btn');                                        // a forced preview that fails
         const line = doc.getElementById('budget-gaps');
         assert.deepEqual([line.hidden, line.textContent], [true, ''], 'no answered preview of this draft: nothing is claimed');
-        // Going back to the first key and opening Models reused its list, and was still his ask: an account that
-        // connects now reads with that key, not with the access the wizard opened with.
+        // An account that connects now acquires subscription evidence independently.
         const asked = reads.length;
         accounts = 1;
         await (await import('../modules/claudexor_status_store.js')).claudexorStatus.refresh();
         await settle();
-        assert.deepEqual(reads.slice(asked), ['first'], 'the unasked read sends the key he last asked with');
+        assert.deepEqual(reads.slice(asked), [], 'account discovery reads its own subscription sources without sending a provider key');
     }, { fetch });
 });
 
-// A key or an address being typed leaves the page only when the owner asks for the list (the Models step, Retry). A
-// read he did not ask for (an account connecting meanwhile) sends the access the wizard opened with, and it is made
-// for every such change: a second account of a family already connected is read too.
+// An account changing on the Accounts step reads subscription sources. Only the Models step or an explicit
+// Retry can send the typed key to a provider for discovery.
 test('an account that connects while a key is being typed never sends that key; opening Models does', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     let accounts = 0;
     const reads = [];
     const fetch = async (url, init = {}) => {
         let body = {};
-        if (String(url) === '/api/onboarding/model-catalog') {
+        if (String(url).startsWith('/api/onboarding/model-catalog')) {
             reads.push(JSON.parse(init.body).OPENROUTER_API_KEY);
+            body = subscription.catalog;
+        } else if (String(url) === '/api/model-catalog?view=sources') {
             body = subscription.catalog;
         } else if (String(url) === '/api/claudexor/status') {
             body = { ...subscription.status, profiles: { ...subscription.status.profiles,
@@ -975,14 +1055,14 @@ test('an account that connects while a key is being typed never sends that key; 
         accounts = 1;
         await claudexorStatus.refresh();
         await settle();
-        assert.deepEqual(reads, [''], 'the unasked read carries the access the wizard opened with');
+        assert.deepEqual(reads, [], 'subscription discovery never posts a draft API key');
         accounts = 2;                                    // a second account of the same family
         await claudexorStatus.refresh();
         await settle();
-        assert.deepEqual(reads, ['', ''], 'its list is read too, still without the key being typed');
+        assert.deepEqual(reads, [], 'account changes do not ask a provider while the key is being typed');
         doc.getElementById('next-btn').fire('click');   // Accounts → Models: the owner asks for the list
         await settle();
-        assert.deepEqual(reads, ['', '', 'sk-or-v1-typed-not-a-secret']);
+        assert.deepEqual(reads, ['sk-or-v1-typed-not-a-secret']);
         doc.getElementById('back-btn').fire('click');
         await settle();
         const asked = reads.length;                      // while the draft is the one he asked with, it may be read again
@@ -991,7 +1071,82 @@ test('an account that connects while a key is being typed never sends that key; 
         accounts = 1;                                    // and an account leaves meanwhile
         await claudexorStatus.refresh();
         await settle();
-        assert.deepEqual(reads.slice(asked), [''], 'a key deleted since he last asked is not sent again');
+        assert.deepEqual(reads.slice(asked), [], 'a key deleted since he last asked is not sent again');
+    }, { fetch });
+});
+
+// The built-in OpenAI key's API (settings_provider_cards.js createFlatKeyChoices). A key typed where the install had
+// none is a key being created: the draft the Models step reads with stores Responses with it and proposes the
+// profile that option names, where the server offers one. A key the bootstrap reports as configured keeps what it
+// stored: its untouched choice sends no word and its saved models are left as they were. The bootstraps here add or
+// drop that profile themselves, so the case reads the same before and after the fixture is regenerated.
+test('a key typed on a fresh install carries Responses and its profile in the draft; a configured key keeps its API and its models', async () => {
+    const reads = [];
+    const fetch = async (url, init = {}) => {
+        const catalog = String(url).startsWith('/api/onboarding/model-catalog');
+        if (catalog) reads.push(JSON.parse(init.body));
+        const body = catalog ? { items: [], model_sources: [], errors: [] } : {};
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const strip = (html) => html.match(/<div data-flat-key-choice="OPENAI_API_SURFACE"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/)?.[0] || '';
+    const current = { ...BOOTSTRAP.modelDefaults.openai, main: 'openai::test-current-main', light: 'openai::test-current-light', fallback: 'openai::test-current-fallback' };
+    const { 'openai-responses': _dropped, ...earlierOnly } = BOOTSTRAP.modelDefaults;
+    const offered = { ...BOOTSTRAP, modelDefaults: { ...earlierOnly, 'openai-responses': current } };
+    const typeAndRead = async (doc) => {
+        const key = doc.getElementById('openai-key');
+        key.value = 'sk-openai-typed-not-a-secret';
+        key.fire('input');
+        doc.getElementById('next-btn').fire('click');   // Accounts → Models: the draft is read
+        await settle();
+        return reads.at(-1);
+    };
+    await withWizard(offered, 'openai-api-fresh', async ({ doc }) => {
+        await settle();
+        const html = () => doc.getElementById('root').innerHTML;
+        assert.match(strip(html()), /^<div data-flat-key-choice="OPENAI_API_SURFACE" hidden>/, 'no key in the draft: the strip is not shown');
+        assert.equal((html().match(/data-flat-key-choice=/g) || []).length, 1, 'only the kind that has the choice draws it');
+        assert.doesNotMatch(html(), /id="openai-api-surface"/, 'the contract\'s field of the stored word is this strip, never a text field');
+        const draft = await typeAndRead(doc);
+        assert.deepEqual([draft.OPENAI_API_KEY, draft.OPENAI_API_SURFACE], ['sk-openai-typed-not-a-secret', 'responses']);
+        assert.deepEqual([draft.OUROBOROS_MODEL, draft.OUROBOROS_MODEL_LIGHT, draft.OUROBOROS_MODEL_FALLBACKS],
+            [current.main, current.light, current.fallback], 'the proposals are the profile the option names');
+        doc.getElementById('back-btn').fire('click');   // the step is drawn again from the draft
+        await settle();
+        assert.match(strip(html()), /^<div data-flat-key-choice="OPENAI_API_SURFACE">/);
+        assert.match(strip(html()), /class="ui-segment active" data-connection-choice-value="responses" aria-pressed="true"/);
+        assert.match(strip(html()), /OpenAI’s current API\. Some newer models call tools only through it\./);
+    }, { fetch });
+    // A server that offers no such profile: the kind's own defaults, on Responses all the same.
+    await withWizard({ ...BOOTSTRAP, modelDefaults: earlierOnly }, 'openai-api-fresh-earlier-profile', async ({ doc }) => {
+        await settle();
+        const draft = await typeAndRead(doc);
+        assert.deepEqual([draft.OPENAI_API_SURFACE, draft.OUROBOROS_MODEL], ['responses', BOOTSTRAP.modelDefaults.openai.main]);
+    }, { fetch });
+    const kept = { ...BOOTSTRAP.initialState, openaiKey: BOOTSTRAP.secretPlaceholder, mainModel: 'openai::gpt-kept', automaticModels: [] };
+    await withWizard({ ...offered, initialState: kept }, 'openai-api-configured', async ({ doc }) => {
+        await settle();
+        const drawn = strip(doc.getElementById('root').innerHTML);
+        assert.match(drawn, /^<div data-flat-key-choice="OPENAI_API_SURFACE">/, 'a configured key shows its choice');
+        assert.match(drawn, /class="ui-segment active" data-connection-choice-value="chat_completions" aria-pressed="true"/);
+        assert.match(drawn, /class="ui-segment" data-connection-choice-value="responses" aria-pressed="false"/);
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        assert.ok(!reads.at(-1).OPENAI_API_SURFACE, 'an untouched choice of a key the install holds sends no word');
+        assert.equal(reads.at(-1).OUROBOROS_MODEL, 'openai::gpt-kept', 'and the saved model is left as it was');
+    }, { fetch });
+    // A key the install holds on Responses: shown so, and its saved model is still the owner's.
+    await withWizard({ ...offered, initialState: { ...kept, openaiApiSurface: 'responses' } }, 'openai-api-configured-responses', async ({ doc }) => {
+        await settle();
+        assert.match(strip(doc.getElementById('root').innerHTML), /class="ui-segment active" data-connection-choice-value="responses" aria-pressed="true"/);
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        assert.equal(reads.at(-1).OUROBOROS_MODEL, 'openai::gpt-kept');
+    }, { fetch });
+    // Summary says the key's API beside it.
+    const summary = { ...BOOTSTRAP, stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')], initialState: kept };
+    await withWizard(summary, 'openai-api-summary', async ({ doc }) => {
+        assert.match(doc.getElementById('root').innerHTML, /<strong>OpenAI<\/strong>\s*<span>configured · Chat Completions API<\/span>/);
     }, { fetch });
 });
 
@@ -1038,7 +1193,7 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
         } else if (String(url) === '/api/claudexor/status') {
             body = { ...subscription.status, profiles: { ...subscription.status.profiles,
                 profiles: connected ? subscription.status.profiles.profiles : [] } };
-        } else if (String(url) === '/api/onboarding/model-catalog') {
+        } else if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) {
             body = subscription.catalog;
         }
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
@@ -1071,8 +1226,15 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
             type(revisitInputs);
             routeLocal(revisitLocalMode);
             await click(shortcut ? 'quick-start-btn' : 'next-btn');
+            // Review & start lands on its own steps in order (Consciousness, then Skills, where the page offers them);
+            // the last one's Continue goes to Summary.
+            for (const step of shortcut ? bootstrap.stepOrder.filter((id) => ['consciousness', 'skills'].includes(id)) : []) {
+                assert.match(doc.getElementById('root').innerHTML, step === 'skills' ? /data-starter-skills="step"/ : /data-consciousness-step/);
+                await click('next-btn');
+            }
+            if (shortcut) assert.match(doc.getElementById('root').innerHTML, /Start Ouroboros/, 'then Summary');
         }
-        for (let step = 0; step < (shortcut ? 1 : 4); step += 1) await click('next-btn');   // … → Start Ouroboros.
+        for (let step = 0; step < (shortcut ? 1 : bootstrap.stepOrder.length - 1); step += 1) await click('next-btn');   // … → Start Ouroboros.
     }, { fetch, location });
     assert.equal(posted.length, 1, 'the walk reached the completion POST');
     return posted[0];
@@ -1175,6 +1337,22 @@ for (const [name, models, expected] of [
         if (name === 'main-edited') assert.equal(body.OUROBOROS_MODEL, 'zai::owner-main');
     });
 }
+
+// Review & start passes the steps a quick start still asks (owner 2026-11-21: Skills joins Consciousness there), and
+// only the ones the page offers: without Skills Consciousness goes on to Summary, without both Summary is next.
+test('Review & start passes Consciousness and Skills where the page offers them, then Summary', async () => {
+    const quiet = { ...BOOTSTRAP.consciousnessOffer, offered: false };
+    for (const [stepOrder, consciousnessOffer] of [
+        [BOOTSTRAP.stepOrder, BOOTSTRAP.consciousnessOffer],
+        [BOOTSTRAP.stepOrder.filter((step) => step !== 'skills'), BOOTSTRAP.consciousnessOffer],
+        [BOOTSTRAP.stepOrder.filter((step) => !['consciousness', 'skills'].includes(step)), quiet],
+    ]) {
+        const body = await finishFromAccounts({ ...FRESH, stepOrder, consciousnessOffer }, `quick-${stepOrder.length}`,
+            { inputs: { 'zai-key': ZAI_KEY }, revisit: true, shortcut: true });
+        assert.equal(body.subscriptionsConnected, true, stepOrder.join());
+        assert.equal(body.consciousness, consciousnessOffer.offered ? true : undefined);
+    }
+});
 
 // Owner 4A: a fresh local-only setup proposes no unreachable remote Light or Fallbacks — blank
 // Light follows the local Main and blank Fallbacks is no chain (the server's own proposal). An

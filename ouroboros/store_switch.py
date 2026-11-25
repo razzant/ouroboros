@@ -12,7 +12,9 @@ preflight (nothing moves on failure; a refusal is a normal restart on the curren
 plus a reason for the owner) -> phase ``exporting`` in every store -> facts
 (``store_import.export_facts`` per root) -> money (``usage_store.export_journal`` when the
 target lacks ``usage_store.py``), idempotent through the switch receipt -> handles (the packing stage
-restores every retained checkpoint prefix) -> fsync -> ``export.status=completed``
+restores every retained checkpoint prefix) -> threads, dialogue and wake transitions (each step only for a
+target without that reader; ``wake_transitions`` writes the accepted wake chain in the form an older body
+reads) -> fsync -> ``export.status=completed``
 + receipt -> the intent is CONSUMED -> the stores are retired -> the SAME switching owner
 the door used to call runs (``switching_owner``, bound to the intent's target and reason;
 HEAD is verified against the target after it returns) -> the caller exits 42 or re-execs. A
@@ -102,12 +104,19 @@ def report_outcomes(root: pathlib.Path, owner_chat_id: int) -> None:
         intent = outcome.get("intent") or {}
         door = doors.get(intent.get("door"), "Version switch")
         target = intent.get("target_ref") or intent.get("target_sha") or "the requested version"
-        reason = outcome.get("reason") or outcome.get("message") or "the app stopped before changing versions"
-        # The headline line only: Git's whole output stays in the receipt and progress record.
-        reason = " ".join((str(reasons.get(reason, reason)).splitlines() or [""])[0].split()).rstrip(".")
-        msg = (f"{door} to {target} did not happen: {reason}. The app is running the current version. "
-               "You can press that door again.")
-        send_with_budget(owner_chat_id, msg, role="system", system_type="storage_switch_notice", require_write=True)
+        # A typed cause is said in words; no recorded cause at all is the host's own sentence; any other text (Git's
+        # output) is the notice's detail, whole, beside the target.
+        reason, message = str(outcome.get("reason") or ""), str(outcome.get("message") or "")
+        cause = reasons.get(reason) or ("" if reason or message else "the app stopped before changing versions")
+        raw = "" if reason in reasons else "; ".join(part for part in (reason, message) if part)
+        if len(lines := raw.splitlines()) > 1:  # Git's whole output stays in this outcome's own record, never overwritten
+            raw = f"{' '.join(lines[0].split())} (whole message: {PROGRESS_REL}, outcome at {outcome.get('at') or 'unknown'})"
+        msg = f"{door} did not happen{': ' + cause if cause else ''}. The app is running the current version."
+        from ouroboros.host_notice import fields
+
+        send_with_budget(owner_chat_id, msg, role="system", system_type="storage_switch_notice", require_write=True,
+                         progress_meta=fields("version_switch_refused", details=f"{door} to {target}" + (f": {raw}" if raw else ""),
+                                              step="press_again" if intent.get("door") in ("ui_rollback", "update_replace") else ""))
         outcome["reported"] = utc_now_iso()
         atomic_write_json(root / PROGRESS_REL, progress, fsync=True)
 

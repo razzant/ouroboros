@@ -627,7 +627,8 @@ def test_a_late_proof_of_no_start_retracts_the_paused_send_in_the_public_census(
         assert closed.wait(10)
         assert getattr(outcome.get("error"), "receiver_abandoned", False)
         held = census()
-        assert (held["ledger_state"], held["applied"], held["llm_call_id"]) == ("dispatched", "low", "call-x")
+        # A task-local Low send is Low, temporarily, for the window, beside the owner's Max (21.11): named Low.
+        assert (held["ledger_state"], held["applied"], held["books"], held["llm_call_id"]) == ("dispatched", "low", "maps", "call-x")
         if neighbour == "after-genuine-send":
             assert (held["previous"]["attempt_id"], held["previous"]["applied"]) == ("attempt-p", "max")
         record = registry.get("root") if direct else None
@@ -764,7 +765,8 @@ def test_the_newest_request_not_proven_unsent_stands_in_the_census(tmp_path, sco
         owner_pause.install_fence(tmp_path, "root", request_id="pause")
         assert closed.wait(10) and getattr(outcome.get("error"), "receiver_abandoned", False)
         held_a = census()
-        assert (held_a["ledger_state"], held_a["applied"], held_a["previous"]["attempt_id"]) == ("dispatched", "low", "attempt-p")
+        assert (held_a["ledger_state"], held_a["applied"], held_a["books"], held_a["previous"]["attempt_id"]) == (
+            "dispatched", "low", "maps", "attempt-p")  # a task-local Low is named Low (21.11)
         emit_main_call_state(queue_, b_call, "started")
         emit_main_call_state(queue_, b_call, "dispatched", capture=b)
         held_b = census()
@@ -787,8 +789,8 @@ def test_the_newest_request_not_proven_unsent_stands_in_the_census(tmp_path, sco
             previous = fact.get("previous") or {}
             if late == "released":
                 return (previous.get("attempt_id"), previous.get("applied")) == ("attempt-p", "max")
-            return (previous.get("attempt_id"), previous.get("ledger_state"), previous.get("applied")) == (
-                held_a["attempt_id"], late, "low")
+            return (previous.get("attempt_id"), previous.get("ledger_state"), previous.get("books")) == (
+                held_a["attempt_id"], late, "maps")
 
         assert _until(settled_view), census()
         fact = census()

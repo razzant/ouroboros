@@ -166,7 +166,11 @@ late copyback or quarantine restore projects without another receipt.
 `review_price.py` prices one review by one reviewer row from the same rows:
 `review_seat_costs` groups the review category's attempts by
 `(review_wave_id, review_slot_id)` through the `(category, ts_last)` index,
-summing every physical attempt of a seat in one wave. A wave is measured by
+summing every physical attempt of a seat in one wave. Its `models` list names only
+attempts whose send was witnessed (dispatched, settled or unresolved): only a
+reservation released before its send, or proven unsent, never ran, so its model
+cannot be charged the seat's money; an abandoned or unknown outcome does not prove
+no send. A wave is measured by
 its bills, not by what the catalog knew before the send: every attempt was
 released unsent, settled with a recorded sum that is not partial, or is a
 subscription call settled without a sum (a seat and time, no API money); an
@@ -174,6 +178,13 @@ open attempt or a paid one without a sum leaves the wave out. The median of a ro
 recent measured waves on its current model is shown with its count and range, no
 history reads `cost unknown`, and one process keeps the table for half an hour
 so `## Review` never waits on the ledger.
+
+For known spend across the installation, read `settled`, `confirmed` and
+`estimated` from `summaries WHERE scope='global' AND key=''`; inspect
+`unknown_unmetered` separately. Do not sum across scopes: the same attempt
+contributes to several. Imported `usage_baseline_group` rows can carry a string
+amount in `extra` with NULL `attempts.cost_usd`, so summing that column alone
+can undercount even the known spend.
 
 From money to the round and its cause: a task result's `[SUBTASK_OUTCOME]`
 carries its `swarm_receipt`, whose `cost.attempts[]` names every physical
@@ -387,8 +398,31 @@ without a valid upstream figure it is unknown, never $0. Every other reply keeps
 its charge (OpenRouter repeats it in that field), and settled history is not
 rewritten. `_usage_response.provider_cost_value` validates incoming cash; malformed prices
 stay unknown despite available tariffs. The host-derived `cost_invalid` fact
-survives settlement, loop and Safety telemetry. Valid alternate evidence wins;
-absent/null prices permit nonfinal token estimates, never image text tariffs.
+survives settlement, loop and Safety telemetry. Valid alternate evidence wins. Absent prices permit nonfinal
+text-token estimates, never text tariffs for media usage. A sealed OpenRouter request
+with an `unpriced_add_on` requires a reported total even after reconciliation.
+
+On the exact OpenCode Go Chat route, only a valid `usage.cost` supplies a price.
+`usage.opencode.estimated` marks an estimate; list price, plan allowance and
+billed-token split are different units, not stand-ins.
+
+When a multimodal bill has no applicable class weights, the period
+keeps the recorded amount whole. A reported count is a nonnegative integer, absent, or malformed (negative,
+fractional, not a number). Absent and malformed counts are stored unknown, never
+as zero or a truncated number; a malformed one also prices nothing
+(`cost_coverage` `partial`), while its reply and a reported price stay. The loop
+and ledger use the same cache-read resolver: an explicit `cached_tokens: 0` in
+the details block outranks a conflicting top-level alias. DeepSeek
+tariffs read the counts as reported, exact integers only. A native Messages
+prompt is fresh input plus cache reads and writes: without a reported
+`input_tokens` it is unknown and measures neither a window nor a density. A body
+error with zero text counts can settle free only without evidence of a partial
+price, non-text usage or server-tool work, such as a nonzero web search count.
+A paid `web_search` leg's `llm_usage` event mirrors its own settled attempt's
+amount (including an explicit zero), finality, estimate and `cost_invalid` flags,
+and four token counts (`_usage_settlement.attempt_money_fact`). The display
+read is bounded independently of the money wait. Without a readable settled
+row, the event has no amount or counts; it computes neither.
 Generation 404, 401, 403, 429, mismatched ID and absent/invalid money are distinct
 non-price outcomes. `Retry-After` is retained for an operator's next invocation;
 the command never schedules another lookup. A valid retained price needs no

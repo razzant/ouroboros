@@ -18,7 +18,9 @@ pending, and every obligation the drive still holds is in canonical custody:
 * the input closure of the mail addressed to the task (attachments and their
   manifest sources) and of its task contract;
 * the child's verification receipts, unioned into the canonical stream;
-* every exact unread mailbox line (``unread_mailbox``), held by the canonical row.
+* every exact unread mailbox line (``unread_mailbox``), held by the canonical row;
+* every leftover service log, as its verified private copy in the canonical root (``tools.services``
+  prepares the copies off-lock and rechecks their identities before the move, without unlinking sources).
 
 Missing, unreadable or mismatched material RETAINS the drive; a later pass
 converges after a restore. A recorded immutable capture is published only from
@@ -28,7 +30,7 @@ source gone it is held only by a canonical row whose digest its canonical copy
 verifies against and no child-side claim contradicts); a canonical file is never
 replaced (a differing copy publishes beside it under a content-named collision);
 unrecorded files are carried without inventing rows. Every placement is a
-create-only link: a name that appeared after the identity check retains the pass.
+create-only link: a name that appeared after the identity check retains the pass. A pending owner release holds the drive; an exact release receipt prevents republishing those bytes under the original name or its collision alias.
 
 Ownership interlock. Preparation (verification, staging into private unserved
 staging) runs without locks and writes nothing served. The probe is re-asked
@@ -75,6 +77,7 @@ import logging
 import os
 import pathlib
 import shutil
+import time
 import uuid
 from typing import Any, Callable, ContextManager, Dict, Iterator, List, Optional, Tuple
 
@@ -232,6 +235,15 @@ def recorded_execution_drive(row: Dict[str, Any], drive: pathlib.Path, spellings
 
     target = physical_path(spellings, drive)
     return any(physical_path(spellings, recorded) == target for recorded in child_drive_candidates(row))
+
+
+def child_layout_owner(parts: tuple[str, ...]) -> str:
+    """Directory owner of a host child layout, compared lexically even after retirement."""
+    if len(parts) == 2 and parts[:1] == TASK_DRIVES_DIR.parts and parts[1] != "..":
+        return parts[1]
+    if len(parts) == 4 and parts[:2] == HEADLESS_TASKS_DIR.parts and parts[3] == "data" and parts[2] != "..":
+        return parts[2]
+    return ""
 
 
 def own_child_drives(canonical_root: Any, task_id: str, *, store_row: Optional[Dict[str, Any]] = None,
@@ -709,7 +721,7 @@ def custody_revision(row: Dict[str, Any]) -> str:
     """A digest of the fields custody publishes, so a concurrent publisher's write between
     two looks at the row is seen even under the same status and attempt."""
     fields = {key: row.get(key) for key in ("artifacts", "artifact_bundle", "child_ref_promotion", "unread_mailbox",
-                                             *_INPUT_FIELDS)}
+                                             "payload_release", *_INPUT_FIELDS)}
     return hashlib.sha256(json.dumps(fields, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
@@ -725,7 +737,6 @@ def _identity(path: pathlib.Path) -> Optional[tuple]:
 def _occupants(drive: pathlib.Path, task_id: str) -> List[str]:
     """Every task whose result, store or mailbox lives in DRIVE (a timeout retry keeps the
     original drive); a name that is not a task id retains the drive."""
-    from ouroboros.store import StoreError
     from ouroboros.task_store import task_ids
 
     ids = {task_id}
@@ -761,17 +772,6 @@ def _verified(path: pathlib.Path, expected: Optional[Dict[str, Any]]) -> Optiona
         return stream_artifact_file(path, expected=expected)
     except (OSError, ValueError):
         return None
-
-
-def _held_copy(target: pathlib.Path, canonical_rows: List[Dict[str, Any]], row: Dict[str, Any],
-               preferred: pathlib.Path) -> str:
-    """The canonical relpath already holding ROW's recorded immutable bytes (its own relpath
-    first, then any canonical row with the same identity, e.g. a collision name), verified
-    now; '' when none does."""
-    rels = [store_relpath(target, preferred)] + [store_relpath(target, item.get("path")) for item in canonical_rows
-                                                 if item.get("sha256") == row.get("sha256")
-                                                 and item.get("size") == row.get("size")]
-    return next((rel for rel in rels if rel and _verified(target.joinpath(*rel.split("/")), row)), "")
 
 
 def _collision(dest: pathlib.Path, digest: str) -> pathlib.Path:
@@ -827,41 +827,52 @@ def _listed(source: pathlib.Path) -> Dict[str, pathlib.Path]:
 
 def _child_store_plan(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, current: Dict[str, Any],
                       child: Dict[str, Any], staging: pathlib.Path) -> List[Dict[str, Any]]:
-    """Stage every obligation of TASK's store in DRIVE the canonical store does not hold yet.
-    Returns ``{rel, row?, staged?, dest_identity}`` publication items (``rel`` canonical;
-    ``row`` None for an unrecorded file, carried without a row). Missing, unreadable or
-    mismatched material raises ``_Retained``; nothing touches the served store."""
+    """Stage uncustodied obligations as ``{rel, row?, staged?, dest_identity}``; no served writes.
+    ``row`` is None for unrecorded files. Missing, unreadable or mismatched bytes retain the drive."""
     from ouroboros.artifacts import copy_artifact_file, stream_artifact_file
+    from ouroboros.payload_release_state import task_release_state
 
     source, target = drive / _ARTIFACTS_DIR / task_id, canonical / _ARTIFACTS_DIR / task_id
-    canonical_rows = [row for row in current.get("artifacts") or [] if isinstance(row, dict)]
     listed = _listed(source)
     recorded = _obligations(source, current, child)
     if target.resolve(strict=False) != target:
         raise _Retained("canonical_store_unsafe")
-    canonical_by_rel = {rel: row for row in canonical_rows if (rel := store_relpath(target, row.get("path")))}
+    releases = task_release_state(current, target)
+    released, pending = releases.released, releases.pending
     plan: List[Dict[str, Any]] = []
     for rel in sorted(set(recorded) | set(listed)):
         row = recorded.get(rel)
         dest = target.joinpath(*rel.split("/"))
         if dest.parent.resolve(strict=False) != target.joinpath(*rel.split("/")[:-1]) or dest.is_symlink():
             raise _Retained("canonical_store_unsafe")  # a linked component would redirect the write
-        if row is not None and row.get("immutable"):
+        try:
+            address = releases.address(rel)
+            if address in pending:
+                raise _Retained("payload_release_pending")
+            if row is not None and releases.collision(source / rel, dest, row):
+                continue  # the canonical row already carries this identity; preserve its accepted metadata
+        except OSError as exc:
+            raise _Retained(str(exc)) from exc
+        if address in released:
+            # Receipt-matching bytes keep the row, never republish the file; else the collision path below.
+            if (expected := releases.released_source(listed, rel, address, row, dest, plan)) is None:
+                continue
+        elif row is not None and row.get("immutable"):
             if not (isinstance(row.get("size"), int) and row.get("sha256")):
                 raise _Retained("artifact_identity_incomplete")
-            if held := _held_copy(target, canonical_rows, row, dest):
+            if held := releases.held_copy(row, dest):
                 plan.append({"rel": held, "row": row, "dest_identity": _identity(target.joinpath(*held.split("/")))})
                 continue
             if rel not in listed:
                 raise _Retained("artifact_source_missing")
-            expected: Optional[Dict[str, Any]] = row
+            expected = row
         else:
             expected = None
             if rel not in listed:
                 # A recorded mutable file whose source is gone is held only by a canonical row
                 # recording a digest its canonical copy verifies against AND that no child-side
                 # claim contradicts: anything less is convenient metadata, not preserved proof.
-                canonical_row = canonical_by_rel.get(rel)
+                canonical_row = releases.canonical_rows.get(rel)
                 if canonical_row is None or not canonical_row.get("sha256") or _verified(dest, canonical_row) is None \
                         or (row is not None and row.get("sha256") and row["sha256"] != canonical_row["sha256"]):
                     raise _Retained("artifact_source_missing")
@@ -880,15 +891,19 @@ def _child_store_plan(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
             measured = copy_artifact_file(listed[rel], staged, expected=expected)
         except OSError as exc:
             raise _Retained("artifact_source_mismatch" if expected is not None else "child_artifact_store_unreadable") from exc
-        if dest.exists() or dest.is_symlink():  # different bytes: publish beside, never replace
+        if address in released or dest.exists() or dest.is_symlink():  # released name stays absent; conflicts go beside
             beside = _collision(dest, measured["sha256"])
+            beside_rel = releases.address(store_relpath(target, beside))
+            if beside_rel in pending:
+                raise _Retained("payload_release_pending")
+            if releases.released_beside(beside_rel, measured, row, beside, staged, plan):
+                continue
             if beside.exists() or beside.is_symlink():
                 if _verified(beside, measured) is None:
                     raise _Retained("artifact_identity_conflict")
                 staged.unlink(missing_ok=True)
                 if row is not None:
-                    plan.append({"rel": store_relpath(target, beside), "row": {**row, **measured},
-                                 "dest_identity": _identity(beside)})
+                    plan.append({"rel": beside_rel, "row": {**row, **measured}, "dest_identity": _identity(beside)})
                 continue
             dest = beside
         plan.append({"rel": store_relpath(target, dest), "row": {**row, **measured} if row is not None else None,
@@ -951,12 +966,18 @@ def _verify_readback(row: Dict[str, Any], source: pathlib.Path, rows: List[Dict[
         raise _Retained("canonical_listing_references_child")
 
 
-def _copied_back(drive: pathlib.Path, row: Dict[str, Any]) -> bool:
-    """Whether copy-back published this drive's child result onto ROW (its promotion mark)."""
+def copied_child_drive(row: Dict[str, Any]) -> Optional[pathlib.Path]:
+    """The drive named by copy-back's promotion mark, without accessing its old location."""
     promotion, source = row.get("child_ref_promotion"), str(row.get("headless_child_drive_root") or "")
-    return bool(isinstance(promotion, dict) and promotion.get("schema_version") == 1
-                and promotion.get("status") in {"complete", "incomplete"}
-                and source and pathlib.Path(source).resolve(strict=False) == drive)
+    if (source and isinstance(promotion, dict) and type(promotion.get("schema_version")) is int
+            and promotion["schema_version"] == 1 and promotion.get("status") in {"complete", "incomplete"}):
+        return pathlib.Path(source)
+    return None
+
+
+def _copied_back(drive: pathlib.Path, row: Dict[str, Any]) -> bool:
+    source = copied_child_drive(row)
+    return source is not None and source.resolve(strict=False) == drive
 
 
 def _pending_refs_under(row: Dict[str, Any], drive: pathlib.Path) -> bool:
@@ -1049,12 +1070,9 @@ def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
     """Everything outside the locks: liveness, durable settledness, copy-back, pending refs and
     private staging; nothing served is written. Raises ``_Retained``."""
     from ouroboros.owner_mailbox import settled_mailbox_cleanup_allowed
-    from ouroboros.store import StoreError
     from ouroboros.task_results import cancellation_blocks_child_result
 
-    alive = live(task_id)
-    if alive is not False:
-        raise _Retained("liveness_unknown" if alive is None else "task_live")
+    _require_not_live([task_id], live)
     try:
         current = load_task_result(canonical, task_id, strict=True) or {}
         child = load_task_result(drive, task_id, strict=True) or {}
@@ -1188,13 +1206,21 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
         raise _Retained("call_inventory_changed")  # The next pass re-arms retention outside the queue lock.
 
 
+def _require_not_live(task_ids: List[str], live: LiveProbe) -> None:
+    """Every named occupant proven not live; a live or unknown one keeps the drive."""
+    for task_id in task_ids:
+        alive = live(task_id)
+        if alive is not False:
+            raise _Retained("liveness_unknown" if alive is None else "task_live")
+
+
 # Retentions a later pass would meet again until an input of the settlement changes; the rest
 # (a live or unknown owner, a busy lock, a closed generation, a race, an unreadable row, an
 # I/O error) is attempted again on the next pass.
 TRANSIENT_RETENTIONS = frozenset({"liveness_unknown", "task_live", "generation_closed", "custody_busy",
                                    "mailbox_busy", "store_busy", "canonical_changed", "drive_occupant_changed",
                                    "call_inventory_changed", "task_result_unreadable", "review_environment_held",
-                                   "kept_service_capture_owed"})
+                                   "kept_service_capture_owed", "service_logs_uncustodied"})
 
 
 def settlement_basis(parent: pathlib.Path, task_id: str, task_dir: pathlib.Path, drive: pathlib.Path) -> list:
@@ -1326,14 +1352,16 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     final census, probe and move happen inside it. ``stop()`` closes a maintenance
     generation between phases. ``admission_rollback`` additionally lets a never-started
     task's drive go without a settled row. Returns ``{"status": "removed" | "retained",
-    "reason", "published"}`` and, given a prune ``report``, records a kept drive. ``owed``: the pass's one read of the
-    kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
+    "reason", "published"}`` and, given a prune ``report``, records a kept drive and Phase B's step seconds
+    (``under_q_sec``, on the event of a pass that writes its ``headless_task_drive_prune`` event, never its job row). ``owed``: the pass's one
+    read of the kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
     """
     canonical = pathlib.Path(canonical_root).resolve(strict=False)
     tid = validate_task_id(task_id)
     drive = pathlib.Path(drive).resolve(strict=False)
     base = drive.parent if drive.parent.name == tid and drive.name == "data" else drive
     outcome: Dict[str, Any] = {"status": "retained", "reason": "", "published": 0}
+    under_q: List[float] = []  # Phase B's steps under the guard (rechecks, locks, move): the pass's ``under_q_sec``
     staging = canonical / _STAGING_DIR / f"{tid}-{uuid.uuid4().hex[:12]}"
     closed = stop or (lambda: False)
     try:
@@ -1353,10 +1381,12 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                     for occupant in occupants]
         if closed():
             raise _Retained("generation_closed")
-        for item in prepared:
-            alive = live(item["task_id"])
-            if alive is not False:
-                raise _Retained("liveness_unknown" if alive is None else "task_live")
+        _require_not_live([item["task_id"] for item in prepared], live)
+        from ouroboros.tools.services import drive_service_logs_current, preserve_drive_service_logs
+        with publication_fence(closed):
+            logs = preserve_drive_service_logs(canonical, drive, occupants)
+        if logs is None:
+            raise _Retained("service_logs_uncustodied")
         with contextlib.ExitStack() as stack:  # Phase A: publication, per occupant, every write fenced
             stack.enter_context(publication_fence(closed))
             for item in prepared:
@@ -1369,11 +1399,11 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
         # Phase A may have published custody onto the canonical row. Prepare the
         # supervisor's signed ownership read AFTER that publication, outside its
         # queue lock; Phase B still rejects any subsequent change or new owner.
-        for item in prepared:
-            alive = live(item["task_id"])
-            if alive is not False:
-                raise _Retained("liveness_unknown" if alive is None else "task_live")
-        with (guard() if guard is not None else contextlib.nullcontext(True)) as allowed:  # Phase B: the move
+        _require_not_live([item["task_id"] for item in prepared], live)
+        with contextlib.ExitStack() as phase_b:  # Phase B: the move, under the guard
+            allowed = phase_b.enter_context(guard() if guard is not None else contextlib.nullcontext(True))
+            phase_b.callback(lambda: under_q.append(time.monotonic()))  # its last step ends as the guard is left
+            under_q.append(time.monotonic())
             if not allowed:
                 raise _Retained("generation_closed")
             if _occupants(drive, tid) != occupants:
@@ -1382,10 +1412,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                 raise _Retained("review_environment_held")
             if owed_output_hold(canonical, base):
                 raise _Retained("kept_service_capture_owed")
-            for item in prepared:
-                alive = live(item["task_id"])
-                if alive is not False:
-                    raise _Retained("liveness_unknown" if alive is None else "task_live")
+            _require_not_live([item["task_id"] for item in prepared], live)
+            under_q.append(time.monotonic())
             with contextlib.ExitStack() as stack:
                 for item in prepared:
                     if not stack.enter_context(task_custody_lock(canonical, item["task_id"],
@@ -1398,12 +1426,17 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                     raise _Retained("generation_closed")  # closed while the locks were awaited: no move
                 for item in prepared:
                     _recheck_occupant(canonical, drive, item)
+                under_q.append(time.monotonic())
                 trash = canonical / _TRASH_DIR / f"{tid}-{uuid.uuid4().hex[:12]}"
                 trash.parent.mkdir(parents=True, exist_ok=True)
                 try:  # this pass itself read the drive's store; Windows moves no folder with an open file
                     close_connections_under(base)
                 except StoreBusy as exc:
                     raise _Retained("store_busy") from exc
+                if not drive_service_logs_current(drive, occupants, logs):
+                    raise _Retained("service_logs_uncustodied")
+                if closed():
+                    raise _Retained("generation_closed")
                 os.replace(base, trash)
         outcome.update(status="removed")  # the moved drive is deleted by the maintenance child (remove_custody_trash)
     except _Retained as retained:
@@ -1417,6 +1450,9 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             log.warning("Child drive %s kept: custody could not be proven", drive, exc_info=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+    if report is not None and len(under_q) > 1:
+        report.setdefault("under_q_sec", []).append({"task_id": tid, **{step: round(b - a, 3) for step, a, b in zip(
+            ("rechecks", "locks", "move"), under_q, under_q[1:])}})
     if report is not None:
         if outcome["published"]:
             report.setdefault("custodied", []).append({"task_id": tid, "published": outcome["published"]})
@@ -1440,41 +1476,54 @@ def _remove_entry(entry: pathlib.Path) -> None:
 
 def sweep_custody_leftovers(canonical_root: Any, *, min_age_sec: float = 3600.0) -> None:
     """Remove the staging a crashed settlement left behind (older than ``min_age_sec``, so a
-    running settlement keeps its own); staging is a private copy, unserved and unreferenced. A scratch
-    release's entry holds its record, the only one: the next release pass publishes it instead."""
-    import time
-
-    from ouroboros.workspace_preflight import _RELEASE_MARK
-
+    running settlement keeps its own); staging is a private copy, unserved and unreferenced. A release's
+    entry ('+' in its name: a scratch record, the only one, or files the owner released, the only originals)
+    is never swept: the next release pass publishes it (``payload_release.recover``) instead."""
     root = pathlib.Path(canonical_root) / _STAGING_DIR
     if not root.is_dir() or root.is_symlink():
         return
     for entry in root.iterdir():
         try:
-            if _RELEASE_MARK not in entry.name and time.time() - entry.lstat().st_mtime >= min_age_sec:
+            if "+" not in entry.name and time.time() - entry.lstat().st_mtime >= min_age_sec:
                 _remove_entry(entry)
         except OSError:
             continue
 
 
-def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
-    """``(name, identity)`` of each drive a settlement moved aside (one directory read, an ``lstat`` each)."""
+def custody_trash_scan(canonical_root: Any) -> Tuple[List[Tuple[str, Optional[List[int]]]], bool]:
+    """``(entries, complete)``: each listed name with its identity, and whether enumeration proved the
+    names whole. An unreadable identity is ``None``: its name is still present. Only complete
+    enumeration proves that a name not in the listing is gone."""
     root = pathlib.Path(canonical_root) / _TRASH_DIR
-    entries: List[Tuple[str, List[int]]] = []
+    entries: List[Tuple[str, Optional[List[int]]]] = []
+    if root.is_symlink():
+        return entries, False  # a denied listing is not a proved-empty one
     try:
-        if root.is_symlink():
-            return entries
-        with os.scandir(root) as listing:
-            for entry in listing:
-                with contextlib.suppress(OSError):
-                    stat = os.lstat(entry.path)  # remove_custody_trash's identity, not a Windows listing's copy
-                    entries.append((entry.name, [stat.st_ino, stat.st_mtime_ns]))
-    except (FileNotFoundError, NotADirectoryError):
-        pass
-    return entries
+        listing = os.scandir(root)
+    except FileNotFoundError:
+        return entries, True
+    except NotADirectoryError:
+        return entries, False
+    with listing:
+        for entry in listing:
+            try:
+                stat = os.lstat(entry.path)  # preserve the remover's identity, including on Windows
+            except OSError:
+                entries.append((entry.name, None))
+            else:
+                entries.append((entry.name, [stat.st_ino, stat.st_mtime_ns]))
+    return entries, True
 
 
-def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
+    """Readable ``(name, identity)`` pairs; callers that need absence evidence use the scan."""
+    return [(name, identity) for name, identity in custody_trash_scan(canonical_root)[0] if identity is not None]
+
+
+def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None,
+                         before_unlink: Optional[Callable[[pathlib.Path], None]] = None,
+                         notify_retirement: bool = True,
+                         listing: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
     """Delete the drives settlements moved aside: each was fully custodied before its move, and
     nothing serves or references it, so no age or liveness applies. The maintenance child runs this,
     off the serving process. Returns the count removed, stuck and held entries that survived
@@ -1483,24 +1532,42 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
     marker keeps (#2708) has moved into its own ``<id>+scratch-<token>/`` entry, held, re-read every run,
     as ``producer_retained`` (the marker's words, since it was written) until the marker is gone
     (``session_scratch.release_trash_entry``). A failed release or handoff, or a removal it survived, keeps
-    the entry whole, its records included, as the hold ``removal_failed`` (its name and the failure)."""
-    from ouroboros.session_scratch import aggregate_holds, release_trash_entry
+    the entry whole, its records included, as the hold ``removal_failed`` (its name and the failure).
+    BEFORE_UNLINK(entry) is the caller's debt record: it runs before each unlink attempt, and a failure of it
+    unlinks nothing more. NOTIFY_RETIREMENT (the default) schedules the removed sources' retirement here; the
+    trash lane passes False because it books that same fact in the transaction that writes its row — one owner
+    for one fact, while a direct caller keeps its own notification. LISTING, when given, is filled by this
+    pass with ``initial`` (the whole enumeration before processing) and ``gone`` (the names already counted
+    removed by this pass). A Stop ends processing, not the earlier enumeration. The report is unchanged."""
+    from ouroboros.session_scratch import _trash_read_view, aggregate_holds, release_trash_entry
     from ouroboros.tools.kept_service_outputs import owed_declarations
 
     report: Dict[str, Any] = {"removed": 0, "stuck": {}, "holds": []}
     held: List[Any] = []
     root = pathlib.Path(canonical_root) / _TRASH_DIR
     owed = owed_declarations(canonical_root)  # one selection for the whole pass: every entry reads the same debts
+    reads, members, live = _trash_read_view(canonical_root)
     try:
-        entries = [] if root.is_symlink() else list(root.iterdir())
-    except (FileNotFoundError, NotADirectoryError):
+        if root.is_symlink():
+            raise OSError(f"custody trash listing denied: {root} is a symlink")
+        entries = list(root.iterdir())
+    except FileNotFoundError:
         entries = []
+    except NotADirectoryError:
+        return report if notify_retirement else {**report, "incomplete": True}
+    except OSError:
+        if notify_retirement:
+            raise
+        log.warning("Custody trash listing incomplete", exc_info=True)
+        return {**report, "incomplete": True}
+    if listing is not None:
+        listing.update(initial=[entry.name for entry in entries], gone=[])
     for entry in entries:
         if stop is not None and stop():
             break
         holding, failed = False, ""
         try:  # the scratch release and every retained record's handoff are the conditions of the removal
-            holding, retained = release_trash_entry(canonical_root, entry, owed=owed)
+            holding, retained = release_trash_entry(canonical_root, entry, owed=owed, reads=reads, live=live, members=members)
         except Exception as exc:  # whatever failed, the entry and every record still in it wait
             failed = f"{entry.name}: {type(exc).__name__}"
             held += [(row["class"], row["example"], row["since"]) for row in getattr(exc, "retained", ())]
@@ -1508,6 +1575,8 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
         else:
             held += [(row["class"], row["example"], row["since"]) for row in retained]
             if not holding:
+                if before_unlink is not None:
+                    before_unlink(entry)  # outside the suppress: a failed debt record unlinks nothing
                 with contextlib.suppress(OSError):
                     _remove_entry(entry)
         try:
@@ -1517,11 +1586,13 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
                 held.append(("removal_failed", failed or f"{entry.name}: survived its removal", stat.st_mtime))
         except FileNotFoundError:
             report["removed"] += 1
+            if listing is not None:
+                listing["gone"].append(entry.name)
         except OSError as exc:
             report["stuck"][entry.name] = [type(exc).__name__]
             held.append(("removal_failed", f"{entry.name}: {type(exc).__name__}", None))
     report["holds"] = aggregate_holds(held)
-    if report["removed"]:  # the bytecode the removed sources left is owed to retirement now
+    if report["removed"] and notify_retirement:  # the bytecode the removed sources left is owed to retirement now
         from ouroboros.maintenance_retirement import artifact_changed
 
         artifact_changed(canonical_root, immediate=True)

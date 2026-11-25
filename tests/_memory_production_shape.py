@@ -99,7 +99,7 @@ def quiz_rows(alpha: int) -> List[Dict[str, Any]]:
     card = {"quiz_id": "q-inventory", "question": QUESTION, "options": OPTIONS, "asked_at": ASKED, "chat_id": alpha}
     answered = {**card, "answered_index": 1, "comment": COMMENT, "answered_at": ANSWERED}
     return [shared.msg(ASKED, "", chat_id=alpha, direction="out", type="quiz", task_id="ta2", quiz=card),
-            shared.msg(ANSWERED, quiz_answer_frame(answered, 1, COMMENT), chat_id=alpha, direction="system",
+            shared.msg(ANSWERED, quiz_answer_frame(answered, 1, COMMENT, asker="ta2"), chat_id=alpha, direction="system",
                        type="quiz_answer", task_id="ta2", source="owner_quiz_answer",
                        client_message_id="quiz_answer:ta2:q-inventory", quiz=answered)]
 

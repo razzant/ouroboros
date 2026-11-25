@@ -18,10 +18,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import budget_pause
 from ouroboros.tool_custody import submit_tool_future
-from ouroboros.config import (
-    NESTED_SETTLEMENT_MARGIN_SEC,
-    load_settings,
-)
+from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC, load_settings
 from ouroboros.deadline_utils import deadline_clamped_timeout_sec
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
@@ -31,8 +28,7 @@ from ouroboros.tool_call_log import (
     worker_position,
 )
 from ouroboros.tool_capabilities import (
-    FOREGROUND_MUTATIVE_TOOLS, PARALLEL_SAFE_ENQUEUE_TOOLS,
-    READ_ONLY_PARALLEL_TOOLS,
+    FOREGROUND_MUTATIVE_TOOLS, call_segments, legacy_pool_response,
     REVIEWED_MUTATIVE_TOOLS,
     STATEFUL_BROWSER_TOOLS,
     requested_result_view, routing_action_for_tool, completion_control_call, substantive_tool_calls,
@@ -75,6 +71,10 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
     tool_ctx = getattr(tools, "_ctx", None)
     event_queue = getattr(tool_ctx, "event_queue", None)
     enriched = dict(payload)
+    from ouroboros.task_finalization import schedule_report_ctx
+    if enriched.get("tool") == "presence_finish" and schedule_report_ctx(tool_ctx):
+        enriched.pop("args", None)  # the exact call remains in the task's own retained evidence
+        enriched.pop("result_preview", None)
     meta = _tool_task_metadata(tools)
     for key in ("parent_task_id", "root_task_id"):
         if meta.get(key) and not enriched.get(key):
@@ -446,10 +446,8 @@ def _typed_result_metadata(
     outcome classifier and the web client already read, so the
     cutover replaces the PRODUCER of the field, not its consumers.
 
-    The rules below are deliberately NOT text classification and stay here: the
-    untruncated artifact-registration fallback, the plan-review metadata, the
-    process facts, and the
-    skill-publish projection — all keyed on the tool name and on trusted meta.
+    Use producer facts for artifact registration, plan review, process results and
+    skill publication. Only legacy artifact producers need the full result body.
     """
     text = str(result or "")
     if isinstance(tool_result, ToolResult):
@@ -468,10 +466,11 @@ def _typed_result_metadata(
             meta["verification"] = dict(tool_result.meta["verification"])
         if isinstance(tool_result.meta.get("image_attachment"), dict):
             meta["image_attachment"] = dict(tool_result.meta["image_attachment"])
-    # Legacy non-process deliverable fallback reads the FULL result before trace
-    # truncation. Process producers must supply the typed fact below.
+    # Only fall back to legacy text where no producer effect facts apply.
+    facts = meta.get("tool_result_meta", {})
     if (
         fn_name not in _PROCESS_RESULT_TOOLS
+        and not {"artifact_registered", "target_files_changed"}.intersection(facts)
         and not is_error
         and "ARTIFACT_OUTPUTS" in text
     ):
@@ -955,6 +954,7 @@ def _emit_finished(tools: ToolRegistry, live: Dict[str, Any], result: Dict[str, 
     """The live ``tool_call_finished`` frame of one call (every branch shares it)."""
     result.update(invocation_fields(live))
     result_meta = result.get("result_meta") or {}
+    published = result_meta.get("tool_result_meta") or {}  # a call the host refused a further step reads so live too
     _emit_live_log(tools, {
         **{key: value for key, value in live.items() if key not in {"ts", "timeout_sec", "terminal_wait"}},
         "type": "tool_call_finished",
@@ -964,6 +964,8 @@ def _emit_finished(tools: ToolRegistry, live: Dict[str, Any], result: Dict[str, 
         "status": result_meta.get("status"),
         **_process_fact_fields(result_meta),
         **({"verification": result_meta["verification"]} if "verification" in result_meta else {}),
+        **({"tool_result_meta": {key: published[key] for key in ("refused_step", "control_reason") if key in published}}
+           if published.get("refused_step") is True else {}),
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result.get("result", ""), 500)),
         **extra,
     })
@@ -1132,22 +1134,9 @@ def _retire_stateful_tool(stateful_executor, tool_ctx, future):
     return settlement_target, on_settled
 
 
-_PARALLEL_SAFE_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS
-
-
-def tool_calls_can_run_parallel(tool_calls: List[Dict[str, Any]]) -> bool:
-    """True when a tool-call round may execute in the shared ThreadPool.
-
-    Read-only-parallel tools plus fire-and-forget enqueue tools
-    (schedule_subagent) qualify; any other tool forces sequential execution.
-    """
-    return (
-        len(tool_calls) > 1
-        and all(
-            str(tc.get("function", {}).get("name") or "").strip() in _PARALLEL_SAFE_TOOLS
-            for tc in tool_calls
-        )
-    )
+def _call_name(tc: Any) -> str:  # tolerant: a malformed call is named "", so it is never inert and runs alone
+    fn = tc.get("function") if isinstance(tc, dict) else None
+    return str(fn.get("name") or "").strip() if isinstance(fn, dict) else ""
 
 
 def handle_tool_calls(
@@ -1176,7 +1165,10 @@ def handle_tool_calls(
     results = execute_tool_calls(tool_calls, tools, drive_logs, task_id, stateful_executor, llm_trace)
     errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
                                   fit_candidate=fit_candidate, tool_schemas=tool_schemas, project_results=project_results)
-    if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
+    from ouroboros.loop_nudges import observe_handover_work
+    batch = llm_trace.get("tool_calls", [])[initial_count:]
+    observe_handover_work(tools._ctx, llm_trace, batch)
+    if substantive_tool_calls(batch):
         tools._ctx._skill_finalization_injected = False
     return errors
 
@@ -1213,16 +1205,6 @@ def _left_by_control(tools: ToolRegistry, tc: Dict[str, Any], control: BaseExcep
         f"⚠️ TOOL_ERROR ({fn_name}): NOT STARTED: {reason} ended this batch before the handler was entered."))
 
 
-def _sibling_after_control(tools: ToolRegistry, tc: Dict[str, Any], future: Any, control: BaseException) -> Dict[str, Any]:
-    """A parallel call once its pool has settled: the shutdown cancelled only those still queued."""
-    if future.cancelled():
-        return _left_by_control(tools, tc, control, started=False)
-    error = future.exception()
-    if isinstance(error, (UsageAccountingError, ModelWaitInterrupted)):
-        return _left_by_control(tools, tc, error, started=not getattr(error, "invocation_not_started", False))
-    return future.result() if error is None else _unexpected_batch_error(tools, tc, error)
-
-
 def execute_tool_calls(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, drive_logs: pathlib.Path, task_id: str,
                        stateful_executor: StatefulToolExecutor, llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Run one batch's effects and return their results; ``process_tool_results`` records them."""
@@ -1247,6 +1229,11 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
     validation = tuple(getattr(tools._ctx, "_request_wire_custom_receipts", ()) or ())
     tools._ctx._request_wire_custom_receipts = ()
     validation_by_id = custom_validation_by_call_id(validation)
+
+    legacy = len(tool_calls) > 1 and legacy_pool_response(  # the old pool's own question, lazy and strict as it was:
+        str(tc.get("function", {}).get("name") or "").strip() for tc in tool_calls)  # a malformed call raises here
+    names = [_call_name(tc) for tc in tool_calls]  # every other response runs in segments
+    from ouroboros.presence_context import keep_first_receipts
 
     def _execute(tc: Dict[str, Any]) -> Dict[str, Any]:
         receipt = validation_by_id.get(str(tc.get("id") or ""))
@@ -1277,54 +1264,71 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
             result.setdefault("result_meta", {})["presence_delivery_confirmed"] = sorted(confirmed)
         return result
 
-    can_parallel = tool_calls_can_run_parallel(tool_calls)
-    results: List[Any] = [None] * len(tool_calls)
-    control: Optional[Exception] = None
+    ending = (UsageAccountingError, ModelWaitInterrupted) if legacy else (Exception,)  # what ends the response
+    outcomes: Dict[int, Tuple[bool, Any]] = {}  # index -> (returned, row or exception)
+    entered: set = set()  # a pool item a failed submit queued is cancelled or settled by the shutdown, never left
 
-    if not can_parallel:
-        for idx, tc in enumerate(tool_calls):
-            try:
-                results[idx] = _execute(tc)
-            except Exception as exc:
-                control = exc
-                results[idx] = _left_by_control(tools, tc, exc, started=not getattr(exc, "invocation_not_started", False))
-                break
-    else:
-        max_workers = min(len(tool_calls), 8)
-        executor = ThreadPoolExecutor(max_workers=max_workers)
+    def member(idx: int) -> None:
+        entered.add(idx)
         try:
-            future_to_index = {
-                executor.submit(
-                    contextvars.copy_context().run,
-                    _execute,
-                    tc,
-                ): idx
-                for idx, tc in enumerate(tool_calls)
-            }
-            batch_raised = True
-            for future in as_completed(future_to_index):
-                idx = future_to_index[future]
+            outcomes[idx] = (True, _execute(tool_calls[idx]))
+        except BaseException as exc:  # a sibling's own failure stays its row after a control ended collection
+            outcomes[idx] = (False, exc)
+            raise
+
+    def pool(segment: List[int]) -> Optional[BaseException]:  # at once, at most 8 threads, each in a context copy
+        executor, stopped = ThreadPoolExecutor(max_workers=min(len(segment), 8)), True  # returns the ending surfaced
+        try:
+            futures = []
+            for idx in segment:
                 try:
-                    results[idx] = future.result()
-                except (UsageAccountingError, ModelWaitInterrupted) as exc:
-                    control = exc
-                    break
-                except Exception as exc:
-                    results[idx] = _unexpected_batch_error(tools, tool_calls[idx], exc)
-            else:
-                batch_raised = False
+                    futures.append(executor.submit(contextvars.copy_context().run, member, idx))
+                except RuntimeError:  # no thread to start (a PID-limited container): the rest run alone below
+                    if legacy:
+                        raise
+                    return None
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except ending as exc:
+                    return exc
+                except Exception:
+                    pass  # a legacy response's row
+            stopped = False
         finally:
             # A batch leaving on an exception (BudgetExceeded) must not strand an
             # already-running wrapper that has not yet registered its inner future
             # with budget-pause quiescence: cancel the queued ones, WAIT for the
             # started ones (each bounded by its own tool timeout) (#1196, Astra #4).
-            executor.shutdown(wait=batch_raised, cancel_futures=True)
-        if control is not None:
-            for future, idx in future_to_index.items():
-                if results[idx] is None:
-                    results[idx] = _sibling_after_control(tools, tool_calls[idx], future, control)
-    if control is not None:  # a sequential batch's remainder was never entered
-        results = [row or _left_by_control(tools, tc, control, started=False) for row, tc in zip(results, tool_calls)]
+            executor.shutdown(wait=stopped, cancel_futures=True)
+        return None
+
+    control: Optional[BaseException] = None
+    for segment in [list(range(len(tool_calls)))] if legacy else call_segments(names):
+        surfaced = pool(segment) if len(segment) > 1 else None
+        raised = [i for i in segment if not outcomes.get(i, (True,))[0] and isinstance(outcomes[i][1], ending)]
+        for idx in [] if raised else [idx for idx in segment if idx not in entered]:  # alone, in order, here
+            try:
+                member(idx)
+            except Exception:
+                raised = [idx]
+                break
+        if len(segment) > 1 and not legacy:  # a send two overlapping windows saw rides the first of their rows
+            keep_first_receipts([outcomes[i][1] for i in segment if outcomes.get(i, (False,))[0]])
+        if raised:  # the legacy pool: what its collector surfaced; a group: the smallest request index raised
+            control = surfaced if legacy else outcomes[raised[0]][1]
+            break
+    results: List[Any] = []
+    for idx, tc in enumerate(tool_calls):
+        returned, value = outcomes.get(idx, (False, None))
+        if returned:
+            results.append(value)
+        elif value is None:  # never entered: only a control can have left it
+            results.append(_left_by_control(tools, tc, control, started=False))
+        elif isinstance(value, ending):
+            results.append(_left_by_control(tools, tc, value, started=not getattr(value, "invocation_not_started", False)))
+        else:
+            results.append(_unexpected_batch_error(tools, tc, value))
     return results, control
 
 

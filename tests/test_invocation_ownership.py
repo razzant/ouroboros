@@ -1,6 +1,6 @@
 """Actual invocation ownership, final admission and lazy custody ordering."""
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 import datetime
 import json
 import os
@@ -16,24 +16,11 @@ from ouroboros import budget_pause, owner_pause, task_store, tool_custody
 from ouroboros.loop_tool_execution import _execute_with_timeout
 from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import load_task_result, write_task_result
-from tests.test_batch4_producer_custody import _registry
+from tests._invocation_harness import _registry
 
 
 
-@contextmanager
-def owner(registry, *, attempt=1, control=None):
-    ctx = registry._ctx
-    with task_model_wait_scope(task={"id": ctx.task_id, "_attempt": attempt},
-            drive_root=ctx.drive_root, event_queue=None, worker_slot_held=False,
-            **({"owner_control": lambda: control[0]} if control is not None else {})) as held:
-        held.tool_context = ctx
-        yield held
-
-
-def run(registry, *, timeout=3, name="knowledge_read", args=None):
-    return _execute_with_timeout(registry, {"id": "call", "function": {
-        "name": name, "arguments": json.dumps(args or {"topic": "fixture"})}},
-        registry._ctx.drive_root / "logs", timeout, task_id=registry._ctx.task_id)
+from tests._invocation_harness import owner, run  # noqa: F401 -- shared (tests/_invocation_harness.py)
 
 
 def claims(root):
@@ -383,45 +370,106 @@ def test_cancelled_before_entry_has_one_host_settlement(tmp_path, monkeypatch):
     assert not claims(tmp_path)
 
 
-def test_real_sql_reader_wait_releases_control_locks_and_keeps_one_tail(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode,statement", [("PERSIST", "COMMIT"), ("WAL", "BEGIN IMMEDIATE")])
+def test_real_sql_reader_wait_releases_control_locks_and_keeps_one_tail(tmp_path, monkeypatch, mode, statement):
+    from ouroboros import loop_tool_execution, store
+    from tests._store_journal_shared import write_hold
+
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     registry, queue, _ = _registry(tmp_path, monkeypatch)
-    from ouroboros import loop_tool_execution
-    from tests.test_admission_contention import database_reader
-    entered, finish, publishing = threading.Event(), threading.Event(), threading.Event()
+    entered, finish = threading.Event(), threading.Event()
+    held, attempting = threading.Event(), threading.Event()
     calls = []
+
     def body(*_a, **_kw):
         calls.append(True)
         entered.set()
-        assert finish.wait(5)
+        finish.wait()
         return "done once"
+
     registry.override_handler("knowledge_read", body)
+
     def timeout(*_args):
-        assert entered.wait(3)
+        held.wait()
         raise TimeoutError()
+
     monkeypatch.setattr(loop_tool_execution, "future_result", timeout)
-    retain = tool_custody.retain_invocation
-    def publishing_tail(outcome, update=None):
-        publishing.set()
-        return retain(outcome, update)
-    monkeypatch.setattr(tool_custody, "retain_invocation", publishing_tail)
+    writing = threading.local()
+    patch = task_store.patch_handoff
+    drive = os.path.realpath(tmp_path)
+    database = store.store_path(tmp_path)
+    attempted_ids = set()
+
+    def publish(root, task_id, kind, op_id, mutator):
+        target = task_id == "root" and kind == "launch_handoffs" and os.path.realpath(root) == drive
+        writing.tail = op_id if target else None
+        try:
+            return patch(root, task_id, kind, op_id, mutator)
+        finally:
+            writing.tail = None
+
+    monkeypatch.setattr(task_store, "patch_handoff", publish)
+    lease = store.connection
+
+    def trace(sql):
+        if held.is_set() and sql == statement:
+            attempted_ids.add(writing.tail)
+            attempting.set()
+
+    @contextmanager
+    def observe_connection(path, *args, **kwargs):
+        with lease(path, *args, **kwargs) as conn:
+            if path != database or not getattr(writing, "tail", None):
+                yield conn
+                return
+            # SQLite reports the real handoff statement while the other thread
+            # owns its conflicting transaction. The store keeps its own busy handler.
+            conn.set_trace_callback(trace)
+            try:
+                yield conn
+            finally:
+                conn.set_trace_callback(None)
+
+    monkeypatch.setattr(store, "connection", observe_connection)
+
     def call():
         with owner(registry):
             return run(registry)
+
     with ThreadPoolExecutor(1) as executor:
+        future = executor.submit(call)
         try:
-            with database_reader(tmp_path) as release_reader:
-                future = executor.submit(call)
-                assert publishing.wait(3) and not future.done()
-                with queue._queue_lock, owner_pause.launch_lock(tmp_path, "root", wait=False):
-                    pass
+            assert entered.wait(3)
+            with closing(write_hold(database)) as blocker:
+                assert blocker.execute("PRAGMA journal_mode").fetchone()[0].upper() == mode
+                assert blocker.in_transaction
+                held.set()
+                assert attempting.wait(3) and not future.done()
+                assert queue._queue_lock.acquire(blocking=False)
+                try:
+                    with owner_pause.launch_lock(tmp_path, "root", wait=False):
+                        pass
+                finally:
+                    queue._queue_lock.release()
                 assert not budget_pause.drain_local_tool_futures(registry._ctx, timeout_sec=0)["drained"]
-                release_reader()
-                assert future.result(timeout=3)["is_error"]
-                assert len(claims(tmp_path)) == 1 and calls == [True]
+            timed_out = future.result(timeout=3)
+            assert timed_out["is_error"] and timed_out["tool_result"].code == "TOOL_TIMEOUT"
+            invocation_id = timed_out["invocation_id"]
+            active = claims(tmp_path)
+            assert set(active) == attempted_ids == {invocation_id}
+            assert (active[invocation_id]["state"], active[invocation_id]["tool"]) == ("claimed", "knowledge_read")
+            assert calls == [True]
         finally:
+            held.set()
             finish.set()
     assert budget_pause.drain_local_tool_futures(registry._ctx, timeout_sec=3)["drained"]
     assert not claims(tmp_path)
+    rows = [json.loads(line) for line in (tmp_path / "logs/tools.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["type"] for row in rows] == ["tool_call_started", "tool_call_timeout", "tool_call"]
+    assert {row["invocation_id"] for row in rows} == {invocation_id}
+    settled = rows[-1]
+    assert settled["is_error"] is False and (settled["status"], settled["tool_result_code"]) == ("ok", "OK")
+    assert settled["result_preview"] == "done once"
 
 
 def test_model_wait_close_prunes_its_frozen_scope_under_another_current_attempt(tmp_path):
@@ -699,21 +747,38 @@ def nested_start(gate, events, label="nested"):
     asyncio.run(start())
 
 
-def nested_start_after_soft_wait(registry, tool, gate, *, control, deadline, before_start, reader=None):
-    """``tool`` runs with a 0.05 s soft wait inside the caller's own execution bound ``deadline``. Past that wait its
-    body calls ``before_start`` and makes one nested start. The task's owner is held until the body ended, as a live
-    task's owner outlives a tool it stopped waiting for. ``reader`` is bound around the call alone, as a live call's
-    batch binds its End; an abandoned worker keeps it after the call came back. Returns what the body saw and what
-    reached the caller."""
-    from ouroboros import model_wait
+def nested_start_after_soft_wait(registry, monkeypatch, tool, gate, *, control, clock, deadline, before_start,
+                                 reader=None):
+    """Spend the soft wait on a test clock only after handler entry, then make one nested start. For a read the
+    caller leaves first; a foreground edit must join. Keep the task owner live for the tail, but bind the End
+    reader only around the call, as a live call's batch does."""
+    from ouroboros import loop_tool_execution, model_wait
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     events, body_bounds, refusals, outcome = [], [], [], {}
-    done = threading.Event()
+    entered, proceed, done = (threading.Event() for _ in range(3))
+
+    def monotonic_now(_slot=None):
+        return clock[0]
+
+    def timeout_after_entry(future, timeout):
+        assert entered.wait(5), "the handler did not enter before the simulated soft wait"
+        clock[0] += timeout
+        try:
+            return future.result(timeout=0)  # The handler is parked, so this reports a real Future timeout.
+        finally:
+            if tool == "edit_text":
+                proceed.set()  # The loop joins a foreground mutator rather than returning a timeout.
+
+    monkeypatch.setattr(model_wait, "monotonic_now", monotonic_now)
+    monkeypatch.setattr(loop_tool_execution, "monotonic_now", monotonic_now)
+    monkeypatch.setattr(loop_tool_execution, "future_result", timeout_after_entry)
 
     def body(*_a, _resolved_binding=None, **_kw):
         try:
-            time.sleep(.15)  # past the soft wait: the loop joins a foreground mutator and abandons a read
+            entered.set()
+            assert proceed.wait(5), "the test did not release the handler after the soft wait"
             body_bounds.append(model_wait.dispatch_deadline_remaining_sec())
+            assert clock[0] < deadline, "the caller's bound is still open after the soft wait"
             before_start()
             try:
                 nested_start(gate, events)
@@ -726,14 +791,24 @@ def nested_start_after_soft_wait(registry, tool, gate, *, control, deadline, bef
             done.set()
     registry.override_handler(tool, body)
     with owner(registry, control=control):
-        with model_wait.execution_deadline_scope(deadline), (
-                owner_pause.call_end_reader(registry._ctx, reader) if reader is not None else nullcontext()):
-            try:
-                outcome["is_error"] = run(registry, timeout=.05, name=tool, args=SOFT_WAIT_ARGS[tool])["is_error"]
-            except (PhysicalDispatchInterrupted, owner_pause.OwnerPauseRefused) as refused:
-                outcome["raised"] = type(refused).__name__
-        assert done.wait(5)
-        assert budget_pause.drain_local_tool_futures(registry._ctx, timeout_sec=5)["drained"]
+        try:
+            with model_wait.execution_deadline_scope(deadline), (
+                    owner_pause.call_end_reader(registry._ctx, reader) if reader is not None else nullcontext()):
+                try:
+                    result = run(registry, timeout=.05, name=tool, args=SOFT_WAIT_ARGS[tool])
+                    outcome["is_error"] = result["is_error"]
+                    if tool == "knowledge_read":
+                        assert result["tool_result"].code == "TOOL_TIMEOUT" and not done.is_set()
+                except (PhysicalDispatchInterrupted, owner_pause.OwnerPauseRefused) as refused:
+                    if tool == "knowledge_read":
+                        # A read's caller must return TOOL_TIMEOUT; a caller-side control refusal is a defect.
+                        # Re-raise so the parked body's own expected refusal cannot mask the wrong caller outcome.
+                        raise
+                    outcome["raised"] = type(refused).__name__
+        finally:
+            proceed.set()
+            assert budget_pause.drain_local_tool_futures(registry._ctx, timeout_sec=5)["drained"]
+        assert done.is_set(), outcome
     return events, body_bounds, refusals, outcome
 
 
@@ -750,15 +825,15 @@ def test_a_nested_start_after_the_soft_wait_keeps_the_callers_bounds(tmp_path, m
     start whose gate reads the bounds the invocation inherited, as nested starts did before that gate existed: it
     begins while they allow, and the caller's own expired deadline, the call's End, a Stop or a Pause refuse it,
     saying the invocation had begun. The body keeps its spent envelope, so its own model sends still stop."""
-    from ouroboros import cancel_intents, model_wait
+    from ouroboros import cancel_intents
     registry, _, _ = _registry(tmp_path, monkeypatch)
     controls, ended = [None], [None]
-    deadline = model_wait.monotonic_now() + (.4 if control == "caller_deadline" else 30)
+    clock = [0.0]
+    deadline = .4 if control == "caller_deadline" else 30
 
     def before_start():
         if control == "caller_deadline":
-            while model_wait.monotonic_now() <= deadline:
-                time.sleep(.01)
+            clock[0] = deadline + 1
         elif control == "end":
             ended[0] = "owner_end"
         elif control == "stop":
@@ -768,7 +843,8 @@ def test_a_nested_start_after_the_soft_wait_keeps_the_callers_bounds(tmp_path, m
         elif control == "pause":
             owner_pause.install_fence(tmp_path, "root", request_id="after-the-soft-wait")
     events, body_bounds, refusals, outcome = nested_start_after_soft_wait(
-        registry, tool, gate, control=None if control == "durable_stop" else controls, deadline=deadline,
+        registry, monkeypatch, tool, gate, control=None if control == "durable_stop" else controls,
+        clock=clock, deadline=deadline,
         before_start=before_start, reader=lambda: ended[0])
     assert body_bounds == [0.0], "the body itself is past its soft wait"
     if control == "open":
@@ -793,15 +869,15 @@ def test_a_contended_nested_start_after_the_soft_wait_waits_under_the_callers_bo
     the spent soft envelope never ends it and the start then begins once, its lock released while it waits. The
     caller's deadline or a Stop seen by that check refuse it there, before any sleep, saying the invocation had
     begun."""
-    from ouroboros import model_wait, queue_observation
+    from ouroboros import queue_observation
     from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
     registry, _, _ = _registry(tmp_path, monkeypatch)
     controls = [None]
-    deadline = model_wait.monotonic_now() + (.4 if control == "caller_deadline" else 30)
+    clock = [0.0]
+    deadline = .4 if control == "caller_deadline" else 30
 
     def expire():  # the caller's own bound passes while the read is contended
-        while model_wait.monotonic_now() <= deadline:
-            time.sleep(.01)
+        clock[0] = deadline + 1
     arm, hits = one_contended_strict_read(monkeypatch, controls, stop=control == "stop",
                                           meanwhile=expire if control == "caller_deadline" else None)
     waits, sleep = [], queue_observation._sleep
@@ -811,7 +887,7 @@ def test_a_contended_nested_start_after_the_soft_wait_waits_under_the_callers_bo
         sleep(seconds)
     monkeypatch.setattr(queue_observation, "_sleep", observed_wait)
     events, body_bounds, refusals, _outcome = nested_start_after_soft_wait(
-        registry, tool, gate, control=controls, deadline=deadline, before_start=arm)
+        registry, monkeypatch, tool, gate, control=controls, clock=clock, deadline=deadline, before_start=arm)
     assert hits == [True] and body_bounds == [0.0]
     if control == "open":
         assert events == ["nested"] and refusals == [] and waits == [ACQUISITION_SLICE_SEC], (refusals, waits)

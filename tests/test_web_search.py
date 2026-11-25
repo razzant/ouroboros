@@ -141,7 +141,8 @@ def test_responses_flex_refusal_reprices_standard_and_keeps_original_intent(ctx,
     with ua._locked(holds[0].drive_root):
         records = ledger_rows(holds[0].drive_root)
     matching = [row for row in records if row.get("candidate_raw_sha256") == prepared[0].candidate_raw_sha256]
-    assert matching[-1]["state"] == "released"
+    assert (matching[-1]["state"], matching[-1]["settle_reason"]) == ("settled", "processing_not_started")
+    assert (matching[-1]["cost_usd"], matching[-1]["cost_final"]) == (None, False)
     for request in prepared:
         assert request.effort == {
             "requested": "high", "sent": {"reasoning": {"effort": "high"}},
@@ -150,6 +151,40 @@ def test_responses_flex_refusal_reprices_standard_and_keeps_original_intent(ctx,
         }
         attempt_rows = [row for row in records if row.get("candidate_raw_sha256") == request.candidate_raw_sha256]
         assert all(row["effort"] == request.effort for row in attempt_rows)
+
+
+@pytest.mark.parametrize(("work_seen", "input_tokens", "cost", "full_bill", "expected"), [
+    (True, 0, 0.0, False, None), (True, 0, 0.125, False, 0.125), (False, 0, 0.0, False, 0.0),
+    (True, 0, 0.0, True, 0.0),
+    pytest.param(False, 10, 0.0, True, 0.0, id="confirmed-full-zero-with-terminal-tokens"),
+    pytest.param(False, 10, 0.0, False, None, id="gateway-zero-with-terminal-tokens"),
+])
+def test_responses_failure_bills_zero_only_without_contradictory_prior_work(
+    ctx, patch_env, mock_openai, monkeypatch, work_seen, input_tokens, cost, full_bill, expected,
+):
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "openai")
+    holds = []
+    original_reserve = search_module.reserve_attempt
+
+    def reserve(request):
+        hold = original_reserve(request)
+        holds.append(hold)
+        return hold
+
+    monkeypatch.setattr(search_module, "reserve_attempt", reserve)
+    terminal = {"status": "failed", "error": {"code": "invalid_request_error", "status_code": 400},
+                "usage": {"input_tokens": input_tokens, "output_tokens": 0}}
+    if full_bill:
+        terminal["total_cost_usd"] = cost
+    else:
+        terminal["usage"]["cost"] = cost
+    events = [_make_event("response.web_search_call.searching")] if work_seen else []
+    events.append(_make_event("response.failed", response=types.SimpleNamespace(model_dump=lambda: terminal)))
+    mock_openai.responses.create.return_value = _FakeStream(events)
+    assert "error" in json.loads(_web_search(ctx, "once"))
+    assert mock_openai.responses.create.call_count == len(holds) == 1
+    [row] = [row for row in ledger_rows(holds[0].drive_root) if row["attempt_id"] == holds[0].attempt_id]
+    assert (row["state"], row["cost_usd"], row["cost_final"]) == ("settled", expected, expected is not None)
 
 
 def test_web_search_uses_official_openai_responses(monkeypatch):
@@ -199,12 +234,12 @@ def test_web_search_uses_official_openai_responses(monkeypatch):
     assert {key: result[key] for key in ("answer", "answer_type", "sources", "backend")} == {"answer": "fresh answer", "answer_type": "summary", "sources": [], "backend": "openai_responses"}
     assert result["legs_tried"][0]["model"] == "gpt-5.2"
     assert calls["api_key"] == "openai-key"
-    assert calls["base_url"] is None
+    assert calls["base_url"] == "https://api.openai.com/v1"
     assert calls["kwargs"]["model"] == "gpt-5.2"
     assert calls["kwargs"]["stream"] is True
     assert calls["kwargs"]["tools"][0]["type"] == "web_search"
     assert request_ctx.pending_events[0]["provider"] == "openai"
-    assert request_ctx.pending_events[0]["model"] == "gpt-5.2"
+    assert request_ctx.pending_events[0]["model"] == "openai/gpt-5.2"
 
 
 def test_web_search_falls_back_to_openrouter_server_tool(monkeypatch):
@@ -214,19 +249,10 @@ def test_web_search_falls_back_to_openrouter_server_tool(monkeypatch):
 
     calls: dict = {}
 
-    class _Usage:
-        def model_dump(self):
-            return {"prompt_tokens": 11, "completion_tokens": 7}
-
-    class _Message:
-        content = "fresh answer from openrouter"
-
-    class _Choice:
-        message = _Message()
-
     class _Response:
-        choices = [_Choice()]
-        usage = _Usage()
+        def model_dump(self):
+            return {"choices": [{"message": {"content": "fresh answer from openrouter"}}],
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 7}}
 
     class _Completions:
         def create(self, **kwargs):
@@ -724,7 +750,7 @@ def test_web_search_rechecks_owner_deadline_after_client_preparation(
     assert calls == []
 
 
-def _captured_provider_error(*, provider="openrouter", status=None):
+def _captured_provider_error(*, provider="openrouter", status=None, error_type=""):
     from ouroboros.usage_accounting import PhysicalAttemptCapture
 
     exc = RuntimeError("provider transport ended")
@@ -735,11 +761,13 @@ def _captured_provider_error(*, provider="openrouter", status=None):
         state="unresolved",
         candidate_measurement_kind="opaque",
         provider_status_code=status,
+        provider_error_type=error_type,
     )
     return exc
 
 
-def test_openrouter_ambiguous_outcome_stops_cross_provider_cascade(ctx, monkeypatch):
+@pytest.mark.parametrize("status", [None, 503])
+def test_openrouter_ambiguous_outcome_stops_cross_provider_cascade(ctx, monkeypatch, status):
     from ouroboros import llm
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -748,7 +776,7 @@ def test_openrouter_ambiguous_outcome_stops_cross_provider_cascade(ctx, monkeypa
     monkeypatch.delenv("OUROBOROS_WEBSEARCH_BACKEND", raising=False)
     monkeypatch.setattr(
         llm, "openrouter_web_search_server_tool",
-        lambda **_kwargs: (_ for _ in ()).throw(_captured_provider_error()),
+        lambda **_kwargs: (_ for _ in ()).throw(_captured_provider_error(status=status)),
     )
     monkeypatch.setattr(
         search_module, "_web_search_anthropic",
@@ -767,6 +795,18 @@ def test_openrouter_ambiguous_outcome_stops_cross_provider_cascade(ctx, monkeypa
 
     assert result["backend"] == "openrouter_server_tool"
     assert result["reason_code"] == "provider_outcome_unknown"
+
+
+def test_r3_openrouter_error_finish_is_not_a_search_summary(ctx, monkeypatch):
+    from ouroboros import llm
+
+    body = {"choices": [{"message": {"content": "partial"}, "finish_reason": "error"}], "usage": {"cost": 0}}
+    monkeypatch.setattr(search_module, "_search_target", lambda *_args: {"api_key": "test-key"})
+    monkeypatch.setattr(llm, "openrouter_web_search_server_tool", lambda **_kwargs: body)
+    result = json.loads(search_module._web_search_openrouter(ctx, "once", model="openrouter::test-model"))
+    assert result["reason_code"] == "provider_outcome_unknown"
+    assert "answer" not in result
+    assert (ctx.pending_events[-1]["cost"], ctx.pending_events[-1]["cost_final"]) == (None, False)
 
 
 def test_anthropic_ambiguous_outcome_stops_ddgs_cascade(ctx, monkeypatch):
@@ -809,7 +849,7 @@ def test_terminal_openrouter_status_allows_next_backend(ctx, monkeypatch):
     monkeypatch.setattr(
         llm, "openrouter_web_search_server_tool",
         lambda **_kwargs: (_ for _ in ()).throw(
-            _captured_provider_error(status=503)
+            _captured_provider_error(status=503, error_type="overloaded_error")
         ),
     )
     monkeypatch.setattr(
@@ -825,18 +865,112 @@ def test_terminal_openrouter_status_allows_next_backend(ctx, monkeypatch):
     assert [leg["outcome"] for leg in result["legs_tried"]] == ["failed", "succeeded"]
 
 
-def test_explicit_web_503_allows_one_safe_retry(ctx, patch_env, monkeypatch):
+_NO_ENDPOINTS = "No endpoints found for vendor/search-model."
+_TYPED_404 = {"code": "model_not_found", "type": "invalid_request_error", "message": _NO_ENDPOINTS}
+
+
+@pytest.mark.parametrize("error,envelope,advances", [
+    ({"code": 404, "message": _NO_ENDPOINTS}, {}, False),
+    ({"code": 404, "message": _NO_ENDPOINTS, "metadata": {"failed_routing_step": "Filter by Parameters"}}, {}, False),
+    ({"code": 404, "message": "No endpoints found matching your data policy."}, {}, False),
+    (_TYPED_404, {}, True),
+    (_TYPED_404, {"usage": {"cost": 0.25}}, False),
+    ({"code": 404, "message": _NO_ENDPOINTS}, {"usage": {"server_tool_use": {"web_search_requests": 1}}}, False),
+], ids=["router-number", "router-number-naming-its-routing-step", "router-number-data-policy", "provider-typed",
+        "provider-typed-beside-a-charge", "router-number-with-search-work"])
+def test_a_404_reaches_another_search_source_only_as_a_typed_refusal_nothing_contradicts(
+        ctx, monkeypatch, tmp_path, error, envelope, advances):
+    """One OpenRouter search leg answered HTTP 404 through the real attempt ledger, with a second source eligible.
+
+    OpenRouter types its own verdicts by a number and words only (``error.code`` equal to the status, a message,
+    optional ``metadata``). The ledger settles the "No endpoints found" 404 free, which is a price; the same words also
+    say that a data-policy or provider filter left no endpoint, and the routing step it may name serves the repair of
+    that one route (``request_wire_recovery``). None of them is a typed refusal before work, so a second source is
+    possible there and not supported: the search is held. With the status, the words and the free settlement all the
+    same, the provider's own typed code is what lets Auto try its next source, unless the same reply shows a charge.
+    """
+    from ouroboros import llm
+    from ouroboros import usage_accounting as ua
+
+    class NotFoundError(Exception):  # the SDK's class name, which is no provider's typed word
+        status_code = 404
+
+    failure = NotFoundError(f"Error code: 404 - {{'error': {error}}}")
+    failure.body = {"error": dict(error), **envelope}
+
+    def send(**_kwargs):
+        request = ua.AttemptRequest(
+            model="vendor/search-model", provider="openrouter", prompt_tokens_estimate=1000, max_completion_tokens=100,
+            reservation_usd=5.0, drive_root=tmp_path, task_id="task-web", root_task_id="root-web", global_limit_usd=100.0)
+        return ua.execute_physical_attempt(request, lambda: (_ for _ in ()).throw(failure))
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.delenv("OUROBOROS_WEBSEARCH_BACKEND", raising=False)
+    monkeypatch.setattr(llm, "openrouter_web_search_server_tool", send)
+    another = MagicMock(return_value=json.dumps({"answer": "another source", "backend": "anthropic_server_tool"}))
+    monkeypatch.setattr(search_module, "_web_search_anthropic", another)
+    monkeypatch.setattr(search_module, "_web_search_ddgs", lambda *_args, **_kwargs: pytest.fail("no scraper leg"))
+
+    result = json.loads(_web_search(ctx, "one search"))
+
+    [row] = ledger_rows(tmp_path)
+    assert result["legs_tried"][0]["ledger_attempt_ids"] == [row["attempt_id"]]
+    if not envelope:  # the ledger says the same of all four: free, by the router's status and words
+        assert (row["state"], row["settle_reason"], row["cost_usd"], row["cost_final"]) == (
+            "settled", "pre_routing_rejection", 0, True)
+    elif "server_tool_use" in envelope["usage"]:
+        assert (row["state"], row.get("cost_usd"), bool(row.get("cost_final"))) == ("unresolved", None, False)
+    assert another.called is advances
+    if advances:
+        assert result["answer"] == "another source" and result["backend"] == "anthropic_server_tool"
+        assert [leg["outcome"] for leg in result["legs_tried"]] == ["failed", "succeeded"]
+    else:
+        assert result["reason_code"] == "provider_outcome_unknown" and result["backend"] == "openrouter_server_tool"
+        assert [leg["outcome"] for leg in result["legs_tried"]] == ["provider_outcome_unknown"]
+
+
+@pytest.mark.parametrize("status,body", [
+    (408, None), (429, "gateway unavailable"), (503, {"error": {"code": 503}}),
+    (502, {"error": {"type": "server_error"}}),
+])
+def test_opaque_http_failure_after_dispatch_holds_one_search(ctx, patch_env, mock_openai, monkeypatch, tmp_path,
+                                                            status, body):
+    ctx.task_metadata["budget_drive_root"] = str(tmp_path)
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "auto")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-fallback")
+    monkeypatch.setattr(search_module, "_web_search_openrouter", lambda *a, **k: pytest.fail("duplicate search"))
+    error = RuntimeError("indeterminate upstream reply")
+    error.status_code, error.body = status, body
+    mock_openai.responses.create.side_effect = error
+    result = json.loads(_web_search(ctx, "query"))
+    mock_openai.responses.create.assert_called_once()
+    [row] = ledger_rows(tmp_path)
+    [leg] = result["legs_tried"]
+    assert row["state"] == "unresolved" and leg["ledger_attempt_ids"] == [row["attempt_id"]]
+    assert leg["outcome"] == result["reason_code"] == "provider_outcome_unknown"
+
+
+@pytest.mark.parametrize("connect_timeout", [False, True], ids=["typed-rate-limit", "unsent-timeout"])
+def test_known_search_outcome_allows_one_safe_retry(ctx, patch_env, monkeypatch, tmp_path, connect_timeout):
+    import httpx
+
+    ctx.task_metadata["budget_drive_root"] = str(tmp_path)
     calls = 0
 
-    class _Terminal503(Exception):
-        status_code = 503
+    class _RateLimited(Exception):
+        status_code = 429
+        body = {"error": {"code": "rate_limit_exceeded"}, "usage": {"cost": 0, "output_tokens": 0}}
 
     class _Responses:
         def create(self, **_kwargs):
             nonlocal calls
             calls += 1
             if calls == 1:
-                raise _Terminal503("service unavailable")
+                if connect_timeout:
+                    raise httpx.ConnectTimeout("no connection")
+                raise _RateLimited("rate limit")
             return _FakeStream([
                 _make_event("response.output_text.delta", delta="recovered"),
                 _make_completed_event(),
@@ -851,9 +985,14 @@ def test_explicit_web_503_allows_one_safe_retry(ctx, patch_env, monkeypatch):
 
     assert calls == 2
     assert result["answer"] == "recovered"
+    rows = ledger_rows(tmp_path)
+    assert [row["state"] for row in rows] == ["released" if connect_timeout else "settled", "settled"]
+    if not connect_timeout:
+        assert (rows[0]["cost_usd"], rows[0]["cost_final"]) == (0, True)
+    assert result["legs_tried"][0]["ledger_attempt_ids"] == [row["attempt_id"] for row in rows]
 
 
-def test_streamed_web_503_preserves_status_for_one_safe_retry(ctx, patch_env, monkeypatch):
+def test_streamed_typed_overload_before_work_allows_one_retry(ctx, patch_env, monkeypatch):
     calls = 0
 
     class _Responses:
@@ -864,7 +1003,8 @@ def test_streamed_web_503_preserves_status_for_one_safe_retry(ctx, patch_env, mo
                 return _FakeStream([
                     _make_event(
                         "response.failed",
-                        error=types.SimpleNamespace(message="service unavailable", status_code=503),
+                        response=types.SimpleNamespace(error=types.SimpleNamespace(
+                            message="service unavailable", status_code=503, type="overloaded_error")),
                     )
                 ])
             return _FakeStream([
@@ -899,21 +1039,33 @@ def test_streaming_no_progress_without_search_events(ctx, patch_env, mock_openai
     assert data["answer"] == "Direct answer"
 
 
-def test_streaming_empty_text_engages_cascade(ctx, patch_env, mock_openai):
-    """NW-11: an empty OpenAI result (no text AND no sources) is a soft failure,
-    not a successful "(no answer)" — it must fall through to the provider
-    cascade so a working fallback backend is not shadowed. With no fallback
-    backend configured here, the cascade is exhausted and an error is returned
-    (NOT a fake "(no answer)" success)."""
+@pytest.mark.parametrize("has_fallback", [False, True])
+def test_streaming_empty_text_engages_cascade(ctx, patch_env, mock_openai, monkeypatch, has_fallback):
+    """NW-11: a confirmed empty completion is a soft failure, not a fabricated answer or a same-leg repeat."""
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "auto")
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_MODEL", "")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    fallback = MagicMock(return_value=json.dumps({"answer": "another source"}))
+    monkeypatch.setattr(search_module, "_web_search_openrouter", fallback)
+    if has_fallback:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "fallback")
+    else:
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     events = [_make_completed_event(10, 0)]
     mock_openai.responses.create.return_value = _FakeStream(events)
 
-    result = _web_search(ctx, "empty query")
-
-    data = json.loads(result)
-    assert "answer" not in data
-    assert "error" in data
+    data = json.loads(_web_search(ctx, "empty query"))
+    mock_openai.responses.create.assert_called_once()
     assert any("no answer and no sources" in e for e in data.get("backend_errors", []))
+    if has_fallback:
+        fallback.assert_called_once()
+        assert data["answer"] == "another source"
+        assert [(leg["source"], leg["outcome"]) for leg in data["legs_tried"]] == [
+            ("openai", "failed"), ("openrouter", "succeeded")]
+    else:
+        fallback.assert_not_called()
+        assert "error" in data and "answer" not in data
+        assert len(data["legs_tried"]) == 1
 
 
 def test_streaming_progress_fires_only_once(ctx, patch_env, mock_openai):
@@ -1103,8 +1255,8 @@ def _deepseek_tariff(monkeypatch, currency="USD"):
     for name, value in (("_cache", {}), ("_retry_after", {}), ("_currency", {}), ("_currency_fetching", set())):
         monkeypatch.setattr(pricing_catalog, name, value)
     monkeypatch.setattr(pricing_catalog, "_fetch_catalog", lambda: snapshot)
-    monkeypatch.setattr(pricing_catalog, "_fetch_currency",
-                        lambda key: asked.append(key) or (currency, "" if currency else "http_401"))
+    reading = pricing_catalog._CurrencyReading(currency, "" if currency else "http_401")
+    monkeypatch.setattr(pricing_catalog, "_fetch_currency", lambda key: asked.append(key) or reading)
     return asked
 
 
@@ -1223,3 +1375,324 @@ def test_a_saved_deepseek_head_sends_on_its_named_connection_only(deepseek, monk
     [request] = deepseek.sent
     assert request.headers["authorization"] == "Bearer work-key"
     assert result["route"]["legs"][0]["connection"] == "work" and "error" not in result
+
+
+# ---------------------------------------------------------------------------
+# One money fact: a paid leg's llm_usage event states what its attempt row settled
+# ---------------------------------------------------------------------------
+# Only the provider SDK client is faked. The leg, the recovery driver, the attempt ledger, the event and the
+# supervisor's llm_usage consumer are the real ones.
+
+_SEARCH_COUNTERS = ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens")
+_NATIVE_CACHE = {"input_tokens": 9, "output_tokens": 4, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 0}
+_CHAT_USAGE = {"prompt_tokens": 100, "completion_tokens": 20}
+_RESPONSES_USAGE = {"input_tokens": 100, "output_tokens": 50, "input_tokens_details": {"cached_tokens": 40}}
+
+
+def _sdk_object(payload, **attributes):
+    """A provider SDK reply: public attributes the leg reads and the ``model_dump`` the ledger reads."""
+    return types.SimpleNamespace(model_dump=lambda: json.loads(json.dumps(payload)), **attributes)
+
+
+@pytest.fixture
+def paid_leg(monkeypatch, tmp_path):
+    """``run(source, usage, envelope)``: one real ``web_search`` call on a pinned paid Source whose SDK client
+    answers with ``usage`` (and reply-level ``envelope`` fields); returns the tool result, the leg's event, the
+    attempt row the event names and the supervisor's persisted row."""
+    from ouroboros import pricing, usage_store
+    from ouroboros import usage_accounting as ua
+    from supervisor.events_budget import _handle_llm_usage
+
+    catalog = {"rows": {}}  # no catalog read; a case may price its model here
+    monkeypatch.setattr(pricing, "get_pricing", lambda **_: catalog["rows"])
+    monkeypatch.delenv("OUROBOROS_CONNECTIONS", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_MODEL", "")
+    monkeypatch.setitem(sys.modules, "ddgs", None)
+    sent = []
+
+    def run(source, usage, envelope=None):
+        envelope = dict(envelope or {})
+        sent.clear()
+        monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", source)
+        monkeypatch.setenv({"openrouter": "OPENROUTER_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
+                            "openai": "OPENAI_API_KEY"}[source], "synthetic-key")
+
+        def chat(**kwargs):
+            sent.append(kwargs)
+            payload = {"choices": [{"message": {"content": "answer"}}], "model": "m", **envelope,
+                       **({} if usage is None else {"usage": usage})}
+            return _sdk_object(payload, model="m", usage=None if usage is None else _sdk_object(usage),
+                               choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="answer"))])
+
+        def messages(**kwargs):
+            sent.append(kwargs)
+            payload = {"type": "message", "content": [{"type": "text", "text": "answer"}], "model": "m",
+                       "usage": usage, **envelope}
+            return _sdk_object(payload, model="m", usage=_sdk_object(usage), content=payload["content"])
+
+        def responses(**kwargs):
+            sent.append(kwargs)
+            payload = {"object": "response", "output": [], "model": "m", "usage": usage, **envelope}
+            return _FakeStream([_make_event("response.output_text.delta", delta="answer"),
+                                _make_event("response.completed", response=_sdk_object(
+                                    payload, model="m", usage=_sdk_object(usage)))])
+
+        class _OpenAI:
+            def __init__(self, **_kwargs):
+                self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=chat))
+                self.responses = types.SimpleNamespace(create=responses)
+
+        class _Anthropic:
+            def __init__(self, **_kwargs):
+                self.messages = types.SimpleNamespace(create=messages)
+
+        monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_OpenAI))
+        monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=_Anthropic))
+        ctx = types.SimpleNamespace(task_id="search", task_metadata={}, drive_root=tmp_path, pending_events=[],
+                                    emit_progress_fn=None)
+        with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="search", root_task_id="search")):
+            result = json.loads(_web_search(ctx, "one query"))
+        assert len(sent) == 1 and result.get("answer") == "answer", result
+        [event] = [item for item in ctx.pending_events if item["type"] == "llm_usage"]
+        assert event["ledger_attempt_ids"] and event["ledger_attempt_ids"] == result["ledger_attempt_ids"]
+        with usage_store.read(tmp_path) as txn:
+            row = txn.attempt(event["ledger_attempt_ids"][-1])
+        logged = []
+        _handle_llm_usage(event, types.SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=types.SimpleNamespace(
+            push_log=logged.append)))
+        [persisted] = logged
+        return result, event, row, persisted
+
+    run.catalog = catalog
+    return run
+
+
+def _one_fact(event, row, persisted, cost, final, estimated=False):
+    """The event, the row its attempt id names and the supervisor's row state one amount and one finality."""
+    assert row is not None and row["state"] == "settled"
+    for holder, amount in ((row, row["cost_usd"]), (event, event["cost"]), (persisted, persisted["cost"])):
+        assert amount == (None if cost is None else pytest.approx(cost, rel=1e-12, abs=0)), holder
+    assert row["cost_final"] is event["cost_final"] is persisted["cost_final"] is final
+    assert bool(row["cost_estimated"]) is persisted["cost_estimated"] is estimated
+    assert persisted["cost_known"] is (cost is not None)
+    # The event's usage copy, which the supervisor reads first, states the same fact.
+    assert event["usage"]["cost"] == event["cost"]
+    assert (event["usage"]["cost_final"], event["usage"]["cost_estimated"]) == (final, estimated)
+    # Whether the bill was unreadable is the row's own fact too, never the reply's label.
+    unreadable = row["cost_usd"] is None and bool(row.get("cost_invalid"))
+    assert bool(event["usage"].get("cost_invalid")) is persisted["cost_invalid"] is unreadable
+    for key in _SEARCH_COUNTERS:  # the event's four counts are the row's own: a measured zero and an unknown too
+        assert event[key] == row[key] == persisted[key], key
+
+
+@pytest.mark.parametrize("source,usage,envelope,cost,final", [
+    pytest.param("openrouter", _CHAT_USAGE, {}, None, False, id="openrouter-unknown"),
+    pytest.param("openrouter", None, {}, None, False, id="openrouter-no-usage-block"),
+    pytest.param("openrouter", {"prompt_tokens": "bad", "completion_tokens": None}, {}, None, False,
+                 id="openrouter-malformed-counts-no-bill"),
+    pytest.param("openrouter", {**_CHAT_USAGE, "cost": "NaN"}, {}, None, False, id="openrouter-unreadable-bill"),
+    pytest.param("openrouter", {**_CHAT_USAGE, "cost": 0}, {}, 0.0, True, id="openrouter-reported-zero"),
+    pytest.param("openrouter", {"cost": 0}, {}, 0.0, True, id="openrouter-reported-zero-without-counts"),
+    pytest.param("openrouter", {**_CHAT_USAGE, "cost": 0.031}, {}, 0.031, True, id="openrouter-reported-charge"),
+    pytest.param("openrouter", {"cost": 0.031}, {}, 0.031, True, id="openrouter-reported-charge-without-counts"),
+    pytest.param("openrouter", {**_CHAT_USAGE, "cost": 0, "is_byok": True, "cost_details": {}}, {}, None, False,
+                 id="openrouter-byok-gateway-fee-alone"),
+    pytest.param("openrouter", {"cost": 0, "is_byok": True}, {}, None, False,
+                 id="openrouter-byok-gateway-fee-alone-without-counts"),
+    pytest.param("openrouter", {**_CHAT_USAGE, "cost": 0.001, "is_byok": True,
+                                "cost_details": {"upstream_inference_cost": 0.03}}, {}, 0.031, True,
+                 id="openrouter-byok-both-shares"),
+    pytest.param("openrouter", {"prompt_tokens": 100, "completion_tokens": "abc", "cost": 0.031}, {}, 0.031, True,
+                 id="openrouter-malformed-output-reported-charge"),
+    pytest.param("anthropic", _NATIVE_CACHE, {}, None, False, id="anthropic-native-cache-unknown"),
+    pytest.param("anthropic", _NATIVE_CACHE, {"total_cost_usd": 0}, 0.0, True, id="anthropic-reported-zero"),
+    pytest.param("anthropic", _NATIVE_CACHE, {"total_cost_usd": 0.031}, 0.031, True, id="anthropic-reported-charge"),
+    pytest.param("anthropic", {"output_tokens": 4, "cache_read_input_tokens": 300}, {"total_cost_usd": 0.031},
+                 0.031, True, id="anthropic-no-fresh-input-reported-charge"),
+    pytest.param("openai", _RESPONSES_USAGE, {}, None, False, id="responses-unknown"),
+    pytest.param("openai", _RESPONSES_USAGE, {"total_cost_usd": 0}, 0.0, True, id="responses-reported-zero"),
+    pytest.param("openai", _RESPONSES_USAGE, {"total_cost_usd": 0.031}, 0.031, True, id="responses-reported-charge"),
+    pytest.param("openai", {"input_tokens": "abc", "output_tokens": 50}, {"total_cost_usd": 0.031}, 0.031, True,
+                 id="responses-malformed-input-reported-charge"),
+])
+def test_a_paid_search_event_states_the_amount_its_attempt_row_settled(paid_leg, source, usage, envelope, cost, final):
+    """Without a provider amount the event states none and is not final; a reported $0 or $0.031 keeps its exact
+    finality; half a BYOK price is unknown, never a proven zero; a malformed count costs neither the answer nor
+    the reported bill. The search side prices nothing itself on any of the three paid legs."""
+    result, event, row, persisted = paid_leg(source, usage, envelope)
+    _one_fact(event, row, persisted, cost, final)
+    assert row["source"] == {"openrouter": "web_search.openrouter", "anthropic": "web_search.anthropic",
+                             "openai": "web_search.openai_responses"}[source]
+
+
+_FRESH_ZERO = {"input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 5}
+_ONE_BIN = {**_FRESH_ZERO, "cache_creation": {"ephemeral_1h_input_tokens": 5}}
+
+
+@pytest.mark.parametrize("source,usage,envelope,counts,cost,final", [
+    pytest.param("anthropic", _NATIVE_CACHE, {}, [309, 4, 300, 0], None, False, id="anthropic-aggregate"),
+    pytest.param("openai", _RESPONSES_USAGE, {}, [100, 50, 40, None], None, False, id="responses-cached-input"),
+    pytest.param("anthropic", {**_FRESH_ZERO, "cache_creation": {"ephemeral_5m_input_tokens": 3,
+                                                                 "ephemeral_1h_input_tokens": 5}},
+                 {}, [8, 5, 0, 8], None, False, id="anthropic-both-bins-reported-zero-fresh-input"),
+    pytest.param("anthropic", _ONE_BIN, {"total_cost_usd": 0}, [None, 5, 0, None], 0.0, True,
+                 id="anthropic-one-bin-reported-zero"),
+    pytest.param("anthropic", _ONE_BIN, {"total_cost_usd": 0.031}, [None, 5, 0, None], 0.031, True,
+                 id="anthropic-one-bin-reported-charge"),
+])
+def test_a_native_search_reply_states_the_rows_own_counts(paid_leg, source, usage, envelope, counts, cost, final):
+    """The event, the settled row its attempt id names and the supervisor's row hold the same four counts, a
+    measured zero and an unknown included. 0 fresh and 0 read tokens with write bins of 3 and 5 and no aggregate
+    measure a prompt of 8 with 8 written. One bin alone is neither a write total nor a prompt, and a reported $0
+    or $0.031 beside it stays exact and final."""
+    _result, event, row, persisted = paid_leg(source, usage, envelope)
+    _one_fact(event, row, persisted, cost, final)
+    for holder in (row, event, persisted):
+        assert [holder[key] for key in _SEARCH_COUNTERS] == counts
+
+
+@pytest.mark.parametrize("source,usage,estimate", [
+    pytest.param("openrouter", _CHAT_USAGE, None, id="openrouter-add-on-unpriced"),
+    pytest.param("anthropic", _NATIVE_CACHE, 9 * 1.0 + 300 * 0.5 + 4 * 2.0, id="anthropic-native-cache"),
+    pytest.param("openai", _RESPONSES_USAGE, 60 * 1.0 + 40 * 0.5 + 50 * 2.0, id="responses-cached-input"),
+])
+def test_a_search_event_carries_the_ledgers_own_estimate_as_an_estimate(paid_leg, source, usage, estimate):
+    """With a tariff of $1/M input, $0.5/M cache reads and $2/M output the attempt row holds the ledger's own
+    non-final estimate over the inclusive prompt and its cache reads. The event states that very amount as an
+    estimate: never a second price over the reply's exclusive text counts, and never as final. A call with an
+    unpriced add-on has no estimate in either reader."""
+    from ouroboros import pricing
+
+    class _EveryModel(dict):
+        def get(self, _key, _default=None):
+            return pricing.PricingSchedule((1.0, 0.5, 3.0, 2.0))
+
+    paid_leg.catalog["rows"] = _EveryModel()
+    _result, event, row, persisted = paid_leg(source, usage)
+    expected = None if estimate is None else estimate / 1_000_000
+    _one_fact(event, row, persisted, expected, False, estimated=estimate is not None)
+
+
+_LABELLED = {"cost_invalid": True}  # a reply's own claim about its bill: no host fact
+
+
+@pytest.mark.parametrize("source,usage,envelope,unreadable,cost", [
+    pytest.param("anthropic", _NATIVE_CACHE, {"total_cost_usd": "NaN"}, True, None, id="anthropic-unreadable-bill"),
+    pytest.param("openrouter", {**_CHAT_USAGE, "cost": "NaN"}, {}, True, None, id="openrouter-unreadable-bill"),
+    pytest.param("openai", _RESPONSES_USAGE, {"total_cost_usd": "NaN"}, True, None, id="responses-unreadable-bill"),
+    pytest.param("anthropic", {**_NATIVE_CACHE, **_LABELLED}, {}, False, None, id="anthropic-label-without-a-bill"),
+    pytest.param("openrouter", {**_CHAT_USAGE, **_LABELLED}, {}, False, None, id="openrouter-label-without-a-bill"),
+    pytest.param("openai", {**_RESPONSES_USAGE, **_LABELLED}, {}, False, None, id="responses-label-without-a-bill"),
+    pytest.param("anthropic", {**_NATIVE_CACHE, **_LABELLED}, {"total_cost_usd": 0.031}, False, 0.031,
+                 id="anthropic-label-beside-a-reported-charge"),
+    pytest.param("anthropic", _NATIVE_CACHE, {}, False, None, id="anthropic-no-bill"),
+    pytest.param("openrouter", {"cost": 0, "is_byok": True}, {}, False, None, id="openrouter-byok-gateway-fee-alone"),
+    pytest.param("openrouter", {**_CHAT_USAGE, "cost": 0}, {}, False, 0.0, id="openrouter-reported-zero"),
+])
+def test_a_paid_search_event_states_whether_its_attempt_row_found_the_bill_unreadable(
+        paid_leg, source, usage, envelope, unreadable, cost):
+    """An unreadable bill (NaN) is unknown money the attempt row marks ``cost_invalid``; a bill that is merely
+    absent, or half a BYOK price, is unknown and not marked. The event of that attempt id says the same in both
+    of its copies and so does the supervisor's row, on each paid leg: a reply that labels itself ``cost_invalid``
+    marks nothing, and the label never stands beside a reported $0.031."""
+    _result, event, row, persisted = paid_leg(source, usage, envelope)
+    _one_fact(event, row, persisted, cost, cost is not None)
+    assert bool(row.get("cost_invalid")) is unreadable
+    assert bool(event.get("cost_invalid")) is bool(event["usage"].get("cost_invalid")) is unreadable
+    assert persisted["cost_invalid"] is unreadable
+    assert persisted["ledger_attempt_ids"] == event["ledger_attempt_ids"] == [row["attempt_id"]]
+
+
+def test_a_search_never_waits_out_the_money_lock_for_its_event_and_states_no_fact_it_could_not_read(
+        paid_leg, monkeypatch, tmp_path):
+    """Another connection holds the ledger EXCLUSIVE (a commit in progress) from the moment a leg reads its settled
+    row for the display event. The search still answers at once, far inside the 45-second money wait: the event
+    then states no amount, no finality, no validity and no count, never a $0 or a measured zero, and the attempt
+    row keeps the $0.031 the provider reported, as every ordinary read sees once the hold ends."""
+    import threading
+    import time
+
+    from ouroboros import usage_store
+    from tests._store_journal_shared import exclusive_hold
+
+    read, waits = search_module._settled_fact, []
+
+    def held_off(attempt_ids, drive_root=None):
+        hold = exclusive_hold(tmp_path / usage_store.STORE_REL)
+        started = time.monotonic()
+        try:
+            return read(attempt_ids, drive_root)
+        finally:
+            waits.append(time.monotonic() - started)
+            hold.execute("ROLLBACK")
+            hold.close()
+
+    monkeypatch.setattr(search_module, "_settled_fact", held_off)
+    result, event, row, persisted = paid_leg("openrouter", {**_CHAT_USAGE, "cost": 0.031})
+    assert result["answer"] == "answer" and len(waits) == 1
+    assert waits[0] < 5.0, f"the event's read held a successful search for {waits[0]:.1f}s"
+    assert (row["state"], row["cost_usd"], row["cost_final"]) == ("settled", 0.031, True)
+    assert [row[key] for key in _SEARCH_COUNTERS] == [100, 20, None, None]
+    for holder in (event, event["usage"], persisted):
+        assert holder["cost"] is None, holder
+        assert (holder["cost_final"], holder["cost_estimated"], holder["cost_invalid"]) == (False, False, False)
+    assert persisted["cost_known"] is False
+    assert [event[key] for key in _SEARCH_COUNTERS] == [persisted[key] for key in _SEARCH_COUNTERS] == [None] * 4
+    assert persisted["ledger_attempt_ids"] == [row["attempt_id"]]  # the id still names the row that holds the money
+    # Only the display fact is short. Held off by the same lock, the ledger's ordinary read still waits for the
+    # exact row, as settlement does, while the display fact has already given up.
+    from ouroboros._usage_settlement import attempt_money_fact
+
+    def ordinary_read():
+        with usage_store.read(tmp_path) as txn:
+            exact.append(txn.attempt(row["attempt_id"]))
+
+    exact, hold = [], exclusive_hold(tmp_path / usage_store.STORE_REL)
+    waiting = threading.Thread(target=ordinary_read, daemon=True)
+    try:
+        waiting.start()
+        waiting.join(timeout=1.0)
+        assert waiting.is_alive() and not exact, "an ordinary ledger read refused instead of waiting"
+        assert attempt_money_fact(tmp_path, row["attempt_id"]) == {}
+    finally:
+        hold.execute("ROLLBACK")
+        hold.close()
+    waiting.join(timeout=60)
+    assert [(found["state"], found["cost_usd"], found["cost_final"]) for found in exact] == [("settled", 0.031, True)]
+    # With the ledger free the same reader states the row's own fact again.
+    monkeypatch.setattr(search_module, "_settled_fact", read)
+    _result, event, row, persisted = paid_leg("openrouter", {**_CHAT_USAGE, "cost": 0.031})
+    _one_fact(event, row, persisted, 0.031, True)
+
+
+@pytest.mark.parametrize("beside,split", [
+    pytest.param({"prompt_tokens_details": {"audio_tokens": 40}}, False, id="audio-beside-the-text-counts"),
+    pytest.param({}, True, id="text-alone"),
+])
+def test_a_searchs_reported_charge_is_one_amount_from_its_row_to_its_event_and_the_costs_page(
+        paid_leg, tmp_path, beside, split):
+    """The provider billed one search $0.031 for 100 prompt and 20 output tokens. The attempt row, the leg's event,
+    the supervisor's row and the Costs period state that same $0.031. With a price list of $1 input and $2 output a
+    million at hand, Costs shares it out by class only when the text counts are all the reply reported: beside 40
+    audio tokens no text price ratio explains the bill, so the amount stays whole and unshared."""
+    import asyncio
+
+    from ouroboros import pricing
+    from ouroboros.gateway.history import make_cost_breakdown_endpoint
+    from ouroboros.provider_models import normalize_model_identity
+
+    usage = {**_CHAT_USAGE, "cached_tokens": 0, "cache_write_tokens": 0, "cost": 0.031, **beside}
+    _result, event, row, persisted = paid_leg("openrouter", usage)
+    _one_fact(event, row, persisted, 0.031, True)
+    paid_leg.catalog["rows"] = {normalize_model_identity(row["model"]): pricing.PricingSchedule((1.0, 0.5, 3.0, 2.0))}
+    served = json.loads(asyncio.run(make_cost_breakdown_endpoint(tmp_path)(
+        types.SimpleNamespace(query_params={"period": "24h"}))).body)
+    model, = served["period"]["models"]
+    assert served["total_cost"] == model["cost"] == 0.031 and (model["model"], model["calls"]) == (row["model"], 1)
+    if split:  # 100 prompt tokens at $1 and 20 output tokens at $2 a million weigh 100 : 40
+        assert model["by_class"] == pytest.approx({"uncached_input": 0.031 * 100 / 140, "output": 0.031 * 40 / 140,
+                                                   "cache_read": 0.0, "cache_write": 0.0})
+        assert (model["unshared_calls"], model["unshared_cost"]) == (0, 0)
+    else:
+        assert model["by_class"] is None and (model["unshared_calls"], model["unshared_cost"]) == (1, 0.031)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from tests._skills_page_harness import (
-    URL, capture, fixture, no_overflow, open_skills, skills_browser as skills_browser,
+    URL, capture, fixture, no_overflow, open_skills, open_view, skills_browser as skills_browser,
 )
 from tests.test_skill_install_checks import registry_release as registry_release
 from tests.ui_console_errors import PageErrors
@@ -28,7 +28,7 @@ def _open(browser, engine, width, theme, rows, sources=None):
 
 def _contained(page):
     assert no_overflow(page)
-    assert page.locator(".marketplace-modal-body").evaluate_all(
+    assert page.locator(".ui-modal-body").evaluate_all(
         "nodes => nodes.every(el => el.scrollWidth <= el.clientWidth + 1)")
 
 
@@ -209,6 +209,10 @@ def test_publication_visibility_survives_saved_sources_confirmation_and_task(ski
             toast.wait_for()
             toast.click()
             toast.wait_for(state="detached")
+            # A started publication hands the owner to chat, as app.js shows pages (#3921's harness); come back.
+            assert page.evaluate("window.shownPage") == "chat"
+            assert not page.locator("#skills-installed-search").is_visible()
+            open_view(page, "installed")
         assert errors.unexpected() == [], errors
     finally:
         skills.close(browser) if skills else browser.close()

@@ -150,6 +150,15 @@ def test_a_title_hidden_in_metadata_is_refused_like_a_project_id(admission):
     assert "project_id must be a top-level field, not metadata" in other.text
 
 
+def test_task_admission_keeps_custom_metadata_but_not_internal_reply_context(admission):
+    client, _data, captured, _broadcasts = admission
+    response = client.post("/api/tasks", json={"description": "Review a summary",
+        "metadata": {"tag": "summary", "reply_reference": {"kind": "message"}}})
+    assert response.status_code == 200, response.text
+    assert captured[0]["metadata"]["tag"] == "summary"
+    assert "reply_reference" not in captured[0]["metadata"]
+
+
 def test_a_derived_name_is_not_reported_as_model_coined():
     """Turn-into-project reuses the name slot; it must not claim authorship.
 

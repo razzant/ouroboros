@@ -13,207 +13,83 @@ test that must send nothing proves it sent nothing.
 """
 from __future__ import annotations
 
-import copy
 import json
 import threading
 from datetime import datetime, timedelta, timezone
 
-import httpx
 import pytest
 
 from ouroboros import delegate_collection as body, delegate_custody as c, delegate_custody_current as current
 from ouroboros import delegate_custody_reconcile as reconcile
-from ouroboros.config import CLAUDEXOR_MIN_VERSION, CLAUDEXOR_PROTOCOL_MAJOR
-from ouroboros.gateways import claudexor as cx, claudexor_metadata as metadata
+from ouroboros.gateways import claudexor as cx
 from ouroboros.delegate_custody_usage import run_names
 from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture applies on import)
     _owned_gateway_uses_each_test_transport,
-    _select_transport_access,
+    Engine, ENQUEUE_ERROR, LOOKUPS, _delegating, _held, _lost_start, _rows, _start, _sweep,
 )
+from tests._delegate_plan_shared import plan_setup  # noqa: F401  (fixture: a found agent start in a Git tree)
 from tests._review_session_route_shared import fake_route as _fake_route_fixture
-from tests._delegated_transport_shared import _delegate_registry
 
 fake_route = _fake_route_fixture  # the review seat's scripted engine (FakeGateway), for the panel's own rejoin
 
-_REAL_GATEWAY = cx.ClaudexorGateway
-ENQUEUE_ERROR = {"message": "fixture turn preflight refused", "code": "fixture_preflight_refusal", "retryable": False,
-                 "requiredActions": [], "context": {}, "failedAt": "2026-11-11T12:37:12.000Z"}
-_LOOKUP_ROW = {"mutability": "read_only", "idempotency": "key_required", "completion": "immediate",
-               "responseSchema": "ControlStartLookupResponse", "parameters": []}
-LOOKUPS = [{"method": "POST", "path": "/v2/runs/lookup", "requestSchema": "ControlRunStartRequest",
-            "applicability": "run", **_LOOKUP_ROW},
-           {"method": "POST", "path": "/v2/threads/:id/turns/lookup", "requestSchema": "ControlThreadTurnRequest",
-            "applicability": "thread", **_LOOKUP_ROW}]  # the engine's catalog rows (sibling INTERFACE.md)
+
+def test_recovering_a_pending_binding_keeps_its_first_positive_state_and_fences_dispatch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from ouroboros import delegate_accepted, owner_pause
+    from ouroboros.task_results import write_task_result
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _pending
+
+    task, token = "root-1", "lost"
+    write_task_result(tmp_path, task, "running", root_task_id=task)
+    assert _decide(tmp_path, _pending(tmp_path, task, token))
+    engine = Engine(tmp_path)
+    job = engine.accept(token, REQUEST)
+    rid = engine.commands[job]["run"]
+    record = {**c.invocation_record(tmp_path, token), "invocation_id": token}
+    with engine.gateway() as gateway:
+        entry, shape = reconcile.recovered_custody(tmp_path, gateway, record, rid, engine.store)
+        emit = c.emit
+        with monkeypatch.context() as failed:
+            failed.setattr(c, "emit", lambda root, kind, payload: kind != c.STARTED and emit(root, kind, payload))
+            assert not delegate_accepted.bind_started(tmp_path, entry, shape=shape).durable
+        assert current.run(tmp_path, rid) is None and entry.resume_start_state == "unknown"
+        bound, receipt = delegate_accepted.recover(tmp_path, gateway, record)
+    assert receipt["action"] == "accepted_start_bound"
+    assert bound.resume_start_state == current.run(tmp_path, rid).resume_start_state == "running"
+    assert len(engine.lookups) == 1 and not any(method == "GET" and path.endswith(rid) for method, path in engine.paths)
+    ctx = SimpleNamespace(drive_root=tmp_path, root_task_id=task, task_id=task)
+    with pytest.raises(owner_pause.OwnerPauseRefused):
+        owner_pause.run_operation(ctx, lambda: pytest.fail("late active start fenced this dispatch"))
 
 
-class Engine:
-    """One serving store, its accepted commands and thread turns, in Claudexor's wire shapes."""
+def test_starter_can_stop_its_identified_uncustodied_run_after_store_returns(tmp_path, monkeypatch):
+    from ouroboros.owner_pause import read_fence
+    from ouroboros.delegate_resume import address
+    from tests._owner_pause_ended_helpers import _decide
 
-    def __init__(self, tmp_path, store="store-a", lookup=True):
-        descriptor = tmp_path / "control-api.json"
-        descriptor.write_text("{}", encoding="utf-8")
-        self.endpoint = cx.DaemonEndpoint("127.0.0.1", 1, "secret-token", str(descriptor),
-                                          metadata.descriptor_stamp(descriptor))
-        self.root, self.store, self.lookup = str(tmp_path), store, lookup
-        self.commands, self.turns = {}, {}
-        self.creates, self.lookups, self.paths, self.cancels = [], [], [], []
-        self.lose, self.queue_runs, self.health, self.answer = 0, False, "ok", None
-        self.replace_at_post, self.on_accept = "", None  # the store a POST lands in; a reader inside the POST
-        self.create_refusal = None  # a ControlProblem every creating POST answers with, as the engine's own validation
+    registry, engine = _delegating(tmp_path, monkeypatch)
+    starter = registry._ctx.task_id
 
-    def accept(self, key, request, *, run=True, state="running", spend=0.25, failure=None, problem=None):
-        number = len(self.commands) + 1
-        job = f"job-{number}"
-        self.commands[job] = {"store": self.store, "key": key, "body": copy.deepcopy(request), "seq": 2,
-                              "run": f"run-{number}" if run else None, "state": state if run or state != "running"
-                              else "queued", "spend": spend, "failure": failure, "problem": problem,
-                              "text": "the complete answer"}
-        return job
+    def accept_risk(job):
+        invocation = engine.commands[job]["key"]
+        assert _decide(tmp_path, address({"task_id": starter, "invocation_id": invocation}))
 
-    def _handle(self, job, **turn):
-        """``ControlStartLookupHandle``: runDir/taskId present (null before a run), ``problem`` only when recorded."""
-        row = self.commands[job]
-        return {"jobId": job, "runId": row["run"], "state": row["state"],
-                "runDir": f"/runs/{row['run']}" if row["run"] else None, "taskId": f"task-{job}" if row["run"] else None,
-                **turn, **({"problem": copy.deepcopy(row["problem"])} if row["problem"] else {})}
-
-    def bind_run(self, job, state="running"):
-        command = self.commands[job]
-        command["run"] = command["run"] or "run-" + job.split("-", 1)[1]
-        command["state"], command["seq"] = state, command["seq"] + 1
-        return command["run"]
-
-    def _held(self, key):
-        return next((job for job, row in self.commands.items() if (row["store"], row["key"]) == (self.store, key)), None)
-
-    def _named(self, request):
-        return {"storeId": self.store} if request.headers.get("x-claudexor-store-identity") == "1" and self.store else {}
-
-    def _detail(self, job):
-        row = self.commands[job]
-        summary = {"runId": row["run"], "jobId": job, "state": row["state"], "effectiveAccess": "readonly",
-                   **({"spendUsd": row["spend"], "spendEstimated": False} if row["spend"] is not None else {}),
-                   **({"failure": row["failure"]} if row["failure"] else {})}
-        detail = {"summary": summary, "lastSeq": row["seq"], "pendingInteractions": []}
-        if row["state"] == "succeeded":
-            detail["primaryOutput"] = {"text": row["text"], "bytes": len(row["text"].encode()), "truncated": False}
-        return detail
-
-    def _lookup(self, request, key, path):
-        sent = json.loads(request.read())
-        thread = path.split("/")[3] if path.startswith("/v2/threads/") else ""
-        self.lookups.append((thread or "run", key, sent))
-        if self.answer is not None:
-            return httpx.Response(self.answer[0], json=self.answer[1])
-        if thread:
-            turn = self.turns.get((self.store, thread, key))
-            if turn is None:
-                return httpx.Response(200, json={"status": "not_found", "storeId": self.store})
-            if turn["job"]:
-                return httpx.Response(200, json={"status": "found", "storeId": self.store,
-                                                 "handle": self._handle(turn["job"], threadId=thread, turnId=turn["turn"])})
-            return httpx.Response(200, json={"status": "turn_only", "storeId": self.store, "threadId": thread,
-                                             "turnId": turn["turn"], "runId": turn["run"], "enqueueError": turn["error"]})
-        job = self._held(key)
-        if job is None:
-            return httpx.Response(200, json={"status": "not_found", "storeId": self.store})
-        if self.commands[job]["body"] != sent:
-            return httpx.Response(409, json={"code": "idempotency_conflict", "message": "the key holds another request",
-                                             "retryable": False})
-        return httpx.Response(200, json={"status": "found", "storeId": self.store, "handle": self._handle(job)})
-
-    def __call__(self, request):
-        path, method = request.url.path, request.method
-        self.paths.append((method, path))
-        if path == "/v2/handshake":
-            return httpx.Response(200, json={"protocolMajor": CLAUDEXOR_PROTOCOL_MAJOR, "compatible": True,
-                                             "engine": {"version": CLAUDEXOR_MIN_VERSION}, **self._named(request)})
-        if path == "/v2/agent-capabilities":
-            return httpx.Response(200, json={"harnesses": [{"id": "some-route", "enabled": True, "status": self.health,
-                                                            "accessProfilesSupported": ["readonly"]}]})
-        if path == "/v2/quota":
-            return httpx.Response(200, json={"snapshots": []})
-        if path == "/v2/operations":
-            return httpx.Response(200, json={"operations": LOOKUPS if self.lookup else []})
-        if path == "/v2/projects":
-            return httpx.Response(200, json={"projects": [{"id": "prj-existing", "root": self.root}]})
-        key = request.headers.get("Idempotency-Key")
-        if path == "/v2/runs/lookup" or path.endswith("/turns/lookup"):
-            return self._lookup(request, key, path)
-        if path == "/v2/runs" and method == "POST":
-            self.store, self.replace_at_post = self.replace_at_post or self.store, ""
-            sent = json.loads(request.read())
-            self.creates.append((key, self.store, sent))
-            if self.create_refusal is not None:
-                return httpx.Response(self.create_refusal[0], json=self.create_refusal[1])
-            job = self._held(key) or self.accept(key, sent, run=not self.queue_runs)
-            if self.on_accept is not None:
-                hook, self.on_accept = self.on_accept, None
-                hook(job)
-            if self.lose:
-                self.lose -= 1
-                raise httpx.ConnectError("the reply was lost after the POST was accepted")
-            return httpx.Response(200, json={"jobId": job, "runId": self.commands[job]["run"], "runDir": "/tmp/run",
-                                             **self._named(request)})
-        name = path.split("/")[3]
-        job = next((job for job, row in self.commands.items() if row["store"] == self.store and name in (job, row["run"])),
-                   None)
-        if path.endswith("/control"):
-            self.cancels.append(name)
-            return httpx.Response(200 if job else 404, json={"accepted": True} if job else {"error": "no such run"})
-        if "/artifacts/" in path or job is None:
-            return httpx.Response(404, json={"error": "no such run", "context": {"storeId": self.store}})
-        assert method == "GET" and path == f"/v2/runs/{name}", path
-        return httpx.Response(200, json=self._detail(job))
-
-    def gateway(self):
-        gateway = _REAL_GATEWAY(self.endpoint)
-        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(self),
-                                       headers=dict(gateway._client.headers))
-        gateway.handshake()  # the serving store, as every owned gateway proves it
-        return gateway
-
-
-def _delegating(tmp_path, monkeypatch, **engine):
-    engine = Engine(tmp_path, **engine)
-    _select_transport_access(monkeypatch, "readonly")
-    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
-    monkeypatch.setattr(cx, "ClaudexorGateway", lambda *_a, **_k: engine.gateway())
-    return _delegate_registry(tmp_path, monkeypatch), engine
-
-
-def _start(registry, retry_of=""):
-    from ouroboros.tools import delegate
-
-    if retry_of:
-        return json.loads(registry.execute_result("delegate_start", {"retry_of": retry_of}).text)
-    return json.loads(delegate._delegate_start(registry._ctx, "Summarize the layout.", max_seconds=120).text)
-
-
-def _lost_start(tmp_path, monkeypatch, **engine):
-    """A real start whose reply was lost after the engine accepted it: only START_REQUESTED names it."""
-    registry, engine = _delegating(tmp_path, monkeypatch, **engine)
-    engine.lose = 1
-    token = _start(registry)["pending_invocation_id"]
-    c._CUSTODY.clear()  # the worker that held the reply is gone
-    return registry, engine, token
-
-
-def _rows(root, kind, invocation_id="", **match):
-    """The chain's rows of ``kind`` for one invocation (STARTED, START_FAILED) or one run (``run_id=``: SETTLED)."""
-    return [row for row in c.custody_rows(root) if row["type"] == kind
-            and (not invocation_id or row.get("invocation_id") == invocation_id)
-            and all(row.get(key) == value for key, value in match.items())]
-
-
-def _held(root, invocation_id):
-    return [run for run in current.runs(root).values() if run.invocation_id == invocation_id]
-
-
-def _sweep(root, engine, live=(), *, observe=lambda: True, replay=lambda: True, factory=None):
-    """The admitted startup/periodic sweep's shape: one not-stopping predicate admits the read and the replay."""
-    return c.reconcile_orphaned_runs(root, set(live), gateway_factory=factory or engine.gateway,
-                                     replay_pending=replay, observe_pending=observe)
+    engine.on_accept = accept_risk
+    emit = c.emit
+    with monkeypatch.context() as failed:
+        failed.setattr(c, "emit", lambda root, kind, payload, **kw: kind != c.STARTED and emit(root, kind, payload, **kw))
+        started = _start(registry)
+    assert started["status"] == "started_uncustodied" and current.run(tmp_path, started["run_id"]) is None
+    rid = started["run_id"]
+    reply = registry.execute_result("delegate_cancel", {"run_id": rid, "reason": "Stop"}).text
+    assert reply.lstrip().startswith("{"), reply
+    stop = json.loads(reply)
+    assert stop["status"] == c.CANCEL_REQUESTED and stop["run_may_still_be_live"]
+    assert engine.cancels == [rid] and len(engine.creates) == 1
+    bound = current.run(tmp_path, rid)
+    assert bound.invocation_id == started["pending_invocation_id"] and bound._recovered_cancel == c.CANCEL_REQUESTED
+    assert read_fence(tmp_path, starter)["active_delegated_start"]["run_id"] == rid
 
 
 def test_an_explicit_retry_reads_its_accepted_start_before_route_health_and_sends_nothing(tmp_path, monkeypatch):
@@ -223,6 +99,10 @@ def test_an_explicit_retry_reads_its_accepted_start_before_route_health_and_send
     payload = _start(registry, retry_of=token)
     assert payload["status"] == "started" and payload["recovered_without_start"] is True, payload
     assert payload["run_id"] == accepted["run"] and payload["idempotent_recovery"] is True
+    # The accepted start answers with its receipt, measured from the recorded body it did not send again.
+    assert payload["note"].startswith("The engine had already accepted") and "\nreceipt:\n" in payload["note"]
+    # A read-only start outside a folderless Project could receive no automatic lineage copies: none is claimed.
+    assert "sent: prompt " in payload["note"] and "automatic lineage" not in payload["note"], payload["note"]
     assert ("GET", "/v2/agent-capabilities") not in engine.paths, "no route health is asked of work already accepted"
     assert [(kind, key) for kind, key, _ in engine.lookups] == [("run", token)]
     assert engine.lookups[0][2] == engine.creates[0][2], "the lookup carries the recorded start's exact body"
@@ -235,6 +115,111 @@ def test_an_explicit_retry_reads_its_accepted_start_before_route_health_and_send
     again = _start(registry, retry_of=token)
     assert (again["reason"], again["run_id"]) == ("invocation_already_started", accepted["run"])
     assert len(engine.creates) == 1 and len(engine.lookups) == 1
+
+
+@pytest.mark.parametrize("selected", [True, False], ids=["selected", "lineage"])
+def test_an_accepted_retry_names_its_recorded_selection_and_lineage_only_where_copies_could_be(
+        tmp_path, monkeypatch, selected):
+    """A found start answers with what this invocation recorded: its selected copies, from the invocation row (the
+    binding this read makes carries no request row), and "no record" of automatic lineage only for a folderless
+    read-only start that selected nothing, the one start that could have received such copies."""
+    from ouroboros.tools import delegate
+    from tests._delegated_transport_shared import _REAL_GATEWAY
+
+    registry, engine = _delegating(tmp_path, monkeypatch)
+    ctx = registry._ctx
+    ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}  # Project work without a folder
+    # The scripted engine knows one root; the start's own scratch scope registers as a new project (``None``: an
+    # answer without ``created``, so no engine trait is learned for the tests after this one).
+    monkeypatch.setattr(_REAL_GATEWAY, "project_registration", lambda _self, _root: ("prj-scratch", None))
+    drive = tmp_path / "task_drives" / ctx.task_id
+    drive.mkdir(parents=True, exist_ok=True)
+    (drive / "one.md").write_text("known", encoding="utf-8")
+    engine.lose = 1
+    chosen = {"input_files": [{"root": "task_drive", "path": "one.md"}]} if selected else {}
+    lost = json.loads(delegate._delegate_start(ctx, "Read it.", max_seconds=120, **chosen).text)
+    token = lost.get("pending_invocation_id")
+    assert token, json.dumps(lost)
+    recorded = c.invocation_record(tmp_path, token).get("input_files")
+    c._CUSTODY.clear()  # the worker that held the reply is gone
+    answer = _start(registry, retry_of=token)
+    assert answer["recovered_without_start"] and len(engine.creates) == len(engine.lookups) == 1, answer
+    if selected:
+        assert [(row["path"], row["size"]) for row in recorded] == [("one.md", 5)], recorded
+        assert "inputs: 1 file, 5 bytes, prepared before the first send" in answer["note"], answer["note"]
+        assert "automatic lineage" not in answer["note"], "a nonempty selection replaces lineage copies"
+    else:
+        assert recorded is None and "inputs: automatic lineage, no record" in answer["note"], answer["note"]
+
+
+@pytest.mark.parametrize("case", ["drive_untraversable", "moved_to_folderless", "moved_to_folder"])
+def test_an_accepted_retry_decides_its_lineage_line_from_its_own_recorded_request(tmp_path, monkeypatch, case):
+    """The lineage line of a found start comes from what THAT start's request recorded (its ``scope.root`` is this
+    invocation's own preparation address, or not), never from the task's present folder, and nothing touches the
+    filesystem before the lookup: a task drive the process cannot traverse still lets the one lookup reach the
+    engine; a work moved after its first start keeps the line its first request warrants, in both directions."""
+    from ouroboros.tools import delegate
+    from tests._delegated_transport_shared import _REAL_GATEWAY
+
+    registry, engine = _delegating(tmp_path, monkeypatch)
+    ctx = registry._ctx
+    first_folderless = case != "moved_to_folderless"
+    folder = tmp_path.parent / f"folder-{tmp_path.name}"
+    folder.mkdir(exist_ok=True)
+    ctx.project_id = ctx.task_metadata["project_id"] = "test-project"
+    if first_folderless:
+        ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}
+    else:
+        ctx.workspace_root, ctx.workspace_mode = str(folder), "external"
+    monkeypatch.setattr(_REAL_GATEWAY, "project_registration", lambda _self, _root: ("prj-scratch", None))
+    drive = tmp_path / "task_drives" / ctx.task_id
+    drive.mkdir(parents=True, exist_ok=True)
+    (drive / "brief.md").write_text("first attempt", encoding="utf-8")
+    engine.lose = 1
+    token = json.loads(delegate._delegate_start(ctx, "Read the brief.", max_seconds=120).text)["pending_invocation_id"]
+    c._CUSTODY.clear()
+    carrier = tmp_path / "task_drives"
+    if case == "moved_to_folderless":  # the same work, now in a Project without a folder
+        ctx.workspace_root, ctx.workspace_mode = "", ""
+        ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}
+    elif case == "moved_to_folder":
+        ctx.workspace_root, ctx.workspace_mode = str(folder), "external"
+        ctx.task_metadata.pop("resource_intent", None)
+    else:
+        carrier.chmod(0)
+    try:
+        answer = _start(registry, retry_of=token)
+    finally:
+        carrier.chmod(0o755)
+    assert answer["recovered_without_start"] and len(engine.creates) == len(engine.lookups) == 1, answer
+    assert ("inputs: automatic lineage, no record" in answer["note"]) is first_folderless, answer["note"]
+
+
+@pytest.mark.parametrize("investigation", [True, False], ids=["investigation", "writer"])
+def test_a_start_found_by_its_key_says_when_it_is_an_evidence_only_investigation(plan_setup, monkeypatch, investigation):  # noqa: F811
+    """A found agent start reads its recorded purpose: an investigation says, briefly, that nothing from it is
+    applied (no promise about its copy); a found writing start, whose diff may land, says no such thing."""
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
+
+    p = plan_setup
+    if investigation:
+        p.ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
+        p.ctx.workspace_mode = "external"
+    p.engine.fail_next = True
+    token = p.start("Look at the folder", mode="agent")["pending_invocation_id"]
+    record = c.invocation_record(p.root, token)
+    assert (record["authority_source"] == INVESTIGATION_AUTHORITY) is investigation and record["snapshot_id"], record
+    monkeypatch.setattr(p.engine, "operations", lambda: [{"method": "POST", "path": "/v2/runs/lookup"}], raising=False)
+    monkeypatch.setattr(p.engine, "lookup_run", lambda body, *, idempotency_key: {
+        "status": "found", "storeId": "store-plan", "handle": {
+            "jobId": "accepted", "runId": p.engine.accepted[idempotency_key]["runId"], "state": "running"}}, raising=False)
+    sent = len(p.engine.calls)
+    c._CUSTODY.clear()
+    found = p.start("", retry_of=token)
+    assert found.get("recovered_without_start") and len(p.engine.calls) == sent, found
+    said = "investigation: evidence-only investigation: nothing from it is applied" in found["note"]
+    assert said is investigation, found["note"]
 
 
 @pytest.mark.parametrize("consumer", ["retry", "sweep"])
@@ -579,7 +564,7 @@ def test_an_orphan_replay_adopts_the_job_bound_while_its_post_waited(tmp_path, m
                "primaryHarness": "some-route", "maxSeconds": 120}
     assert c.record_start_requested(tmp_path, task_id="t-family", invocation_id=token, idempotency_key=token,
                                     request=request, project_id="", project_owned=False, route="some-route",
-                                    store_identity_unproven=False)
+                                    store_identity_unproven=False, daemon_store_id=engine.store)
     job = engine.accept(token, request, run=False)
 
     def returned_owner_reads(job_id):
@@ -633,7 +618,8 @@ def test_a_creating_replay_rechecks_stop_after_lookup(tmp_path, monkeypatch, sto
     token = "legacy-missed-start"
     assert c.record_start_requested(tmp_path, run_id="", task_id="gone-owner", invocation_id=token,
                                     idempotency_key=token, request={"prompt": "work", "primaryHarness": "some-route"},
-                                    route="some-route", project_id="", project_owned=False)
+                                    route="some-route", project_id="", project_owned=False,
+                                    daemon_store_id=engine.store)  # receipt-bound replay; this test varies Stop
     stopped = False
     lookup = engine._lookup
 
@@ -1053,3 +1039,28 @@ def test_an_accepted_continuation_is_collected_after_its_window_closed_and_its_c
         assert refused.value.code == "review_subject_unavailable"
         assert reads == [] and c.invocation_record(tmp_path, "inv-seat")["state"] == "pending"
     assert [request for gateway in fake_route.instances for request in gateway.start_requests] == []
+
+
+def test_a_delayed_started_receipt_keeps_the_first_optional_facts(tmp_path):
+    """A duplicate STARTED row (a delayed receipt following a lookup binding) must not overwrite the
+    first recorded window origin, effort or processing facts: the first non-None value wins, and only
+    ``resume_start_state`` keeps its own transition rule. Before the fix the reducer dropped the first
+    ``window_started_at``/``effort``/``processing`` values, so a review requested at 08:00 with a
+    30-second cap acquired an 08:06 window origin and was granted time after its window expired."""
+    from ouroboros.delegate_custody_current import run
+
+    first = c.RunCustody(run_id="run-1", task_id="t-1", window_started_at="2026-11-19T08:00:00+00:00",
+                         effort="high", row_effort="auto", processing_preference="low", row_processing="fast",
+                         resume_start_state="unknown")
+    assert c.record_started(tmp_path, first)
+    later = c.RunCustody(run_id="run-1", task_id="t-1", window_started_at="2026-11-19T08:06:00+00:00",
+                         effort="max", row_effort="max", processing_preference="high", row_processing="slow",
+                         resume_start_state="running")
+    assert c.record_started(tmp_path, later)
+    c._CUSTODY.clear()  # the durable replay is the authority, not the in-process memo
+    folded = run(tmp_path, "run-1")
+    assert folded.window_started_at == "2026-11-19T08:00:00+00:00"
+    assert folded.window_origin == "2026-11-19T08:00:00+00:00"
+    assert (folded.effort, folded.row_effort) == ("high", "auto")
+    assert (folded.processing_preference, folded.row_processing) == ("low", "fast")
+    assert folded.resume_start_state == "running", "the observed state still transitions over 'unknown'"

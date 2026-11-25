@@ -520,7 +520,7 @@ def test_supervisor_grace_toast_is_not_the_task_answering_it(monkeypatch, tmp_pa
     assert meta["finalization_requested_at"] == 2000.0
     tick(2000.5)  # the toast is dispatched here, exactly as the loop does it
 
-    assert any("Task t-narration: The task reached its deadline." in line for line in tick.delivered), (
+    assert any("The task reached its deadline; it is wrapping up" in line for line in tick.delivered), (
         "the harness never drained the bus — the toast under test was never dispatched"
     )
     assert meta["last_progress_at"] == 1000.0, "host narration counted as the task's work"
@@ -640,7 +640,7 @@ def test_quiet_work_keeps_a_finalize_now_only_while_its_stop_still_applies(
         assert meta["silence_attention"]["state"] == "pending_attention"
         tick(3000.0)  # quiet work is never reaped once no bound holds; drain the notice
         assert task_id in queue_mod.RUNNING and queue_mod._reap_queue.empty()
-        assert any("finalization condition no longer applies" in text for text in tick.delivered)
+        assert any("its condition no longer applies" in text for text in tick.delivered)
         assert not any("resumed work" in text for text in tick.delivered)
     if owner_stop:
         assert meta["finalization_control_msg_id"] == "owner-stop-control"
@@ -742,7 +742,7 @@ def test_provider_outage_root_terminal_notifies_owner_chat(tmp_path):
         },
     )
     outage_lines = [t for _c, t in sent if "provider outage" in t]
-    assert outage_lines and "NOT completed" in outage_lines[0]
+    assert outage_lines and "stopped this task" in outage_lines[0]
 
     # A CHILD's provider death keeps the ordinary subagent toast only — the
     # parent absorbs child failures; no second owner ping per child.
@@ -760,7 +760,7 @@ def test_provider_outage_root_terminal_notifies_owner_chat(tmp_path):
         },
     )
     assert not [t for _c, t in sent if "provider outage" in t]
-    assert [t for _c, t in sent if "Subagent kid9 failed" in t]
+    assert [t for _c, t in sent if t == "Subagent failed."]
 
 
 def test_every_host_authored_progress_frame_declares_itself():

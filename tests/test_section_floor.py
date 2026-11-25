@@ -24,7 +24,7 @@ def test_host_ladder_lists_live_producers_and_keeps_only_the_actual_protected_co
 
     assert memory_floor.HOST_STEPS == ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
         "world", "subagents",
-        "architecture_map", "development_map")
+        "architecture_map", "development_map", "return_facts_words")
     assert section_floor.PROTECTED == TIER0_ALWAYS_FULL
     # The overview joins the protected core by the owner's choice (20.10.2026): never an address.
     assert {"system", "bible", "identity", "scratchpad", "memory_marks", "shared_understanding"} <= section_floor.PROTECTED
@@ -336,6 +336,84 @@ def test_host_sections_then_memory_forms_then_a_physical_index_outline_and_peopl
         output_reserve=RESERVE, tool_schemas=[])
     steps = smallest.max_projection.memory_facts["floor"]["steps"]
     assert steps["F5"] == 3 and steps["F2"] == 1 and steps["F7"] == 1
+
+
+def test_an_owner_target_never_outlines_a_world_map_the_window_holds(tmp_path):
+    """WORLD.md shortens only for the window (memory audit 15.11, F7): while the window's own start bound holds the
+    request with memory at its shortest forms, neither an owner's Low target nor a Max start's own room outlines the
+    map (other host forms still pay); a window that cannot hold it outlines it in any mode, its exact source behind a
+    reader, still before memory."""
+    world = _service("world", 60_000)  # about 255,000 tokens: above Low's target even after the runtime steps
+    core = _core(tmp_path, [_service(size=60_000)], [world], syn.snapshot(story=syn.pages(3, 20_000)))
+    roomy = _plan(core, 1_000_000, "low")
+    assert [r["section_id"] for r in _host_facts(roomy, "low")] == ["runtime"]  # the target's own host step
+    assert world in _text(roomy, "low")
+    tight = _plan(core, 200_000, "low")  # its start bound cannot hold the map beside the rest
+    assert "world" in [r["section_id"] for r in _host_facts(tight, "low")] and world.operative_view in _text(tight, "low")
+    plain = _plan(core, 200_000, "max")  # no target, a window that cannot hold the map: outlined before memory
+    assert "world" in [r["section_id"] for r in _host_facts(plain, plain.initial_mode)]
+    mature = _core(tmp_path, [_service(size=60_000)], [world], syn.snapshot(story=syn.pages(60, 60_000)))
+    held = _plan(mature, 1_000_000, "low")  # whole memory far above the window's bound, its shortest forms below it
+    assert "world" not in [r["section_id"] for r in _host_facts(held, "low")] and world in _text(held, "low")
+    started = _plan(mature, 1_000_000, "max")  # the same memory in Max: the start's own room never outlines the map
+    shown = started.initial_mode
+    assert "world" not in [r["section_id"] for r in _host_facts(started, shown)] and world in _text(started, shown)
+
+
+def test_the_facts_and_the_peoples_words_stand_until_only_the_window_could_shorten_them(tmp_path):
+    """The facts beside my human's word and the people's newest words beside them (M5; owner 15.11 4A, 18.11 1A): both
+    stand whatever a selected Low asks, while the window's start bound holds them beside memory's shortest telling and
+    the books; past it the words step first to their readers and then the facts to their totals, memory folding first."""
+    facts = HostSection("return_facts", "## Since my human's previous word\n" + "a fact line " * 30_000,
+                        "## Since my human's previous word\nSince then, counted: 3 places.")
+    words = HostSection("return_facts_words", "## Their newest words since my human's previous word\n" + "«words» " * 200_000,
+                        "## Their newest words since my human's previous word\nThe newest words of 3 people stand at "
+                        "the readers on their place lines above.")
+    roomy = _plan(_core(tmp_path, [_service(size=60_000), facts, words], [], syn.snapshot(story=syn.pages(3, 20_000))),
+                  1_000_000, "low")
+    stepped = [r["section_id"] for r in _host_facts(roomy, "low")]
+    assert "runtime" in stepped, "the Low frame steps what it may"
+    assert "return_facts_words" not in stepped and "return_facts" not in stepped, "a selected Low shortens neither"
+    assert words.full_text in _text(roomy, "low") and facts.full_text in _text(roomy, "low")
+    mature = _core(tmp_path, [facts, words], [], syn.snapshot(conversations=[syn.conversation(i, words=20, word_chars=1_000)
+                                                                                for i in range(150)]))
+    held = _plan(mature, 1_000_000, "max")  # other conversations far above the window whole, at my telling below it
+    shown = held.initial_mode
+    assert not [r for r in _host_facts(held, shown) if r["section_id"].startswith("return_facts")]
+    assert words.full_text in _text(held, shown) and facts.full_text in _text(held, shown)
+    worded = _plan(mature, 400_000, "max")  # the words would cost my telling: they step, the facts keep their detail
+    shown = worded.initial_mode
+    stepped = [r["section_id"] for r in _host_facts(worded, shown)]
+    assert "return_facts_words" in stepped and "return_facts" not in stepped and facts.full_text in _text(worded, shown)
+    tight = _plan(mature, 100_000, "max")  # the facts would cost the books: their totals, and Max keeps whole books
+    shown = tight.initial_mode
+    assert shown == "max" and "return_facts" in [r["section_id"] for r in _host_facts(tight, shown)]
+    assert facts.operative_view in _text(tight, shown) and facts.full_text not in _text(tight, shown)
+
+
+def test_a_refit_of_held_work_keeps_the_facts_while_memory_can_still_fold_to_its_telling(tmp_path):
+    """A held view re-fitted for a smaller window or a refusal (M5 council, Opus R5) prices the facts and the people's
+    words by the same test as a start, its running tail at memory's telling and no new work room: memory folds first,
+    then the words step, and the facts keep their detail until even that request exceeds the window."""
+    facts = HostSection("return_facts", "## Since my human's previous word\n" + "a fact line " * 3_000,
+                        "## Since my human's previous word\nSince then, counted: 3 places.")
+    words = HostSection("return_facts_words", "## Their newest words since my human's previous word\n" + "«words» " * 20_000,
+                        "## Their newest words since my human's previous word\nThe newest words of 3 people stand at "
+                        "the readers on their place lines above.")
+    core = _core(tmp_path, [facts, words], [], syn.snapshot(conversations=[syn.conversation(i, words=20, word_chars=1_000)
+                                                                          for i in range(150)]))
+    initial = _plan(core, 2_000_000)
+
+    def refit(window):
+        plan = initial.reproject_for_route(window_tokens=window, known_window=True, ratio=1.0, output_reserve=RESERVE,
+                                           tool_schemas=[], refused_tokens=1_000)
+        return plan, [row["section_id"] for row in _host_facts(plan)]
+
+    folded, stepped = refit(300_000)  # memory pays the refusal: both stand
+    assert "return_facts_words" not in stepped and "return_facts" not in stepped and words.full_text in _text(folded)
+    worded, stepped = refit(60_000)
+    assert "return_facts_words" in stepped and "return_facts" not in stepped and facts.full_text in _text(worded)
+    assert "return_facts" in refit(16_000)[1]
 
 
 def test_known_window_renders_every_active_note_in_outline_unknown_steps_nothing(tmp_path):

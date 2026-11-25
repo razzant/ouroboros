@@ -113,12 +113,13 @@ def test_notice_import_does_not_block_current_store_and_late_receipts_are_found(
     assert not notice_receipts.recorded(tmp_path, 3, row["type"])
 
 
-@pytest.mark.parametrize("reader", ["owner", "publication", "narrative"])
+@pytest.mark.parametrize("reader", ["owner", "exact-owner", "publication", "narrative"])
 def test_absence_readers_answer_over_the_readable_rows_of_a_root_with_a_torn_line(tmp_path, reader):
     """A line the import could not read is an unreadable old row, as it was for the chain readers:
-    absence-only answers are given over the readable rows, so one torn line in the archive never
-    makes a reader refuse forever (a finished task's Done card, an owed notice, a routing click).
-    Readers with a coverage field disclose the interval (``range_coverage``)."""
+    answers are given over the readable rows, so one torn line in the archive never makes a reader
+    refuse forever (a finished task's Done card, an owed notice, a routing click), a partial owner ref
+    included. Readers with a coverage field disclose the interval (``range_coverage``)."""
+    from ouroboros.owner_relay import owner_row_source
     from ouroboros.terminal_projection import _already_in_chat
 
     def result_ref(task_id):
@@ -136,6 +137,7 @@ def test_absence_readers_answer_over_the_readable_rows_of_a_root_with_a_torn_lin
         reads = {
             "owner": lambda key: resolve_owner_message_source(root, build_owner_message_ref(
                 chat_id=1, client_message_id=key, ts=owner()["ts"], text=owner()["text"])),
+            "exact-owner": lambda key: resolve_owner_message_source(root, owner_row_source(owner(key))[0]),
             "routing": lambda key: _origin_message(root, key),
             "words": lambda key: owner_words._inbound_rows(root, {key: "steer_task"}),
             "notices": lambda key: notice_receipts.recorded(root, 1 if key == "selected" else 22, "legacy_memory_notice"),
@@ -148,19 +150,24 @@ def test_absence_readers_answer_over_the_readable_rows_of_a_root_with_a_torn_lin
         assert bool(ds.range_coverage(root, "chat")["gaps"]) is gapped, "the torn line stays disclosed by coverage"
 
 
-def test_a_torn_line_leaves_the_routing_card_open_until_its_source_is_readable(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_room,exact", [(1, False), (None, False), (1, True)],
+                         ids=["recorded-room", "legacy-room-unknown", "physical-address"])
+def test_a_torn_line_leaves_the_routing_card_open_until_its_source_is_readable(tmp_path, monkeypatch, source_room, exact):
     from types import SimpleNamespace
-    from ouroboros import project_dialogue as pd, routing_wait
+    from ouroboros import chat_annotations as journal, routing_wait
     from supervisor import workers
 
     seed(tmp_path, live={"chat": ["{broken\n"]})
     ds.ensure(tmp_path)
-    monkeypatch.setattr(pd, "_COMPACT_AT_BYTES", 1)
+    monkeypatch.setattr(journal, "_COMPACT_AT_BYTES", 1)
     dispatched = []
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put_nowait=dispatched.append))
     monkeypatch.setattr(routing_wait, "wait_for_routing_annotation", lambda *args: {"status": "delivered"})
+    original = owner()
+    address = chat_chain.format_address(chat_chain.row_address(original))
     append_chat_annotation(tmp_path, "owner-one", action="route_decision", status="needs_manual_target",
-                           routing_token="route-one", options=[{"action": "steer_task", "task_id": "target"}])
+                           routing_token="route-one", source_chat_id=source_room,
+                           source_row_address=address if exact else "", options=[{"action": "steer_task", "task_id": "target"}])
     before = latest_chat_annotations(tmp_path)
     assert before["owner-one"]["status"] == "needs_manual_target"
     request = {"request_id": "click-one", "decision_id": "routing:owner-one:route-one", "option_index": 0}
@@ -168,11 +175,23 @@ def test_a_torn_line_leaves_the_routing_card_open_until_its_source_is_readable(t
     # Over the readable rows the origin is not there: the card says so and stays open, never a 503 forever.
     assert status == 409 and payload["error"] == "origin_text_unavailable" and payload["state"] == "open"
     assert latest_chat_annotations(tmp_path) == before and dispatched == []
-    ds.append(tmp_path, "chat", owner())
+    assert exact or "unread line" in payload["reason"]
+    ds.append(tmp_path, "chat", original)
+    if not exact:
+        # An old card names only an id: two distinct readable rows with it are told apart by nothing it saved, so
+        # the same card read against such a history stays open, and the owner can retry the same click.
+        journal_path = pathlib.Path("logs/chat_annotations.jsonl")
+        twin = tmp_path / "twin"
+        seed(twin, live={"chat": [owner("owner-one", text="Another request"), original]})
+        (twin / journal_path).write_bytes((tmp_path / journal_path).read_bytes())
+        status, payload = handle_routing_decision(twin, **request)
+        assert (status, payload["state"], dispatched) == (409, "open", [])
+    # The torn line hides only itself: the one readable row answers the card, exact or not.
     status, payload = handle_routing_decision(tmp_path, **request)
     assert status == 200 and payload["dispatched"] == "delivered"
     # The owner's words travel as his verified quote; the steer note is only his (absent) comment.
-    assert [event["quotes"][0]["text"] for event in dispatched] == [owner()["text"]]
+    [event] = dispatched
+    assert (event["quotes"][0]["text"], event["quotes"][0]["source"]["address"]) == (original["text"], address)
     assert latest_chat_annotations(tmp_path)["owner-one"]["status"] == "delivered"
 
 
@@ -205,10 +224,10 @@ def test_named_reader_has_equal_sql_work_with_one_or_thirty_foreign_rooms(tmp_pa
 
 
 def test_annotation_compaction_uses_stored_ids_and_keeps_pending_import(tmp_path, monkeypatch):
-    from ouroboros import project_dialogue as pd
+    from ouroboros import chat_annotations as journal
 
     seed(tmp_path, archives={"chat_20261016T000000.jsonl": [owner()]})
-    monkeypatch.setattr(pd, "_COMPACT_AT_BYTES", 1)
+    monkeypatch.setattr(journal, "_COMPACT_AT_BYTES", 1)
     append_chat_annotation(tmp_path, "owner-one", action="steer_task", status="delivered")
     append_chat_annotation(tmp_path, "absent", action="steer_task", status="delivered")
     assert set(latest_chat_annotations(tmp_path)) == {"owner-one", "absent"}
@@ -221,11 +240,11 @@ def test_annotation_compaction_uses_stored_ids_and_keeps_pending_import(tmp_path
 def test_annotation_compaction_over_a_torn_line_keeps_every_source_and_the_newest_act(tmp_path, monkeypatch):
     """A gap cannot prove an annotation's source absent, so nothing is dropped for it; the sidecar
     still compacts to the newest act per message instead of growing without bound."""
-    from ouroboros import project_dialogue as pd
+    from ouroboros import chat_annotations as journal
 
     seed(tmp_path, live={"chat": ["{broken\n"]})
     ds.ensure(tmp_path)
-    monkeypatch.setattr(pd, "_COMPACT_AT_BYTES", 1)
+    monkeypatch.setattr(journal, "_COMPACT_AT_BYTES", 1)
     for status in ("queued", "delivering", "delivered"):
         append_chat_annotation(tmp_path, "unreadable-source", action="steer_task", status=status)
     assert ds.range_coverage(tmp_path, "chat")["gaps"]
@@ -234,11 +253,27 @@ def test_annotation_compaction_over_a_torn_line_keeps_every_source_and_the_newes
     assert len(sidecar.read_text(encoding="utf-8").splitlines()) == 1, "compacted to the newest act"
 
 
+def test_legacy_and_scoped_receipts_keep_append_order_through_compaction(tmp_path, monkeypatch):
+    from ouroboros import chat_annotations as journal
+
+    ds.append(tmp_path, "chat", owner())
+    monkeypatch.setattr(journal, "_COMPACT_AT_BYTES", 1)
+    times = iter(["2024-01-01T10:00:00Z", "2024-01-01T10:01:00Z", "2024-01-01T09:59:00Z"])
+    monkeypatch.setattr(journal, "utc_now_iso", lambda: next(times))
+    for room, token, status in [(1, "first", "pending"), (1, "second", "scheduled"), (None, "first", "delivered")]:
+        assert append_chat_annotation(tmp_path, "owner-one", source_chat_id=room, routing_token=token,
+                                      status=status, action="steer_task")
+    assert journal.latest_picker_annotation(tmp_path, "owner-one", "first")[1]["status"] == "delivered"
+    assert journal.scoped_chat_annotations(tmp_path)[1, "owner-one"]["status"] == "delivered"
+    assert [row["status"] for row in journal.scoped_chat_annotations(tmp_path, by_token=True).values()] == [
+        "scheduled", "delivered"]
+
+
 def test_annotation_compaction_asks_the_store_once_however_many_messages_it_keeps(tmp_path, monkeypatch):
     """Past the threshold every append compacts. A transaction per annotated message cost the owner's busy server
     seconds an append (each releases the GIL; 823 messages, 14.11); one statement asks for every source, and the
     rows kept stay the per-message answer: each source's newest act, none of an absent source."""
-    from ouroboros import project_dialogue as pd
+    from ouroboros import chat_annotations as journal
 
     counts = []
     for messages in (1, 30):
@@ -255,7 +290,7 @@ def test_annotation_compaction_asks_the_store_once_however_many_messages_it_keep
         append_chat_annotation(root, quoted, action="steer_task", status="queued", routing_token="act")
         append_chat_annotation(root, "absent", action="steer_task", status="delivered", routing_token="act")
         with monkeypatch.context() as patched, metered(monkeypatch) as measured:
-            patched.setattr(pd, "_COMPACT_AT_BYTES", 1)
+            patched.setattr(journal, "_COMPACT_AT_BYTES", 1)
             append_chat_annotation(root, ids[-1], action="steer_task", status="delivered", routing_token="act")
         counts.append((measured["transactions"], measured["statements"]))
         sidecar = (root / "logs" / "chat_annotations.jsonl").read_text(encoding="utf-8")
@@ -540,13 +575,22 @@ def test_memory_readers_do_equal_work_with_one_or_thirty_foreign_rooms(tmp_path,
             "identity": lambda: chat_chain.resolve_row(root, chat_chain.row_address(row))[0],
             "room": lambda: [r for _a, r, _p in chat_chain.iter_room_rows(root, 777)],
             "evidence": lambda: read_room_source(root, 777),
-            "task": lambda: Memory(root).read_task_recent("chat.jsonl", "selected", 5)[0],
+            "task": lambda: Memory(root).read_task_recent("chat.jsonl", "selected", 5),
         }
         with metered(monkeypatch) as measured:
             result = reads[reader]()
         assert result
         if reader == "evidence":
             assert len(result["rows"]) == 1 and result["rows"][0]["text"] == row["text"]
+        elif reader == "task":
+            # #4012: the task reader also names the row in the retained store — ``dialogue_store.Row.history_id``,
+            # the store's own coordinate ("<stream>:<seq>"), which the mind's clipped progress line quotes. The
+            # row's data, its order, the read's volume and its gaps are what they were; the id is that coordinate.
+            task_rows, task_coverage = result
+            stored = ds.probe_rows(root, "chat", [("task_id", "selected")], limit=5)
+            assert task_rows == [{**row, "history_id": stored[0].history_id}]
+            assert stored[0].history_id == "chat:0"
+            assert task_coverage["shown"] == task_coverage["matched"] == 1 and task_coverage["gaps"] == []
         else:
             assert result == (row if reader == "identity" else [row])
         measurements.append(dict(measured))
@@ -738,3 +782,138 @@ def test_the_sidebar_keeps_every_project_while_the_archive_imports(tmp_path):
         projects_summary(tmp_path, chat_id=quiet["chat_id"])
     di.run_dialogue_import(tmp_path)
     assert projects_summary(tmp_path, chat_id=quiet["chat_id"])[0]["has_thread_activity"] is False
+
+
+def test_a_pre_identity_project_opening_resolves_to_its_one_original_and_refuses_a_rival(tmp_path):
+    """A binding older than client ids and times names only a room and a checksum. Its Project still holds the one
+    readable original of those words (lens refs, retained opening, memory membership, room rows), every such address
+    of a read checked by one walk of its room; a second distinct row with the same words leaves nothing to project,
+    and the retained copy says so instead of picking either."""
+    from ouroboros import memory_inventory
+    from ouroboros.project_dialogue import _source_ref_identity, project_origin_rows, source_refs_for_project
+    from ouroboros.projects_registry import create_project
+
+    project = create_project(tmp_path, "selected", origin="reconcile")
+    original = owner(client_id="", ts="2026-01-02T00:00:00+00:00")
+    ref = build_owner_message_ref(chat_id=1, client_message_id="", ts="", text=original["text"])
+    (tmp_path / "state/project_task_bindings.json").write_text(json.dumps({"bindings": {"legacy": {
+        "project_id": project["id"], "project_chat_id": project["chat_id"], "source_ref": ref,
+        "source_text": original["text"]}}}), encoding="utf-8")
+    ds.append(tmp_path, "chat", original)
+    ds.append(tmp_path, "chat", owner("other", text="Other words"))
+    key = _source_ref_identity(ref)
+
+    def projected():
+        gaps: set = set()
+        return (source_refs_for_project(tmp_path, project["chat_id"]),
+                [row["text"] for row in project_origin_rows(tmp_path, project["chat_id"], gaps=gaps)], gaps,
+                memory_inventory._membership_facts(tmp_path).projects_by_source_key.get(key),
+                [entry.row for entry in chat_chain.room_rows(tmp_path, project["chat_id"])])
+
+    assert projected() == ([ref], [original["text"]], set(), frozenset({project["chat_id"]}), [original])
+    ds.append(tmp_path, "chat", owner("rival", ts="2026-01-03T00:00:00+00:00"))  # the same words, a distinct row
+    assert projected() == ([], [], {"The visibility of a retained project opening could not be verified."}, None, [])
+
+
+@pytest.mark.parametrize("reader", ["refs", "origins", "membership", "room"])
+def test_older_project_bindings_resolve_in_one_read_however_many_a_room_holds(tmp_path, monkeypatch, reader):
+    """Every pre-upgrade binding names its opening by a partial address. One read resolves all of them together
+    (their client ids in one probe), so a room with twenty such bindings costs the SQL work of a room with one: no
+    lookup per binding for the lens refs, the retained openings, the memory membership or the room's rows (Opus
+    measured 381 ms for the membership of 1,000 such bindings)."""
+    from ouroboros import memory_inventory
+    from ouroboros.project_dialogue import project_origin_rows, source_refs_for_project
+    from ouroboros.projects_registry import create_project
+
+    work = []
+    for count in (1, 20):
+        root = tmp_path / str(count)
+        project = create_project(root, "selected", origin="reconcile")
+        bindings, rows = {}, []
+        for index in range(count):
+            row = owner(f"opening-{index}", ts=f"2026-10-01T00:00:{index:02d}+00:00")
+            ds.append(root, "chat", row)
+            rows.append(row)
+            bindings[f"task-{index}"] = {"project_id": project["id"], "project_chat_id": project["chat_id"],
+                                         "source_text": row["text"], "source_ref": build_owner_message_ref(
+                                             chat_id=1, client_message_id=row["client_message_id"], ts=row["ts"],
+                                             text=row["text"])}
+        (root / "state/project_task_bindings.json").write_text(json.dumps({"bindings": bindings}), encoding="utf-8")
+        # Each filled root starts the measured read from the same premise: its chat confirmed imported, read here
+        # and not under the meter, so neither count pays the process's first coverage read for the other.
+        assert ds.range_coverage(root, "chat")["imported"]
+        reads = {
+            "refs": lambda: source_refs_for_project(root, project["chat_id"]),
+            "origins": lambda: project_origin_rows(root, project["chat_id"]),
+            "membership": lambda: list(memory_inventory._membership_facts(root).projects_by_source_key),
+            "room": lambda: [entry.row for entry in chat_chain.room_rows(root, project["chat_id"])],
+        }
+        with metered(monkeypatch) as measured:
+            result = reads[reader]()
+        assert result == rows if reader == "room" else len(result) == count, result
+        work.append((measured["transactions"], measured["statements"]))
+    assert work[0] == work[1] and work[0][0] > 0
+
+
+def test_a_legacy_selector_names_the_cross_room_origin_by_its_physical_row(tmp_path):
+    """A Project task opened from Main records its origin with that row's digest, while a skill's owner_source still
+    sends the four older fields. Such a selector is the task's own source when its one original is that physical row
+    (also against an origin recorded before digests); another row, an ambiguous selector or a task with no recorded
+    origin stays refused."""
+    from types import SimpleNamespace
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.owner_source import resolve_owner_source
+    from ouroboros.task_results import write_task_result
+
+    row = owner()
+    ds.append(tmp_path, "chat", row)
+    other = owner("other-one", text="Unrelated words")
+    ds.append(tmp_path, "chat", other)
+    recorded, words = owner_row_source(row)
+    legacy = build_owner_message_ref(chat_id=1, client_message_id=row["client_message_id"], ts=row["ts"], text=row["text"])
+    write_task_result(tmp_path, "room-task", "running", chat_id=77, origin_message_ref=recorded, origin_message_text=words)
+    write_task_result(tmp_path, "older-task", "running", chat_id=77, origin_message_ref=legacy, origin_message_text=words)
+
+    def source(ref, task_id="room-task"):
+        ctx = SimpleNamespace(task_id=task_id, drive_root=tmp_path, current_chat_id=77, task_metadata={})
+        return resolve_owner_source(ctx, {"kind": "chat", "ref": ref}).get("ref")
+
+    assert source(legacy) == source(recorded) == source(legacy, "older-task") == legacy
+    stranger = build_owner_message_ref(chat_id=1, client_message_id="other-one", ts=other["ts"], text=other["text"])
+    assert source(stranger) is None and source(legacy, "no-origin") is None
+    ds.append(tmp_path, "chat", owner("twin", ts=row["ts"]))  # the same words at the same time, a distinct row
+    unnamed = build_owner_message_ref(chat_id=1, client_message_id="", ts=row["ts"], text=row["text"])
+    assert source(unnamed) is None, "the saved fields cannot tell the two rows apart"
+
+
+@pytest.mark.parametrize("reader", ["origins", "refs"])
+def test_pre_identity_openings_of_one_room_share_one_walk_of_it(tmp_path, monkeypatch, reader):
+    """Two old bindings that name their openings only by Main and a checksum: one read walks Main's rows once for
+    both (no index holds a checksum), so the second costs no second walk; each still answers with its own one
+    original, and no other room's history is read."""
+    from ouroboros.project_dialogue import project_origin_rows, source_refs_for_project
+    from ouroboros.projects_registry import create_project
+
+    work = []
+    for count in (1, 2):
+        root = tmp_path / str(count)
+        project = create_project(root, "selected", origin="reconcile")
+        bindings, texts = {}, []
+        for index in range(2):
+            row = owner(client_id="", ts=f"2026-01-0{index + 1}T00:00:00+00:00", text=f"Opening words {index}")
+            ds.append(root, "chat", row)  # both originals stay in Main whichever bindings name them
+            if index < count:
+                texts.append(row["text"])
+                bindings[f"legacy-{index}"] = {"project_id": project["id"], "project_chat_id": project["chat_id"],
+                                               "source_text": row["text"], "source_ref": build_owner_message_ref(
+                                                   chat_id=1, client_message_id="", ts="", text=row["text"])}
+        for room in range(3):
+            ds.append(root, "chat", owner(f"foreign-{room}", chat_id=room + 10))
+        (root / "state/project_task_bindings.json").write_text(json.dumps({"bindings": bindings}), encoding="utf-8")
+        read = {"origins": lambda: [row["text"] for row in project_origin_rows(root, project["chat_id"])],
+                "refs": lambda: [ref["text_sha256"] for ref in source_refs_for_project(root, project["chat_id"])]}[reader]
+        with metered(monkeypatch) as measured:
+            result = read()
+        assert len(result) == count and (reader == "refs" or result == texts), result
+        work.append((measured["transactions"], measured["statements"]))
+    assert work[0] == work[1] and work[0][0] > 0

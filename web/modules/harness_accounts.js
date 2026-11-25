@@ -11,6 +11,7 @@
 // PER FACET and outranks the aggregate: `daemonAnswered` is the one predicate, and the status line asks the facets
 // before it repeats any runtime claim. Pure helpers up top are node-tested without a DOM.
 
+import { bindAccountAction, paintAccountFamilies } from './harness_account_rows.js';
 import { capabilityMarkup, createAccountResourcesController, resourcePanelId, resourceReadGap,
     resourceSummary, targetFor } from './account_resources.js';
 import {
@@ -40,7 +41,7 @@ import {
 import { createRestartController } from './claudexor_restart.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { planLabel } from './harness_presentation.js';
-import { createLoginCardController, normalizeProfileName, preserveCardFocus } from './harness_login_cards.js';
+import { createLoginCardController, normalizeProfileName } from './harness_login_cards.js';
 import { refreshMaintenanceCatalogs } from './settings_catalog.js';
 import { createHarnessMaintenanceController } from './harness_maintenance.js';
 import { formatRelativeAge } from './ui_helpers.js';
@@ -707,6 +708,8 @@ export function accountGroups(payload, {
     });
 }
 
+const familyAccountCommand = group => group.rows.length ? 'named' : 'default';
+
 export function familyActionLabel(group, payload) {
     // The card's OWN button, and the fix for "позиции кнопок нелогичные": the
     // add affordance lives in the family header instead of hanging off one
@@ -724,7 +727,7 @@ export function familyActionLabel(group, payload) {
     // The repair is a PREREQUISITE, not the destination: the login card
     // performs it in the foreground and reports it there, and the tab's service
     // banner already names the fault above.
-    return group.rows.length ? 'Add account' : runtimeActionLabel(payload);
+    return familyAccountCommand(group) === 'named' ? 'Add account' : runtimeActionLabel(payload);
 }
 
 export function rowActionLabel(row, payload) {
@@ -967,7 +970,6 @@ export function vendorCredentialRetainedNotice(receipt, name, family) {
 const state = {
     store: claudexorStatus,
     loginCard: null,
-    loginFamily: '',
     resources: null,
     maintenance: null,
     disposers: [],
@@ -986,6 +988,7 @@ const state = {
     family: '',    // the provider whose page is mounted ('' lists every family)
     path: '',      // that page's Settings path: its showing is the owner's act that may activate the read
     mark: null,    // the page's lead mark for a row: `({ row, badge, quota }) => html`
+    paintOverview: null, // the provider's own blocks above the list, inside the same reading-place capture
 };
 
 // The disclosure's quiet chevron (it turns when open).
@@ -1083,7 +1086,7 @@ function rowHtml(row, payload, facets = {}) {
     // Remove) shows on that line with More, whose panel holds the account's resources. A login that
     // is verified is the quiet case and says nothing: the card's first line counts them, and a row speaks of trouble.
     const rare = String(row?.status?.verification || '') === 'passed';
-    const login = `<button type="button" class="btn btn-default btn-sm" data-harness-login${rare ? ' data-rare' : ''}>${escapeHtml(loginAction.label)}</button>`;
+    const login = `<button type="button" class="btn btn-default btn-sm" data-login-command="${loginAction.refresh ? 'refresh' : 'login'}" data-harness-login${rare ? ' data-rare' : ''}>${escapeHtml(loginAction.label)}</button>`;
     return `
         <div class="ui-row harness-account-row${quota.exhausted ? ' harness-exhausted' : ''}" data-harness="${escapeHtml(row.harness)}" data-profile="${escapeHtml(row.profile_id)}" data-kind="${escapeHtml(row.kind)}"${on && badge.tone === 'error' ? ' data-tone="warn"' : ''}>
             <span class="harness-account-mark" aria-hidden="true">${facets.mark?.({ row, badge, quota }) || ''}</span>
@@ -1116,7 +1119,7 @@ export function harnessFamilyMarkup(group, payload, facets) {
             <div class="ui-card settings-card agent-family-accounts"${group.maintenanceOnly ? ' hidden' : ''}>
                 <div class="settings-card-head agent-family-head">
                     <h3 class="settings-card-title">Accounts</h3>
-                    ${group.maintenanceOnly || facets?.accountsUnsupported ? '' : `<button type="button" class="btn btn-default btn-sm" data-family-add>${escapeHtml(familyActionLabel(group, payload))}</button>`}
+                    ${group.maintenanceOnly || facets?.accountsUnsupported ? '' : `<button type="button" class="btn btn-default btn-sm" data-family-command="${familyAccountCommand(group)}" data-family-add>${escapeHtml(familyActionLabel(group, payload))}</button>`}
                 </div>
                 <p class="settings-card-lead agent-family-id">
                     ${group.maintenanceOnly ? '' : `<span class="ui-status" data-tone="${group.status.tone}">${escapeHtml(group.status.label)}</span>`}
@@ -1142,7 +1145,17 @@ function paintServiceBanner() {
     paintServiceDiagnostics(line);
 }
 
+function preservePage(update) {
+    const host = document.getElementById('harness-accounts-groups');
+    if (host && state.resources) state.resources.preserve(host, control => update(host, control));
+    else update(host);
+}
+
 function renderRows() {
+    preservePage(paintRows);
+}
+
+function paintRows(host, control) {
     // The wake error expires HERE, on the one condition that makes it moot: a
     // FRESH reading (store error retired) in which the daemon provably
     // answered. A refusal was only ever news while nothing answered; keeping
@@ -1151,7 +1164,6 @@ function renderRows() {
     if (state.wakeError && !state.store.error && daemonAnswered(state.store.snapshot)) {
         state.wakeError = '';
     }
-    const host = document.getElementById('harness-accounts-groups');
     paintServiceBanner();
     // The Refresh button says what pressing it does (one predicate feeds the
     // label AND the click — see initHarnessAccounts), and while a wake is in
@@ -1184,81 +1196,62 @@ function renderRows() {
     const accountsRead = state.store.facet(FACET_ACCOUNTS);
     const quotaRead = state.store.facet(FACET_QUOTA);
     const accountsUnsupported = Boolean(state.store.accountsUnsupported);
-    // The family-mounted login card lives INSIDE this container, so the
-    // innerHTML rebuild destroys a focused paste-code/name input before the
-    // card's own render can see it. The capture must therefore wrap the
-    // whole rebuild: same SSOT helper, one level up.
-    const repaint = () => preserveCardFocus(host, () => {
-        const groups = accountGroups(payload, {
-            accountsRead,
-            catalogKnown: state.store.catalogKnown,
-            accountsUnsupported,
-        });
-        for (const harness of state.maintenance?.harnesses || []) {
-            if (!groups.some((group) => group.harness === harness)) groups.push({
-                harness, label: familyLabel(harness, payload, { catalogKnown: state.store.catalogKnown }),
-                rows: [], maintenanceOnly: true,
-            });
-        }
-        host.innerHTML = groups.filter((group) => !state.family || group.harness === state.family)
-            .map((group) => harnessFamilyMarkup(group, payload,
-                { accountsRead, quotaRead, store: state.store, accountsUnsupported, mark: state.mark })).join('');
-        state.resources?.mount(host, accountsUnsupported ? [] : accountRows(payload), payload, quotaRead);
-        host.querySelectorAll('[data-harness-login]').forEach((button) => {
-            button.addEventListener('click', () => {
-                if (!state.initialized) return;
-                const row = button.closest('[data-harness]');
-                const rowData = row?.dataset || {};
-                const rowModel = accountRows(payload).find((candidate) =>
-                    String(candidate?.harness || '') === String(rowData.harness || '')
-                    && String(candidate?.profile_id || '') === String(rowData.profile || '')
-                );
-                const action = rowLoginAction(rowModel, payload);
-                if (action.refresh) {
-                    state.store.refresh();
-                    return;
-                }
-                startLogin(rowData.harness, rowData.profile);
-            });
-        });
-        host.querySelectorAll('[data-harness-remove]').forEach((button) => {
-            button.addEventListener('click', () => {
-                const row = button.closest('[data-harness]');
-                confirmRemoveAccount(row?.dataset.harness, row?.dataset.profile);
-            });
-        });
-        host.querySelectorAll('[data-harness-toggle]').forEach((button) => {
-            button.addEventListener('click', () => {
-                const row = button.closest('[data-harness]');
-                // The switch carries the state it RENDERED for, so a press flips exactly what the owner saw —
-                // never a re-read of a row the poll may have replaced mid-press. In flight it is disabled and busy.
-                Object.assign(button, { disabled: true }).setAttribute?.('aria-busy', 'true');
-                toggleAccountEnabled(row?.dataset.harness, row?.dataset.profile,
-                    button.dataset.enabled === '0');
-            });
-        });
-        host.querySelectorAll('[data-family-add]').forEach((button) => {
-            button.addEventListener('click', async () => {
-                if (!state.initialized) return;
-                // Captured before the await: the status poll replaces the cards
-                // while the dialog is open, detaching this button's section.
-                const card = button.closest('[data-family]');
-                const harness = card?.dataset.family;
-                const hasRows = Boolean(card?.querySelector('[data-harness]'));
-                if (!hasRows) { startLogin(harness, ''); return; }
-                const profile = await promptProfileName({
-                    family: familyLabel(harness, state.store.snapshot || {}, {
-                        catalogKnown: state.store.catalogKnown,
-                    }),
-                });
-                if (profile) startLogin(harness, profile);
-            });
-        });
-        state.loginCard?.render();
-        state.maintenance?.render();
+    state.paintOverview?.(payload, { accountsRead, quotaRead, accountsUnsupported });
+    const groups = accountGroups(payload, {
+        accountsRead,
+        catalogKnown: state.store.catalogKnown,
+        accountsUnsupported,
     });
-    if (state.resources) state.resources.preserve(host, repaint);
-    else repaint();
+    for (const harness of state.maintenance?.harnesses || []) {
+        if (!groups.some((group) => group.harness === harness)) groups.push({
+            harness, label: familyLabel(harness, payload, { catalogKnown: state.store.catalogKnown }),
+            rows: [], maintenanceOnly: true,
+        });
+    }
+    paintAccountFamilies(host, groups.filter((group) => !state.family || group.harness === state.family)
+        .map((group) => harnessFamilyMarkup(group, payload,
+            { accountsRead, quotaRead, store: state.store, accountsUnsupported, mark: state.mark })).join(''), control);
+    state.resources?.mount(host, accountsUnsupported ? [] : accountRows(payload), payload, quotaRead);
+    host.querySelectorAll('[data-harness-login]').forEach((button) => {
+        const command = button.dataset.loginCommand;
+        bindAccountAction(button, command, () => {
+            if (!state.initialized) return;
+            const { harness, profile } = button.closest('[data-harness]').dataset;
+            if (command === 'refresh') state.store.refresh();
+            else startLogin(harness, profile);
+        });
+    });
+    host.querySelectorAll('[data-harness-remove]').forEach((button) => {
+        button.onclick = () => {
+            const row = button.closest('[data-harness]');
+            confirmRemoveAccount(row?.dataset.harness, row?.dataset.profile);
+        };
+    });
+    host.querySelectorAll('[data-harness-toggle]').forEach((button) => {
+        const enabled = button.dataset.enabled === '0';
+        bindAccountAction(button, button.disabled ? 'busy' : enabled, () => {
+            if (!state.initialized || button.disabled) return;
+            const row = button.closest('[data-harness]');
+            Object.assign(button, { disabled: true }).setAttribute?.('aria-busy', 'true');
+            toggleAccountEnabled(row?.dataset.harness, row?.dataset.profile, enabled);
+        }, button.closest('label'));
+    });
+    host.querySelectorAll('[data-family-add]').forEach((button) => {
+        const command = button.dataset.familyCommand;
+        bindAccountAction(button, command, async () => {
+            if (!state.initialized) return;
+            const harness = button.closest('[data-family]')?.dataset.family;
+            if (command === 'default') { startLogin(harness, ''); return; }
+            const profile = await promptProfileName({
+                family: familyLabel(harness, state.store.snapshot || {}, {
+                    catalogKnown: state.store.catalogKnown,
+                }),
+            });
+            if (profile) startLogin(harness, profile);
+        });
+    });
+    state.loginCard?.render();
+    state.maintenance?.render();
 }
 
 // A host reason that is already a sentence keeps one stop when a row result quotes it.
@@ -1371,25 +1364,33 @@ function familyLoginSelector(harness) {
     return `[data-family-login="${String(harness).replace(/["\\]/g, '\\$&')}"]`;
 }
 
+// The surface of the sign-in that is open. A requested family does not own it
+// until the controller releases the old job and makes the new one active.
+function loginHost(harness) {
+    return (harness && document.querySelector?.(familyLoginSelector(harness)))
+        || document.getElementById('harness-login-card');
+}
+
 function ensureLoginCard() {
     if (state.loginCard && !state.loginCard.disposed) return state.loginCard;
     // `detach()` permanently fences one controller. Explicit Connect after a
     // destroy/re-init must therefore build a fresh controller instead of
     // reusing a cached disposed object whose start() correctly does nothing.
-    state.loginCard = null;
-    state.loginCard = createLoginCardController({
-        host: () => (
-            (state.loginFamily
-                && document.querySelector?.(familyLoginSelector(state.loginFamily)))
-            || document.getElementById('harness-login-card')
-        ),
+    let paintedHost;
+    const card = createLoginCardController({
+        host: () => {
+            const host = loginHost(card.active?.harness);
+            if (paintedHost && paintedHost !== host) paintedHost.replaceChildren();
+            return (paintedHost = host);
+        },
         store: state.store,
         // The Settings face is the FULL card: paste-code entry, engine detail,
         // the collapsed Advanced terminal fallback, Close.
         mode: 'full',
+        preservePlace: preservePage,
         onSettled: () => renderRows(),
     });
-    return state.loginCard;
+    return (state.loginCard = card);
 }
 
 /**
@@ -1398,13 +1399,14 @@ function ensureLoginCard() {
  */
 export async function startLogin(harness, profile) {
     if (!harness || !state.initialized) return;
-    state.loginFamily = String(harness);
+    // The command shows its card, or the open sign-in that would not yield, where the owner can act on it.
+    // The create's answer and every poll after it are ordinary repaints (DESIGN §10).
+    const show = state.resources?.command();
     const card = ensureLoginCard();
-    await card.start(harness, profile);
-    // The card mounts inside the clicked family's block; make sure a long
-    // account list has not left it above/below the viewport.
-    document.querySelector?.(familyLoginSelector(state.loginFamily))
-        ?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+    await card.start(harness, profile, '', paint => {
+        paint();
+        show?.(loginHost(card.active?.harness));
+    });
 }
 
 /** Read the shared status once for passive consumers and first paint. */
@@ -1447,15 +1449,15 @@ async function refreshHarnessStatusOnActivation() {
  * Mount the section. The exported destroy seam is an honest local detach, so
  * remount never waits on or invents daemon release proof.
  */
-export function initHarnessAccounts({ store = claudexorStatus, restartDeps = {}, family = '', path = '', mark = null } = {}) {
-    return _init(store, restartDeps, { family, path, mark });
+export function initHarnessAccounts({ store = claudexorStatus, restartDeps = {}, family = '', path = '', mark = null, paintOverview = null } = {}) {
+    return _init(store, restartDeps, { family, path, mark, paintOverview });
 }
 
 async function _init(store, restartDeps, page) {
     _destroy();
-    Object.assign(state, { store, family: String(page.family || ''), mark: page.mark,
+    Object.assign(state, { store, family: String(page.family || ''), mark: page.mark, paintOverview: page.paintOverview,
         path: String(page.path || `accounts/${page.family || ''}`) });
-    state.resources = createAccountResourcesController({ store, render: renderRows });
+    state.resources = createAccountResourcesController({ store });
     state.removeError = '';
     state.removeNotice = '';
     state.wakeError = '';
@@ -1467,7 +1469,8 @@ async function _init(store, restartDeps, page) {
     state.maintenance = createHarnessMaintenanceController({
         host: () => document.getElementById('harness-accounts-groups'),
         onInventory: renderRows,
-        onInspectionProblem: paintServiceBanner,
+        preservePlace: preservePage,
+        onInspectionProblem: () => preservePage(paintServiceBanner),
         onSettled: refreshMaintenanceCatalogs,
         visible: () => !document.hidden
             && document.getElementById('harness-accounts-groups')?.offsetParent != null,
@@ -1542,6 +1545,9 @@ function _destroy() {
         try { dispose(); } catch (err) { /* a broken disposer must not block the rest */ }
     }
     state.initialized = false;
+    state.paintOverview = null;
+    state.resources?.dispose();
+    state.resources = null;
     state.maintenance?.dispose();
     state.maintenance = null;
     const card = state.loginCard;

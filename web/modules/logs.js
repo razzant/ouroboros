@@ -1,8 +1,10 @@
-import { escapeHtml, escapeHtmlAttr } from './utils.js';
+import { escapeHtml, escapeHtmlAttr, formatMsgTime, machineWords } from './utils.js';
 import { apiFetch } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
+import { plainActivityText, selectionInside as selectionWithin } from './chat_activity.js';
 import {
+    ERROR_LOG_PHASES as FAILED_PHASES,
     LOG_CATEGORIES,
     categorizeLogEvent,
     duplicateLogEventKey,
@@ -10,36 +12,49 @@ import {
     formatReviewProjection,
     getLogTaskGroupId,
     isGroupedTaskEvent,
-    normalizeLogTs,
     summarizeLogEvent,
+    serviceOutputLinksHtml,
+    taskPresentation,
 } from './log_events.js';
-import { outcomeTone } from './task_phase_chip.js';
-import { createLogRaw, LOG_RAW_HTML, LOG_RAW_TOGGLE_HTML } from './logs_raw.js';
+import { markView, statusMarkHtml } from './status_mark.js';
+import { bindScrollFade } from './scroll_fade.js';
+import { revealStripChoice } from './page_header.js';
+import { createLogRaw, LOG_RAW_HTML } from './logs_raw.js';
 
 /** Dashboard › Logs (docs/ARCHITECTURE.md §3 "Dashboard"). The panel's entries are data first: every live frame and
- * backfilled row updates its entry (task grouping, x-N collapse, the sticky Errors filter, the settled headline) whether
+ * backfilled row updates its entry (task grouping, ×N collapse, the sticky Errors filter, the settled headline) whether
  * or not the panel is on screen, while the DOM follows only a shown panel. Hidden, the panel writes no node and reads no
  * history; shown again it places what changed newest first, RENDER_CHUNK entries a frame, so a burst that arrived
- * meanwhile never becomes one long rebuild. A task's timeline rows exist while its Timeline is open. Raw pins one
- * compact row's source or received event, pages asynchronously, and offers a full download (logs_raw.js). The reader keeps their place across
- * hide and show: following the newest entry, or on the entry they were reading. The compact history says what it left
- * out: the fields a row's view omits (on that row) and the damaged records a read skipped (in the status line).
- * The panel is one Dashboard tab body, its scroller; an event is one line in one card of trays (U026-U035). */
+ * meanwhile never becomes one long rebuild. Every event is one shared fold whose summary is its head: a task's opens
+ * its timeline, whose rows exist while it is open; an event's opens its facts and its record, which pins one compact
+ * row's source or received event while open, pages asynchronously and offers a full download (logs_raw.js). The reader
+ * keeps their place across hide and show: following the newest entry, or on the entry they were reading. The compact
+ * history says what it left out: the fields a row's view omits (in its record) and the damaged records a read skipped
+ * (in the status line). The panel is one Dashboard tab body, its scroller; an event is one tray of the list's one card
+ * (U026-U035). Only a failure is coloured: the shared outcome chip, beside the failure's own words. */
 
 // The kinds of damaged record a compact read skips (`gaps`, ouroboros/gateway/logs.py); an unknown kind is shown as named.
 const GAP_WORDS = { malformed_jsonl: 'malformed line', incomplete_live_line: 'unfinished live line', torn_archive_line: 'torn archive line' };
 
-// What a compact row's view leaves out (`_raw.omitted_fields`, at most 64 names of `omitted_field_count`); Raw has it.
+// An event's time, said by this one function: Main's clock at its head's end (utils.js formatMsgTime), its tooltip the
+// exact moment to the second, as a Main message's time carries its date (chat_text_bubble.js), which leads its facts.
+const timeOf = (ts) => formatMsgTime(ts) || { short: '', exact: '' };
+// A task's id said short: its first eight characters, past the `presence-` its live turns' ids begin with.
+const shortTaskId = (id) => String(id || '').replace(/^presence-/, '').slice(0, 8);
+// Words an author wrote (narration, an executor's message) read as text, without Markdown's marks (chat_activity.js).
+const wordsOf = (view, text) => (view.markdown && text ? plainActivityText(text) : text);
+
+// What a compact row's view leaves out (`_raw.omitted_fields`, at most 64 names of `omitted_field_count`); its record has it.
 function omittedNote(evt) {
     const names = Array.isArray(evt?._raw?.omitted_fields) ? evt._raw.omitted_fields.map(String) : [];
     const count = Math.max(names.length, Number.isSafeInteger(evt?._raw?.omitted_field_count) ? evt._raw.omitted_field_count : 0);
     if (!count) return '';
     const more = count - names.length;
     const left = names.length ? `${names.join(', ')}${more ? ` and ${more} more` : ''}` : `${count} fields`;
-    return `Left out of this view: ${left}. Raw reads the whole row.`;
+    return `Left out of this view: ${left}. The record below reads the whole row.`;
 }
 
-export function initLogs({ ws, state, mount, setBeforePageLeave }) {
+export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) {
     const MAX_LOGS = 500;
     const MAX_TASK_EVENTS = 30;
     // Entries placed per frame while a shown panel catches up with what changed while it was hidden.
@@ -65,17 +80,25 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
     // The reader follows the newest entry (`pinned`) or reads an entry (`anchor`); `ownTop` is this module's own scroll.
     let pinned = true, anchor = null, ownTop = null, selectionInside = false, settleQueued = false;
 
-    state.activeFilters = state.activeFilters || Object.fromEntries(
-        Object.keys(LOG_CATEGORIES).map((key) => [key, true]),
-    );
+    // The filter shows the kinds chosen, every kind while none is: All, lit at rest. The choice lives in
+    // `state.activeFilters`, which meant the kinds SHOWN before (all six at rest, one turned off to narrow): read once
+    // here, a kind it still shows stays chosen and all six (or none) is the rest, so what the owner saw stays.
+    const KINDS = Object.keys(LOG_CATEGORIES);
+    const choice = state.activeFilters || {};
+    if (KINDS.every((key) => choice[key])) KINDS.forEach((key) => { choice[key] = false; });
+    state.activeFilters = choice;
+    const narrowed = () => KINDS.some((key) => state.activeFilters[key]);
+    const shows = (category) => !narrowed() || Boolean(state.activeFilters[category]);
 
-    // One Dashboard tab body is the tab's root and its one scroller; the filters stay at its top while the list,
-    // one card of tray rows, scrolls under them. The history line and the empty line live in the list's card.
+    // The list is one plain scroller. Its filter rail and Clear belong to the section's header; moving the nodes
+    // keeps their handlers and counts. The history line and empty line belong to the card.
     const page = document.createElement('div');
     page.id = 'page-logs';
-    page.className = 'dashboard-body settings-logs-panel';
+    page.className = 'dashboard-body settings-logs-panel scroll-fade-y';
     page.innerHTML = `
-        <div class="logs-filters" id="log-filters"><button type="button" class="btn btn-ghost btn-sm logs-inline-clear" id="btn-clear-logs">Clear</button></div>
+        <div class="logs-filters"><div class="logs-kinds app-tab-strip" id="log-filters" role="group" aria-label="Show" data-scroll-x>${
+            Object.entries({ '': 'All', ...LOG_CATEGORIES }).map(([key, label]) => `<button type="button" class="filter-chip skills-category" data-log-kind="${key}">${label}<span class="skills-category-count"></span></button>`).join('')
+        }</div><button type="button" class="btn btn-default logs-clear-list" id="btn-clear-logs">Clear</button></div>
         <section class="ui-card logs-card">
             <div class="ui-status logs-history-status" role="status"></div>
             <p class="logs-empty" data-log-empty hidden></p>
@@ -83,13 +106,18 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
         </section>
     `;
     mount.appendChild(page);
+    bindScrollFade(page);  // the Logs panel is mounted after the app-wide pass; its newest end is hidden at first paint
 
     const filtersDiv = page.querySelector('#log-filters');
+    bindScrollFade(filtersDiv, { axis: 'x' });  // a phone's one scrolling line fades where chips hide
     const logEntries = page.querySelector('#log-entries');
     const historyStatus = page.querySelector('.logs-history-status');
     const emptyLine = page.querySelector('[data-log-empty]');
+    // The section's sheets decide whether its page column is drawn (a one-column list hides it): a panel with no box
+    // is not shown, whatever its tab.
     function isLogsVisible() {
-        return state.activePage === 'dashboard' && state.dashboardActiveSubtab === 'logs' && !document.hidden;
+        return state.activePage === 'dashboard' && state.dashboardActiveSubtab === 'logs' && !document.hidden
+            && page.getClientRects().length > 0;
     }
 
     const raw = createLogRaw({ visible: isLogsVisible });
@@ -149,7 +177,7 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
     }
 
     function updateVisibility(entry) {
-        if (entry.node) entry.node.hidden = !state.activeFilters[entry.category];
+        if (entry.node) entry.node.hidden = !shows(entry.category);
         raw.exposure();
     }
 
@@ -159,7 +187,8 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
     let emptyWords = null;
     function updateEmptyState() {
         if (!isLogsVisible()) return;
-        const quiet = [...entries.values()].some((entry) => state.activeFilters[entry.category])
+        syncFilterChips();
+        const quiet = [...entries.values()].some((entry) => shows(entry.category))
             || (historyLoading && !entries.size);
         if (emptyLine.hidden !== quiet) emptyLine.hidden = quiet;
         if (quiet) return;
@@ -170,48 +199,37 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
         else emptyLine.innerHTML = 'The filters hide every event. <button type="button" class="btn btn-ghost btn-sm" data-log-show-all>Show all</button>';
     }
 
-    // Filters narrow the list: while every one is on nothing is narrowed and no chip takes the chosen tone; once
-    // one is off, the ones still on are the chosen ones (board fork "Logs filters": quiet chips, one tone).
-    const chips = new Map();
+    // Skills' chips: All leads, lit while no kind is chosen; a kind pressed is lit beside the others chosen, All pressed
+    // clears the choice. Each counts the entries held of it ("Errors 2"), one with none hides unless chosen; while the
+    // first history read is in flight with nothing held, no count is said and nothing hides.
+    const chips = new Map([...filtersDiv.querySelectorAll('[data-log-kind]')].map((chip) => [chip.dataset.logKind, chip]));
     function syncFilterChips() {
-        const narrowed = Object.keys(LOG_CATEGORIES).some((key) => !state.activeFilters[key]);
+        const known = !historyLoading || entries.size > 0;
+        const counts = { '': entries.size };
+        for (const entry of entries.values()) counts[entry.category] = (counts[entry.category] || 0) + 1;
         chips.forEach((chip, key) => {
-            chip.classList.toggle('active', narrowed && Boolean(state.activeFilters[key]));
-            chip.setAttribute('aria-pressed', String(Boolean(state.activeFilters[key])));
+            const lit = key ? Boolean(state.activeFilters[key]) : !narrowed();
+            chip.classList.toggle('active', lit);
+            chip.setAttribute('aria-pressed', String(lit));
+            setText(chip.querySelector('.skills-category-count'), known ? String(counts[key] || 0) : '');
+            chip.hidden = known && Boolean(key) && !counts[key] && !lit;
         });
     }
 
-    function applyFilters() {
-        syncFilterChips();
+    function choose(key) {
+        if (key) state.activeFilters[key] = !state.activeFilters[key];
+        else KINDS.forEach((kind) => { state.activeFilters[kind] = false; });
         entries.forEach(updateVisibility);
         updateEmptyState();
         follow();
+        revealStripChoice(filtersDiv, chips.get(key));
     }
 
-    function renderFilters() {
-        const inlineClear = filtersDiv.querySelector('.logs-inline-clear');
-        filtersDiv.innerHTML = '';
-        chips.clear();
-        Object.entries(LOG_CATEGORIES).forEach(([key, cat]) => {
-            const chip = document.createElement('button');
-            chip.type = 'button';
-            chip.className = 'filter-chip';
-            chip.textContent = cat.label;
-            chip.addEventListener('click', () => {
-                state.activeFilters[key] = !state.activeFilters[key];
-                applyFilters();
-            });
-            chips.set(key, chip);
-            filtersDiv.appendChild(chip);
-        });
-        if (inlineClear) filtersDiv.appendChild(inlineClear);
-        syncFilterChips();
-    }
+    chips.forEach((chip, key) => chip.addEventListener('click', () => choose(key)));
 
+    // The empty line's Show all is All pressed: every kind shown.
     emptyLine.addEventListener('click', (event) => {
-        if (!event.target?.closest?.('[data-log-show-all]')) return;
-        Object.keys(LOG_CATEGORIES).forEach((key) => { state.activeFilters[key] = true; });
-        applyFilters();
+        if (event.target?.closest?.('[data-log-show-all]')) choose('');
     });
 
     // ---- The entries (data) --------------------------------------------------------------------------------------
@@ -269,11 +287,8 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
 
     function createStandaloneEntry(evt) {
         const dedupeKey = duplicateLogEventKey(evt);
-        const now = (() => {
-            const parsed = evt.ts ? Date.parse(evt.ts) : NaN;
-            return Number.isFinite(parsed) ? parsed : Date.now();
-        })();
-        const tsText = normalizeLogTs(evt.ts || evt.timestamp);
+        const ts = evt.ts || evt.timestamp || '';
+        const now = Date.parse(ts) || Date.now();  // its own time, as a card's (updateTaskGroupCard), else now
 
         if (dedupeKey) {
             let last = duplicateState.get(dedupeKey);
@@ -285,7 +300,7 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
                 last.count += 1;
                 last.entry.repeat = last.count;
                 // A backfilled twin may be the older one: the entry keeps showing the newest.
-                if (now >= last.ts) Object.assign(last.entry, { evt, tsText, at: now });
+                if (now >= last.ts) Object.assign(last.entry, { evt, ts, at: now });
                 last.ts = Math.max(last.ts, now);
                 touch(last.entry);
                 return;
@@ -293,9 +308,10 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
         }
 
         const view = summarizeLogEvent(evt);
+        // An event of a task with no card of its own says its task after its name, as a card does: runs side by side part.
         const entry = addEntry({
-            kind: 'standalone', evt, view, tsText, repeat: 1, dedupeKey, at: now, omitted: omittedNote(evt),
-            category: categorizeLogEvent(evt, view), execution: executorChip(evt),
+            kind: 'standalone', evt, view, ts, repeat: 1, dedupeKey, at: now, omitted: omittedNote(evt),
+            category: categorizeLogEvent(evt, view), execution: executorChip(evt), task: shortTaskId(evt.subagent_task_id || evt.task_id),
         });
         if (dedupeKey) duplicateState.set(dedupeKey, { entry, ts: now, count: 1 });
     }
@@ -319,12 +335,12 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
         const wake = evt.initiator === 'consciousness' || Boolean(earlier?.wake);
         const category = eventCategory === 'errors' || earlier?.category === 'errors' ? 'errors'
             : (wake ? 'consciousness' : 'tasks');
-        // A task is named by its own type and its id's first eight characters, as every other row of the log names
-        // one (U030); the type, once seen, stays the card's.
+        // A task is named by its type in words and its short id, as every other row of the log names one (U030); the
+        // type, once seen, stays the card's.
         const taskType = String(earlier?.taskType || evt.task_type || '').trim();
         const record = earlier || createTaskGroupCard(groupId);
-        const ts = normalizeLogTs(evt.ts || evt.timestamp);
-        const at = Date.parse(evt.ts || evt.timestamp || '') || Date.now();
+        const ts = evt.ts || evt.timestamp || '';
+        const at = Date.parse(ts) || Date.now();
         // A backfilled row older than what this card already shows joins its timeline in place and leaves the rest.
         const behind = batching && earlier && at < record.at;
 
@@ -332,54 +348,34 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
         record.category = category;
         record.wake = wake;
         record.taskType = taskType;
-        record.kindLabel = wake ? 'Consciousness' : `${taskType || 'task'} ${String(groupId).slice(0, 8)}`;
+        record.name = wake ? 'Consciousness' : machineWords(taskType || 'task');
         // The card's time is its newest event's: an older frame, live or from history, never dates it back.
-        if (at >= record.at) { record.tsText = ts; record.at = at; }
+        if (at >= record.at) { record.ts = ts; record.at = at; }
         // The card's headline settles only on the typed task_done frame. The bus
         // serves control before telemetry, so a task's late tool or round frame
         // (its own `done`/`error` phase included) can arrive after its task_done:
         // it stays a timeline row and never reopens or rewrites the settled
         // headline. Until then the headline follows the latest frame.
         const settles = evt.type === 'task_done';
-        if (settles || (!record.terminal && !behind)) {
-            record.phase = view.phase || 'info';
-            // A settled headline is the task's outcome and takes the cards' tone (Stopped neutral, Done with
-            // warnings green); until then it is the latest event's phase in its level's colour.
-            record.tone = settles ? outcomeTone(view.phase) : '';
-            record.headline = view.headline || 'Task activity';
-        }
-        if (settles) record.terminal = true;
-        // The card's facts beside its kind; the ids and the type its kind and lineage already are stay in its
-        // Timeline (U029).
-        if (!behind) {
-            const lineage = new Set([`task=${groupId}`, `task=${evt.task_id || ''}`, `parent=${evt.parent_task_id || ''}`,
-                `root=${evt.root_task_id || ''}`, taskType]);
-            record.meta = view.meta.filter((item) => !lineage.has(item));
-        }
+        // A task's words are its latest event's (a settled task's are its outcome). While it holds a failure they are its
+        // newest failure's own words under every filter (its error, or its name where it has none; a failed ending's
+        // name is its chip), kept even after the failure's row leaves the timeline.
+        if (settles || (!record.terminal && !behind)) record.words = wordsOf(view, view.headline || view.body) || 'Task activity';
+        if (settles) { record.terminal = true; record.failed = view.phase === 'error'; }
+        const failed = FAILED_PHASES.has(view.phase);
+        if (failed && !settles) record.failures = (record.failures || 0) + 1;
+        if (failed && at >= (record.failure?.at || 0)) record.failure = { at, words: wordsOf(view, view.body) || (settles ? '' : view.headline) };
         const execution = executorChip(evt), review = formatReviewProjection(evt.review_projection);
         record.execution = (behind ? record.execution || execution : execution || record.execution);
         record.review = (behind ? record.review || review : review || record.review);
 
         const last = record.recent[record.recent.length - 1];
         const dedupeKey = duplicateLogEventKey(evt);
-        // A row's body and what its view left out come from the same event (an adopted file source changes neither).
+        // A row's view and what its view left out come from the same event (an adopted file source changes neither).
         if (!behind && last && last.dupKey && last.dupKey === dedupeKey) {
-            Object.assign(last, { count: last.count + 1, ts, meta: view.meta, body: view.body, omitted: omittedNote(evt), evt, at,
-                rev: last.rev + 1 });
+            Object.assign(last, { count: last.count + 1, ts, view, omitted: omittedNote(evt), evt, at, rev: last.rev + 1 });
         } else {
-            const row = {
-                ts,
-                phase: view.phase || 'info',
-                headline: view.headline || 'Task event',
-                meta: view.meta,
-                body: view.body,
-                omitted: omittedNote(evt),
-                evt,
-                at,
-                count: 1,
-                dupKey: dedupeKey,
-                rev: 0,
-            };
+            const row = { ts, view, omitted: omittedNote(evt), evt, at, count: 1, dupKey: dedupeKey, rev: 0 };
             const later = behind ? record.recent.findIndex((item) => item.at > at) : -1;
             if (later >= 0) record.recent.splice(later, 0, row);
             else record.recent.push(row);
@@ -390,159 +386,124 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
     }
 
     function createTaskGroupCard(groupId) {
-        const record = { kind: 'group', groupId, events: 0, recent: [], terminal: false, meta: [], at: 0 };
+        const record = { kind: 'group', groupId, events: 0, recent: [], terminal: false, at: 0 };
         taskGroups.set(groupId, record);
         return addEntry(record);
     }
 
     // ---- The panel (DOM): only while shown ------------------------------------------------------------------------
 
-    function metaPills(meta) {
-        if (!meta.length) return '';
-        return `<div class="log-meta">${meta.map((item) => `<span class="log-pill">${escapeHtml(item)}</span>`).join('')}</div>`;
-    }
+    // One anatomy for every event, a task card and a timeline row alike (U027, U028): one shared fold
+    // (details.ui-disclosure) whose summary is its head: its name right after the caret, its task's short id and its count,
+    // its time at the line's end as a sidebar row's; then its line of words from the name's edge, at most three lines, led
+    // by a failure's chip. Open, the words are whole (their whole text where the view cut them) over its facts and its
+    // record, or a task's timeline. A head without a name says its line in the name's place (style.css).
+    const HEAD_HTML = '<summary class="log-head"><span class="log-title"><span class="log-name"></span>'
+        + '<span class="log-task" hidden></span><span class="log-count" hidden></span></span><time class="log-ts"></time>'
+        + '<span class="log-line" hidden><span class="chat-live-phase log-failure" data-chip-tone="failed" hidden>'
+        + `${statusMarkHtml('', markView({ outcome: 'error' }))}<span class="log-failure-word"></span></span>`
+        + '<span class="log-words"></span></span></summary>'
+        + '<div class="log-facts" hidden></div><div class="log-note log-executor-detail" hidden></div>';
+    const RECORD_HTML = `<div class="log-note" data-log-omitted hidden></div>${LOG_RAW_HTML}`;
+    const TIMELINE_HTML = '<div class="log-note log-task-review" hidden></div><div class="log-task-timeline"></div>';
+    const partsOf = new WeakMap();  // an event's node → its parts, found once when it is made
+    const wordsOfNode = new WeakMap();  // an event's node → its words and their whole text, where its view cut them
 
-    // An event's one first line (U027, U028): its time, its type only when the headline does not already say it
-    // (a task card's kind always: it changes with the card), its level (the default `info` says nothing, CSS hides
-    // it), the headline, the repeat count and, for an event with a record, Raw at the line's end (logs_raw.js). The
-    // headline, its count and Raw are one lead that wraps as a whole, so Raw never stands on a line of its own.
-    function logMainHtml({ ts = '', type = '', phase = 'info', headline = 'Event', repeat = '', attrs = {}, hasRaw = false }) {
-        const attr = (key) => attrs[key] ? ` ${attrs[key]}` : '';
-        const showType = type && (attrs.type || (type.label && type.label !== headline));
-        return `
-            <div class="log-main">
-                <span class="log-ts"${attr('ts')}>${escapeHtml(ts)}</span>
-                ${showType ? `<span class="log-type ${escapeHtml(type.className || '')}"${attr('type')}>${escapeHtml(type.label || '')}</span>` : ''}
-                <span class="log-phase ${escapeHtml(phase)}"${attr('phase')}>${escapeHtml(phase)}</span>
-                <span class="log-lead"><span class="log-headline"${attr('headline')}>${escapeHtml(headline)}</span>
-                <span class="log-repeat"${attr('repeat')}${repeat ? '' : ' hidden'}>${escapeHtml(repeat)}</span>
-                ${hasRaw ? LOG_RAW_TOGGLE_HTML : ''}</span>
-            </div>
-        `;
+    function createEvent(className, body) {
+        const node = document.createElement('details');
+        node.className = `ui-disclosure log-fold ${className}`;
+        node.innerHTML = HEAD_HTML + body;
+        const find = (selector) => node.querySelector(selector);
+        partsOf.set(node, { ts: find('.log-ts'), title: find('.log-title'), name: find('.log-name'), task: find('.log-task'),
+            count: find('.log-count'), line: find('.log-line'), failure: find('.log-failure'), failureWord: find('.log-failure-word'),
+            words: find('.log-words'), facts: find('.log-facts'), detail: find('.log-executor-detail'), omitted: find('[data-log-omitted]') });
+        return node;
     }
 
     const setText = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
-    const setClass = (el, name) => { if (el && el.className !== name) el.className = name; };
-    const setData = (el, key, value) => { if (el.dataset[key] !== value) el.dataset[key] = value; };
+    const setAttr = (el, key, value) => { if (el.getAttribute(key) !== value) el.setAttribute(key, value); };
     const shownHtml = new WeakMap();  // markup a node was last given, so an unchanged one is not rewritten
     const setHtml = (el, html) => { if (el && shownHtml.get(el) !== html) { el.innerHTML = html; shownHtml.set(el, html); } };
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+    // An event's own head and fold: its name, a failure's chip (the outcome family's word), its words, and its facts
+    // after the exact moment.
+    const eventParts = (view, ts) => ({ ts, name: view.headline, failure: FAILED_PHASES.has(view.phase) ? taskPresentation(view.phase).headline : '',
+        words: wordsOf(view, view.body), whole: wordsOf(view, view.full), facts: [timeOf(ts).exact, ...view.meta],
+        serviceStop: view.serviceStop });
+
+    // An event's parts, each written only when it changed. A delegated executor is a quiet chip among its facts, and its
+    // detail sentence is text in the fold (#360 A).
+    function paintEvent(node, { ts = '', name = '', task = '', failure = '', count = '', words = '', whole = '', facts = [],
+        execution = null, omitted = '', serviceStop = null }) {
+        const parts = partsOf.get(node), time = timeOf(ts);
+        setText(parts.ts, time.short);
+        setAttr(parts.ts, 'datetime', ts);
+        setAttr(parts.ts, 'title', time.exact);
+        setText(parts.name, name);
+        setText(parts.task, task);
+        parts.task.hidden = !task;
+        setText(parts.count, count);
+        parts.count.hidden = !count;
+        parts.title.hidden = !name && !task && !count;
+        setText(parts.failureWord, failure);
+        parts.failure.hidden = !failure;
+        wordsOfNode.set(node, { words, whole });
+        showWords(node);
+        parts.line.hidden = !words && !failure;
+        const chip = execution ? `<span class="harness-chip log-executor-chip" title="${escapeHtmlAttr(execution.title || '')}">${
+            harnessIdentityMarkup(execution.harness, { label: execution.label || '', className: 'log-executor-identity' })}</span>` : '';
+        const said = facts.filter(Boolean);
+        const links = serviceOutputLinksHtml(serviceStop?.links);
+        node.classList.toggle('service-stop-result', Boolean(serviceStop));
+        setHtml(parts.facts, chip + escapeHtml(said.join(' · ')) + links);
+        parts.facts.hidden = !chip && !said.length && !links;
+        setText(parts.detail, execution?.title || '');
+        parts.detail.hidden = !execution?.title;
+        if (parts.omitted) { setText(parts.omitted, omitted); parts.omitted.hidden = !omitted; }
+    }
+
+    // Open, an event's words are whole: the CSS clamp lets go, and words its view cut read in full.
+    function showWords(node) {
+        const { words = '', whole = '' } = wordsOfNode.get(node) || {};
+        setText(partsOf.get(node).words, node.open && whole ? whole : words);
+    }
 
     function renderStandalone(entry) {
         if (!entry.node) {
-            const { view, execution } = entry;
-            const node = document.createElement('div');
-            node.className = 'log-entry';
-            node.innerHTML = `
-                ${logMainHtml({
-                    ts: entry.tsText,
-                    type: { className: entry.category, label: view.typeLabel },
-                    phase: view.phase || 'info',
-                    headline: view.headline || 'Event',
-                    hasRaw: true,
-                })}
-                ${execution ? `<div class="harness-chip log-executor-chip" title="${escapeHtmlAttr(execution.title || '')}">${harnessIdentityMarkup(execution.harness, {
-                    label: execution.label || '',
-                    className: 'log-executor-identity',
-                })}</div>` : ''}
-                ${execution?.title ? `<div class="log-body log-executor-detail">${escapeHtml(execution.title)}</div>` : ''}
-                ${metaPills(view.meta)}
-                ${view.body ? `<div class="log-body">${escapeHtml(view.body)}</div>` : ''}
-                ${entry.omitted ? `<div class="log-body" data-log-omitted>${escapeHtml(entry.omitted)}</div>` : ''}
-                ${LOG_RAW_HTML}
-            `;
-            raw.bind(node, () => entry.evt);
-            entry.node = node;
-            entryOf.set(node, entry);
+            entry.node = createEvent('log-entry', RECORD_HTML);
+            raw.bind(entry.node, () => entry.evt);
+            entryOf.set(entry.node, entry);
         }
-        const { node } = entry;
-        setData(node, 'category', entry.category);
-        setData(node, 'logTime', String(entry.at));
-        setText(node.querySelector('.log-ts'), entry.tsText);
-        const repeat = node.querySelector('.log-repeat');
-        setText(repeat, entry.repeat > 1 ? `x${entry.repeat}` : '');
-        if (repeat) repeat.hidden = entry.repeat <= 1;
+        const { node, view } = entry;
+        setAttr(node, 'data-category', entry.category);
+        setAttr(node, 'data-log-time', String(entry.at));
+        paintEvent(node, { ...eventParts(view, entry.ts), task: entry.task, count: entry.repeat > 1 ? `×${entry.repeat}` : '',
+            execution: entry.execution, omitted: entry.omitted });
         raw.changed(node);
     }
 
-    function createTaskGroupNode(entry) {
-        const node = document.createElement('div');
-        node.className = 'log-entry log-task-card';
-        node.dataset.taskGroup = entry.groupId;
-        node.innerHTML = `
-            ${logMainHtml({
-                type: { className: entry.category, label: entry.kindLabel },
-                phase: 'info',
-                headline: 'Task activity',
-                attrs: {
-                    ts: 'data-task-ts',
-                    type: 'data-task-kind',
-                    phase: 'data-task-phase',
-                    headline: 'data-task-headline',
-                    repeat: 'data-task-count',
-                },
-            })}
-            <div class="log-task-summary" data-task-summary></div>
-            <div class="harness-chip log-executor-chip" data-task-executor hidden></div>
-            <div class="log-body log-executor-detail" data-task-executor-detail hidden></div>
-            <div class="log-body log-task-review" data-task-review hidden></div>
-            <details class="ui-disclosure log-task-details">
-                <summary>Timeline</summary>
-                <div class="log-task-timeline" data-task-timeline></div>
-            </details>
-        `;
-        const find = (selector) => node.querySelector(selector);
-        entry.dom = {
-            ts: find('[data-task-ts]'),
-            kind: find('[data-task-kind]'),
-            phase: find('[data-task-phase]'),
-            headline: find('[data-task-headline]'),
-            count: find('[data-task-count]'),
-            summary: find('[data-task-summary]'),
-            executor: find('[data-task-executor]'),
-            executorDetail: find('[data-task-executor-detail]'),
-            review: find('[data-task-review]'),
-            details: find('details'),
-            timeline: find('[data-task-timeline]'),
-        };
-        entry.rows = new Map();
-        entry.node = node;
-        entryOf.set(node, entry);
-    }
-
     function renderTaskGroup(entry) {
-        if (!entry.node) createTaskGroupNode(entry);
-        const { dom } = entry;
-        setData(entry.node, 'category', entry.category);
+        if (!entry.node) {
+            const node = entry.node = createEvent('log-entry log-task-card', TIMELINE_HTML);
+            node.dataset.taskGroup = entry.groupId;
+            entry.dom = { review: node.querySelector('.log-task-review'), timeline: node.querySelector('.log-task-timeline') };
+            entry.rows = new Map();
+            entryOf.set(node, entry);
+        }
+        const { node, dom } = entry;
+        setAttr(node, 'data-category', entry.category);
         // A card stands where its newest event does (`at`); an older event never dates it back.
-        setData(entry.node, 'logTime', String(entry.at));
-        setText(dom.ts, entry.tsText);
-        setText(dom.kind, entry.kindLabel);
-        setClass(dom.kind, `log-type ${entry.category}`);
-        setText(dom.phase, entry.phase);
-        setClass(dom.phase, `log-phase ${entry.phase}`);
-        if (entry.tone) dom.phase.dataset.chipTone = entry.tone;
-        else delete dom.phase.dataset.chipTone;
-        setText(dom.headline, entry.headline);
-        setText(dom.count, `x${entry.events}`);
-        dom.count.hidden = entry.events <= 1;
-        setHtml(dom.summary, metaPills(entry.meta));
-        const execution = entry.execution;
-        if (execution) {
-            if (dom.executor.title !== (execution.title || '')) dom.executor.title = execution.title || '';
-            setHtml(dom.executor, harnessIdentityMarkup(execution.harness, {
-                label: execution.label || '',
-                className: 'log-executor-identity',
-            }));
-            dom.executor.hidden = false;
-            // The chip stays quiet; its detail sentence is text, never only a title.
-            setText(dom.executorDetail, execution.title || '');
-            dom.executorDetail.hidden = !execution.title;
-        }
-        if (entry.review) {
-            setText(dom.review, entry.review);
-            dom.review.hidden = false;
-        }
-        if (dom.details.open) renderTaskTimeline(entry);
+        setAttr(node, 'data-log-time', String(entry.at));
+        // A task that failed says the outcome's word; one that holds failed steps while it works says how many, never
+        // Failed (DESIGN §4: a local failure does not relabel a working task). Its count is its events, not repeats.
+        const failed = entry.failed ? taskPresentation('error').headline : entry.failures ? `${plural(entry.failures, 'step')} failed` : '';
+        paintEvent(node, { ts: entry.ts, name: entry.name, task: shortTaskId(entry.groupId), failure: failed,
+            count: plural(entry.events, 'event'), words: failed ? entry.failure.words : entry.words, execution: entry.execution });
+        // The task's review sentence opens with its timeline.
+        setText(dom.review, entry.review || '');
+        dom.review.hidden = !entry.review;
+        if (node.open) renderTaskTimeline(entry);
     }
 
     // An open Timeline's rows follow the task's recent events in place: a new event appends its row, the oldest
@@ -559,29 +520,14 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
             const item = entry.recent[index];
             let row = rows.get(item);
             if (!row) {
-                row = document.createElement('div');
-                row.className = 'log-task-event';
+                row = createEvent('log-task-event', RECORD_HTML);
+                raw.bind(row, () => item.evt);
                 rows.set(item, row);
                 entry.dom.timeline.insertBefore(row, next);
             }
             next = row;
             if (row.dataset.rev === String(item.rev)) continue;
-            if (!row.dataset.rev) {
-                row.innerHTML = `
-                    ${logMainHtml({ ts: item.ts, phase: item.phase || 'info', headline: item.headline, hasRaw: true })}
-                    <div data-row-meta></div><div class="log-body"></div><div class="log-body" data-log-omitted hidden></div>
-                    ${LOG_RAW_HTML}`;
-                raw.bind(row, () => item.evt);
-            }
-            setText(row.querySelector('.log-ts'), item.ts);
-            const repeat = row.querySelector('.log-repeat');
-            setText(repeat, item.count > 1 ? `x${item.count}` : '');
-            repeat.hidden = item.count <= 1;
-            setHtml(row.querySelector('[data-row-meta]'), metaPills(item.meta));
-            setText(row.querySelector('.log-body'), item.body || '');
-            const omitted = row.querySelector('[data-log-omitted]');
-            setText(omitted, item.omitted || '');
-            omitted.hidden = !item.omitted;
+            paintEvent(row, { ...eventParts(item.view, item.ts), count: item.count > 1 ? `×${item.count}` : '', omitted: item.omitted });
             row.dataset.rev = String(item.rev);
             raw.changed(row);
         }
@@ -667,6 +613,8 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
     }
 
     function eventKey(evt) {
+        if (evt?.checkpoint_kind === 'service_stop' && evt.task_id && evt.service_stop?.launch_id && evt.card_row_revision)
+            return `service-stop|${evt.task_id}|${evt.service_stop.launch_id}|${evt.card_row_revision}`;
         const ts = evt?.ts || evt?.timestamp || '';
         const type = evt?.type || '';
         // Dedupe on the natural identity (timestamp has microseconds, so distinct
@@ -724,8 +672,6 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
         }
         createStandaloneEntry(evt);
     }
-
-    renderFilters();
 
     // Backfill recent history so the panel is not empty when it is shown after a
     // page load or reconnect (the live WS stream only carries events from the
@@ -798,7 +744,7 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
         backfillAbort?.abort(); backfillAbort = null; backfillRevision += 1;
         backfillOwed = false;
         historyLoading = false;
-        // Clear empties this view, not the evidence that its history could not be read.
+        // Clear list empties this view, not the evidence that its history could not be read.
         if (cancelledRead) {
             setInlineStatus(historyStatus, 'History read cancelled. Live events continue.', 'warn');
             historyStatus.hidden = false;
@@ -810,7 +756,7 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
         duplicateState.clear();
         taskGroups.clear();
         logEntries.innerHTML = '';
-        clearedAt = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        clearedAt = timeOf(new Date().toISOString()).short;
         updateEmptyState();
         follow();
     });
@@ -818,17 +764,23 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
     page.addEventListener('scroll', noteReader, { passive: true });
     logEntries.addEventListener('click', (event) => {
         if (raw.click(event.target, event)) return;
+        const head = event.target?.closest?.('summary');
+        // A press that selected words of a head was reading them: it neither opens nor closes the event (DESIGN §5).
+        if (head && event.detail && selectionWithin(head)) { event.preventDefault(); return; }
         // A Timeline about to open draws its rows first, so they are there when it opens.
-        const details = event.target?.closest?.('summary')?.parentElement;
-        const entry = details?.classList?.contains('log-task-details') && entryOf.get(details.closest('.log-entry'));
-        if (entry && !details.open) renderTaskTimeline(entry);
+        const entry = head && entryOf.get(head.parentElement);
+        if (entry?.kind === 'group' && !head.parentElement.open) renderTaskTimeline(entry);
     });
-    // `toggle` does not bubble: caught on its way down. Closed, a Timeline lets its rows go.
+    // `toggle` does not bubble: caught on its way down. An event's words are whole while it is open, and its record
+    // opens and closes with it (logs_raw.js); a task's timeline draws its rows open and lets them go closed.
     logEntries.addEventListener('toggle', (event) => {
-        const details = event.target;
-        const entry = details?.classList?.contains('log-task-details') && entryOf.get(details.closest('.log-entry'));
-        if (!entry) return;
-        if (details.open) renderTaskTimeline(entry);
+        const fold = event.target;
+        if (!fold?.classList?.contains('log-fold')) return;
+        showWords(fold);
+        if (raw.toggled(fold)) return;
+        const entry = entryOf.get(fold);
+        if (entry?.kind !== 'group') return;
+        if (fold.open) renderTaskTimeline(entry);
         else closeTaskTimeline(entry);
     }, true);
     document.addEventListener('selectionchange', () => {
@@ -846,5 +798,10 @@ export function initLogs({ ws, state, mount, setBeforePageLeave }) {
     // place is set again, the newest entry or the one being read.
     window.addEventListener('ouro:page-shown', show);
     document.addEventListener('visibilitychange', show);
+    setControls?.('logs', page.querySelector('.logs-filters'));
     show();
+    return { captureReading() {
+        const saved = { pinned, anchor: pinned ? null : captureAnchor() };
+        return () => { pinned = saved.pinned; anchor = saved.anchor; settleSoon(); };
+    } };
 }

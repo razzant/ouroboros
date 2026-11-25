@@ -115,8 +115,9 @@ def in_place_block(entry):
                      "through git, which also reverts any uncommitted edit of your own there.")}
 
 
-def started_receipt(payload, resource_ref, target_root, *, durable, investigation):
-    """Receipt facts and note of a folder or in-place start (delegate_start's started result)."""
+def started_receipt(payload, resource_ref, target_root, *, durable, investigation, receipt=""):
+    """Receipt facts and note of a folder or in-place start (delegate_start's started result); ``receipt``, what
+    reached the run (``helper_receipt``), follows the folder's own statement."""
     lead = "CUSTODY IS NOT DURABLE. " if not durable else ""
     if is_in_place_run({"resource_ref": resource_ref}):
         payload.update(workspace=IN_PLACE, authority_target_root=target_root, execution_root=target_root)
@@ -125,7 +126,7 @@ def started_receipt(payload, resource_ref, target_root, *, durable, investigatio
                            "or reject (integrate_delegated_patch refuses); undo through git. Do not edit the same files "
                            "meanwhile and do not start a second in-place writer in this folder: their edits would mix. "
                            "When this folder is the Ouroboros body, its protected paths are not checked for this writer "
-                           "(the commit gate still checks them). Use delegate_wait for its result.")
+                           "(the commit gate still checks them). Use delegate_wait for its result.\n" + receipt)
         return
     direct = resource_ref.get("strategy") == "direct"
     payload.update(authority_target_root=target_root,
@@ -139,6 +140,7 @@ def started_receipt(payload, resource_ref, target_root, *, durable, investigatio
         + ("This evidence-only investigation's results are kept as evidence, never applied "
            "(integrate_delegated_patch refuses); never let it commit." if investigation
            else "Copy results use integrate_delegated_patch for apply or reject.")
+        + "\n" + receipt
     )
 
 
@@ -160,7 +162,10 @@ def git_directory_options_refusal(target_root, strategy, scope_paths, *, git_wor
     from ouroboros import work_domain
 
     if (git_workspace or work_domain.exists(Path(target_root) / ".git")) and not default_shaped_directory_options(strategy, scope_paths):
-        return "Directory options apply to ordinary folders; Git workspaces keep their snapshot contract."
+        named = " and ".join(name for name, off in (("directory_strategy", strategy not in (None, "direct")),
+                                                     ("scope_paths", bool(scope_paths))) if off)
+        return ("Directory options apply to ordinary folders; Git workspaces keep their snapshot contract. "
+                f"Omit {named} for this Git workspace.")
     return ""
 
 
@@ -287,12 +292,16 @@ def prepare_directory_execution(ctx, gateway, target_root, authority, strategy, 
     return replace(authority, isolation=options["isolation"]), options, reference
 
 
-def _download(gateway, run_id, source, destination, expected=None):
+def _download(gateway, run_id, source, destination, expected=None, *, secrets=()):
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{uuid.uuid4().hex}.tmp")
     try:
+        from ouroboros.secret_masking import SecretScan
         with temporary.open("xb") as sink:
-            measured = gateway.stream_run_artifact(run_id, source, sink, expected=expected)
+            scan = SecretScan(secrets, sink)
+            measured = gateway.stream_run_artifact(run_id, source, scan, expected=expected)
+        if scan.found:
+            return {"reason": "installation_settings", "size": scan.size}
         temporary.replace(destination)
         return {"kind": "workspace_file_output", "name": destination.name,
                 "path": str(destination), **measured, "immutable": True}
@@ -354,7 +363,19 @@ def capture_directory_result(drive, entry, gateway, *, publish=True):
     if not source or len(digest) != 64:
         raise ValueError("the file work product has no verifiable manifest")
     raw_path = cap_dir / "engine-files-manifest.json"
-    raw = _download(gateway, entry.run_id, source, raw_path, {"sha256": digest})
+    from ouroboros.delegate_registration_policy import evidence_only
+    from ouroboros.secret_masking import installation_secret_bytes
+    secrets = installation_secret_bytes() if evidence_only(entry) else ()
+    raw = _download(gateway, entry.run_id, source, raw_path, {"sha256": digest}, secrets=secrets)
+    if "reason" in raw:
+        gap = {"path": raw_path.name, **raw}
+        manifest = {"schema_version": 1, "capture_kind": "engine_directory", "status": "partial", "gaps": [gap],
+                    "file_outputs": [], "complete": False, "scope_paths": None, "workspace_root": "",
+                    "strategy": entry.resource_ref["strategy"], "engine_manifest_sha256": digest}
+        atomic_write_json(manifest_path, manifest, trailing_newline=True)
+        if publish:
+            custody.record_patch_captured(drive, entry, status="partial", sha256=digest, capture_dir=str(cap_dir))
+        return manifest
     original = json.loads(raw_path.read_text())
     source_root = entry.resource_ref.get("source_root") or entry.target_root  # a staged folderless input copy
     if (original.get("version") != 1 or not original.get("executionRoot")
@@ -366,6 +387,7 @@ def capture_directory_result(drive, entry, gateway, *, publish=True):
         raise ValueError("engine directory strategy differs from the recorded request")
     if not direct and original.get("complete") is not True:
         raise ValueError("the selected execution copy was not completely captured")
+    gaps = []
     records, retained = [raw], {}  # retained: this capture's verified file per content identity
     for index, row in enumerate(original["entries"]):
         for side in ("before", "after"):
@@ -379,13 +401,17 @@ def capture_directory_result(drive, entry, gateway, *, publish=True):
             identity = (state.get("sha256"), state.get("sizeBytes"))
             if identity not in retained:
                 retained[identity] = _download(gateway, entry.run_id, state["artifactPath"],
-                                               cap_dir / f"{side}-{index}", state)
+                                               cap_dir / f"{side}-{index}", state, secrets=secrets)
+            if "reason" in retained[identity]:
+                gaps.append({"path": row["path"], "side": side, **retained[identity]})
+                continue
             records.append({**retained[identity], "source_path": row["path"], "side": side})
     manifest = {
         "schema_version": 1, "capture_kind": "engine_directory", "status": "ready",
+        **({"status": "partial", "gaps": gaps} if gaps else {}),
         "workspace_root": original["executionRoot"], "authority_target_root": entry.target_root,
         "engine_manifest": raw, "engine_manifest_sha256": digest,
-        "complete": original.get("complete"), "scope_paths": original.get("scopePaths"),
+        "complete": original.get("complete") and not gaps, "scope_paths": original.get("scopePaths"),
         "strategy": entry.resource_ref["strategy"], "file_outputs": records,
         "apply_state": (product.get("meta") or {}).get("apply_state"),
         "note": ("Direct effects are already in the source folder; no separate apply or full rollback."
@@ -393,7 +419,7 @@ def capture_directory_result(drive, entry, gateway, *, publish=True):
     }
     atomic_write_json(manifest_path, manifest, trailing_newline=True)
     if publish:
-        custody.record_patch_captured(drive, entry, status="ready", sha256=digest,
+        custody.record_patch_captured(drive, entry, status=manifest["status"], sha256=digest,
                                      capture_dir=str(cap_dir), execution_root=original["executionRoot"])
     return manifest
 
@@ -409,6 +435,8 @@ def directory_capture_block(drive, entry, manifest):
             "manifest_artifact": str(cap_dir / "workspace_patch.json"),
             "manifest_read": {"root": "artifact_store", "path": f"delegated_runs/{cap_dir.name}/workspace_patch.json"},
             "file_outputs": manifest["file_outputs"], "patch_artifact": None,
+            **({"gaps": manifest["gaps"]} if manifest.get("gaps") else {}),
+            "retained_bytes": sum({f["path"]: f["size"] for f in manifest["file_outputs"] if f.get("side")}.values()),
             "complete": manifest["complete"], "scope_paths": manifest["scope_paths"],
             "strategy": manifest["strategy"],
             "note": INVESTIGATION_NOTE if evidence_only(entry) else manifest["note"]}

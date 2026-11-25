@@ -13,7 +13,10 @@ from typing import Any, Dict, List, Optional
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, migrating_error, request_drive_root, request_json_or, request_repo_dir, run_sync_to_completion, stage_initial_task_attachments, task_time_limits
+from ouroboros.gateway._helpers import (
+    UTF8JSONResponse, coerce_int, json_error, json_exception, migrating_error, request_drive_root,
+    request_json_or, request_repo_dir, run_sync_to_completion, stage_initial_task_attachments, task_time_limits,
+)
 from ouroboros.gateway.cost_breakdown import _task_cost_breakdown_view  # noqa: F401
 from ouroboros.gateway.contracts import TaskCreateRequest
 from ouroboros.gateway.completion_gist import short_gist
@@ -38,7 +41,7 @@ from ouroboros.gateway.task_hurry import api_task_hurry  # noqa: F401
 from ouroboros.gateway.task_pause import api_task_pause, owner_tree_control_routes  # noqa: F401 -- same split as hurry
 from ouroboros.gateway.task_decision import api_decision_answer  # noqa: F401
 from ouroboros.gateway.task_archive import (
-    chat_media_identity, directory_archives, plain_segments, serve_directory_archive, serve_task_file,
+    chat_media_identity, directory_archives, download_refusal, plain_segments, serve_directory_archive, serve_task_file,
     task_artifact_location, recorded_identity, serve_task_source, serve_wrap_up_document,
 )
 from ouroboros.confined_files import root_spellings
@@ -110,7 +113,7 @@ _RESERVED_METADATA_KEYS = frozenset({
     "workspace_executor",
     "project_id",
     # Owner provenance (its recorded absence, a late answer's place relation) belongs to the host, never a caller.
-    "origin_message_ref",
+    "origin_message_ref", "origin_message_snapshot", "reply_reference",
     "origin_suppressed", "origin_message_absent", "presence_binding_relation",
     # Who wrote the text, the words a tree carries and a control press: host attestations, never a caller's.
     "objective_author", "context_author", "owner_corpus", "ui_control",
@@ -864,7 +867,7 @@ async def api_tasks_list(request: Request) -> JSONResponse:
         payload = await asyncio.to_thread(_tasks_list_payload, drive_root, wanted, limit, queue_only)
     except StoreMigrating:
         return json_error("the task store is importing; retry shortly", 503, reason_code="migrating")
-    return JSONResponse(payload)
+    return UTF8JSONResponse(payload)
 
 
 def _plan_objections_view(drive_root: pathlib.Path, task_id: str, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -918,6 +921,9 @@ def _task_get_response(request: Request) -> JSONResponse:
     payload["question_rooms"] = question_display_rooms(drive_root, task_id, payload.get("owner_quiz"))
     from ouroboros.owner_continue import continuation_offer  # Batch4: a Continue, or its accepted successor
     payload["continuation_offer"] = continuation_offer(data, task_id)
+    from ouroboros.subagent_messages import place_origin  # the place that called it, as its census and frames say it
+    if origin := place_origin(data["metadata"] if isinstance(data.get("metadata"), dict) else {}):
+        payload["place_origin"] = origin
     objections = _plan_objections_view(drive_root, task_id, data)  # the host's fold; the browser never re-derives it
     if objections is not None:
         payload["plan_objections"] = objections
@@ -930,7 +936,7 @@ def _task_get_response(request: Request) -> JSONResponse:
     breakdown_view = _task_cost_breakdown_view(drive_root, data)
     if breakdown_view is not None:
         payload["cost_breakdown"] = breakdown_view
-    return JSONResponse(payload)
+    return UTF8JSONResponse(payload)
 
 
 def api_task_artifact(request: Request):
@@ -943,7 +949,7 @@ def api_task_artifact(request: Request):
         task_id = validate_task_id(request.path_params.get("task_id"))
     except ValueError as exc:
         return json_error(str(exc), 400)
-    name = str(request.path_params.get("name") or "").strip()
+    name = str(request.path_params.get("name") or "")
     if plain_segments(name) != [name]:
         return json_error("artifact name must be a simple filename", 400)
     source, relpath = request.query_params.get("source"), request.query_params.get("relpath")
@@ -968,10 +974,15 @@ def api_task_artifact(request: Request):
         return (serve_task_file(drive_root, stores[0], media[2], name, chat_media_identity(name), task_id=task_id)
                 if media else json_error("artifact not found", 404, task_id=task_id, artifact=name))
     registered = artifact_store.registered_task_artifact(drive_root, task_id, name) if relpath in (None, name) else None
-    # A registered immutable top-level file needs one identity check, not a result projection.
+    # The immutable fast path can serve a running task. The byte reader checks its addressed
+    # release state once after the confined open, even when this registration predates a move.
     fast = bool(not source and registered and registered.get("immutable")
-                and (at := task_artifact_location(stores, registered.get("path"), spellings)) and at[2] == name)
-    result = {} if fast else (load_effective_task_result(drive_root, task_id) or {})
+                and (at := task_artifact_location(stores, registered.get("path"), spellings)) and at[2] == name
+                and pathlib.Path(str(registered.get("path"))).exists())
+    try:
+        result = {} if fast else (load_effective_task_result(drive_root, task_id) or {})
+    except (StoreError, OSError, ValueError) as exc:
+        return json_error("task record unavailable", 503, reason_code="artifact_unavailable", cause=type(exc).__name__)
     if not result and not registered:
         return json_error("task not found", 404)
     if source:
@@ -986,6 +997,8 @@ def api_task_artifact(request: Request):
         return json_error("artifact name matches several nested files; select one with ?relpath=", 409,
                           reason_code="artifact_name_ambiguous", task_id=task_id, artifact=name, relpaths=nested)
     if not matches:
+        if refusal := download_refusal(drive_root, task_id, relpath or name):
+            return refusal
         if relpath is None and any(at[2].rsplit("/", 1)[-1] != name for at, _order, _row in located):
             return json_error("artifact metadata path does not match requested name", 500)
         if (rows or registered) and not located and relpath is None:
@@ -993,7 +1006,7 @@ def api_task_artifact(request: Request):
         return json_error("artifact not found", 404, task_id=task_id, artifact=name)
     (index, _path, relative), _order, artifact = min(matches, key=lambda item: (item[0][0], item[1]))
     return serve_task_file(drive_root, stores[index], relative, name, recorded_identity(artifact), task_id=task_id,
-                           mutable=not artifact.get("immutable"))
+                           mutable=not artifact.get("immutable"), head_only=request.method == "HEAD")
 
 
 def _record_cascade_incident(task_id: str, kind: str, detail: str = "") -> None:
@@ -1041,9 +1054,9 @@ def _record_cascade_incident(task_id: str, kind: str, detail: str = "") -> None:
 
 
 def _cascade_waits_only_on_runs(task_id: str) -> bool:
-    """Whether a cascade that did not settle left only its tree's open delegated runs live.
+    """Whether the cascade awaits delegated work in its tree or a witnessed inline Presence runner.
 
-    Their cancel is in flight (an engine confirms a cancel asynchronously), refused (a containment fault,
+    A lookup-only start awaits binding. A known run's cancel is in flight (an engine confirms a cancel asynchronously), refused (a containment fault,
     critical until a verified terminal) or not sent (the engine is unreachable: pending until it answers).
     A witnessed live inline Presence root waits the same way: its runner observes the open intent at its
     next stop check and writes the terminal itself (#2012). The Stop stays pending and the cancel-intent
@@ -1052,12 +1065,12 @@ def _cascade_waits_only_on_runs(task_id: str) -> bool:
     stays; only a Presence root's own row reads that census.
     """
     try:
-        from ouroboros.delegate_custody_reconcile import tree_open_runs
+        from ouroboros.delegate_custody_current import cascade_work_open
         from ouroboros.presence_runner import presence_execution_witness
         from supervisor.cancel_publication import live_presence_row
         from supervisor.queue import DRIVE_ROOT, task_subtree_is_live
 
-        waits = tree_open_runs(DRIVE_ROOT, task_id) or (live_presence_row(load_task_result(DRIVE_ROOT, task_id))
+        waits = cascade_work_open(DRIVE_ROOT, task_id) or (live_presence_row(load_task_result(DRIVE_ROOT, task_id))
                                                          and presence_execution_witness(task_id, drive_root=DRIVE_ROOT) is True)
         return bool(waits) and not task_subtree_is_live(task_id, ignore_intents=True, count_runs=False)
     except Exception:
@@ -1393,12 +1406,20 @@ async def api_task_resume(request: Request) -> JSONResponse:
             or not all(isinstance(value, str) for value in named)):
         return json_error('resume accepts only {"accept_unknown", "reason"}', 400, task_id=task_id,
                           reason_code="unexpected_fields")
-    try:
+    if any(value.startswith("delegate_start:") for value in named) and not (
+            isinstance(body.get("reason"), str) and body["reason"].strip()):
+        return json_error("Give a reason for accepting the delegated start risk.", 400, task_id=task_id,
+                          reason_code="missing_resume_reason")
+    def resume() -> Dict[str, Any]:
         from ouroboros.control_actor import accepting_unknown, owner_door
         from supervisor.queue import resume_budget_paused_task
 
+        # Bound on the worker thread itself: the grant decisions read these where the call runs.
         with owner_door("api_task_resume"), accepting_unknown(named, str(body.get("reason") or "")):
-            result = resume_budget_paused_task(task_id)
+            return resume_budget_paused_task(task_id)
+
+    try:
+        result = await asyncio.to_thread(resume)  # its writes wait on Q and the disk, never on the web loop
     except Exception as exc:
         return json_exception(exc, 503)
     if result.get("ok"):
@@ -1411,27 +1432,12 @@ async def api_task_resume(request: Request) -> JSONResponse:
         return json_error(message + " The task stays paused; budget exhaustion was not established.", 409,
                           code=error, reason_code=result.get("cause", ""), task_id=task_id,
                           **({"action": result["action"]} if result.get("action") else {}))
-    status = 409 if error in {
-        "task_not_budget_paused", "replay_unsafe", "root_budget_fence_missing",
-        # exact-continuation refusals (#1196): the task stays paused
-        "budget_still_exhausted", "root_hard_cap_exhausted", "cancel_intent_active",
-        "deadline_passed", "lifetime_exhausted", "root_still_paused", "resume_already_granted",
-        "restart_no_resume", "update_in_progress", "pause_record_missing", "pause_source_missing", "pause_source_unreadable",
-        "pause_record_unreadable", "grant_not_recorded", "snapshot_not_persisted",
-        "monetary_authority_unavailable", "cancellation_authority_unavailable", "task_terminal",
-        # holds and root-grant refusals (#1196, owner Q9): the row stays paused/held
-        "root_resume_grant_missing", "root_resume_generation_stale", "root_replay_unsafe",
-        "root_accounting_unavailable", "root_accounting_degraded", "external_custody_unreadable",
-        "accounting_unavailable", "resume_grant_revocation_unwritten",
-        # fresh custody at grant (#1196, owner Q8): a delegated run not proven
-        # terminal keeps the task paused; a marker/attempt drift is typed too
-        "external_runs_unsettled", "pause_attempt_mismatch",
-        "owner_pause_effects_unsettled", "owner_pause_custody_unreadable", "selection_authority_changed",
-        # a held Continue's observed blockers (#1721): an existing successor, never Not Found
-        "predecessor_writers_unsettled", "selection_owner_held",
-    } else 404
+    # Only a task the queue does not hold is Not Found; every other answer is a typed refusal of a task that
+    # exists (Panic's owner-only hold, an unresumable stop, a selection still to observe, money, custody...).
+    status = 404 if error in {"task_not_pending", "missing_task_id"} else 409
     return JSONResponse({"error": error, "task_id": task_id, **{key: result[key] for key in (
-                             "action", "blockers", "message", "acceptable_unknown") if result.get(key)}},
+                             "action", "blockers", "message", "refusal_basis",
+                             "acceptable_unknown", "accepted_start_risks") if result.get(key)}},
                         status_code=status)
 
 

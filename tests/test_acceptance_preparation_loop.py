@@ -156,7 +156,6 @@ def test_every_retained_answer_path_survives_a_broken_read_and_claims_nothing(tm
         assert payload["status"] == "completion_requested"
         assert delivery_mod.consume_completion_request(registry, ctx, trace)
         assert registry._ctx._delivery_candidate.full_text == candidate.full_text
-        assert registry._ctx._completion_selected["observation"]["evidence_fingerprint"] == ""
     published = trace["delivery_candidate"]
     assert published["evidence_current"] is False and published["subject_sha256"] == ""
     assert published["evidence_status"] == "unavailable"

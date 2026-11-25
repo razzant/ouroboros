@@ -63,11 +63,11 @@ _MEASURE = """([name, selector]) => {
             chosen: button.matches('.active, [aria-checked="true"], [aria-pressed="true"]'),
             fill: button.matches('.active, [aria-checked="true"]') && fill ? getComputedStyle(fill).backgroundColor : look.backgroundColor, overflows: button.scrollWidth > button.clientWidth + 1};
   });
-  const separators = [...group.children].filter(el => !el.matches('.ui-segment, .ui-segment-fill') && el.getClientRects().length);
+  const separators = [...group.querySelectorAll(':scope > :not(.ui-segment, .ui-segment-fill, .evo-measure-set), .evo-measures-sep')].filter(el => el.getClientRects().length);
   const inset = px(style.paddingLeft) + px(style.paddingRight) + px(style.borderLeftWidth) + px(style.borderRightWidth);
   const needed = buttons.reduce((sum, b) => sum + Math.max(b.touch, b.word), inset)
     + separators.reduce((sum, el) => sum + el.getBoundingClientRect().width, 0)
-    + px(style.columnGap) * (buttons.length + separators.length - 1);
+    + (style.getPropertyValue('--measure-gap') ? px(style.getPropertyValue('--measure-gap')) : px(style.columnGap)) * (buttons.length + separators.length - 1);
   const doc = document.scrollingElement;
   return {name, needed, inset, ...box(group.getBoundingClientRect()), track: style.backgroundColor, overflowX: style.overflowX,
           spills: group.scrollWidth > group.clientWidth + 1, buttons, backing: fill ? box(fill.getBoundingClientRect()) : null,
@@ -112,10 +112,26 @@ _TRUST = """async () => {
     {id: 'community', name: 'Ouroboros community', trust: 'review', about: '48 skills shared by other people'}]);
 }"""
 
+_EVO_PAIR = """() => {
+  const group = document.querySelector('.evo-measures');
+  const buttons = [...group.querySelectorAll('.ui-segment')].map((b) => {
+    const r = b.getBoundingClientRect();
+    return {label: b.textContent.trim(), left: r.left, right: r.right, top: Math.round(r.top),
+            chosen: b.matches('.active, [aria-pressed="true"]'), pressed: b.getAttribute('aria-pressed')};
+  });
+  const sep = group.querySelector('.evo-measures-sep');
+  const s = sep.getBoundingClientRect(), ink = getComputedStyle(sep);
+  const clear = (c) => c === 'transparent' || c === 'rgba(0, 0, 0, 0)';
+  return {buttons, lines: new Set(buttons.map((b) => b.top)).size,
+          dividerVisible: s.height > 0.5 && !clear(ink.backgroundColor),
+          sep: {left: s.left, right: s.right, top: Math.round(s.top), height: s.height},
+          spills: group.scrollWidth > group.clientWidth + 1};
+}"""
+
 
 def _go(page, place: str) -> None:
     toggle = page.locator("[data-mobile-nav-toggle]:visible")
-    while not toggle.count() and page.locator("#page-settings.active .app-page-header [data-settings-back]").is_visible():
+    while not toggle.count() and page.locator("#page-settings.active .app-page-header [data-shell-back]").is_visible():
         go_back(page)
     if toggle.count():
         toggle.first.click()
@@ -225,10 +241,10 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
 
                 _open(page, fixture["url"])
                 page.add_style_tag(content=_STILL)
-                for path, fold in [('agents', 'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS'),
-                                   ('permissions', 'OUROBOROS_REVIEW_MAX_CYCLES'),
-                                   ('models', 'OUROBOROS_PROMPT_CACHE_TTL'), ('computer', '')]:
-                    open_settings(page, path, fold)
+                for path, reveal in [('agents', 'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS'),
+                                     ('permissions', 'OUROBOROS_REVIEW_MAX_CYCLES'),
+                                     ('models', 'OUROBOROS_PROMPT_CACHE_TTL'), ('computer', '')]:
+                    open_settings(page, path, reveal)
                     for name in GROUPS:
                         measure(name)
                     target, label = LONG
@@ -260,7 +276,7 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
                 page.locator(STRIPS['OUROBOROS_CONSCIOUSNESS_AUTONOMY'][0]).wait_for(state='visible')
                 measure('OUROBOROS_CONSCIOUSNESS_AUTONOMY')
                 if not page.locator('[data-dashboard-tab="evolution"]').is_visible():
-                    page.locator('#page-dashboard [data-dashboard-list-back]').click()
+                    page.locator('#page-dashboard [data-shell-back]').click()
                 page.locator('[data-dashboard-tab="evolution"]').click()
                 page.locator(".evo-measures").wait_for(state="visible", timeout=30_000)
                 measure("evolution-measures")
@@ -274,6 +290,64 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
         finally:
             browser.close()
     assert not problems, "\n".join(problems)
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_evolution_measures_break_at_divider_with_wider_font(direct_server_with_data, engine):
+    """The install pair stays together and no hairline hangs at a line edge (ouroboros#3561)."""
+    from playwright.sync_api import sync_playwright
+
+    fixture = direct_server_with_data
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        try:
+            for viewport in (DESK, PHONE):
+                page = browser.new_page(viewport=viewport, has_touch=viewport is PHONE)
+                page.route("**/api/evolution-data*", lambda route: route.fulfill(json=evolution_history()))
+                # Dashboard › Evolution as the Evolution page's own browser tests reach it, at either width
+                # (tests/test_evolution_browser.py `open_evolution`): its address, then its tab. No drawer is opened.
+                page.goto(fixture["url"] + "/#dashboard", wait_until="domcontentloaded")
+                page.add_style_tag(content=_STILL)
+                page.locator('[data-dashboard-tab="evolution"]').click(timeout=30_000)
+                page.locator(".evo-measures").wait_for(state="visible", timeout=30_000)
+                page.evaluate(_SETTLE, "light")
+                choice = page.get_by_role("button", name="Identity, this installation", exact=True)
+                choice.focus()
+                choice.press("Enter")
+                if viewport is DESK:
+                    # Measure this engine's own single-line strip, then place its actual container either side of
+                    # the break. A hard-coded 36rem case can miss it entirely when font metrics differ.
+                    page.add_style_tag(content=".evo-measure { letter-spacing: 0.45em; }")
+                    head = page.locator(".evo-story-head")
+                    head.evaluate("el => el.style.inlineSize = '1600px'")
+                    page.evaluate(_SETTLE, "light")
+                    ruler = page.evaluate(_EVO_PAIR)
+                    assert ruler["lines"] == 1, ruler
+                    span = ruler["buttons"][-1]["right"] - ruler["buttons"][0]["left"]
+                    widths = [(span + 1, False), (span - 1, True), (span + 1, False)]
+                else:
+                    widths = [(None, True)]  # the natural phone layout
+                for width, wrapped in widths:
+                    if width is not None:
+                        head.evaluate("(el, width) => el.style.inlineSize = width + 'px'", width)
+                    page.evaluate(_SETTLE, "light")
+                    strip = page.evaluate(_EVO_PAIR)
+                    tag = f"{engine} {viewport['width']} / {width}: {strip}"
+                    buttons = strip["buttons"]
+                    assert [b["label"] for b in buttons] == ["Code", "Constitution", "System prompt", "Identity", "Scratchpad"], tag
+                    assert [b["pressed"] for b in buttons] == ["false", "false", "false", "true", "false"], tag
+                    assert choice.evaluate("el => el === document.activeElement"), tag
+                    assert not strip["spills"] and (strip["lines"] > 1) == wrapped, tag
+                    if wrapped:
+                        assert [b["label"] for b in buttons if b["top"] == buttons[3]["top"]] == ["Identity", "Scratchpad"], tag
+                        assert not strip["dividerVisible"], tag
+                    else:
+                        assert strip["dividerVisible"] and buttons[2]["right"] <= strip["sep"]["left"] + 1, tag
+                        assert strip["sep"]["right"] <= buttons[3]["left"] + 1, tag
+                page.close()
+        finally:
+            browser.close()
 
 
 @pytest.mark.ui_browser

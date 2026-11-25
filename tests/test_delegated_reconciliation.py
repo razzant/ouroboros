@@ -19,6 +19,7 @@ import pytest
 from ouroboros.config import CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION
 from ouroboros.gateways import claudexor as cx
 
+from tests._budget_pause_exact_helpers import _install_fresh_supervisor_memory
 from tests._cancel_intents_shared import qenv as _qenv
 from tests._store_shared import unreadable_result
 from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture applies on import)
@@ -43,10 +44,20 @@ def startup_owners(tmp_path, monkeypatch):
     monkeypatch.setattr(server_maintenance, "_tick_maintenance_child", lambda: None)
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "PENDING", [])
+    # The fences object is shared with task_lifecycle's name for it: the tick's
+    # settlement_look_owed recomputes from it, so it starts empty here too.
+    fences: dict = {}
+    monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", fences)
+    from supervisor import task_lifecycle
+    monkeypatch.setattr(task_lifecycle, "BUDGET_ROOT_FENCES", fences)
     monkeypatch.setattr(workers, "WORKERS", {})
     monkeypatch.setattr(post_task_checkpoint, "POST_TASK_SYNTHESIS_INFLIGHT", {})
     registry = active_activity.DirectActivityRegistry()
     monkeypatch.setattr(active_activity, "_DIRECT_ACTIVITY_REGISTRY", registry)
+    # This room drives the maintenance tick itself: run it with this fixture's own
+    # supervisor state, so a settlement look an earlier test left owed cannot start
+    # the owner_pause_settlement duty thread here (#3428 cross-test leak).
+    _install_fresh_supervisor_memory(monkeypatch)
     return queue, workers, post_task_checkpoint, registry
 
 
@@ -156,7 +167,7 @@ def test_both_custody_surfaces_see_the_same_live_task_set(tmp_path, monkeypatch,
     try:
         sm._periodic_supervisor_maintenance([0.0], [time.time()])
         assert entered.wait(2)
-        assert [thread.name for thread in threads if thread.name not in {"cold-custody", "schedule-admission"}] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "custody-maintenance"]
+        assert [thread.name for thread in threads if thread.name not in {"cold-custody", "schedule-admission", "subscription-census"}] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "custody-maintenance"]
         assert threads[0].is_alive(), "the 20 s sweep is still inside its delayed work"
         next(thread for thread in threads if thread.name == "custody-maintenance").join(5)
         assert seen["processes"] is seen["delegated"] is sm._live_task_ids
@@ -711,6 +722,7 @@ def test_a_review_panels_run_outlives_every_owner_terminal_but_cancellation(
 
 @pytest.mark.parametrize("deliberate,expected", [
     ("cancelled", "cancelled"),
+    ("interrupted", "left_live"),
     ("completed", "left_live"),
 ])
 def test_only_a_claimed_cancellation_speaks_for_a_review_panels_run(
@@ -802,6 +814,7 @@ def test_cancellation_uses_adopted_terminal_for_live_delegation(qenv, monkeypatc
     recovered_keys = []
 
     class Gateway(_LiveRunStub):
+        store_identity = "fixture-store"
         def start_run(self, request, *, idempotency_key=""):
             recovered_keys.append(idempotency_key)
             return {"runId": run_id}
@@ -821,6 +834,7 @@ def test_cancellation_uses_adopted_terminal_for_live_delegation(qenv, monkeypatc
         assert dc.record_start_requested(
             root, task_id=task_id, invocation_id="inv-owned", idempotency_key="inv-owned",
             route="r", project_id="p", project_owned=False, root_task_id=task_id,
+            daemon_store_id=transport.store_identity,  # receipt-bound; this test varies cancellation verdict
             request={"prompt": "stored request", "primaryHarness": "r", "model": "m"},
         )
     else:
@@ -916,10 +930,12 @@ def test_pending_recovery_without_owner_verdict_leaves_live_run(tmp_path, monkey
     assert dc.record_start_requested(
         tmp_path, task_id="owner", invocation_id="inv-unknown", route="r",
         project_id="p", project_owned=False, request={"prompt": "original work", "model": "m"},
+        daemon_store_id="fixture-store",
     )
     recovered = []
 
     class Gateway(_LiveRunStub):
+        store_identity = "fixture-store"
         def start_run(self, request, *, idempotency_key=""):
             recovered.append((request, idempotency_key))
             return {"runId": "run-unknown"}

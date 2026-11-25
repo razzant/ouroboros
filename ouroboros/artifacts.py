@@ -16,7 +16,7 @@ from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from ouroboros.artifact_storage import clone_file, temporary_sibling
-from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
+from ouroboros.utils import atomic_write_json, file_identity, read_json_dict, update_json_locked, write_bytes_atomic
 from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_custody import fence_publication
@@ -143,6 +143,11 @@ def stage_task_attachments(
 
         {"ordinal", "status": "rejected", "reason": "source_missing",
          "label"}
+
+    A staged row of a spec marked ``path_only`` (a file new work inherits from the owner row it
+    answers, ``owner_relay.source_upload_specs``) keeps ``"path_only": True``: the one marker by
+    which a start and its Continue leave an image out of ``attachment_images``, so it is read by
+    path and never injected as pixels. Nothing else reads it.
     """
 
     declared = list(attachments) if isinstance(attachments, list) else []
@@ -247,13 +252,16 @@ def stage_task_attachments(
         else:
             raw_path = str(raw_item or "").strip()
         label = _display_label(raw_item, raw_path, ordinal)
+        # A ref whose bytes are known gone or held by another store names that reason, never a vague path.
+        known = raw_item.get("unavailable") if isinstance(raw_item, dict) else None
+        known = known if known in ("missing", "outside_store") else ""
         if not raw_path:
-            manifest.append(_rejected(ordinal, label, "invalid_path"))
+            manifest.append(_rejected(ordinal, label, known or "invalid_path"))
             continue
         try:
             source = pathlib.Path(raw_path).expanduser().resolve(strict=False)
             if not source.exists():
-                manifest.append(_rejected(ordinal, label, "source_missing"))
+                manifest.append(_rejected(ordinal, label, known or "source_missing"))
                 continue
             if not source.is_file():
                 manifest.append(_rejected(ordinal, label, "source_not_file"))
@@ -317,6 +325,7 @@ def stage_task_attachments(
                 "abs_path": str(dest),
                 "mime": mime,
                 "is_image": kind == "image",
+                **({"path_only": True} if isinstance(raw_item, dict) and raw_item.get("path_only") is True else {}),
             })
         except Exception:
             log.debug("stage_task_attachments: rejected a file on error", exc_info=True)
@@ -755,7 +764,10 @@ def stream_actor_source(drive_root: Union[pathlib.Path, str], task_id: str, *, c
                                             source_path=None, source_stamp=())
         ref = actor_source_reference(category=category, source_id=source_id, data=b"", extension=extension,
                                      measured=measured)
-        target = task_artifact_dir_path(drive_root, task_id).joinpath(*pathlib.PurePosixPath(ref["path"]).parts)
+        from ouroboros.payload_release_state import check_source_release
+        parts = pathlib.PurePosixPath(ref["path"]).parts
+        check_source_release(drive_root, task_id, parts)
+        target = task_artifact_dir_path(drive_root, task_id).joinpath(*parts)
         try:  # write-once by digest: an intact file of these bytes IS this handle; a damaged one is repaired
             present = target.is_file() and not target.is_symlink() and bool(stream_artifact_file(target, expected=measured))
         except OSError:
@@ -784,6 +796,8 @@ def store_actor_source_bytes(
 
     ref = actor_source_reference(category=category, source_id=source_id, data=data, extension=extension)
     relative = pathlib.PurePosixPath(ref["path"])
+    from ouroboros.payload_release_state import check_source_release
+    check_source_release(drive_root, task_id, relative.parts)
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
     target = artifact_dir.joinpath(*relative.parts)
     # WRITE-ONCE. The name carries the digest, so an existing file (loose or a pack member) with
@@ -829,6 +843,7 @@ def read_actor_source_bytes(
         if not target.is_relative_to(base):
             raise ValueError("actor source ref escapes its task artifact root")
     from ouroboros.evidence_packs import handle_bytes
+    from ouroboros.payload_release_state import check_source_release
     try:
         if rel.parts[:2] == ("source_handles", "context_checkpoints"):
             raw = handle_bytes(placement, task_id, rel.as_posix(), anchor=anchor)
@@ -839,10 +854,13 @@ def read_actor_source_bytes(
         else:
             raw = target.read_bytes()
     except FileNotFoundError:
+        check_source_release(placement, task_id, parts, anchor=anchor)
         if not retained:
             raise
         from ouroboros.source_retention import read_retained_task_source
-        return read_retained_task_source(placement, task_id, ref, anchor=anchor)
+        raw = read_retained_task_source(placement, task_id, ref, anchor=anchor)
+        check_source_release(placement, task_id, parts, anchor=anchor)
+        return raw  # the alternate placement verified the same ref before returning
     try:
         expected_size = int(ref["size"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -851,6 +869,7 @@ def read_actor_source_bytes(
         raise ValueError("actor source ref failed size verification")
     if sha256(raw).hexdigest() != str(ref.get("sha256") or ""):
         raise ValueError("actor source ref failed sha256 verification")
+    check_source_release(placement, task_id, parts, anchor=anchor)
     return raw
 
 
@@ -891,12 +910,13 @@ def persist_exact_text_source(
         }
 
 
-def _matching_projection(drive_root: Any, call: Dict[str, Any]) -> Dict[str, Any]:
-    """Read the call's redacted observability projection, verified to be the same call."""
+def _matching_projection(drive_root: Any, call: Dict[str, Any], task_id: Optional[str] = None) -> Dict[str, Any]:
+    """Read the call's redacted observability projection, verified to be the same call (``task_id``, the task that
+    made the call, is the packs reader's cost hint)."""
     from ouroboros.observability import read_blob_ref
 
     trace = call.get("trace_ref") if isinstance(call.get("trace_ref"), dict) else {}
-    payload = read_blob_ref(pathlib.Path(drive_root), trace.get("redacted_projection_ref") or {})
+    payload = read_blob_ref(pathlib.Path(drive_root), trace.get("redacted_projection_ref") or {}, task_id=task_id)
     # An absent tool_call_id cannot identify a call, so it never matches. The
     # argument gap publishes this text; the result fallback swallows it.
     if (not isinstance(payload, dict) or not call.get("tool_call_id")
@@ -914,7 +934,8 @@ SANITIZER_OMISSION_MARKERS = (
 )
 
 
-def materialize_tool_args_source(drive_root: Any, call: Dict[str, Any]) -> tuple[Any, bool, Dict[str, Any]]:
+def materialize_tool_args_source(drive_root: Any, call: Dict[str, Any],
+                                 task_id: Optional[str] = None) -> tuple[Any, bool, Dict[str, Any]]:
     """Recover logging-sanitizer omissions from the existing redacted call blob."""
     args = call.get("args")
     rendered = json.dumps(args, ensure_ascii=False, default=str)
@@ -925,7 +946,7 @@ def materialize_tool_args_source(drive_root: Any, call: Dict[str, Any]) -> tuple
     trace = call.get("trace_ref") if isinstance(call.get("trace_ref"), dict) else {}
     ref = trace.get("redacted_projection_ref") or {}
     try:
-        payload = _matching_projection(drive_root, call)
+        payload = _matching_projection(drive_root, call, task_id)
         if "args" not in payload:
             raise ValueError("argument source does not match the tool call")
         return payload["args"], True, {}
@@ -965,7 +986,7 @@ def materialize_tool_result_source(
             gap.update(reason=f"{type(exc).__name__}: {exc}",
                        declared_status=str(call.get("result_source_status") or ""))
     try:
-        payload = _matching_projection(drive_root, call)
+        payload = _matching_projection(drive_root, call, task_id)
         if isinstance(payload.get("result"), str):
             text = payload["result"]
             _, recovered_ref, issue = persist_exact_text_source(
@@ -1150,9 +1171,6 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     """
     source_path = pathlib.Path(path) if isinstance(path, (str, os.PathLike)) else None
     digest, size = sha256(), 0
-    def identity(observation: os.stat_result) -> tuple:
-        return (observation.st_dev, observation.st_ino, observation.st_size,
-                observation.st_mtime_ns, observation.st_ctime_ns)
     from ouroboros.store import open_for_read  # a held store file keeps its locks (no new descriptor to close)
 
     # Reject pipes/devices before opening: the descriptor check alone comes too
@@ -1173,8 +1191,8 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
             size += len(chunk)
             if size > before.st_size:
                 raise OSError(f"artifact source size changed during read: {path}")
-        if (identity(before) != identity(os.fstat(handle.fileno()))
-                or (source_path is not None and identity(before) != identity(source_path.stat()))):
+        if (file_identity(before) != file_identity(os.fstat(handle.fileno()))
+                or (source_path is not None and file_identity(before) != file_identity(source_path.stat()))):
             raise OSError(f"artifact source changed during read: {path}")
     result = {"size": size, "sha256": digest.hexdigest()}
     if size != before.st_size:
@@ -1182,11 +1200,11 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     expected = expected if isinstance(expected, dict) else {}
     if expected.get("immutable") and (not isinstance(expected.get("size"), int) or not expected.get("sha256")):
         raise ArtifactIdentityError(f"immutable artifact is missing its capture identity: {path}",
-                                    source_path=source_path, source_stamp=identity(before))
+                                    source_path=source_path, source_stamp=file_identity(before))
     for key in ("size", "sha256"):
         if expected.get(key) not in (None, "") and expected[key] != result[key]:
             raise ArtifactIdentityError(f"artifact source failed {key} verification: {path}",
-                                        source_path=source_path, source_stamp=identity(before))
+                                        source_path=source_path, source_stamp=file_identity(before))
     return result
 
 
@@ -1251,6 +1269,8 @@ def store_task_artifact_bytes(
     temporary = temporary_sibling(path)
 
     def publish(_current):
+        from ouroboros.payload_release_state import require_file_available
+        require_file_available(path, anchor=drive_root)
         try:
             os.link(temporary, path)
         except OSError as exc:
@@ -1374,11 +1394,20 @@ def _copy_work_file_to_task_artifacts(ctx: Any, source: pathlib.Path, *, kind: s
         shutil.rmtree(private, ignore_errors=True)
 
 
+def immutable_artifact_name(source: pathlib.PurePath, digest: str) -> str:
+    """The name of an immutable copy: bounded stem, content digest, bounded suffix. A raw POSIX name byte has no
+    UTF-8 spelling, so the suffix spells it ``_`` as the stem does; every other source name keeps its carrier."""
+    stem = _safe_attachment_name(source.stem).removesuffix("-" + digest).encode("utf-8")[:120].decode("utf-8", errors="ignore")
+    suffix = re.sub(r"[\ud800-\udfff]", "_", source.suffix).encode("utf-8")[:20].decode("utf-8", errors="ignore")
+    return f"{stem}-{digest}{suffix}"
+
+
 def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str], *, kind: str = "user_file", immutable: bool = False, expected: Any = None,
                                 logical: Any = None) -> Dict[str, Any] | None:
     """Copy a generated file, preserving an immutable rebase's original identity. A store file keeps
     its source and kind while its bytes stay unchanged; a conversion becomes its own result."""
     from ouroboros import work_domain
+    from ouroboros.payload_release_state import require_file_available
 
     if work_domain.is_work(source_path):
         return _copy_work_file_to_task_artifacts(ctx, work_domain.settle(source_path), kind=kind,
@@ -1388,6 +1417,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         return None
     task_id = task_id_for_artifacts(ctx)
     drive_root = pathlib.Path(getattr(ctx, "drive_root"))
+    require_file_available(source, anchor=drive_root, identity=expected)
     if is_verification_receipts_path(drive_root, task_id, source):
         return None
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
@@ -1407,10 +1437,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         dest = artifact_dir / name
     elif immutable:
         source_identity = stream_artifact_file(source, expected=expected)
-        stem = _safe_attachment_name(source.stem).removesuffix("-" + source_identity["sha256"])
-        stem = stem.encode("utf-8")[:120].decode("utf-8", errors="ignore")
-        suffix = source.suffix.encode("utf-8")[:20].decode("utf-8", errors="ignore")
-        dest = artifact_dir / f"{stem}-{source_identity['sha256']}{suffix}"
+        dest = artifact_dir / immutable_artifact_name(source, source_identity["sha256"])
     if captured and not immutable:
         dest, reused_existing_source = pathlib.Path(captured["path"]), True
     if (
@@ -1421,10 +1448,10 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
             and not reused_existing_source and not immutable
         )
     ):
-        suffix = source.suffix
-        stem = source.name[: -len(suffix)] if suffix else source.name
         digest = sha256(str(logical or source.resolve(strict=False)).encode("utf-8", errors="replace")).hexdigest()[:8]
-        dest = artifact_dir / f"{stem}.{digest}{suffix}"
+        dest = artifact_dir / f"{source.stem}.{digest}{source.suffix}"
+    if source != dest:
+        require_file_available(dest, anchor=drive_root, identity=source_identity)
     if reused_existing_source and dest.resolve(strict=False) != source.resolve(strict=False):  # user files and process outputs alike
         _archive_previous_artifact_version(drive_root, task_id, dest, source)
     if immutable and dest.exists() and not dest.is_symlink() and (not source.exists() or not dest.samefile(source)):

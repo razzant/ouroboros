@@ -22,6 +22,8 @@ them a second time:
   transfer's period its source states; each labelled), a part's union over its members, an
   account's union over its sources (several rooms: their rows' span, which is not every event
   between and seals no row). The aggregate a part records is historical and not shown.
+- A **stored moment** prints in one form (``minute``, a period as ``period_text``): UTC minutes of
+  any ISO date CPython 3.12 reads, on an older Python too; the stored value stays whole.
 - **Who wrote a record and how a transfer came** are printed in one form by every reader
   (``record_byline``, ``transfer_words``): a claim the record carries, never a confirmed identity;
   the words a transfer brought appear only ``quoted``, as data that never starts a line.
@@ -48,9 +50,11 @@ Nothing here publishes a record or calls a model.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import pathlib
+import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
@@ -71,7 +75,8 @@ VIEW_TRACE_KEY = "memory_view"
 # request keeps only its attribution fact, a transport its ``_TRANSPORT_NESTED`` facts: ``row_meta``) stay
 # in the chain, read by address. Facts stored before a field joined this list keep their old form (the
 # stored prefix is never rewritten for it): a reader shows such a field as unknown.
-_META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id", "root_task_id",
+_META_FIELDS = ("chat_id", "ts", "type", "kind",  # ``kind``: the display stamp (``stamped_room_echo``)
+                "direction", "task_id", "parent_task_id", "root_task_id",
                 "client_message_id", "subagent_task_id", "delegation_role", "subagent_role", "initiator",
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
                 "status", "outcome", "outcome_phase", "reason_code", "outcome_final", "outcome_authority",
@@ -79,7 +84,9 @@ _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id
                 "wake_summary",  # a finished root's closing sentence: how my other conversations know that turn
                 "fold_read")  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
-_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved")
+# ``telegram_room_chat_id``: the room the host decided for the bundled bridge's Reply (``room_membership``); no
+# stored prefix lacks it wrongly, since no released body wrote it before it joined this list.
+_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved", "telegram_room_chat_id")
 # What a row's ``transport`` keeps: its scalars, which ``dialogue_provenance.place_row_facts`` spreads as the row's
 # place facts (``place_activity`` reads the event, place and conversation keys) and which name its provider, account,
 # conversation and thread (``dialogue_provenance``, ``RoomLabelResolver.label``), so a row that came over a transport
@@ -103,9 +110,10 @@ _TRANSPORT_NESTED = {
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
 # fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
-# closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest): a prefix of another version
-# is another source, read live until the maintenance job ``memory_tail`` refills it.
-_META_VERSION = 9
+# closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest; 10: the row's
+# ``kind`` stamp; 11: whole-row identity for a bound opening, including an answered card): a prefix of another
+# version is another source, read live until the maintenance job ``memory_tail`` refills it.
+_META_VERSION = 11
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 
@@ -139,13 +147,15 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
                         "secret_outcome": {key: outcome[key] for key in ("event", "pluginName", "fields") if key in outcome}}
     if isinstance(ref := row.get("reply_to"), dict):  # ``room_membership.reply_target_room`` reads these, a
         meta["reply_to"] = {key: ref[key] for key in _REPLY_FIELDS if key in ref}  # saved target by its address
-    if str(row.get("direction") or "") == "in":
+    if str(row.get("direction") or "") == "in" or row.get("type") == "quiz_answer":
         from ouroboros.project_dialogue import _entry_source_identities, _text_sha256  # D15->D17 is lazy-only
 
-        meta["text_sha256"] = _text_sha256(row.get("text"))
-        if facts := place_message_facts(row):  # same words alone do not make different forwards/files a repeat
-            meta["message_facts_sha256"] = hashlib.sha256(facts.encode("utf-8")).hexdigest()
-        meta["source_keys"] = tuple(sorted(_entry_source_identities(row)))
+        if row.get("direction") == "in":
+            meta["text_sha256"] = _text_sha256(row.get("text"))
+            if facts := place_message_facts(row):  # same words alone do not make different forwards/files a repeat
+                meta["message_facts_sha256"] = hashlib.sha256(facts.encode("utf-8")).hexdigest()
+        if keys := _entry_source_identities(row):
+            meta["source_keys"] = tuple(sorted(keys))
     return meta
 
 
@@ -178,18 +188,22 @@ def membership_facts(root: Any) -> MembershipFacts:
 
 
 def _membership_facts(root: Any) -> MembershipFacts:
-    from ouroboros.project_dialogue import _source_ref_identity  # D15->D17 is lazy-only
+    from ouroboros.project_dialogue import _source_ref_identity, physical_origin_refs  # D15->D17 is lazy-only
     from ouroboros.projects_registry import all_task_bindings, list_reserved_projects, project_task_bindings, RoomResolver
 
     projects = frozenset(int(project["chat_id"]) for project in list_reserved_projects(root))
     by_key: Dict[Tuple[Any, ...], set] = {}
+    bound = []
     for binding in project_task_bindings(root).values():
         try:
             chat = int(binding.get("project_chat_id") or 0)
         except (TypeError, ValueError):
             continue
-        ref = binding.get("source_ref")
-        key = _source_ref_identity(ref) if chat in projects and isinstance(ref, dict) and ref else None
+        if chat in projects:
+            bound.append((chat, binding))
+    # Every older partial address of the snapshot resolves in one read, never one lookup per binding.
+    for (chat, _binding), ref in zip(bound, physical_origin_refs(root, [binding for _chat, binding in bound])):
+        key = _source_ref_identity(ref) if ref else None
         if key is not None:
             by_key.setdefault(key, set()).add(chat)
     return MembershipFacts(projects, dict(all_task_bindings(root)),
@@ -408,22 +422,33 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
         if frontier is None:
             return {}
         facts = membership_facts(root)
-        grouped: Dict[str, List[Entry]] = {}
         projected = _projection_rows(root, frontier)
         # The rows' task lineages in one read a generation (``RoomResolver.warm``), not one read per task.
         facts.rooms.warm({str(entry[1].get(key) or "") for entry in projected
                           for key in ("task_id", "parent_task_id", "root_task_id")} - {""})
+        from ouroboros.room_appearances import REPLY_TARGET_UNREADABLE  # D15->D17 is lazy-only
+        from ouroboros.room_membership import capture_reply_targets, unknown_target_rooms
+
+        def group():
+            grouped: Dict[str, List[Entry]] = {}
+            considered: Dict[str, List[Entry]] = {}
+            missing = set()
+            for entry in projected:
+                for room in rooms_of_row(entry[1], facts):
+                    grouped.setdefault(room, []).append(entry)
+                    if quiet is not None and entry[1].get("quiet_finish") is True:
+                        considered.setdefault(room, []).append(entry)
+                if gaps is not None and isinstance(entry[1].get("reply_to"), dict):
+                    missing.update(unknown_target_rooms(entry[1], facts.project_chat_ids, facts.rooms))
+            return grouped, considered, missing
+
+        grouped, considered, missing = capture_reply_targets(facts.rooms, group)
+        if quiet is not None:
+            for room, rows in considered.items():
+                quiet.setdefault(room, []).extend(rows)
         if gaps is not None:
-            from ouroboros.room_appearances import REPLY_TARGET_UNREADABLE  # D15->D17 is lazy-only
-            from ouroboros.room_membership import unknown_target_rooms
-        for entry in projected:
-            for room in rooms_of_row(entry[1], facts):
-                grouped.setdefault(room, []).append(entry)
-                if quiet is not None and entry[1].get("quiet_finish") is True:
-                    quiet.setdefault(room, []).append(entry)
-            if gaps is not None and isinstance(entry[1].get("reply_to"), dict):
-                for room in unknown_target_rooms(entry[1], facts.project_chat_ids, facts.rooms):
-                    gaps.setdefault(str(room), set()).add(REPLY_TARGET_UNREADABLE)
+            for room in missing:
+                gaps.setdefault(str(room), set()).add(REPLY_TARGET_UNREADABLE)
         rooms: Dict[str, List[Entry]] = {}
         timed = rooms_read_by_time(root, (entry[1] for entry in projected))  # every room at once, sealed rows or not
         for room, entries in grouped.items():
@@ -646,6 +671,115 @@ def legacy_progress(units: List[LegacyUnit]) -> Dict[str, Any]:
             blocks[unit.block] = blocks.get(unit.block, True) and unit.folded
     pending = sorted(block for block, folded in blocks.items() if not folded)
     return {"periods": len(blocks), "folded": len(blocks) - len(pending), "pending": pending}
+
+
+# --- a stored moment as every reader prints it --------------------------------------------------
+# A 3.12 writer admits ISO forms an older reader's ``fromisoformat`` refuses (``chronicle_import._iso``). These
+# follow CPython 3.12's own parser (Modules/_datetimemodule.c) step by step, so a reader never guesses a date.
+
+_ISO_DATE = re.compile(r"([0-9]{4})(-?)(?:W([0-9]{2})(?:\2([0-9]))?|([0-9]{2})\2([0-9]{2}))")
+_ISO_DIGITS = re.compile(r"[0-9]*")
+_ISO_ZONE = re.compile(r"[Z+-]")
+
+
+def _iso_clock(text: str, pos: int, end: int) -> Tuple[List[int], bool]:
+    """3.12's ``parse_hh_mm_ss_ff`` over ``text[pos:end]``: ``[h, m, s, us]`` and whether ``text`` goes on after it.
+    A fraction may follow any component; digits past the sixth are dropped, never rounded."""
+    values, colon = [0, 0, 0, 0], True
+    for index in range(3):
+        if _ISO_DIGITS.match(text, pos, pos + 2).end() != pos + 2:
+            raise ValueError(text)
+        values[index], char, pos = int(text[pos:pos + 2]), text[pos + 2:pos + 3], pos + 3
+        if not char.isascii():  # the native parser advances one UTF-8 byte here, not a whole code point
+            raise ValueError(text)
+        colon = char == ":" if index == 0 else colon
+        if pos >= end:
+            return values, char != ""
+        if colon and char == ":":
+            continue
+        if char in (".", ","):
+            break
+        if colon:
+            raise ValueError(text)
+        pos -= 1
+    count = min(end - pos, 6)
+    if _ISO_DIGITS.match(text, pos, pos + count).end() != pos + count:
+        raise ValueError(text)
+    values[3] = int(text[pos:pos + count]) * 10 ** (6 - count)
+    return values, _ISO_DIGITS.match(text, pos + count).end() < len(text)
+
+
+def _iso_312(text: str) -> datetime.datetime:
+    """``datetime.fromisoformat(text)`` as CPython 3.12 parses it, on any Python; ValueError where 3.12 refuses
+    (a lone surrogate, never admitted as printable, is refused here wherever it stands)."""
+    text.encode("utf-8")
+    if len(text) < 7:
+        raise ValueError(text)
+    if len(text) == 7:
+        sep = 7
+    elif text[4] == "-":  # YYYY-MM-DD, YYYY-Www, YYYY-Www-D; a digit after YYYY-Www- starts the time
+        sep = 10 if text[5] != "W" else 8 if len(text) < 10 or text[8] != "-" or (
+            len(text) > 10 and text[10] in "0123456789") else 10
+        if len(text) == 9 and text[5] == "W" and text[8] == "-":
+            raise ValueError(text)
+    elif text[4] == "W":  # YYYYWww or YYYYWwwD: the time comes in digit pairs
+        run = _ISO_DIGITS.match(text, 7).end()
+        sep = run if run < 9 else 7 if run % 2 == 0 else 8
+    else:
+        sep = 8
+    date = _ISO_DATE.fullmatch(text, 0, sep)
+    if date is None:
+        raise ValueError(text)
+    year, _, week, weekday, month, day = date.groups()
+    day_of = (datetime.date.fromisocalendar(int(year), int(week), int(weekday or 1)) if week
+              else datetime.date(int(year), int(month), int(day)))
+    clock, zone, end = [0, 0, 0, 0], None, len(text)
+    if end > sep:  # the time after one separator character, then Z or an offset read to the end
+        found = _ISO_ZONE.search(text, sep + 1)
+        at = found.start() if found else end
+        clock, rest = _iso_clock(text, sep + 1, at)
+        if at == end:
+            if rest:
+                raise ValueError(text)
+        elif text[at] == "Z":
+            if at + 1 != end:
+                raise ValueError(text)
+            zone = datetime.timezone.utc
+        else:  # an offset of zero whole seconds is UTC whatever its fraction, as 3.12 builds it
+            offset, rest = _iso_clock(text, at + 1, end)
+            sign = -1 if text[at] == "-" else 1
+            seconds = sign * (offset[0] * 3600 + offset[1] * 60 + offset[2])
+            if rest:
+                raise ValueError(text)
+            zone = (datetime.timezone(datetime.timedelta(seconds=seconds, microseconds=sign * offset[3]))
+                    if seconds else datetime.timezone.utc)
+    return datetime.datetime(day_of.year, day_of.month, day_of.day, *clock, tzinfo=zone)
+
+
+def minute(value: Any) -> str:
+    """A stored moment as ``YYYY-MM-DD HH:MM`` in UTC (a naive one as written), however its source spelled it;
+    anything that is no such date (or leaves the calendar in UTC) is printed as it is."""
+    text = str(value)
+    try:
+        try:
+            moment = datetime.datetime.fromisoformat(text)  # this reader's own parser first, as before
+        except ValueError:
+            moment = _iso_312(text)
+        if moment.tzinfo is not None:
+            moment = moment.astimezone(datetime.timezone.utc)
+    except (ValueError, OverflowError):
+        return text
+    return moment.strftime("%Y-%m-%d %H:%M")
+
+
+def period_text(span: Any, note: str = "") -> str:
+    """``start → end`` of a time span in ``minute``s, then ``note`` (a ``Period``'s: a block's period is labelled as
+    the block's); a span with unknown bounds says so."""
+    span = span if isinstance(span, Mapping) else {}
+    if not span.get("start") and not span.get("end"):
+        return "period unknown"
+    text = f"{minute(span.get('start') or '?')} → {minute(span.get('end') or '?')}"
+    return (text + " (incomplete)" if span.get("incomplete") else text) + note
 
 
 # --- the period and place of a story record ----------------------------------------------------
@@ -1002,8 +1136,9 @@ def record_byline(record: Mapping[str, Any]) -> str:
 
 
 def transfer_words(record: Mapping[str, Any]) -> str:
-    """How a transfer (``chronicle_import``) came here and when its source says its words were written; ``''``
-    for any other record. ``ts`` is the local publication, never the source's date; who ran it is ``quoted``."""
+    """How a transfer came here and when its source says its words were written: date-only stays date-only,
+    a time prints in ``minute``s, and the stored value stays whole. ``''`` for any other record; ``ts`` is the local
+    publication, never the source's date; who ran it is ``quoted``."""
     meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
     moved = meta.get("transfer") if isinstance(meta.get("transfer"), Mapping) else {}
     if not moved:
@@ -1012,9 +1147,12 @@ def transfer_words(record: Mapping[str, Any]) -> str:
     def named(key: str, missing: str) -> str:
         return quoted(moved[key]) if moved.get(key) else missing
 
+    written = meta.get("legacy_written_at")
+    if written and not (isinstance(written, str) and _ISO_DATE.fullmatch(written)):
+        written = minute(written)
     return (f"transferred {str(record.get('ts') or '')[:10] or 'date not recorded'} by "
             f"{named('operator', 'operator not recorded')} with {named('tool', 'tool not recorded')}, "
-            f"task {named('task_id', 'not recorded')}; written {meta.get('legacy_written_at') or 'date not stated'}")
+            f"task {named('task_id', 'not recorded')}; written {written or 'date not stated'}")
 
 
 def _change_line(record: Mapping[str, Any], released: Optional[Mapping[str, Any]] = None) -> str:

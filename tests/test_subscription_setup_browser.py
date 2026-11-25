@@ -18,6 +18,7 @@ from tests.test_onboarding_complete_endpoint import (
 )
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.ui_console_errors import PageErrors
+from tests._wizard_walk import past_quick_steps, rail_shows_its_steps, step_order, walk
 
 pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
@@ -44,6 +45,40 @@ def status_answer(route, status):
     route.fulfill(json=passive_status(status) if passive else status)
 
 
+def scoped_catalog_answer(url, catalog, harnesses):
+    """Serve the models and account evidence belonging to the requested source."""
+    query = parse_qs(urlparse(url).query)
+    pin = query.get("credential_profile_id", [""])[0]
+    if query.get("view") == ["sources"]:
+        return {"items": [], "errors": [], "model_sources": catalog.get("model_sources", [])}
+    if harness := query.get("harness_id"):
+        source = next((row for row in harnesses if row["id"] == harness[0]), {"id": harness[0], "models": []})
+        native = copy.deepcopy(source)
+        if pin:
+            native["models"] = [item for item in native.get("models", []) if item.get("credential_profile_id") == pin]
+            if native.get("model_catalog"):
+                native["model_catalog"]["accounts"] = [a for a in native["model_catalog"]["accounts"] if a["credentialProfileId"] == pin]
+                native["model_catalog"]["partial"] = any(a.get("catalog") is None for a in native["model_catalog"]["accounts"])
+        return {"items": [], "model_sources": [], "errors": [], "session_catalog": native, "partial": bool(native.get("model_catalog", {}).get("partial"))}
+    if source := query.get("source_id"):
+        source_id = source[0]
+        accounts = [{**env, "accounts": [a for a in env["accounts"] if not pin or a.get("credentialProfileId") == pin]}
+                    for env in catalog.get("account_catalogs", []) if env["source"] == source_id]
+        if pin:
+            for env in accounts:
+                env["partial"] = any(a.get("catalog") is None for a in env["accounts"])
+        return {**catalog, "model_sources": [s for s in catalog.get("model_sources", []) if s["id"] == source_id],
+                "items": [item for item in catalog.get("items", [])
+                          if (item.get("source_id") == source_id or item.get("value", "").startswith(f"claudexor::{source_id}="))
+                          and (not pin or item.get("credential_profile_id") == pin)],
+                "account_catalogs": accounts, "partial": any(env.get("partial") for env in accounts),
+                "errors": [error for error in catalog.get("errors", []) if not pin or error.get("credential_profile_id", pin) == pin]}
+    if provider := query.get("provider_id"):
+        return {**catalog, "model_sources": [], "account_catalogs": [], "items": [item for item in catalog.get("items", [])
+                if item.get("value", "").startswith(provider[0] + "::") or provider == ["openrouter"] and "::" not in item.get("value", "")]}
+    return catalog
+
+
 @pytest.fixture
 def subscription_ui():
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
@@ -65,7 +100,13 @@ def subscription_ui():
         "OUROBOROS_SUBAGENTS": fixture["preview"]["available_subagents"],
         "OUROBOROS_RUNTIME_MODE": "advanced",
         "OUROBOROS_CONTEXT_MODE": "max",
-        "_meta": {"setup_contract": bootstrap["contract"]},
+        # Main's binding as the real document carries it (defaults for the keys the preview leaves out), each with
+        # the token a write of Main stands on: a Main write is refused without all four (model_roles.js, model_catalog_store.js).
+        "USE_LOCAL_MAIN": False,
+        "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {},
+        "_meta": {"setup_contract": bootstrap["contract"],
+                  "tokens": {key: f"fixture-{key.lower()}" for key in (
+                      "OUROBOROS_MODEL", "USE_LOCAL_MAIN", "OUROBOROS_MODEL_ACCOUNTS", "OUROBOROS_MODEL_PROCESSING_PREFERENCES")}},
     }
 
     class Handler(SimpleHTTPRequestHandler):
@@ -203,9 +244,7 @@ def subscription_ui():
             if backend.get("catalog_status"):
                 route.fulfill(status=backend["catalog_status"], content_type="application/json", body=json.dumps(body))
                 return
-            profile = parse_qs(urlparse(request.url).query).get("credential_profile_id", [""])[0]
-            if profile == "work":
-                body["items"][0].update(credential_profile_id="work", max_context_window=500000)
+            body = scoped_catalog_answer(request.url, body, fixture["status"]["harnesses"])
         elif path == "/api/onboarding":
             route.fulfill(status=204)
             return
@@ -327,9 +366,10 @@ def test_codex_quick_setup_computes_skipped_steps_and_finishes_once(subscription
     page = ui["page"]
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_selector('#quick-start-btn:not([hidden])')
-    assert page.locator('.wizard-step').count() == 5
+    assert rail_shows_its_steps(page)
     capture(page, "accounts-connected")
     page.click('#quick-start-btn')
+    past_quick_steps(page)  # Review & start passes Consciousness and Skills where offered, then Summary
     page.wait_for_selector('.summary-card')
     assert "gpt-test" in page.locator('.summary-card').inner_text()
     reviewers = page.locator('.summary-kv').filter(has=page.get_by_text('Reviewers', exact=True))
@@ -362,7 +402,7 @@ def test_quick_start_requires_a_model_source_for_the_connected_harness(subscript
     ui["fixture"]["catalog"]["model_sources"] = [
         {"id": "opaque-source", "label": "Managed models", "credentialHarness": credential_harness},
     ]
-    with page.expect_response("**/api/onboarding/model-catalog"):
+    with page.expect_response("**/api/model-catalog?view=sources"):
         page.goto(ui["url"] + "/onboarding")
     page.wait_for_function(
         "expected => document.querySelector('#quick-start-btn').hidden !== expected", arg=expected)
@@ -454,6 +494,13 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     assert page.locator('[data-reviewers-note]').inner_text().startswith('Reviewers: 1 — the rows marked Reviewer')
     capture(page, "review-editable")
     page.click('#next-btn')
+    if "consciousness" in step_order(page):
+        page.wait_for_selector('[data-consciousness-step]')
+        capture(page, "consciousness-subscription")
+        page.click('#next-btn')
+    if "skills" in step_order(page):
+        page.wait_for_selector('[data-starter-skills="step"]')
+        page.click('#next-btn')
     page.wait_for_selector('[data-collapse="api-budget"]')
     assert not page.locator('[data-collapse="api-budget"]').evaluate('(el) => el.open')
     capture(page, "budget-subscription")
@@ -497,7 +544,7 @@ def test_settings_accounts_and_model_roles_use_the_same_compact_components(subsc
     main = role.locator('[data-model-role="main"]')
     main.locator('[data-model-role-model]').wait_for(state='visible')
     main.locator('[data-model-role-account]').select_option('work')
-    controls = main.locator('.model-role-controls input, .model-role-controls select')
+    controls = main.locator('.model-role-controls input, .model-role-controls select:not([data-model-role-source]), .model-role-controls [data-source-picker]')
     shapes = controls.evaluate_all("""(els) => els.filter((el) => !el.hidden && el.getClientRects().length).map((el) => ({
         font: getComputedStyle(el).fontSize, height: Math.round(el.getBoundingClientRect().height) }))""")
     assert len(shapes) >= 3, shapes  # source, model and account at least
@@ -532,8 +579,7 @@ def test_cursor_only_does_not_claim_model_access_and_api_only_finishes(subscript
     page.click('#next-btn')
     page.wait_for_selector('#main-model')
     assert page.locator('#main-model').input_value()
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('.summary-card')
     assert 'no API key' not in page.locator('.summary-card').inner_text()
     page.click('#next-btn')
@@ -622,8 +668,7 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
     main.locator('[data-model-role-source]').select_option('subscription:codex')
     main.locator('[data-model-role-model]').fill('owner-main')
     main.locator('[data-model-role-account]').select_option('personal')
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('.summary-card')
     page.wait_for_selector('#skip-presets-btn:not([hidden])')
     page.click('#skip-presets-btn')
@@ -634,25 +679,21 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
     assert 'claudexor::codex=owner-main · Account: personal' in reviewers.inner_text()
     capture(page, 'manual-main-reviewer-recovery')
     if edit_after_recovery == 'main':
-        for _ in range(3):
-            page.click('#back-btn')
+        walk(page, 'summary', 'models')
         page.locator('[data-model-role="main"] [data-model-role-model]').fill('new-main')
-        for _ in range(3):
-            page.click('#next-btn')
+        walk(page, 'models', 'summary')
         page.wait_for_selector('#skip-presets-btn:not([hidden])')
         assert page.locator('#next-btn').is_enabled()
         assert 'Main changed; reviewers keep the assignments shown above' in page.locator('.wizard-inline-note').inner_text()
         assert 'owner-main' in reviewers.inner_text() and 'new-main' not in reviewers.inner_text()
     elif edit_after_recovery:
         # The reviewers are rows of the Models step's catalog: edit one there.
-        for _ in range(3):
-            page.click('#back-btn')
+        walk(page, 'summary', 'models')
         page.locator('[data-collapse="subagents"] > summary').click()
         first = page.locator('[data-subagent-row]').filter(has=page.locator('[data-subagent-field="review_eligible"]:checked')).first
         assert first.count() == 1
         first.locator('[data-subagent-field="model"]').fill('owner-deep')
-        for _ in range(3):
-            page.click('#next-btn')
+        walk(page, 'models', 'summary')
         page.wait_for_function("() => !document.querySelector('.wizard-error').textContent")
         assert 'claudexor::codex=owner-deep' in reviewers.inner_text()
     page.click('#next-btn')
@@ -687,8 +728,7 @@ def test_failed_main_reviewer_recovery_does_not_latch_finish(subscription_ui):
     main = page.locator('[data-model-role="main"]')
     main.locator('[data-model-role-source]').select_option('subscription:codex')
     main.locator('[data-model-role-model]').fill('owner-main')
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('#skip-presets-btn:not([hidden])')
     page.click('#skip-presets-btn')
     page.wait_for_function("() => document.querySelector('.wizard-error').textContent.includes('managed model source')")
@@ -764,7 +804,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     ui, page = subscription_ui, subscription_ui['page']
     ui['backend']['preview_error'] = 'Agent inventory unavailable.'
     held = []
-    page.route('**/api/onboarding/model-catalog', lambda route: held.append(route))
+    page.route('**/api/model-catalog?view=sources', lambda route: held.append(route))
     page.goto(ui['url'] + '/onboarding')
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Checking model sources')")
     assert held
@@ -773,7 +813,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Signed in')")
     for route in held:
         route.fulfill(content_type='application/json', body=json.dumps(ui['fixture']['catalog']))
-    page.unroute('**/api/onboarding/model-catalog')
+    page.unroute('**/api/model-catalog?view=sources')
     assert page.locator('#next-btn').is_disabled()
     assert page.locator('#quick-start-btn').is_hidden()
 
@@ -803,8 +843,7 @@ def test_fresh_zai_setup_proposes_the_image_capable_vision_the_owner_may_change(
         page.click('#back-btn')
         page.click('#next-btn')
         assert vision.input_value() == owner_vision.rpartition('::')[2]   # the source picker holds "zai"
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('.summary-card')
     capture(page, f'zai-summary-{plan or "default"}-{"owner" if owner_vision is not None else "default"}')
     page.click('#next-btn')
@@ -873,8 +912,7 @@ def test_local_main_with_zai_defaults_only_untouched_vision(subscription_ui, mon
     page.click('#next-btn')
     capture(page, f'local-zai-models-{scenario}')
     assert vision.input_value() == expected_vision.rpartition('::')[2]
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('.summary-card')
     capture(page, f'local-zai-summary-{scenario}')
     page.click('#next-btn')
@@ -951,6 +989,7 @@ def test_review_shortcut_reconciles_local_vision_before_preview(
     page.locator('[data-local-mode="all"]').click()
     capture(page, f'shortcut-local-accounts-{choice}')
     page.click('#quick-start-btn')
+    past_quick_steps(page)  # Review & start passes Consciousness and Skills where offered, then Summary
     page.wait_for_selector('.summary-card')
     summary = page.locator('.summary-kv').filter(has=page.get_by_text('Vision', exact=True)).inner_text()
     capture(page, f'shortcut-summary-{choice}')

@@ -16,6 +16,8 @@ from ouroboros.tools.edit_ops import (
     _parse_patch,
     _syntax_check,
 )
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 
 SAMPLE = "\n".join([
@@ -391,18 +393,17 @@ def test_registry_registration():
 # write_file rails (git._repo_write): syntax guard + overwrite diff
 # ---------------------------------------------------------------------------
 
-def _ws_ctx(tmp_path):
-    import subprocess
+def _lay_ws(folder):
+    ws = git_repository(folder / "extws", unborn=True)
+    (ws / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    world_git(ws, "add", "-A")
+    world_git(ws, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "seed")
 
+
+def _ws_ctx(tmp_path):
     from ouroboros.tools.registry import ToolContext
 
-    ws = tmp_path / "extws"
-    ws.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
-    (ws / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=ws, check=True)
-    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-q", "-m", "seed"], cwd=ws, check=True)
+    ws = clone_repository(world("edit-ops-extws", _lay_ws) / "extws", tmp_path / "extws")
     drive = tmp_path / "drive"
     drive.mkdir()
     return ToolContext(repo_dir=tmp_path / "repo", drive_root=drive,
@@ -510,13 +511,10 @@ def test_repo_write_force_bypass_is_disclosed(tmp_path):
 
 def _guard_registry(tmp_path):
     """A registry over a throwaway repo, so guards run for real (no fake resolver)."""
-    import subprocess
-
     from ouroboros.tools.registry import ToolRegistry
 
-    repo = tmp_path / "repo"
-    (repo / "ouroboros").mkdir(parents=True)
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True)
+    (repo / "ouroboros").mkdir()
     drive = tmp_path / "drive"
     drive.mkdir()
     return ToolRegistry(repo_dir=repo, drive_root=drive), repo
@@ -557,18 +555,13 @@ def test_protected_path_blocked_in_every_spelling(tmp_path, tool, spelling):
 
 
 def _workspace_guard_registry(tmp_path, monkeypatch):
-    import subprocess
-
     import ouroboros.safety as safety
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-    system = tmp_path / "system"
-    project = tmp_path / "project"
+    system = git_repository(tmp_path / "system", unborn=True)
+    project = git_repository(tmp_path / "project", unborn=True)
     drive = tmp_path / "drive"
-    for path in (system, project, drive):
-        path.mkdir()
-    for repo in (system, project):
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    drive.mkdir()
     ctx = ToolContext(
         repo_dir=system,
         system_repo_dir=system,
@@ -623,13 +616,10 @@ def test_repo_batch_tool_explicit_system_binding_mutates_only_system_and_invalid
 def test_repo_batch_tool_protected_name_depends_on_physical_target(
     tmp_path, monkeypatch, tool,
 ):
-    from ouroboros import config
-
     registry, _ctx, system, project = _workspace_guard_registry(tmp_path, monkeypatch)
     (system / "BIBLE.md").write_text("SYSTEM = 1\n", encoding="utf-8")
     (project / "BIBLE.md").write_text("PROJECT = 1\n", encoding="utf-8")
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
-    monkeypatch.setattr(edit_ops, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     project_args = {
         "apply_patch": {
             "patch": "*** Update File: BIBLE.md\n-PROJECT = 1\n+PROJECT = 2\n",
@@ -656,6 +646,64 @@ def test_repo_batch_tool_protected_name_depends_on_physical_target(
     assert "LIGHT_MODE_BLOCKED" in system_result or "CORE_PROTECTION_BLOCKED" in system_result
     assert (project / "BIBLE.md").read_text(encoding="utf-8") == "PROJECT = 2\n"
     assert (system / "BIBLE.md").read_text(encoding="utf-8") == "SYSTEM = 1\n"
+
+
+def test_edit_batch_shared_path_reaches_every_write_guard(tmp_path, monkeypatch):
+    """A top-level path is outside edit_batch's schema. Dispatch gives it to each edit that names none and
+    removes it BEFORE any guard reads the call, so a protected file, a path outside the root, or (light mode)
+    a skill-file decoy beside a memory edit is refused exactly as when each edit names its path; an allowed
+    shared path runs and the result says how many edits it named."""
+    registry, _ctx, system, project = _workspace_guard_registry(tmp_path, monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    (system / "BIBLE.md").write_text("SYSTEM = 1\n", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("OUT = 1\n", encoding="utf-8")
+    (project / "mod.py").write_text("A = 1\nB = 1\n", encoding="utf-8")
+    (project / "other.py").write_text("C = 1\n", encoding="utf-8")
+    for root, path, edit, refused in (
+            ("system_repo", "BIBLE.md", ("SYSTEM = 1", "SYSTEM = 2"), "CORE_PROTECTION_BLOCKED"),
+            ("active_workspace", "../outside.txt", ("OUT = 1", "OUT = 2"), "Path traversal")):
+        item = {"old_str": edit[0], "new_str": edit[1]}
+        shared = registry.execute("edit_batch", {"root": root, "path": path, "edits": [item]})
+        assert refused in shared, shared
+        assert shared == registry.execute("edit_batch", {"root": root, "edits": [{"path": path, **item}]})
+    allowed = registry.execute("edit_batch", {"path": "mod.py", "edits": [
+        {"old_str": "A = 1", "new_str": "A = 2"}, {"path": "other.py", "old_str": "C = 1", "new_str": "C = 2"},
+        {"old_str": "B = 1", "new_str": "B = 2"}]})
+    assert allowed.startswith("✅") and "path='mod.py' named the 2 edit(s) that had no path" in allowed, allowed
+    own = registry.execute("edit_batch", {"path": "other.py", "edits": [
+        {"path": "other.py", "old_str": "C = 2", "new_str": "C = 3"}]})
+    assert own.startswith("✅") and "path='other.py' ignored: every edit names its own path" in own, own
+    empty = {"path": "", "old_str": "C = 3", "new_str": "C = 4"}  # a present path stays, even empty (a host binding)
+    canonical = registry.execute("edit_batch", {"edits": [empty]})
+    kept_empty = registry.execute("edit_batch", {"path": "other.py", "edits": [empty]})
+    assert not canonical.startswith("✅") and canonical in kept_empty, kept_empty
+    note = {"path": "Desktop/absent-note.txt", "old_str": "N", "new_str": "M"}
+    per_item = registry.execute("edit_batch", {"root": "user_files", "edits": [note]})
+    unused = registry.execute("edit_batch", {"root": "user_files", "path": str(project / "mod.py"), "edits": [note]})
+    assert per_item in unused and "ROOT_REQUIRED" not in unused, unused
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    identity = tmp_path / "drive" / "memory" / "identity.md"
+    identity.parent.mkdir(parents=True, exist_ok=True)
+    identity.write_text("OLD\n", encoding="utf-8")
+    plugin = tmp_path / "drive" / "skills" / "external" / "demo" / "plugin.py"
+    plugin.parent.mkdir(parents=True, exist_ok=True)
+    plugin.write_text("P = 1\n", encoding="utf-8")
+    memory_edit = {"path": "memory/identity.md", "old_str": "OLD", "new_str": "NEW"}
+    per_edit = registry.execute("edit_batch", {"root": "runtime_data", "edits": [memory_edit]})
+    assert "LIGHT_MODE_BLOCKED" in per_edit, per_edit
+    decoy = registry.execute("edit_batch", {"root": "runtime_data", "path": "skills/external/demo/plugin.py",
+                                            "edits": [memory_edit]})
+    assert decoy == per_edit
+    plugin_edit = {"old_str": "P = 1", "new_str": "P = 2"}
+    mixed = registry.execute("edit_batch", {"root": "runtime_data", "path": "skills/external/demo/plugin.py",
+                                            "edits": [plugin_edit, memory_edit]})
+    assert not mixed.startswith("✅") and mixed == registry.execute("edit_batch", {"root": "runtime_data", "edits": [
+        {"path": "skills/external/demo/plugin.py", **plugin_edit}, memory_edit]}), mixed
+    assert identity.read_text(encoding="utf-8") == "OLD\n" and plugin.read_text(encoding="utf-8") == "P = 1\n"
+    assert (system / "BIBLE.md").read_text(encoding="utf-8") == "SYSTEM = 1\n"
+    assert (tmp_path / "outside.txt").read_text(encoding="utf-8") == "OUT = 1\n"
+    assert (project / "mod.py").read_text(encoding="utf-8") == "A = 2\nB = 2\n"
+    assert (project / "other.py").read_text(encoding="utf-8") == "C = 3\n"
 
 
 @pytest.mark.parametrize("tool", ["write_file", "apply_patch", "edit_batch"])
@@ -833,9 +881,7 @@ def test_pro_mode_protected_edit_announces_itself(tmp_path, monkeypatch, tool):
     that stays silent makes a protected edit look like an ordinary one.
     """
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
-    from ouroboros import config
 
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "pro")
     reg, repo = _guard_registry(tmp_path)
     (repo / "BIBLE.md").write_text("P1 honest\n", encoding="utf-8")
     args = {

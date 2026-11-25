@@ -1,5 +1,5 @@
 import { isTerminalTaskDetail, taskPresentation, taskTerminalSummary } from './log_events.js';
-import { fmt, tr } from './i18n.js';
+import { fmt, tr, tx } from './i18n.js';
 import { waitFacts } from './question_presentation.js';
 import { strokeIcon } from './page_icons.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
@@ -142,7 +142,7 @@ export function modelActivityPresentation(activity) {
 // of its work (`work.owner`) or the owner's System message about this task (`ownerMove`).
 export function taskActivityPresentation({ phase = 'working', outcome = '', ended = false,
     finalizing = false, ownerWait = '', modelWaiting = false, modelOwnerAction = false, resumeAction = false,
-    ownerMove = false, hold = '', pauseCause = '', stopPolicy = '', finishingReviews = false, modelActivity = null,
+    ownerMove = false, hold = '', pauseCause = '', pauseReason = '', stopPolicy = '', finishingReviews = false, modelActivity = null,
     workView = null, work = null, quietEffective = false } = {}) {
     if (ended) return outcomeView(outcome, quietEffective);
     const theirs = Boolean(ownerMove || work?.owner);
@@ -153,9 +153,16 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
     }
     let current;
     const modelPhase = modelActivityPresentation(modelActivity);
-    if (phase === 'unknown') current = phaseView('unknown', CHIP.unconfirmed(), 'warn', { mark: CENSUS_MARKS.unknown });
+    // A recorded queue hold speaks where the server's view of the card cannot be confirmed: its label is the chip's
+    // word, parent and child alike, as in 7.11 (an unconfirmed work gave no view there, and children read no member
+    // state). The card's own parked unknown still outranks it, as it did then.
+    const holdSpeaks = Boolean(hold) && workView?.phase === 'unknown';
+    if (phase === 'unknown' && !holdSpeaks) {
+        current = phaseView('unknown', CHIP.unconfirmed(), 'warn', { mark: CENSUS_MARKS.unknown });
+        if (workView?.phase === 'unknown' && workView.secondary) current.secondary = workView.secondary;
+    }
     // The card of a work's current episode says the work's word and its line (work_status.cardWorkView).
-    else if (workView) current = { ...phaseView(workView.phase, workView.text, workView.classes, { mark: work?.mark,
+    else if (workView && !holdSpeaks) current = { ...phaseView(workView.phase, workView.text, workView.classes, { mark: work?.mark,
         tone: workView.tone, waiting: workView.waiting }), ...(workView.secondary ? { secondary: workView.secondary } : {}),
         // The exact call still explains the work's word in the card's details where both say the same word; a held
         // work's latest refused Resume (`note`, already dated and attributed) explains it there too.
@@ -164,7 +171,7 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
     else if (['budget_paused', 'budget_pausing'].includes(phase)) {
         // The chip says the word; what holds it, a hold and the reviews a settled Pause lets finish are its quieter
         // second fact.
-        const beside = [CAUSE_SENTENCES[pauseCause]?.() || '', hold,
+        const beside = [pauseCause === 'authority' && pauseReason ? tx(pauseReason) : CAUSE_SENTENCES[pauseCause]?.() || '', hold,
             phase === 'budget_paused' && finishingReviews ? reviewsFinishing() : ''].filter(Boolean);
         // A cold sleep wakes by itself: it waits, it is not paused.
         const mark = phase === 'budget_paused' && pauseCause === 'sleep' ? 'still' : CENSUS_MARKS[phase];
@@ -219,31 +226,36 @@ export function censusTaskPhase(activity, detail = null, connected = true, { wai
         phase: connected && activity && !activity._activityUnconfirmed ? activity.phase || 'unknown' : 'unknown',
         ownerWait: activityWaitPhase(activity || {}), modelWaiting: waiting, modelOwnerAction: waiting && ownerAction,
         resumeAction: activity?.can_resume === true && activity?.pause_cause !== 'owner',
-        hold: activity?.project_admission_hold?.label || '', pauseCause: activity?.pause_cause || '',
+        hold: activity?.project_admission_hold?.label || '', pauseCause: activity?.pause_cause || '', pauseReason: activity?.pause_reason || '',
         finishingReviews: Boolean(activity?.finishing_reviews),
         modelActivity: activity?.model_activity,
     });
 }
 
 function recordPhase(record = {}, terminalPhase = 'done') {
+    const finishingChild = record.isSubagent && record.finalizingHold;
+    const view = finishingChild && !record.workView?.finalizing ? null : record.workView;
+    const phase = record.isSubagent ? view?.phase || record.censusPhase || '' : record.censusPhase || 'working';
     // The card's one parked word also represents an optional question gap;
     // its observed census phase distinguishes that from unknown activity.
     const ownerWait = record.parkedPhase === 'owner_wait' ? 'owner_wait'
         : record.parkedPhase === 'unknown' && record.censusPhase && record.censusPhase !== 'unknown' ? 'unknown' : '';
     return taskActivityPresentation({
         phase: ownerWait ? record.censusPhase || 'working'
-            : record.parkedPhase || record.censusPhase || 'working',
+            : record.parkedPhase || (finishingChild ? 'finalizing' : phase),
         outcome: record.finished ? terminalPhase || 'done' : record.observedOutcome,
-        ended: Boolean(record.finished), finalizing: Boolean(record.finalizingHold),
+        ended: Boolean(record.finished), finalizing: Boolean(record.finalizingHold || view?.finalizing),
         quietEffective: record.quietEffective ?? record.historicalTerminal?.quiet_effective,
         ownerWait,
         modelWaiting: Boolean(record.modelWaiting), modelOwnerAction: Boolean(record.modelWaiting && record.modelOwnerAction),
         // The census's explicit Resume (main_waiting's rule): the owner's own Pause is not the owner's move.
         resumeAction: record.canResume === true && record.pauseCause !== 'owner',
-        ownerMove: Boolean(record.ownerMove), hold: record.projectHold,
-        pauseCause: record.pauseCause, stopPolicy: record.cancelPendingPolicy,
+        // The hold speaks for a card whose member state the server could not confirm, not for a card the client itself
+        // parked because it lost the connection (chat.js sets `parkedOffline` and a fresh connected queue read clears it).
+        ownerMove: Boolean(record.ownerMove), hold: record.parkedOffline && record.parkedPhase === 'unknown' ? '' : record.projectHold,
+        pauseCause: record.pauseCause, pauseReason: record.pauseReason, stopPolicy: record.cancelPendingPolicy,
         finishingReviews: Boolean(record.finishingReviews),
-        modelActivity: record.modelActivity, workView: record.workView, work: record.workLook,
+        modelActivity: record.modelActivity, workView: view, work: finishingChild && !view ? null : record.workLook,
     });
 }
 
@@ -282,6 +294,7 @@ export function syncParkedPhase(record, phase = '', activity = {}) {
     const cause = ['budget_paused', 'budget_pausing'].includes(parked) ? String(activity.pause_cause || '') : '';
     record.parkedPhase = parked;
     record.pauseCause = cause;
+    record.pauseReason = cause ? activity.pause_reason || '' : '';
     record.censusPhase = phase;
     record.canResume = activity.can_resume === true;  // a Resume only the owner gives, unless their own Pause holds it
     record.modelActivity = activity.model_activity || null;
@@ -289,6 +302,30 @@ export function syncParkedPhase(record, phase = '', activity = {}) {
     record.detached = activity.detached === true;  // a detached work's census row (CONTRACTS K7/K8), in any room
     const desired = desiredLiveCardPhase(record);
     return setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary);
+}
+
+// A fresh frame can settle a gap. An exact member projection still owns its published word and reason. true when the
+// card then agrees with this frame (a running member does); a recorded hold ignores it (work_status.applyCardWorkViews).
+export function observeChildPhase(record, phase) {
+    const parkedUnknown = record.parkedPhase === 'unknown';
+    if (!parkedUnknown && record.workView && record.workView.phase !== 'unknown') return record.workView.phase === 'working';
+    if (parkedUnknown || record.workView || record.censusPhase !== phase) {
+        record.workView = record.workLook = null;
+        syncParkedPhase(record, phase);
+    }
+    return true;
+}
+
+// A live admission can fill a child's unknown phase, never override its later state. A leaf's
+// activity speaks for that executor alone; historical frames do not establish current work.
+export function frameObservesPhase(record, summary, live) {
+    if (!live || (record.isSubagent && summary.activity)) return false;
+    const phase = summary.phase;
+    if (phase === 'working' || phase === 'thinking') return true;
+    if (phase !== 'queued' || record.finished || !record.isSubagent) return false;
+    const known = record.workView ? record.workView.phase !== 'unknown'
+        : Boolean(record.censusPhase) && record.censusPhase !== 'unknown';
+    return !known;
 }
 
 // A replayed final may preserve only an already-terminal phase. Ordinary DOM
@@ -407,7 +444,7 @@ export function setLiveCardPhase(record, phase = 'working', text = '', className
 // expanded card says about its chip or amount, or its list of labelled facts.
 export function ownLiveDetail(record, key) {
     const own = node => Boolean(node?.dataset && key in node.dataset);
-    for (const node of record?.root?.children || []) {
+    for (const node of (record?.episodeDisclosure || record?.root)?.children || []) {
         if (own(node)) return node;
         if (node.classList?.contains('chat-live-details')) {
             const line = [...(node.children || [])].find(own);
@@ -430,6 +467,10 @@ export function paintLiveDetail(record, key, text = '') {
 function phaseSecondaryElement(record) {
     if (record.phaseSecondaryEl === undefined) {
         record.phaseSecondaryEl = record.root?.querySelector?.('[data-live-phase-secondary]') || null;
+    }
+    const el = record.phaseSecondaryEl;
+    if (record.isSubagent && el && record.summaryButtonEl && el.parentNode !== record.summaryButtonEl) {
+        record.summaryButtonEl.insertBefore(el, record.episodesEl || null);
     }
     return record.phaseSecondaryEl;
 }
@@ -481,7 +522,12 @@ export function setHistoricalUnavailable(record, enabled, held) {
 
 export function setHistoricalUnconfirmed(record) {
     if (!record || record.finished || record.reviewAnchor || record.historicalUnavailable
-            || record.historicalUnconfirmed) return false;
+            || record.historicalUnconfirmed
+            // A nested card its member state already speaks for is no quiet historical row: a known own
+            // phase, or its own external work observed beside an unknown one (the view's secondary line,
+            // the same fact taskActivityPresentation carries into the unconfirmed chip).
+            || (record.isSubagent && record.workView
+                && (record.workView.phase !== 'unknown' || record.workView.secondary))) return false;
     record.historicalUnconfirmed = true;
     setInertCardPresentation(record, true);
     return true;

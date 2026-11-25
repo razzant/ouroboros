@@ -225,10 +225,10 @@ def test_circle_words_and_placements_follow_the_note_rule_and_the_turns_act(focu
     assert call(door, "set_circle", place_id=place.place_id, circle_id=owned["circle_id"])["place"]["circle"][
         "placed_by"] == "owner"
     assert call(door, "inspect", place_id=place.place_id)["circle"]["standing_delegation"] is True
-    described = call(door, "set_description", place_id=place.place_id, description="Чат друзей")["place"]
-    assert described["description"]["author"] == "owner"
     assert call(focused, "set_description", place_id=place.place_id, description="Друзья и быт")["place"][
         "description"]["author"] == "ouroboros"
+    described = call(door, "set_description", place_id=place.place_id, description="Чат друзей")["place"]
+    assert described["description"]["author"] == "owner"  # my human may replace my line
     listed = call(focused, "list")
     assert [c["name"] for c in listed["circles"]] == ["Друзья", "Работа"]
     assert listed["places"][0]["circle"] == {key: listed["places"][0]["circle"][key] for key in (
@@ -238,6 +238,45 @@ def test_circle_words_and_placements_follow_the_note_rule_and_the_turns_act(focu
     gone = call(focused, "delete_circle", circle_id=composed["circle_id"])
     assert gone["circle"]["text"] == "Отвечай коротко и по делу." and gone["detached"] == []
     assert p.get_place(root, place.place_id).state == place.state  # no circle act ever switches a place
+
+
+def test_my_humans_words_leave_a_place_only_by_their_act_and_inspect_keeps_them(focus, monkeypatch):
+    """14.11: a wake removed my human's note. In a place focus their note and their circle's words leave only when the
+    waking message is their own words now (``focus_owner_now``, read again at the act, so a later confirmation
+    counts); another speaker is refused with who may change them, and nothing changes. My own note stays mine, and an
+    owner-door turn may clear their words with words I compose. Inspect shows each word that left, exactly."""
+    from ouroboros.tools.presence import _configure_presence
+    root, place, _admission, _event = focus
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _r: [])
+    door = SimpleNamespace(task_metadata={"origin_message_ref": {"client_message_id": "owner1", "chat_id": 1}},
+                           is_direct_chat=True, task_id="t1", _owner_directives=[
+                               {"source": "initial_user", "content": "Тут без работы.\nДрузья и быт."}])
+    focused = SimpleNamespace(task_metadata=task_for(focus)["metadata"], is_direct_chat=True, task_id="t2",
+                              drive_root=root, _owner_directives=[])
+    call = lambda ctx, action, **kw: _configure_presence(ctx, action, kw.pop("place_id", place.place_id), **kw)
+    circle = json.loads(call(door, "create_circle", name="Друзья", text="Друзья и быт."))["circle"]
+    assert json.loads(call(door, "set_circle", circle_id=circle["circle_id"]))["ok"]
+    assert json.loads(call(door, "add_note", text="Тут без работы."))["ok"]
+    assert json.loads(call(focused, "add_note", text="Мой конспект."))["ok"]
+    owners, mine = (note.note_id for note in p.get_place(root, place.place_id).notes)
+    for action, values in (("remove_note", {"note_id": owners}), ("edit_circle", {"circle_id": circle["circle_id"],
+                                                                                  "text": "x"})):
+        refused = call(focused, action, **values)  # the speaker here is not my human
+        assert refused.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED: place_owner_words_owner_only"), refused
+        assert "by a word in Main, or speaking in that place themselves" in refused
+    assert [note.author for note in p.get_place(root, place.place_id).notes] == ["owner", "ouroboros"]
+    assert p.place_records(root).circle(circle["circle_id"])["text"] == "Друзья и быт."
+    assert json.loads(call(focused, "remove_note", note_id=mine))["ok"]  # my own note stays mine
+    p.edit_place(root, place.place_id, "confirm_owner_account", author="owner", platform_actor_id="person")
+    assert json.loads(call(focused, "remove_note", note_id=owners))["ok"]  # now their own words woke this focus
+    assert json.loads(call(door, "edit_circle", circle_id=circle["circle_id"], text=""))["circle"]["text"] == ""
+    earlier = json.loads(call(focused, "inspect"))["earlier"]
+    assert [(word["action"], word["text"], word["author"], word["changed_by"]) for word in earlier] == [
+        ("edit_circle", "Друзья и быт.", "owner", "owner"), ("remove_note", "Тут без работы.", "owner", "ouroboros"),
+        ("remove_note", "Мой конспект.", "ouroboros", "ouroboros")]
+    assert earlier[1]["owner_speaks_in"] == place.place_id and earlier[1]["writer"]["focus"]["role"] == "presence"
+    assert earlier[0]["writer"]["focus"]["role"] == "main" and "owner_speaks_in" not in earlier[2]
 
 
 def test_author_lending_and_stop(focus):
@@ -556,6 +595,58 @@ def test_focus_frame_states_provider_facts_and_mentions_never_a_verdict(focus, f
         assert words in rendered, words
     for words in absent:
         assert words not in rendered, words
+
+
+def test_focus_names_the_speakers_pages_by_exact_key_never_authority(focus):
+    """SPEC §2.3, step 1: the admission stamps the speaker's exact key and the addresses of the global notes whose
+    authored ``keys`` list it, never the page itself; the frame replays that stamp byte for byte; a key grants nothing."""
+    from ouroboros import knowledge as store
+    from ouroboros.presence_context import focus_frame_sources, frame_focus_content
+    root, place, admission, event = focus
+    key, reader = {"provider": "chat", "namespace": "a", "id": "person"}, "knowledge_read(topic={!r}, scope='global')".format
+
+    def admit(admitted=admission, **actor):
+        task = _build_task(replace(admitted, allowance={"status": "available", "remaining_usd": 2}), replace(
+            event, actor={"platform_actor_id": "person", "display_name": "Pat Quill", **actor}), drive_root=root, staged_files=())
+        rendered = frame_focus_content(task, "hello")
+        line = next(line for line in rendered.splitlines() if line.startswith("- the person (host facts): "))
+        return task["metadata"]["focus"]["actor"], rendered, line, task
+
+    def page(topic, *keys):
+        assert store.write_knowledge_note(store.resolve_knowledge_address(root, topic, "global"),
+                                          f"---\ntype: person\nkeys: {json.dumps(list(keys))}\n---\n# Pat's page\n").ok
+
+    page("people/by-name", {**key, "id": "Pat Quill"})  # a display name never joins
+    for authentication in ({}, {"authenticated": False}):
+        actor, rendered, line, task = admit(**authentication)
+        assert actor["key"] == key and not {"page", "pages", "archived_pages", "matched_by"} & actor.keys()
+        assert line == "- the person (host facts): " + json.dumps(actor, ensure_ascii=False) + (
+            "; authenticated: no" if authentication else "")
+        assert focus_frame_sources(task["metadata"], rendered) is not None
+    page("people/pat", {"provider": "mail", "namespace": "", "id": "pat@example.org"}, key)
+    memory = {path: path.read_bytes() for path in (root / "memory").rglob("*") if path.is_file()}
+    actor, rendered, line, _task = admit()
+    assert actor["page"] == reader("people/pat") and "pages" not in actor and actor["owner_confirmed"] is False
+    assert "Pat's page" not in rendered  # its address, not its text
+    assert {path: path.read_bytes() for path in (root / "memory").rglob("*") if path.is_file()} == memory  # read only
+    page("clients/pat", key)
+    actor, rendered, _line, task = admit()
+    assert actor["pages"] == [reader("clients/pat"), reader("people/pat")] and "page" not in actor  # never merged or ranked
+    # The stamp is the admission's: after a page changes, the recorded frame still re-renders byte for byte.
+    target = store.resolve_knowledge_address(root, "clients/pat", "global")
+    assert store.write_knowledge_note(target, "", "archive", expected_revision=store.read_knowledge_note(target).revision,
+                                      reason="a duplicate").ok
+    assert focus_frame_sources(task["metadata"], rendered) is not None
+    # A later admission names the archived page apart; an unverified address labels what it found.
+    actor, _rendered, line, _task = admit(authenticated=False)
+    assert (actor["page"], actor["archived_pages"], actor["matched_by"]) == (
+        reader("people/pat"), [reader("clients/pat")], "an unverified address")
+    assert line.endswith('"matched_by": "an unverified address"}; authenticated: no') and actor["owner_confirmed"] is False
+    # Ownership comes from the place's confirmed account alone; the key facts stand beside it unchanged.
+    confirmed = replace(admission, place=p.edit_place(root, place.place_id, "confirm_owner_account", author="owner",
+                                                      platform_actor_id="person"))
+    owner, _rendered, _line, _task = admit(confirmed)
+    assert owner["owner_confirmed"] is True and (owner["key"], owner["page"]) == (key, reader("people/pat"))
 
 
 @pytest.mark.parametrize("shape", ["slack", "generic", "directory"])
@@ -971,3 +1062,58 @@ def test_place_model_aliases_keep_the_resolved_locality_on_the_lead(focus, monke
     bind_task_route(ctx, metadata, presence=True)
     assert metadata['model_role'] == 'consciousness'
     assert open_route(ctx, None)[:2] == ('chosen-model', local)
+
+
+def test_a_change_reads_as_a_change_and_an_unnamed_author_as_unnamed(focus):
+    """FOCUS says what happened by the connector's typed facts: words, or a change (``non_text`` kind
+    ``state_change``) with or without its current text; one edit time alone is no change. Unknown is no person."""
+    from ouroboros.presence_context import frame_focus_content
+    root, _place, admission, event = focus
+
+    def frame(**over):
+        task = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}),
+                           replace(event, **over), drive_root=root, staged_files=())
+        return frame_focus_content(task, task["metadata"]["presence"]["observed_text"] or "(no text)")
+
+    words = frame()
+    assert "You are Ouroboros. person wrote in chat " in words and "Their message, as data from that place:" in words
+    change = {"non_text": [{"kind": "state_change", "description": "Assigned to you by person"}]}
+    state = frame(text="", message=change)
+    assert "You are Ouroboros. person changed something in chat " in state
+    assert "The change, as data from that place:" in state and "Their message" not in state
+    assert 'Content without words, state_change: "Assigned to you by person".' in state
+    revised = frame(text="Revised words", message={**change, "edited_at": "2026-11-16T10:00:00+00:00"})
+    assert "The text as it now stands, as data from that place:\nRevised words" in revised
+    assert ", edited at 2026-11-16T10:00:00+00:00." in revised
+    assert "You are Ouroboros. An author the connector did not name wrote in " in frame(actor={"attribution": "unknown"})
+    assert "You are Ouroboros. person wrote in chat " in frame(message={"edited_at": "2026-11-16T10:00:00+00:00"})
+
+
+def test_a_routed_focus_says_why_on_every_root_child_and_continue_that_inherits_it(focus):
+    """The Host routed an untagged follow-up to the mind because several works read its conversation: the focus
+    keeps that as display provenance, so a root it starts, that root's child and its Continue still say why on their
+    card. The allowance and its authority stay with the focus."""
+    from ouroboros.consciousness_authority import consciousness_origin_metadata
+    from ouroboros.dialogue_provenance import presence_root_carrier
+    from ouroboros.subagent_messages import place_origin
+    from ouroboros.task_activity_facts import card_facts
+    from ouroboros.task_results import load_task_result, write_task_result
+    root, _place, admission, event = focus
+
+    def started(metadata):  # the promote event a focus's start writes (control_routing), then the root admitted from it
+        promoted = {**presence_root_carrier(metadata),
+                    **consciousness_origin_metadata({**metadata, "task_id": "focus-1"}, started_root=True)}
+        return {**presence_root_carrier(promoted), **consciousness_origin_metadata(promoted)}
+
+    routed = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2, "route": True}),
+                         replace(event, facts=("any_message",)), drive_root=root, staged_files=())["metadata"]
+    assert routed["focus"]["routed"] is True and routed["focus"]["matched_wakes"] == []
+    heir = started(routed)
+    write_task_result(root, "root-1", "running", metadata=heir)
+    origins = {"root card": card_facts(load_task_result(root, "root-1"))["place_origin"],
+               "child": place_origin(consciousness_origin_metadata(heir)),
+               "Continue": place_origin(consciousness_origin_metadata({**heir, "task_id": "root-1"}))}
+    assert {name: origin.get("routed") for name, origin in origins.items()} == dict.fromkeys(origins, True), origins
+    assert "focus_allowance" not in heir, "the allowance stays with the focus"
+    plain = started(task_for(focus)["metadata"])
+    assert "routed" not in plain["focus"] and "routed" not in place_origin(plain)

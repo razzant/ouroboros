@@ -762,7 +762,7 @@ class Memory:
                         "quota_met": own >= limit, "older_available": bounded, "gaps": gaps,
                         "archives_bounded": False, "archives": 0, "archives_available": 0,
                         "live_size": upper, "live_window": upper - lower}
-            return [entry.row for entry in reversed(records)], coverage
+            return [{**entry.row, "history_id": entry.history_id} for entry in reversed(records)], coverage
 
         from ouroboros.jsonl_tail import read_rotated_jsonl_entries, remembered_listing, task_archive_parser
         from ouroboros.tool_call_log import counts_as_call, logical_calls
@@ -910,6 +910,7 @@ class Memory:
         """The newest ``limit`` progress rows, oldest first; each run of host waits among them is
         one line that does not count against ``limit`` (``checkpoint_waits.fold_progress``)."""
         from ouroboros.checkpoint_waits import fold_progress
+        from ouroboros.host_notice import mind_text
 
         lines, own = [], 0
         for e in reversed(fold_progress(entries or [])):
@@ -917,7 +918,8 @@ class Memory:
             if own > limit:
                 break
             ts = str(e.get('ts', ''))
-            lines.append(f"⚙️ {ts[11:16] if len(ts) >= 16 else ''} {short(str(e.get('text', '')), 800)}")
+            body = str(e.get('text', '')) + mind_text(e)  # a clipped row names where its whole text is stored
+            lines.append(f"⚙️ {ts[11:16] if len(ts) >= 16 else ''} {short(body, 800)}" + (f" [whole row: {e['history_id']}]" if len(body) > 800 and e.get('history_id') else ""))
         return "\n".join(reversed(lines))
 
     def summarize_tools(self, entries: List[Dict[str, Any]]) -> str:

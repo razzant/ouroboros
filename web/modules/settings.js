@@ -6,9 +6,8 @@
  * at the home (in two panes beside the first-level page last opened on this device, kept in localStorage). An address no page registers (a skill written for the tabs Settings had) never shows an empty page:
  * the home opens with the address's last part searched, its hyphens and underscores read as spaces (`local-model`
  * searches "local model"), and search says where the thing lives now. Pages open in levels. One opened from the
- * home, a search result or outside Settings is the first level; one opened from a page lies over that page. The
- * header's Back names where it leads: the level under it, the home ("Settings"), or the place outside Settings that
- * opened it (`back: { label, go }`).
+ * home, search or outside keeps its list page under a child address; one opened from a page lies over that page. The
+ * shell names the top page layer's Back: the parent level, Settings, or a jump's origin.
  *
  * The page box's width decides the layout (settings.css `@container sectionplace`). Narrow: one level alone, each one
  * `page: true` layer of the shell's stack (layers.js), so Escape, the browser's or Android's Back and Telegram's Back
@@ -20,23 +19,22 @@
  * Settings is shown, after a reconnect and when the window is seen again. A page reads and repaints on it for its own
  * path; the row helper never rewrites a field that holds focus or typed text. */
 
-import { settingsReturn } from './dashboard.js';
 import { currentLayout, sectionHoldsTwoPanes } from './layout.js';
-import { renderBackControl, renderPageHeader, setBackControlTarget } from './page_header.js';
+import { renderPageHeader } from './page_header.js';
 import { revealPastFade, bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
 import { isDoorId, mountSettingsHome, settingsTitle } from './settings_home.js';
-import { settingsPageFor } from './settings_pages.js';
+import { retireMcpStatusRead } from './mcp_settings.js';
+import { extensionsPageOf, settingsPageFor } from './settings_pages.js';
+import { createSectionLevels, isVisible as visible } from './section_levels.js';
+import { HOME_ROWS } from './settings_rows.js';
 import { resetSecretReveals } from './settings_secrets.js';
-import { setResult } from './ui_primitives.js';
 // The page modules: each registers its family when it is imported (settings_pages.js).
 import './settings_ui.js';
 import './settings_accounts.js';
 import './subagents_settings.js';
-import './mcp_settings.js';
 import './model_roles.js';
 import './settings_local_model.js';
-import './settings_extension_forms.js';
 
 // The first-level page last opened on this device (docs/DESIGN.md "Settings": a section lands on its first page the
 // first time, later on the last one opened on the device). A stored page no longer registered falls back to Models.
@@ -46,10 +44,13 @@ function readLastFirst() {
 }
 
 const quoted = (value) => String(value).replace(/["\\]/g, '\\$&');
-const visible = (el) => Boolean(el?.isConnected && el.getClientRects?.().length);
+
+// Before Extensions, the global tool timeout lived beside the MCP timeout on Tools.
+const settingsTarget = (path, row) => path === 'tools' && row === 'OUROBOROS_TOOL_TIMEOUT_SEC'
+    ? 'computer/advanced' : String(path || '');
 
 export function initSettings(ctx = {}) {
-    const { state, ws, layers = null, setBeforePageLeave, showPage, openDashboardTab, stateSnapshots } = ctx;
+    const { state, ws, layers = null, setBeforePageLeave, showPage, openExtensions, openDashboardTab, stateSnapshots } = ctx;
     state.settingsPath = '';
     const page = document.createElement('div');
     page.id = 'page-settings';
@@ -60,7 +61,7 @@ export function initSettings(ctx = {}) {
     // lead on the shell's own columns). A phone's home has one band, `☰ Settings`; its search starts the list.
     const leadHtml = `<div class="settings-lead section-lead" data-settings-lead>
             <span class="settings-lead-col settings-lead-rail section-lead-col section-lead-rail" data-settings-search-slot></span>
-            <span class="settings-lead-col settings-lead-page section-lead-col section-lead-page">${renderBackControl({ to: 'Settings', attrs: 'data-settings-back' })}<span class="app-page-lead-title" data-settings-lead-name></span></span>
+            <span class="settings-lead-col settings-lead-page section-lead-col section-lead-page"><span class="app-page-return" data-page-return></span><h2 class="app-page-lead-title" data-settings-lead-name></h2></span>
         </div>`;
     page.dataset.sectionView = 'home';
     page.innerHTML = `${renderPageHeader({ page: 'settings', leadHtml })}
@@ -73,20 +74,18 @@ export function initSettings(ctx = {}) {
     const header = page.querySelector('.app-page-header');
     const homeEl = page.querySelector('[data-settings-home]');
     const levelsEl = page.querySelector('.settings-levels');
-    const headerBack = page.querySelector('.app-page-header [data-settings-back]');
     const leadName = page.querySelector('[data-settings-lead-name]');
-    headerBack?.addEventListener('click', () => { const level = top(); if (level) backFrom(level); });
-    const levels = [];
-    const aside = new Map();  // path → a level put aside with unsaved words
-    const layered = new Set();
     const places = new WeakMap();  // a column → where it was scrolled while visible
     let opening = false;
+    let landedBy = null;  // the return of the jump landing now: the levels it shows stay under it
     let besideBefore = false;
-    let serial = 0;
     const shown = () => state.activePage === 'settings';
-    const top = () => levels[levels.length - 1] || null;
     const beside = () => levels.length > 0 && visible(homeEl);
-    const pageCtx = { openSettings: (path, options) => go(path, options), openDashboardTab, showPage, layers, ws, state, readSettings };
+    const pageCtx = { openSettings: (path, options) => go(path, options), openDashboardTab, showPage, layers, ws, state, readSettings,
+        onScreen: (path) => sectionLevels.onScreen(path) };
+    const sectionLevels = createSectionLevels({ place: 'settings', pane: levelsEl, layers, shown, ctx: pageCtx,
+        title: settingsTitle, onTitled: () => paintLead() });
+    const { levels, top, arrive, revealRow } = sectionLevels;
     // Landing (owner 13.11, "1. C"): from 40rem the list and an open page always stand together, never an empty pane;
     // a second press of the chosen row keeps its page when that page is on top, and returns to it from a deeper level
     // (the chosen row is the open page's own: a door from one page of the list to another chooses the other).
@@ -129,7 +128,8 @@ export function initSettings(ctx = {}) {
     }
     const panes = () => sectionHoldsTwoPanes(page);
     function placeSearch() {
-        const inHome = currentLayout() === 'stack' && !panes();
+        const inHome = currentLayout() === 'stack';
+        page.dataset.searchPlace = inHome ? 'list' : 'band';
         const parent = inHome ? cardHome : searchSlot;
         if (!searchField || !parent) return;
         header.toggleAttribute('data-search-in-home', inHome);
@@ -148,14 +148,16 @@ export function initSettings(ctx = {}) {
         const saved = lastFirst;
         let target = 'models';
         try {
-            const registered = !isDoorId(saved) && settingsPageFor(saved);
+            const registered = !isDoorId(saved) && !extensionsPageOf(saved) && settingsPageFor(saved);
             if (registered && (!registered.exists || await registered.exists(saved))) target = saved;
         } catch { /* An unread registry cannot establish that the stored page still exists. */ }
         landing = false;
         if (!panes() || levels.length || ownChosen || opening || !shown() || saved !== lastFirst) return;
         // Open a resolved page directly: unknown-path search paints the home and queues ensurePage again.
-        // Landing never overwrites the device's choice, including while its registry cannot be read.
-        open(target, { under: 0, remember: false });
+        // Landing never overwrites the device's choice, including while its registry cannot be read. Settings entered
+        // from the sidebar or drawer takes the focus into the page it lands on (Back returns it to the row); a row of
+        // its own that holds the focus (one a return gave back) keeps it.
+        open(target, { under: 0, remember: false, quiet: page.contains(document.activeElement) });
     };
     let panesBefore = null;
     function placeOverview(level) {
@@ -180,180 +182,67 @@ export function initSettings(ctx = {}) {
         return showing;
     }
 
-    // A door out of Settings. Pressed inside Settings (`back`: the path it was pressed on), it gives where it leads a
-    // Back to that path (dashboard.js settingsReturn): in the header's Back slot before the page's name (the
-    // Dashboard's band, a page of its own such as Circles or Skills); only a page without that slot takes it as its
-    // first row. Leaving that page any other way drops it (onPageShown). A door asked for from
-    // outside Settings (a capsule's `dashboard:costs`) gets no Back: nobody came from Settings. `main:context` shows
-    // Main and does nothing else: the Context capsule is the room's.
-    const doorBack = settingsReturn({ layers, openSettings: (path) => openFromOutside(path), id: 'settings-door-back' });
-    let leavingDoor = false;
-    async function leave(door, { row = '', back } = {}) {
+    // A door uses the shell's ordinary jump: no return callback belongs to a link.
+    async function leave(door, { row = '', ...options } = {}) {
         const [kind, name] = door.split(':');
-        const inside = typeof back === 'string';
-        leavingDoor = inside;
-        try {
-            if (kind === 'dashboard') return await openDashboardTab?.(name, inside ? { row, back } : { row });
-            const left = await showPage?.(kind === 'main' ? 'chat' : name);
-            const landed = left !== false && kind === 'page' && inside ? document.getElementById(`page-${name}`) : null;
-            let first = landed && [...landed.children].find((part) => part.matches('.app-page-header'))?.nextElementSibling;
-            if (first?.matches('.app-page-tabs')) first = first.nextElementSibling;
-            if (first?.matches('.dashboard-shell')) doorBack.show(first, back);
-            else if (first) doorBack.show(landed, back, first);
-            return left;
-        } finally {
-            // The destination's return replaces the Settings levels without consuming their browser Back entry.
-            leavingDoor = false;
-            syncLayers();
-        }
+        if (kind === 'skills' || door === 'page:skills') return openExtensions?.(kind === 'skills' ? door.slice(7) : '', { row, ...options });
+        if (kind === 'dashboard') return openDashboardTab?.(name, { row, ...options });
+        return showPage?.(kind === 'main' ? 'chat' : name, options);
     }
 
     // `view` is what a door asks its page to show first (Permissions' Reviewers: the Agents list on its reviewers).
-    function go(path = '', { row = '', back = null, fresh = false, opener = null, view = '' } = {}) {
-        const target = String(path || '');
-        if (isDoorId(target)) return leave(target, { row, back: state.settingsPath });
+    function go(path = '', { row = '', fresh = false, opener = null, view = '' } = {}) {
+        const target = settingsTarget(path, row);
+        if (isDoorId(target)) return leave(target, { row });
+        if (extensionsPageOf(target)) return openExtensions?.(target, { row });
         if (target && !settingsPageFor(target)) {
             ownChosen = true; // an explicit unknown address keeps its search, rather than re-entering landing
             closeLevels(0);
             home.search((target.split('/').filter(Boolean).pop() || '').replace(/[-_]+/g, ' ').trim());
             return true;
         }
-        const at = back || fresh ? -1 : levels.findIndex((level) => level.path === target);
+        const at = fresh ? -1 : levels.findIndex((level) => level.path === target);
         if (!target) closeLevels(0);
         else if (at >= 0) closeLevels(at + 1, { row });
-        else open(target, { row, back, under: back || fresh ? 0 : levels.length, opener, view });
+        else open(target, { row, under: fresh ? 0 : levels.length, opener, view });
         return true;
     }
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
-    // A level put aside with unsaved words (`close`) comes back as it was left; any other is drawn anew.
-    function open(path, { row, back, under, opener, view = '', remember = true }) {
+    // A jump-owned or unsaved level comes back as left; a closed clean page is drawn anew.
+    function open(path, { row, under, opener, view = '', remember = true, quiet = false }) {
+        const parent = path.split('/')[0];
+        if (!under && path.includes('/') && HOME_ROWS.some(row => row.to === parent) && settingsPageFor(parent)) {
+            open(parent, { under: 0, opener, remember, quiet });
+            under = levels.length;
+        }
         if (remember && !under && path !== lastFirst) {
             lastFirst = path;
             try { globalThis.localStorage?.setItem(LAST_PAGE_KEY, path); } catch { /* storage blocked: kept for this load */ }
         }
-        while (levels.length > under) close(levels.pop());
-        const focused = document.activeElement === document.body ? null : document.activeElement;
-        const kept = aside.get(path);
-        aside.delete(path);
-        const level = Object.assign(kept || { path, id: `settings-level-${++serial}`, view }, { back, opener: opener || focused });
-        if (!kept) {
-            level.el = document.createElement('section');
-            level.el.className = 'settings-page scroll-fade-y';
-            level.el.dataset.settingsPage = path;
-            level.el.tabIndex = -1;
-            level.el.setAttribute('aria-label', settingsTitle(path));
-            level.el.innerHTML = '<div class="settings-column"><div class="settings-page-body"></div></div>';
-            level.disposeFade = bindScrollFade(level.el);
-        }
-        // Only the arriving page moves (settings.css): the one that leaves is gone at once.
-        arrive(level.el);
-        levelsEl.append(level.el);
-        levels.push(level);
-        if (!kept) mount(level, row);
-        paint({ row, opened: level });
-    }
-
-    function mount(level, row) {
-        const found = settingsPageFor(level.path);  // `go` opens a level only for a path a page registered
-        const body = level.el.querySelector('.settings-page-body');
-        const failed = (err) => {
-            console.error('settings: a page failed to draw', level.path, err);
-            const line = document.createElement('p');
-            line.className = 'ui-result';
-            body.replaceChildren(line);
-            setResult(line, { text: `This page could not be shown: ${err?.message || err}`, tone: 'danger' });
-        };
-        try {
-            Promise.resolve(found.mount(body, { path: level.path, row, view: level.view || '', ctx: pageCtx })).then((handle) => {
-                if (level.closed) { handle?.unmount?.(); return; }
-                level.handle = handle;
-                // A page that learns its name while it draws (a skill's form) is named again.
-                level.el.setAttribute('aria-label', settingsTitle(level.path));
-                if (level === top()) paintLead();
-            }, failed);
-        } catch (err) { failed(err); }
-    }
-
-    // A level closes: the field it holds is left first (its row commits on that change), then its page is let go. A
-    // page that says it holds unsaved words (an editor with its own Save) is put aside whole instead: its path opens
-    // it again as it was left, while the app is open.
-    function close(level) {
-        const at = document.activeElement;
-        if (at && level.el.contains(at)) at.blur?.();
-        level.watch?.disconnect();
-        level.el.remove();
-        if (layered.delete(level.id)) layers?.remove(level.id);
-        if (level.handle?.unsaved?.()) { aside.set(level.path, level); return; }
-        level.closed = true;
-        level.disposeFade?.();
-        try { level.handle?.unmount?.(); } catch (err) { console.error('settings: a page failed to let go', level.path, err); }
+        const level = sectionLevels.open(path, { row, under, opener, view, jump: landedBy });
+        paint({ row, opened: level, quiet });
     }
 
     function closeLevels(keep, { row = '', quiet = false } = {}) {
-        const left = levels.length > keep ? levels[keep] : null;
-        while (levels.length > keep) close(levels.pop());
+        const left = sectionLevels.closeLevels(keep);
         paint({ row, returned: left, quiet });
     }
 
-    // The arriving page: held at its start state for its first paint, then it comes in (opacity and 8 px from the
-    // right on --motion-fade, settings.css; reduced motion keeps the fade alone). Nothing waits on it.
-    function arrive(el) {
-        el.dataset.settingsArrive = 'wait';
-        const run = () => {
-            if (el.dataset.settingsArrive !== 'wait') return;
-            el.dataset.settingsArrive = 'in';
-            el.addEventListener('animationend', () => { delete el.dataset.settingsArrive; }, { once: true });
-            setTimeout(() => { delete el.dataset.settingsArrive; }, 600);
-        };
-        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(run));
-        else delete el.dataset.settingsArrive;
-    }
-
     // The header's lead follows the open level: its name, and Back only where it leads to a level not on screen (one
-    // column: always; two panes: a level below the first, or a first level opened from outside Settings), named for
-    // where it leads.
+    // column: its open page; two panes: a deeper level). The shell paints Back from the layer stack.
     function paintLead() {
         const level = top();
         const overview = !level && Boolean(overviewEl && !overviewEl.hidden);
         page.dataset.sectionView = level || overview ? 'page' : 'home';
         // Ouroboros's own pane is named by its card: the band over it holds no title.
         if (leadName) leadName.textContent = level ? settingsTitle(level.path) : '';
-        const leadsTo = !level ? 'Settings'
-            : levels.length > 1 ? settingsTitle(levels[levels.length - 2].path) : level.back?.label || 'Settings';
-        setBackControlTarget(headerBack, leadsTo);
-        if (headerBack) headerBack.hidden = !level || (beside() && levels.length === 1 && !level.back);
+        page.dataset.settingsDepth = String(levels.length);
     }
 
     function backFrom(level) {
         if (level !== top()) return;
-        if (levels.length === 1 && level.back) {
-            closeLevels(0, { quiet: true });
-            level.back.go?.();
-            return;
-        }
         closeLevels(levels.length - 1);
-    }
-
-    // The row a page was opened for: its fold opens, it scrolls into view, its control takes focus. A page drawn after
-    // a read gets it when the row appears.
-    function revealRow(level, id) {
-        const find = () => level.el.querySelector(`[data-setting-row="${quoted(id)}"]`);
-        const reveal = (node) => {
-            for (let fold = node.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
-            node.scrollIntoView?.({ block: 'center' });
-            const control = node.querySelector('[data-setting-control], [data-setting-value], button, input, select, textarea');
-            (control || node).focus?.({ preventScroll: true });
-        };
-        const node = find();
-        if (node || typeof MutationObserver !== 'function') { if (node) reveal(node); return; }
-        level.watch = new MutationObserver(() => {
-            const hit = find();
-            if (!hit) return;
-            level.watch.disconnect();
-            reveal(hit);
-        });
-        level.watch.observe(level.el, { childList: true, subtree: true });
     }
 
     function paint({ row = '', opened = null, returned = null, quiet = false } = {}) {
@@ -364,7 +253,7 @@ export function initSettings(ctx = {}) {
         shell.dataset.settingsView = shell.dataset.sectionView = level || overview ? 'page' : 'home';
         if (!level) queueMicrotask(ensurePage);
         paintLead();
-        for (const each of levels) each.el.hidden = each !== level;
+        sectionLevels.showTop();
         const column = level ? level.el : overview ? overviewEl : homeEl;
         column.scrollTop = places.get(column) || 0;
         if (beside() || overview || !level) homeEl.scrollTop = places.get(homeEl) || 0;
@@ -376,10 +265,10 @@ export function initSettings(ctx = {}) {
         if (!quiet) {
             if (row && level) revealRow(level, row);
             else if (opened) {  // beside the home too: a keyboard reaches the page at once, and Back returns to the row
-                (visible(headerBack) ? headerBack : opened.el).focus({ preventScroll: true });
+                opened.el.focus({ preventScroll: true });
             } else if (returned) {
                 const to = visible(returned.opener) ? returned.opener
-                    : level ? (visible(headerBack) ? headerBack : level.el)
+                    : level ? level.el
                         : homeEl.querySelector(`[data-settings-open="${quoted(returned.path.split('/')[0])}"]`);
                 to?.focus?.({ preventScroll: true });
             }
@@ -394,25 +283,7 @@ export function initSettings(ctx = {}) {
         places.set(homeEl, homeEl.scrollTop);
     }
 
-    // Every level that hides the one under it is a layer, so Escape and the system's (and Telegram's) Back close the
-    // top one: in one column every level; in two panes every level below the first (the first stands beside the list,
-    // which is not hidden). Settings put away: none.
-    function syncLayers() {
-        if (!layers || leavingDoor) return;
-        const wanted = !shown() ? [] : beside() ? levels.slice(1) : levels;
-        layers.batch(() => {
-            for (const id of [...layered]) {
-                if (wanted.some((level) => level.id === id)) continue;
-                layers.remove(id);
-                layered.delete(id);
-            }
-            for (const level of wanted) {
-                layers.push({ id: level.id, el: level.el, page: true, modal: false, focus: false, opener: null,
-                    onClose: () => backFrom(level) });
-                layered.add(level.id);
-            }
-        });
-    }
+    function syncLayers() { sectionLevels.layer(beside(), backFrom); }
 
     // The home reads its answers when it comes on screen (Settings shown, the window seen again, a reconnect, one column
     // back on the list, a width that brings it beside the page), not at a press beside it; off screen its reads are
@@ -426,23 +297,29 @@ export function initSettings(ctx = {}) {
     }
     function announce(again = false) {
         if (!shown()) return;
-        window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: state.settingsPath } }));
+        sectionLevels.announce();
         look(again);
     }
 
     // From outside Settings (app.js `openSettings`): Settings is shown first, and refused when the page left vetoes.
     // A path already open keeps its level and its place (a Dashboard tab's Back returns there); any other starts anew.
-    async function openFromOutside(path = '', { row = '', back = null } = {}) {
-        const target = String(path || '');
-        if (isDoorId(target)) return leave(target, { row });
+    async function openFromOutside(path = '', { row = '', ...options } = {}) {
+        const target = settingsTarget(path, row);
+        if (isDoorId(target)) return leave(target, { row, ...options });
+        if (extensionsPageOf(target)) return openExtensions?.(target, { row, ...options });
         opening = true;
         try {
-            if (!await showPage('settings')) return false;
+            return await showPage('settings', { ...options, row, key: `settings:${target}`, enter: () => {
+                const jump = layers?.returnPage?.();
+                landedBy = jump?.destination === `settings:${target}` ? jump.id : null;
+                const at = levels.findIndex((level) => level.path === target);
+                if (landedBy) levels.slice(0, at + 1).forEach((level) => { level.jump = landedBy; });
+                try {
+                    if (!target || at >= 0) closeLevels(target ? at + 1 : 0, { row });
+                    else go(target, { row, fresh: true });
+                } finally { landedBy = null; }
+            } });
         } finally { opening = false; }
-        const at = levels.findIndex((level) => level.path === target);
-        if (!target || (at >= 0 && !back)) closeLevels(target ? at + 1 : 0, { row });
-        else go(target, { row, back, fresh: true });
-        return true;
     }
 
     // Settings pressed in the sidebar while it is shown (app.js). Two panes: the list beside a first-level page (or
@@ -460,13 +337,17 @@ export function initSettings(ctx = {}) {
         if (box === homeEl || (overviewEl && box === overviewEl) || levels.some((level) => level.el === box)) places.set(box, box.scrollTop);
     };
     const onPageShown = (event) => {
-        doorBack.clear();  // a door's page was left (its own showing came before its row was drawn)
+        // Settings opened from outside syncs its layers once its landing is known (openFromOutside's `enter`).
+        if (event.detail?.page === 'settings' && (opening || event.detail.reveal)) return;
         syncLayers();
         if (event.detail?.page !== 'settings') look();
-        else if (!opening) { announce(); ensurePage(); }
+        else { announce(); ensurePage(); }
     };
     const onVisible = () => (document.hidden ? look() : announce());
-    const offReconnect = ws?.on?.('open', (event) => announce(Boolean(event?.previouslyConnected)));  // a reconnect, not the first open
+    const offReconnect = ws?.on?.('open', (event) => {
+        retireMcpStatusRead(event);
+        announce(Boolean(event?.previouslyConnected));
+    });
     // A width that puts the home beside the page, or takes it away: the layers follow, the home comes back where it
     // was left, and reads when it comes on screen.
     const resized = () => {
@@ -506,7 +387,7 @@ export function initSettings(ctx = {}) {
         disposeFade();
         disposeOverviewFade?.();
         offReconnect?.();
-        doorBack.clear();
+        sectionLevels.destroy();
         window.removeEventListener('ouro:page-shown', onPageShown);
         document.removeEventListener('visibilitychange', onVisible);
         home.dispose();
@@ -514,5 +395,18 @@ export function initSettings(ctx = {}) {
 
     // Loopback-only debug hook, like app.js's __ouroWs: Settings has no URL, so browser tests open a path through it.
     window.__ouroSettings = { open: openFromOutside };
-    return { page, open: openFromOutside, pressedAgain, stateApplied: (data) => home.stateApplied(data) };
+    return { page, open: openFromOutside, pressedAgain, stateApplied: (data) => home.stateApplied(data),
+        capture(opener) {
+            const snapshot = sectionLevels.capture(), own = ownChosen;
+            const origin = homeEl.contains(opener) ? [] : levels;
+            return { label: origin.length ? settingsTitle(origin.at(-1).path) : 'Settings',
+                title: ['Settings', ...origin.map((level) => settingsTitle(level.path))].join(' › '),
+                retains: snapshot.retains, release: snapshot.release,
+                restore() {
+                    snapshot.restore();
+                    ownChosen = own;
+                    paint({ quiet: true });
+                    announce();
+                } };
+        } };
 }

@@ -102,7 +102,10 @@ def get_tools() -> List[ToolEntry]:
             "integrated = consumed by this answer (item closes); irrelevant = not needed "
             "here (the child result stays as evidence; item closes); deferred = STILL OWED: "
             "your terminal answer reads degraded/best_effort until you re-disposition this "
-            "exact child_result_sha256."
+            "exact child_result_sha256. Integrated/irrelevant also let the host release the "
+            "child's disposable scratch; until then it waits for your end, Continues included: "
+            "while a step or sibling reads it by a path you passed (the host cannot see such "
+            "paths), stay deferred or save what must outlive it."
         ),
     }
 
@@ -175,7 +178,7 @@ def get_tools() -> List[ToolEntry]:
                         "directive": {"type": "string", "enum": list(DELEGATION_CONSTRAINT_DIRECTIVES)},
                         "scope": {},
                         "rationale": {"type": "string"},
-                        "created_by": {"type": "string"},
+                        "created_by": {"type": "string", "description": "Display label. The host records the emitting task."},
                     },
                 },
             }},

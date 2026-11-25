@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -27,9 +28,26 @@ import urllib.request
 import uuid
 from typing import Any
 
+from . import mac_input
 from .macos_native import parse_info, parse_list, resolve
 from .place import parse_wmctrl_rows, parse_x11_front, window_id_int, x11_resolve, x11_same
 
+# Run by the account's login shell, whatever it is (single quotes mean the same to sh, zsh, bash and tcsh): sh reads
+# the whole script from stdin, then hands it to the account's shell as one -c argument with stdin closed.
+_RAW_SCRIPT_RUNNER = """/bin/sh -c 'script=$(cat); exec "${SHELL:-/bin/sh}" -c "$script" </dev/null'"""
+# The skill's own POSIX commands: sh reads the whole script and evaluates it itself (no exec, so no argument length
+# limit), with stdin closed for the commands in it. tcsh and other non-POSIX account shells never parse them.
+_SH_SCRIPT_RUNNER = """/bin/sh -c 'script=$(cat); eval "$script" </dev/null'"""
+
+
+def _fits_command_line(argv: list[str], windows: bool = os.name == "nt") -> bool:
+    """Whether the host can start this argv: on Windows the command line the launcher builds (quoting and escaping
+    included), measured in UTF-16 units against CreateProcess's 32,767 with its terminator; elsewhere one argument
+    against Linux's 128 KiB per-argument limit and the whole against a 1 MiB argument area (macOS ARG_MAX)."""
+    if windows:
+        return len(subprocess.list2cmdline(argv).encode("utf-16-le")) // 2 + 1 <= 32_767
+    sizes = [len(arg.encode("utf-8")) + 1 for arg in argv]
+    return max(sizes) <= 131_072 and sum(sizes) <= 1_000_000
 # Cap a remote /screenshot download (a 1920x1080 PNG is well under 10 MB).
 _MAX_REMOTE_SHOT_BYTES = 20 * 1024 * 1024
 
@@ -74,34 +92,6 @@ def _osworld_completion(out):
 def _osworld_result_ok(out: dict[str, Any]) -> tuple[bool, str]:
     ok, _completed, error = _osworld_completion(out)
     return ok, error
-
-
-# Complete kp vocabulary, from cliclick 5.1 KeyPressAction.getSupportedKeycodes:
-# https://github.com/BlueM/cliclick/blob/d786bc5faf8830dd30584e731b166e504927dbad/Actions/KeyPressAction.m
-_CLICLICK_KEYS = set("return enter esc tab space delete fwd-delete arrow-up arrow-down arrow-left arrow-right "
-                     "home end page-up page-down num-clear num-equals num-divide num-multiply num-minus num-plus "
-                     "num-enter mute volume-up volume-down brightness-up brightness-down play-pause play-previous "
-                     "play-next keys-light-toggle keys-light-up keys-light-down".split()) | {
-                         f"f{i}" for i in range(1, 17)} | {f"num-{i}" for i in range(10)}
-_CLICLICK_MODS = {"cmd", "ctrl", "alt", "shift", "fn"}
-
-
-def cliclick_keys(mods, base, *, hold_ms=None):
-    if any(m not in _CLICLICK_MODS for m in mods):
-        raise ValueError(f"unsupported cliclick modifiers {mods!r}")
-    if hold_ms is not None:
-        if base not in _CLICLICK_MODS:
-            raise ValueError(f"cliclick cannot hold non-modifier key {base!r}; only modifier combos are holdable")
-        held = ",".join([*mods, base])
-        return [f"kd:{held}", f"w:{hold_ms}", f"ku:{held}"]
-    if len(base) == 1 and base.isprintable():
-        inner = f"t:{base}"
-    elif base.lower() in _CLICLICK_KEYS:
-        inner = f"kp:{base.lower()}"
-    else:
-        raise ValueError(f"unknown cliclick key {base!r}")
-    held = ",".join(mods)
-    return [f"kd:{held}", inner, f"ku:{held}"] if mods else [inner]
 
 
 _PYAUTOGUI_BASE_ALIASES = {
@@ -197,12 +187,6 @@ def ssh_paste_command(text: str) -> str:
     return f"printf %s {shlex.quote(text)} | LC_ALL={PBCOPY_LOCALE} pbcopy && echo __CLIPBOARD_WRITTEN__ && {chord}"
 
 
-def cliclick_point(x: int, y: int) -> str:
-    """A cliclick point: an absolute negative coordinate (a display left of or above the main one) takes the ``=``
-    prefix, because a bare ``-`` means a move relative to the pointer."""
-    return f"{'=' if int(x) < 0 else ''}{int(x)},{'=' if int(y) < 0 else ''}{int(y)}"
-
-
 def parse_markers(text: str, parse: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
     """Marker LINES (``__FRONT_BEFORE__…``, ``__FRONT_AFTER__…``, ``__TARGET_LOST__``, ``__FRONT_UNREAD__``) ->
     (before, after, stop) where ``stop`` is ``"target_lost"``, ``"front_unread"`` or ``""``. Only a whole line is a
@@ -296,65 +280,6 @@ class RemoteBackends:
         if unsupported:
             raise ValueError(f"unsupported guest key(s): {unsupported!r}")
 
-    @staticmethod
-    def _ssh_macos_key_name(key: str) -> str:
-        low = str(key or "").strip().lower()
-        return {
-            "enter": "return", "return": "return", "esc": "esc", "escape": "esc",
-            # Input is a PYAUTOGUI key name: its "delete" is forward delete (cliclick fwd-delete).
-            "delete": "fwd-delete", "backspace": "delete", "pagedown": "page-down",
-            "pageup": "page-up", "down": "arrow-down", "up": "arrow-up",
-            "left": "arrow-left", "right": "arrow-right", "winleft": "cmd",
-            "super": "cmd", "meta": "cmd",
-        }.get(low, key)
-
-    def _ssh_macos_cliclick_for_pyautogui(self, code: str) -> tuple[list[str], str]:
-        """Translate the pyautogui snippets this skill emits into cliclick args."""
-        text = str(code or "").strip()
-        m = re.search(r"pyautogui\.click\((-?\d+),\s*(-?\d+),\s*clicks=(\d+).*button=([\"'])([^\"']+)\4", text)
-        if m:
-            x, y, clicks, button = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(5)
-            if button == "right":
-                return [f"rc:{cliclick_point(x, y)}"], ""
-            if button == "middle":
-                return [], "middle-click unsupported by cliclick"
-            op = "tc" if clicks >= 3 else ("dc" if clicks == 2 else "c")
-            return [f"{op}:{cliclick_point(x, y)}"], ""
-        m = re.search(r"pyautogui\.moveTo\((-?\d+),\s*(-?\d+)\).*pyautogui\.dragTo\((-?\d+),\s*(-?\d+)", text)
-        if m:
-            sx, sy, ex, ey = map(int, m.groups())
-            return [f"dd:{cliclick_point(sx, sy)}", f"dm:{cliclick_point(ex, ey)}", f"du:{cliclick_point(ex, ey)}"], ""
-        m = re.search(r"pyautogui\.moveTo\((-?\d+),\s*(-?\d+)\)", text)
-        if m:
-            return [f"m:{cliclick_point(int(m.group(1)), int(m.group(2)))}"], ""
-        m = re.search(r"pyautogui\.(mouseDown|mouseUp)\(x=(-?\d+),\s*y=(-?\d+),\s*button=([\"'])([^\"']+)\4", text)
-        if m:
-            fn, x, y, button = m.group(1), int(m.group(2)), int(m.group(3)), m.group(5)
-            if button != "left":
-                return [], "mouseDown/mouseUp supports only left button via cliclick"
-            return [f"{'dd' if fn == 'mouseDown' else 'du'}:{cliclick_point(x, y)}"], ""
-        m = re.search(r"pyautogui\.(mouseDown|mouseUp)\(button=([\"'])([^\"']+)\2", text)
-        if m:
-            fn, button = m.group(1), m.group(3)
-            if button != "left":
-                return [], "mouseDown/mouseUp supports only left button via cliclick"
-            return [f"{'dd' if fn == 'mouseDown' else 'du'}:."], ""
-        m = re.search(r"pyautogui\.typewrite\((?P<q>[\"'])(?P<txt>.*?)(?P=q),\s*interval=", text)
-        if m:
-            return [f"t:{m.group('txt')}"], ""
-        if text.startswith(("pyautogui.press(", "pyautogui.hotkey(")):
-            import ast
-            try:
-                call = ast.parse(text, mode="eval").body
-                tokens = [ast.literal_eval(arg) for arg in call.args]
-                keys = [self._ssh_macos_key_name(t) for t in tokens]
-                return cliclick_keys(keys[:-1], keys[-1]), ""
-            except (ValueError, SyntaxError, AttributeError, IndexError) as exc:
-                return [], str(exc)
-        if "pyautogui.scroll" in text or "pyautogui.hscroll" in text:
-            return [], "scroll unsupported via cliclick; use key page-down/page-up"
-        return [], f"unsupported pyautogui snippet for ssh_macos/cliclick: {text[:120]}"
-
     def _remote_pyautogui(self, conn: dict[str, Any], code: str, *, note: dict[str, Any] | None = None, timeout: int = 30,
                           input_effect: bool = True, target: str = "", ctx: dict[str, Any] | None = None, later: bool = False,
                           raise_policy: str = "allow") -> str:
@@ -363,19 +288,23 @@ class RemoteBackends:
 
     def _remote_input(self, conn: dict[str, Any], code: str, *, note: dict[str, Any] | None = None, timeout: int = 30,
                       input_effect: bool = True, target: str = "", ctx: dict[str, Any] | None = None,
-                      ssh_command: str = "", later: bool = False, raise_policy: str = "allow") -> dict[str, Any]:
+                      ssh_command: str = "", later: bool = False, ask_stop: bool = False,
+                      raise_policy: str = "allow") -> dict[str, Any]:
         """One remote input (or read, ``input_effect=False``). With ``target`` the application is resolved and brought
         forward first (``_begin``); with ``ctx`` (a later step of one call) the earlier switch is reused and the guest
-        pre-check withholds the input when that application is no longer in front."""
+        pre-check withholds the input when that application is no longer in front. An ``ask_stop`` input (a key chord,
+        the first included) asks the host's Stop of the call last (``_stop_refusal``); nothing is sent when it is refused."""
         if conn.get("disabled"):
             return json.loads(self._disabled_connection_error("remote", conn))
         backend = str(conn.get("backend") or "").lower()
         if backend == "ssh_macos" and not ssh_command:
-            # Translate before any switch: a snippet cliclick cannot express is refused without moving the front.
-            cliclick_args, err = self._ssh_macos_cliclick_for_pyautogui(code)
+            # Translate before any switch: a snippet the input program cannot express is refused without moving the front.
+            ops, err = mac_input.ops_for_pyautogui(code)
             if err:
                 return {"ok": False, "backend": backend, "error": err, "code": code}
-            ssh_command = "cliclick " + " ".join(shlex.quote(arg) for arg in cliclick_args)
+            ssh_command = shlex.join(mac_input.argv(ops, remote=True, budget_ms=max(1000, timeout * 1000 - 3000),
+                                                     until=mac_input.typing_until(ops, timeout)))
+            note = {**(note or {}), "method": mac_input.method_of(ops)} if input_effect else note
         if input_effect and ctx is None:
             refusal, ctx = self._begin(target, raise_policy=raise_policy, connection=("remote", conn))
             if refusal:
@@ -384,6 +313,8 @@ class RemoteBackends:
         ctx = dict(shared)
         expect = ((ctx.get("target") or {}).get("resolved") or {}) if input_effect else {}
         activated = bool((ctx.get("target") or {}).get("activated"))
+        if ask_stop and input_effect and (stopped := self._stop_refusal(ctx, first=not later, after=None)):
+            return {**stopped, "backend": backend}  # the host's Stop, read last before the remote input; the guest's front unread
         try:
             if backend == "osworld_http":
                 if input_effect:
@@ -410,7 +341,7 @@ class RemoteBackends:
                         payload.update({"reason": "completion_unknown", "transport_failed": True})
                 stderr = ""
             elif backend == "ssh_macos":
-                remote = ssh_command
+                remote, timeout = mac_input.fit_shell(ssh_command, timeout)  # the call's time left after the switch
                 if input_effect:
                     precheck = _SSH_PRECHECK.format(pid=int(expect["pid"])) if expect.get("pid") else ""
                     remote = _SSH_INPUT_WRAPPER.format(read=_SSH_FRONT_READ, precheck=precheck, command=remote)
@@ -418,15 +349,18 @@ class RemoteBackends:
                 before, after, stop = parse_markers(stdout, _info_or_none)
                 if stop:
                     return self._stopped(ctx, shared, before, backend, stop, later=later)
-                # The wrapper prints `__FRONT_BEFORE__` before the input and `__FRONT_AFTER__` after it. Both received:
-                # the wrapper completed and `rc` is the input's own exit. A reply cut short (a refused connection, a
-                # channel broken after the input may have run) leaves the outcome unknown: never "not sent".
-                # ssh returns the remote exit status only after the session ended normally: exit 0 is completion too.
-                completed = (rc == 0 or bool(re.search(r"^__FRONT_AFTER__", stdout, re.M))) if input_effect else True
-                started = completed or bool(re.search(r"^__FRONT_BEFORE__", stdout, re.M))
+                # The wrapper prints `__FRONT_BEFORE__` first and `__FRONT_AFTER__` after the input: the latter, or exit 0
+                # after the former, is completion and `rc` the input's; a cut reply leaves the outcome unknown. Exit 0 with
+                # no marker on either stream (a forced command may send them to stderr) means sh ran no script: nothing sent.
+                marked = f"{stdout}\n{stderr}"
+                started = bool(re.search(r"^__FRONT_BEFORE__", marked, re.M))
+                completed = (rc == 0 and started or bool(re.search(r"^__FRONT_AFTER__", marked, re.M))) if input_effect else True
                 payload = {"ok": rc == 0 and completed, "backend": backend, "returncode": rc, "output": strip_markers(stdout),
-                           "dispatched": True if completed else None}
-                if not completed:
+                           "dispatched": True if completed else None,
+                           **(mac_input.answer_fields(strip_markers(stdout), stderr) if completed else {})}
+                if not completed and rc == 0:
+                    payload.update(mac_input.SCRIPT_NOT_RUN)
+                elif not completed:
                     payload.update({"transport_failed": True, "reason": "ssh_failed",
                                     "error": f"ssh ended without the wrapper's completion marker ({stderr.strip() or f'exit {rc}'}); "
                                              + ("the input stage had started when the reply was cut short" if started
@@ -466,8 +400,14 @@ class RemoteBackends:
             return failed
         if note:
             payload.update({k: v for k, v in note.items() if k not in payload})
-        if not input_effect:
-            return payload
+        if not input_effect:  # a read dispatches no input; an SSH Mac's pointer comes back as fields, as locally
+            payload.pop("dispatched", None)
+            if backend != "ssh_macos" or not payload.get("ok"):
+                return payload
+            at = mac_input.position_of(payload.get("output"))
+            return {**payload, **at} if at else {**payload, "ok": False, "reason": "position_unread",
+                                                 "error": "the remote Mac answered no pointer position: "
+                                                          f"{str(payload.get('output'))[:200]!r}"}
         if payload["ok"]:
             payload["observed_effect"] = True
         else:
@@ -479,7 +419,7 @@ class RemoteBackends:
                 payload["clipboard_done"] = True
         ctx["delivered_to"] = before
         ctx.setdefault("front_before", before)
-        payload = self._finish(payload, ctx, stderr, after=after)
+        payload = mac_input.posted_effect(self._finish(mac_input.posted_effect(payload), ctx, stderr, after=after))
         shared["front_last"] = ctx.get("front_last")  # the call's last front read, for a sequence's aggregate
         return payload
 
@@ -544,7 +484,8 @@ class RemoteBackends:
             return None
         return None
 
-    def _remote_activate_dict(self, conn: dict[str, Any], app: str, wait_ms: int, *, raise_policy: str = "allow") -> dict[str, Any]:
+    def _remote_activate_dict(self, conn: dict[str, Any], app: str, wait_ms: int, *, raise_policy: str = "allow",
+                              ask_stop: bool = False) -> dict[str, Any]:
         """Resolve ``app`` from the remote's own inventory, bring it forward by id/pid (never by name, never a
         launch) and read who is in front afterwards. Same result shape as the local helper's ``activate``."""
         backend = str(conn.get("backend") or "").lower()
@@ -570,6 +511,8 @@ class RemoteBackends:
             script = (f"export DISPLAY=:0; wmctrl -i -a {shlex.quote(str(target['window_id']))} 2>/dev/null; RC=$?; i=0; "
                       f"while [ $i -lt {polls} ]; do W=$(xdotool getactivewindow 2>/dev/null); [ \"$W\" = \"{wid}\" ] && break; "
                       f"sleep 0.1; i=$((i+1)); done; echo; printf '__FRONT_AFTER__'; {_X11_FRONT_SH}; echo; exit $RC")
+            if ask_stop and (stopped := self._stop_before_activation(app, before, target)):
+                return {**stopped, "backend": backend}
             t0 = time.monotonic()
             try:
                 out = self._osworld_execute(conn, ["bash", "-lc", script], timeout=max(20, wait_ms // 1000 + 15))
@@ -607,6 +550,8 @@ class RemoteBackends:
                         "activated": False, "verified": False, "reason": "target_lost" if before else "front_unread",
                         "resolved": target}
             script = _SSH_ACTIVATE.format(read=_SSH_FRONT_READ, pid=int(target["pid"]), polls=polls)
+            if ask_stop and (stopped := self._stop_before_activation(app, before, target)):
+                return {**stopped, "backend": backend}
             t0 = time.monotonic()
             rc, out, err = self._ssh_run(conn, script, timeout=max(20, wait_ms // 1000 + 15))
             waited = int((time.monotonic() - t0) * 1000)
@@ -875,9 +820,19 @@ class RemoteBackends:
         src = f"{dest}:{remote_path}"
         return ["-P", str(port), src] if port != 22 else [src]
 
-    def _ssh_run(self, conn: dict[str, Any], command: str, *, timeout: int = 30) -> tuple[int, str, str]:
-        ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *self._ssh_destination(conn), command]
-        return self._run_cmd(ssh_cmd, timeout=timeout)
+    def _ssh_run(self, conn: dict[str, Any], command: str, *, timeout: int = 30, raw: bool = False) -> tuple[int, str, str]:
+        """One remote command through the user's ssh. The skill's own POSIX commands always go on ssh's stdin (``-T``,
+        as UTF-8 bytes: a text pipe on Windows would turn LF into CRLF) to /bin/sh, whatever the account's shell (tcsh
+        cannot run them, even short ones). A ``raw`` remote_exec script goes as ssh's argument, to the account's own
+        shell, while the host's command line can carry it, else on stdin, read first and then run by the account's
+        own shell, not as a login, with its stdin closed so that a command in it cannot swallow the rest."""
+        dest = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *self._ssh_destination(conn)]
+        if raw and _fits_command_line([*dest, command]):
+            return self._run_cmd([*dest, command], timeout=timeout)
+        remote = _RAW_SCRIPT_RUNNER if raw else _SH_SCRIPT_RUNNER
+        proc = subprocess.run(["ssh", "-T", *dest[1:], remote], input=command.encode("utf-8"), capture_output=True, timeout=timeout)
+        out, err = (part.decode("utf-8", "replace") if isinstance(part, bytes) else str(part or "") for part in (proc.stdout, proc.stderr))
+        return int(proc.returncode), out, err
 
     def _ssh_macos_screenshot(self, conn: dict[str, Any], *, max_width: int, max_height: int,
                               connection_name: str = "") -> str:
@@ -915,24 +870,28 @@ class RemoteBackends:
     def _test_ssh_macos(self, conn: dict[str, Any], name: str) -> str:
         rc, stdout, stderr = self._ssh_run(
             conn,
-            "printf 'host='; hostname; printf '\\nuser='; whoami; printf '\\nos='; sw_vers -productVersion 2>/dev/null; printf '\\n'; command -v screencapture; command -v cliclick || true",
+            "printf 'host='; hostname; printf '\\nuser='; whoami; printf '\\nos='; sw_vers -productVersion 2>/dev/null; printf '\\n'; command -v screencapture; command -v osascript || true",
             timeout=15,
         )
-        ok = rc == 0 and "screencapture" in stdout
+        ok = rc == 0 and "screencapture" in stdout and "osascript" in stdout
         hint = ""
         if rc != 0:
             hint = (
                 "SSH auth failed. Put the private key in ~/.ssh/<name>, chmod 600 it, "
                 "and add Host/User/IdentityFile to ~/.ssh/config; then retry test_connection."
             )
-        elif "cliclick" not in stdout:
-            hint = "Install cliclick on the Mac (e.g. brew install cliclick) and grant Accessibility permission."
+        elif "osascript" not in stdout:
+            hint = "osascript (part of macOS) was not found on the remote Mac: input is posted through it, so nothing can be sent."
+        else:
+            hint = ("Input is posted as CoreGraphics events through the Mac's own osascript: the remote Mac must grant "
+                    "Accessibility to the process the SSH session runs as, or every input is refused before posting.")
         return self._json_text({"ok": ok, "connection": name, "backend": "ssh_macos", "output": stdout, "error": stderr, "hint": hint})
 
 
     def _remote_type_text(self, conn: dict[str, Any], text: str, interval_ms: int = 0, target: str = "", via: str = "",
                           raise_policy: str = "allow") -> str:
         """type_text on a remote backend (OSWorld clipboard routing measured on the bench; SSH Mac types or pastes)."""
+        began = mac_input.deadline_in(0)  # the host's deadline counts from here, the switch below included
         text = str(text or "")
         interval = max(0, int(interval_ms or 0)) / 1000.0
         typewrite_code = f"pyautogui.typewrite({text!r}, interval={interval!r})"
@@ -950,7 +909,7 @@ class RemoteBackends:
             if refusal:
                 return self._json_text(refusal)
         # typewrite silently drops non-ASCII, so paste it via the in-VM clipboard
-        # (base64-safe), like official OSWorld agents; ssh_macos `t:` handles unicode.
+        # (base64-safe), like official OSWorld agents; ssh_macos types Unicode key events.
         #
         # ASCII is NOT automatically safe either: pyautogui types shift-symbols by
         # pressing the unshifted key with SHIFT held, and on the guest's keymap that
@@ -1005,7 +964,8 @@ class RemoteBackends:
                 conn, typewrite_code, note={"method": "typewrite", "clipboard_fallback": True}, timeout=60, target=target, ctx=ctx,
                 raise_policy=raise_policy,
             )
-        return self._remote_pyautogui(conn, typewrite_code, note={"method": "typewrite"}, timeout=60, target=target,
+        timeout = mac_input.left_of(began, max(60, mac_input.type_seconds(text, interval_ms))) if backend == "ssh_macos" else 60
+        return self._remote_pyautogui(conn, typewrite_code, note={"method": "typewrite"}, timeout=timeout, target=target,
                                       ctx=ctx, raise_policy=raise_policy)
 
     def remote_exec(self, *, command: str, timeout: int = 60) -> str:
@@ -1032,7 +992,7 @@ class RemoteBackends:
                     payload["error"] = err
                 return self._json_text(payload)
             if backend == "ssh_macos":
-                rc, stdout, stderr = self._ssh_run(conn, cmd, timeout=timeout)
+                rc, stdout, stderr = self._ssh_run(conn, cmd, timeout=timeout, raw=True)
                 return self._json_text({"ok": rc == 0, "backend": backend, "returncode": rc, "output": stdout, "error": stderr})
         except Exception as exc:  # noqa: BLE001
             return self._json_text({"ok": False, "backend": backend, "error": f"{type(exc).__name__}: {exc}"})

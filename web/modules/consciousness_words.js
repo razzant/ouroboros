@@ -74,6 +74,13 @@ export const CHECK_CHIPS = Object.freeze({
 });
 
 export const placeStateOf = (value) => PLACE_STATES.find((state) => state.value === value) || null;
+/** No kind is checked under "What calls it here". Then no event starts a new conversation at once, yet a conversation
+ *  that already has live work can still wake its author (`place_intake.author_hears`, `offer_arrival`): the words of
+ *  such a place state the setting and promise neither a wake nor silence. A bot check alone is a checked kind; Paused
+ *  and consciousness off say their own. */
+export const noKindChecked = (place) => !place?.wakes?.length;
+/** Active's note while no kind is checked: what calls it is said once, under "What calls it here". */
+export const ACTIVE_UNCHECKED_NOTE = 'Lives here: listens, speaks and acts.';
 export const safetyLevelOf = (value) => SAFETY_LEVELS.find((level) => level.value === value) || null;
 
 /** «a», «a and b», «a, b and c». */
@@ -185,7 +192,7 @@ export function placeScopeText(place) {
 /** A dollar amount as Costs writes it (grouped); an absent amount is the dash, never $0.00. */
 export const usdText = formatUsd;
 
-/** The money line of the chip's Shade and the Dashboard's headline card: «$2 of $20 in the last 24 hours», in the
+/** The money line of the chip's Shade and the Dashboard's headline card: «$2 of $15 in the last 24 hours», in the
  *  limit's money; what it leaves out (calls without a known price, calls in progress) said after it, or "so far" while
  *  only calls in progress may add more; '' when either amount is unknown. */
 export function allowanceText(snapshot) {
@@ -204,11 +211,11 @@ export function allowanceText(snapshot) {
 }
 
 // The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit (new starts refused, or
-// its own wake held at the allowance it started with) or waiting for a first conversation. A failure is an outcome's
-// red dot, an unconfirmed outcome a ring, any other paused wake two bars, a due wake the still mark.
-const OWNER_MOVE = new Set(['allowance_exhausted', 'waiting_for_first_conversation']);
+// its own wake held at the allowance it started with). A failure is an outcome's red dot, an unconfirmed outcome or an
+// unreadable owner chat a ring, any other paused wake two bars, a due wake the still mark.
+const OWNER_MOVE = new Set(['allowance_exhausted']);
 const FAILED = new Set(['wake_failed', 'wake_rejected', 'stopped']);
-const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown']);
+const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown', 'owner_chat_unknown']);
 const ALLOWANCE_HOLDS = new Set(['allowance', 'allowance_and_cap']);
 
 /** Whether its own wake is held, proven, at the allowance it started with (consciousness_view.hold_cause): the

@@ -22,6 +22,8 @@ from tests.test_place_focus import focus as _focus
 focus = _focus
 RULES = "Rule one: keep private work private.\nRule two: hold a disputed send and ask me in Main."
 OPENING = "host or Ouroboros text that opened this run; not the owner's words"
+PRESS_AUTHOR = ("the owner's answer by a press of an offered option on the card in reply_to, with no words of their own "
+                "(the option's label is the card's text, written by Ouroboros)")
 
 
 def _whole(rows):
@@ -148,8 +150,8 @@ def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, 
     root, _place, _admission, _event = focus
     _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, extra_rows=tuple(drained._owner_directives))
     [shown] = [source for source in bundle["occasion"]["sources"] if source.get("quiz_id") == "q7"]
-    assert shown == {**answer, "author": "the owner: the owner's answer to the card quoted in reply_to "
-                                         "(the card's text was written by Ouroboros)"}  # the answer and its card
+    assert shown == {**answer, "author": PRESS_AUTHOR}  # the press, an act of my human's, and its card
+    assert answer["source"] == "owner_press"
     assert shown["content"] == "1. Publish it" and shown["reply_to"]["text"].startswith(card["question"])
 
 
@@ -243,11 +245,11 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
     prompt, sources = sources_of(helper)
     card_reply = {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
                   "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)"}
-    later_words = {"author": "the owner: a later message to this work", "ts": "2026-10-04T06:00:00+00:00"}
-    assert sources == [{"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""],
+    later_words = {"author": PRESS_AUTHOR, "ts": "2026-10-04T06:00:00+00:00"}  # a press: my human's act, no words
+    assert sources == [{"source": "owner_press", "content": "1. Publish it", "msg_id": addresses[""],
                         "reply_to": card_reply, **later_words}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
-    corpus = {"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""], "chat_id": "1",
+    corpus = {"source": "owner_press", "content": "1. Publish it", "msg_id": addresses[""], "chat_id": "1",
               "client_message_id": "owner-answer", "carried": True}
     helper._owner_directives = [dict(corpus)]  # its corpus copy, without the card and time its held row has
     assert sources_of(helper)[1] == [{**corpus, "reply_to": card_reply, **later_words}]
@@ -262,8 +264,10 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
     prompt, sources = sources_of(later)
     brief = ("this task's brief: written by its parent task (Ouroboros) with blocks added by the host; "
              "not the owner's words")
+    record = ("(host record: my human pressed «1. Publish it» and wrote no words; the label is the text of task "
+              "asker)")  # the field carries the host's record of the act, never the label as their words
     assert sources == [{"source": "initial_text", "content": "Ship the release notes.", "author": brief},
-                       {"source": "owner_mailbox", "content": "1. Publish it", "msg_id": "chat 1 / owner-answer",
+                       {"source": "owner_press", "content": record, "msg_id": "chat 1 / owner-answer",
                         "reply_to": card_reply, **later_words}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
     later._owner_directives.append(dict(corpus))
@@ -478,7 +482,7 @@ def test_circle_words_changed_after_the_event_keep_the_events_words_beside_today
         if change == "reworded":
             p.edit_circle(root, circle["circle_id"], author="owner", text="NOW: keep my projects out of this chat.")
         else:
-            p.delete_circle(root, circle["circle_id"])
+            p.delete_circle(root, circle["circle_id"], author="owner")
     _ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker, before_reply=later)
     source = bundle["occasion"]["sources"][0]
     assert source["circle_at_event"]["text"] == "EARLIER: you may discuss my projects here."
@@ -519,3 +523,26 @@ def test_a_placement_i_made_carries_my_humans_words_as_labelled_restriction_into
     # Their restriction still binds there; only consent needs their own placement (prompts/SAFETY.md).
     assert "(they still restrict here; consent needs your human's placement)" in lines[0] and "CIRCLE WORDS" in lines[0]
     assert "context" not in lines[0]
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
+def test_a_held_reference_only_answer_keeps_the_safety_source_shape(tmp_path, kind):
+    from ouroboros.owner_quiz import record_answered, record_asked
+    from ouroboros.owner_words import safety_sources
+
+    asker, quiz, label = "birch-desk", "birch-choice", "Use birch paper"
+    comment = "  keep the sample  " if kind == "comment" else ""
+    if kind != "unavailable":
+        record_asked(tmp_path, asker, quiz_id=quiz, question="Which paper?", options=[label])
+        record_answered(tmp_path, asker, quiz_id=quiz, option_index=0, comment=comment, request_id="birch-answer")
+    row = {"direction": "in", "text": comment or "1. " + label, "ts": "2040-03-01T00:00:00Z",
+           "late_answer": {"task_id": asker, "quiz_id": quiz}, "carried": {"went_to": ""}}
+    ctx = SimpleNamespace(task_id="birch-reader", drive_root=tmp_path, _held_owner_messages={"birch-address": row})
+    [item] = safety_sources(ctx)
+    assert item["source"] == {"press": "owner_press", "comment": "owner_mailbox", "unavailable": "owner_card_input"}[kind]
+    assert (item["msg_id"], item["ts"]) == ("birch-address", row["ts"])
+    if kind == "unavailable":
+        assert set(item) == {"content", "source", "msg_id", "ts"} and label not in item["content"]
+    else:
+        assert set(item) == {"content", "source", "msg_id", "ts", "reply_to"}
+        assert item["content"] == row["text"] and item["reply_to"]["address"] == "quiz birch-choice of task birch-desk"

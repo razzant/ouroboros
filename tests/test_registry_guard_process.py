@@ -10,13 +10,11 @@ import ouroboros.tools.registry_guard_process as process_guard
 import ouroboros.tools.registry_guards as registry_guards
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.tool_result import LegacyTextResultAdapter, ToolResult
+from tests._workspace_git import git_repository
 
 
 # Semantic mention detectors were removed; execution and observation owners remain.
 _FUNCTION_SIGNATURES = {
-    "_trusted_read_head": "(token: 'str') -> 'str'",
-    "_denied_read_option": "(token: 'str', denied: 'frozenset') -> 'bool'",
-    "_is_pure_read_inspection": "(text_lower: 'str') -> 'bool'",
     "_run_shell_safety_check": "(self, args: 'Dict[str, Any]', runtime_mode: 'str', binding: 'Any' = None) -> 'ToolResult | None'",
     "_light_repo_snapshot": "(repo_dir: 'pathlib.Path') -> 'Optional[Dict[str, Any]]'",
     "_format_light_repo_write_note": "(before: 'Dict[str, Any]', after: 'Dict[str, Any]', tool_name: 'str' = 'run_command') -> 'str'",
@@ -35,32 +33,19 @@ _REGISTRY_GUARD_SIGNATURES = {
     "_shell_git_and_runtime_block": "(self, raw_cmd: 'Any', args: 'Dict[str, Any]', cmd_path_lower: 'str', workspace_mode: 'bool', acting_self_worktree: 'bool', binding: 'Any') -> 'ToolResult | None'",
 }
 
-_CONSTANT_CARDINALITIES = {
-    "_READ_ONLY_INSPECTION_COMMANDS": 41,
-    "_COMMAND_HEAD_WRAPPERS": 11,
-    "_SEARCH_TOOL_EXEC_OPTIONS": 4,
-    "_DENIED_READ_OPTIONS": 12,
-    "_TRUSTED_EXECUTABLE_DIRS": 6,
-    "_NESTED_EXECUTION_MARKERS": 4,
-    "_NESTED_EXECUTION_TOKENS": 6,
-}
-
 _RETIRED_REGISTRY_DEPENDENCIES = frozenset({
     "LIGHT_SHELL_WRITER_COMMANDS",
     "SKILL_OWNER_STATE_FILENAMES",
     "SKILL_OWNER_STATE_STEMS",
     "build_resolved_resource_binding",
     "interpreter_family",
-    "light_shell_repo_mutation",
     "parse_porcelain_paths",
     "protected_artifact_shell_block_reason",
-    "runtime_data_guard_targets",
     "safe_relpath",
     "shell_command_string",
     "strip_leading_env_assignments",
     "sudo_noninteractive_violation",
     "unwrap_env_argv",
-    "workspace_executor_state_write_block",
     "writer_target_tokens",
 })
 
@@ -68,8 +53,6 @@ _RETIRED_REGISTRY_DEPENDENCIES = frozenset({
 def test_process_guard_owner_surface_is_exact_and_retired_from_registry():
     for name, signature in _FUNCTION_SIGNATURES.items():
         assert str(inspect.signature(getattr(process_guard, name))) == signature
-    for name, cardinality in _CONSTANT_CARDINALITIES.items():
-        assert len(getattr(process_guard, name)) == cardinality
 
     # Tip adaptation: the reference also asserted every moved name's absence
     # from the registry facade; on this tree the facade deliberately re-exports
@@ -95,7 +78,6 @@ def test_registry_shell_guard_owner_surface_is_exact_and_retired_from_registry()
     )
     retired_module_names = {
         "PROTECTED_RUNTIME_PATHS",
-        "PROTECTED_RUNTIME_PATHS_LOWER",
         "SKILL_PAYLOAD_CONTROL_DIRNAMES",
         "_executor_backend_candidate_allowed",
         "_command_mentions_protected_root",
@@ -104,14 +86,10 @@ def test_registry_shell_guard_owner_surface_is_exact_and_retired_from_registry()
         "is_external_workspace",
         "is_skill_payload_path",
         "normalize_root",
-        "path_text_is_inside",
         "resolve_shell_cwd",
         "resolve_skill_payload_target",
         "run_shell_git_block_reason",
         "shell_argv",
-        "shell_argv_with_path_tokens",
-        "shell_has_write_indicator",
-        "shell_writer_targets_protected",
         "task_artifact_dir_path",
         "task_id_for_artifacts",
         "workspace_git_safety_violation",
@@ -313,9 +291,7 @@ def test_light_repo_formatter_preserves_sorted_bounded_path_disclosure():
 
 
 def test_git_ref_snapshot_detects_a_ref_only_change(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True)
     (repo / "tracked.txt").write_text("content\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
     subprocess.run(

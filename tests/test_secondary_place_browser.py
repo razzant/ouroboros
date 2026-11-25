@@ -3,7 +3,7 @@
 
 Real server and real page. Main left reading an older passage returns to it, left at its end follows it. Settings keeps
 its page, a value being typed and its place across other pages. Logs takes a burst while hidden: no node, no history read; shown,
-it draws the newest entries at once and the rest in chunks, keeps its filters, Raw is written when opened, and a live
+it draws the newest entries at once and the rest in chunks, keeps its filters, a record is written when its fold opens, and a live
 event for the card holding the selection and the focus leaves them where they were. A live event for the open card the
 owner reads inside, already the newest entry, keeps them on the row they were reading.
 """
@@ -133,6 +133,7 @@ def test_settings_keeps_its_page_a_typed_value_and_its_place_across_other_pages(
             _nav(page, "settings")
             # The home: scrolled down its list, left, shown again at the same place.
             home = page.locator("#page-settings [data-settings-home]")
+            expect(home.locator('[data-settings-open="models"]')).to_be_visible()
             # DESIGN "A section with pages": the rail's Ouroboros row opens its card in the page pane.
             home.locator("[data-settings-overview-row]").click()
             expect(page.locator("#page-settings [data-settings-card]")).to_be_visible()
@@ -147,7 +148,8 @@ def test_settings_keeps_its_page_a_typed_value_and_its_place_across_other_pages(
             # A page with a value being typed: leaving asks nothing, and the same page with the same field comes back.
             page.locator('#page-settings [data-settings-open="computer"]').scroll_into_view_if_needed()
             assert page.evaluate("() => window.__ouroSettings.open('skill-sources')") is not False
-            level = page.locator('#page-settings [data-settings-page="skill-sources"]')
+            # Skill sources is a page of Extensions (its old Settings address leads there).
+            level = page.locator('#page-skills [data-settings-page="skill-sources"]')
             field = level.locator("#setting-OUROBOROS_CLAWHUB_REGISTRY_URL")
             expect(field).to_be_visible()
             stored = field.input_value()
@@ -156,7 +158,7 @@ def test_settings_keeps_its_page_a_typed_value_and_its_place_across_other_pages(
             _nav(page, "dashboard")
             assert page.get_by_role("button", name="Stay", exact=True).count() == 0, "leaving asks nothing"
             _nav(page, "chat")
-            _nav(page, "settings")
+            _nav(page, "skills")
             expect(level).to_be_visible()
             expect(field).to_have_value("https://clawhub.ai/api/kept-while-away")
             assert field.evaluate("input => input === window.__typedNode"), "the same field"
@@ -203,37 +205,39 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
             body = page.locator("#page-logs")  # the tab body is the Logs scroller (style.css .dashboard-body)
             assert body.evaluate("box => box.scrollHeight - box.scrollTop - box.clientHeight") <= 48, "following the newest"
 
-            # Raw is written when opened and released when closed.
-            entry = entries.locator(".log-entry:not(.log-task-card)").filter(has_text="burst_note_").last
+            # A record is written when its fold opens and released when it closes.
+            entry = entries.locator(".log-entry:not(.log-task-card)").filter(has_text="Burst note ").last
             raw = entry.locator(".log-raw")
             assert raw.evaluate("pre => pre.textContent") == ""
-            entry.get_by_role("button", name="Raw", exact=True).click()
-            expect(entry.locator(".log-raw-status")).to_contain_text("bytes")
+            entry.locator(":scope > summary").click()
+            expect(entry.locator(".log-raw-status")).to_contain_text("Received event")
             assert json.loads(raw.inner_text())["type"].startswith("burst_note_")
-            entry.get_by_role("button", name="Hide raw", exact=True).click()
-            assert raw.evaluate("pre => pre.textContent") == ""
+            entry.locator(":scope > summary").click()
+            expect(raw).to_have_text("")  # Native toggle dispatches after the closing click.
 
             # The owner's filter stays across another page; so does a card's open Timeline.
-            chip = page.locator(".filter-chip", has_text="System")
-            chip.click()
-            expect(chip).not_to_have_class(re.compile(r"\bactive\b"))
-            expect(chip).to_have_attribute("aria-pressed", "false")  # off (quiet chips: none is toned while all are on)
             card = entries.locator(".log-task-card").last
-            card.locator("summary").click()
+            card.locator(":scope > summary").click()
             rows = card.locator(".log-task-event")
             assert rows.count() >= 1
+            chip = page.locator(".filter-chip", has_text="System")
+            chip.click()
+            expect(chip).to_have_class(re.compile(r"\bactive\b"))
+            expect(chip).to_have_attribute("aria-pressed", "true")  # chosen: System's events alone are shown
             _nav(page, "settings")
             _nav(page, "dashboard")
-            expect(chip).not_to_have_class(re.compile(r"\bactive\b"))
-            expect(chip).to_have_attribute("aria-pressed", "false")
-            assert card.locator("details").evaluate("d => d.open")
+            expect(chip).to_have_class(re.compile(r"\bactive\b"))
+            expect(chip).to_have_attribute("aria-pressed", "true")
+            assert card.evaluate("d => d.open")
             chip.click()
 
             # A live event for the card holding the selection and the focus moves the card, not them.
             group = card.get_attribute("data-task-group")
-            card.locator(".log-raw-toggle").first.focus()
+            card.locator(".log-task-event summary").first.focus()
             page.evaluate("""group => {
-                const row = document.querySelector(`[data-task-group="${group}"] .log-task-event .log-headline`);
+                const head = document.querySelector(`[data-task-group="${group}"] .log-task-event summary`);
+                const row = [...head.querySelectorAll('.log-name, .log-words')]
+                    .find(node => node.textContent && node.getClientRects().length);
                 const range = document.createRange();
                 range.setStart(row.firstChild, 0);
                 range.setEnd(row.firstChild, Math.min(5, row.firstChild.length));
@@ -273,6 +277,49 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
 
 
 @pytest.mark.parametrize("engine", ENGINES)
+def test_logs_sidebar_return_restores_reading_when_one_column_reopens_the_selected_row(direct_server_with_data, engine):
+    from playwright.sync_api import expect, sync_playwright
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page, _logs, errors = _page(browser, direct_server_with_data["url"], {"width": 900, "height": 700})
+            page.evaluate(_BURST, [150, "reading"])
+            _nav(page, "dashboard")
+            dashboard = page.locator("#page-dashboard")
+            # The automatic view: one column draws the list alone, the selected Logs page has no box until pressed.
+            expect(dashboard).to_have_attribute("data-section-view", "auto")
+            expect(page.locator("#page-logs")).to_be_hidden()
+            page.locator('[data-dashboard-tab="logs"]').click()
+            page.wait_for_function("() => document.getElementById('log-entries').children.length >= 100")
+            page.wait_for_function("() => !document.querySelector('.logs-history-status')?.textContent.includes('Loading')")
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+            body = page.locator("#page-logs")
+            body.evaluate("box => { box.scrollTop = (box.scrollHeight - box.clientHeight) / 2; }")
+            page.wait_for_timeout(250)
+            place = body.evaluate("box => box.scrollTop")
+            assert place > 100
+            for _ in range(2):
+                _nav(page, "skills")
+                _nav(page, "dashboard")
+                expect(dashboard).to_have_attribute("data-section-view", "auto")
+                expect(body).to_be_hidden()
+                page.locator('[data-dashboard-tab="logs"]').click()
+                expect(body).to_be_visible()
+                page.evaluate(_SETTLE_RESTORE_FRAMES)
+                assert abs(body.evaluate("box => box.scrollTop") - place) <= 2, "the selected Logs row restores its reader"
+            centers = page.evaluate("""() => ['[data-shell-back]', '[data-dashboard-lead-name]',
+                '[data-log-kind=""]', '#btn-clear-logs'].map(selector => {
+                    const r = document.querySelector('#page-dashboard ' + selector).getBoundingClientRect();
+                    return r.y + r.height / 2;
+                })""")
+            assert max(centers) - min(centers) <= 2, "a tablet keeps return, caption, filters and Clear on one line"
+            assert not errors, errors
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("engine", ENGINES)
 def test_logs_reader_inside_the_newest_open_card_keeps_their_place_when_that_card_updates(direct_server_with_data, engine):
     """The owner reads the middle of an open task card that is the newest entry. A live event for that task redraws the
     card where it stands, so the reader stays on the row they were reading; nothing sends them to the new bottom."""
@@ -282,14 +329,15 @@ def test_logs_reader_inside_the_newest_open_card_keeps_their_place_when_that_car
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()
         try:
-            page, _logs, errors = _page(browser, direct_server_with_data["url"])
+            # Compact Timeline rows must still leave a passage beyond the viewport, within the 30-row bound.
+            page, _logs, errors = _page(browser, direct_server_with_data["url"], {"width": 1187, "height": 420})
             _nav(page, "dashboard")
             page.wait_for_function("() => !document.querySelector('.logs-history-status')?.textContent.includes('Loading')")
             page.evaluate(_BURST, [24, "earlier"])
             steps = 20
             page.evaluate(_TASK_STEPS, [group, 0, steps])
             card = page.locator(f'#log-entries [data-task-group="{group}"]')
-            card.locator("summary").click()
+            card.locator(":scope > summary").click()
             expect(card.locator(".log-task-event")).to_have_count(steps)
             body = page.locator("#page-logs")  # the tab body is the Logs scroller (style.css .dashboard-body)
             box = body.bounding_box()
@@ -333,6 +381,7 @@ def test_safety_counter_defers_its_tail_until_permissions_is_shown(direct_server
         try:
             page, logs, errors = _page(browser, direct_server_with_data["url"])
             _nav(page, "settings")
+            settings_page(page, "").locator('[data-settings-open="models"]').wait_for(state="visible")
             settings_page(page, "").locator("[data-settings-overview-row]").click()
             page.locator("#page-settings [data-settings-card]").wait_for(state="visible")
             page.wait_for_timeout(400)
@@ -369,13 +418,15 @@ def test_received_raw_shown_again_keeps_its_page_scroll_and_selection_and_a_page
             page.evaluate("""() => window.__testSockets[0].dispatchEvent(new MessageEvent('message', {data: JSON.stringify({type: 'log',
                 data: {type: 'raw_return_probe', ts: '2026-11-04T02:00:00.000Z', payload: 'x'.repeat(200000), sentinel: 'RAW-END'}})}))""")
             _nav(page, "dashboard")
-            entry = page.locator("#log-entries .log-entry:not(.log-task-card)").filter(has_text="raw_return_probe").last
-            entry.get_by_role("button", name="Raw", exact=True).click()
+            entry = page.locator("#log-entries .log-entry:not(.log-task-card)").filter(has_text="Raw return probe").last
+            entry.locator(":scope > summary").click()
             status = entry.locator(".log-raw-status")
             expect(status).to_contain_text("Received event")
             download = entry.get_by_role("link", name="Download full")
             expect(download).to_be_visible()
             raw = entry.locator(".log-raw")
+            # A reader selects inside Raw, leaving the summary's focus before making the range.
+            raw.click(position={"x": 20, "y": 20})
             before = raw.evaluate("""pre => {
                 pre.scrollTop = 200;
                 const text = pre.firstChild, range = document.createRange();

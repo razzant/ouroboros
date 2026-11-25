@@ -4,8 +4,18 @@ import { readFileSync } from 'node:fs';
 import { MAIN_FOLLOW_NOTE, composeModelSource, createModelRolesEditor, inheritTargetOf, modelContextNote,
     modelSourceGroups, parseModelSource, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
 import { configuredApiProviders, routeChoiceGroups } from '../modules/route_editor_primitives.js';
+import { settingsTitle } from '../modules/settings_home.js';
 
-const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url)));
+const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
+
+test('a model role names its destination without repeating the source section, while the parent stays Models', () => {
+    assert.equal(settingsTitle('models'), 'Models');
+    for (const [slot, name] of [['main', 'Main model'], ['light', 'Light model'],
+        ['consciousness', 'Consciousness model'], ['websearch', 'Web search model'], ['fallback/2', 'Fallback model 2']]) {
+        assert.equal(settingsTitle(`models/role/${slot}`), name);
+    }
+    assert.equal(settingsTitle('models'), 'Models');
+});
 
 test('source/model spelling is reversible and never embeds the account', () => {
     for (const value of ['google/a', 'openai::b', 'claudexor::codex=gpt-test', 'custom::x=y']) {
@@ -229,6 +239,26 @@ test('Settings says under Main, before Save, what a new Main does to running wor
     assert.ok(!rendered(false).includes('data-main-follow-note'), 'the wizard and the wait card never show it');
 });
 
+test('each role says what it serves once, visibly under its name, never as a hover title', () => {
+    const rendered = (slots) => {
+        const host = inertNode();
+        const editor = createModelRolesEditor({ hostId: 'roles', doc: { getElementById: () => host }, showContext: false });
+        editor.load({ OUROBOROS_MODEL: 'openai::main' }, { ...contract, ...(slots ? { modelSlots: slots } : {}) });
+        editor.destroy();
+        return String(host.innerHTML);
+    };
+    const html = rendered();
+    const group = (slot) => html.slice(html.indexOf(`data-model-role-group="${slot}"`)).split('</section>')[0];
+    const light = contract.modelSlots.find((slot) => slot.slot === 'light');
+    assert.match(light.note, /Memory consolidation/);
+    assert.ok(group('light').includes(`<p class="model-role-copy ui-field-help" data-model-role-note>${light.note}</p>`));
+    assert.doesNotMatch(html, /<h4 title=/, 'touch and keyboard readers never meet a hover-only caption');
+    for (const slot of contract.modelSlots) assert.equal(group(slot.slot).split('data-model-role-note').length, 2, `${slot.slot}: one note`);
+    assert.match(group('fallback'), /data-model-role-note>Tried in this order/);
+    // A host whose role carries no note (the wait card's picker) draws none.
+    assert.ok(!rendered([{ slot: 'main', settingKey: 'model', inputId: 'wait-model', label: 'Model' }]).includes('data-model-role-note'));
+});
+
 test('a kept fallback preserves its unfinished field while source choices follow a new settings read', async (t) => {
     const { Stub, world, settle } = await import('./helpers/settings_dom.js');
     const { env } = world(t);
@@ -279,4 +309,269 @@ test('a clean fallback refresh takes a new saved context window', async (t) => {
         assert.deepEqual(editor.entry().errors, []);
         await settle();
     } finally { editor.destroy(); }
+});
+
+/* --- a role's Processing follows its own route as it is bound (DESIGN "Composer owner controls", the tier strip) --- */
+
+// Codex with two accounts as one read gives them: `home` lists Ultrafast for gpt-6-astra, `work` does not; the
+// transport carries no Flex.
+const CODEX_TIERS = (() => {
+    const account = (id, modes) => ({ credentialProfileId: id, availability: 'available', problem: null,
+        catalog: { source: 'codex', credentialProfileId: id, provenance: 'live', models: [{ id: 'gpt-6-astra', processing: { modes } }] } });
+    return { errors: [], model_sources: [{ id: 'codex', label: 'Codex', credentialHarness: 'codex', processingPreferences: ['standard', 'fast', 'ultrafast'] }],
+        account_catalogs: [{ source: 'codex', partial: false, accounts: [account('home', ['standard', 'fast', 'ultrafast']), account('work', ['standard', 'fast'])] }],
+        items: ['home', 'work'].map((profile) => ({ provider_id: 'claudexor', provider: 'Codex', source_id: 'codex', id: 'gpt-6-astra', name: 'gpt-6-astra',
+            value: 'claudexor::codex=gpt-6-astra', credential_profile_id: profile })) };
+})();
+
+/* One role alone on its page: its scoped catalog read answered by `fetched.value` (an Error: the read fails), its
+   question and its endpoint reads recorded. `answer.value` is what the question is answered, or a function run while
+   it stands. */
+async function rolePage(t, slot, settings, { answer = { value: true }, fetched = { value: CODEX_TIERS }, detail = () => null, readDetail = () => {} } = {}) {
+    const { Stub, world, settle } = await import('./helpers/settings_dom.js');
+    const { env } = world(t);
+    const host = new Stub(); host.id = 'roles'; env.document.body.append(host);
+    const seen = { questions: [], endpoints: [], changes: 0 };
+    const editor = createModelRolesEditor({ hostId: 'roles', doc: env.document, only: { slot, index: 0 }, store: { snapshot: {}, accountsKnown: true },
+        catalogFetch: async () => { if (fetched.value instanceof Error) throw fetched.value; return fetched.value; }, onChange: () => { seen.changes += 1; },
+        tierStore: { detail, readDetail: async (route) => { seen.endpoints.push(route.model); return readDetail(route); }, subscribe: () => () => {} },
+        askUltrafast: async (facts) => { seen.questions.push(facts); return typeof answer.value === 'function' ? answer.value() : answer.value; } });
+    t.after(() => editor.destroy());
+    editor.load(settings, contract);
+    await settle();
+    const select = () => host.querySelector('[data-model-role-processing]');
+    const put = (selector, value) => { const node = host.querySelector(selector); node.value = value; return node.fire('change', { target: node }); };
+    const set = async (selector, value) => { await put(selector, value); await settle(); };
+    return { editor, host, seen, answer, fetched, select, settle, put,
+        field: () => host.querySelector('[data-processing-field]'),
+        options: () => select().querySelectorAll('option').map((node) => [node.getAttribute('value'), node.textContent]),
+        note: () => host.querySelector('[data-processing-capability]').textContent,
+        account: (id) => set('[data-model-role-account]', id), tier: (value) => set('[data-model-role-processing]', value) };
+}
+const MAIN_ON_CODEX = { OUROBOROS_MODEL: 'claudexor::codex=gpt-6-astra', OUROBOROS_MODEL_ACCOUNTS: { main: 'work' } };
+
+test('the role page hides redundant Standard processing without hiding a reset or an inherited override', async (t) => {
+    const settings = { OUROBOROS_MODEL: 'zai::example' };
+    const page = await rolePage(t, 'main', settings);
+    assert.equal(page.field().hidden, false, 'not read is not Standard-only');
+    page.editor.adoptCatalog({ items: [{ id: 'example', value: settings.OUROBOROS_MODEL, processing_transport: ['standard'] }] });
+    assert.equal(page.field().hidden, true);
+    assert.match(page.note(), /Standard is the only listed tier/);
+    assert.equal(page.editor.entry().processing, '', 'catalog information did not create a draft override');
+
+    for (const tier of ['standard', 'fast']) {
+        page.editor.load({ ...settings, OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: tier } }, contract);
+        assert.equal(page.field().hidden, false, `a saved ${tier} can still be cleared`);
+        assert.equal(page.editor.entry().processing, tier);
+        await page.tier('');
+        assert.equal(page.editor.entry().processing, '');
+        assert.equal(page.field().hidden, true);
+    }
+    page.editor.load({ ...settings, OUROBOROS_PROCESSING_PREFERENCE: 'fast' }, contract);
+    assert.equal(page.field().hidden, false, 'inherited Fast remains visible and overridable');
+    assert.match(page.host.querySelector('[data-processing-summary]').textContent, /Fast/);
+    assert.ok(page.options().some(([tier]) => tier === 'standard'));
+    await page.tier('standard');
+    assert.equal(page.editor.entry().processing, 'standard');
+});
+
+test('a Standard-only endpoint list does not erase the OpenRouter workspace override', async (t) => {
+    const settings = { OUROBOROS_MODEL: 'vendor/example' };
+    const page = await rolePage(t, 'main', settings, { detail: () => ({ state: 'ok', complete: true, modes: new Set(['standard']), endpoints: [] }) });
+    page.editor.adoptCatalog({ items: [{ id: settings.OUROBOROS_MODEL, value: settings.OUROBOROS_MODEL, provider_id: 'openrouter',
+        processing_transport: ['standard', 'fast', 'economy', 'ultrafast'] }] });
+    assert.equal(page.field().hidden, false);
+    assert.match(page.note(), /OpenRouter may apply a workspace default/);
+    assert.deepEqual(page.options().map(([tier]) => tier), ['', 'standard']);
+    page.editor.load({ ...settings, OUROBOROS_PROCESSING_PREFERENCE: 'standard' }, contract);
+    assert.equal(page.field().hidden, true, 'inheriting explicit Standard already requests the same mode');
+});
+
+test('a role\'s page offers the tiers its own route lists for its own account; another account of the same model is another word', async (t) => {
+    const page = await rolePage(t, 'main', MAIN_ON_CODEX);
+    assert.deepEqual(page.options(), [['', 'Use global setting'], ['standard', 'Standard'], ['fast', 'Fast'], ['ultrafast', 'Ultrafast · not confirmed']],
+        'pinned to the account that does not list Ultrafast: never confirmed on the other account\'s word (its transport carries it, so Main may try it); Flex is beyond the transport');
+    assert.equal(page.note(), '', 'the ordinary service needs no note');
+    assert.deepEqual(page.seen.endpoints, ['claudexor::codex=gpt-6-astra'], 'the page\'s own model is asked for once, however often it repaints');
+    await page.account('home');
+    assert.deepEqual(page.options().slice(1), [['standard', 'Standard'], ['fast', 'Fast'], ['ultrafast', 'Ultrafast']]);
+    await page.account('');
+    assert.deepEqual(page.options().at(-1), ['ultrafast', 'Ultrafast · some accounts'], 'Auto: said for a part of the accounts, with no count of them');
+    await page.tier('fast');
+    assert.deepEqual([page.note(), page.editor.entry().processing, page.seen.questions], ['Requests faster processing. It may cost more.', 'fast', []]);
+});
+
+test('a subscription role is told by its own account\'s read alone: a failed one, or one kept from another engine store, confirms nothing', async (t) => {
+    const fetched = { value: new Error('offline') };
+    const page = await rolePage(t, 'main', { ...MAIN_ON_CODEX, OUROBOROS_MODEL_ACCOUNTS: { main: 'home' } }, { fetched });
+    // The general catalog lists everything for this account; the role's own read failed, so it stands in for nothing.
+    page.editor.adoptCatalog({ ...CODEX_TIERS, store_id: 'store-a' });
+    await page.settle();
+    assert.deepEqual(page.options().slice(1), [['standard', 'Standard'], ['fast', 'Fast · not confirmed'], ['ultrafast', 'Ultrafast · not confirmed']],
+        'the transport still excludes Flex and carries Ultra, but no account confirms it');
+    // Its own read answers, from the same store: the account's word stands.
+    fetched.value = { ...CODEX_TIERS, store_id: 'store-a' };
+    page.editor.adoptCatalog({ ...CODEX_TIERS, store_id: 'store-a' });
+    await page.settle();
+    assert.deepEqual(page.options().slice(1), [['standard', 'Standard'], ['fast', 'Fast'], ['ultrafast', 'Ultrafast']]);
+    // The engine is another store now, and the role's read still answers from the old one: yesterday's account is not today's.
+    page.editor.adoptCatalog({ ...CODEX_TIERS, store_id: 'store-b' });
+    await page.settle();
+    assert.deepEqual(page.options().slice(1), [['standard', 'Standard'], ['fast', 'Fast · not confirmed'], ['ultrafast', 'Ultrafast · not confirmed']]);
+    fetched.value = { ...CODEX_TIERS, store_id: 'store-b' };
+    page.editor.adoptCatalog({ ...CODEX_TIERS, store_id: 'store-b' });
+    await page.settle();
+    assert.deepEqual(page.options().at(-1), ['ultrafast', 'Ultrafast'], 'read again from the store that serves now');
+});
+
+test('Main\'s draft takes Ultrafast only after its question, for the route it has; a cancel leaves the draft and a changed account asks again at Save', async (t) => {
+    const page = await rolePage(t, 'main', { ...MAIN_ON_CODEX, OUROBOROS_MODEL_ACCOUNTS: { main: 'home' } }, { answer: { value: false } });
+    const read = page.editor.entry();
+    await page.tier('ultrafast');
+    const { doc: _doc, ...facts } = page.seen.questions[0];
+    assert.deepEqual(facts, { model: 'gpt-6-astra', source: 'Codex · Pinned account home', pinned: true, priceSaid: false,
+        explain: 'Requests the fastest processing this source offers. It may cost more.' });
+    assert.deepEqual([page.editor.entry().processing, page.select().value, page.seen.changes], ['', '', 0], 'a cancel leaves the draft and its select as they were');
+    page.answer.value = true;
+    await page.tier('ultrafast');
+    assert.deepEqual([page.seen.questions.length, page.editor.entry().processing, page.editor.entry().errors, page.editor.ultrafastUnasked(read)],
+        [2, 'ultrafast', [], false], 'asked at the choice: its Save asks nothing more');
+    // The account changes after the question: the yes was for another binding, so Save asks for this one.
+    await page.account('work');
+    assert.equal(page.editor.ultrafastUnasked(read), true);
+    page.answer.value = false;
+    assert.equal(await page.editor.confirmUltrafast(), false);
+    assert.match(page.seen.questions.at(-1).explain, /Not confirmed for gpt-6-astra here: a provider may serve it as Standard\.$/);
+    assert.equal(page.editor.ultrafastUnasked(read), true, 'a no confirms nothing');
+    page.answer.value = true;
+    assert.deepEqual([await page.editor.confirmUltrafast(), page.editor.ultrafastUnasked(read)], [true, false]);
+    // The account moves while the question stands, back to one confirmed earlier: the answer is for the binding it
+    // was asked for, which the row no longer has, so it confirms nothing, whatever was confirmed before.
+    await page.account('home');
+    assert.equal(await page.editor.confirmUltrafast(), true);
+    page.answer.value = () => { void page.put('[data-model-role-account]', 'work'); return true; };
+    assert.equal(await page.editor.confirmUltrafast(), false, 'asked for home, answered when the row is on work');
+    await page.settle();
+    page.answer.value = () => { void page.put('[data-model-role-account]', 'home'); return true; };
+    assert.equal(await page.editor.confirmUltrafast(), false, 'asked for work: an earlier yes for home does not stand in');
+    await page.settle();
+    page.answer.value = async () => {
+        await page.account('work');
+        await page.account('home');
+        return true;
+    };
+    assert.equal(await page.editor.confirmUltrafast(), false, 'a return to the same pin cannot revive a dialog left open across edits');
+    assert.equal(page.editor.ultrafastUnasked(read), true);
+    // A stored Ultrafast left as it was read never asks; it is offered whatever the route says, so it can be left.
+    page.editor.load({ ...MAIN_ON_CODEX, OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'ultrafast' } }, contract);
+    await page.settle();
+    const stored = page.editor.entry();
+    assert.deepEqual([stored.processing, page.editor.ultrafastUnasked(stored), page.editor.ultrafastUnasked(null)], ['ultrafast', false, true]);
+    assert.deepEqual(page.options().at(-1), ['ultrafast', 'Ultrafast · not confirmed']);
+});
+
+test('Main confirmation retains the general fingerprint when the scoped catalog omits it', async (t) => {
+    const page = await rolePage(t, 'main', MAIN_ON_CODEX);
+    const read = page.editor.entry();
+    const adopt = async (fingerprint) => {
+        const catalog = structuredClone(CODEX_TIERS);
+        catalog.store_id = 'same-store';
+        catalog.account_catalogs[0].accounts.find((entry) => entry.credentialProfileId === 'work').catalog.accountFingerprint = fingerprint;
+        page.editor.adoptCatalog(catalog);
+        await page.settle();
+    };
+    await adopt('first-account');
+    await page.tier('ultrafast');
+    assert.equal(page.editor.entry().processing, 'ultrafast');
+    assert.equal(page.editor.ultrafastUnasked(read), false);
+    await adopt('replaced-account');
+    assert.equal(page.editor.ultrafastUnasked(read), true);
+});
+
+test('after a refused pinned Ultrafast the page asks again, and the yes stands on the store and fingerprint its reread names', async (t) => {
+    const read = (store, login) => {
+        const catalog = structuredClone(CODEX_TIERS);
+        catalog.store_id = store;
+        for (const account of catalog.account_catalogs[0].accounts) account.catalog.accountFingerprint = `${login}-${account.credentialProfileId}`;
+        return catalog;
+    };
+    const fetched = { value: read('store-a', 'first') };
+    const page = await rolePage(t, 'main', { ...MAIN_ON_CODEX, OUROBOROS_MODEL_ACCOUNTS: { main: 'home' } }, { fetched });
+    const asRead = page.editor.entry();
+    page.editor.adoptCatalog(read('store-a', 'first'));
+    await page.settle();
+    await page.tier('ultrafast');
+    const refused = page.editor.entry();
+    assert.deepEqual(JSON.parse(refused.tierBinding).slice(2), ['home', 'store-a', 'first-home']);
+    // Its Save answered 409 for the pinned account: the page retires what it held of that scope and reads again
+    // (mountRole's save). The account signed in anew under another engine store meanwhile.
+    fetched.value = read('store-b', 'second');
+    page.editor.invalidateAccountCatalog(refused);
+    assert.equal(page.options().at(-1)[1], 'Ultrafast · not confirmed', 'nothing held of the scope confirms it meanwhile');
+    page.editor.adoptCatalog(read('store-b', 'second'));
+    await page.settle();
+    assert.equal(page.editor.ultrafastUnasked(asRead), true, 'the yes was for the identity the server refused');
+    assert.equal(await page.editor.confirmUltrafast(), true);
+    assert.deepEqual(JSON.parse(page.editor.entry().tierBinding).slice(2), ['home', 'store-b', 'second-home']);
+    assert.deepEqual([page.editor.ultrafastUnasked(asRead), page.seen.questions.length], [false, 2]);
+});
+
+test('Settings confirms a key model after its priced detail answers, not after the picker moves away', async (t) => {
+    const first = 'fixture/first', second = 'fixture/second';
+    const reads = new Map();
+    const replies = new Map();
+    const page = await rolePage(t, 'main', { OUROBOROS_MODEL: first }, {
+        detail: (route) => replies.get(route.model),
+        readDetail: (route) => reads.get(route.model)?.promise,
+    });
+    const block = (model) => { let done; const promise = new Promise((resolve) => { done = resolve; }); reads.set(model, { promise }); return done; };
+    const firstDone = block(first);
+    const secondDone = block(second);
+    page.editor.adoptCatalog({ api_sources: [{ id: 'openrouter', label: 'Fixture key', processing_transport: ['standard', 'ultrafast'] }],
+        items: [first, second].map((value) => ({ id: value, value })) });
+    const awaitingPrice = page.put('[data-model-role-processing]', 'ultrafast');
+    await page.settle();
+    assert.equal(page.seen.questions.length, 0, 'the already requested model detail is still out');
+    replies.set(first, { state: 'ok', complete: true, modes: new Set(['standard', 'ultrafast']),
+        endpoints: [{ mode: 'ultrafast', price: { input: 19, output: 23 } }] });
+    firstDone();
+    await awaitingPrice;
+    assert.equal(page.seen.questions.length, 1);
+    assert.match(page.seen.questions[0].explain, /Listed at \$19 in \/ \$23 out per 1M tokens/);
+    assert.equal(page.editor.entry().processing, 'ultrafast');
+
+    const field = page.host.querySelector('[data-model-role-model]');
+    field.disabled = true;  // no layout in this stub: a disabled field never opens the chooser's popup, the editor still reads the input
+    field.value = second;
+    await field.fire('input', { target: field });
+    const awaitingSecond = page.editor.confirmUltrafast(true);
+    field.value = first;
+    await field.fire('input', { target: field });
+    secondDone();
+    assert.equal(await awaitingSecond, false);
+    assert.equal(page.seen.questions.length, 1, 'the late reply cannot open a question under either model');
+});
+
+test('no other role may hold Ultrafast, and the whole list of roles keeps each role\'s tiers as they are', async (t) => {
+    const light = await rolePage(t, 'light', { ...MAIN_ON_CODEX, OUROBOROS_MODEL_PROCESSING_PREFERENCES: { light: 'ultrafast' } });
+    assert.match(light.editor.entry().errors[0], /choose Standard, Fast, Flex or inherited processing/);
+    await light.tier('fast');
+    assert.deepEqual([light.editor.entry().errors, light.seen.questions], [[], []], 'another role\'s tier asks nothing');
+    const editor = createModelRolesEditor({ hostId: 'none', doc: () => null });
+    editor.load({ ...MAIN_ON_CODEX, OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'ultrafast', light: 'ultrafast' } }, contract);
+    assert.match(editor.validate(), /^Light/, 'Main\'s stored Ultrafast is valid wherever the roles are edited');
+    editor.destroy();
+});
+
+test('an empty Safety Supervisor\'s page names the route it runs on as the runtime resolves it: Light, else Main, with account, tier and local', async (t) => {
+    const viaMain = await rolePage(t, 'safety', { ...MAIN_ON_CODEX, OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'fast' } });
+    const placeholder = (page) => page.host.querySelector('[data-model-role-model]').getAttribute('placeholder');
+    assert.equal(placeholder(viaMain), 'Empty uses the Light model: gpt-6-astra · account work · Fast');
+    // Light's box over a cloud Main puts Main's model on the local model, for the Supervisor too.
+    const local = await rolePage(t, 'safety', { ...MAIN_ON_CODEX, USE_LOCAL_LIGHT: true });
+    assert.match(placeholder(local), /^Empty uses the Light model: gpt-6-astra · local/);
+    // Light with its own model ends the chain there: Main's tier is not the Supervisor's.
+    const viaLight = await rolePage(t, 'safety', { ...MAIN_ON_CODEX, OUROBOROS_MODEL_LIGHT: 'openai::gpt-light',
+        OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'fast' } });
+    assert.equal(placeholder(viaLight), 'Empty uses the Light model: gpt-light');
 });

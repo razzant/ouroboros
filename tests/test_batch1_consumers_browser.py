@@ -712,14 +712,14 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                                            arg=[a_id, b_id, c_id], timeout=60000)
                     logs_view = page.evaluate("""ids => Object.fromEntries(ids.map(id => {
                         const card = document.querySelector(`[data-task-group="${id}"]`);
-                        return [id, {headline: card.querySelector('[data-task-headline]').textContent,
-                                     phase: card.querySelector('[data-task-phase]').textContent,
-                                     timeline: [...card.querySelectorAll('.log-task-event .log-headline, .log-task-event .log-main')]
+                        return [id, {headline: card.querySelector('.log-words').textContent,
+                                     failure: card.querySelector('.log-failure').hidden ? '' : card.querySelector('.log-failure-word').textContent,
+                                     timeline: [...card.querySelectorAll('.log-task-event .log-head, .log-task-event .log-words')]
                                         .map(node => node.textContent.replace(/\\s+/g, ' ').trim())}];
                     }))""", [a_id, b_id, c_id])
                     for task in (a_id, b_id):
                         group = page.locator(f'[data-task-group="{task}"]')
-                        group.locator("details.log-task-details").evaluate("d => { d.open = true; }")
+                        group.evaluate("d => { d.open = true; }")
                     page.locator(f'[data-task-group="{b_id}"]').scroll_into_view_if_needed()
                     page.screenshot(path=str(shots / "12-boot2-logs-backfill.png"), full_page=True, animations="disabled")
                     receipt["logs_view"] = logs_view
@@ -737,7 +737,7 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                     wait_until(lambda: _api(server, "/api/state")["bg_consciousness_enabled"] is False, 60)
                     chip_off = _wait_chip(page, "chip.dataset.off === 'true'")
                     assert chip_off["word"] == "Off", chip_off
-                    assert chip_off["label"].startswith("Consciousness: Off: no own wakes"), chip_off  # the host's Off sentence, its place count aside
+                    assert chip_off["label"].startswith("Consciousness: Only when you write to it."), chip_off  # the switch's position, then the host's line
                     pills2 = _evolution_pills(page)
                     page.screenshot(path=str(shots / "14-boot2-known-controls-evolution-panel.png"), animations="disabled")
                     passed("known_enabled_and_disabled_distinct", chip_on=chip_on, chip_off=chip_off, pills=pills2)

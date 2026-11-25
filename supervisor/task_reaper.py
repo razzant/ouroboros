@@ -202,14 +202,14 @@ def request_finalization_grace(
         # would only decorate its summary.
         return control_msg_id
     try:
+        from ouroboros.host_notice import notice
         from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
         from supervisor import workers as _workers_mod
-        cause = TASK_CAUSE_PHRASES.get(terminal_reason, terminal_reason)  # an unknown rail stays raw
+        cause = TASK_CAUSE_PHRASES.get(terminal_reason, "The task reached a limit")  # an unknown rail: its details
         _workers_mod.get_event_q().put({
             "type": "send_message",
             "chat_id": chat_id,
-            "text": str(toast_text or "") or (f"⏳ Task {task_id}: {cause}. Finalize artifacts/results now; "
-                                              "supervisor will stop the task after the grace window."),
+            "text": str(toast_text or "") or f"{cause}; it is wrapping up and stops after its grace window.",
             "role": "system", "system_type": "finalization_notice",
             "format": "markdown",
             "is_progress": True,
@@ -220,7 +220,8 @@ def request_finalization_grace(
             HOST_NARRATION: True,
             # toast_tone=warning: a rail is a limit the task hit, not an error the owner must fix (TZ-2 C1).
             "progress_meta": {"task_incident": terminal_reason, "toast_tone": "warning",
-                              "toast_once": f"{task_id}:{terminal_reason}:{stamp}"},
+                              "toast_once": f"{task_id}:{terminal_reason}:{stamp}",
+                              "notice": notice("finalization_grace", details=f"task {task_id}, {terminal_reason}")},
             "ts": utc_now_iso(),
         })
     except Exception:
@@ -268,6 +269,7 @@ def withdraw_finalization_grace(
         # Plain progress, NOT a task_incident: the request's toast is styled as an
         # error in the UI, and its retraction is good news. It is emitted at most
         # once per episode, because the latch is already gone by here.
+        from ouroboros.host_notice import notice
         from supervisor import workers as _workers_mod
         _workers_mod.get_event_q().put({
             "type": "send_message",
@@ -277,16 +279,14 @@ def withdraw_finalization_grace(
             # already consumed the control is in-process state (`loop._owner_msg_seen`)
             # the supervisor cannot see, and claiming a cancelled stop after the task
             # took the order was a plain lie. Correcting the sentence, not adding an ack.
-            "text": (
-                f"Task {task_id}: the {reason} finalization condition no longer applies; "
-                "the stop request was retracted from its mailbox — if the task had "
-                "already read it, it may still finalize."
-            ),
+            "text": ("The stop request was withdrawn because its condition no longer applies; if the task "
+                     "already read it, it may still wrap up."),
             "role": "system", "system_type": "finalization_notice",
             "format": "markdown",
             "is_progress": True,
             "task_id": task_id,
             HOST_NARRATION: True,
+            "progress_meta": {"notice": notice("finalization_withdrawn", details=f"task {task_id}, {reason}")},
             "ts": utc_now_iso(),
         })
     except Exception:
@@ -448,18 +448,19 @@ def _hold_wedged_worker(task_id: str, task_type: str, worker_id: int, terminal_r
         log.debug("Reaper: failed to log task_reaper_wedged for %s", task_id, exc_info=True)
     if notify_chat_id is not None:
         try:
+            from ouroboros.host_notice import notice
+
             send_with_budget(
                 notify_chat_id,
-                (
-                    f"⚠️ A timed-out worker (task {task_id}) did not die after repeated kills. Its slot is "
-                    f"held unavailable and the task is left running to avoid racing a still-live process. "
-                    f"If this persists, /restart to recover the slot."
-                ),
+                ("A timed-out worker did not stop after repeated kills; its task keeps running rather than race a "
+                 "process that may still be alive, and its slot is held."),
                 is_progress=True,
                 task_id=task_id,
                 progress_meta={
                     "task_incident": "task_reaper_wedged",
                     "toast_once": f"{task_id}:task_reaper_wedged:{worker_id}:{terminal_reason}",
+                    "notice": notice("task_reaper_wedged", step="restart",
+                                     details=f"task {task_id}, worker slot {worker_id}, {terminal_reason}"),
                 },
                 role="system", system_type="task_reaper_notice")
         except Exception:
@@ -777,10 +778,13 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                                     terminal_metadata, unreconciled, worker_id=worker_id,
                                     files_prepared_attempt=attempt)
     else:
-        # Answer first: an attempt whose answer the host already holds is finalized from the
-        # outbox BEFORE the history salvage below can replace the preserved copy
-        # a held host salvage points at (both live at salvaged/<task>.txt).
-        adopted_answer = _adopt_held_answer(_q, task, task_id, attempt, terminal_reason)
+        from ouroboros.terminal_time import captured_task_attempt
+
+        physical_attempt = captured_task_attempt(task, job.get("attempt"))
+        # The outbox owns a held answer. Reuse it before considering any intermediate response.
+        adopted_answer = _adopt_held_answer(
+            _q, task, task_id, attempt if physical_attempt is None else physical_attempt, terminal_reason,
+        )
         # 3. Reconstruct real cost/rounds from the usage ledger (the killed worker never
         #    finalized; the event would otherwise carry zeros and understate metrics).
         #    A failure here cannot abort teardown before the slot is respawned.
@@ -887,15 +891,20 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         incident_chat_id = _incident_chat_id(task, owner_chat_id, _q)
         if incident_chat_id is not None and not adopted_answer:
             try:
+                from ouroboros.host_notice import phrase
                 from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
-                cause = TASK_CAUSE_PHRASES.get(terminal_reason, terminal_reason)  # an unknown rail stays raw
-                headline = f"🛑 {cause}: task {task_id} killed after {int(runtime_sec)}s.\n"
-                stop_detail = _stop_detail(ceiling_reached, deadline_reached)
+                cause = TASK_CAUSE_PHRASES.get(terminal_reason, "")  # an unknown rail is named in the details only
+                # The cause is one of a closed table of host phrases, so it stays in the template; the seconds do not.
+                # #4074: this row leaves before any respawn attempt, and the slot may not be replaced, so it
+                # states only what was observed — the cause, the seconds, the stop — never a restart.
+                text, said = phrase("task_reaper_stopped", f"{cause + '; it' if cause else 'The task'} was stopped after "
+                                    "{seconds} s.", seconds=int(runtime_sec), details=(
+                                        f"task {task_id}, worker slot {worker_id}, {terminal_reason}. "
+                                        + _stop_detail(ceiling_reached, deadline_reached)))
                 send_with_budget(
-                    incident_chat_id,
-                    headline + f"Worker {worker_id} restarted. {stop_detail}",
-                    is_progress=True, task_id=task_id,
-                    progress_meta={"task_incident": "task_reaper_stopped", "toast_once": incident_toast_once},
+                    incident_chat_id, text, is_progress=True, task_id=task_id,
+                    progress_meta={"task_incident": "task_reaper_stopped", "toast_once": incident_toast_once,
+                                   "notice": said["notice"]},
                     role="system", system_type="task_reaper_notice")
             except Exception:
                 log.debug("Reaper: failed to send owner notification for %s", task_id, exc_info=True)

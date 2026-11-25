@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "7.11.0"
+version = "7.12.0"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -42,7 +42,11 @@ dependencies = [
     "huggingface_hub",
     "starlette",
     "python-multipart",
-    "Pillow>=10.0",
+    # Pillow 13 (decoder security fixes) has no Python 3.10 wheels. An installed app whose
+    # bundled interpreter is still 3.10 keeps the last 12.x line so its in-app Update keeps
+    # working; that branch stays vulnerable until the app is reinstalled (docs/DEPLOYMENT.md).
+    "Pillow>=12.3.0,<13; python_version < '3.11'",
+    "Pillow>=13.0.0; python_version >= '3.11'",
     "pypdf>=7.0",
     "uvicorn[standard]",
     "websockets",
@@ -155,6 +159,7 @@ web = [
     "vendor/katex/contrib/*.js",
     "vendor/katex/fonts/*.woff2",
     "vendor/licenses/*",
+    "vendor/qrcodegen/*.js",
 ]
 [tool.ruff]
 line-length = 120

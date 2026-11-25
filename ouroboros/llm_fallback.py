@@ -20,6 +20,7 @@ import time
 from dataclasses import replace
 from typing import Any, Dict, Optional
 
+from ouroboros._usage_response import _plain, failed_chat_completion_shows_work, provider_body_error, refusal_failure_payload
 from ouroboros.model_concurrency import limit_physical_send
 
 from ouroboros.llm_attempt import (
@@ -32,6 +33,7 @@ from ouroboros.llm_attempt import (
     _is_provider_policy_refusal,
     is_size_refusal,
     preserve_prior_dispatch,
+    ProcessingNotStarted,
     strongest_dispatch_capture,
     processing_refusal,
     reasoning_strip_retry_allowed,
@@ -40,7 +42,9 @@ from ouroboros.llm_attempt import (
 from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.pricing_catalog import pin_tariff
 from ouroboros.llm_stream import consume_stream, consume_stream_async
-from ouroboros.transport_custody import ProviderNotDispatched
+from ouroboros.openai_responses import responses_route
+from ouroboros.provider_models import OPENAI_API_SURFACES
+from ouroboros.transport_custody import ProviderNotDispatched, is_processing_refusal
 from ouroboros.reasoning_artifacts import (
     note_replay_omission,
     pop_reasoning_pin_note,
@@ -60,11 +64,43 @@ from ouroboros.usage_accounting import UsageAccountingError, last_physical_attem
 log = logging.getLogger("ouroboros.llm")
 
 
-def _response_body_error(client: Any, response: Any) -> Optional[Dict[str, Any]]:
+def _wire_surface(target: Dict[str, Any]) -> str:
+    """The wire profile's API name for this target: Messages, a connection's Responses, else Chat Completions."""
+    if target.get("provider") == "anthropic":
+        return "messages"
+    return OPENAI_API_SURFACES["responses"] if responses_route(target) else OPENAI_API_SURFACES["chat_completions"]
+
+
+def _retryable_body_error(client: Any, body: Any) -> Optional[Dict[str, Any]]:
+    error = client._provider_body_error(body)
+    return None if error and failed_chat_completion_shows_work(body) else error
+
+
+def _response_body_error(client: Any, response: Any, *, for_retry: bool = False) -> Optional[Dict[str, Any]]:
     try:
-        return client._provider_body_error(response.model_dump())
+        body = response.model_dump()
+        return _retryable_body_error(client, body) if for_retry else client._provider_body_error(body)
     except Exception:
         return None
+
+
+def _check_received_tier_error(client, response, request, target, candidate, *, account_received: bool = False):
+    """Adapt a returned body error to the same physical failure as an SDK exception. Only an uncontradicted refusal
+    proves no work. A contradicted one stays a failure on a chat send; a search leg (``account_received``) keeps it
+    as the reply it received, so its own attempt row and its one usage event carry what that reply reported."""
+    if request.submitted_processing_mode not in {"priority", "flex", "fast", "ultrafast"}:
+        return
+    body = _plain(response)
+    native = client._provider_body_error(body)
+    if native:
+        error = RuntimeError(str(native.get("message") or "Provider refused the submitted processing tier"))
+        error.status_code, error.body = native.get("status_code", native.get("code")), body
+        error.response, error.response_body_error = response, True
+        refusal = processing_refusal(target, candidate, error)
+        if refusal is not error:
+            raise refusal from error
+        if is_processing_refusal(error) and not account_received:
+            raise error
 
 
 def _with_tariff(request, target: Dict[str, Any], candidate: Dict[str, Any]):
@@ -92,7 +128,7 @@ class _RecoveryLadderMixin:
         exc: BaseException,
     ) -> Optional[Dict[str, Any]]:
         """Remove only an explicitly rejected cache control or affinity once."""
-        if getattr(exc, "stream_incomplete", False):
+        if getattr(exc, "stream_incomplete", False) or is_processing_refusal(exc):
             return None
         if is_size_refusal(exc) or _is_provider_policy_refusal(exc):
             return None
@@ -184,12 +220,12 @@ class _RecoveryLadderMixin:
                 body = response.model_dump()
             except Exception:
                 return None
-            error = cls._provider_body_error(body)
+            error = _retryable_body_error(cls, body)
             if error is None:
                 return None
             status, receipt = error.get("code"), body.get("openrouter_metadata")
         else:
-            if _is_provider_policy_refusal(failure) or isinstance(failure, ProviderNotDispatched):
+            if _is_provider_policy_refusal(failure) or isinstance(failure, ProviderNotDispatched) or is_processing_refusal(failure):
                 return None
             streamed = getattr(failure, "stream_receipt", None)
             if getattr(failure, "stream_incomplete", False) and not (
@@ -235,9 +271,21 @@ class _RecoveryLadderMixin:
         exc: Exception,
     ) -> Optional[Dict[str, Any]]:
         """Strip replayed reasoning once for a non-overflow OpenRouter 400."""
-        if not target.get("supports_openrouter_extensions"):
+        if (not target.get("supports_openrouter_extensions")
+                or not self._has_replayed_reasoning_metadata(kwargs.get("messages") or [])):
             return None
         if not reasoning_strip_retry_allowed(exc):
+            return None
+        # A route's catalogue can explain a generic 400 before the loop sees it.
+        # Use the same answer, typed precedence and numeric equality as recovery.
+        from ouroboros._usage_response import provider_answer
+        from ouroboros.context_budget import cited_declared_limit
+        from ouroboros.loop_llm_call import classify_llm_exception
+        from ouroboros.pricing import declared_token_limits
+        model = str(kwargs.get("model") or target.get("resolved_model") or "")
+        if model and classify_llm_exception(exc).untyped and cited_declared_limit(
+                provider_answer(exc).said, int(kwargs.get("max_tokens") or kwargs.get("max_completion_tokens") or 0),
+                lambda: declared_token_limits("openrouter", model)):
             return None
         retry_kwargs = self._reroute_same_model_kwargs(target, kwargs)
         if retry_kwargs is not None:
@@ -309,26 +357,7 @@ class _RecoveryLadderMixin:
         self._rotate_openrouter_session_affinity(retry_kwargs)
         return retry_kwargs
 
-    @staticmethod
-    def _provider_body_error(resp_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """An OpenAI-compatible HTTP 200 whose body carries a top-level ``error``
-        object instead of a usable completion. OpenRouter passes upstream
-        provider errors and its own 429/5xx through the body with status 200; the
-        OpenAI SDK builds these leniently, keeping ``error`` and ``choices=None``.
-        Returns the error dict, else None (a real completion wins over a
-        non-fatal error field)."""
-        if not isinstance(resp_dict, dict):
-            return None
-        err = resp_dict.get("error")
-        if not isinstance(err, dict):
-            return None
-        choices = resp_dict.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0] if isinstance(choices[0], dict) else {}
-            msg = first.get("message") if isinstance(first, dict) else None
-            if isinstance(msg, dict) and (msg.get("content") or msg.get("tool_calls")):
-                return None
-        return err
+    _provider_body_error = staticmethod(provider_body_error)
 
     @staticmethod
     def _is_transient_body_error(err: Dict[str, Any]) -> bool:
@@ -364,7 +393,7 @@ class _RecoveryLadderMixin:
             resp_dict = resp.model_dump()
         except Exception:
             return None
-        err = self._provider_body_error(resp_dict)
+        err = _retryable_body_error(self, resp_dict)
         if not err or is_size_refusal(err):  # read on the whole object, before the transient heuristic below
             return None
         if not self._is_transient_body_error(err):
@@ -395,7 +424,7 @@ class _RecoveryLadderMixin:
             resp_dict = resp.model_dump()
         except Exception:
             return None
-        body_err = self._provider_body_error(resp_dict)
+        body_err = _retryable_body_error(self, resp_dict)
         if not isinstance(body_err, dict) or is_size_refusal(body_err):
             return None
         try:
@@ -419,6 +448,8 @@ class _RecoveryLadderMixin:
         create_fn: Any,
         kwargs: Dict[str, Any],
         target: Dict[str, Any],
+        *,
+        search_server_tool: bool = False,
     ) -> Any:
         # Discard a prior aborted ladder's pin note and omission fact.
         pop_reasoning_pin_note()
@@ -429,22 +460,26 @@ class _RecoveryLadderMixin:
 
         def _send(candidate: Dict[str, Any]) -> Any:
             nonlocal prior_capture
-            candidate = _finalized_physical_candidate(
-                target, candidate, "messages" if target.get("provider") == "anthropic" else "chat.completions",
-                fresh_clock=True,
-            )
+            candidate = _finalized_physical_candidate(target, candidate, _wire_surface(target), fresh_clock=True)
             request = _with_tariff(_attempt_request(target, candidate), target, candidate)
 
             def dispatch():
                 timeout = physical_dispatch_timeout(transport_timeout)
                 try:
                     response = create_fn(**candidate, **({"timeout": timeout} if timeout is not None else {}))
+                    if candidate.get("stream"):
+                        response = consume_stream(response, expected_choices=candidate.get("n", 1),
+                                                  responses=responses_route(target), opencode_go=request.opencode_go)
                 except Exception as error:
+                    if search_server_tool:
+                        refusal_failure_payload(error)  # Retain charges on non-tier search failures too.
                     refusal = processing_refusal(target, candidate, error)
                     if refusal is error:
                         raise
                     raise refusal from error
-                return consume_stream(response, expected_choices=candidate.get("n", 1)) if candidate.get("stream") else response
+                _check_received_tier_error(self, response, request, target, candidate,
+                                           account_received=search_server_tool)
+                return response
 
             try:
                 result = _execute_candidate(
@@ -452,7 +487,7 @@ class _RecoveryLadderMixin:
                     limit_physical_send(target, dispatch),
                     _candidate_before_dispatch(candidate, request),
                 )
-                note_wire_send_succeeded(last_physical_attempt_capture())
+                note_wire_send_succeeded(last_physical_attempt_capture(), target, unpriced_add_on=request.unpriced_add_on)
                 prior_capture = strongest_dispatch_capture(prior_capture, last_physical_attempt_capture())
                 self._stage_reasoning_pin_disclosure(candidate)
                 # Only a generated answer means the model read this send; a body error read nothing.
@@ -484,7 +519,7 @@ class _RecoveryLadderMixin:
                 signature_used = False
                 for _ in range(8):
                     if current_failure is None:
-                        body = _response_body_error(self, current_response)
+                        body = _response_body_error(self, current_response, for_retry=True)
                         retry_kwargs = plan_next_wire_retry(
                             current_candidate, error=body, body_error=True, target=target,
                         )
@@ -525,9 +560,18 @@ class _RecoveryLadderMixin:
                 self._pop_effort_clamp_disclosure()
                 raise
 
-        if single_physical_send_active():
+        if single_physical_send_active() or search_server_tool:
             try:
-                return _send(kwargs)  # preserve the repeat's error/body; no repair or affinity mutation
+                try:
+                    return _send(kwargs)
+                except ProcessingNotStarted as exc:
+                    if single_physical_send_active():
+                        raise
+                    # Only a refusal before generation bound to this candidate permits a Standard retry.
+                    standard = plan_next_wire_retry(kwargs, error=exc, target=target, processing_only=True)
+                    if standard is None:
+                        raise
+                return _send(standard)
             except Exception:
                 self._pop_effort_clamp_disclosure()
                 raise
@@ -571,7 +615,7 @@ class _RecoveryLadderMixin:
             except UsageAccountingError:
                 raise
             except Exception as exc:
-                if _is_provider_policy_refusal(exc):
+                if _is_provider_policy_refusal(exc) or is_processing_refusal(exc):
                     # A refused call is not a provider answer to fall back FROM.
                     self._pop_effort_clamp_disclosure()
                     raise
@@ -588,7 +632,7 @@ class _RecoveryLadderMixin:
             except UsageAccountingError:
                 raise
             except Exception as exc:
-                if _is_provider_policy_refusal(exc):
+                if _is_provider_policy_refusal(exc) or is_processing_refusal(exc):
                     self._pop_effort_clamp_disclosure()
                     raise
                 return resp
@@ -610,7 +654,7 @@ class _RecoveryLadderMixin:
 
         async def _send(candidate: Dict[str, Any]) -> Any:
             nonlocal prior_capture
-            candidate = _finalized_physical_candidate(target, candidate, "chat.completions", fresh_clock=True)
+            candidate = _finalized_physical_candidate(target, candidate, _wire_surface(target), fresh_clock=True)
             request = _attempt_request(target, candidate)
             if target.get("provider") == "deepseek":  # its key's balance read stays off the event loop
                 request = await asyncio.to_thread(_with_tariff, request, target, candidate)
@@ -619,12 +663,16 @@ class _RecoveryLadderMixin:
                 timeout = physical_dispatch_timeout(transport_timeout)
                 try:
                     response = await create_fn(**candidate, **({"timeout": timeout} if timeout is not None else {}))
+                    if candidate.get("stream"):
+                        response = await consume_stream_async(response, expected_choices=candidate.get("n", 1),
+                                                              responses=responses_route(target), opencode_go=request.opencode_go)
                 except Exception as error:
                     refusal = processing_refusal(target, candidate, error)
                     if refusal is error:
                         raise
                     raise refusal from error
-                return await consume_stream_async(response, expected_choices=candidate.get("n", 1)) if candidate.get("stream") else response
+                _check_received_tier_error(self, response, request, target, candidate)
+                return response
 
             try:
                 result = await _execute_candidate_async(
@@ -632,7 +680,7 @@ class _RecoveryLadderMixin:
                     limit_physical_send(target, dispatch),
                     _candidate_before_dispatch(candidate, request),
                 )
-                note_wire_send_succeeded(last_physical_attempt_capture())
+                note_wire_send_succeeded(last_physical_attempt_capture(), target, unpriced_add_on=request.unpriced_add_on)
                 prior_capture = strongest_dispatch_capture(prior_capture, last_physical_attempt_capture())
                 self._stage_reasoning_pin_disclosure(candidate)
                 # Only a generated answer means the model read this send; a body error read nothing.
@@ -664,7 +712,7 @@ class _RecoveryLadderMixin:
                 signature_used = False
                 for _ in range(8):
                     if current_failure is None:
-                        body = _response_body_error(self, current_response)
+                        body = _response_body_error(self, current_response, for_retry=True)
                         retry_kwargs = plan_next_wire_retry(
                             current_candidate, error=body, body_error=True, target=target,
                         )
@@ -747,7 +795,7 @@ class _RecoveryLadderMixin:
             except UsageAccountingError:
                 raise
             except Exception as exc:
-                if _is_provider_policy_refusal(exc):
+                if _is_provider_policy_refusal(exc) or is_processing_refusal(exc):
                     # A refused call is not a provider answer to fall back FROM.
                     self._pop_effort_clamp_disclosure()
                     raise
@@ -764,7 +812,7 @@ class _RecoveryLadderMixin:
             except UsageAccountingError:
                 raise
             except Exception as exc:
-                if _is_provider_policy_refusal(exc):
+                if _is_provider_policy_refusal(exc) or is_processing_refusal(exc):
                     self._pop_effort_clamp_disclosure()
                     raise
                 return resp

@@ -227,7 +227,8 @@ def test_owner_foci_keep_cited_model_choices_at_dispatch(tmp_path, monkeypatch, 
     assert result.status == "ok" and json.loads(result.text.splitlines()[0])["ok"], result.text
     writes, recents = model_effects
     if scope == "work":
-        assert requests == [{"kind": "model", "model": "vendor/chosen", "use_local": False, "cited": "use the other model"}]
+        assert requests == [{"kind": "model", "model": "vendor/chosen", "use_local": False, "cited": "use the other model",
+                             "source": "owner_words"}]
         assert not writes and not recents
     else:
         assert not requests and len(recents) == 1
@@ -611,3 +612,28 @@ def test_full_can_create_and_edit_circle_models_through_dispatch(tmp_path, monke
         "action": "edit_circle", "circle_id": created["circle_id"], "model": "",
         "expected_revision": edited["revision"]}))["circle"]
     assert cleared["model"] == ""
+
+
+def test_a_full_wake_keeps_my_humans_place_note_and_removes_its_own_through_dispatch(tmp_path, monkeypatch):
+    """14.11: a wake at Full removed my human's note of 11.11 from two places and nothing kept the words. Through the
+    real dispatch a Full wake is refused their note, which stays, and still removes its own; what it removed stays
+    readable by inspect, signed by the wake."""
+    from ouroboros import places
+    from tests._safety_fixtures import disable_safety
+    disable_safety(monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
+    wake = _registry(tmp_path, _wake_task("full")["metadata"])
+    root = tmp_path / "drive"
+    place = places.connect_place(root, connector="bridge", provider="chat")
+    places.edit_place(root, place.place_id, "add_note", author="owner", text="Owner's note of 11.11.")
+    places.edit_place(root, place.place_id, "add_note", author="ouroboros", text="The wake's own note.")
+    theirs, own = (note.note_id for note in places.get_place(root, place.place_id).notes)
+    remove = {"action": "remove_note", "place_id": place.place_id}
+    assert "place_owner_words_owner_only" in wake.execute("configure_presence", {**remove, "note_id": theirs})
+    assert json.loads(wake.execute("configure_presence", {**remove, "note_id": own}))["ok"]
+    assert [note.text for note in places.get_place(root, place.place_id).notes] == ["Owner's note of 11.11."]
+    inspected = json.loads(wake.execute("configure_presence", {"action": "inspect", "place_id": place.place_id}))
+    assert [(word["text"], word["author"], word["changed_by"]) for word in inspected["earlier"]] == [
+        ("The wake's own note.", "ouroboros", "ouroboros")]
+    assert inspected["earlier"][0]["writer"]["focus"]["role"] == "consciousness"

@@ -16,6 +16,7 @@
  * `/api/state` snapshot the room already reads.
  */
 import { headlineView } from './consciousness_dashboard.js';
+import { switchActionWords, switchReadingWords, turnConsciousness } from './consciousness_switch.js';
 import { failureText, normalizeConsciousness, readConsciousness, readPlaces } from './consciousness_api.js';
 import { allowanceMove, allowanceText, clockText, consciousnessMark, deadlineWords, splitWakes, wakePhaseText } from './consciousness_words.js';
 import { fmt, tr } from './i18n.js';
@@ -24,6 +25,7 @@ import { controlIcon } from './page_icons.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
 import { hangUnderCapsules } from './room_work.js';
 import { motionMs, reducedMotion } from './motion.js';
+import { bindScrollFade } from './scroll_fade.js';
 
 export { allowanceText };
 // A campaign stopped by its limit or waiting for the owner's chat is the owner's move too (the state's own marks are
@@ -49,7 +51,7 @@ export function chipView(data = {}) {
     const word = evolving ? 'Evolving' : off ? 'Off' : headline.moving || unknown ? '' : deadlineWords(snapshot);
     const mark = consciousnessMark(snapshot,
         { owner: evolving && CAMPAIGN_OWNER_MOVE.has(String(data.evolution_state?.status || '')) });
-    const said = [`Consciousness: ${headline.text}`,
+    const said = [`Consciousness: ${headline.position ? `${headline.position}. ${headline.text}` : headline.text}`,
         evolving ? 'evolution campaign running' : '', mark.hue === 'owner' ? 'waits for you' : '']
         .filter(Boolean).join(' · ');
     return { word, mark, off, evolving, said, headline, snapshot };
@@ -72,7 +74,7 @@ export function wakeRows(wakes) {
  * every `/api/state` answer the room reads.
  */
 export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = null, refreshState = () => {},
-    read = readConsciousness, readPlacesFn = readPlaces, openSheet = openPlaceSheet } = {}) {
+    read = readConsciousness, readPlacesFn = readPlaces, openSheet = openPlaceSheet, turn = turnConsciousness } = {}) {
     const doc = bar?.ownerDocument;
     if (!doc) return null;
     const element = (tag, className = '', text = '') => {
@@ -95,14 +97,17 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     glyph.innerHTML = controlIcon('brain', 18);
     const word = element('span', 'cx-chip-word');
     const mark = createStatusMark(doc, 'cx-chip-mark');
-    chip.append(glyph, word, mark);
+    // Its name, shown where the chip lies as a row of the room's work list (Telegram's shared row, room_work.js), whose
+    // authored subtree the language overlay skips: the name is translated here.
+    const label = element('span', 'cx-chip-label', tr('consciousness.row', 'Consciousness'));
+    chip.append(glyph, label, word, mark);
     const titleBlock = bar.querySelector('.app-page-title-block');
     if (titleBlock) titleBlock.after(chip);
     else bar.append(chip);
 
     // ---- the Shade: the room Shade's anchor and material under the bar
     const anchor = element('div', 'rw-shade-anchor cx-anchor');
-    const shade = element('div', 'rw-surface rw-shade cx-shade');
+    const shade = element('div', 'rw-surface scroll-fade-y rw-shade cx-shade');
     shade.id = `${uid}-shade`;
     shade.hidden = true;
     shade.tabIndex = -1;
@@ -148,6 +153,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     shade.append(body);
     anchor.append(shade);
     bar.append(anchor);
+    const disposeShadeFade = bindScrollFade(shade);
 
     let view = null;
     let open = false;
@@ -174,15 +180,16 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     function paintShade() {
         if (!view) return;
         const { snapshot, headline } = view;
-        stateLine.textContent = headline.text;
-        stateNote.textContent = headline.note;
-        stateNote.hidden = !headline.note;
+        // Its position by meaning, then the host's state line and what follows from it (owner 15.11, 5A).
+        stateLine.textContent = headline.position || headline.text;
+        stateNote.textContent = [headline.position ? headline.text : '', headline.note].filter(Boolean).join(' ');
+        stateNote.hidden = !stateNote.textContent;
         const allowance = allowanceText(snapshot);
         money.textContent = allowance;
         money.hidden = !allowance;
         const on = snapshot.enabled === true;
         toggle.hidden = snapshot.enabled === null;
-        toggle.textContent = on ? 'Stop' : 'Start';
+        toggle.textContent = pending === 'read' ? switchReadingWords() : switchActionWords(on);
         toggle.disabled = Boolean(pending) || !ws?.send || !connected();
         costsDoor.hidden = !allowanceMove(snapshot);
         evolutionDoor.hidden = !view.evolving;
@@ -246,7 +253,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         if (destroyed || !open) return;
         if (place) {
             close({ restoreFocus: false });
-            openSheet(place, { returnFocus: chip });
+            openSheet(place, { returnFocus: returnTarget() });
             return;
         }
         if (!failed && doc.activeElement === door) { coverageNote.tabIndex = -1; coverageNote.focus(); }
@@ -294,24 +301,39 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         delete chip.dataset.open;
         bar.removeAttribute('data-cx-shade');
         foldAway();
-        if (restoreFocus && chip.isConnected && !chip.hidden) chip.focus({ preventScroll: true });
+        if (restoreFocus && chip.isConnected && !chip.hidden) returnTarget().focus({ preventScroll: true });
+    }
+    // Where a return to the chip lands: the chip, or, while it is a row of the room's work list that is folded or still
+    // folding (Telegram's shared row; a folding list is inert already), the room's capsule that opened that list.
+    function returnTarget() {
+        const away = !chip.getClientRects().length || Boolean(chip.closest('[inert], [hidden]'));
+        return (away && bar.querySelector('.rw-trigger:not([hidden])')) || chip;
     }
 
-    const disposers = [];
+    const disposers = [disposeShadeFade];
     const listen = (target, type, fn, options) => {
         target.addEventListener(type, fn, options);
         disposers.push(() => target.removeEventListener(type, fn, options));
     };
+    // The row's name is translated here, so a language change says it again.
+    if (globalThis.window) listen(globalThis.window, 'ouro:language-changed', () => {
+        label.textContent = tr('consciousness.row', 'Consciousness');
+    });
     // A click with detail 0 is Enter or Space on the focused chip: a keyboard open lands in the Shade.
     listen(chip, 'click', (event) => (open ? close() : openShade(event.detail === 0)));
     listen(chip, 'keydown', (event) => {
         if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !open) { event.preventDefault(); openShade(true); }
     });
-    listen(toggle, 'click', () => {
-        if (toggle.disabled || !view) return;
-        pending = view.snapshot.enabled ? 'stop' : 'start';
+    listen(toggle, 'click', async () => {
+        if (toggle.disabled || !view || pending) return;
+        // The one switch: it names what changes first (consciousness_switch.js), then sends the Dashboard's /bg.
+        const to = view.snapshot.enabled ? 'off' : 'on';
+        pending = 'read';  // «Reading…» while the preview is read
+        pendingAt = Number.POSITIVE_INFINITY;  // a state answer during the read or the question keeps the button waiting
+        paintShade();
+        const onRead = () => { pending = to === 'off' ? 'stop' : 'start'; if (!destroyed) paintShade(); };
+        if (!(await turn(to, { ws, onRead }))) { pending = ''; if (!destroyed) paintShade(); return; }
         pendingAt = Date.now();
-        ws.send({ type: 'command', cmd: `/bg ${pending}`, ui_control: { name: 'consciousness_toggle' } });
         paintShade();
         // The runtime applies the command on its own clock: the room's next state answer shows it.
         setTimeout(() => { if (!destroyed) refreshState(true); }, COMMAND_SETTLE_MS);

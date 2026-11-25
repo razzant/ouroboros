@@ -10,9 +10,10 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
+import { EXTENSIONS_PAGES } from '../modules/extensions.js';
 import { initSettings } from '../modules/settings.js';
 import { isDoorId } from '../modules/settings_home.js';
-import { registerSettingsPage, settingsPageFor, settingsPagePrefixes } from '../modules/settings_pages.js';
+import { extensionsPageOf, registerSettingsPage, settingsPageFor, settingsPagePrefixes } from '../modules/settings_pages.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from '../modules/settings_rows.js';
 import { Stub, settle, world } from './helpers/settings_dom.js';
 
@@ -25,9 +26,29 @@ const HOME_PAGES = HOME_ROWS.map((row) => row.to).filter((to) => !isDoorId(to));
 const PENDING_PAGES = {};
 const PENDING_ROWS = {};
 
+test('an empty Settings page band passes over its scroller; a named level retains its header row', () => {
+    const css = readFileSync(new URL('../settings.css', import.meta.url), 'utf8');
+    const wide = css.slice(css.indexOf('@container sectionplace (min-width: 40rem)'), css.indexOf('/* A phone keeps'));
+    assert.match(wide, /#page-settings:is\(\[data-settings-depth="0"\], \[data-settings-depth="1"\]\) > \.app-page-header:not\(\[data-return\]\) \{[^}]*position: absolute/);
+    assert.match(wide, /\.settings-home \{ margin-top: var\(--page-header-row-h\);/,
+        'the list keeps its band in a native window and in a browser without a chrome token');
+    assert.match(wide, /\.settings-page \{ padding-top: calc\(var\(--page-header-row-h\) \+ var\(--space-2\)\);/,
+        'both hosts start the page below the band, before content scrolls beneath it');
+    assert.match(css, /\.settings-page \{[^}]*padding: var\(--space-2\) var\(--page-header-padding-x\) 56px/,
+        'a named band and one-column pages keep their ordinary inset');
+    assert.doesNotMatch(css, /#page-settings > \.app-page-header\[data-lead\] \{ grid-template-columns/,
+        'a band without actions keeps no end column through the section places\' one rule (page_header.test.js)');
+});
+
 /** Why `path` is no address ('' when it is one): the home, a door, or a page that a home row opens or a module serves. */
 function deadPath(path, { registered = (target) => Boolean(settingsPageFor(target)) } = {}) {
     if (path === '') return '';
+    if (path.startsWith('skills:')) {
+        const target = path.slice('skills:'.length);
+        // A search door can open a section view or a registered editor belonging to Extensions.
+        const served = EXTENSIONS_PAGES.some((page) => page.id === target) || (extensionsPageOf(target) && registered(target));
+        return served ? '' : `no Extensions page serves "${target}"`;
+    }
     if (isDoorId(path)) return DOORS.has(path) ? '' : `no door "${path}"`;
     const first = path.split('/')[0];
     return registered(path) || HOME_PAGES.includes(first) ? '' : `no page serves "${path}"`;
@@ -61,11 +82,14 @@ function sources(dir, keep) {
 }
 
 test('the guard fires on a dead tab name and is quiet on a living path', () => {
-    for (const dead of ['providers', 'secrets', 'behavior', 'advanced', 'about', 'dashboard:nowhere', 'skillz/x']) {
+    for (const dead of ['providers', 'secrets', 'behavior', 'advanced', 'about', 'dashboard:nowhere', 'skillz/x',
+        'skills:nowhere', 'skills:models', 'skills:installed/missing']) {
         assert.notEqual(deadPath(dead), '', dead);
     }
     for (const alive of ['', 'agents', 'models/local', 'accounts/codex', 'computer/about', 'skill/telegram', 'skill-sources',
-        'dashboard:costs', 'page:skills', 'main:context']) assert.equal(deadPath(alive), '', alive);
+        'dashboard:costs', 'page:skills', 'main:context', 'skills:skill', 'skills:skill/telegram', 'skills:tools/new',
+        'skills:skill-sources', 'skills:installed', 'skills:browse', 'skills:sources']) assert.equal(deadPath(alive), '', alive);
+    assert.notEqual(deadPath('skills:skill', { registered: () => false }), '', 'an unregistered editor is still a dead door');
     assert.deepEqual(addresses("ctx.openSettings?.('behavior', { back })"), [{ kind: 'path', value: 'behavior' }]);
     assert.deepEqual(addresses("host.openSettings('permissions', { row: 'SOME_ROW' })"),
         [{ kind: 'path', value: 'permissions' }, { kind: 'row', value: 'SOME_ROW' }]);
@@ -109,9 +133,9 @@ test('every page the home opens is served, or is named as pending with its lane;
 });
 
 test('an address no page registers lands on the home with its last part searched; a registered one opens its page', async (t) => {
-    const { content, state, showPage } = world(t);
+    const { content, state, showPage, layers } = world(t);
     registerSettingsPage('test-known', { title: 'Known', mount(body) { body.innerHTML = '<p data-known>here</p>'; } });
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     const search = () => content.querySelector('#settings-search').value || '';
     const results = () => content.querySelectorAll('[data-settings-result]').map((row) => row.dataset.settingsResult);
     const pages = () => content.querySelectorAll('.settings-page').map((level) => level.dataset.settingsPage);
@@ -148,7 +172,7 @@ test('an address no page registers lands on the home with its last part searched
 });
 
 // The fixture's element, also reading a selector of two parts (`A B`, a descendant) as a browser does: Back now stands in
-// the page's header (79fac1cf4), found there as `.app-page-header [data-settings-back]` (web/modules/settings.js).
+// the page's header (79fac1cf4), found there as `.app-page-header [data-shell-back]` (web/modules/settings.js).
 class DescendantStub extends Stub {
     querySelectorAll(selector) {
         const parts = selector.trim().split(/\s+/);
@@ -159,7 +183,7 @@ class DescendantStub extends Stub {
 }
 
 test('a page left with unsaved words is put aside and comes back as it was left; without them it is let go and drawn anew', async (t) => {
-    const { env, content, state, showPage } = world(t);
+    const { env, content, state, showPage, layers } = world(t);
     env.document.createElement = (tag) => new DescendantStub(tag);
     const drawn = [];
     const letGo = [];
@@ -169,23 +193,25 @@ test('a page left with unsaved words is put aside and comes back as it was left;
         body.innerHTML = '<input data-words value="stored">';
         return { unsaved: () => unsaved, unmount() { letGo.push(body); } };
     } });
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     const pages = () => content.querySelectorAll('.settings-page').map((level) => level.dataset.settingsPage);
     const words = () => content.querySelector('[data-words]');
+    content.querySelector('[data-settings-home]').getClientRects = () => [];
     await controls.open('test-editor');
     await settle();
 
-    // The owner types and presses Back without Save: the page leaves the screen and is not let go.
+    // The owner types and presses Back without Save: the page leaves the screen and is not let go. (One column: the
+    // list is not beside the page, so the page shows its Back.)
     words().setAttribute('value', 'typed');
     unsaved = true;
-    await content.querySelector('[data-settings-back]').fire('click');
+    await content.querySelector('.app-page-header [data-shell-back]').fire('click');
     await settle();
     assert.deepEqual([pages(), state.settingsPath, letGo.length], [[], '', 0]);
     // Its path opens the same page again, as it was left, with Back named anew.
     await controls.open('test-editor');
     await settle();
     assert.deepEqual([pages(), drawn.length, words().getAttribute('value')], [['test-editor'], 1, 'typed']);
-    assert.equal(content.querySelector('[data-settings-back]').getAttribute('aria-label'), 'Back to Settings');
+    assert.equal(content.querySelector('.app-page-header [data-shell-back]').getAttribute('aria-label'), 'Back to Settings');
 
     // Saved or discarded, the page is let go when it is left and drawn anew the next time.
     unsaved = false;
@@ -197,10 +223,52 @@ test('a page left with unsaved words is put aside and comes back as it was left;
     assert.deepEqual([drawn.length, words().getAttribute('value')], [2, 'stored']);
 });
 
+test('a Settings jump retains its clean origin until Back, while a map choice releases an abandoned origin', async (t) => {
+    const { createPageNavigation } = await import('../modules/page_navigation.js');
+    const { env, content, state, layers } = world(t);
+    const drawn = [], released = [];
+    for (const path of ['test-return-clean', 'test-return-next']) registerSettingsPage(path, {
+        title: path, mount(body) { drawn.push(body); return { unmount() { released.push(body); } }; },
+    });
+    let controls;
+    const shown = name => {
+        state.activePage = name;
+        env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
+    };
+    const nav = createPageNavigation({ layers, doc: env.document, canLeave: async () => true, capture: () => {
+        const saved = controls.capture();
+        return { key: `settings:${state.settingsPath}`, label: 'Settings', retains: saved.retains, release: saved.release,
+            restore() { shown('settings'); saved.restore(); } };
+    } });
+    t.after(() => nav.destroy());
+    const showPage = (name, options = {}) => nav.go(options.key || name, () => { shown(name); options.enter?.(); }, options);
+    controls = initSettings({ state, ws: env.ws, layers, showPage });
+    assert.equal(controls.capture().label, 'Settings', 'the home returns to the section');
+    await controls.open('test-return-clean', { map: true }); await settle();
+    assert.equal(controls.capture().label, 'test-return-clean', 'a deeper origin names the level it returns to');
+    assert.equal(controls.capture().title, 'Settings › test-return-clean');
+    const fromHome = controls.capture(content.querySelector('[data-settings-home]'));
+    assert.equal(fromHome.label, 'Settings', 'a door in the list returns to the home even while a pane is open');
+    assert.equal(fromHome.title, 'Settings');
+    const clean = () => content.querySelectorAll('.settings-page').find(level => level.dataset.settingsPage === 'test-return-clean');
+    const origin = clean();
+    const body = origin.querySelector('.settings-page-body');
+    await controls.open('test-return-next'); await settle();
+    assert.equal(content.contains(origin), false);
+    assert.equal(released.includes(body), false, 'the jump owns its detached origin');
+    layers.back(); await settle();
+    assert.equal(clean(), origin);
+    assert.equal(drawn.filter(item => item === body).length, 1, 'Back restores the same node and bindings');
+    await controls.open('test-return-next'); await settle();
+    await showPage('chat', { map: true }); await settle();
+    assert.equal(released.filter(item => item === body).length, 1, 'abandoning the return releases its clean origin once');
+    assert.equal(layers.returnPage(), null);
+});
+
 test('words the shell searched are spent by the first press on their results; words the owner typed stay', async (t) => {
-    const { content, state, showPage } = world(t);
+    const { content, state, showPage, layers } = world(t);
     const dashboard = [];
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {} });
     const field = () => content.querySelector('#settings-search');
     const results = () => content.querySelectorAll('[data-settings-result]').map((row) => row.dataset.settingsResult);
     const press = async (id) => {
@@ -215,7 +283,7 @@ test('words the shell searched are spent by the first press on their results; wo
     assert.equal(field().value, 'budget');
     assert.ok(results().includes('home:costs'), String(results()));
     await press('home:costs');
-    assert.deepEqual(dashboard.at(-1), ['costs', { row: '', back: '' }], 'the door was pressed inside Settings: the tab leads back to the home');
+    assert.deepEqual(dashboard.at(-1), ['costs', { row: '' }], 'the door was pressed inside Settings: the tab leads back to the home');
     // The search did its work: the field is empty and the home shows its rows again, so a return finds no stale results.
     assert.deepEqual([field().value, results()], ['', []]);
     assert.ok(content.querySelector('[data-settings-open="models"]'), 'the home\'s own rows are back');
@@ -251,12 +319,12 @@ function layout(t, controls, content, wide) {
 }
 
 test('the list\'s chosen row returns to its page from a deeper level, and keeps it as it stands when it is on top', async (t) => {
-    const { content, state, showPage } = world(t);
+    const { content, state, showPage, layers } = world(t);
     const drawn = { first: 0, deeper: 0 };
     let firstCtx = null;
     registerSettingsPage('test-first', { title: 'First', mount(body, { ctx }) { drawn.first += 1; firstCtx = ctx; } });
     registerSettingsPage('test-deeper', { title: 'Deeper', mount() { drawn.deeper += 1; } });
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     layout(t, controls, content, { on: true });
     const pages = () => content.querySelectorAll('.settings-page').map((el) => el.dataset.settingsPage).filter(Boolean);
     const level = (path) => content.querySelectorAll('.settings-page').find((el) => el.dataset.settingsPage === path);
@@ -287,12 +355,12 @@ test('the list\'s chosen row returns to its page from a deeper level, and keeps 
 });
 
 test('a door from one page of the list to another chooses the other\'s row and hands it the door\'s view', async (t) => {
-    const { content, state, showPage } = world(t);
+    const { content, state, showPage, layers } = world(t);
     const views = [];
     let doorCtx = null;
     registerSettingsPage('test-from', { title: 'From', mount(body, { ctx, view }) { views.push(['test-from', view ?? '']); doorCtx = ctx; } });
     registerSettingsPage('test-to', { title: 'To', mount(body, { view }) { views.push(['test-to', view ?? '']); } });
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     layout(t, controls, content, { on: true });
     const home = content.querySelector('[data-settings-home]');
     const rows = Object.fromEntries(['test-from', 'test-to'].map((path) => {
@@ -321,10 +389,10 @@ test('a door from one page of the list to another chooses the other\'s row and h
 });
 
 test('a row chosen under the rail\'s bottom fade comes just clear of it; a row clear of both fades never moves', async (t) => {
-    const { content, state, showPage } = world(t);
+    const { content, state, showPage, layers } = world(t);
     registerSettingsPage('test-low', { title: 'Low', mount() {} });
     registerSettingsPage('test-mid', { title: 'Mid', mount() {} });
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     layout(t, controls, content, { on: true });
     const home = content.querySelector('[data-settings-home]');
     home.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: () => '32px' });
@@ -391,7 +459,7 @@ test('returning to the overview keeps the rail passage; explicitly choosing its 
 });
 
 test('Settings pressed again in the sidebar: two panes keep a first-level page and return from a deeper one; one column shows the list', async (t) => {
-    const { env, content, state, showPage } = world(t);
+    const { env, content, state, showPage, layers } = world(t);
     const drawn = { first: 0, deeper: 0 };
     let letGo = 0;
     let firstCtx = null;
@@ -401,7 +469,7 @@ test('Settings pressed again in the sidebar: two panes keep a first-level page a
         return { unmount() { letGo += 1; } };
     } });
     registerSettingsPage('test-deeper', { title: 'Deeper', mount() { drawn.deeper += 1; } });
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     const wide = { on: true };
     layout(t, controls, content, wide);
     const pages = () => content.querySelectorAll('.settings-page').map((el) => el.dataset.settingsPage).filter(Boolean);
@@ -442,7 +510,7 @@ test('Settings pressed again in the sidebar: two panes keep a first-level page a
 
 // The sidebar's press (app.js `pressNavPage`): Settings pressed while shown goes to `pressedAgain`, never to an opening
 // anew, and the open drawer it was pressed in closes as it does for every other place; another page is shown.
-test('app.js: Settings pressed again goes to pressedAgain and closes the open drawer it was pressed in', () => {
+test('app.js: Settings and Extensions pressed again go to pressedAgain and close the open drawer', () => {
     const source = readFileSync(join(ROOT, 'web/app.js'), 'utf8').replace(/\r\n?/g, '\n');
     const from = source.search(/\nfunction pressNavPage\(/);
     const until = source.indexOf('\n}\n', from + 1);
@@ -451,32 +519,72 @@ test('app.js: Settings pressed again goes to pressedAgain and closes the open dr
     const context = vm.createContext({
         state: { activePage: 'settings' }, navState: { mobileDrawerOpen: true },
         settingsControls: { pressedAgain: () => calls.push('again'), open: (path) => calls.push(`open:${path}`) },
+        skillsControls: { pressedAgain: () => calls.push('extensions-again') },
         setMobileDrawerOpen: (open) => { calls.push(`drawer:${open}`); context.navState.mobileDrawerOpen = open; },
-        showPage: (name) => calls.push(`show:${name}`),
+        dashboardControls: { pressedAgain: () => calls.push('dashboard-again') },
+        showPage: (name, options) => {
+            assert.equal(options.map, true);
+            calls.push(`show:${name}`);
+            options.enter?.();
+            if (context.navState.mobileDrawerOpen) context.setMobileDrawerOpen(false);
+        },
     });
     vm.runInContext(source.slice(from + 1, until + 2), context);
     // Execute the actual registration too: an unused correct helper is no protection against an old callback.
     const binding = source.match(/document.querySelectorAll\('\[data-nav-page\]'\)\.forEach\(btn => \{[\s\S]*?\n\}\);/)[0];
-    const buttons = ['settings', 'dashboard'].map((name) => ({ dataset: { navPage: name },
+    const buttons = ['settings', 'dashboard', 'skills'].map((name) => ({ dataset: { navPage: name },
         addEventListener(type, callback) { assert.equal(type, 'click'); this.click = callback; } }));
     context.document = { querySelectorAll: () => buttons };
     vm.runInContext(binding, context);
     buttons[0].click();
-    assert.deepEqual(calls, ['again', 'drawer:false']);
+    assert.deepEqual(calls, ['show:settings', 'again', 'drawer:false']);
     // No drawer open (two panes, or the drawer already closed): nothing else happens.
     calls.length = 0;
     buttons[0].click();
-    assert.deepEqual(calls, ['again']);
+    assert.deepEqual(calls, ['show:settings', 'again']);
     // Away from Settings, or another page: the ordinary showing, which closes the drawer itself.
     calls.length = 0;
     context.state.activePage = 'chat';
     buttons[0].click();
     buttons[1].click();
-    assert.deepEqual(calls, ['show:settings', 'show:dashboard']);
+    assert.deepEqual(calls, ['show:settings', 'show:dashboard', 'dashboard-again']);
+    calls.length = 0;
+    context.state.activePage = 'skills';
+    buttons[2].click();
+    assert.deepEqual(calls, ['show:skills', 'extensions-again']);
 });
 
 // The first-level page two panes land on is the one last opened on this device (docs/DESIGN.md "Settings"), kept across
 // loads; a stored page no longer registered falls back to Models.
+test('passive landing keeps a restored home row focused; an explicitly opened page still takes focus', async (t) => {
+    const { env, content, state, showPage, layers } = world(t);
+    registerSettingsPage('test-focus', { title: 'Focus', mount() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage });
+    layout(t, controls, content, { on: true });
+    const row = content.querySelector('[data-settings-open="voice"]');
+    row.focus();
+    state.activePage = 'settings';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
+    await settle();
+    assert.equal(env.document.activeElement, row);
+    await controls.open('test-focus'); await settle();
+    assert.equal(env.document.activeElement.dataset.settingsPage, 'test-focus');
+});
+
+test('Settings chosen from the sidebar lands its page with the focus, as a place that takes it', async (t) => {
+    const { env, content, state, showPage, layers } = world(t);
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage });
+    layout(t, controls, content, { on: true });
+    const row = new Stub('button');  // the sidebar's Settings row, outside the page: a map choice keeps its focus
+    env.document.body.appendChild(row);
+    row.focus();
+    state.activePage = 'settings';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
+    await settle();
+    assert.equal(state.settingsPath, 'models');
+    assert.equal(env.document.activeElement.dataset.settingsPage, 'models', 'a keyboard reaches the landed page at once');
+});
+
 test('two panes land on the first-level page last opened on this device, or on Models when it is gone', async (t) => {
     const saved = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
     const store = new Map();
@@ -485,9 +593,9 @@ test('two panes land on the first-level page last opened on this device, or on M
     t.after(() => { if (saved) Object.defineProperty(globalThis, 'localStorage', saved); else delete globalThis.localStorage; });
     registerSettingsPage('test-kept', { title: 'Kept', mount() {} });
     const land = async (sub, extensions) => {
-        const { env, content, state, showPage } = world(sub);
+        const { env, content, state, showPage, layers } = world(sub);
         if (extensions) env.routes.set('/api/extensions', async () => ({ ok: true, status: 200, json: async () => extensions }));
-        const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+        const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
         layout(sub, controls, content, { on: true });
         state.activePage = 'settings';
         env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
@@ -525,18 +633,18 @@ test('two panes land on the first-level page last opened on this device, or on M
         store.set('ouroboros.settings.last-page', 'agents/reviewer');
         const { state } = await land(sub);
         assert.equal(state.settingsPath, 'agents/reviewer');
-        assert.deepEqual(mounted, ['agents/reviewer'], 'the remembered child reaches its registered renderer');
+        assert.deepEqual(mounted, ['agents', 'agents/reviewer'], 'the remembered child keeps its named list page underneath');
         assert.equal(store.get('ouroboros.settings.last-page'), 'agents/reviewer');
     });
-    await t.test('installed skill and then uninstalled skill', async (sub) => {
-        store.set('ouroboros.settings.last-page', 'skill/one');
-        const installed = await land(sub, { skills: [{ name: 'one' }], live: { settings_sections: [
-            { skill: 'one', title: 'One', render: { components: [{ type: 'markdown', text: 'Installed form' }] } },
-        ] } });
-        assert.equal(installed.state.settingsPath, 'skill/one');
-        const removed = await land(sub, { skills: [], live: { settings_sections: [] } });
-        assert.equal(removed.state.settingsPath, 'models');
-        assert.equal(store.get('ouroboros.settings.last-page'), 'skill/one');
+    await t.test('a remembered page that moved to Extensions (a skill\'s form, Tools) is not landed on here', async (sub) => {
+        for (const moved of ['skill/one', 'tools', 'skill-sources']) {
+            store.set('ouroboros.settings.last-page', moved);
+            const installed = await land(sub, { skills: [{ name: 'one' }], live: { settings_sections: [
+                { skill: 'one', title: 'One', render: { components: [{ type: 'markdown', text: 'Installed form' }] } },
+            ] } });
+            assert.equal(installed.state.settingsPath, 'models', moved);
+            assert.equal(store.get('ouroboros.settings.last-page'), moved, 'landing never overwrites the device\'s choice');
+        }
     });
     await t.test('unreadable skill registry keeps the stored choice', async (sub) => {
         store.set('ouroboros.settings.last-page', 'skill/one');
@@ -550,7 +658,7 @@ test('two panes land on the first-level page last opened on this device, or on M
 // the list it would lead to is on screen; in one column it leads to the list; a deeper level's Back is named after the
 // level under it.
 test('the header Back is hidden beside the list, leads to the list in one column, and names the level under a deeper one', async (t) => {
-    const { env, content, state, showPage } = world(t);
+    const { env, content, state, showPage, layers } = world(t);
     env.document.createElement = (tag) => new DescendantStub(tag);
     let deeper = null;
     registerSettingsPage('test-outer', { title: 'Outer', mount(body, { ctx }) {
@@ -558,36 +666,102 @@ test('the header Back is hidden beside the list, leads to the list in one column
         deeper = () => ctx.openSettings('test-inner');
     } });
     registerSettingsPage('test-inner', { title: 'Inner', mount(body) { body.innerHTML = '<p>inner</p>'; } });
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
-    const back = () => content.querySelector('.app-page-header [data-settings-back]');
-    const said = () => [back().hidden, back().getAttribute('aria-label')];
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const back = () => content.querySelector('.app-page-header [data-shell-back]');
+    const said = () => back()?.getAttribute('aria-label') || null;
     const pages = () => content.querySelectorAll('.settings-page').map((level) => level.dataset.settingsPage);
     await controls.open('');
     await settle();
-    assert.equal(back().hidden, true, 'the list alone: no Back');
+    assert.equal(back(), null, 'the list alone: no Back');
     // Beside the list (the fixture lays every element out, so the list is on screen).
     await controls.open('test-outer');
     await settle();
-    assert.deepEqual([pages(), said()], [['test-outer'], [true, 'Back to Settings']], 'a first level beside the list: the list is on screen');
+    assert.deepEqual([pages(), said()], [['test-outer'], null], 'a first level beside the list: the list is on screen');
     deeper();
     await settle();
     assert.deepEqual(pages(), ['test-outer', 'test-inner']);
-    assert.deepEqual(said(), [false, 'Back to Outer'], 'a deeper level: Back leads to the level under it, by its name');
+    assert.deepEqual(said(), 'Back to Outer', 'a deeper level: Back leads to the level under it, by its name');
     await back().fire('click');
     await settle();
-    assert.deepEqual([pages(), said()], [['test-outer'], [true, 'Back to Settings']]);
+    assert.deepEqual([pages(), said()], [['test-outer'], null]);
     // One column: the list is not on screen, so a first level shows Back to it.
     content.querySelector('[data-settings-home]').getClientRects = () => [];
     await controls.open('test-outer');
     await settle();
-    assert.deepEqual(said(), [false, 'Back to Settings']);
+    assert.deepEqual(said(), 'Back to Settings');
     await back().fire('click');
     await settle();
-    assert.deepEqual([pages(), back().hidden], [[], true]);
+    assert.deepEqual([pages(), back()], [[], null]);
+});
+
+test('after a jump into Settings a level opened there peels before the jump; the landing stays under its return', async (t) => {
+    const { createPageNavigation } = await import('../modules/page_navigation.js');
+    const { env, content, state, layers } = world(t);
+    env.document.createElement = (tag) => new DescendantStub(tag);
+    let deeper = null;
+    registerSettingsPage('test-landing', { title: 'Landing', mount(body, { ctx }) {
+        body.innerHTML = '<p>landing</p>';
+        deeper = () => ctx.openSettings('test-after');
+    } });
+    registerSettingsPage('test-after', { title: 'After', mount(body) { body.innerHTML = '<p>after</p>'; } });
+    const shown = (name) => {
+        state.activePage = name;
+        env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
+    };
+    const nav = createPageNavigation({ layers, doc: env.document, canLeave: async () => true,
+        capture: () => ({ key: state.activePage, label: 'Main', restore() { shown('chat'); } }) });
+    t.after(() => nav.destroy());
+    const showPage = (name, options = {}) => nav.go(options.key || name, () => { shown(name); options.enter?.(); }, options);
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    content.querySelector('[data-settings-home]').getClientRects = () => [];  // one column: a level hides the list
+    const said = () => content.querySelector('.app-page-header [data-shell-back]')?.getAttribute('aria-label') || null;
+    const pages = () => content.querySelectorAll('.settings-page').map((level) => level.dataset.settingsPage);
+    const kinds = () => layers.ids().map((id) => (layers.get(id).returnTo ? 'return' : layers.get(id).back.label));
+    // Main → Settings › Landing (the jump): its landing is the return itself.
+    await controls.open('test-landing'); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing'], ['return'], 'Back to Main']);
+    // A level opened there afterwards goes above the return and is the first to go.
+    deeper(); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing', 'test-after'], ['return', 'Landing'], 'Back to Landing']);
+    layers.back('escape'); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing'], ['return'], 'Back to Main']);
+    layers.back('escape'); await settle();
+    assert.deepEqual([state.activePage, kinds()], ['chat', []]);
+    // A landing's own parent stays under the jump: landing on Landing › After puts After's Back to Landing beneath the
+    // return, and it is there once the jump is spent.
+    await controls.open('test-landing', { map: true }); await settle();
+    deeper(); await settle();
+    await showPage('chat', { map: true }); await settle();
+    await controls.open('test-after'); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing', 'test-after'], ['Landing', 'return'], 'Back to Main']);
+    layers.back('escape'); await settle();
+    await showPage('settings', { map: true }); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing', 'test-after'], ['Settings', 'Landing'], 'Back to Landing']);
+});
+
+test('a direct child address keeps its named parent and row; a first-level address has no extra level', async (t) => {
+    const { env, content, state, showPage, layers, shown } = world(t);
+    env.document.createElement = (tag) => new DescendantStub(tag);
+    const models = settingsPageFor('models');
+    t.after(() => registerSettingsPage('models', models));
+    registerSettingsPage('models', { title: path => path.includes('/') ? 'Consciousness' : 'Models', mount() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, setBeforePageLeave() {} });
+    await controls.open('models/role/consciousness', { row: 'model-source' }); await settle();
+    assert.equal(shown.at(-1)[1].row, 'model-source', 'the navigation owner must not reset a specifically revealed row');
+    assert.equal(controls.page.dataset.settingsDepth, '2');
+    assert.equal(content.querySelector('[data-settings-lead-name]').textContent, 'Consciousness');
+    assert.equal(content.querySelector('[data-shell-back]').getAttribute('aria-label'), 'Back to Models');
+    layers.back(); await settle();
+    assert.equal(state.settingsPath, 'models');
+    assert.equal(controls.page.dataset.settingsDepth, '1');
+    assert.equal(content.querySelector('[data-shell-back]'), null);
+    await controls.open('models'); await settle();
+    assert.equal(controls.page.dataset.settingsDepth, '1', 'a root never gains a synthetic parent');
+    assert.equal(shown.at(-1)[1].row, '', 'an unnamed forward landing still starts at the top');
 });
 
 test('a root font that moves the two panes\' 40rem repaints Settings: the pane and the list are watched beside the shell', async (t) => {
-    const { env, content, state, showPage } = world(t);
+    const { env, content, state, showPage, layers } = world(t);
     env.document.createElement = (tag) => new DescendantStub(tag);
     const observers = [];
     const before = globalThis.ResizeObserver;
@@ -596,13 +770,13 @@ test('a root font that moves the two panes\' 40rem repaints Settings: the pane a
     let font = 16;
     env.window.getComputedStyle = () => ({ fontSize: `${font}px` });
     registerSettingsPage('test-font', { title: 'Font', mount() {} });
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     layout(t, controls, content, { on: true });
     controls.page.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 735 });  // the owner's window
     await controls.open('test-font');
     await settle();
-    const back = content.querySelector('.app-page-header [data-settings-back]');
-    assert.equal(back.hidden, true, 'beside the list: no Back');
+    const back = () => content.querySelector('.app-page-header [data-shell-back]');
+    assert.equal(back(), null, 'beside the list: no Back');
     // The browser's font grows to 20 px: 40rem is 800 px, the sheets draw one column and hide the list, the shell keeps
     // its width. The pane, which loses the list beside it, says so, and the page leads back to the list.
     font = 20;
@@ -612,11 +786,11 @@ test('a root font that moves the two panes\' 40rem repaints Settings: the pane a
     assert.ok(heard(pane), 'the pane is watched');
     assert.ok(heard(content.querySelector('[data-settings-list]')), 'the list is watched');
     heard(pane).fn([]);
-    assert.equal(back.hidden, false);
+    assert.equal(back().getAttribute('aria-label'), 'Back to Settings');
 });
 
 test('Settings search belongs to the phone list and returns to the desktop header as the same working field', async (t) => {
-    const { env, content, state, showPage } = world(t);
+    const { env, content, state, showPage, layers } = world(t);
     globalThis.requestAnimationFrame = fn => setImmediate(fn);
     env.document.createElement = tag => new DescendantStub(tag);
     env.window.ouroLayout = { layout: 'stack' };
@@ -624,7 +798,7 @@ test('Settings search belongs to the phone list and returns to the desktop heade
     const previous = globalThis.ResizeObserver;
     globalThis.ResizeObserver = class { constructor(fn) { observers.push(fn); } observe() {} disconnect() {} };
     t.after(() => { globalThis.ResizeObserver = previous; });
-    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     const wide = { on: false };
     layout(t, controls, content, wide);
     await controls.open('');
@@ -652,13 +826,14 @@ test('Settings search belongs to the phone list and returns to the desktop heade
         await settle();
         assert.equal(env.document.activeElement, field, 'a resize keeps the keyboard in Search');
     }
-    for (const [layoutName, two, parent] of [['docked', false, slot], ['docked', true, slot], ['stack', true, slot], ['stack', false, home]]) {
+    for (const [layoutName, two, parent] of [['docked', false, slot], ['docked', true, slot], ['stack', true, home], ['stack', false, home]]) {
         wide.on = two;
         env.window.ouroLayout.layout = layoutName;
         observers.forEach(fn => fn([{ target: content.querySelector('.settings-shell') }]));
         await settle();
         assert.equal(search.parentElement, parent, `${layoutName}/${two}: search follows the list`);
         assert.equal(header.hasAttribute('data-search-in-home'), parent === home, 'the header state follows Search both ways');
+        assert.equal(controls.page.dataset.searchPlace, parent === home ? 'list' : 'band', 'the writer supplies late placement to WebKit');
         assert.equal(content.querySelector('#settings-search'), field);
         assert.equal(field.value, 'context', 'moving the field preserves the query and its listener');
     }

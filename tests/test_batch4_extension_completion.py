@@ -30,12 +30,18 @@ def _local(tmp_path, monkeypatch, handler, *, process=False, warning=""):
 
 
 @pytest.mark.parametrize("late_runner", [False, True])
-def test_async_timeout_result_stays_while_custody_tracks_actual_unwind(tmp_path, monkeypatch, late_runner):
+@pytest.mark.parametrize("refused", [False, True])
+def test_async_timeout_result_stays_while_custody_tracks_actual_unwind(tmp_path, monkeypatch, late_runner, refused):
+    from ouroboros.extension_plugin_api import adopt_child_stop, call_stop_state
+    cleanup_states = []
     release, cancelled, unwound = threading.Event(), threading.Event(), threading.Event()
     async def handler(_ctx):
+        if refused:
+            adopt_child_stop(_ctx, {"reason": "cancelled"})
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
+            cleanup_states.append(call_stop_state("localcompletion")["reason"])
             cancelled.set()
             if late_runner:
                 while not release.is_set():
@@ -47,7 +53,15 @@ def test_async_timeout_result_stays_while_custody_tracks_actual_unwind(tmp_path,
     registry, queue, workers, name = _local(tmp_path, monkeypatch, handler)
     try:
         result = registry.execute_result(name, {})
-        assert result.code == "EXTENSION_TIMEOUT" and cancelled.is_set()
+        assert (result.status, result.code) == ("timeout", "EXTENSION_TIMEOUT") and cancelled.is_set()
+        assert "handler exceeded timeout" in result.text
+        assert cleanup_states == ["operation_already_returned"]
+        assert result.meta["timeout_sec"] == 1 and result.producer_text is None
+        if refused:
+            assert result.meta["refused_step"] is True and result.meta["control_reason"] == "cancelled"
+            assert result.host_annotations[-1].startswith("⚠️ OWNER_OPERATION_REFUSED: ")
+        else:
+            assert "refused_step" not in result.meta and not result.host_annotations
         runners = [t for t in threading.enumerate() if t.name == f"ext-tool-{name}-async"]
         assert bool(runners) is late_runner
         returned = (result.status, result.code, result.text, dict(result.meta))

@@ -15,7 +15,7 @@ from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_
 from tests._owner_pause_ended_helpers import (
     _Engine, _fence, _kept, _park_root, _run, _tail_tree, _tick,
 )
-from tests.test_owner_pause import _live_tree
+from tests._owner_pause_ended_helpers import _live_tree, _snapshot, _works
 
 
 def _start(root):
@@ -23,20 +23,6 @@ def _start(root):
 
     assert dc.emit(root, dc.START_REQUESTED, {"invocation_id": "inv-1", "task_id": "child-dead", "root_task_id": "root-1",
                                               "route": "codex", "surface": "delegate", "request": {"prompt": "work"}})
-
-
-def _snapshot(root):
-    """The census rows and the works projection ``/api/state`` builds from them, through their real producers."""
-    from ouroboros.gateway.state import _chat_activities_snapshot_safe
-    from ouroboros.gateway.work_projection import works_snapshot
-
-    raw, owners = {}, []
-    census = _chat_activities_snapshot_safe(root, work_facts=raw, decision_owners=owners)
-    return census, works_snapshot(root, owners, raw)
-
-
-def _works(root):
-    return _snapshot(root)[1]["works"]
 
 
 def test_a_pause_stops_what_a_failed_nanny_left_at_once_and_holds_until_it_ends(tmp_path, monkeypatch):
@@ -705,7 +691,11 @@ def test_the_owners_stop_outranks_a_pause_only_an_unbound_start_holds(tmp_path, 
 
     engine.may_start = True
     outcomes = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=engine, replay_pending=lambda: True)
-    assert engine.starts == ["inv-1"] and engine.cancels == ["run-bound"], outcomes
+    assert engine.starts == [] and engine.cancels == [], outcomes
+    assert outcomes[0]["reason"] == "invocation_store_unproven"  # Stop doesn't license a legacy unknown POST
+    _run(tmp_path, run_id="run-bound", invocation_id="inv-1")  # accepted work is bound later, without a new POST
+    dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=engine)
+    assert engine.starts == [] and engine.cancels == ["run-bound"]
     # A stopped root takes no new Pause, and its work offers none: Stop owns what remains.
     assert request_owner_pause("root-1", request_id="later") == {"ok": False, "error": "task_not_live"}
     assert all(control["action"] != "pause" for work in _works(tmp_path) for control in work["controls"])
@@ -738,6 +728,57 @@ def test_the_minds_roster_names_the_same_unbound_start(tmp_path, monkeypatch):
     assert _tick(queue) == []
     tails = peer_roster._tree_tails(tmp_path, {"running": [], "runs": []}, _fence(tmp_path), "root-1")
     assert [(tail["code"], tail["ids"]) for tail in tails] == [("external_runs_unconfirmed", ["inv-1"])]
+
+
+def test_restart_rediscovers_a_recovered_fence_after_the_closing_receipt_is_retired(tmp_path, monkeypatch):
+    from ouroboros import delegate_accepted, delegate_custody, delegate_terminal, obligations, owner_pause
+    from ouroboros.delegate_collection import collect_terminal
+    from ouroboros.gateways import claudexor
+    from ouroboros.task_results import write_task_result
+    from supervisor import followup_policy, owner_pause_control as control
+    from tests._budget_pause_exact_helpers import _install_fresh_supervisor_memory
+    from tests._delegated_transport_shared import Engine, _sweep
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _pending
+
+    tree, member = "root-1", "child-dead"
+    queue, _, _ = _tail_tree(tmp_path, monkeypatch, root_status="completed", tail=lambda _root: None)
+    assert _decide(tmp_path, _pending(tmp_path, member, "lost"))
+    write_task_result(tmp_path, tree, "completed", billing_group={
+        "billing_group_id": tree, "billing_group_limit_usd": 10.0,
+        "billing_group_limit_source": "initial_task_admission", "billing_group_limit_revision": "rev-1"})
+    origin = {"task_id": tree, "root_task_id": tree}
+    schedule = {"id": "related", "source": "task_followup", "followup_origin": origin,
+                "followup_relation": followup_policy.resolve_relation(tmp_path, origin, "related", declared_by="task")}
+    assert not followup_policy.policy_view(tmp_path, {}, schedule)["wait"]
+    assert queue.publish_queue_snapshot(reason="before-the-late-writer")
+    assert queue.restore_pending_from_snapshot() == 0 and not control.settlement_look_owed(queue)
+
+    engine = Engine(tmp_path)
+    monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda *_a, **_kw: engine.gateway())
+    job = engine.accept("lost", REQUEST)
+    with engine.gateway() as gateway:
+        invocation = {**delegate_custody.invocation_record(tmp_path, "lost"), "invocation_id": "lost"}
+        assert delegate_accepted.recover(tmp_path, gateway, invocation)[1]["state"] == "running"
+    assert _fence(tmp_path)["observe_only"] is True
+    rid = engine.bind_run(job, "succeeded")
+    assert _sweep(tmp_path, engine)[0]["settled"]
+    with engine.gateway() as gateway:
+        collect_terminal(tmp_path, rid, gateway=gateway, output_retry=True)
+    delegate_terminal.refresh_terminal_reconciliation(tmp_path, member)
+    assert member not in obligations.members(tmp_path, "delegated_runs")
+    assert tree not in queue.BUDGET_ROOT_FENCES and owner_pause.fence_closed(_fence(tmp_path))
+    assert followup_policy.policy_view(tmp_path, {}, schedule)["wait"]
+
+    # Crash before the settlement pass publishes a latch. Only the fence remains durable.
+    _install_fresh_supervisor_memory(monkeypatch)
+    monkeypatch.setattr(delegate_terminal, "_RESTS", {})
+    assert not control.settlement_look_owed(queue)
+    queue.restore_pending_from_snapshot()
+    assert control.settlement_look_owed(queue)
+    _tick(queue)
+    assert _fence(tmp_path)["state"] == "released" and tree not in queue.BUDGET_ROOT_FENCES
+    assert not followup_policy.policy_view(tmp_path, {}, schedule)["wait"]
+    assert engine.creates == engine.cancels == []
 
 
 def test_a_member_not_proven_ended_is_never_stopped_and_one_with_no_row_left_is(tmp_path, monkeypatch):

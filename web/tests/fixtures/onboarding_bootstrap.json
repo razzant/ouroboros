@@ -1,10 +1,19 @@
 {
   "consciousnessOffer": {
     "autonomy": "act",
-    "dailyUsd": 20.0,
+    "dailyUsd": 15.0,
     "enabled": null,
     "maxTasks": 2,
-    "offered": true
+    "offered": true,
+    "words": {
+      "choice": "Also on its own and in places",
+      "door": "Change it later in Dashboard \u203a Consciousness; the allowance is in Dashboard \u203a Costs.",
+      "gloss": "When Ouroboros acts.",
+      "meaning": "Off: it works when you write to it, and places you connect are heard, not answered. On: it also keeps waking on its own within its daily allowance, even before your first reply, and answers in places you make Active. Either way, Start begins your first conversation.",
+      "off": "Only when you write to it",
+      "on": "Also on its own",
+      "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages."
+    }
   },
   "contract": {
     "budgetFields": [
@@ -83,7 +92,7 @@
         "inputId": "light-model",
         "label": "Light Model",
         "managed": false,
-        "note": "Fast summaries, lightweight internal work and the default Fast scout. Empty uses Main.",
+        "note": "Memory consolidation, Light subagents, review verdicts, duplicate checks, names and translation; Safety when it inherits. Empty uses Main.",
         "settingKey": "OUROBOROS_MODEL_LIGHT",
         "settingsInputId": "s-model-light",
         "settingsToggleId": "s-local-light",
@@ -157,6 +166,17 @@
         "settingKey": "OPENAI_API_KEY",
         "settingsInputId": "s-openai",
         "stateKey": "openaiKey"
+      },
+      {
+        "group": "more",
+        "id": "openai-api-surface",
+        "inputType": "text",
+        "label": "OpenAI API",
+        "note": "",
+        "placeholder": "",
+        "settingKey": "OPENAI_API_SURFACE",
+        "settingsInputId": "s-openai-api-surface",
+        "stateKey": "openaiApiSurface"
       },
       {
         "group": "more",
@@ -304,7 +324,7 @@
       },
       "deepseek": {
         "label": "DeepSeek",
-        "modelCopy": "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-v4-flash for the light lane.",
+        "modelCopy": "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-flash for the light lane.",
         "providerCopy": "DeepSeek is present, so the next step prefills DeepSeek's own model ids."
       },
       "direct-multi": {
@@ -378,12 +398,14 @@
         "value": "cyber_pro"
       }
     ],
+    "scopedModelCatalogs": true,
     "steps": [
       {
         "copy": "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.",
         "footer": "Add more subscriptions or API access later in Settings \u2192 Accounts and keys.",
         "id": "accounts",
         "railCopy": "Subscriptions + API",
+        "railTitle": "Accounts",
         "title": "Connect your accounts"
       },
       {
@@ -391,6 +413,7 @@
         "footer": "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider.",
         "id": "models",
         "railCopy": "model slots",
+        "railTitle": "Models",
         "title": "Choose models"
       },
       {
@@ -398,13 +421,31 @@
         "footer": "",
         "id": "review_mode",
         "railCopy": "Reach",
+        "railTitle": "Access",
         "title": "Choose access"
+      },
+      {
+        "copy": "",
+        "footer": "",
+        "id": "consciousness",
+        "railCopy": "When it acts",
+        "railTitle": "Consciousness",
+        "title": "Consciousness"
+      },
+      {
+        "copy": "Ouroboros starts with the ticked skills; clear any you do not want.",
+        "footer": "Add or remove skills any time in Extensions.",
+        "id": "skills",
+        "railCopy": "What it can do",
+        "railTitle": "Skills",
+        "title": "Skills"
       },
       {
         "copy": "Review subscription quotas and optional API spending limits.",
         "footer": "",
         "id": "budget",
         "railCopy": "Quota + API budget",
+        "railTitle": "Limits",
         "title": "Review limits"
       },
       {
@@ -412,6 +453,7 @@
         "footer": "The same onboarding values remain editable later in Settings.",
         "id": "summary",
         "railCopy": "Final check",
+        "railTitle": "Review",
         "title": "Review before launch"
       }
     ],
@@ -450,7 +492,7 @@
     "connections": [],
     "consciousnessModel": "",
     "deepseekKey": "",
-    "fallbackModel": "openai/gpt-5.6-luna",
+    "fallbackModel": "openai/gpt-6.1-terra",
     "gigachatCredentials": "",
     "gigachatPassword": "",
     "gigachatUser": "",
@@ -463,12 +505,13 @@
     "localPreset": "",
     "localRoutingMode": "cloud",
     "localSource": "",
-    "mainModel": "google/gemini-3.8-flash",
+    "mainModel": "google/gemini-4-hydrogen",
     "minimaxKey": "",
     "minimaxRegion": "",
     "modelAccounts": {},
     "modelContextWindows": {},
     "modelProcessingPreferences": {},
+    "openaiApiSurface": "",
     "openaiKey": "",
     "openrouterKey": "",
     "perTaskCostUsd": 50.0,
@@ -509,8 +552,8 @@
     "anthropic": {
       "consciousness": "",
       "deep_self_review": "anthropic::claude-opus-5-5",
-      "fallback": "anthropic::claude-sonnet-5",
-      "light": "anthropic::claude-sonnet-5",
+      "fallback": "anthropic::claude-sonnet-5-5",
+      "light": "anthropic::claude-sonnet-5-5",
       "main": "anthropic::claude-opus-5-5",
       "safety": "",
       "vision": ""
@@ -526,8 +569,8 @@
     "deepseek": {
       "consciousness": "",
       "deep_self_review": "deepseek::deepseek-v4-pro",
-      "fallback": "deepseek::deepseek-v4-flash",
-      "light": "deepseek::deepseek-v4-flash",
+      "fallback": "deepseek::deepseek-flash",
+      "light": "deepseek::deepseek-flash",
       "main": "deepseek::deepseek-v4-pro",
       "safety": "",
       "vision": ""
@@ -552,7 +595,7 @@
       "consciousness": "",
       "fallback": "",
       "light": "",
-      "main": "google/gemini-3.8-flash",
+      "main": "google/gemini-4-hydrogen",
       "safety": "",
       "vision": ""
     },
@@ -581,11 +624,20 @@
       "safety": "",
       "vision": ""
     },
+    "openai-responses": {
+      "consciousness": "",
+      "deep_self_review": "openai::gpt-6.1-sol",
+      "fallback": "openai::gpt-6.1-sol",
+      "light": "openai::gpt-6-luna",
+      "main": "openai::gpt-6.1-terra",
+      "safety": "",
+      "vision": ""
+    },
     "openrouter": {
       "consciousness": "",
-      "fallback": "openai/gpt-5.6-luna",
+      "fallback": "openai/gpt-6.1-terra",
       "light": "openai/gpt-6-luna",
-      "main": "google/gemini-3.8-flash",
+      "main": "google/gemini-4-hydrogen",
       "safety": "",
       "vision": ""
     },
@@ -599,25 +651,32 @@
     }
   },
   "modelSuggestions": [
+    "google/gemini-4-hydrogen",
     "google/gemini-3.8-flash",
     "x-ai/grok-4.6",
     "openai/gpt-6.1-sol",
     "openai/gpt-6-luna",
+    "openai/gpt-6.1-terra",
     "anthropic/claude-opus-5.5",
     "openai/gpt-5.6-terra",
     "openai/gpt-5.6-sol",
     "openai/gpt-5.6-luna",
+    "openai::gpt-6.1-terra",
+    "openai::gpt-6.1-sol",
+    "openai::gpt-6-luna",
     "openai::gpt-5.6-terra",
     "openai::gpt-5.6-sol",
     "openai::gpt-5.6-luna",
     "anthropic/claude-sonnet-5",
     "anthropic/claude-opus-5",
+    "anthropic::claude-sonnet-5-5",
     "anthropic::claude-sonnet-5",
     "anthropic::claude-opus-5-5",
     "anthropic::claude-opus-5",
     "anthropic::claude-opus-4-6",
     "deepseek/deepseek-v4-pro",
     "deepseek::deepseek-v4-pro",
+    "deepseek::deepseek-flash",
     "deepseek::deepseek-v4-flash",
     "zai::glm-5.3",
     "zai::glm-5.3-flash",
@@ -631,6 +690,8 @@
     "accounts",
     "models",
     "review_mode",
+    "consciousness",
+    "skills",
     "budget",
     "summary"
   ],

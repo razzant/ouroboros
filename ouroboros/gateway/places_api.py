@@ -94,7 +94,7 @@ async def api_circles(request):
         if request.method == "DELETE":
             if set(body) - {"expected_revision"}:
                 raise PlaceError("circle_update_invalid")
-            removed = await run_sync_to_completion(delete_circle, root, circle_id,
+            removed = await run_sync_to_completion(delete_circle, root, circle_id, author=AUTHOR_OWNER,
                                                    expected_revision=body.get("expected_revision"))
             return JSONResponse({"ok": True, "circle": circle_summary(removed["circle"]), "detached": removed["detached"]})
         if circle_id:

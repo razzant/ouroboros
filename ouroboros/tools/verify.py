@@ -40,15 +40,12 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tools.process_facts import (
-    active_resolved_runtime, process_environment_tool, publish_process_facts, redact_process_data,
-    record_runtime_selection, selected_process_environment,
+    active_resolved_runtime, check_output_views, masked_process_or_withheld, process_environment_tool, publish_process_facts,
+    receipt_line_safe, redact_process_data, record_runtime_selection, selected_process_environment,
 )
-from ouroboros.tools.shell_process import CommandStopped, command_start_refusal, command_timeout_for_call, turn_stop_reader
-from ouroboros.utils import utc_now_iso
+from ouroboros.tools.shell_process import CommandStopped, _oom_note, command_start_refusal, command_timeout_for_call, start_refused_result, turn_stop_reader
+from ouroboros.utils import path_for_prose, utc_now_iso
 
-# Durable receipt evidence is bounded but the truncation is DISCLOSED (BIBLE P1, never
-# silent); the tool-result preview is bounded separately for transport.
-_RECEIPT_OUTPUT_CAP = 20000
 # The typed process facts a run-kind receipt DISCLOSES (D6/R4). `duration_ms` —
 # always, for every run-kind check: a 9ms SIGKILL and a 5-minute honest red are
 # different facts. `signal` — the POSIX name of the signal that killed the check
@@ -59,10 +56,9 @@ _RECEIPT_OUTPUT_CAP = 20000
 # (Stream-A resolver seam); its absence means the recorded argv is exactly what
 # executed. The channel publishes MORE than this (the kill facts belong to the
 # call's result_meta, not to the receipt's stored shape), so the receipt keeps
-# exactly the three keys it has always carried, copied from the one publication
-# instead of derived a second time.
-_RECEIPT_PROCESS_KEYS = ("duration_ms", "signal", "resolved_runtime", "runtime_provenance")
-_TOOL_OUTPUT_CAP = 4000
+# these five keys — `duration_ms`, `signal`, `resolved_runtime`, `runtime_provenance`,
+# `memory_oom` (the memory leaf's OOM facts) — copied from the one publication, on timeout/Stop as on completion.
+_RECEIPT_PROCESS_KEYS = ("duration_ms", "signal", "resolved_runtime", "runtime_provenance", "memory_oom")
 # The `no_visible_machine_contract` receipt carries the agent's OWN stated proxy and
 # residual risk — decision-shaping cognitive evidence a reviewer reads, so it goes
 # through the same disclosed bound as every other durable receipt field.
@@ -81,22 +77,29 @@ def _bounded(text: Any, cap: int) -> str:
 def _interrupted_check(ended: BaseException, timeout: Any, *, started_ts: float, resolved_runtime: str) -> tuple:
     """``(why, output, facts)`` of a check that never returned: its timeout, or Stop now of an in-process turn
     (``CommandStopped``), whose host kill is claimed only once its exit was observed. A stopped check's output is
-    the whole text it wrote; the receipt and the reply keep their bounded, masked views of it (``_bounded``), as
-    of a completed run's. The process facts are published once, as for a completed run."""
+    the text captured at Stop (an observed exit does not prove it is all the process wrote); a timeout's is what its
+    wait handed back with it (``TimeoutExpired.stdout/.stderr``, decoded). A wait that returned neither stream (the
+    Stop-aware wait, Windows) gives ``None``: whether the check wrote anything is unknown, never "no output".
+    The receipt and the reply show the captured text masked and bounded (``check_output_views``). The process facts
+    are published once, as for a completed run."""
     stopped = isinstance(ended, CommandStopped)
     why = (f"check ended by Stop now; its exit was {'observed' if ended.exit_observed else 'NOT observed'}"
-           if stopped else f"check timed out after {timeout}s")
-    output = (ended.output + (("\n" + ended.stderr) if ended.stderr else "")) if stopped else ""
+           if stopped else f"check timed out after {timeout}s") + _oom_note(ended)
+    streams = ((ended.output, ended.stderr) if stopped else
+               [b.decode("utf-8", errors="replace") if isinstance(b, (bytes, bytearray)) else b
+                for b in (getattr(ended, "stdout", None), getattr(ended, "stderr", None))])
+    out, err = (str(s or "") for s in streams)
+    output = None if not stopped and streams == [None, None] else out + (("\n" + err) if err else "")
     facts = publish_process_facts(started_ts=started_ts, resolved_runtime=resolved_runtime,
-                                  timed_out=not stopped, killed_by_host=not stopped or ended.exit_observed)
+                                  timed_out=not stopped, killed_by_host=not stopped or ended.exit_observed, memory_oom=getattr(ended, "memory_oom", None))  # kernel OOM count beside the host kill
     return why, output, facts
 
 
 def _publish_verification(ctx: ToolContext, text: str, receipt: dict, *, compared: bool, detail: str = "") -> str:
     """Publish the recorded criterion verdict beside the call's own outcome (#1585).
 
-    Only after the receipt is durable. The check ran (or timed out): ``status`` is the
-    receipt's pass/fail and exit, signal and timeout stay on the process-facts channel.
+    Only after the receipt is durable. ``status`` is its pass/fail for a run or a file
+    observation; exit, signal and timeout stay on the process-facts channel.
     ``matched`` is published only where a comparison was evaluated (``compared``): never
     for a timeout, a check with no ``expected``, or bytes_equal without a byte verdict.
     New receipts store null in these cases; historical records stay unchanged. The
@@ -108,6 +111,8 @@ def _publish_verification(ctx: ToolContext, text: str, receipt: dict, *, compare
     fact = {key: receipt[key] for key in ("status", "contract_kind", "expected_match", "check_rendering",
                                           "criterion_id", "criterion_source") if receipt.get(key)}
     fact.update(check=_bounded(receipt.get("check"), 200), receipt_ts=receipt["ts"])
+    if receipt["contract_kind"] == "artifact_observation":
+        fact["paths_named"] = bool(receipt["paths"])
     if compared:
         fact["matched"] = bool(receipt["matched"])
     if detail:
@@ -278,16 +283,14 @@ def _within_readonly_orchestrator_root(ctx: ToolContext, candidate: pathlib.Path
 
 
 def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | None, str]:
-    """SSOT confinement for a declared artifact path. The RESOLVED path (whether the input
-    was absolute or relative) must stay inside the active workspace, OR a read-only
-    orchestrator root (subagent_projects / deliverables — existence observation of a child's
-    deliverable), else clear the user_files guards (control-plane/secret and outside-home
-    refused) — so a relative `../../etc/passwd` cannot probe arbitrary host files. Returns
-    (candidate, refused_reason): candidate is the resolved host path; refused_reason is
-    non-empty when refused; both falsy for empty input. Used by _observe_artifacts."""
+    """SSOT confinement for a declared artifact path. The RESOLVED path (absolute or relative) must stay inside the active
+    workspace, OR a read-only orchestrator root (subagent_projects / deliverables — existence observation of a child's
+    deliverable), else clear the user_files guards (control-plane/secret and outside-home refused) — so a relative
+    `../../etc/passwd` cannot probe arbitrary host files. Returns (candidate, refused_reason): the resolved host path, and
+    a non-empty reason when refused; both falsy only for the empty string, because whitespace is part of a name."""
     from ouroboros.tool_access import path_is_relative_to, user_files_path_block_reason
 
-    text = str(raw or "").strip()
+    text = str(raw or "")
     if not text:
         return None, ""
     active = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
@@ -297,7 +300,8 @@ def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | N
     if within_active or _within_readonly_orchestrator_root(ctx, candidate):
         return candidate, ""
     if user_files_path_block_reason(ctx, candidate):
-        return None, f"path refused (outside workspace / control-plane): {text}"
+        # Prose for the call's result text: `path_for_prose` keeps a POSIX byte name exact and encodable.
+        return None, f"path refused (outside workspace / control-plane): {path_for_prose(text)}"
     return candidate, ""
 
 
@@ -313,12 +317,12 @@ def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[str
         candidate, refused = _confine_artifact_path(ctx, raw)
         if refused:
             return "refused_out_of_scope", refused
-        if candidate is None:
-            continue
-        name = str(raw or "").strip()
-        seen.append(name)
-        if not candidate.exists():  # a relative name resolves under the active workspace: say where the host looked
-            missing.append(name if pathlib.Path(name).is_absolute() else f"{name} (resolved as {candidate})")
+        if candidate is not None:
+            name = path_for_prose(str(raw))  # the same prose rule, for the spelling that was looked up
+            seen.append(name)
+            if not candidate.exists():  # a relative name resolves under the active workspace: say where the host looked
+                missing.append(name if pathlib.Path(raw).is_absolute()
+                               else f"{name} (resolved as {path_for_prose(str(candidate))})")
     if not seen:
         return "fail", "no artifact_paths given"
     if missing:
@@ -372,13 +376,16 @@ def _compare_files_bytes_equal(
     files (artifact_paths[0] vs [1]) — the golden-file/migration-parity shape a weaker
     substring check silently under-verifies. Runs on the SAME surface as the check
     (executor `cmp` in-container when the cwd is executor-mapped, host chunked read
-    otherwise). Both operands are CONFINED first (see _bytes_equal_confinement_block).
+    otherwise). Both operands are CONFINED first (see _bytes_equal_confinement_block) and reach both
+    surfaces exactly as declared — a name's edge whitespace belongs to it, so no trimmed sibling is
+    ever compared behind it (the receipt attests the name that was asked for).
     Returns (equal, detail); detail carries a BOUNDED hexdump around the first
     divergence so the receipt shows WHERE the bytes differ, never whole files.
     ``equal`` is None when no byte verdict was reached (a refused operand, a missing
     file, cmp without an exit status or outside its 0/1 verdicts): still a FAIL, never
     a claim that the bytes differ (#1585)."""
-    a_raw, b_raw = str(artifact_paths[0]).strip(), str(artifact_paths[1]).strip()
+    a_raw, b_raw = artifact_paths
+    a_name, b_name = path_for_prose(a_raw), path_for_prose(b_raw)
     refusal = _bytes_equal_confinement_block(ctx, a_raw, b_raw, use_executor=use_executor)
     if refusal:
         return None, refusal
@@ -393,10 +400,11 @@ def _compare_files_bytes_equal(
         try:
             rc = int(rc_raw)
         except (TypeError, ValueError):
-            return None, f"bytes_equal: executor cmp returned no exit status for {a_raw} vs {b_raw}"
-        out = redact_process_data((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
+            return None, f"bytes_equal: executor cmp returned no exit status for {a_name} vs {b_name}"
+        # only this diagnostic note can be lost to a mask that cannot complete; the cmp exit and verdict below cannot
+        out = masked_process_or_withheld((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
         if rc == 0:
-            return True, f"bytes_equal: {a_raw} == {b_raw} (executor cmp)"
+            return True, f"bytes_equal: {a_name} == {b_name} (executor cmp)"
         if rc != 1:
             # cmp semantics: 0=equal, 1=differ, >1=trouble (missing file, missing cmp
             # binary =127; a signal-killed cmp is no verdict either). Still a FAIL, but the
@@ -404,16 +412,16 @@ def _compare_files_bytes_equal(
             # byte divergence (triad r3).
             return None, (
                 f"bytes_equal infra error (cmp exit {rc}, not a byte verdict) "
-                f"({a_raw} vs {b_raw}): {out[:400] or 'no output'}"
+                f"({a_name} vs {b_name}): {out[:400] or 'no output'}"
             )
-        return False, f"bytes differ ({a_raw} vs {b_raw}): {out[:400] or 'cmp exit ' + str(rc)}"
+        return False, f"bytes differ ({a_name} vs {b_name}): {out[:400] or 'cmp exit ' + str(rc)}"
 
     def _resolve(text: str) -> pathlib.Path:
         p = pathlib.Path(text)
         return (p if p.is_absolute() else pathlib.Path(work_dir) / text).resolve(strict=False)
 
     a_path, b_path = _resolve(a_raw), _resolve(b_raw)
-    for label, path in ((a_raw, a_path), (b_raw, b_path)):
+    for label, path in ((a_name, a_path), (b_name, b_path)):
         if not path.is_file():
             return None, f"bytes_equal: file not found: {label}"
     a_size, b_size = a_path.stat().st_size, b_path.stat().st_size
@@ -435,7 +443,7 @@ def _compare_files_bytes_equal(
                 break
             offset += len(ca)
     if first_diff < 0 and a_size == b_size:
-        return True, f"bytes_equal: {a_raw} == {b_raw} ({a_size} bytes)"
+        return True, f"bytes_equal: {a_name} == {b_name} ({a_size} bytes)"
     if first_diff < 0:
         first_diff = min(a_size, b_size)
     window_start = max(0, first_diff - 16)
@@ -450,8 +458,8 @@ def _compare_files_bytes_equal(
 
     return False, (
         f"bytes differ at offset {first_diff} (sizes {a_size} vs {b_size}).\n"
-        f"{a_raw} @{window_start}: {_hexwin(a_path)}\n"
-        f"{b_raw} @{window_start}: {_hexwin(b_path)}"
+        f"{a_name} @{window_start}: {_hexwin(a_path)}\n"
+        f"{b_name} @{window_start}: {_hexwin(b_path)}"
     )
 
 
@@ -467,10 +475,7 @@ def _probe_artifact_lifecycle(
     lifecycle: list[dict] = []
     missing_after: list[str] = []
     surface = "executor" if use_executor else "host"
-    for raw in list(artifact_paths or [])[:20]:
-        text = str(raw or "").strip()
-        if not text:
-            continue
+    for text in artifact_paths[:20]:
         exists: bool | None = None
         check_surface = surface
         try:
@@ -515,9 +520,9 @@ def _probe_artifact_lifecycle(
                         check_surface = "unavailable"
         except Exception:  # noqa: BLE001 — probe is advisory; never break the receipt
             exists, check_surface = None, "unavailable"
-        lifecycle.append({"path": text[:300], "exists_after": exists, "check_surface": check_surface})
+        lifecycle.append({"path": text, "exists_after": exists, "check_surface": check_surface})
         if exists is False:
-            missing_after.append(text[:300])
+            missing_after.append(text)
     return lifecycle, missing_after
 
 
@@ -652,7 +657,9 @@ def _verify_and_record(
     **kwargs,
 ) -> str:
     expected_match = kwargs.get("expected_match", "substring")
-    artifact_paths = kwargs.get("artifact_paths")
+    # Only the empty string names nothing; spaces are part of the operand.
+    raw_paths = kwargs.get("artifact_paths")
+    artifact_paths = [p for p in raw_paths if isinstance(p, str) and p] if isinstance(raw_paths, (list, tuple)) else []
     criterion_source = kwargs.get("criterion_source", "")
     criterion_basis = kwargs.get("criterion_basis", "")
     bucket = str(kwargs.get("bucket") or "")
@@ -736,7 +743,7 @@ def _verify_and_record(
         argv = _normalize_check(check)
         if not argv:
             return _missing_check_refusal(kind, check)
-        if match_mode == "bytes_equal" and len([p for p in (artifact_paths or []) if str(p or "").strip()]) != 2:
+        if match_mode == "bytes_equal" and len(artifact_paths) != 2:
             return (
                 "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal requires "
                 "artifact_paths=[<file_a>, <file_b>] — exactly two files to compare byte-for-byte "
@@ -805,21 +812,19 @@ def _verify_and_record(
             return refusal
         try:
             if use_executor:
-                # Route the check through the host-owned executor backend (e.g. docker_exec
-                # with NetworkMode=none) EXACTLY like run_command, so the verification runs
-                # in the SAME place + isolation as the agent's other commands — not on the
-                # host while the work lives in a container.
+                # Same host-owned executor backend + isolation as run_command (e.g. docker_exec
+                # NetworkMode=none): the check runs where the agent's other commands run, not on the host.
                 res = executor_execute(
                     ctx, exec_argv, pathlib.Path(work_dir), timeout,
                     env_overlay=interpreter_path_overlay(node_resolution),
-                    stop=turn_stop_reader(ctx),
+                    stop=turn_stop_reader(ctx), memory=True,
                     **({"target_env": selected_env} if selected_env else {}),
                 )
             else:
                 res = _tracked_subprocess_run(
                     exec_argv, cwd=str(work_dir),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
-                    stop=turn_stop_reader(ctx),
+                    stop=turn_stop_reader(ctx), memory=True,
                     **({"env": run_env} if run_env is not None else {}),
                 )
         except (subprocess.TimeoutExpired, CommandStopped) as ended:
@@ -830,38 +835,41 @@ def _verify_and_record(
                                                   resolved_runtime=_resolved_runtime)
             # Same renderer as the completed-run receipt below, so it carries the same
             # stamp: a timeout red must be reconcilable by the later green of that argv.
+            shown_summary, shown, retention = check_output_views(ctx, out, captured=True)
             receipt.update({"status": "fail", "returncode": None, "matched": None, "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN,
-                            "summary": why + (f"\n{_bounded(out, _RECEIPT_OUTPUT_CAP)}" if out else "")})
+                            "summary": f"{why}\n{shown_summary}", **retention})
             receipt.update({k: v for k, v in _facts.items() if k in _RECEIPT_PROCESS_KEYS})
             if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
-                return _receipt_custody_failure(
-                    kind, why,
-                )
+                return _receipt_custody_failure(kind, why) + f"\n\n{shown}"  # the source may already be durable: keep its address
             return _publish_verification(ctx, (
                 f"verify_and_record [{kind}] FAIL: {why}. "
                 f"root={binding.root}, cwd={binding.target_path}. Receipt recorded."
-            ) + (f"\n\n{_bounded(out, _TOOL_OUTPUT_CAP)}" if out else ""), receipt, compared=False, detail=receipt["summary"])
+            ) + f"\n\n{shown}", receipt, compared=False, detail=receipt["summary"])
+        except Exception as refused:  # refused before any argv ran: no verdict, no receipt; anything else propagates
+            return start_refused_result(ctx, refused, tool="verify_and_record", where=f"root={binding.root}, cwd={binding.target_path}", started_ts=_check_started_ts)
         # Full output captured in-handler BEFORE any transport truncation.
         out = (res.stdout or "") + (("\n" + res.stderr) if res.stderr else "")
         rc = res.returncode
-        # Same typed publication as the timeout branch: the check's own exit and
-        # (POSIX) signal, measured here where the truth is, not re-read from the
-        # ``exit=`` the result text renders for the agent.
+        # Same typed publication as the timeout branch: the check's own exit and (POSIX) signal,
+        # measured here, not re-read from the ``exit=`` the result text renders for the agent.
         _facts = publish_process_facts(
             returncode=rc, started_ts=_check_started_ts,
-            resolved_runtime=_resolved_runtime,
+            resolved_runtime=_resolved_runtime, memory_oom=getattr(res, "memory_oom", None),
         )
         if match_mode == "bytes_equal":
             # v6.60.0: after the check, the VERDICT is the byte-parity of the two
             # declared files (golden-file shape); the check's own exit still gates.
-            _paths2 = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
             matched, _cmp_detail = _compare_files_bytes_equal(
-                ctx, _paths2, pathlib.Path(work_dir), use_executor=use_executor
+                ctx, artifact_paths, pathlib.Path(work_dir), use_executor=use_executor
             )
-            out = (out + "\n\n[bytes_equal] " + _cmp_detail).strip()
+            _cmp_detail = masked_process_or_withheld(_cmp_detail)  # one masked text for the metadata detail and the shown note
         else:
             matched = (not expected_s) or _expected_matches(out, expected_s, match_mode)
         passed = (rc == 0) and matched
+        shown_summary, shown, retention = check_output_views(ctx, out)  # the process output only: summary, reply, retained source
+        if match_mode == "bytes_equal":  # the comparison message is shown and recorded beside it, in neither the summary nor the source
+            receipt["comparison_detail"] = _cmp_note = _bounded(receipt_line_safe(_cmp_detail), 1000)
+            shown = "\n\n".join(part for part in (shown, "[bytes_equal] " + _cmp_note) if part)
         compared = matched is not None if match_mode == "bytes_equal" else bool(expected_s)
         # `shlex.join`, never `" ".join` (v6.78.0): this text is the verification's
         # IDENTITY downstream (`_outcome_receipts.receipt_canonical_identity`), and a
@@ -871,7 +879,7 @@ def _verify_and_record(
         # (`shell_parse.shell_tokens`), so the stored text round-trips back to this argv.
         # The rendering stamp makes old/new spellings incomparable: changing only
         # the renderer reopens the collision across versions.
-        receipt.update({"status": "pass" if passed else "fail", "returncode": rc, "matched": bool(matched) if compared else None, "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN, "summary": _bounded(out, _RECEIPT_OUTPUT_CAP)})
+        receipt.update({"status": "pass" if passed else "fail", "returncode": rc, "matched": bool(matched) if compared else None, "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN, "summary": shown_summary, **retention})
         # D6/D7 disclosure keys (node-runtime sprint stream B), now copied from
         # the one publication above — see _RECEIPT_PROCESS_KEYS for which keys
         # and why. Disclosure-only: receipt IDENTITY (`check` text) and
@@ -880,9 +888,8 @@ def _verify_and_record(
         # C: after-only artifact-lifecycle FLAG (status unchanged — flag-only). If the agent
         # declared artifact_paths, record whether each still exists after the check, probed via
         # the SAME surface as the check, so a build-then-delete is visible to the advisory reviewer.
-        _decl = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
-        if _decl:
-            _lifecycle, _missing_after = _probe_artifact_lifecycle(ctx, _decl, pathlib.Path(work_dir), use_executor=use_executor)
+        if artifact_paths:
+            _lifecycle, _missing_after = _probe_artifact_lifecycle(ctx, artifact_paths, pathlib.Path(work_dir), use_executor=use_executor)
             if _lifecycle:
                 receipt["artifact_lifecycle"] = _lifecycle
             if _missing_after:
@@ -897,26 +904,23 @@ def _verify_and_record(
         if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
             return _receipt_custody_failure(
                 kind, f"verdict={'PASS' if passed else 'FAIL'}, exit={rc}",
-            ) + f"\n\n{_bounded(out, _TOOL_OUTPUT_CAP)}"
+            ) + f"\n\n{shown}"
         verdict = "PASS" if passed else "FAIL"
         exp_note = f" expected={expected_s!r}" if expected_s else ""
         mask_note = f"\n\n{exit_masking_note(_mask_reasons)}" if _masked and rc == 0 else ""
         return _publish_verification(ctx, (
             f"verify_and_record [{kind}] {verdict}: exit={rc}{exp_note}; "
             f"root={binding.root}, cwd={binding.target_path}. Host-attested receipt recorded.\n\n"
-            f"{_bounded(out, _TOOL_OUTPUT_CAP)}{mask_note}"
+            f"{shown}{mask_note}"
         ), receipt, compared=compared, detail=_cmp_detail if match_mode == "bytes_equal" else "")
 
     if kind == "artifact_observation":
-        paths = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
-        obs_status, detail = _observe_artifacts(ctx, paths)
-        # 20 paths stored; _outcome_receipts' identity carries the omitted count and full-set hash.
-        receipt.update({"status": obs_status, "paths": paths[:20], "summary": detail})
+        obs_status, detail = _observe_artifacts(ctx, artifact_paths)
+        receipt.update({"status": obs_status, "paths": artifact_paths, "summary": detail})
         if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
             return _receipt_custody_failure(kind, f"{obs_status}: {detail}")
-        # refused_out_of_scope is a POLICY block, not a verification failure — surface it
-        # honestly (not a red FAIL) so a deliverable outside the observable roots doesn't
-        # force the agent to declare no_visible_machine_contract (v6.57.0).
+        # refused_out_of_scope is a POLICY block, not a verification failure — surface it honestly (not a red FAIL) so a
+        # deliverable outside the observable roots doesn't force the agent to declare no_visible_machine_contract (v6.57.0).
         if obs_status == "refused_out_of_scope":
             return (
                 "verify_and_record [artifact_observation] REFUSED_OUT_OF_SCOPE: "
@@ -926,7 +930,8 @@ def _verify_and_record(
                 "the active profile can read). Receipt recorded."
             )
         verdict = "OBSERVED" if obs_status == "observed" else "FAIL"
-        return f"verify_and_record [artifact_observation] {verdict}: {detail}. Host-attested receipt recorded."
+        text = f"verify_and_record [artifact_observation] {verdict}: {detail}. Host-attested receipt recorded."
+        return _publish_verification(ctx, text, receipt, compared=False, detail=detail) if obs_status == "fail" else text
 
     # no_visible_machine_contract: an honest escape hatch — no host run, the agent's
     # best proxy + residual risk is recorded as a receipt and judged by a reviewer.

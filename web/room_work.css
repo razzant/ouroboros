@@ -170,7 +170,11 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     right: var(--rw-right, 0px);
     box-sizing: border-box;
     max-height: min(60svh, 28rem);
-    overflow-y: auto;
+    /* The sheet's scrollbar must not take width from its content. When it appears with the growing list it
+       shrinks the box the rows are sized against, and a row would stick out of the sheet by the scrollbar's
+       width. The scrollbar is therefore always there: the rows keep their width whether the sheet scrolls
+       or not. */
+    overflow-y: scroll;
     overscroll-behavior: contain;
     border: 1px solid transparent;
     border-radius: var(--radius-sheet);
@@ -187,7 +191,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
    lie flat here, the budget saying its name and its amount, and an empty slot takes no room. */
 .rw-extras { display: flex; flex-direction: column; gap: 2px; padding: 0 var(--space-2) var(--space-3); }
 .rw-extras:empty { display: none; }
-.rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control {
+.rw-extras > :is(.chat-header-btn, .chat-budget-pill, .cx-chip).ui-chrome-control {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: var(--space-3);
     width: 100%; height: auto; min-height: var(--touch-target-min); padding: 0 var(--space-3);
     border-radius: var(--radius-inner); background: transparent; box-shadow: none;
@@ -195,8 +199,16 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     color: var(--text-primary); font-size: var(--type-body); font-weight: 400; text-align: start;
 }
 @media (hover: hover) {
-    .rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control:hover { background: var(--rw-hover); }
+    .rw-extras > :is(.chat-header-btn, .chat-budget-pill, .cx-chip).ui-chrome-control:hover { background: var(--rw-hover); }
 }
+/* In Telegram's shared row the consciousness chip is one of these rows too (room_work.js placeChip), before Restart and
+   the budget: its name, then its next wake and its mark at the row's end; the brain stays the bar's. */
+.cx-chip-label { display: none; }
+.rw-extras > .cx-chip .cx-chip-label { display: inline; margin-inline-end: auto; }
+.rw-extras > .cx-chip .cx-chip-glyph { display: none; }
+.rw-extras > .cx-chip .cx-chip-word:not([hidden]) { display: inline; color: var(--text-meta); }
+/* A word's whole width, read for one moment in the same task (room_work.js cuts): nothing paints between. */
+.rw-measure-whole { min-width: max-content !important; }
 .rw-extras .chat-budget-word { display: inline; }
 .rw-extras .chat-budget-text { font-size: var(--type-body); color: var(--text-meta); }
 .rw-extras .chat-budget-bar { display: none; }
@@ -287,7 +299,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-word { font-weight: 400; }
 /* The word's quieter line (its reason and what still runs, Finalizing… beside an outcome), one accessible status with
    it. The separator ends the word, so a line that wraps under it on a narrow row never starts with a stray dot. */
-.rw-secondary { color: var(--text-meta); }
+.rw-secondary { min-width: 0; overflow-wrap: anywhere; color: var(--text-meta); }
 .rw-secondary::before { content: '· '; }
 @supports selector(:has(*)) {
     .rw-secondary::before { content: none; }
@@ -386,7 +398,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     color: var(--text-meta);
 }
 .rw-detail[hidden] { display: none; }
-.rw-detail-line { margin: 0; }
+.rw-detail-line { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .rw-detail-line + .rw-detail-line { margin-top: var(--space-1); }
 .rw-detail-label { margin-right: 6px; color: var(--text-primary); font-weight: 600; }
 .rw-note { margin: 0; padding: var(--space-1) var(--space-4) 10px; font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }

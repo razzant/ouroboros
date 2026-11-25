@@ -198,7 +198,7 @@ def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
     agent = OuroborosAgent(Env(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=tmp_path),
                            event_queue=queue.Queue())
     if realtime:
-        agent._realtime_turn = SimpleNamespace(resolve_route=route_resolver)
+        agent._realtime_turn = SimpleNamespace(resolve_route=route_resolver, feature={})
     monkeypatch.setattr(agent.llm, "chat", lambda **_kw: pytest.fail("no model call"))
     with pytest.raises(RuntimeError, match="stop after the context build"):
         agent._prepare_task_context({"id": "timed", "type": "task", "chat_id": 1, "text": "hi"})
@@ -221,5 +221,38 @@ def test_a_turns_prologue_rides_on_its_first_rounds_receipt():
     with round_window(slot):
         first = round_receipt()["host_steps"]["sections_ms"]
     assert {"prologue", "prologue.rebind.route", "prologue.restore.tools"} <= set(first)
+    with round_window(slot):
+        assert not any(name.startswith("prologue") for name in round_receipt()["host_steps"]["sections_ms"])
+
+
+def test_the_post_batch_evidence_read_rides_the_next_rounds_receipt_beside_a_waiting_start_prologue(tmp_path, monkeypatch):
+    """After a batch, a retained answer's evidence read (``loop_budget._prepare_post_tool_budget_context``) runs before
+    the next round's window: it rides that round's receipt as ``prologue.delivery_evidence``; a turn's own start
+    prologue, not yet carried, keeps its sections and takes the read's beside them, wall and CPU, carried once; with no
+    retained answer nothing is read or carried."""
+    import ouroboros.loop as loop
+    import ouroboros.loop_delivery as delivery_mod
+    from ouroboros.llm_observability import round_receipt, round_window
+    from tests.test_acceptance_preparation_loop import _delivery_ctx
+
+    monkeypatch.setattr(delivery_mod, "delivery_evidence_fingerprint", lambda *_a, **_k: "known-1")
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    registry, ctx = _delivery_ctx(tmp_path, trace)
+    slot = registry._ctx
+    loop._prepare_post_tool_budget_context(registry, ctx, trace, "test-model", False, "medium")
+    assert not getattr(slot, "_round_prologue", None), "no retained answer: nothing read, nothing carried"
+    loop._replace_delivery_candidate(registry, ctx, trace, "complete answer", control="candidate")
+    loop._prepare_post_tool_budget_context(registry, ctx, trace, "test-model", False, "medium")
+    with round_window(slot):
+        assert "prologue.delivery_evidence" in round_receipt()["host_steps"]["sections_ms"]
+    start = {"total": 7000, "restore.tools": 5000}
+    slot._round_prologue = {"sections_ms": dict(start), "sections_cpu_ms": dict(start), "work": {}}  # a start's
+    loop._prepare_post_tool_budget_context(registry, ctx, trace, "test-model", False, "medium")
+    for kind in ("sections_ms", "sections_cpu_ms"):  # one receipt: the start's sections and the read's, totals summed
+        merged = slot._round_prologue[kind]
+        assert merged["restore.tools"] == 5000 and "delivery_evidence" in merged and merged["total"] >= 7000, merged
+    with round_window(slot):
+        sections = round_receipt()["host_steps"]["sections_ms"]
+    assert {"prologue.restore.tools", "prologue.delivery_evidence"} <= set(sections) and sections["prologue"] >= 7000
     with round_window(slot):
         assert not any(name.startswith("prologue") for name in round_receipt()["host_steps"]["sections_ms"])

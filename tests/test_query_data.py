@@ -187,6 +187,47 @@ def test_whole_jsonl_blank_lines_and_receipts(ctx):
     assert result["data"] == [{"pass": True}]
 
 
+# What POSIX `surrogateescape` reads back for the name bytes FF FE, spelled out so the value is the same on
+# every platform (Windows `os.fsdecode` refuses such bytes instead of escaping them).
+BYTE_NAME = "report_\udcff\udcfe.txt"
+
+
+def test_canonical_projections_keep_posix_name_bytes_inside_the_json_value(ctx):
+    """A stored result that names a file by non-UTF-8 POSIX bytes stays a readable document: the projection
+    escapes them inside the string value instead of failing the whole read at its UTF-8 encode."""
+    stated = f"wrote {BYTE_NAME}; обычная λ; and a literal \\udcff in prose"
+    store.update_task(ctx.drive_root, "bytey", lambda _: {"status": "completed", "result": stated})
+
+    delivery = _query_data(ctx, op="json", kind="task_result", ids=["bytey"], save_as="whole.json")
+    delivery.encode("utf-8")  # the journal, an HTTP response and the model request are all UTF-8
+    row = json.loads(delivery)
+    assert row["status"] == "ok" and row["data"]["result"] == stated == json.loads(saved(ctx, row))["result"]
+    # The name's bytes ride escaped, ordinary Unicode keeps its own bytes, a typed backslash stays doubled.
+    assert "wrote report_\\udcff\\udcfe.txt; обычная λ; and a literal \\\\udcff in prose" in delivery
+    projection = call(ctx, op="json", kind="task_result", ids=["bytey"], select="result", save_as="name.json")
+    assert json.loads(saved(ctx, projection)) == stated  # a projection is retained whatever it names
+    # `format=text` saves one selected string EXACTLY: a name with no UTF-8 carrier is refused, never rewritten.
+    refused(call(ctx, op="json", kind="task_result", ids=["bytey"], select="result", format="text"),
+            "surrogates not allowed")
+
+
+def test_receipt_rows_that_name_byte_paths_stay_readable_and_exact(ctx):
+    """The JSONL reader on the same class: a durable row holds the name escaped, a read returns the name itself,
+    the saved rows are the durable bytes, and a projection of the names is retained as well."""
+    raw = ('{"status":"pass","paths":["report_\\udcff\\udcfe.txt"]}\n'
+           '{"status":"fail","paths":["обычная λ.md"]}\n').encode("utf-8")
+    write(ctx, "task_results/artifacts/caller/verification_receipts.jsonl", raw)
+
+    delivery = _query_data(ctx, op="jsonl", kind="verification_receipts", tail=0, save_as="rows.jsonl")
+    delivery.encode("utf-8")
+    whole = json.loads(delivery)
+    assert whole["status"] == "ok" and saved(ctx, whole) == raw
+    assert whole["data"] == [{"status": "pass", "paths": [BYTE_NAME]}, {"status": "fail", "paths": ["обычная λ.md"]}]
+    named = call(ctx, op="jsonl", kind="verification_receipts", tail=0, select="[*].paths[*]",
+                 filter={"field": "status", "op": "eq", "value": "pass"}, save_as="paths.json")
+    assert named["data"] == [[BYTE_NAME]] == json.loads(saved(ctx, named))
+
+
 def refused(result, *fragments):
     """A pre-existing typed refusal whose message carries each fragment."""
     assert (result["status"], result["code"]) == ("error", "query_failed"), result
@@ -638,7 +679,10 @@ def test_money_defaults_direct_and_missing_packs_are_typed(ctx, monkeypatch):
 
 
 @pytest.mark.parametrize("cache", ["valid", "missing", "quick_check"])
-def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
+def test_pack_index_sql_answers_the_cache_the_packing_pass_rebuilds(ctx, cache):
+    """The plane reads the cache as the packing pass left it and never repairs it: a missing cache is a typed
+    ``evidence_unavailable`` refusal the pass owes a rebuild (from the sidecars, which nothing touches); damage
+    only a whole-file check sees is answered as the cache stands."""
     from ouroboros import evidence_packs as packs
     from tests.test_evidence_packs import _task
 
@@ -671,9 +715,17 @@ def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
                 PRAGMA ignore_check_constraints=OFF;
             """)
             assert conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]
-    # Cold cache recovery is the subject, not a one-second completion SLA.
-    result = call(ctx, op="sql", db="packs", query="SELECT kind, size FROM members ORDER BY kind", timeout_sec=5)
+    query = "SELECT kind, size FROM members ORDER BY kind"
+    result = call(ctx, op="sql", db="packs", query=query, timeout_sec=5)
+    if cache == "missing":
+        assert (result["status"], result["code"], result["reason"]) == ("unavailable", "evidence_unavailable", "damaged")
+        assert not path.exists() and packs.index_owed(ctx.drive_root)
+        packs.ensure_index(ctx.drive_root)  # the packing pass's builder
+        result = call(ctx, op="sql", db="packs", query=query, timeout_sec=5)
     assert result["status"] == "ok", result
+    if cache == "quick_check":  # damage only a whole-file check sees: no reader runs one, the cache answers as it stands
+        assert result["data"]["rows"] == [["json", len(raw)]], result
+        return
     assert result["data"]["rows"] == [["checkpoint", len(raw)], ["json", len(raw)]], result
     assert authority == {p: p.read_bytes() for p in authority}
     with closing(sqlite3.connect(path)) as conn:
@@ -681,10 +733,35 @@ def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
         assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (str(packs.INDEX_SCHEMA_VERSION),)
 
 
+def test_a_blob_whose_place_is_unknown_now_answers_typed_apart_from_absence_and_damage(ctx):
+    """``op=blob`` over a packed blob while the packer holds the index past the read's wait: the typed
+    ``evidence_unavailable`` answer with its reason (the address stays good; nothing is retried or read
+    from the owner plane). A sha no pack holds stays ``not_found``, a damaged pack stays an error, and once
+    the index is free the same call returns the bytes."""
+    from ouroboros import evidence_packer, evidence_packs as packs
+    from tests.test_evidence_packs import _task
+
+    refs, _ = _task(ctx.drive_root, "packed", blobs=1)
+    assert evidence_packer.run_pass(ctx.drive_root)["faults"] == 0
+    sha = refs[0]["sha256"]
+    with store.name_lock(ctx.drive_root, packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0.1):
+        held = call(ctx, op="blob", sha256=sha, blob_kind="json")
+    assert (held["status"], held["code"], held["reason"]) == ("unavailable", "evidence_unavailable", "busy"), held
+    answered = call(ctx, op="blob", sha256=sha, blob_kind="json")
+    assert answered["status"] == "ok" and answered["data"]["message"]["content"].startswith("answer packed"), answered
+    assert call(ctx, op="blob", sha256="0" * 64, blob_kind="json")["code"] == "not_found"
+    pack = packs.packs_dir(ctx.drive_root) / "packed.xz"
+    damaged = bytearray(pack.read_bytes())
+    damaged[len(damaged) // 2] ^= 0xFF
+    pack.write_bytes(bytes(damaged))
+    packs._READERS.clear()
+    broken = call(ctx, op="blob", sha256=sha, blob_kind="json")
+    assert (broken["status"], broken["code"]) == ("error", "query_failed") and "evidence_corrupt" in broken["message"]
+
+
 def test_no_packs_depends_on_sidecars_not_an_empty_cache(ctx):
     from ouroboros import evidence_packs as packs
-    with packs.open_index(ctx.drive_root):
-        pass
+    packs.ensure_index(ctx.drive_root)
     result = call(ctx, op="sql", db="packs", query="SELECT count(*) FROM members")
     assert result["status"] == "unavailable" and result["code"] == "no_packs", result
 
@@ -708,7 +785,8 @@ def test_invalid_requests_are_rejected_before_reading(ctx, kwargs, message):
     ({"op": "blob", "sha256": "0" * 64, "ids": ["caller"]}, 'ids=["caller"] applies only to op=json or op=jsonl'),
     ({"op": "json", "kind": "queue_snapshot", "blob_kind": "txt"}, 'blob_kind="txt" applies only to op=blob'),
     ({"op": "json"}, 'kind="": op=json needs one of task_result, review_ledger'),
-    ({"op": "jsonl", "kind": "queue_snapshot"}, "kind=queue_snapshot requires op=json"),
+    ({"op": "jsonl", "kind": "queue_snapshot", "tail": 5},
+     'kind=queue_snapshot requires op=json; tail=5 applies only to op=jsonl: send op="json" without it'),
     ({"op": "lines"}, 'op="lines": use sql, json, jsonl or blob'),
 ])
 def test_another_operations_parameter_is_named_with_its_owner(ctx, kwargs, message):
@@ -717,6 +795,36 @@ def test_another_operations_parameter_is_named_with_its_owner(ctx, kwargs, messa
     message_text = refused(call(ctx, **kwargs), message)
     if kwargs["op"] in {"json", "blob"}:
         assert "bounds rows" not in message_text  # these operations have no row control to offer
+
+
+def test_the_one_operation_a_kind_takes_is_read_for_the_other_and_named(ctx):
+    """A kind exactly one of json/jsonl reads names its operation: the other one takes it, disclosed;
+    jsonl's own filter or tail on a JSON kind still asks for rows it lacks and is refused with the call."""
+    write(ctx, "task_results/artifacts/caller/verification_receipts.jsonl", b'{"pass":true}\n{"pass":false}\n')
+    write(ctx, "state/queue_snapshot.json", b'{"a":1}')
+    plain = call(ctx, op="jsonl", kind="verification_receipts", tail=1)
+    assert plain["data"] == [{"pass": False}] and "notes" not in plain
+    lines = call(ctx, op="json", kind="verification_receipts", tail=1)  # the tail is kept, not dropped
+    assert lines["status"] == "ok" and lines["data"] == plain["data"] and lines["source"]["op"] == "jsonl"
+    assert lines["notes"] == ["op='json' read as op='jsonl': kind=verification_receipts is read only by op=jsonl; "
+                              "tail=1 limits the read to its last 1 rows"]
+    default = call(ctx, op="json", kind="verification_receipts")  # the default tail is named in the note
+    assert default["data"] == [{"pass": True}, {"pass": False}] and default["notes"][0].endswith(
+        "; tail=100 limits the read to its last 100 rows")
+    # The note describes the request, so it stays true when nothing could be read (a refused bound, a missing file).
+    bounded = call(ctx, op="json", kind="verification_receipts", max_rows=0)
+    assert bounded["status"] != "ok" and all("were read" not in note for note in bounded.get("notes", []))
+    document = call(ctx, op="jsonl", kind="queue_snapshot")
+    assert document["data"] == {"a": 1} and document["source"]["op"] == "json"
+    assert document["notes"] == ["op='jsonl' read as op='json': kind=queue_snapshot is read only by op=json"]
+    canonical = call(ctx, op="json", kind="queue_snapshot")
+    assert (canonical["status"], canonical["data"]) == ("ok", {"a": 1}) and "notes" not in canonical
+    refused(call(ctx, op="jsonl", kind="queue_snapshot", filter={"field": "a", "op": "eq", "value": 1}),
+            'filter={"field": "a", "op": "eq", "value": 1} applies only to op=jsonl: send op="json" without it')
+    # A filter the kind cannot take is refused for the kind first, so the advice is one call, not two refusals.
+    message = refused(call(ctx, op="jsonl", kind="queue_snapshot", filter={"field": "", "op": "eq", "value": 1}),
+                      'kind=queue_snapshot requires op=json; filter=')
+    assert "select/filter fields" not in message and "filter requires" not in message
 
 
 def test_a_default_valued_parameter_of_another_operation_takes_the_omitted_path(ctx):
@@ -747,8 +855,8 @@ def test_schema_states_where_each_limit_and_parameter_applies():
 
 
 def test_real_registry_light_children_and_typed_errors(ctx, monkeypatch):
-    from ouroboros import config, safety
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    from ouroboros import safety
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     assert registry._module_load_omissions == []
     assert "query_data" in registry._FROZEN_TOOL_MODULES
@@ -900,7 +1008,8 @@ def test_knowledge_history_lists_writes_without_bodies_from_the_installation_roo
     narrowed = call(ctx, op="jsonl", kind="knowledge_history", filter={"field": "topic", "op": "contains", "value": "lessons"})
     assert [r["summary"] for r in narrowed["data"]] == ["Exit codes."]
     assert call(ctx, op="jsonl", kind="knowledge_history", tail=1, select="[0].topic")["data"] == "lessons/tests"
-    assert call(ctx, op="json", kind="knowledge_history")["status"] == "error"  # a log reads as JSONL
+    as_json = call(ctx, op="json", kind="knowledge_history", tail=10)  # a log reads as JSONL, named
+    assert as_json["data"] == result["data"] and as_json["notes"][0].startswith("op='json' read as op='jsonl'")
     monkeypatch.setattr("ouroboros.tools.query_data._child_root", lambda *_a: pytest.fail("history has no child"))
     refused = call(ctx, op="jsonl", kind="knowledge_history", child_task_id="second")
     assert refused["status"] == "error" and "global knowledge" in refused["message"]
@@ -982,7 +1091,8 @@ def test_a_failed_sql_statement_names_the_readable_schema_and_a_served_one_does_
                                 "task bodies and cards: op=json kind=task_result")
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
-    assert query_data_sql.schema_hint("money") == "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
+    money_hint = query_data_sql.schema_hint("money")
+    assert "FROM summaries WHERE scope='global' AND key=''" in money_hint and "extra" in money_hint
 
 
 def test_a_malformed_knowledge_history_line_is_a_named_gap_and_later_rows_still_return(ctx):

@@ -24,6 +24,7 @@ _PROGRESS_ID_UNSET = object()
 from ouroboros.utils import (
     append_jsonl,
     atomic_write_json,
+    count_routing_lists,
     emit_log_event,
     get_git_info,
     read_json_dict,
@@ -50,7 +51,10 @@ from ouroboros.agent_startup_checks import (
 from ouroboros.agent_task_pipeline import (
     emit_task_results, build_review_context,
 )
-from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, terminal_result_fields
+from ouroboros.task_finalization import (
+    TERMINAL_ORIGIN_HOST_NOTICE, exception_notice, schedule_report_run, terminal_result_fields,
+)
+from ouroboros.host_notice import phrase
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
@@ -122,8 +126,8 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
         "reasoning_notes": [], "tool_calls": [], "loop_evidence_unavailable": True,
     }
     usage.update(execution_status="infra_failed", reason_code="task_exception",
-                 terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE)
-    text = f"⚠️ Error during processing: {type(exc).__name__}: {exc}"
+                 terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE, host_notice_row=exception_notice(exc))
+    text = usage["host_notice_row"]["record"]  # its row says the phrase with the error behind Details
     log.error("Task %s failed with an unexpected exception", task.get("id"), exc_info=exc)
     append_jsonl(drive_logs / "events.jsonl", {
         "ts": utc_now_iso(), "type": "task_error", "task_id": task.get("id"),
@@ -133,6 +137,7 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
         from ouroboros.outcomes import collect_trace_refs, derive_loop_outcome
         from ouroboros.agent_task_pipeline import build_trace_summary
         from ouroboros.task_results import STATUS_FAILED, _TRULY_TERMINAL_STATUSES, write_task_result
+        from ouroboros.terminal_time import source_task_attempt
 
         loop_outcome = derive_loop_outcome(text, usage, llm_trace)
         write_task_result(
@@ -140,6 +145,9 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
             _field_projector=(lambda current, incoming: None if current.get("status") in _TRULY_TERMINAL_STATUSES
                               else incoming) if keep_terminal else None,
             _terminal_observed=True, result=text, reason_code="task_exception", loop_outcome={k: v for k, v in loop_outcome.items() if k != "trace_refs"},
+            # A start that failed before its own record (``_persist_running_record``) left no row naming this attempt, and
+            # copy-back refuses a replica naming none beside a canonical row that does (``replica_attempt_matches``).
+            **({"task_attempt": n} if (n := source_task_attempt(task)) is not None else {}),
             outcome_axes=loop_outcome.get("outcome_axes") or infra_failed_axes(
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),
@@ -192,9 +200,11 @@ def _restore_saved_clocks(ctx: Any, task: Dict[str, Any], saved_wait: Optional[d
         ctx.budget_pause_resume = task.get("_budget_pause_resume")
         ctx.working_recovery = (task.get("_working_recovery") or {}) if "_working_recovery" in task else None
     if saved_wait:
+        from ouroboros.held_notes import restored_capture
         from ouroboros.settings_integrity import restore_cognition
         from ouroboros.task_pacing import restore_cost_ceiling
 
+        ctx._held_note_capture = restored_capture(saved_wait)
         restore_cognition(saved_wait.get("cognition"))
         ctx._cost_ceiling = restore_cost_ceiling(ctx, saved_wait.get("cost_ceiling"))
     if saved_wait and ctx.model_wait_context is not None:
@@ -248,13 +258,6 @@ def _sync_task_project_scope(task: Dict[str, Any], ctx: Any) -> None:
     project_id = str(getattr(ctx, "project_id", "") or "").strip()
     if project_id and not str(task.get("project_id") or "").strip():
         task["project_id"] = project_id
-
-
-# The dispatched harness contract needs the whole CUSTODY verb set: a child that
-# can start a run but not wait on or cancel it is still broken. `delegate_answer`
-# is deliberately NOT part of this preflight — a nanny without it is degraded
-# (questions benign-decline at the engine timeout), never custody-broken, and
-# failing a dispatch over a missing convenience verb would cost real work.
 
 
 @dataclass(frozen=True)
@@ -484,8 +487,8 @@ class OuroborosAgent:
             log.warning("Worker boot logging failed", exc_info=True)
             return
 
-    def _persist_running_record(self, task: Dict[str, Any]) -> None:
-        """Record actual start on the execution drive and bind split tasks canonically.
+    def _persist_running_record(self, task: Dict[str, Any]) -> bool:
+        """Record actual start on the execution drive and bind split tasks canonically; True once it is stored.
 
         For a delegated child every derived field here was stamped onto ``task`` by
         `resolve_dispatch_axes` moments earlier, so model, effort, route, tool
@@ -594,8 +597,10 @@ class OuroborosAgent:
                     _is_direct_chat=bool(task.get("_is_direct_chat")),
                     **{key: running[key] for key in ("started_at", "ts", "task_attempt") if key in running},
                 )
+            return running.get("status") == STATUS_RUNNING
         except Exception:
             log.warning("Failed to persist running task status", exc_info=True)
+            return False
 
     def _run_delegate_preflight(
         self, drive_logs: Any, task: Dict[str, Any], dispatch: Optional[SubagentDispatch],
@@ -661,12 +666,13 @@ class OuroborosAgent:
         freeze_tool_profile(task)
         _record_executor_resolution(drive_logs, task, dispatch)
         sanitized_task = sanitize_task_for_event(task, drive_logs)
+        if self._persist_running_record(task):  # its source stored first (DEVELOPMENT 03): the event counts the lists
+            sanitized_task = count_routing_lists(sanitized_task)
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task,
                      # #1578: the task's own ids at top level beside its (content) task body.
                      "task_id": str(task.get("id") or ""),
                      **{key: str(task[key]) for key in ("root_task_id", "parent_task_id") if task.get(key)},
                      "activity_emitted_at": getattr(self, "_activity_emitted_at", None)})
-        self._persist_running_record(task)
         # After persistence, mirror the same resolution to the supervisor/queue.
         emit_dispatch_resolution(self._event_queue, task, dispatch)
         self._emit_live_log(
@@ -676,17 +682,17 @@ class OuroborosAgent:
         )
         if str(task.get("delegation_role") or "") == "subagent" and self._event_queue is not None and self._current_chat_id is not None:
             try:
-                role = str(task.get("role") or "").strip()
+                role, tid = str(task.get("role") or "").strip(), str(task.get("id") or "")
+                text, said = phrase("subagent_started", "Subagent running ({role})." if role else "Subagent running.",
+                                    details=f"task {tid}", **({"role": role} if role else {}))  # its id: a detail
                 self._event_queue.put({
                     "type": "send_message", "chat_id": self._current_chat_id,
                     "role": "system", "system_type": "subagent_started",
-                    "text": f"▶️ Subagent {task.get('id')} running{' (' + role + ')' if role else ''}.",
+                    "text": text,
                     "format": "markdown",
                     "is_progress": True,
                     "task_id": str(task.get("id") or ""),
-                    "progress_meta": subagent_message_meta(
-                        task, task_id=str(task.get("id") or ""), event="running",
-                    ),
+                    "progress_meta": {**subagent_message_meta(task, task_id=tid, event="running"), **said},
                     "ts": utc_now_iso(),
                 })
             except Exception:
@@ -848,6 +854,9 @@ class OuroborosAgent:
         # A live call's native session answers the fit's route question: read as an attribute, so the executor
         # inventory sees this door (tests/test_executor_inventory.py).
         turn = self._realtime_turn if getattr(self, "_realtime_turn", None) is not None else None
+        # A call sends its own Nano base, the selectors and its feature's tools (``live_conversation``): its start is
+        # fitted on that set, never on the standing work set an ordinary turn carries.
+        nano_base = tuple(turn.feature.get("initial_tools", ())) if turn is not None else None
         with collector_rests(), measured_sections():  # each section's wall and CPU time rides on the build's context_memory_view receipt
             route_resolver, effort = context_start_route(ctx, task, saved_start,
                 _initial_effort_for(task, str(task.get("type") or "").lower()),
@@ -858,7 +867,9 @@ class OuroborosAgent:
                 task=task,
                 review_context_builder=lambda: build_review_context(review_env),
                 ctx=ctx,
-                tool_schemas=initial_tool_schemas(self.tools, context_mode=get_context_mode()), tool_registry=self.tools,
+                tool_schemas=initial_tool_schemas(self.tools, context_mode=get_context_mode(),
+                                                  standing=nano_base is None, schema_names=nano_base),
+                tool_registry=self.tools, nano_base=nano_base,
                 reasoning_effort=effort,
                 route_resolver=route_resolver,  # the fit's own route question, asked beside the build
             )
@@ -933,27 +944,23 @@ class OuroborosAgent:
         task_id = str(task.get("id") or "")
         task_meta = subagent_message_meta(self._current_task_metadata, task_id=task_id, event="progress")
         task_meta.update(initiator_meta(self._current_task_metadata))
-        return self._bind_task_progress(
-            task_id, self._current_chat_id, task_meta, task.get("_attempt"),
-        )
+        return self._bind_task_progress(task_id, self._current_chat_id, task_meta, task.get("_attempt"),
+                                        record_only=schedule_report_run(task))
 
     def _bind_task_progress(
         self, task_id: str, chat_id: Optional[int], progress_meta: Optional[Dict[str, Any]] = None,
-        task_attempt: Any = None,
+        task_attempt: Any = None, record_only: bool = False,
     ) -> Callable[[str], Any]:
-        """Keep a task's progress address stable after its worker turn ends."""
+        """Keep a task's progress address stable after its worker turn ends. ``record_only`` is the originating
+        task's own fact (``schedule_report_run``): an older schedule's held report is its record, never narration."""
         def emit_task_progress(text: str, **kwargs: Any) -> None:
+            if record_only and kwargs.get("narration"):
+                return
             # A producer can attach per-row facts; the callback's frozen task provenance still wins after this worker changes tasks.
             meta = dict(kwargs.pop("_progress_meta_override", None) or {})
             meta.update(progress_meta or {})
-            self._emit_progress(
-                text,
-                _task_id_override=task_id,
-                _chat_id_override=chat_id,
-                _progress_meta_override=meta,
-                _task_attempt_override=task_attempt,
-                **kwargs,
-            )
+            self._emit_progress(text, _task_id_override=task_id, _chat_id_override=chat_id, _progress_meta_override=meta,
+                                _task_attempt_override=task_attempt, **kwargs)
 
         return emit_task_progress
 
@@ -1098,11 +1105,13 @@ class OuroborosAgent:
 
     def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         from ouroboros.context_fit import MinimumViewUnfit
+        from ouroboros.delegate_resume import finish_selected_answer
+        from ouroboros.terminal_time import source_task_attempt
 
         def finished(text: Any, usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
-            emit_task_results(self.env, self.memory, self.llm, self._pending_events, task, text, usage, llm_trace,
-                              start_time, drive_logs, ctx=ctx, event_queue=self._event_queue)
-            return list(self._pending_events)
+            return finish_selected_answer(ctx, lambda *answer: emit_task_results(  # a forced replacement emits the same way
+                self.env, self.memory, self.llm, self._pending_events, task, *answer, start_time, drive_logs,
+                ctx=ctx, event_queue=self._event_queue), (text, usage, llm_trace), self._pending_events, _worker_immediate_stop)
 
         self._bind_turn(task)
         start_time = self._task_started_ts = _settle_start_origin(task)
@@ -1114,6 +1123,7 @@ class OuroborosAgent:
         self._emit_live_log(
             "task_started",
             task_id=self._current_task_id or "",
+            **({"task_attempt": n} if (n := source_task_attempt(task)) is not None else {}),
             task_type=self._current_task_type,
             task_text=str(task.get("text") or "")[:200],
             direct_chat=bool(task.get("_is_direct_chat")),
@@ -1158,7 +1168,7 @@ class OuroborosAgent:
                 # surface=system) on the row the request named, else Main (decision 3A).
                 # It writes memory/deep_review.md itself and keeps the last report on failure.
                 try:
-                    from ouroboros.deep_self_review import deep_review_unavailable_text
+                    from ouroboros.deep_self_review import deep_review_unavailable, with_review_record
                     from ouroboros.tools.review_change import ReviewChangeArgumentError, run_system_review
                     self._emit_progress("Starting deep self-review... This may take several minutes.")
                     try:
@@ -1168,11 +1178,10 @@ class OuroborosAgent:
                             deadline_at=str((self._current_task_metadata or {}).get("deadline_at") or ""),
                         )
                         text, usage = str(outcome.get("report") or ""), dict(outcome.get("usage") or {})
-                        if outcome.get("record_id"):
-                            text += f"\n\nReview record: {outcome['record_id']} (surface=system)"
-                    except ReviewChangeArgumentError as exc:
-                        text = deep_review_unavailable_text(str(exc))
-                        usage = {"execution_status": "infra_failed", "reason_code": "deep_self_review_unavailable"}
+                        if outcome.get("record_id"):  # a failed review's notice row names the record too
+                            text = with_review_record(text, usage, str(outcome["record_id"]))
+                    except ReviewChangeArgumentError as exc:  # its row says a phrase, the cause behind Details
+                        text, usage = deep_review_unavailable(str(exc))
                     if usage:
                         self._pending_events.append({
                             "type": "llm_usage",
@@ -1201,11 +1210,9 @@ class OuroborosAgent:
                         "task_id": task.get("id"), "error": repr(e),
                         "traceback": truncate_for_log(tb, 2000),
                     })
-                    text = f"⚠️ Deep self-review error: {type(e).__name__}: {e}"
-                    usage = {
-                        "execution_status": "infra_failed",
-                        "reason_code": "deep_self_review_error",
-                    }
+                    from ouroboros.deep_self_review import deep_review_error
+
+                    text, usage = deep_review_error(e)  # the record keeps the error; its row says a phrase
                     llm_trace = {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
             else:
                 with self._owner_message_admission_lock:
@@ -1583,7 +1590,6 @@ from ouroboros.agent_dispatch import (  # noqa: E402, F401 -- intentional public
     _queued_budget_exhausted_message,
     _physical_calls_after_budget_rail,
     _initial_effort_for,
-    model_role_slot_override,
     resolve_dispatch_axes,
     _DELEGATE_VERBS,
     preflight_delegate_visibility,

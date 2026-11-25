@@ -5,7 +5,9 @@ and its owner grants, and it is the only way an extension reaches the host: it
 registers surfaces, subscribes to host events, spawns manifest-declared
 companions, pushes WebSocket messages and reads the settings it was allowed to
 see. Registration closes when ``register()`` returns and runtime access closes
-at unload, so a late call is refused rather than served.
+at unload, so a late call is refused rather than served. A running tool call's
+Stop (``get_stop_state``) is read from the host's own binding of that call,
+never from this shared object.
 """
 
 from __future__ import annotations
@@ -210,6 +212,182 @@ def set_ws_broadcaster(broadcaster: Callable[[dict], None] | None) -> None:
     global _ws_broadcaster
     with _lock:
         _ws_broadcaster = broadcaster
+
+
+# --- the running tool call's Stop (PluginAPI 2.6 ``get_stop_state``) ---
+# The host binds a call, the extension never names one: in process the registry invocation (``owner_pause.
+# _TOOL_OPERATION``: context, tool name and outcome, seen by the call's thread, its async task and contexts copied
+# from them), out of process the per-call child's single binding (tool mode only). The first refusal latches on that
+# call's own record, never on this API object, which the calls of several tasks share.
+STEP_STOP = "step_stop"  # the latch on a call's record, and the field of the host <-> child transport
+_STOP_WORDS = {
+    "cancelled": "Stop is in force for this task",
+    "task_cancelled": "this task has already ended as cancelled",
+    "operation_already_returned": "this tool call has already returned",
+    "stop_unreadable": "this task's Stop could not be read",
+    "no_task": "this call was made for no task, which no Stop governs",
+    "unbound": "no tool call of this skill runs in this context",
+}
+_REFUSALS = frozenset({"cancelled", "task_cancelled", "operation_already_returned", "stop_unreadable"})
+_child_tool_call: Optional[Dict[str, Any]] = None
+
+
+def _stop_answer(status: str, reason: str = "") -> Dict[str, str]:
+    return {"status": status, "reason": reason, "note": _STOP_WORDS.get(reason, "")}
+
+
+def _read_call_stop(source: Any) -> str:
+    """One strict read of the Stop over ``source``'s task: a refusal reason, ``no_task``, or ``""`` (continue).
+
+    Read as ``browser_session._idle_admission`` reads it: ``cancel_intents.immediate_stop_pending`` with the tree root
+    (the task's own immediate Stop, or an immediate cascade above it) within one acquisition budget, then, strictly
+    AFTER that projection, the task row, so an intent settled between the two reads still shows as the ``cancelled``
+    status it left. The tree root is never empty here: without it that predicate reads only its fail-soft pending
+    cancel, never the strict projection. Unreadable authority refuses; a row-less call outside a task's lifecycle has
+    no task to stop."""
+    from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
+    from ouroboros.cancel_intents import immediate_stop_pending
+    from ouroboros.owner_pause import _member_coordinates
+    from ouroboros.store import acquisition_budget
+    from ouroboros.task_results import STATUS_CANCELLED, load_task_result
+
+    root, tree, task_id = _member_coordinates(source)
+    managed = getattr(source, "task_lifecycle_bound", False) is True
+    if not task_id or not root or not tree:
+        return "stop_unreadable" if managed else "no_task"
+    gap: Optional[BaseException] = None
+    try:
+        with acquisition_budget(ACQUISITION_SLICE_SEC):
+            try:
+                if immediate_stop_pending(root, task_id, tree_root_id=tree):
+                    return "cancelled"
+            except Exception as exc:  # unknown, never "no Stop"; the row below still tells a call with no task
+                gap = exc
+            row = load_task_result(root, task_id, strict=True)
+    except Exception:
+        log.warning("Stop of an extension call is unreadable for task %s", task_id, exc_info=True)
+        return "stop_unreadable"
+    if row is None:
+        return "stop_unreadable" if managed else "no_task"
+    if str(row.get("status") or "") == STATUS_CANCELLED:
+        return "task_cancelled"
+    if gap is not None:
+        log.warning("Stop of an extension call is unreadable for task %s", task_id, exc_info=gap)
+        return "stop_unreadable"
+    return ""
+
+
+def _stop_binding_closed(record: Dict[str, Any]) -> bool:
+    return bool(record.get("closed") or record.get("stop_binding_closed"))
+
+
+def _call_stop(record: Dict[str, Any], source: Any) -> Dict[str, str]:
+    """One bound call's answer: its latch, else one read; the first refusal latches on the call's own record. The read
+    holds no lock, so the record decides again after it, whatever it found: a call that returned meanwhile refuses
+    (no later typing reads the record), and a refusal another thread of the call latched meanwhile is answered."""
+    with record["phase_lock"]:
+        if _stop_binding_closed(record):
+            return _stop_answer("stop", "operation_already_returned")
+        latch = record.get(STEP_STOP)
+        if latch:
+            latch["refusals"] += 1
+            return _stop_answer("stop", latch["reason"])
+    reason = _read_call_stop(source)
+    with record["phase_lock"]:
+        if _stop_binding_closed(record):
+            return _stop_answer("stop", "operation_already_returned")
+        if reason in _REFUSALS:
+            latch = record.setdefault(STEP_STOP, {"reason": reason, "note": _STOP_WORDS[reason], "refusals": 0})
+        elif not (latch := record.get(STEP_STOP)):
+            return _stop_answer("continue", reason)
+        latch["refusals"] += 1
+        return _stop_answer("stop", latch["reason"])
+
+
+def call_stop_state(skill: str) -> Dict[str, str]:
+    """``PluginAPI.get_stop_state`` of ``skill``: the call of this skill bound in this context, else ``unbound``."""
+    from ouroboros.owner_pause import _TOOL_OPERATION
+
+    active = _TOOL_OPERATION.get()
+    if active is not None:
+        source, name, record = active
+        if str(name or "").startswith(extension_name_prefix(skill)):
+            return _call_stop(record, source)
+        return _stop_answer("unbound", "unbound")
+    with _lock:
+        child = _child_tool_call
+    if child is not None and child["skill"] == skill:
+        return _call_stop(child, child["source"])
+    return _stop_answer("unbound", "unbound")
+
+
+def bind_child_tool_call(skill: str, source: Any) -> Dict[str, Any]:
+    """Bind the one tool call this per-call child serves (tool mode only); every thread of the child reads it. A
+    second binding is refused, never shared, so no later call, route or handler of the process inherits the first."""
+    global _child_tool_call
+    record = {"skill": skill, "source": source, "phase_lock": threading.Lock(), "closed": False}
+    with _lock:
+        if _child_tool_call is not None:
+            raise RuntimeError("this extension child already serves a tool call")
+        _child_tool_call = record
+    return record
+
+
+def release_child_tool_call(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Close and remove the child's binding (its ``finally``, before unload): the latch a refused further action
+    left, for the transport field ``step_stop``, or None."""
+    global _child_tool_call
+    if record is None:
+        return None
+    with record["phase_lock"]:
+        record["closed"] = True
+        latch = dict(record.get(STEP_STOP) or {})
+    with _lock:
+        if _child_tool_call is record:
+            _child_tool_call = None
+    return latch or None
+
+
+def adopt_child_stop(source: Any, latch: Any) -> None:
+    """The host side of ``step_stop``: a refusal the per-call child reported joins the host invocation ``source``
+    runs, in the host's own words, before its result is typed. Anything else is ignored; this never raises."""
+    from ouroboros.owner_pause import _TOOL_OPERATION
+
+    active = _TOOL_OPERATION.get()
+    reason = str(latch.get("reason") or "") if isinstance(latch, dict) else ""
+    if active is None or active[0] is not source or reason not in _REFUSALS or "phase_lock" not in active[2]:
+        return
+    count = latch.get("refusals")
+    with active[2]["phase_lock"]:
+        if _stop_binding_closed(active[2]):
+            return
+        active[2].setdefault(STEP_STOP, {"reason": reason, "note": _STOP_WORDS[reason],
+                                         "refusals": count if isinstance(count, int) and count > 0 else 1})
+
+
+def close_stop_binding(source: Any, handoff: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Close the extension's Stop reader and snapshot its refusal for the host result."""
+    from ouroboros.owner_pause import _TOOL_OPERATION
+
+    record = handoff
+    if record is None:
+        active = _TOOL_OPERATION.get()
+        record = active[2] if active is not None and active[0] is source else None
+    if not isinstance(record, dict) or "phase_lock" not in record:
+        return None
+    with record["phase_lock"]:
+        # A timeout can end the host's wait while the runner still owns settlement.
+        record["stop_binding_closed"] = True
+        latch = record.get(STEP_STOP)
+        return dict(latch) if latch else None
+
+
+async def await_stop_bound_call(awaitable, source, handoff=None):
+    """Close this call's Stop reader in the handler task, before the event loop runs its next callback."""
+    try:
+        return await awaitable
+    finally:
+        close_stop_binding(source, handoff)
 
 
 class PluginAPIImpl:
@@ -947,6 +1125,7 @@ class PluginAPIImpl:
                     self._state_dir.mkdir(parents=True, exist_ok=True)
                     token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
                     for spawn in staged.companion_spawns:
+                        spawn.descriptor.skill_dir = bundle.skill_dir
                         spawn.descriptor.env.clear()
                         spawn.descriptor.env.update(companion_spawn_env(
                             spawn.spec, token, env_allow=self._env_allow, granted_upper=self._granted_upper,
@@ -980,7 +1159,8 @@ class PluginAPIImpl:
         # same dispose+unload path as a mid-attach failure.
         for spawn in companion_spawns:
             try:
-                companion_supervisor.start(spawn.descriptor)
+                if not companion_supervisor.start(spawn.descriptor):  # workers did not stage a spawn
+                    raise ExtensionRegistrationError(f"companion {spawn.descriptor.name!r} start was declined")
             except Exception:
                 log.warning("extension %s companion %s failed to start; disposed through "
                             "the standard unload path", self._skill, spawn.descriptor.name, exc_info=discloses_failure(self._skill))
@@ -1040,16 +1220,16 @@ class PluginAPIImpl:
                 return {}
             return {key: settings[key] for key in self._readable_settings_keys(keys, document) if key in settings}
 
-    def _require_api_generation(self, method: str) -> None:
-        """2.4 methods need a 2.x negotiation: every declared 2.x minimum negotiates the host's current 2.x, so
+    def _require_api_generation(self, method: str, minimum: str = "2.4") -> None:
+        """2.4+ methods need a 2.x negotiation: every declared 2.x minimum negotiates the host's current 2.x, so
         in practice a field-less legacy (1.3) payload is the one refused them."""
         try:
             major, minor = (int(part) for part in self._plugin_api_generation.split(".", 1))
         except ValueError:
             major, minor = 0, 0
-        if (major, minor) < (2, 4):
+        if (major, minor) < tuple(int(part) for part in minimum.split(".")):
             raise ExtensionRegistrationError(
-                f"{method} needs plugin_api \"2.4\"; skill {self._skill!r} negotiated "
+                f"{method} needs plugin_api \"{minimum}\"; skill {self._skill!r} negotiated "
                 f"{self._plugin_api_generation}")
 
     def get_settings_state(self, keys: Sequence[str]) -> Dict[str, Any]:
@@ -1077,6 +1257,11 @@ class PluginAPIImpl:
             values = {key: settings[key] for key in readable
                       if settings.get(key) is not None and str(settings.get(key)).strip() != ""}
             return {"status": "ok", "values": values, "missing": [key for key in readable if key not in values]}
+
+    def get_stop_state(self) -> Dict[str, Any]:
+        """The Stop of the tool call running in this context (contract: ``PluginAPI.get_stop_state``)."""
+        self._require_api_generation("get_stop_state", "2.6")
+        return call_stop_state(self._skill)
 
     def _published_and_open(self) -> bool:
         """This API is still the open runtime of the live publication: unload and reload both end it."""

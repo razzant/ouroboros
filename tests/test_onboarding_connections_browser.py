@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
+from tests._wizard_walk import untick_starter_skills, walk
 
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
@@ -174,11 +175,9 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
         page.set_viewport_size({'width': 1360, 'height': 900})
         page.click('#next-btn')  # Review
         page.locator('[data-runtime-mode="light"]').click()
-        page.click('#next-btn')  # Budget
-        page.click('#next-btn')  # Summary
+        walk(page, 'review_mode', 'summary')  # Consciousness and Skills where offered, Budget, Summary
         # Disable optional starter installation: this test makes no public network requests.
-        page.locator('[data-starter-toggle]').click()
-        page.locator('[data-starter-all="0"]').click()
+        untick_starter_skills(page)
         receipts = []
 
         def keep_receipt(route):

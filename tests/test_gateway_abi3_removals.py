@@ -184,7 +184,7 @@ class TestAliasProducerFanOutSweep:
         ("ouroboros/usage_accounting.py", "cost_usd", "apply_provider_price_receipt"): ("exact retained receipt updates the private ledger price only", 1),
         ("ouroboros/openrouter_cost.py", "cost_usd", "parse_generation_receipt"): ("private provider-price receipt, never a gateway cost projection", 1),
         ("ouroboros/terminal_cost_reconciliation.py", "cost_usd", "reconcile_abandoned_usage"): ("existing ledger settlement call for the original recovered model operation", 1),
-        ("ouroboros/usage_accounting.py", "cost_usd", "_terminalize_failed_attempt"): ("ledger settlement transitions; shared rejection branch and received-price/usage settlement despite call failure", 3),
+        ("ouroboros/usage_accounting.py", "cost_usd", "_terminalize_failed_attempt"): ("ledger-only settlements for a processing refusal, a priced receipt, or a proved router rejection; a measured failure frame passes no reported amount to the ledger for a possible non-final estimate", 4),
         ("ouroboros/usage_accounting.py", "cost_usd", "_account_response"): ("ledger settlement call shared by sync and async received responses", 1),
         ("ouroboros/_usage_settlement.py", "cost_usd", "settlement_fields"): ("ledger settlement fields shared by text responses (usage_accounting) and live responses (live_usage)", 1),
         ("ouroboros/live_usage.py", "cost_usd", "settle_live_response"): ("ledger settlement call for a priced live (voice) response", 1),
@@ -193,7 +193,7 @@ class TestAliasProducerFanOutSweep:
         ("ouroboros/live_usage.py", "cost_usd", "observe_live_usage"): ("private ledger receipt for the call's separately billed input transcription; never a gateway cost projection", 1),
         ("ouroboros/usage_journal.py", "cost_usd", "legacy_candidates"): ("legacy usage telemetry import rows (the store's one-time migration)", 2),
         ("ouroboros/tools/imagegen.py", "cost_usd", "_recover_image"): ("original physical-attempt ledger settlement; public image receipts use actual_cost_usd/estimated_cost_usd", 1),
-        ("ouroboros/tools/search.py", "cost_usd", "_web_search_openai"): ("ledger settlement call (web search attempt)", 1),
+        ("ouroboros/tools/search.py", "cost_usd", "_web_search_openai"): ("ledger settlement calls (web search attempt: terminal response, and the failure path that still carries provider usage)", 2),
         # usage/observability event streams (events.jsonl, live log frames;
         # /api/logs replay converts to the honest name at the boundary)
         ("ouroboros/loop_llm_call.py", "cost_usd", "call_llm_with_retry"): ("llm_round usage event rows", 1),

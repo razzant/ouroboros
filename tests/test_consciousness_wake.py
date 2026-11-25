@@ -123,7 +123,7 @@ def test_previous_wake_failure_does_not_block_launch(clock, monkeypatch, caplog,
 
 @pytest.mark.parametrize(("failure", "restart"), [("write", False), ("readback", True)])
 def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(clock, monkeypatch, failure, restart):
-    from ouroboros import artifacts, chat_chain
+    from ouroboros import artifacts, chat_chain, knowledge
     from ouroboros.consciousness import BackgroundConsciousness, OBSERVATION_STATE_KEY, OWN_WAKE_STATE_KEY
 
     template = REPO.joinpath("prompts/CONSCIOUSNESS.md").read_text(encoding="utf-8")
@@ -137,6 +137,9 @@ def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(cl
               metadata=launched_a)
     clock.finish("wake0001", True)  # the carrier's terminal settles the wake and lays A's boundary
     assert clock.store[OBSERVATION_STATE_KEY] == accepted_a
+    target = knowledge.resolve_knowledge_address(clock.root, "between-wakes", "global")
+    note = knowledge.write_knowledge_note(target, "Written after the accepted wake.").current
+    reader = f"knowledge_read(topic='between-wakes', scope='global', version='{note.revision}')"
     clock.receipt["task_id"] = "wake0002"
     clock.clock._next_wake_at = T0 + 2 * clock_tests.FLOOR
     with monkeypatch.context() as fault:
@@ -149,12 +152,14 @@ def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(cl
             fault.setattr(artifacts, "read_actor_source_bytes", lambda root, task, ref:
                           read(root, task, ref) if task == "wake0001" else b"bad readback")
         assert clock.clock.tick(T0 + 2 * clock_tests.FLOOR) == "launched"
+    assert reader in clock.launches[-1]["text"]
     assert clock.store[OBSERVATION_STATE_KEY] == accepted_a
     assert clock.store[OWN_WAKE_STATE_KEY]["task_id"] == "wake0002"
     seed_wake(clock.root, task_id="wake0002", status="interrupted", outcome_axes={}, terminal_time=None,
               result="B's whole note.\n\nStill unfinished.", wake_summary="B's line.")
     seed_wake(clock.root, task_id="newer-foreign", result="Never use the newest task's note.")
     clock.finish("wake0002", True)
+    assert clock.store[OBSERVATION_STATE_KEY] == accepted_a
     if restart:
         clock.clock = BackgroundConsciousness(clock.root, clock.root / "repo", lambda: 7,
                                               now=T0 + 2 * clock_tests.FLOOR)
@@ -166,6 +171,9 @@ def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(cl
     assert "Interrupted" in expected and "B's whole note.\n\nStill unfinished." in expected
     assert clock.clock.tick(now) == "launched"
     launch = clock.launches[-1]
+    assert reader in launch["text"]  # failed acceptance did not consume the write, even across restart
+    clock.finish("wake0003", True, alarm=clock.clock)
+    assert clock.store[OBSERVATION_STATE_KEY]["knowledge"]["global"]["offset"] > 0
     for rendered in (launch["text"], launch["task"]["metadata"]["wake_observation"]["projection_text"]):
         assert f"- previous wake: {expected}\n" in rendered
         assert "A's whole note." not in rendered and "Never use the newest task's note." not in rendered
@@ -302,6 +310,188 @@ def _lines(observation):
     return [line for kind, _offset, line in observation.events if kind != "direct_turn"]
 
 
+def test_knowledge_changes_list_each_page_with_all_other_foci_and_the_latest_reader(tmp_path, monkeypatch):
+    from ouroboros import knowledge, knowledge_versions
+    from ouroboros.tools.knowledge import _knowledge_read
+    from ouroboros.tools.registry import ToolContext
+    from tests._knowledge_history_shared import printed_call
+
+    old = knowledge.resolve_knowledge_address(tmp_path, "earlier", "global")
+    assert knowledge.write_knowledge_note(old, "Before the baseline.").ok
+    first = _observe(tmp_path)
+    assert first.events == () and "knowledge" not in first.full_text()
+    accepted, _task = _bind(tmp_path, first, "wake-base")
+    expected = {}
+    for scope in ("global", "project:fixture-shelf"):
+        target = knowledge.resolve_knowledge_address(tmp_path, "notes/river", scope)
+        expected[scope] = []
+        revision = None
+        for index, role in enumerate(["root", "presence", "main", "child", "nanny", "consciousness", "unknown"] * 3):
+            text = f"{scope}: {role} wrote revision {index}.\n"
+            monkeypatch.setattr(knowledge, "utc_now_iso", lambda: _iso(T0 + index))
+            focus = {"role": role, "task_id": f"writer-{role}", "room_id": "fixture-room"}
+            result = knowledge.write_knowledge_note(target, text, expected_revision=revision,
+                focus=focus if role != "unknown" else None)
+            assert result.ok, result.reason
+            revision = result.current.revision
+            if role != "consciousness":
+                expected[scope].append((text, revision))
+        # The index's own retained source is not a note version, even without a publication stamp.
+        with knowledge_versions.journal_path(target).open("a", encoding="utf-8") as journal:
+            journal.write(json.dumps({"type": "knowledge_index_source", "old_content": "index"}) + "\n")
+    observation = _observe(tmp_path, boundary=accepted)
+    assert observation.counts().get("knowledge_change") == len(expected)
+    assert f"{len(expected)} changed knowledge pages" in observation.full_text()
+    assert observation.full_text().count("Knowledge changed by other foci after the accepted journal positions:") == 1
+    assert "Recorded in task results" not in observation.full_text()
+    ctx = ToolContext(repo_dir=REPO, drive_root=tmp_path, task_id="reader")
+    for (kind, offset, line), (scope, writes) in zip(observation.events, expected.items()):
+        assert kind == "knowledge_change" and offset is None
+        writers = ", ".join(f"{role} task_id=writer-{role} room_id=fixture-room"
+                            for role in ("root", "presence", "main", "child", "nanny")) + ", unknown"
+        assert line.startswith(f"- knowledge {scope}/notes/river: 18 writes; by {writers}; ")
+        assert f"first {_iso(T0)}; last {_iso(T0 + 20)}; " in line
+        text, revision = writes[-1]
+        tool, arguments = printed_call(line.split("; ")[-1])
+        assert tool == "knowledge_read" and arguments == {"topic": "notes/river", "scope": scope, "version": revision}
+        assert _knowledge_read(ctx, **arguments).endswith(text)
+        for text, revision in writes:  # every earlier version stays readable at its own address
+            assert _knowledge_read(ctx, topic="notes/river", scope=scope, version=revision).endswith(text)
+    assert _observe(tmp_path, boundary=accepted).events == observation.events  # not accepted: delivered again
+    committed, _task = _bind(tmp_path, observation, "wake-next")
+    assert _observe(tmp_path, boundary=committed).events == ()
+
+
+def test_empty_knowledge_baseline_keeps_the_wake_text_and_observes_the_first_later_write(tmp_path):
+    from ouroboros import knowledge
+
+    first = _observe(tmp_path)
+    unchanged_text = "\n- wake cause: the scheduled wake time; events never move it, they are listed as observed"
+    assert first.full_text() == unchanged_text
+    assert _observe(tmp_path, boundary=first.boundary).full_text() == unchanged_text
+    assert "then memory changes; then outstanding cards)" in first.overview_text({})
+    assert "knowledge" not in first.overview_text({})
+    assert not (tmp_path / "memory").exists()
+    target = knowledge.resolve_knowledge_address(tmp_path, "first-note", "global")
+    note = knowledge.write_knowledge_note(target, "The first knowledge write.").current
+    later = _observe(tmp_path, boundary=first.boundary)
+    assert later.counts().get("knowledge_change") == 1 and "1 changed knowledge page;" in later.full_text()
+    assert f"version='{note.revision}'" in later.full_text()
+    assert "then memory and knowledge changes; then outstanding cards)" in later.overview_text({})
+    assert _observe(tmp_path, boundary=later.boundary).full_text() == unchanged_text
+
+
+@pytest.mark.parametrize("scope", ["global", "project:fixture-recovery"])
+@pytest.mark.parametrize("damage", [b'{"torn":', b'not JSON\n', b'[]\n', b'\xff\n'])
+def test_a_wake_reads_both_sides_of_a_broken_knowledge_row_and_names_it_once(tmp_path, scope, damage):
+    from ouroboros import knowledge, knowledge_versions
+    from ouroboros.tools.knowledge import _knowledge_read
+    from ouroboros.tools.registry import ToolContext
+    from tests._knowledge_history_shared import printed_call
+
+    target = knowledge.resolve_knowledge_address(tmp_path, "recovery", scope)
+    a = knowledge.write_knowledge_note(target, "# A\n").current
+    accepted, _task = _bind(tmp_path, _observe(tmp_path), "wake-before-damage")
+    b = knowledge.write_knowledge_note(target, "# B\n", expected_revision=a.revision).current
+    journal = knowledge_versions.journal_path(target)
+    intact = journal.read_bytes()
+    c = knowledge.write_knowledge_note(target, "# C\n", expected_revision=b.revision).current
+    journal.write_bytes(intact + damage)
+    d = knowledge.write_knowledge_note(target, "# D\n", expected_revision=c.revision).current
+    skipped_end = len(intact) + len(damage) + (not damage.endswith(b"\n"))
+    raw = journal.read_bytes()
+    assert raw[skipped_end - 1:skipped_end] == b"\n"  # the real writer separates a torn record
+
+    observed = _observe(tmp_path, boundary=accepted)
+    calls = [printed_call(line.split("; ")[-1])[1] for line in _lines(observed)]
+    assert calls == [{"topic": "recovery", "scope": scope, "version": d.revision}]
+    assert f"- knowledge {scope}/recovery: 2 writes;" in _lines(observed)[0]
+    ctx = ToolContext(repo_dir=REPO, drive_root=tmp_path, task_id="fixture-reader")
+    assert _knowledge_read(ctx, **calls[0]).endswith(d.text)
+    assert _knowledge_read(ctx, topic="recovery", scope=scope, version=b.revision).endswith(b.text)
+    assert len(observed.gaps) == 1
+    gap = observed.gaps[0]
+    assert str(journal.relative_to(tmp_path)) in gap and f"bytes {len(intact)}..{skipped_end}" in gap
+    assert "invalid row skipped" in gap and observed.full_text().count(gap) == 1
+    assert observed.boundary["knowledge"][scope]["offset"] == len(raw)
+    assert journal.read_bytes() == raw  # reading does not repair or rewrite the journal
+    retry = _observe(tmp_path, boundary=accepted)
+    assert retry.events == observed.events and retry.gaps == observed.gaps  # unaccepted: still owed
+    committed, _task = _bind(tmp_path, observed, "wake-after-damage")
+    again = _observe(tmp_path, boundary=committed)
+    assert again.events == () and not again.gaps
+    e = knowledge.write_knowledge_note(target, "# E\n", expected_revision=d.revision).current
+    complete_end = journal.stat().st_size
+    with journal.open("ab") as stream:
+        stream.write(b'{"unfinished":')
+    later = _observe(tmp_path, boundary=committed)
+    assert len(later.events) == 1 and e.revision in later.full_text()
+    assert len(later.gaps) == 1 and gap not in later.gaps and "incomplete row pending" in later.gaps[0]
+    assert later.boundary["knowledge"][scope]["offset"] == complete_end
+
+
+@pytest.mark.parametrize("fault", ["missing", "shortened", "empty"])
+def test_a_lost_knowledge_journal_is_named_once_and_later_writes_are_seen(tmp_path, fault):
+    import shutil
+    from ouroboros import knowledge, knowledge_versions
+
+    scope = "project:fixture-returning"
+    target = knowledge.resolve_knowledge_address(tmp_path, "returning", scope)
+    a = knowledge.write_knowledge_note(target, "# Before\n").current
+    journal = knowledge_versions.journal_path(target)
+    prefix = journal.read_bytes()
+    b = knowledge.write_knowledge_note(target, "# Accepted\n", expected_revision=a.revision).current
+    healthy = knowledge.resolve_knowledge_address(tmp_path, "healthy", "global")
+    first = knowledge.write_knowledge_note(healthy, "# Before\n").current
+    accepted, _task = _bind(tmp_path, _observe(tmp_path), "wake-before-loss")
+    if fault == "missing":
+        shutil.rmtree(target.shelf.parent)
+    else:
+        journal.write_bytes(prefix if fault == "shortened" else b"")
+    changed = knowledge.write_knowledge_note(healthy, "# After\n", expected_revision=first.revision).current
+
+    observed = _observe(tmp_path, boundary=accepted)
+    assert len(observed.events) == 1 and changed.revision in observed.full_text()
+    assert len(observed.gaps) == 1 and scope in observed.gaps[0]
+    assert str(journal.relative_to(tmp_path)) in observed.gaps[0]
+    if fault == "missing":
+        assert scope not in observed.boundary["knowledge"] and "cursor dropped" in observed.gaps[0]
+    else:
+        assert observed.boundary["knowledge"][scope]["offset"] == journal.stat().st_size
+        assert "shortened" in observed.gaps[0] and "re-baselined" in observed.gaps[0]
+    assert scope in accepted["knowledge"]  # observation never mutates its accepted input
+    committed, _task = _bind(tmp_path, observed, "wake-after-loss")
+    again = _observe(tmp_path, boundary=committed)
+    assert again.events == () and not again.gaps
+    returned = knowledge.write_knowledge_note(target, "# Returned\n",
+        expected_revision=None if fault == "missing" else b.revision).current
+    later = _observe(tmp_path, boundary=committed)
+    assert len(later.events) == 1 and returned.revision in later.full_text() and not later.gaps
+
+
+def test_one_unpositionable_knowledge_journal_does_not_block_the_other_baselines(tmp_path):
+    from ouroboros import knowledge, knowledge_versions
+
+    scopes = ("global", "project:fixture-idle", "project:fixture-working")
+    targets = [knowledge.resolve_knowledge_address(tmp_path, "baseline", scope) for scope in scopes]
+    notes = [knowledge.write_knowledge_note(target, f"# Before: {scope}\n").current
+             for scope, target in zip(scopes, targets)]
+    idle = knowledge_versions.journal_path(targets[1])
+    idle.write_bytes(idle.read_bytes()[:-1])
+    first = _observe(tmp_path)
+    assert first.events == () and len(first.gaps) == 1
+    accepted, _task = _bind(tmp_path, first, "wake-partial-baseline")
+    assert set(accepted.get("knowledge", {})) == {scopes[0], scopes[2]}
+    assert "project:fixture-idle" in first.gaps[0] and "journal skipped" in first.gaps[0]
+    for index in (0, 2):
+        assert accepted["knowledge"][scopes[index]]["offset"] == knowledge_versions.journal_path(targets[index]).stat().st_size
+    changed = [knowledge.write_knowledge_note(targets[index], f"# After: {scopes[index]}\n",
+               expected_revision=notes[index].revision).current for index in (0, 2)]
+    later = _observe(tmp_path, boundary=accepted)
+    assert len(later.events) == 2 and all(note.revision in later.full_text() for note in changed)
+    assert all(note.revision not in later.full_text() for note in notes)  # the other shelves did baseline
+
+
 def test_every_event_of_the_window_is_observed_without_a_count_cut(tmp_path):
     """No ten-line window, no four-card cap, no 512 KB human tail: all of it, in append order."""
     since = T0 - 3600
@@ -416,6 +606,23 @@ def test_terminals_no_chat_row_announced_reach_the_next_wake_once(tmp_path):
     # Accepted: the next wake finds nothing new, however often the rows are rewritten.
     _write(tmp_path, "root1", updated_at=_iso(T0 + 700))
     assert _wake(tmp_path, second.boundary, T0 + 1200).events == ()
+
+
+def test_the_wake_line_of_a_helper_whose_first_coding_attempt_failed_states_only_that(tmp_path):
+    """The wake reads the stored typed fact through the shared verdict: no claim about later runs, the answer or the whole work."""
+    _write(tmp_path, "root1", status="running", ts=_iso(T0 - 900), updated_at=_iso(T0 - 900))
+    _write(tmp_path, "kid1", status="running", ts=_iso(T0 - 800), updated_at=_iso(T0 - 800),
+           parent_task_id="root1", delegation_role="subagent", description="child work")
+    first = _wake(tmp_path, None, T0)
+    fact = {"status": "incomplete", "reason": "initial_execution_unresolved",
+            "initial_execution": {"state": "failed", "run_id": "run-1", "invocation_id": "inv-1"}}
+    _write(tmp_path, "kid1", status="completed", updated_at=_iso(T0 + 100), reason_code="configured_actor_incomplete",
+           outcome_axes={"execution": {"status": "degraded", "reason_code": "configured_actor_incomplete",
+                                       "actor_first_terminal": fact}})
+    line = _lines(_wake(tmp_path, first.boundary, T0 + 600))[0]
+    assert line.startswith("- child task kid1 of root1 Done with warnings")
+    assert "(First coding attempt failed.)" in line
+    assert "no such run" not in line and "came without" not in line
 
 
 def test_a_task_first_recorded_after_the_scan_is_new_and_a_proven_terminal_keeps_its_own_stamp(tmp_path):
@@ -567,7 +774,8 @@ def test_human_input_is_classified_by_producer_provenance(tmp_path):
         "owner_message", "correspondent_message", "card_answer", "task_error"]
     lines = _lines(observation)
     assert lines[1].startswith("- message in a place in ") and lines[1].endswith("] from a correspondent")
-    assert lines[2].startswith("- owner card q9 on task asker: answered") and "chose option 1: Keep" in lines[2]
+    assert lines[2].startswith("- owner card q9 on task asker: answered") and (
+        "The owner pressed option 1 and wrote no words. The label «Keep» is the text of task asker") in lines[2]
     assert "task w1 runner failed" in lines[3]
     text = observation.full_text()
     assert "I opened this cycle" not in text and "machine traffic" not in text and "my reply" not in text
@@ -621,11 +829,12 @@ def test_answered_card_line_renders_mixed_answers_and_missing_facts_honestly():
     both = wake._answered_card_line("t1", "q1", {
         "answered_at": _iso(now - 120), "asked_at": _iso(now - 240), "options": ["Go", "Stop"],
         "answered_index": 0, "comment": "but only on weekdays", "question": "Deploy?"}, now=now)
-    assert both == ("- owner card q1 on task t1: answered 2 min ago; asked 4 min ago; "
-                    "chose option 1: Go; with the words: but only on weekdays; question: Deploy?")
+    assert both == ("- owner card q1 on task t1: answered 2 min ago; asked 4 min ago; The owner pressed option 1 "
+                    "(«Go», the text of task t1) and wrote: but only on weekdays; question: Deploy?")
     bare = wake._answered_card_line("t1", "q2", {"answered_at": "not a stamp", "answered_index": 5}, now=now)
-    assert bare == ("- owner card q2 on task t1: answered at an unknown time; asked at an unknown time; "
-                    "chose option 6: label unavailable; question: question text unavailable")
+    assert bare == ("- owner card q2 on task t1: answered at an unknown time; asked at an unknown time; The owner "
+                    "pressed option 6, whose label is not recorded, and wrote no words.; question: question text "
+                    "unavailable")
     empty = wake._answered_card_line("t1", "q3", {"answered_at": _iso(now - 60)}, now=now)
     assert "answer text unavailable" in empty
 
@@ -745,15 +954,21 @@ def test_projection_names_every_honest_status(describe):
     assert describe(BASE, enabled=False)["status"] == "disabled"
     assert describe(BASE, enabled=False)["enabled"] is False  # the caller's flag, not the snapshot's
     sleeping = describe(BASE)
-    assert sleeping["status"] == "sleeping" and sleeping["detail"] == f"Sleeping until {server._clock_of(BASE['next_wake_at'])}."
+    # The time is the server's, and the sentence names that zone (a UTC server is not the reader's morning).
+    from datetime import datetime
+
+    zone = datetime.fromisoformat(BASE["next_wake_at"]).astimezone().strftime("%z")
+    assert sleeping["status"] == "sleeping" and sleeping["detail"] == (
+        f"Sleeping until {server._clock_of(BASE['next_wake_at'])} (UTC{zone[:3]}:{zone[3:]}).")
     assert sleeping["next_wake_at"] == BASE["next_wake_at"] and sleeping["enabled"] is True
     # #1603: no early wake exists, so even a stale snapshot key is never rendered as one.
     stale = describe({**BASE, "pending_reason": "task_finished:a:completed"})
     assert "Early wake" not in stale["detail"] and stale["detail"] == sleeping["detail"]
     thinking = describe({**BASE, "live_wake_task_id": "wake0001"})
     assert thinking["status"] == "thinking" and "wake0001" in thinking["detail"]
-    first = describe({**BASE, "last_wake_outcome": "skipped:waiting_for_first_conversation"})
-    assert first["status"] == "waiting_for_first_conversation"
+    unread = describe({**BASE, "last_wake_outcome": "skipped:owner_chat_unknown", "last_error": "runtime state unavailable"})
+    assert unread["status"] == "owner_chat_unknown"  # unknown, never "no chat yet": a known empty slot wakes in Main
+    assert unread["detail"].startswith("The owner chat could not be read (runtime state unavailable); retry ")
     exhausted = describe({**BASE, "last_wake_outcome": "skipped:allowance_exhausted", "spent_24h_usd": 21.5,
                           "allowance_resets_at": "2027-01-15T18:00:00+00:00",
                           "next_wake_at": "2027-01-15T18:00:00+00:00"})  # a real skip waits no sooner than its reset
@@ -1152,6 +1367,12 @@ def test_the_export_for_an_older_body_writes_the_previous_form_it_reads_with_the
     assert older == {**{key: value for key, value in accepted.items() if key != "transition_chain"},
                      "transitions": {"version": 2, "source_ref": older["transitions"]["source_ref"]}}
     assert ct.read_source_transitions(tmp_path, older) == chain.state
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    header = json.loads(read_actor_source_bytes(tmp_path, older["task_id"],
+                                               older["transitions"]["source_ref"]).splitlines()[0])
+    assert "knowledge" in header["boundary"]
+    assert header["boundary"]["knowledge"] == accepted["knowledge"]
     assert ct.export_for_older_body(tmp_path) == {"status": "nothing_to_export"}
     _write(tmp_path, "late", status="completed", ts=_iso(T0 - 86400), updated_at=_iso(T0 - 86400))
     through_source, through_chain = _wake(tmp_path, older, T0 + 1200), _wake(tmp_path, accepted, T0 + 1200)

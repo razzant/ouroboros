@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tests._phone_room_shared import VIEWPORT, facts, history, shot, telegram_sdk
-from tests.test_design_system_gate_browser import rest, seed_page, settle
+from tests.test_design_system_gate_browser import open_nav, rest, seed_page, settle
 from tests.test_shell_interactions_browser import open_project, shell_ui
 from tests.test_subscription_setup_browser import subscription_ui
 
@@ -58,6 +58,13 @@ EDGES = """() => {
         projectBar: px(document.querySelector('.project-panel-bar'), 'paddingTop'),
         sideways: document.scrollingElement.scrollWidth - innerWidth};
 }"""
+# A room's bar in Telegram's shared row (DESIGN "Telegram's shared row"): its box, its reserves for Telegram's two
+# controls, and whether the room's own × is drawn.
+ROW = """(sel) => { const bar = document.querySelector(sel); const s = getComputedStyle(bar);
+    const close = document.querySelector('.project-panel.open .project-panel-close');
+    return {top: parseFloat(s.paddingTop), height: bar.getBoundingClientRect().height,
+        start: parseFloat(s.paddingLeft), end: parseFloat(s.paddingRight),
+        closeShown: !!(close && close.getClientRects().length && getComputedStyle(close).display !== 'none')}; }"""
 # Where the closed drawer's painted part begins on screen (its translate and its clip): never beside an inset room.
 DRAWER_SHOWS_FROM = r"""() => {
     const s = document.getElementById('primary-sidebar'), r = s.getBoundingClientRect();
@@ -74,8 +81,11 @@ def test_fullscreen_is_asked_once_acknowledged_only_by_telegram_and_an_exit_is_n
     calls = page.evaluate(CALLS)
     assert calls.count('requestFullscreen') == 1 and calls.index('expand') < calls.index('requestFullscreen'), calls
     edges = page.evaluate(EDGES)
-    # The stack header clears the device's and Telegram's top (5 px chrome inset + 47 + 46); the sides are the shell's.
-    assert edges['app'] == {'left': 20, 'right': 12} and edges['header'] == 98 and edges['sideways'] <= 0, edges
+    # The room's bar is Telegram's row: it starts under the status bar (47) and is the row's height (46), clear of
+    # Telegram's Close (no layer open) and its ⌄ ··· (owner 17.11 1A); the sides are the shell's.
+    assert edges['app'] == {'left': 20, 'right': 12} and edges['header'] == 47 and edges['sideways'] <= 0, edges
+    main_row = page.evaluate(ROW, '#page-chat .app-page-header')
+    assert main_row['height'] == 93 and main_row['start'] == 124 and main_row['end'] == 102, main_row
     assert edges['room']['left'] == 20 and edges['room']['right'] == 12, edges
     assert edges['composer'] == 34, 'the composer keeps the bottom inset'
     shot(page, f'telegram-fullscreen-main-{shell_ui["engine"]}')  # before the edge check: a failure keeps its frame
@@ -94,6 +104,9 @@ def test_fullscreen_is_asked_once_acknowledged_only_by_telegram_and_an_exit_is_n
     rest(page)
     project = page.evaluate(EDGES)
     assert project['project']['left'] == 20 and project['project']['right'] == 12, project
+    # An open room is a layer: Telegram draws its Back, the bar keeps that narrower reserve and the room's × gives way.
+    project_row = page.evaluate(ROW, '.project-panel.open .project-panel-bar')
+    assert project_row['top'] == 47 and project_row['start'] == 104 and not project_row['closeShown'], project_row
     assert page.evaluate(DRAWER_SHOWS_FROM) >= 19.5
     assert page.evaluate("getComputedStyle(document.querySelector('.project-panel')).boxShadow") == 'none', \
         'no shadow of the docked panel falls into the inset'
@@ -110,6 +123,9 @@ def test_fullscreen_is_asked_once_acknowledged_only_by_telegram_and_an_exit_is_n
     page.wait_for_function("() => document.documentElement.dataset.telegramFullscreen === 'expanded'")
     page.wait_for_timeout(300)
     assert page.evaluate(CALLS).count('requestFullscreen') == 1
+    # Out of fullscreen the bar is the page's own again: no reserve for Telegram's row, and the room's × is drawn.
+    expanded_row = page.evaluate(ROW, '.project-panel.open .project-panel-bar')
+    assert expanded_row['start'] not in (104, 124) and expanded_row['closeShown'], expanded_row
     facts(f'telegram-fullscreen-edges-{shell_ui["engine"]}', {'main': edges, 'drawer': drawer, 'project': project,
                                                               'keyboard': keyboard, 'calls': page.evaluate(CALLS)})
 
@@ -343,3 +359,49 @@ def test_page_notices_keep_their_margin_inside_telegrams_side_insets(shell_ui, w
     shot(page, name)
     assert measured['right'] >= side + 18 - 0.5 and measured['left'] >= side - 0.5, measured
     page.close()
+
+
+# Each visible command of Extensions (the rows of its list, which the tabs were, and the actions that end the band of
+# the open page), and what a press at its centre reaches.
+PRESSES = """() => [...document.querySelectorAll('#page-skills [data-extensions-open], #page-skills > .app-page-header .app-page-toolbar button')]
+    .filter(n => n.getClientRects().length).map(n => { const r = n.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return {name: (n.querySelector('.section-row-title') || n).textContent.trim(), reached: n === hit || n.contains(hit),
+                top: r.top, left: r.left, right: r.right, within: r.left >= 0 && r.right <= innerWidth}; })"""
+
+
+@pytest.mark.parametrize('root', [16, 24])
+def test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_the_row(shell_ui, root):
+    """Grok r2: at 320 px Skills' Update (prepended into its toolbar) and Refresh stood over the third tab, so Sources
+    could not be pressed. Extensions (#3921) has no tabs: a phone shows its list alone, and the Skills row opens the page
+    whose band ends with Update and Refresh, on the line under the name below Telegram's row. A press at the centre of
+    each row, then of each action, reaches that control inside the screen, at either root size."""
+    sdk = telegram_sdk(fullscreen='grant', insets={'top': 13}, content={'top': 46})
+    page = telegram_page(shell_ui, 320, 700, sdk)
+    page.route('**/api/extensions', lambda route: route.fulfill(json={'skills': [
+        {'name': f'update-{i}', 'description': 'Test update', 'enabled': True, 'loaded': True,
+         'review_status': 'pass', 'review_gate': 'pass', 'install': {'basis': 'trusted', 'source': {'id': 'official'},
+         'release': {'version': '1'}, 'update_available': {'digest': str(i) * 64, 'version': '2'}}} for i in (1, 2)],
+        'live': {}}))
+    page.add_init_script(f"document.addEventListener('DOMContentLoaded', () => {{ document.documentElement.style.fontSize = '{root}px'; }})")
+    boot(page, shell_ui)
+    page.wait_for_function("() => document.documentElement.dataset.telegramFullscreen === 'active'")
+    open_nav(page, 'skills')
+    skills_row = page.locator('#page-skills [data-extensions-open="installed"]')
+    skills_row.wait_for()
+    rest(page)
+    rows = page.evaluate(PRESSES)
+    shot(page, f'telegram-extensions-list-320-{root}-{shell_ui["engine"]}')
+    skills_row.click()  # one column: the list stands first; the Skills row opens the page that holds Update and Refresh
+    page.locator('#skills-update-all').wait_for()
+    rest(page)
+    actions = page.evaluate(PRESSES)
+    name_bottom = page.evaluate("() => document.querySelector('#page-skills [data-extensions-lead-name]').getBoundingClientRect().bottom")
+    shot(page, f'telegram-skills-header-320-{root}-{shell_ui["engine"]}')
+    facts(f'telegram-extensions-presses-320-{root}-{shell_ui["engine"]}',
+          {'list': rows, 'page': actions, 'nameBottom': name_bottom})
+    assert [p['name'] for p in rows] == ['Skills', 'MCP servers', 'Browse', 'Sources'], rows
+    assert [p['name'] for p in actions] == ['Update 2', 'Refresh'], actions
+    assert all(p['reached'] and p['within'] for p in rows + actions), (rows, actions)
+    assert all(p['top'] >= name_bottom for p in actions), f'an action starts on the line under the name: {name_bottom}, {actions}'
+

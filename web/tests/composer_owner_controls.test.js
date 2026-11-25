@@ -560,11 +560,13 @@ test('the context capsule: ring, Context and the mode; it opens into exactly thr
     m.controls.destroy();
 });
 
+const contextHeaders = { 'Content-Type': 'application/json', 'X-Ouroboros-Surface': 'app', 'X-Ouroboros-Actor': 'owner' };
+
 test('a context choice posts the owner endpoint at once, waits for the answer, shows a refusal and always re-reads /api/state', async () => {
     const m = mountPair();
     await m.press(m.contextHead);
     await m.choose('low');
-    assert.deepEqual(m.posts, [['/api/owner/context-mode', { mode: 'low' }]]);
+    assert.deepEqual(m.posts, [['/api/owner/context-mode', { mode: 'low' }, contextHeaders]]);
     assert.equal(m.contextEl.dataset.contextMode, 'low');
     assert.equal(m.contextEl.querySelector('.chat-capsule-value').textContent, '—', 'a choice never paints the observation');
     assert.equal(m.seg('low').getAttribute('aria-checked'), 'true');
@@ -628,23 +630,24 @@ test('closed, Context says the mode this room\'s latest request was sent in; the
     assert.deepEqual([low.value, low.actual, low.lit, low.dot, low.label], ['Low', 'low', ['low'], ['157.78', '115.94'], 'Context: Low now, Max chosen'],
         'one word and one lit arc for the observation; Effort\'s dot on the Max arc keeps the choice');
     assert.equal(low.fact[0], 'Low now');
-    assert.match(low.fact[1], /^The history does not fit the Max window\. Request at .+\.$/, 'one short cause and the request\'s time');
+    assert.match(low.fact[1], /^Low for now, not Max: the whole books do not fit beside the history\. Request at .+\.$/,
+        'one short cause and the request\'s time: the work\'s state apart from the choice');
     assert.deepEqual(m.posts, [], 'painting the observation saves nothing');
     assert.equal(m.contextEl.dataset.contextMode, 'max', 'nor changes the saved mode');
     await m.press(m.contextHead);
     assert.equal(m.seg('max').getAttribute('aria-checked'), 'true', 'open, the strip marks the saved mode');
     assert.deepEqual(['word', 'text'].map((part) => m.contextHint.querySelector(`.ui-hint-${part}`).textContent), ['Max', 'The full context window.']);
     // Choosing the observed mode makes them agree: today's closed capsule, no dot, the head's own words; open, the hint
-    // still dates the observation (no cause: nothing differs).
+    // dates the observation and keeps the reason of a send made under Max (Astra 10): a temporary Low is not the choice.
     await m.choose('low');
     const agreed = closed(m);
     assert.deepEqual({ ...agreed, fact: null }, { value: 'Low', actual: 'low', lit: ['low'], dot: null, label: '', fact: null });
     assert.equal(agreed.fact[0], 'Low now');
-    assert.match(agreed.fact[1], /^Request at .+\.$/);
+    assert.match(agreed.fact[1], /^Low for now, not Max: the whole books do not fit beside the history\. Request at .+\.$/);
     // A choice changes the dot, never the word: the next request will try Nano, the last one was sent in Low.
     await m.choose('nano');
     assert.deepEqual([closed(m).value, closed(m).lit, closed(m).dot], ['Low', ['low'], ['26.22', '115.94']]);
-    assert.equal(closed(m).fact[1].split(' Request at')[0], 'The history does not fit the Max window.',
+    assert.equal(closed(m).fact[1].split(' Request at')[0], 'Low for now, not Max: the whole books do not fit beside the history.',
         'the cause is about the mode its work held at send');
     m.controls.destroy();
 });
@@ -655,7 +658,7 @@ test('each recorded reason of a lower request reads as its own sentence; a lower
         m.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low', { cause, id: `work-${cause}` })] });
         return closed(m).fact[1].split(/ ?Request at /)[0];
     };
-    const said = ['memory', 'route', 'window', 'after_start'].map(reason);
+    const said = ['memory', 'request', 'route', 'window', 'after_start'].map(reason);
     assert.ok(said.every(Boolean) && new Set(said).size === said.length, said.join(' | '));
     assert.equal(reason(''), '', 'an unknown start (no recorded reason) is not given one');
     m.controls.destroy();
@@ -869,7 +872,7 @@ test('an explicitly incomplete census never claims the room\'s current mode: its
     const fresh = mountPair();
     fresh.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low')], active_chat_activities_complete: false });
     assert.deepEqual([closed(fresh).value, closed(fresh).label, closed(fresh).fact[0]], ['Low', 'Context: Low last, Max chosen', 'Low last']);
-    assert.match(closed(fresh).fact[1], /^The history does not fit the Max window\. Request at .+\. The current read is incomplete\.$/);
+    assert.match(closed(fresh).fact[1], /^Low for now, not Max: the whole books do not fit beside the history\. Request at .+\. The current read is incomplete\.$/);
     // ... and one whose incomplete read lists nothing: unknown, saying why.
     const empty = mountPair();
     empty.controls.syncState({ context_mode: 'max', active_chat_activities: [], supervisor_ready: false });
@@ -1041,31 +1044,48 @@ test('the model keeps its value: where the cap would cut it, Subagents, Context 
 });
 
 test('folded touch rings give their reach spacing back before Model is cut, and regain it as the row grows', () => {
-    const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}) });
-    const styles = new Map();
-    const m = mountPair({ subagents: true, model: { store }, win: { ...hoverWindow(false), getComputedStyle: node => styles.get(node) || {} } });
-    const gap = () => m.row.dataset.ownerGlyphs && !m.row.dataset.ownerTight ? 12 : 8;
-    styles.set(m.row, { get columnGap() { return `${gap()}px`; } });
-    const values = { model: 83, subagents: 120, context: 120, effort: 120 };
-    const steps = [
-        [900, undefined, undefined, undefined, '', 8],
-        [260, 'true', 'true', undefined, '', 12],
-        [250, 'true', 'true', 'true', '', 8],
-        [230, 'values', 'true', 'true', '69px', 8],
-        [250, 'true', 'true', 'true', '', 8],
-        [260, 'true', 'true', undefined, '', 12],
-        [900, undefined, undefined, undefined, '', 8],
-    ];
-    for (const [width, compact, glyphs, tight, cap, pitch] of steps) {
-        const line = layRow(m, { width, values, gap });
+    // The row's gap is its layout's (style.css --composer-row-gap): 8 px docked, 6 px in the stacked layout, the phone's,
+    // where a coarse pointer folds the rings and the tight step happens. Folded rings stand 12 px apart (44 - 32) until
+    // the line is tight. The fit reads the computed gap: at 240 px the stacked row holds its tight line (237 px) where
+    // the docked one (243 px) would cut Model, and its cut at 230 px is the 6 px row's own.
+    const LAYOUTS = {
+        docked: [8, [
+            [900, undefined, undefined, undefined, '', 8],
+            [260, 'true', 'true', undefined, '', 12],
+            [250, 'true', 'true', 'true', '', 8],
+            [230, 'values', 'true', 'true', '69px', 8],
+            [250, 'true', 'true', 'true', '', 8],
+            [260, 'true', 'true', undefined, '', 12],
+            [900, undefined, undefined, undefined, '', 8],
+        ]],
+        stacked: [6, [
+            [900, undefined, undefined, undefined, '', 6],
+            [260, 'true', 'true', undefined, '', 12],
+            [240, 'true', 'true', 'true', '', 6],
+            [230, 'values', 'true', 'true', '75px', 6],
+            [240, 'true', 'true', 'true', '', 6],
+            [260, 'true', 'true', undefined, '', 12],
+            [900, undefined, undefined, undefined, '', 6],
+        ]],
+    };
+    for (const [layout, [rowGap, steps]] of Object.entries(LAYOUTS)) {
+        const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}) });
+        const styles = new Map();
+        const m = mountPair({ subagents: true, model: { store }, win: { ...hoverWindow(false), getComputedStyle: node => styles.get(node) || {} } });
+        const gap = () => m.row.dataset.ownerGlyphs && !m.row.dataset.ownerTight ? 12 : rowGap;
+        styles.set(m.row, { get columnGap() { return `${gap()}px`; } });
+        const values = { model: 83, subagents: 120, context: 120, effort: 120 };
+        for (const [width, compact, glyphs, tight, cap, pitch] of steps) {
+            const line = layRow(m, { width, values, gap });
+            m.controls.syncState({});
+            assert.deepEqual([...line.said(), m.row.dataset.ownerTight, gap()], [compact, glyphs, cap, tight, pitch], `${layout} ${width}px`);
+            assert.ok(line.total() <= width, `${layout} ${width}px keeps one line`);
+        }
+        layRow(m, { width: steps[2][0], values, gap });
         m.controls.syncState({});
-        assert.deepEqual([...line.said(), m.row.dataset.ownerTight, gap()], [compact, glyphs, cap, tight, pitch], `${width}px`);
-        assert.ok(line.total() <= width, `${width}px keeps one line`);
+        m.controls.destroy();
+        assert.equal(m.row.dataset.ownerTight, undefined, `${layout}: destroy retires the tight spacing too`);
     }
-    layRow(m, { width: 250, values, gap });
-    m.controls.syncState({});
-    m.controls.destroy();
-    assert.equal(m.row.dataset.ownerTight, undefined, 'destroy retires the tight spacing too');
 });
 
 test('a row without the model keeps the fit it had: names, then the widest values cut, never glyphs alone', () => {
@@ -1339,7 +1359,7 @@ test('Main and two projects read and save only their room, including delayed con
     assert.equal(alpha.controls.hasPendingSave(), true);
     release({ ok: true }); await saving;
     assert.equal(await alpha.controls.pendingSave(), true);
-    assert.deepEqual(alpha.posts[0], ['/api/owner/context-mode', { mode: 'nano', project_id: 'alpha' }]);
+    assert.deepEqual(alpha.posts[0], ['/api/owner/context-mode', { mode: 'nano', project_id: 'alpha' }, contextHeaders]);
     assert.equal(main.contextEl.dataset.contextMode, 'max');
     assert.equal(beta.contextEl.dataset.contextMode, 'nano');
     alpha.answer.value = { ok: true, json: async () => ({ project_id: 'beta', context_mode: 'max' }) };

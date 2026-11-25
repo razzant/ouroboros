@@ -264,13 +264,13 @@ def _admitted_workspace_root(ctx: ToolContext, value: str) -> pathlib.Path:
 
 def resolve_review_root(ctx: ToolContext, binding: Any, request: ReviewChangeRequest) -> Tuple[str, pathlib.Path]:
     """(root_kind, top level) of the repository this call reviews."""
-    from ouroboros.tools import git as git_mod
+    from ouroboros.tools import git_vcs_ops
 
     if request.workspace_root:
         start = _admitted_workspace_root(ctx, request.workspace_root)
     else:
         try:
-            start = pathlib.Path(git_mod._vcs_binding(ctx, binding, root=request.root).base_path)
+            start = pathlib.Path(git_vcs_ops._vcs_binding(ctx, binding, root=request.root).base_path)
         except (OSError, ValueError, RuntimeError) as exc:
             raise ReviewChangeArgumentError(f"root={request.root} does not resolve here: {exc}") from exc
     top = _git_line(start, "rev-parse", "--show-toplevel")
@@ -967,7 +967,7 @@ def run_system_review(ctx: ToolContext, *, reviewer: str = "", effort: str = "",
     from dataclasses import replace
 
     from ouroboros.deep_self_review import SystemReviewAsk, run_deep_self_review
-    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, new_review_wave_id, review_failure_facts
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, new_review_wave_id, reported_review_cost, review_failure_facts
     from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
 
     row = system_review_row(reviewer, effort)
@@ -990,7 +990,7 @@ def run_system_review(ctx: ToolContext, *, reviewer: str = "", effort: str = "",
     usage = dict(usage or {})
     failed = str(usage.get("execution_status") or "") == "infra_failed"
     refused = failed and str(usage.get("reason_code") or "") == "deep_self_review_unavailable"
-    cost = usage.get("cost")
+    cost = reported_review_cost(usage)
     fact = body_fact(system, system_repo=system, data_dir=drive, treat_as_body=False)
     degraded = [f"system_review_failed: {usage.get('reason_code')}"] if failed and not refused else []
     after = _system_tree(system)
@@ -1007,7 +1007,7 @@ def run_system_review(ctx: ToolContext, *, reviewer: str = "", effort: str = "",
         "structured": {"started_ts": started, "rows": [system_seat_plan(row)]},
         "triad_raw": [] if refused else [{
             "slot_id": row.slot_id, "status": "error" if failed else "responded", "raw_text": "" if failed else report,
-            "model_id": str(usage.get("resolved_model") or ""), "cost_usd": cost if isinstance(cost, (int, float)) else None,
+            "model_id": str(usage.get("resolved_model") or ""), "cost_usd": cost,
             "capability_delta": list(usage.get("capability_delta") or []),
             # A failed /review keeps its reason on the row, before the report text can be pruned.
             **(review_failure_facts({"status": "error", "error": report,
@@ -1278,6 +1278,8 @@ def _handle_new_review_change(
                 _resolved_binding=_resolved_binding, _preflight_execution=exhibit if exhibit.get("status") == "passed" or exhibit.get("observed") else None,
                 _public_execution=True)
     except ContinuationRefused as exc:  # a choice recorded on this round that could not be sent now
+        if str(subject or "").strip() == "result":  # a typed $0 refusal of this result review (#3304)
+            return _publish_result_refusal_fact(ctx, json.dumps(exc.payload(), ensure_ascii=False, indent=2, default=str), exc.reason)
         return json.dumps(exc.payload(), ensure_ascii=False, indent=2, default=str)
     except ValueError as exc:
         return argument_refusal(ctx, "TOOL_ARG_ERROR (review_change)", [str(exc)], effect="No reviewer was dispatched.")
@@ -1303,6 +1305,16 @@ def left_wave_terms(*, commit: bool = False) -> str:
             + ("this task's or its recorded Continue successor's." if commit else "this task's alone."))
 
 
+def _publish_result_refusal_fact(ctx: ToolContext, text: str, reason: str) -> str:
+    """Publish the typed $0 refusal fact beside the refusal text (#3304): the Finish door reads it from this
+    call's ``tool_result_meta`` and no longer counts the refused call as an examination, while the bound
+    NOT_DISPATCHED run keeps its own exclusion. Status stays the call's own ``ok`` — nothing else changes."""
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text,
+                                                meta={"result_review_refusal": {"reason": str(reason)}}))
+
+
 def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *, continue_seats: Any = None,
                           _resolved_binding: Any = None, **args: Any) -> str:
     from ouroboros.review_continuation import ContinuationRefused
@@ -1320,6 +1332,10 @@ def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *, con
             payload = json.loads(text[text.index("{"):])
         except (ValueError, TypeError):
             return text
+        if payload.get("dispatch_refusal") and str((payload.get("review_reference") or {}).get("surface") or "") == "result":
+            # A $0 refusal sent nothing: the typed fact lets the Finish door and the record agree this call
+            # examined nothing (#3304), while the bound NOT_DISPATCHED run keeps its own exclusion.
+            text = _publish_result_refusal_fact(ctx, text, str(payload["dispatch_refusal"].get("kind") or "refused"))
     else:
         try:
             if args:

@@ -11,7 +11,7 @@ import pytest
 from ouroboros import dialogue_store
 from ouroboros.agent_task_pipeline import emit_task_results
 from ouroboros.gateway.history import make_chat_history_endpoint
-from ouroboros.post_task_synthesis import _record_task_facts, task_tool_metrics
+from ouroboros.post_task_synthesis import _record_task_facts, build_trace_summary, task_tool_metrics
 from ouroboros.task_results import load_task_result
 from ouroboros.utils import append_jsonl
 from supervisor.events_worker_reports import _handle_task_metrics
@@ -119,3 +119,44 @@ def test_completion_metrics_require_the_host_fact_and_success():
              {"tool": "finish_task", "completion_control": True, "is_error": True}]
     metrics = task_tool_metrics({"tool_calls": calls})
     assert (metrics["tool_calls"], metrics["tool_errors"], metrics["completion_tool_calls"]) == (3, 1, 1)
+
+
+def test_host_refused_step_is_no_tool_error_but_an_independent_failure_stays_one():
+    """The envelope types a host refusal as is_error; the host's own narrow mark — status
+    "blocked" beside tool_result_meta.refused_step, the same predicate the durable-row
+    replay reads (tool_call_log.is_plain_step_refusal) — says a further STEP was refused, not that
+    the call failed. A failure beside a refusal keeps its own recorded status and counts."""
+    refused = {"refused_step": True, "control_reason": "cancelled"}
+    calls = [
+        # a clean Stop: the extension's own action succeeded, the host refused the next one
+        {"tool": "ext_stopper_send", "is_error": True, "status": "blocked",
+         "tool_result_code": "OWNER_OPERATION_REFUSED", "tool_result_meta": refused},
+        # independent failures the host ALSO refused a further step: real errors
+        {"tool": "ext_stopper_send", "is_error": True, "status": "error", "tool_result_code": "EXTENSION_ERROR",
+         "tool_result_meta": refused},
+        {"tool": "run_command", "is_error": True, "status": "timeout",
+         "tool_result_meta": {**refused, "control_reason": "task_cancelled"}},
+        # an ordinary failure and a guard's plain blocked (no host mark) stay errors
+        {"tool": "read_file", "is_error": True, "status": "error"},
+        {"tool": "write_file", "is_error": True, "status": "blocked",
+         "tool_result_code": "ACCESS_BLOCKED", "tool_result_meta": {}},
+        {"tool": "edit_text", "is_error": False, "status": "ok"},
+    ]
+    metrics = task_tool_metrics({"tool_calls": calls})
+    assert metrics["tool_calls"] == 6
+    assert metrics["tool_errors"] == 4
+    lines = build_trace_summary({"tool_calls": calls}).splitlines()
+    assert lines[2].endswith("[status=error] → ERROR → FURTHER STEP REFUSED")
+    assert lines[3].endswith("[status=timeout] → ERROR → FURTHER STEP REFUSED")
+    assert lines[4].endswith("[status=error] → ERROR")
+
+
+def test_a_clean_stop_reads_policy_denied_in_the_trace_summary():
+    """The trace side needs no separate compact refusal fact: the classifier already buckets
+    the refused "blocked" completion as a recorded policy denial, never an unresolved error."""
+    trace = {"tool_calls": [{"tool": "ext_stopper_send", "is_error": True, "status": "blocked",
+                             "tool_result_meta": {"refused_step": True, "control_reason": "cancelled"}}]}
+    assert task_tool_metrics(trace)["tool_errors"] == 0
+    summary = build_trace_summary(trace).splitlines()
+    assert summary[1].endswith("[status=blocked] → FURTHER STEP REFUSED")
+    assert summary[0] == "## Tool trace (1 calls, 0 errors, 1 policy-denied)"

@@ -165,7 +165,15 @@ def _describe_bg(request: Request) -> Callable[[bool], dict[str, Any]] | None:
 
 
 async def api_consciousness(request: Request) -> JSONResponse:
-    """The Dashboard's read-only status, spend by cause, place labels and recent wakes."""
+    """The Dashboard's read-only status, spend by cause, place labels and recent wakes; with ``?switch=on|off``,
+    what that turn would change, read at the press (``consciousness_view.read_switch_preview``)."""
+    to = request.query_params.get("switch")
+    if to in ("on", "off"):
+        from ouroboros.consciousness_view import read_switch_preview
+        state_line = _state_attr(request, "describe_bg_consciousness_state")  # its live wake and own tasks, if any
+        running = await asyncio.to_thread(state_line, True) if state_line and to == "off" else None
+        preview = await asyncio.to_thread(read_switch_preview, request_drive_root(request), to, running)
+        return JSONResponse(preview, headers={"Cache-Control": "no-store"})
     describe = _state_attr(request, "describe_consciousness")
     if describe is None:
         return JSONResponse({"status": "unavailable", "recent_wakes": []}, status_code=503,
@@ -275,14 +283,16 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     from ouroboros.gateway.main_decisions import main_decisions_snapshot
     from ouroboros.gateway.state_publication import map_revision, wire_bindings
     sent_bindings = wire_bindings(task_bindings)  # what a reader receives; the census below keeps the named map
+    verdicts = {}  # what this one measurement decided of each row's owner action (its address and availability)
     decisions = main_decisions_snapshot(drive_root, decision_owners, task_bindings,
                                        activities_complete=activity_availability["complete"],
-                                       bindings_complete=bindings_complete)
+                                       bindings_complete=bindings_complete, verdicts=verdicts)
     from ouroboros.gateway.work_projection import works_snapshot
     publication_roots = set()
+    publication_runs = {}
     works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"],
-                           bindings=task_bindings, publication_roots=publication_roots,
-                           questions=decisions["current_questions"])
+                           bindings=task_bindings, publication_roots=publication_roots, publication_runs=publication_runs,
+                           questions=decisions["current_questions"], verdicts=verdicts)
     # Registered-project facts (never raise): the compact sidebar list, and the
     # COMPLETE (uncapped, all-status) project chat_ids for the live WS fan-out
     # isolation SSOT — distinct from the capped/filtered sidebar list, so
@@ -291,7 +301,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         from ouroboros.projects_registry import list_sidebar_projects, projects_summary
         from ouroboros.room_messages import project_revision
 
-        listable = list_sidebar_projects(root := request_drive_root(request))  # one read: the feed and its count
+        listable = list_sidebar_projects(root := request_drive_root(request), require_readable=True)
         messages_revision = project_revision(root, listable)  # read before the feed: a later move reads the list again
         # A listed room that is the owner's turn always has its row: the amber on Ouroboros's picture stands for a row
         # the owner can reach, however long ago its work ended (after the recent slice, in the same message order).
@@ -325,6 +335,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         # Other data roots the census read (a task's ledger root): the next revision probe stamps them too.
         "roots": sorted({str(facts["budget_drive_root"]) for facts in work_facts.values()
                          if isinstance(facts, dict) and facts.get("budget_drive_root")} | publication_roots),
+        "member_run_activity": publication_runs,
         "pending_count": len(PENDING),
         "running_count": len(RUNNING),
         "limit": limit,
@@ -558,38 +569,43 @@ def _raw_work_facts(row: dict) -> dict:
     continuation = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
     facts = {key: row[key] for key in ("_budget_pause_hold", "_budget_pause", "title", "suggested_name", "focus",
                                         "root_task_id", "parent_task_id", "original_task_id", "budget_drive_root", "owner_wait",
-                                        "_presence_turn", "silence_attention") if row.get(key)}
+                                        "_presence_turn", "silence_attention", "lane_wait") if row.get(key)}
     edges = {key: continuation[key] for key in ("predecessor_task_id", "work_id", "work_name") if continuation.get(key)}
-    return {**facts, **({"continuation": edges} if edges else {})}
+    attempt = row.get("_queue_attempt", row.get("_attempt"))
+    return {**facts, **({"queue_attempt": attempt} if type(attempt) is int and attempt >= 0 else {}),
+            **({"continuation": edges} if edges else {})}
 
 
 def _ended_tail(drive_root: Any, root_id: str) -> tuple:
     """``(live, stoppable)`` of what an ended root's tree left, by the work's own run typing (``work_status.run_tail``
     over its open runs, with ``work_projection.unconfirmed_stops``, as the work's tails are typed): ``live`` only when a
     run is typed live, never for a run nobody can confirm, an unbound start or unreadable custody; ``stoppable`` while
-    an open run is there for the Stop door to reach (its ``tree_open_runs``). One tree-scoped custody read."""
+    custody holds an open run or an accepted lookup-only start of this tree. One tree-scoped read."""
+    from ouroboros.delegate_custody import TERMINAL_STATES
     from ouroboros.delegate_custody_current import tree_closure
     from ouroboros.gateway import work_status as ws
     from ouroboros.gateway.work_projection import unconfirmed_stops
     from ouroboros.task_results import load_task_result
 
     try:
-        held = tree_closure(pathlib.Path(drive_root), root_id)["unfinished"].values()
-        runs = [run for run in held if not run.settled]
+        closure = tree_closure(pathlib.Path(drive_root), root_id)
+        runs = [run for run in closure["unfinished"].values() if not run.settled]
     except Exception:
         return False, True  # unknown custody runs nothing it can prove; the Stop door reads it again itself
     for run in runs:
         task_id = str(run.task_id or "")
-        if run.terminal_state or not task_id:  # an engine terminal is no member of the work (``_open_runs``)
+        start_state = getattr(run, "resume_start_state", None)
+        if run.terminal_state or start_state in TERMINAL_STATES or not task_id:
             continue
         try:
             owner = load_task_result(pathlib.Path(drive_root), task_id)
         except Exception:
             owner = None  # an unreadable owner proves no failure: the run reads live, as on its tail
         stops = unconfirmed_stops(drive_root, task_id, owner)
-        if ws.run_tail(run.source, owner, stop_unknown=str(run.run_id) in stops) == ("run", "live"):
+        if ws.run_tail(run.source, owner, stop_unknown=stops is None or str(run.run_id) in stops,
+                       start_state=start_state) == ("run", "live"):
             return True, True
-    return False, bool(runs)
+    return False, bool(runs) or any(row.get("resume_decisions") for row in closure["pending"])
 
 
 def _answered_root_phase(drive_root: Any, root_id: str, facts: dict, reviews: Any, members: bool) -> tuple:
@@ -598,7 +614,7 @@ def _answered_root_phase(drive_root: Any, root_id: str, facts: dict, reviews: An
     The fence's own census is the truth of "Paused": reviewers already launched finish separately and never keep the
     tree Pausing. With no member left, what they left holds a requested Pause: a run typed live is the Pause settling
     (``running``); anything else (a run nobody can confirm, an unbound start) is ``tail_unknown``, never running and
-    never a settled Pause, with ``nothing_to_stop`` when no open run is there for Stop. Without this row an accepted
+    never a settled Pause, with ``nothing_to_stop`` when custody has nothing the cascade can reach. Without this row an accepted
     Pause over an ended root would show nowhere.
     """
     from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
@@ -654,7 +670,7 @@ def _direct_activity_pause_projection(drive_root: Any, row: dict, availability: 
         if own.get("owner_wait_state") == "waiting" and own.get("owner_wait_reason") == "owner_pause":
             view = parked_stop_view(drive_root, row, task_id, {})
             activity.update(phase="budget_paused", live=False, stop=view["stop"],
-                            refusal=view["refusal"], pause_cause=view["pause_cause"])
+                            refusal=view["refusal"], pause_cause=view["pause_cause"], pause_reason=view["reason"]["text"])
             if state == "paused" and (finishing := _finishing_reviews(drive_root, row, task_id)):
                 activity["finishing_reviews"] = finishing
     return activity
@@ -674,13 +690,18 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                                                   listed={row.get("activity_id") for row in direct_rows})
     try:
         with queue_mod._queue_lock:
-            pending_rows = [dict(task) for task in queue_mod.PENDING]
+            from supervisor.queue_publication import note_lane_waits
+
+            # Who keeps a queued root's lane now, noted as the tick notes it (a claim between ticks moves the revision).
+            waits = note_lane_waits() if work_facts is not None and not owners_only else {}
+            pending_rows = [dict(task, lane_wait=waits.get(str(task.get("id") or ""))) for task in queue_mod.PENDING]
             fence_rows = {str(key): dict(value) for key, value in queue_mod.BUDGET_ROOT_FENCES.items()
                           if isinstance(value, dict)}
             running_rows = [
                 (str(task_id), {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt")
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
+                    "_queue_attempt": meta.get("attempt"),  # unlike _attempt above, never defaulted
                     "context_attempt": meta.get("context_attempt"), "lead": meta.get("lead"),
                     "_lead_request_id": meta.get("_lead_request_id"), "processing_last": meta.get("processing_last"),
                     "turn_phase": meta.get("turn_phase"), "_census_carrier": "worker" if meta.get(
@@ -838,14 +859,14 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 # Cancel stops a lineage-resolved root (``ChatOutbound.cancelable``); Resume is the
                 # parked row's own release rule (``work_stop.current_stop``).
                 "can_resume": bool(can_resume), "cancelable": bool(root),
-                **({"pause_cause": view["pause_cause"], "stop": view["stop"], "refusal": view["refusal"],
+                **({"pause_cause": view["pause_cause"], "pause_reason": view["reason"]["text"], "stop": view["stop"], "refusal": view["refusal"],
                     "live": live} if view else {}),
                 **({"finishing_reviews": finishing} if phase == "budget_paused" and (
                     finishing := _finishing_reviews(drive_root, row, task_id)) else {}),
                 "started_at": started_at,
                 "task_attempt": int(row.get("_attempt") or 1),
                 **{key: row[key] for key in ("timeout_retry_from", "original_task_id") if row.get(key)},
-                # A child is never a census row: its lineage serves only the Main decision projection.
+                # Children belong to the work and decision projections; only roots enter the public census.
                 **({} if root else {key: row[key] for key in ("parent_task_id", "root_task_id", "delegation_role")
                                     if row.get(key)}),
                 **({"model_waits": row["model_waits"]} if row.get("model_waits") else {}),
@@ -853,10 +874,9 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                    and row["model_activity"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
                 **({"context_attempt": row["context_attempt"]} if isinstance(row.get("context_attempt"), dict)
                    and row["context_attempt"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
-                # A running root a worker holds, and the start step its own frames reached (#2862: the RUNNING
-                # row's ``turn_phase``), as a conversation-lane row says them (``lane_turn_rows``).
-                **({"carrier": row["_census_carrier"]} if root and row.get("_census_carrier") else {}),
-                **({"turn_phase": str(row["turn_phase"])} if root and row.get("turn_phase") else {}),
+                # The pooled worker and start step belong to this member's own RUNNING row.
+                **({"carrier": row["_census_carrier"]} if row.get("_census_carrier") else {}),
+                **({"turn_phase": str(row["turn_phase"])} if row.get("turn_phase") else {}),
                 **({"project_admission_hold": project_hold_fact(row)}
                    if row.get("_project_admission_restore_hold") else {}),
             }
@@ -1083,7 +1103,8 @@ def _production(request: Request, direct: Optional[tuple]) -> Dict[str, Any]:
 
     snap = _state_snapshot(request, direct=direct)
     return {"fields": produced_fields(snap), "task_bindings": snap["task_bindings"],
-            "task_bindings_revision": snap["task_bindings_revision"], "roots": snap["roots"], "jobs": snap["jobs"]}
+            "task_bindings_revision": snap["task_bindings_revision"], "roots": snap["roots"], "jobs": snap["jobs"],
+            "member_run_activity": snap["member_run_activity"]}
 
 
 async def api_state(request: Request) -> Response:

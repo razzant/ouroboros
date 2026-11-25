@@ -27,7 +27,12 @@ def test_role_budget_is_one_frame_and_reply_is_charged_once():
                                 output_reserve_tokens=65_536, non_memory_tokens=0)
     assert actual["margin"] == 175_000 and actual["physical"] == 200_000
     unknown = mf.floor_allowances(window_tokens=None, output_reserve_tokens=65_536, non_memory_tokens=10)
-    assert unknown == {"margin": None, "physical": None, "budget": None}
+    assert unknown == {"margin": None, "physical": None, "window": None, "budget": None}
+    # The window's own start bound beside an owner target: what a target may never cross for it (owner 15.11, 3A).
+    low = mf.floor_allowances(window_tokens=1_000_000, output_reserve_tokens=65_536, non_memory_tokens=10_000,
+                              target_tokens=cb.OWNER_LOW_TARGET_TOKENS)
+    assert low["budget"] == low["margin"] == 250_000 - 65_536 - 10_000 - 31_250
+    assert low["window"] == 1_000_000 - 65_536 - 10_000 - 125_000 and low["physical"] == 1_000_000 - 65_536 - 10_000
 
 
 def test_story_openings_precede_untold_current_replies():
@@ -113,8 +118,9 @@ def test_a_project_roots_sealed_owner_rows_fold_only_under_physical_pressure_old
     ([syn.spoken(i, "ouroboros", 1_000) for i in range(400)], False),
 ])
 def test_the_start_room_notice_names_owner_words_only_when_they_keep_the_view_above_it(lane1, owners):
+    """The window's walk of a start its window took to chapter maps (an owner's Max rendered ``low``, no target)."""
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=lane1))
-    fit = mf.render_view_for_mode(snapshot, mode="max", owner_mode="max", window_tokens=200_000,
+    fit = mf.render_view_for_mode(snapshot, mode="low", owner_mode="max", window_tokens=200_000,
         known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=104_464)
     text, facts = fit.room, fit.facts
     floor = facts["floor"]
@@ -126,6 +132,24 @@ def test_the_start_room_notice_names_owner_words_only_when_they_keep_the_view_ab
         assert floor['steps']['F7a'] == 1 and 0 < floor['steps']['F2'] <= 400
         assert mf.view_tokens(text) <= floor['allowance_tokens']
     assert "F7" not in dict(floor["steps"])
+
+
+def test_low_under_my_humans_max_has_no_target_of_its_own_and_the_owners_low_keeps_it():
+    """Owner 21.11.2026: a start the window took from my human's Max runs in Low, temporarily, for the window, and only
+    the window cuts my memory there: Low's own target binds nothing (no ``by_budget``, no mode budget in its note),
+    while the owner's own Low keeps that target. Its cuts are Low's, never named Max's."""
+    snapshot = syn.snapshot(conversations=[syn.conversation(i, notes=1, words=3, word_chars=2_000) for i in range(40)])
+    frame = dict(known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=180_000)
+    temporary = mf.render_view_for_mode(snapshot, mode="low", owner_mode="max", window_tokens=400_000,
+                                        lowered_from="max", **frame)
+    owners = mf.render_view_for_mode(snapshot, mode="low", owner_mode="low", window_tokens=400_000, **frame)
+    assert temporary.level.by_budget == 0 and temporary.facts["floor"]["target_tokens"] is None
+    assert "mode budget" not in temporary.note and "Low, temporarily, for the window" in temporary.note
+    assert owners.level.by_budget > 0 and "the Low mode budget (250000 tokens)" in owners.note
+    tight = mf.render_view_for_mode(snapshot, mode="low", owner_mode="max", window_tokens=260_000, lowered_from="max",
+                                    **frame)
+    assert tight.level.by_budget == 0 and "mode budget" not in tight.note
+    assert "Low cuts for the window (260000 tokens)." in tight.note and "Max cuts" not in tight.note
 
 
 def test_other_conversations_fold_their_words_then_a_group_to_its_line_and_only_last_all_to_one_count():
@@ -151,6 +175,49 @@ def test_other_conversations_fold_their_words_then_a_group_to_its_line_and_only_
     level = mf.fit_memory_view(snapshot, frame(tokens(snapshot) - 1_000))  # the oldest words fold first, alone
     taken = dict(level.addressed)
     assert set(taken) == {"F6w"} and taken["F6w"] == tuple(ident for step, ident in order if step == "F6w")[:len(taken["F6w"])]
+
+
+def test_an_owner_target_keeps_every_conversation_by_its_line_and_only_the_window_counts_them():
+    """Owner 15.11.2026 (3A): a Low target the rest of the request alone exceeds leaves every conversation its line (one
+    per conversation, with its gist and address), records the miss as its own fact and names it; the count of
+    conversations, the window's last rung, comes only when the window's own start bound needs it."""
+    from ouroboros import memory_view_conversations as conversations
+
+    groups = [syn.conversation(i, notes=1, words=3, word_chars=2_000) for i in range(164)]
+    snapshot = syn.snapshot(conversations=groups)
+
+    def low(window, fixed=300_000):  # 300,000 before any memory: a 250,000 target cannot be met
+        return mf.render_view_for_mode(snapshot, mode="low", owner_mode="low", window_tokens=window, known_window=True,
+                                       output_reserve=65_536, ratio=1, non_memory_tokens=fixed)
+    missed = low(1_000_000)
+    steps, floor = dict(missed.level.addressed), missed.facts["floor"]
+    assert "F6a" not in steps and len(steps["F6g"]) == 164 and floor["target_missed"] is True
+    assert all(conversations.identity_line(group) in missed.room for group in groups)
+    assert "Low's target (250,000 tokens) is not met at this start" in missed.note and "shortest forms" not in missed.note
+    shortest = tokens(snapshot, missed.level)  # every conversation by its line: the floor a target may not cross
+    window = (shortest + 300_000 + 65_536) * 8 // 7 - 2_000  # its start bound cannot hold one line per conversation
+    counted = low(window)
+    assert dict(counted.level.addressed).get("F6a") and counted.facts["floor"]["target_missed"] is True
+    fits = low(1_000_000, fixed=10_000)  # a target with room: memory yields only what the target asks
+    assert fits.facts["floor"]["target_missed"] is False and "F6a" not in dict(fits.level.addressed)
+
+
+def test_a_max_start_keeps_memory_at_my_tellings_while_the_books_stay_whole():
+    """Owner 15.11.2026 (4A): beside whole books my memory yields far conversations to their lines and no further;
+    this room's replies become openings and addresses only in a start the window took to chapter maps (rendered
+    ``low``), where only the window bounds the walk."""
+    replies = [syn.spoken(i, "ouroboros", 1_000) for i in range(400)]
+    groups = [syn.conversation(i, words=3, word_chars=2_000) for i in range(40)]
+    snapshot = syn.snapshot(conversations=groups, room_facts=syn.room("1", lane1=replies))
+
+    def fit(mode):
+        return mf.render_view_for_mode(snapshot, mode=mode, owner_mode="max", window_tokens=200_000, known_window=True,
+                                       output_reserve=65_536, ratio=1, non_memory_tokens=50_000)
+    held, maps = fit("max"), fit("low")
+    held_steps, maps_steps = dict(held.level.addressed), dict(maps.level.addressed)
+    assert held_steps.get("F6g") and not {"F2", "F7a", "F6a"} & set(held_steps)
+    assert "shortest forms exceeds it" in held.note  # the books' own step is the next one (context_fit)
+    assert maps_steps.get("F2") and "Start room is smaller" not in maps.note
 
 
 def test_giveback_keeps_a_reply_prefix_and_never_returns_kept_choices():
@@ -359,7 +426,9 @@ def test_a_selection_keeps_the_reader_path_of_the_request_that_follows_it(monkey
                           False, memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     schemas = [{"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object"}}}
-               for name in ("compact_context", "enable_tools", "list_available_tools", "memory_read", "read_file")]
+               for name in ("compact_context", "enable_tools", "list_available_tools", "read_file")]
+    # Nano's standing set holds memory_read wherever a request carries it; this request leaves it out (a route's
+    # schema ceiling, a contract), which is when the floor names the reader's path.
 
     def start(tools):
         return cf.build_context_fit_plan(None, core, {"id": "nano-room"}, preferred_mode="nano", tool_schemas=tools,
@@ -454,16 +523,64 @@ def test_notes_aggregate_only_when_all_the_label_lines_still_do_not_fit():
     assert mf.fit_memory_view(snap, frame(10**9), kept=level) == level
 
 
-def test_note_forms_are_attributed_to_the_owner_target():
+def test_this_rooms_notes_never_yield_to_lows_target_and_the_window_owns_its_cut():
+    """SPEC 2.13 (owner 15.11.2026, 3A): this room does not yield to Low's target. The owner's Low target leaves this
+    room's note whole and records its miss; a window whose own start bound cannot hold it shortens it, and the target's
+    count (``by_budget``) never names that cut. Nano's number still takes it and owns that cut (owner 11.10, 13.10)."""
     snap = syn.snapshot(room_facts=syn.room(notes=1))
     snap.room['notes'][0]['text'] = 'Held meaning. ' + 'detail ' * 1000
     level = mf.fit_memory_view(snap, {'margin': 0, 'budget': 0, 'physical': 500})
     assert dict(level.steps)['F8'] == 1 and level.by_budget > 0
-    fit = mf.render_view_for_mode(snap, mode='nano', owner_mode='nano', window_tokens=1000000,
-        known_window=True, output_reserve=65536, ratio=1, non_memory_tokens=66000)
-    room, facts = fit.room, fit.facts
-    assert 'only physical pressure can narrow them' not in room
-    assert facts['floor']['steps']['F8'] == 1 and facts['floor']['by_budget'] > 0
+
+    def fit(mode, window, fixed):
+        return mf.render_view_for_mode(snap, mode=mode, owner_mode=mode, window_tokens=window,
+            known_window=True, output_reserve=65536, ratio=1, non_memory_tokens=fixed)
+    roomy = fit('low', 1_000_000, 250_000)  # the rest of the request alone exceeds Low's 250,000
+    assert 'F8' not in roomy.facts['floor']['steps'] and roomy.facts['floor']['target_missed']
+    assert "Low's target (250,000 tokens) is not met at this start" in roomy.note
+    assert roomy.facts['floor']['no_memory_tokens'] == 250_000 + 65_536  # what the mode's screen names (3A)
+    tight = fit('low', 300_000, 250_000)  # the window's own start bound cannot hold the note
+    assert tight.facts['floor']['steps']['F8'] == 1 and tight.facts['floor']['by_budget'] == 0
+    assert 'only physical pressure can narrow them' not in tight.room
+    small = fit('low', 200_000, 108_000)  # a window smaller than Low's target: its own bound takes the note
+    assert small.facts['floor']['steps']['F8'] == 1 and small.facts['floor']['by_budget'] == 0
+    assert small.facts['floor']['budget_allowance_tokens'] is None and 'mode budget' not in small.note
+    nano = fit('nano', 1_000_000, 66_000)  # Nano's number takes the note and owns the cut
+    assert nano.facts['floor']['steps']['F8'] == 1 and nano.facts['floor']['by_budget'] > 0
+    assert not nano.facts['floor']['target_missed'] and "target (" not in nano.note
+    assert 'only physical pressure can narrow them' not in nano.room
+
+
+def test_lows_target_never_counts_the_windows_cut_of_my_humans_words():
+    """Owner 15.11.2026 (3A): my human's words never yield to Low's target. When the window itself cannot hold an
+    uncovered row of them, its address is the window's cut: the target's count (``by_budget``) never names it."""
+    rows = [{**syn.spoken(0, "human", 200_000), "owner_side": True}]
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=rows))
+    fit = mf.render_view_for_mode(snap, mode="low", owner_mode="low", window_tokens=300_000, known_window=True,
+                                  output_reserve=65_536, ratio=1, non_memory_tokens=210_000)
+    floor = fit.facts["floor"]
+    assert floor["steps"]["F7"] == 1 and floor["target_missed"]  # 24,464 left beside the rest: the window's cut
+    assert floor["by_budget"] == 0
+    # At the boundary the range the window adds is priced as the window's too: four rows and the range fit the
+    # physical room exactly, so a fifth row keeps its words (Astra's case).
+    rows = [{**syn.spoken(i, "human", 8_000), "owner_side": True} for i in range(8)]
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=rows))
+    edge = mf.render_view_for_mode(snap, mode="low", owner_mode="low", window_tokens=300_000, known_window=True,
+                                   output_reserve=65_536, ratio=1, non_memory_tokens=225_983).facts["floor"]
+    assert (edge["steps"]["F7"], edge["steps"]["F7a"], edge["by_budget"]) == (4, 1, 0)
+
+
+def test_a_max_start_keeps_my_humans_words_while_its_books_are_whole():
+    """The one order at a start (owner 15.11.2026, 4A; consilium 17.11): a Max start floored at my tellings never turns
+    my human's words into addresses beside whole books; when the window cannot hold it the books go to chapter maps
+    first, and only that frame lets the window take them."""
+    rows = [{**syn.spoken(i, "human", 8_000), "owner_side": True} for i in range(3)]
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=rows))
+    frame = dict(window_tokens=80_000, known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=10_000)
+    start = mf.render_view_for_mode(snap, mode="max", owner_mode="max", **frame)
+    assert "F7" not in start.facts["floor"]["steps"]
+    maps = mf.render_view_for_mode(snap, mode="low", owner_mode="max", lowered_from="max", **frame)
+    assert maps.facts["floor"]["steps"].get("F7")  # the chapter-map frame: the window may take the oldest
 
 
 def test_short_notes_still_have_selectable_forms_and_a_saving_aggregate():

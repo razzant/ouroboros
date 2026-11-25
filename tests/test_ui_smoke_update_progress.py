@@ -1,5 +1,6 @@
 """The actual Updates consumer stays informative through a pending apply."""
 
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,7 +40,7 @@ def test_update_progress_pending_reopen_and_failure(direct_server, tmp_path, wid
             # A phone's Dashboard shows its list or one of its pages (docs/DESIGN.md "One spine of depth"): the page's
             # Back brings the list, whose row opens the next page. A desk keeps the list beside the page.
             if width < 980:
-                page.click("[data-dashboard-list-back]")
+                page.click("#page-dashboard [data-shell-back]")
             page.click(f'[data-dashboard-tab="{tab}"]')
 
         try:
@@ -124,7 +125,9 @@ def test_update_progress_pending_reopen_and_failure(direct_server, tmp_path, wid
 
 @pytest.mark.ui_browser
 def test_successful_recheck_keeps_release_tags_and_the_last_attempt(direct_server):
-    """A check refreshes availability: it neither clears the retained attempt nor loses its tags."""
+    """A check refreshes availability: it neither clears the retained attempt nor loses its tags. Up to date, the
+    headline's check is Check and describe, one request whose answer carries that check's status; a status frame
+    during it neither ends its Checking… nor erases the releases its answer brings."""
     from playwright.sync_api import expect, sync_playwright
 
     status = {
@@ -143,21 +146,25 @@ def test_successful_recheck_keeps_release_tags_and_the_last_attempt(direct_serve
             page.add_init_script(f"({_CAPTURE_TEST_SOCKET})();")
             page.route("**/api/update/status**", lambda route: route.fulfill(json=status))
             page.route("**/api/update/check", lambda route: pending_check.append(route))
+            page.route("**/api/update/description", lambda route: pending_check.append(route))
             page.goto(direct_server, wait_until="domcontentloaded")
             page.wait_for_selector("#page-chat")
             page.wait_for_function("window.__testSockets?.some(s => s.readyState === 1)")
             page.click('[data-nav-page="dashboard"]')
             page.click('[data-dashboard-tab="updates"]')
             expect(page.locator("#updates-attempt-headline")).to_have_text("No update was applied.")
-            expect(page.locator("#btn-update-primary")).to_have_text("Check again")
+            expect(page.locator("#btn-update-primary")).to_have_text("Check and describe")
             page.click("#btn-update-primary")
-            expect(page.locator("#updates-summary")).to_have_text("Checking the official channel…")
+            expect(page.locator("#btn-update-primary")).to_have_text("Checking…")
             expect(page.locator("#btn-update-primary")).to_be_disabled()
             # A concurrent invalidation during the check; its passive read carries no tags.
             _emit_ws_frame(page, {"type": "update_progress_changed"})
-            assert len(pending_check) == 1
-            pending_check.pop().fulfill(json={**status, "official_tags": [{"tag": "v7.0.0-test", "sha": "a" * 40}]})
+            expect(page.locator("#btn-update-primary")).to_have_text("Checking…")
+            assert len(pending_check) == 1 and json.loads(pending_check[0].request.post_data) == {"mode": "latest"}
+            pending_check.pop().fulfill(json={"status": "no_update", "checked_key": None,
+                                              "update": {**status, "official_tags": [{"tag": "v7.0.0-test", "sha": "a" * 40}]}})
             expect(page.locator("#updates-official-tags")).to_contain_text("v7.0.0-test")
+            expect(page.locator("#btn-update-primary")).to_have_text("Check and describe")
             expect(page.locator("#updates-attempt-headline")).to_have_text("No update was applied.")
             expect(page.locator("#updates-attempt-text")).to_contain_text("The update changed after it was prepared.")
             expect(page.locator("#updates-attempt-text")).not_to_contain_text("stopped")
@@ -170,7 +177,7 @@ def test_successful_recheck_keeps_release_tags_and_the_last_attempt(direct_serve
 def _sidebar(page, width):
     """The sidebar the indicator lives in: always there on a desk, the open drawer on a phone."""
     if width < 720 and not page.evaluate("document.body.classList.contains('nav-drawer-open')"):
-        back = page.locator('.page.active [data-dashboard-list-back]:visible')
+        back = page.locator('.page.active [data-shell-back]:visible')
         if back.count():
             back.click()
         page.locator(".page.active [data-mobile-nav-toggle]:visible").click()
@@ -304,13 +311,13 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             page.screenshot(path=str(evidence / f"update-foot-{engine}-{width}-focus.png"), clip={
                 "x": max(0, box["x"] - 12), "y": max(0, box["y"] - 12), "width": box["width"] + 24, "height": box["height"] + 24})
             page.keyboard.press("Enter")
-            expect(pill).to_have_text("Update available")
+            expect(pill).to_have_text("Update")
             expect(close).to_be_hidden()
             assert page.evaluate(_NOTICE)["active"] == "update-pill", "focus never falls to the page"
             expect(page.locator("#updates-attempt-headline")).to_have_text("No update was applied.")
             # Reload: this browser remembers the hide for that attempt.
             _reload(page, width)
-            expect(pill).to_have_text("Update available")
+            expect(pill).to_have_text("Update")
             expect(close).to_be_hidden()
             # The next attempt is a new notice, closable; an unconfirmed outcome stays beside a newer version, and
             # pressing the close with a pointer hides it the same way.
@@ -334,12 +341,12 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             finally:
                 other.close()
             close.click()
-            expect(pill).to_have_text("Update available")
+            expect(pill).to_have_text("Update")
             expect(close).to_be_hidden()
             # A confirmed success wears nothing: no capsule, no toast, no timer; a newer version still shows.
             conclude(page, operation_id="attempt-c", outcome="applied", result="applied", concluded_by="boot", blockers=[],
                      work_stop="", reason="")
-            expect(pill).to_have_text("Update available")
+            expect(pill).to_have_text("Update")
             expect(pill).not_to_have_attribute("data-tone", "ok")
             expect(close).to_be_hidden()
             status["available"] = False

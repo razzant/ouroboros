@@ -178,7 +178,10 @@ def test_a_chosen_stopped_seat_continues_once_in_the_same_wave_from_its_original
     assert answered["reason"] == "not_continuable" and len(a.engine.posts) == 2  # its usable verdict stands
 
 
-def test_a_definitely_refused_successor_is_continued_only_by_a_new_choice_naming_it(stopped_wave):
+def test_a_successor_refused_after_its_post_stays_unknown_and_its_repeat_choice_replays_it(stopped_wave):
+    """An engine 404 answering the successor's entered POST is no proof it created nothing (#3138): the successor
+    is never ``failed_definite``, the seat stays owed and offers no new choice, and the author's repeated choice
+    rejoins it by replaying the same key and bytes (``review_continuation``'s rule for an UNKNOWN send)."""
     a = stopped_wave
     first = _wave(a)
     reference, record_id = first["review_reference"], first["record_id"]
@@ -188,17 +191,18 @@ def test_a_definitely_refused_successor_is_continued_only_by_a_new_choice_naming
     seat = _seat(a, record_id)
     successor = seat["continuations"][0]["operation_id"]
     token = seat["continuations"][0]["invocation_id"]
-    assert delegate_custody.invocation_record(a.data, token)["state"] == "failed_definite"
-    offer = refused["continuable_seats"]
-    assert offer == [{**offer[0], "seat_id": "second", "operation_id": successor, "run_id": "", "continues_run": "run-1"}]
+    assert delegate_custody.invocation_record(a.data, token)["state"] == "pending"
+    assert (refused["state"], refused["continuable_seats"]) == ("pending", [])  # owed, not offered anew
+    assert (seat["operation_id"], seat["status"], seat["operation_state"]) == (successor, "pending", "in_flight")
+    (_first, _k), (refused_post, refused_key) = a.engine.posts
     rejoined = _call(a, review_reference=reference, continue_seats=[{"seat_id": "second", "operation_id": named}])
-    assert rejoined["continuation"]["continued"][0]["rejoined"] is True and len(a.engine.posts) == 2
+    assert rejoined["continuation"]["continued"][0]["rejoined"] is True and rejoined["state"] == "settled"
+    assert a.engine.posts[-1] == (refused_post, refused_key) == (refused_post, token) and len(a.engine.posts) == 3
+    assert delegate_custody.invocation_record(a.data, token)["state"] == "started"
+    assert _seat(a, record_id)["status"] == "responded" and len(_seat(a, record_id)["continuations"]) == 1
 
     answered = _call(a, review_reference=reference, continue_seats=[{"seat_id": "second", "operation_id": successor}])
-    assert answered["state"] == "settled" and _seat(a, record_id)["status"] == "responded"
-    third, key = a.engine.posts[-1]
-    assert third["continueFrom"] == "run-1" and key != token  # its retained target run; a new decision
-    assert len(_seat(a, record_id)["prior_operations"]) == 2
+    assert answered["reason"] == "not_continuable" and len(a.engine.posts) == 3  # its usable verdict stands
 
 
 def test_an_unknown_successor_start_replays_the_same_key_and_bytes_never_a_new_generation(stopped_wave):

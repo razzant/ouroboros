@@ -324,6 +324,45 @@ def test_a_page_up_to_an_address_seals_exactly_the_rooms_open_rows_to_it(tmp_pat
     assert "not both" in _chronicle_write(ctx, kind="page", text="x", covers={"to": at[20], "task_ids": ["t2"]})
 
 
+def test_a_page_without_covers_refuses_unwritten_and_names_the_reader_of_real_addresses(tmp_path):
+    """Following the refusal gives the writer real bounds to choose from; it seals no other rows."""
+    from ouroboros import memory_inventory as mi
+
+    side = project_chat(tmp_path, "nightly builds")
+    rows = chat(tmp_path, [
+        {"chat_id": side, "direction": "in", "ts": ts(1), "text": "Check the nightly build", "client_message_id": "n1"},
+        {"chat_id": side, "direction": "out", "ts": ts(2), "task_id": "taskB001", "text": "The nightly build is green."},
+        {"chat_id": side, "direction": "in", "ts": ts(3), "text": "And the docs build?", "client_message_id": "n2"},
+    ])
+    store, ctx = ChronicleStore(tmp_path), ctx_for(tmp_path)
+    for missing in ({}, {"covers": {}}):
+        refused = _chronicle_write(ctx, kind="page", room_id=str(side), text="The nightly build passed.", **missing)
+        assert "TOOL_ARG_ERROR" in refused and "No page was written" in refused
+        assert f"memory_read(room_id='{side}', rows=true)" in refused
+        assert "entire inclusive room range" in refused and "{task_ids}" in refused
+        assert not any(addr(row) in refused for row in rows)  # no suggested bounds
+    assert store.room_records(str(side)) == []
+    # The reader the refusal names prints each row's exact address; the mind chooses from those.
+    printed = re.findall(rf"row:{side}@[^\s;\]]+#[0-9a-f]{{12}}", _memory_read(ctx, room_id=str(side), rows=True))
+    assert printed == [addr(row) for row in rows]
+    page = write(ctx, kind="page", room_id=str(side), text="The nightly build passed.",
+                 covers={"from": printed[0], "to": printed[1]})
+    assert page["ok"] and page["rows"] == 2 and (page["first"], page["last"]) == (printed[0], printed[1])
+    assert store.get(page["node_id"])["covers"]["rows"] == [sha(rows[0]), sha(rows[1])]
+    assert [a["row_sha256"] for a, _m, _p in mi.open_room_rows(tmp_path, str(side))] == [sha(rows[2])]
+    assert page["node_id"] in _memory_read(ctx, room_id=str(side))
+
+
+def test_legacy_page_without_covers_names_its_note_reader_not_chat_rows(tmp_path):
+    ctx = ctx_for(tmp_path)
+    note = write(ctx, kind="note", room_id="legacy", text="The previous build was green.")
+    refused = _chronicle_write(ctx, kind="page", room_id="legacy", text="The previous build was green.")
+    assert "memory_read(room_id='legacy')" in refused and "rows=true" not in refused
+    assert note["node_id"] in _memory_read(ctx, room_id="legacy")
+    page = write(ctx, kind="page", room_id="legacy", text="The previous build was green.", covers={"note_ids": [note["node_id"]]})
+    assert page["ok"] and page["notes"] == 1
+
+
 def test_default_room_is_own_room_and_chat_id_zero_is_an_address(tmp_path):
     assert write(ctx_for(tmp_path, current_chat_id=0), kind="note", text="hidden")["room_id"] == "0"
     meta_only = ctx_for(tmp_path, current_chat_id=None, task_metadata={"chat_id": 0})
@@ -1023,6 +1062,26 @@ def test_a_conversation_page_seals_every_room_of_its_conversation_each_in_its_ow
     document = _memory_read(ctx, node_id=page["node_id"])
     assert all(reader in document for reader in readers.values()), document  # every room it sealed, the middle one too
     assert "second issue" in _memory_read(ctx, room_id=i2, rows=True, **{"from": addr(rows[1]), "to": addr(rows[1])})
+    # A sealed room's map names the room that published the page, not the showing one; a capture from before
+    # that record keeps the reader and discloses the gap (its room-liveness coverage lives here: one installation,
+    # one publication).
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    showing = mv.capture_memory_view(tmp_path, {"id": "map-focus", "chat_id": int(i1)},
+                                     mv.ViewSpec("integrator", room_id=i1))
+    assert [item["room_id"] for item in showing.room["sealed_by"]] == [i3]
+
+    def held(view):
+        parts = ordinary_composition(view)["blocks"]["room"]["parts"]
+        return next(p for p in parts if p["kind"] == "sealed_by")["sources"][0]
+    source = held(showing)
+    assert source["room_id"] == i3 and "publishing_room_gap" not in source
+    assert source["read"]["arguments"] == {"node_id": page["node_id"], "revision": page["node_id"]}
+    assert "Three issues read" in _memory_read(ctx, **source["read"]["arguments"])
+    old = json.loads(mv.snapshot_json(showing))
+    old["room"]["sealed_by"][0].pop("room_id")  # a capture from before the publisher was recorded
+    legacy = held(mv.snapshot_from_json(json.dumps(old)))
+    assert "room_id" not in legacy and legacy["publishing_room_gap"] and legacy["read"] == source["read"]
     account = write(ctx, kind="account", text="The repository, read.", sources=[page["node_id"]], room_id=i3)["node_id"]
     preview = _memory_read(ctx, proposed_selection={"target_id": account, "replaces": [page["node_id"]]}, room_id=i3)
     assert all(f"rows: {reader}" in preview for reader in readers.values()), preview  # one reader per covered room
@@ -1169,3 +1228,55 @@ def test_writer_receipts_read_no_whole_story_and_survive_a_migrating_store(tmp_p
     assert shown["ok"] and shown["shown"] is True
     assert captures == []  # no writer captured the whole story around its write
     assert all("memory_read(story=true)" in result["effect"] for result in (part, shown))
+
+
+@pytest.mark.parametrize("choice, comment", [(0, ""), (0, "  after the frost  "), (None, "  my own answer  ")])
+def test_an_answer_row_can_only_supply_the_humans_entered_words(tmp_path, choice, comment):
+    from ouroboros.dialogue_provenance import quote_words, render_row_text
+
+    label = "Open the amber gate"
+    quiz = {"quiz_id": "amber-gate", "state": "answered", "options": [label], "comment": comment,
+            "answered_index": choice}
+    [row] = chat(tmp_path, [{"chat_id": 1, "direction": "system", "type": "quiz_answer", "ts": ts(1),
+                             "source": "owner_quiz_answer", "task_id": "gate-keeper", "quiz": quiz}])
+    address = addr(row)
+    cite = {"address": address, "speaker": "human", "text": label}
+    covers = {"from": address, "to": address}
+    assert (label if choice == 0 else comment) in render_row_text(row)
+    assert quote_words(row) == comment
+    refused = write(ctx_for(tmp_path), kind="page", text="I recorded the decision.", covers=covers, quotes=[cite])
+    assert refused["reason"] == "quote_mismatch"
+    if comment:
+        assert write(ctx_for(tmp_path), kind="page", text="The answer came with words.", covers=covers,
+                     quotes=[{**cite, "text": comment}])["ok"]
+
+
+def test_a_late_answer_bubble_offers_only_the_comment_for_a_human_quote(tmp_path):
+    from ouroboros.dialogue_provenance import quote_words
+
+    for i, comment in enumerate(("", "  to the east  ")):
+        block = {"quiz_id": "late-iris", "state": "answered", "answered_after_terminal": True,
+                 "options": ["Open the iris"], "answered_index": 0, "comment": comment}
+        [row] = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(i+1), "text": comment or "1. Open the iris",
+                                 "late_answer": {"task_id": "iris-keeper", "quiz_id": "late-iris",
+                                                 "answer_snapshot": {"task_id": "iris-keeper", "quiz": block}}}])
+        assert quote_words(row) == comment
+        assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": "Open the iris"}]) == (False, 0)
+        if comment:
+            assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": comment}]) == (True, None)
+
+
+def test_form_quotes_and_marks_stay_inside_one_submitted_field(tmp_path):
+    from ouroboros.dialogue_provenance import quote_words
+
+    values = {"from": "  at\nmoonrise", "to": "sunset  "}
+    press = {"task_id": "reed-desk", "card_id": "card_2a2b2c2d2e2f3031", "request_id": "reed-form",
+             "submission": {"label": "Submit", "title": "Reed dates", "values": values}}
+    [row] = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(1),
+                             "text": "Reed dates\nfrom:   at\nmoonrise\nto: sunset  ", "card_press": press}])
+    for words, accepted in (("moonrise\nsunset", False), ("at\nmoonrise", True), ("sunset  ", True), ("Submit", False)):
+        assert check_quotes(tmp_path, [{"address": addr(row), "speaker": "human", "text": words}]) == (
+            (True, None) if accepted else (False, 0))
+        mark = json.loads(_memory_mark(ctx_for(tmp_path), text="Record the dates", address=addr(row), quote=words))
+        assert mark["ok"] is accepted
+    assert "moonrise\nsunset" not in quote_words(row)

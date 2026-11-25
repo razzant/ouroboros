@@ -78,7 +78,7 @@ def test_a_real_stop_is_offered_and_admits_one_successor_with_the_same_work_and_
     assert stored["outcome_axes"]["execution"]["task_completion"]["rationale"] == STOP_RATIONALE
     assert outcome_phase(stored, {}) == outcome_phase({}, stored) == "cancelled"
     assert shown_outcome(stored) == "cancelled"
-    assert _completed_lifecycle_display({}, stored) == ("⏹", "stopped")
+    assert _completed_lifecycle_display({}, stored) == "stopped"
     assert _completion_verdict(stored, {}) == TASK_CAUSE_PHRASES["author_stop"][:-1] + " · " + STOP_RATIONALE
     _queue, _state, workers = _install_queue(data, monkeypatch)
     assert continuation_offer(stored, "stop-root") == {"eligible": True, "cause": AUTHOR_STOP_CAUSE, "refusal": ""}
@@ -315,13 +315,14 @@ def test_the_incident_replayed_as_facts_a_stop_over_running_work_reaches_the_nex
     finish_task(action="stop", pending_review="wait"). It ended in that batch, as a stop does; the owner's next turn
     asked why and answered from `status: completed`. Replayed as facts (the review and the plan seat are their tools'
     own returns): the stop ends in its batch, its receipt says the argument had no effect, its summary is kept; the
-    next owner-started turn's metadata names the stopped work, its card word, its own reason as its author's account
-    and its open Continue; continue_task from that turn admits one successor and a second request names the same one.
-    Nothing here asserts what a model then does."""
+    next owner message, routed through the owner ingress of an install with no Project (owner decision of 21.11.2026:
+    Main's facts are the same with Projects or without), gets metadata naming the stopped work, its card word, its
+    own reason as its author's account and its open Continue; continue_task from that turn admits one successor and
+    a second request names the same one. Nothing here asserts what a model then does."""
     import queue
 
-    from ouroboros import projects_registry
     from ouroboros.review_pause import PROCESS_TOKEN
+    from ouroboros.server_owner_routing import _route_owner_message
     from ouroboros.server_routing_context import STOP_REASON_LABEL, _decision_turn_metadata
     from ouroboros.tool_call_log import invocation_scope
     from ouroboros.tools import plan_review, review_change
@@ -360,10 +361,15 @@ def test_the_incident_replayed_as_facts_a_stop_over_running_work_reaches_the_nex
     assert run.usage["wake_summary"] == summary and stored["wake_summary"] == summary
     assert stored["outcome_axes"]["execution"]["task_completion"]["rationale"] == STOP_RATIONALE
 
-    projects_registry.create_project(data, "elsewhere", name="Elsewhere")  # Main lists its rooms beside results
+    turns = []
     ctx = SimpleNamespace(DRIVE_ROOT=data, PENDING=[], RUNNING={}, load_state=lambda: {"owner_id": 1, "owner_chat_id": 1},
-                          update_state=lambda fn: fn({"owner_id": 1, "owner_chat_id": 1}))
-    metadata = _decision_turn_metadata(ctx, 7, "cm-why-stopped", {})  # «почему остановился? доделали?»
+                          update_state=lambda fn: fn({"owner_id": 1, "owner_chat_id": 1}),
+                          handle_chat_direct=lambda *_a, **kwargs: turns.append(kwargs["task_metadata"]))
+    _route_owner_message(object(), ctx, {"chat_id": 7, "text": "почему остановился? доделали?",
+                                         "client_message_id": "cm-why-stopped", "log_text": "почему остановился?",
+                                         "origin_message_ref": {"chat_id": 7, "client_message_id": "cm-why-stopped"}})
+    [metadata] = turns
+    assert metadata["main_routing_manifest"]["projects"] == []
     reference = next(row for row in metadata["main_routing_manifest"]["final_results"] if row["task_id"] == "stop-root")
     assert (reference["status"], reference["outcome"]) == ("completed", "Stopped")
     assert reference["continuation_offer"] == {"eligible": True, "cause": "author_stop", "refusal": ""}
@@ -541,7 +547,9 @@ def test_an_owner_image_the_loop_read_continues_with_its_exact_words_and_files(t
         assert [base64.b64decode(part["image_url"]["url"].split(",", 1)[1]) for part in sent] == pixels
     successor = next(row for row in workers.PENDING if row["id"] == first.json()["successor_task_id"])
     mine = [row for row in successor["metadata"]["owner_corpus"] if row.get("msg_id") == MID]
-    assert mine == [{"source": "owner_mailbox", "content": text, "msg_id": MID,
+    # The corpus row keeps its message's own time beside its identity (the captured mailbox row's), as the chain reads it.
+    [sent_at] = [json.loads(line)["ts"] for line in stored["owner_mailbox"]["rows"] if json.loads(line)["msg_id"] == MID]
+    assert mine == [{"source": "owner_mailbox", "content": text, "msg_id": MID, "ts": sent_at,
                      "reply_to": {"address": REPLY["address"], "author": "", "text": ""}}]
     assert successor["text"].count(WORDS) == 1, "the exact words once, never beside a rendering of them"
     again = door.post("/api/tasks/stop-root/continue", json={"action_nonce": NONCE})

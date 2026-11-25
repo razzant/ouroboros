@@ -167,11 +167,34 @@ def test_a_part_shows_its_members_do_not_and_corrections_of_members_stand_under_
     assert f"part {plain}" in text and first not in text and second not in text
     assert "correction by me of" not in text  # no correction, no line
     store = ChronicleStore(tmp_path)
-    assert store.correct(first, "The first page, said right.", shared.MIND,
-                         expected_sequence=store.room_head("1")).ok
+    fix = store.correct(first, "The first page, said right.", shared.MIND, expected_sequence=store.room_head("1"))
+    assert fix.ok
     corrected = _story(tmp_path)
     assert f"- correction by me of {first}:\n  The first page, said right." in corrected
     assert corrected.count("correction by me of") == 1 and second not in corrected  # no cascade
+    # The map names the printed correction by its own record and the member as of it, never its words.
+    from ouroboros.memory_form_facts import memory_composition
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.registry import ToolContext
+
+    snapshot, ident = _snapshot(tmp_path), fix.record["id"]
+
+    def changes(view, level=mv.FULL_VIEW):
+        parts = memory_composition(view, level)["blocks"]["story"]["parts"]
+        return [c for p in parts if p["kind"] == "story_record" and p["sources"][0]["id"] == plain for c in p.get("changes", ())]
+    whole = changes(snapshot)
+    assert [(c["kind"], c["id"], c["target"]) for c in whole] == [("correction", ident, first)]
+    assert whole[0]["read"]["arguments"] == {"node_id": ident, "revision": ident}
+    assert whole[0]["target_read"]["arguments"] == {"node_id": first, "revision": ident}
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="reader")
+    assert "The first page, said right." in _memory_read(ctx, **whole[0]["target_read"]["arguments"])
+    assert "TOOL_ARG_ERROR" not in _memory_read(ctx, **whole[0]["read"]["arguments"])
+    assert "said right" not in json.dumps(whole)
+    assert changes(snapshot, mv.FloorLevel((("F5", (plain,)),))) == []  # the address form prints no correction
+    old = json.loads(mv.snapshot_json(snapshot))
+    next(e for e in old["story"] if e["id"] == plain)["fixes"][0].pop("id")  # a capture from before change ids
+    gap = changes(mv.snapshot_from_json(json.dumps(old)))[0]
+    assert gap["read_gap"] and "read" not in gap and gap["target_navigation"]["arguments"] == {"node_id": first}
 
 
 def test_a_correction_of_a_page_folded_twice_stands_under_the_surviving_part(tmp_path):
@@ -246,24 +269,48 @@ def test_the_story_always_ends_with_the_pages_line_and_the_progress_line_only_wh
 
 
 def test_a_helper_refusal_receipt_is_one_line_after_the_status_and_absent_without_one(tmp_path):
+    from ouroboros.memory_form_facts import ordinary_composition
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.registry import ToolContext
+
     rooms = shared.world(tmp_path)
     assert "A helper could not fold" not in _story(tmp_path)
     unit = f"legacy-b01-r{rooms['beta']}"
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="fallback-helper")
+    ref = chat_chain.retain_memory_source(ctx, "memory_fallback_response", b"Retained helper response.")
+    path = ref["read"]["arguments"]["path"]
     receipt = {"input_sha256": "e" * 64, "kind": "context_overflow", "at": "2026-10-03T00:00:00+00:00",
-               "response_ref": {"path": "x.md", "read": {"tool": "read_file", "arguments": {
-                   "root": "runtime_data", "path": "task_results/fallback/x.md"}}}}
+               "response_ref": ref}
     assert ChronicleStore(tmp_path).publish([], scan_state={"fallback_refusals": {unit: receipt}}).ok
     lines = _story(tmp_path).split("\n")
     refusal = [line for line in lines if line.startswith("A helper could not fold")]
     assert refusal == ["A helper could not fold: Beta; 2026-09-02 00:02 → 2026-09-02 00:03; context_overflow; "
-                       "its answer: read_file(root='runtime_data', path='task_results/fallback/x.md')"]
+                       f"its answer: read_file(root='runtime_data', path='{path}')"]
     assert lines.index(refusal[0]) == next(i for i, line in enumerate(lines) if line.startswith("Story status:")) + 1
+    def mapped(snapshot):
+        parts = ordinary_composition(snapshot)["blocks"]["story"]["parts"]
+        return next(p["sources"][0] for p in parts if p["kind"] == "refusal")
+    snapshot = _snapshot(tmp_path)
+    source = mapped(snapshot)
+    assert source["retold_record"]["read"]["arguments"] == {"node_id": unit, "revision": unit}
+    assert source["answer"]["read"]["tool"] == "memory_read"
+    fork = ToolContext(repo_dir=tmp_path, drive_root=tmp_path / "fork", budget_drive_root=tmp_path, task_id="reader")
+    assert not (fork.drive_root / path).exists()
+    assert "Retained helper response." in _memory_read(fork, **source["answer"]["read"]["arguments"])
+    old = json.loads(mv.snapshot_json(snapshot))
+    retained = old["fallback_refusals"][0].pop("source_ref")
+    for fields in ({}, {"source_ref": {k: v for k, v in retained.items() if k != "task_id"}}):
+        old["fallback_refusals"][0].update(fields)
+        legacy = mapped(mv.snapshot_from_json(json.dumps(old)))["answer"]
+        assert legacy["canonical_path"] == path and legacy["read_gap"] and "read" not in legacy
     # A receipt without a readable answer says so; the retelling's own id is not the helper's answer.
     bare = {**receipt, "response_ref": {}}
     assert ChronicleStore(tmp_path).publish([], scan_state={"fallback_refusals": {unit: bare}}).ok
     refusal = [line for line in _story(tmp_path).split("\n") if line.startswith("A helper could not fold")]
     assert refusal == ["A helper could not fold: Beta; 2026-09-02 00:02 → 2026-09-02 00:03; context_overflow; "
                        "its answer was not retained"]
+    answer = mapped(_snapshot(tmp_path))["answer"]
+    assert answer.get("read_gap") and "read" not in answer
 
 
 def test_drafts_rejections_corrections_and_indented_texts(tmp_path):
@@ -280,6 +327,7 @@ def test_drafts_rejections_corrections_and_indented_texts(tmp_path):
     assert "(drafted by a helper (Light), accepted by me)" in _story(tmp_path)
     mine = _page(tmp_path, "1", 11, 12, text="My own page.")
     result = store.correct(mine, "My own page, corrected.", shared.MIND, expected_sequence=store.room_head("1"))
+    captured = _snapshot(tmp_path)
     text = _story(tmp_path)
     # The correction stands under the page's own words, signed and dated; nothing is replaced or re-announced.
     signed = f"  My own page.\n\n  [correction {result.record['id']} by mind (root, task t1), {result.record['ts'][:10]}]\n  My own page, corrected."
@@ -291,6 +339,21 @@ def test_drafts_rejections_corrections_and_indented_texts(tmp_path):
     text = _story(tmp_path)
     assert "(draft by a helper (child, task kid00001), not yet accepted or rejected by me)" in text
     assert text.count("(draft by a helper") == 1 and "(draft by a helper (Light)" not in text
+
+    from ouroboros.memory_form_facts import ordinary_composition
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.registry import ToolContext
+
+    assert store.correct(mine, "Words added after capture.", shared.MIND, expected_revision=result.record["id"],
+                         expected_sequence=store.room_head("1")).ok
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="reader")
+    parts = ordinary_composition(mv.snapshot_from_json(mv.snapshot_json(captured)))["blocks"]["story"]["parts"]
+    source = next(s for part in parts for s in part.get("sources", ()) if s.get("id") == mine)
+    args = source["read"]["arguments"]
+    assert args == {"node_id": mine, "revision": result.record["id"]}
+    document = _memory_read(ctx, **args)
+    assert "My own page, corrected." in document and "Words added after capture." not in document
+    assert "Words added after capture." in _memory_read(ctx, node_id=mine)
 
 
 def test_the_story_is_byte_identical_for_every_integrator_and_changes_only_with_the_chronicle(tmp_path, monkeypatch):

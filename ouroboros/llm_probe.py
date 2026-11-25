@@ -3,30 +3,52 @@
 Probe transports deliberately do not use the ordinary chat retry, fallback,
 reasoning, cache, or capability-learning paths.  Target resolution and client
 construction remain owned by the routing leaf the client composes
-(:mod:`ouroboros.llm_routing`); this module only builds the final probe candidate
-and dispatches it through the existing physical-attempt accounting seam.
+(:mod:`ouroboros.llm_routing`); this module only builds the final probe candidates
+and dispatches each through the existing physical-attempt accounting seam.
 Transport reachability is a separate non-generating metadata observation; it
 never reserves a paid attempt or claims the prior generation completed.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Mapping, Optional
 
 from ouroboros.model_concurrency import limit_physical_send
 
 from ouroboros.usage_accounting import (
     UsageScope,
+    current_usage_scope,
     physical_attempt_limit,
     usage_scope,
 )
 
 PROVIDER_TEST_MAX_TOKENS = 16
 PROVIDER_TEST_PROMPT = "Reply OK"
+# Direct OpenAI is tested with one ordinary harmless function call through the connection's own API at the
+# provider's default reasoning (no effort is forced: no one value suits every model): a model whose tools need
+# another API then fails visibly here, not on its first real tool round. A trivial forced call is expected to spend
+# a few hundred tokens of default reasoning; 4,096 leaves several times that and bounds the worst case. A reply the
+# cap (or anything else) left unfinished is reported as that, never as a missing call (``_tool_test_result``).
+# Chat asks in its runtime's forms and order (``_send_probe``): custom, function, function with reasoning none.
+PROVIDER_TOOL_TEST_MAX_TOKENS = 4096
+PROVIDER_TOOL_TEST_PROMPT = "Call the provider_test function with ok set to true."
+_PROBE_FUNCTION = {"name": "provider_test", "description": "Confirms that this connection can call a function.",
+                   "parameters": {"type": "object", "properties": {"ok": {"type": "boolean"}},
+                                  "required": ["ok"], "additionalProperties": False}}
 
 
 class ProbeEnvelopeError(RuntimeError):
     """A provider returned HTTP success without a completion envelope."""
+
+
+class ProbeToolTestFailed(RuntimeError):
+    """The tool test established no function call; ``reason`` is its bounded result."""
+
+    def __init__(self, reason: str, status_code: Optional[int] = None):
+        self.reason, self.status_code = reason, status_code
+        super().__init__(reason)
 
 
 def _accounted_send(
@@ -61,10 +83,14 @@ def _accounted_send(
 
 
 def accounted_one_shot(target: dict[str, Any], candidate: dict[str, Any], send, *, source: str) -> Any:
-    """One accounted provider-test send attributed to ``system:<source>``; at most one physical attempt."""
+    """One accounted provider-test send attributed to ``system:<source>``; at most one physical attempt.
+    A send made inside a task's own usage scope stays that task's (its root, budget and Stop fences), tagged
+    ``source``: a synthetic system root would take the task's spending out of its control."""
+    bound = current_usage_scope()
     task_id = f"system:{source}"
-    with usage_scope(UsageScope(task_id=task_id, root_task_id=task_id, category="provider_test",
-                                non_task_operation=True, source=source)), physical_attempt_limit(1):
+    scope = bound if bound is not None and bound.task_id and not bound.non_task_operation else UsageScope(
+        task_id=task_id, root_task_id=task_id, category="provider_test", non_task_operation=True, source=source)
+    with usage_scope(scope), physical_attempt_limit(1):
         return _accounted_send(target, candidate, send, source=source)
 
 
@@ -91,10 +117,60 @@ def _plain(value: Any) -> Any:
         return value
 
 
-def _valid_completion_envelope(response: Any, provider: str) -> bool:
+def _label(value: Any) -> str:
+    """A provider-named terminal label (status, reason, error code) as a short bounded token."""
+    return re.sub(r"[^a-z0-9_.-]+", "", str(value or "").strip().lower())[:40]
+
+
+def _tool_test_result(payload: dict, responses: bool) -> str:
+    """'' when the one reply completed with complete calls of the test function, each with ``{"ok": true}``;
+    else its bounded reason. A Response is read through the send path's own view (``completion_view``: calls only
+    from a completed reply, each with its id, name and string arguments). An unfinished terminal leaves tool
+    capability unestablished and names itself (incomplete and its reason, a failed or other status, no terminal
+    fact); only a completed reply without such a call is "No function call returned"."""
+    from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS
+
+    completion, status, withheld = payload, "", ()
+    if responses:
+        from ouroboros.openai_responses import completion_view
+
+        completion, facts = completion_view(payload)
+        status, withheld = str(facts.get("response_status") or ""), facts.get("response_withheld_output") or ()
+        if not status:
+            return "Reply status unknown"
+        if status not in {"completed", "incomplete"}:
+            code = _label((completion.get("error") or {}).get("type"))
+            return f"Reply {_label(status)}" + (f" ({code})" if code else "")
+    choice = _plain((completion.get("choices") or [{}])[0]) or {}
+    message, finish = _plain(choice.get("message")) or {}, _label(choice.get("finish_reason"))
+    if status == "incomplete" or finish in OUTPUT_LIMIT_FINISH_REASONS | CONTENT_REFUSAL_FINISH_REASONS:
+        return f"Reply incomplete ({finish or 'no reason given'})"
+    if not finish:
+        return "Reply status unknown"
+    calls = [_plain(call) or {} for call in message.get("tool_calls") or ()]
+    if not calls:
+        named = any(isinstance(item, dict) and item.get("name") == _PROBE_FUNCTION["name"] for item in withheld)
+        return "Function call malformed" if named else "No function call returned"
+    for call in calls:
+        # A Chat custom call (the form the Chat probe asks for) carries its JSON in ``custom.input``.
+        function = _plain(call.get("custom") if call.get("type") == "custom" else call.get("function")) or {}
+        raw = function.get("input") if call.get("type") == "custom" else function.get("arguments")
+        try:
+            arguments = json.loads(raw) if isinstance(raw, str) else None
+        except ValueError:
+            arguments = None
+        if not (isinstance(call.get("id"), str) and call["id"].strip() and function.get("name") == _PROBE_FUNCTION["name"]
+                and isinstance(arguments, dict) and arguments.get("ok") is True):
+            return "Function call malformed"
+    return ""
+
+
+def _valid_completion_envelope(response: Any, provider: str, *, responses: bool = False) -> bool:
     payload = _plain(response)
     if not isinstance(payload, dict):
         return False
+    if responses:
+        return isinstance(payload.get("output"), list)
     if provider == "anthropic":
         return isinstance(payload.get("content"), list)
     choices = payload.get("choices")
@@ -142,7 +218,9 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
     }
     model_codes = {"model_not_found", "unknown_model"}
 
-    if status == 402 or code in credit_codes or error_type in credit_codes:
+    if isinstance(exc, ProbeToolTestFailed):
+        reason = exc.reason
+    elif status == 402 or code in credit_codes or error_type in credit_codes:
         reason = "No credits"
     elif status == 401:
         reason = "Invalid key"
@@ -196,17 +274,81 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
     }
 
 
+def _chat_rungs():
+    """Direct OpenAI Chat's own tool ladder, asked at the provider's default effort: custom, function, function with
+    reasoning ``none`` (``request_wire_receipts.direct_openai_tool_candidate_ladder``)."""
+    from ouroboros.request_wire_receipts import direct_openai_tool_candidate_ladder
+
+    return direct_openai_tool_candidate_ladder("provider_default", remaining_physical_attempts=3)
+
+
+def _chat_rung_form(model: str, rung) -> dict[str, Any]:
+    """One rung as the Chat tool test's request: its dialect (the runtime's custom projection or plain functions) and
+    its effort (no carrier at the provider's default, an explicit ``none`` on the task-local rung)."""
+    from ouroboros.openai_chat_custom import project_function_tool_request_to_openai_custom
+
+    form = {"model": model, "messages": [{"role": "user", "content": PROVIDER_TOOL_TEST_PROMPT}],
+            "max_completion_tokens": PROVIDER_TOOL_TEST_MAX_TOKENS, "tool_choice": "required",
+            "tools": [{"type": "function", "function": dict(_PROBE_FUNCTION)}]}
+    if rung.effort == "none":
+        form["reasoning_effort"] = "none"
+    if rung.tool_dialect == "openai_chat_custom":
+        projected = project_function_tool_request_to_openai_custom(form["tools"], "required")
+        form.update(tool_choice=projected.tool_choice, tools=projected.catalog.wire_tools())
+    return form
+
+
+def _send_probe(target: dict[str, Any], candidate: dict[str, Any], dispatch,
+                sent: list) -> tuple[Any, dict[str, Any]]:
+    """``(reply, the form it answered)``; ``sent`` collects each tool form's API, dialect and effort. Direct OpenAI Chat
+    walks its runtime's rungs (``_chat_rungs``), each next one only after the exact typed refusal the runtime advances on
+    (``openai_chat_dispatch.exact_tool_dialect_rejection``), each its own accounted one-shot: a pass on the last rung
+    confirms the tool call with reasoning off, not reasoning. Any other refusal, an unknown outcome or a broken
+    connection ends the test as it is; the connection's chosen API never changes."""
+    from ouroboros.openai_chat_dispatch import exact_tool_dialect_rejection
+
+    api = str(target.get("api_surface") or "")
+    if not (target.get("provider") == "openai" and api == "chat_completions"):
+        if "tools" in candidate:
+            sent.append({"api": api, "tool_dialect": "function", "effort": "provider_default",
+                         "rung": "requested_wire_form"})
+        return accounted_one_shot(target, candidate, dispatch, source="provider_test"), candidate
+    rungs = _chat_rungs()
+    for index, rung in enumerate(rungs):
+        form = _chat_rung_form(str(candidate.get("model") or ""), rung)
+        sent.append({"api": api, "tool_dialect": rung.tool_dialect, "effort": rung.effort, "rung": rung.reason_code})
+        try:
+            return accounted_one_shot(target, form, dispatch, source="provider_test"), form
+        except Exception as refused:
+            if not exact_tool_dialect_rejection(refused, rung.tool_dialect):
+                raise
+            if index + 1 == len(rungs):
+                raise ProbeToolTestFailed("Tool calls refused by this API",
+                                          getattr(refused, "status_code", None)) from refused
+    raise AssertionError("unreachable: the last rung returns or raises")
+
+
+def _modes(sent: list) -> dict[str, Any]:
+    """The tool test's requested form and the one it ended on (``applied``), for the result and its log line."""
+    return {"requested": dict(sent[0]), "applied": dict(sent[-1])} if sent else {}
+
+
 def _probe_candidate(target: Mapping[str, Any]) -> dict[str, Any]:
     provider = str(target.get("provider") or "")
     model = str(target.get("resolved_model") or "")
-    # The send path's provider-wide rule (``_build_remote_kwargs``): official direct
-    # OpenAI Chat takes the current completion-token carrier for every model; a model
-    # name is not evidence of which carrier a route accepts.
-    token_key = "max_completion_tokens" if provider == "openai" else "max_tokens"
+    if provider == "openai" and target.get("api_surface") == "responses":
+        return {"model": model, "input": [{"role": "user", "content": PROVIDER_TOOL_TEST_PROMPT}], "store": False,
+                "max_output_tokens": PROVIDER_TOOL_TEST_MAX_TOKENS, "tool_choice": "required",
+                "tools": [{"type": "function", **_PROBE_FUNCTION, "strict": True}]}
+    if provider == "openai":
+        # Chat refuses function tools beside reasoning, so the Chat lane sends its tools as the runtime's custom
+        # projection at every effort but none (``openai_chat_custom``; the recorded gpt-5.6-terra wire in
+        # tests/fixtures/llm_wire): the probe asks in that form first, never plain functions before it.
+        return _chat_rung_form(model, _chat_rungs()[0])
     candidate: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": PROVIDER_TEST_PROMPT}],
-        token_key: PROVIDER_TEST_MAX_TOKENS,
+        "max_tokens": PROVIDER_TEST_MAX_TOKENS,
     }
     if provider == "openrouter":
         candidate["extra_body"] = {"provider": {"allow_fallbacks": False}}
@@ -235,9 +377,11 @@ def probe_provider_readiness(
     settings: Mapping[str, Any],
     timeout: float = 20.0,
 ) -> dict[str, Any]:
-    """Send one short request through one request-local provider target."""
+    """Send the short test request (direct OpenAI Chat: its runtime's rungs, ``_send_probe``) through one request-local
+    provider target; a tool test's result names its requested and applied API, dialect and effort."""
     target: dict[str, Any] = {}
     remote_client = None
+    sent: list[dict[str, str]] = []
     try:
         target = client._resolve_remote_target(model, settings=settings)
         from ouroboros.model_slots import resolve_processing_preference
@@ -250,6 +394,10 @@ def probe_provider_readiness(
                 "exception_type": "ProviderNotConfigured",
             }
         candidate = _probe_candidate(target)
+        from ouroboros.opencode_go import go_chat_headers
+
+        if headers := go_chat_headers(target):
+            candidate["extra_headers"] = headers
         provider = str(target.get("provider") or "")
 
         if provider in {
@@ -260,6 +408,8 @@ def probe_provider_readiness(
 
             def send_openai(payload):
                 scoped = remote_client.with_options(timeout=timeout)
+                if "input" in payload:  # the connection's Responses API
+                    return scoped.responses.create(**payload)
                 return scoped.chat.completions.create(**payload)
 
             dispatch = send_openai
@@ -302,16 +452,20 @@ def probe_provider_readiness(
         else:
             raise ValueError("unsupported provider route")
 
-        response = accounted_one_shot(target, candidate, dispatch, source="provider_test")
-        if not _valid_completion_envelope(response, provider):
+        response, candidate = _send_probe(target, candidate, dispatch, sent)
+        responses = "input" in candidate
+        if not _valid_completion_envelope(response, provider, responses=responses):
             raise ProbeEnvelopeError("provider returned no completion envelope")
+        if "tools" in candidate and (reason := _tool_test_result(_plain(response), responses)):
+            raise ProbeToolTestFailed(reason)
         return {
             "ok": True,
             "status_code": 200,
             "exception_type": "",
+            **_modes(sent),
         }
     except Exception as exc:
-        return controlled_probe_error(exc)
+        return {**controlled_probe_error(exc), **_modes(sent)}
     finally:
         close = getattr(remote_client, "close", None)
         if callable(close):
@@ -380,8 +534,9 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
         # connection allowance for every HEAD phase, not the LLM read window.
         timeout = min(float(timeout), float(llm._no_proxy_timeout(timeout).connect))
         from ouroboros.net_transport import verify_kwargs
+        from ouroboros.opencode_go import go_client_headers
         with httpx.Client(trust_env=False, timeout=timeout, follow_redirects=False, **verify_kwargs()) as client:
-            response = client.head(url)
+            response = client.head(url, headers=go_client_headers(target.get("provider"), url))
         # An upstream HTTP refusal still proves connectivity. A gateway/server
         # outage does not. This says nothing about the old generation's outcome.
         if 200 <= response.status_code < 500:

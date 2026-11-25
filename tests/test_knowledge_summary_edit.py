@@ -47,7 +47,7 @@ def _body(note):
 
 def _receipt(reply):
     assert reply.startswith("✅"), reply
-    return json.loads(reply.split("\n", 1)[1])
+    return json.loads(reply.split("\n", 2)[1])
 
 
 def _setup(tmp_path, topic="people/ada", raw=NOTE):
@@ -295,6 +295,36 @@ def test_summary_revision_keeps_a_recursive_yaml_field(tmp_path):
     assert _body(current) == b"Body.\n"
 
 
+def test_a_boolean_yaml_key_before_type_keeps_summary_and_field_edits_while_a_changed_field_refuses(
+        tmp_path, monkeypatch):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    address = store.resolve_knowledge_address(tmp_path, "weekly", "global")
+    address.path.parent.mkdir(parents=True)
+    address.path.write_bytes(b"---\non: Monday\ntype: note\nsummary: Old.\n---\nBody.\n")
+    original = store.read_knowledge_note(address)
+    assert list(original.metadata) == [True, "type", "summary"]  # PyYAML cannot sort a bool key beside str keys
+    _receipt(tools._knowledge_write(ctx, "weekly", mode="edit", scope="global", summary="New.",
+                                    expected_revision=original.revision))
+    summarized = store.read_knowledge_note(address)
+    _receipt(tools._knowledge_write(ctx, "weekly", "---\nclaims: [room:1]\nkeys: [ada]\n---\n", mode="edit",
+                                    scope="global", expected_revision=summarized.revision))
+    current = store.read_knowledge_note(address)
+    assert current.metadata == {True: "Monday", "type": "note", "summary": "New.", "claims": ["room:1"],
+                                "keys": ["ada"]}
+    assert _body(summarized) == _body(current) == b"Body.\n"
+    write_content = store._write_content
+
+    def change_another_field(*args, **kwargs):  # a re-render that changes a field the call did not revise
+        raw, claims = write_content(*args, **kwargs)
+        return raw.replace(b"true: Monday", b"true: Tuesday"), claims
+
+    monkeypatch.setattr(store, "_write_content", change_another_field)
+    refused = tools._knowledge_write(ctx, "weekly", mode="edit", scope="global", summary="Newer.",
+                                     expected_revision=current.revision)
+    assert "invalid_note: edit cannot change frontmatter" in refused
+    assert address.path.read_bytes() == current.raw
+
+
 def test_unparseable_source_leaves_both_change_facts_unknown(tmp_path):
     address = store.resolve_knowledge_address(tmp_path, "malformed", "global")
     address.path.parent.mkdir(parents=True)
@@ -370,7 +400,7 @@ def test_an_overwrite_takes_its_summary_after_its_own_merge(tmp_path):
 def test_a_bare_append_is_answered_with_the_outline_and_says_earlier_text_stood(tmp_path):
     ctx, address, _original = _setup(tmp_path)
     reply = tools._knowledge_write(ctx, "people/ada", "\n## Later\nNew fact.\n", mode="append", scope="global")
-    assert reply.count("\n") == 1  # the meta holds this outline: nothing follows the JSON line
+    assert reply.splitlines()[2:] == ["This situation's names: room:1 (Main)"]  # the outline fits in the JSON
     receipt = _receipt(reply)
     assert receipt["knowledge_note"] == "Earlier text was not revised by this write."
     assert receipt["knowledge_outline"].startswith("Outline of 'people/ada' (global)")
@@ -390,7 +420,8 @@ def test_a_bare_append_whose_outline_the_receipt_cannot_hold_carries_it_after_th
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry.set_context(ctx)
     reply = tools._knowledge_write(ctx, "journal/long", "\n## Позже\n\nНовое.\n", mode="append", scope="global")
-    line, _, carried = reply.split("\n", 1)[1].partition("\n\n")
+    line = reply.split("\n", 2)[1]
+    carried = reply.partition("\n\n")[2]
     receipt = json.loads(line)
     assert receipt["knowledge_outline"]["omitted"] is True  # the meta cannot hold it ...
     assert carried == versions.render_outline(store.read_knowledge_note(address))  # ... so it follows, whole

@@ -17,6 +17,7 @@ import pathlib
 import time
 from typing import Any, Dict, List, Optional
 
+from ouroboros.host_notice import notice
 from ouroboros.model_wait import execution_close
 from ouroboros.outcomes import (
     EXECUTION_FAILED,
@@ -510,11 +511,14 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
     # never generated again: the dead attempt is finalized from the outbox's bytes
     # and published like a saved terminal, with the answer still replayed by the
     # outbox. Only a confirmed absence of any registered answer reaches crash policy.
+    from ouroboros.terminal_time import captured_task_attempt
     from ouroboros.working_checkpoint import adopt_registered_answer
 
+    # Label the already-selected answer; the retry and checkpoint rails keep their queue ordinal.
+    physical_attempt = captured_task_attempt(task, meta.get("attempt"))
     try:
         adopted = adopt_registered_answer(
-            root, task, task_id, attempt=attempt, cause="worker_crash",
+            root, task, task_id, attempt=attempt if physical_attempt is None else physical_attempt, cause="worker_crash",
             registry_root=pathlib.Path(task.get("budget_drive_root") or root),
         )
     except Exception as exc:
@@ -567,8 +571,9 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             reason_code = "worker_crash_budget_pausing"
         elif replay_unsafe:
             result_text = (
-                "Worker process died after an owner-wait checkpoint. The continuation "
-                "source is retained; completed actions were not retried."
+                "Worker process died after an owner-wait checkpoint. Completed actions were not "
+                "retried; Continue starts a new work from this one's notes, and the saved state "
+                "goes after the days set in Keep finished work for."
             )
             reason_code = "worker_crash_owner_wait"
         else:
@@ -600,13 +605,9 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             raise TerminalFileRecoveryPending("crash terminal result could not be stored") from exc
         # Message before task_done: otherwise the UI may close the card first.
         try:
-            if replay_unsafe:
-                user_msg = result_text
-            else:
-                user_msg = (
-                    f"❌ Task `{task_id[:8]}` failed after {attempt} crash(es). "
-                    "Worker process crashed repeatedly. Please try again."
-                )
+            # A crash that exhausted its retries says so in words; its ids and exit code are the notice's details. Only that
+            # ordinary crash offers a new try: past an owner-wait or budget checkpoint a repeat could redo completed actions.
+            user_msg = result_text if replay_unsafe else "The task failed because its worker process kept crashing."
             incident_task_id = str(task_id or "")
             _pool().send_with_budget(
                 chat_id,
@@ -616,6 +617,8 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                 progress_meta={
                     "task_incident": reason_code,
                     "toast_once": f"{incident_task_id}:{reason_code}:{attempt}",
+                    "notice": notice(reason_code, step="" if replay_unsafe else "try_again",
+                                     details=f"task {task_id}, {attempt} attempts, last exit code {exitcode}"),
                 },
                 role="system", system_type="worker_failure")
         except Exception:

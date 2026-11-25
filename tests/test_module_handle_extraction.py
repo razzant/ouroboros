@@ -107,7 +107,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # L5 (server-saturation sprint): publication left the restore leaf for its own owner; the
     # capture reads the live maps and the publication record through the same handle.
     "supervisor/queue_publication.py": ("supervisor/queue.py", "_queue", frozenset({
-        "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "INITIALIZED", "PENDING", "QUEUE_PUBLICATION",
+        "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "INITIALIZED", "PENDING", "PRIOR_DIRECT_ROOTS", "QUEUE_PUBLICATION",
         "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock", "atomic_write_text", "persist_queue_snapshot",
     })),
     "supervisor/queue_timeouts.py": ("supervisor/queue.py", "_queue", frozenset({
@@ -216,10 +216,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/tools/git_vcs_ops.py": ("ouroboros/tools/git.py", "_git", frozenset({
         "_acquire_git_lock", "_authorized_managed_update_resolver",
-        "_binding_relative_path", "_current_runtime_mode", "_ff_pull",
-        "_limit_git_output", "_release_git_lock",
-        "_run_git_network_cmd", "_vcs_binding", "_vcs_result",
-        "binding_targets_system_repo", "build_resolved_resource_binding",
+        "_current_runtime_mode", "_release_git_lock", "_run_git_network_cmd",
+        "binding_targets_system_repo",
         "is_protected_runtime_path", "normalize_repo_path", "protected_paths_in",
         "run_cmd",
     })),
@@ -277,7 +275,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     "ouroboros/delegate_custody_reconcile.py": ("ouroboros/delegate_custody.py", "_custody", frozenset({
         "RECONCILED", "RunCustody", "START_FAILED", "_reconcile_one", "admitted_store_id",
         "cancel_and_verify", "close_absent_run", "daemon_says_absent", "emit",
-        "is_terminal", "output_disposition", "pending_invocations",
+        "is_terminal", "names_another_run", "output_disposition", "pending_invocations",
         "record_containment_fault", "record_settled_unread",
         "retire_settled_registrations", "review_owned_source",
         "settle_run", "summary_of",
@@ -343,6 +341,10 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_prepare_forced_prompt", "_prepare_post_tool_budget_context",
         "_publish_delivery_candidate",
         "_record_forced_finalization", "_server_web_allowed_by_task",
+    })),
+    "ouroboros/delivery_facts.py": ("ouroboros/loop.py", "_loop", frozenset({
+        "_arm_delivery_control", "_append_or_merge_user_message", "_publish_delivery_candidate",
+        "_emit_round_progress", "_delivery_evidence_state", "_replace_delivery_candidate",
     })),
     "ouroboros/loop_delivery.py": ("ouroboros/loop.py", "_loop", frozenset({
         'DeliveryCandidate', 'TERMINAL_ORIGIN_MODEL_FINAL', '_LoopExitContext',

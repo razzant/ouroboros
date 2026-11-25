@@ -12,8 +12,8 @@ import pathlib
 from typing import Any
 
 from ouroboros.project_dialogue import (
-    bound_room_chat, entry_matches_source_ref, project_origin_rows,
-    room_membership, source_refs_for_project, latest_chat_annotations,
+    bound_room_chat, entry_matches_source_ref, opening_input, opening_view, project_origin_rows,
+    room_membership, source_refs_for_project,
 )
 from ouroboros.projects_registry import list_reserved_projects, RoomResolver
 from ouroboros.utils import utc_now_iso
@@ -28,6 +28,7 @@ _ROW_FACTS = (
     "lifecycle", "quiz", "actions", "title", "filename", "caption", "mime",
     "project_origin_projection", "presence_provenance", "presence_contact", "attachment_gap",
     "reply_to", "relay", "reply_to_relay",  # the host-resolved relations: what a row replies to, the owner words a relay quotes
+    "text_placeholder", "notice",  # a host notice's code, step and raw details (its text is only the phrase)
 )
 
 
@@ -58,8 +59,8 @@ def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, p
     # and, for a chat row with a stream position, by the activation's lineage epoch.
     from ouroboros.owner_quiz import secret_outcome_block
 
-    if stream == "mailbox" and secret_outcome_block(row) is not None:
-        result["author"] = "host"  # a secret request's outcome frame, never the owner's words
+    if row.get("text_placeholder") is True or (stream == "mailbox" and secret_outcome_block(row) is not None):
+        result["author"] = "host"  # a file-only placeholder or secret outcome is not the owner's words
     elif stream == "mailbox" and row.get("type") != "quiz_answer":
         result["author"] = str(row.get("provenance") or "Owner")
     else:  # the epoch's rule needs the row's stream position; the places' owner snapshot never does
@@ -74,12 +75,30 @@ def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, p
             attachments = resolve_attachment_manifest(root, str(row.get("task_id") or ""), row)
         except (OSError, ValueError) as exc:
             result["attachment_gap"] = type(exc).__name__
+    if not attachments:
+        attachments = row.get("attachments")  # the accepted row's upload metadata before any task stages it
     if isinstance(attachments, list):
         result["attachments"] = [
-            {key: item[key] for key in ("label", "name", "filename", "original_filename", "mime", "size", "sha256", "status", "reason") if key in item}
+            {key: item[key] for key in ("label", "name", "filename", "original_filename", "mime", "size", "sha256",
+                                       "status", "reason", "unavailable") if key in item}
             for item in attachments if isinstance(item, dict)
         ]
     return result
+
+
+def _opening_evidence(result, typed):
+    """One typed card input; the raw bubble stays available as display, not submitted words."""
+    if not typed:
+        return
+    display = result.setdefault("display_text", result["text"])
+    result["source_input"] = typed
+    if (result.get("type") == "quiz_answer" and result.get("source") in (None, "", "owner_quiz_answer")
+            and result.get("direction") == "system"):
+        return  # The physical quiz record already carries its frame, author and accepted block.
+    view = opening_view({"text": display, "source_input": typed})
+    result["text"] = view["text"]
+    if view["source"] in {"owner_press", "owner_card_input"}:
+        result["author"] = "host"
 
 
 def _progress_source(root: pathlib.Path, chat_id: int) -> tuple[list, dict]:
@@ -98,6 +117,26 @@ def _progress_source(root: pathlib.Path, chat_id: int) -> tuple[list, dict]:
         gaps.append({"kind": "recorded_invalid_intervals", "count": coverage["gaps"]})
     return rows, {"generations": ([{"path": str(ds.path(root)), "size": upper}] if upper else []),
                   "gaps": gaps, "snapshot_stable": coverage["imported"]}
+
+
+def _physical_key(ref: dict) -> tuple:
+    return ref["chat_id"], ref["ts"], ref["row_sha256"]
+
+
+def _quiz_answer_key(row: dict, chat_id: int) -> tuple | None:
+    """Only a canonical accepted quiz answer may have several physical history writes for one decision."""
+    if row.get("type") != "quiz_answer" or row.get("source") != "owner_quiz_answer" or row.get("direction") != "system":
+        return None
+    task, quiz = row.get("task_id"), row.get("quiz")
+    if not isinstance(quiz, dict) or quiz.get("state") != "answered":
+        return None
+    qid, request, stamp = (quiz.get(key) for key in ("quiz_id", "request_id", "answered_at"))
+    if (not all(isinstance(value, str) and value for value in (task, qid, request, stamp))
+            or row.get("client_message_id") != f"quiz_answer:{task}:{qid}" or row.get("ts") != stamp):
+        return None
+    # Read retries by their producer's identity and the immutable quiz snapshot, not by caption or client id alone.
+    decision = {key: value for key, value in quiz.items() if key not in {"delivery", "discharged_at"}}
+    return chat_id, task, json.dumps(decision, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
@@ -119,8 +158,9 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     rows, coverage = Memory(root).read_chat_generations(room_id=chat_id, predicate=lambda row: matches(_chat_id(row), row))
     if chat_id not in projects and chat_id not in {0, 1} and not rows and not coverage["gaps"]:
         return None
-    annotations = latest_chat_annotations(root)
-    from ouroboros.chat_chain import iter_room_rows, source_row_id  # D06->D15 is lazy-only
+    from ouroboros.chat_annotations import addressed_chat_annotations
+    annotations = addressed_chat_annotations(root)
+    from ouroboros.chat_chain import format_address, row_address, iter_room_rows  # D06->D15 is lazy-only
     from ouroboros.chronicle_import import row_lineage
 
     # An activated chronicle records the lineage epoch: an outgoing row before it is signed by
@@ -129,14 +169,38 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     if lineage.get("lineage_epoch") and coverage["snapshot_stable"]:
         for address, _row, pos in iter_room_rows(root, chat_id):
             positions.setdefault(address["row_sha256"], pos)
-    source_rows = []
-    for index, row in enumerate(rows, 1):
-        pos = positions.get(source_row_id(row)) if positions else None
-        annotation = annotations.get(str(row.get("client_message_id") or ""), {})
+    from ouroboros.chat_references import projected_reply_fields
+    source_rows, visibility = [], {}
+    physical, quiz_answers, owner_deliveries = {}, set(), {}
+
+    def include_owner_source(projected, key):
+        message = projected.get("client_message_id")
+        if task_id and projected.get("direction") == "in" and message:
+            owner_deliveries.setdefault(f"{message}:{task_id}", {})[key] = projected
+
+    for row in rows:
+        address = row_address(row)
+        key = _physical_key(address)
+        if key in physical:
+            continue  # one physical row even if its identical bytes were imported twice
+        physical[key] = None
+        if (answer := _quiz_answer_key(row, address["chat_id"])) is not None:
+            if answer in quiz_answers:
+                continue  # the canonical history still retains each physical write
+            quiz_answers.add(answer)
+        pos = positions.get(address["row_sha256"]) if positions else None
+        message = row.get("client_message_id")
+        display_address = format_address(address)
+        annotation = annotations.get((address["chat_id"], message, display_address), {}) if message else {}
         if (row.get("direction") == "in" and not row.get("attachment_manifest")
                 and not row.get("attachment_manifest_ref") and isinstance(annotation.get("attachment_manifest"), list)):
             row = {**row, "attachment_manifest": annotation["attachment_manifest"]}
-        source_rows.append(_row_projection(row, "chat", index, root, pos=pos, lineage=lineage))
+        fields = _row_projection(row, "chat", len(source_rows) + 1, root, pos=pos, lineage=lineage)
+        fields["row_address"] = display_address
+        projected = projected_reply_fields(root, chat_id, row, fields, visibility=visibility)
+        physical[key] = projected, opening_input(row, root)
+        source_rows.append(projected)
+        include_owner_source(projected, key)
     # Pre-existing accepted blocks are another retained projection of the same
     # quiz producer. Recover them where still available; never call an old ask
     # currently open merely because its lifecycle projection was evicted.
@@ -165,18 +229,34 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
                 "client_message_id": f"{kind}:{tid}:{qid}"}, "retained_quiz_projection", len(source_rows) + 1, root))
             answered.add((tid, qid))
     coverage["gaps"].extend(quiz_gaps)
-    for origin in project_origin_rows(root, chat_id):
-        if not any(entry_matches_source_ref(row, [origin["ref"]]) for row in rows):
-            source_rows.append(_row_projection({**origin["ref"], "direction": "in", "text": origin["text"],
-                                               "project_origin_projection": True}, "retained_origin", len(source_rows) + 1))
+    origin_gaps = set()
+    for origin in project_origin_rows(root, chat_id, gaps=origin_gaps):
+        ref = origin["ref"]
+        key = _physical_key(ref) if ref.get("row_sha256") else None
+        if key in physical:
+            current, saved = physical[key], origin.get("source_input")
+            if current is not None and saved and current[1].get("source") in (None, "owner_card_input"):
+                physical[key] = current[0], saved
+            continue
+        if key is None and any(entry_matches_source_ref(row, [ref]) for row in rows):
+            continue
+        projected = _row_projection({**ref, "direction": "in", "text": origin["text"],
+                                     "attachments": origin.get("attachments"), "source": origin.get("channel", ""),
+                                     "text_placeholder": origin["text_placeholder"], "project_origin_projection": True},
+                                    "retained_origin", len(source_rows) + 1)
+        _opening_evidence(projected, origin.get("source_input"))
+        if key is not None:
+            projected["row_address"] = format_address(ref)
+            include_owner_source(projected, key)
+        source_rows.append(projected)
+    for projected, typed in (row for row in physical.values() if row is not None):
+        _opening_evidence(projected, typed)
+    coverage["gaps"].extend({"kind": "origin_omission", "detail": gap} for gap in sorted(origin_gaps))
     progress, progress_coverage = _progress_source(root, chat_id)
     source_rows.extend(_row_projection(row, "progress", i, root) for i, row in enumerate(progress, 1))
     mailbox_coverage = {"included": bool(task_id), "complete": True}
-    # steering.py constructs this exact delivery id from the canonical client
-    # id and target. Link delivery provenance, never deduplicate by meaning.
-    owner_deliveries = {f"{row['client_message_id']}:{task_id}": row for row in source_rows
-                        if row.get("direction") == "in" and row.get("client_message_id")}
     if task_id:
+        from ouroboros.dialogue_store import annotation_sources
         from ouroboros.owner_mailbox import (
             KIND_CARD_INPUT, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE,
             deliver_task_message, drain_owner_entries,
@@ -184,6 +264,17 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
         entries = drain_owner_entries(pathlib.Path(mailbox_root or root), task_id, include_acknowledged=True,
                                       kinds={KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_CARD_INPUT, KIND_TASK_MESSAGE},
                                       _read_status=mailbox_coverage)
+        from ouroboros.project_dialogue import owner_message_ref_is_valid
+        from ouroboros.store import StoreError
+        # One indexed uniqueness read for older id-only deliveries. The mailbox id is a delivery key,
+        # never proof of which chat row supplied it. A partial view cannot pick the only row it happened to show.
+        weak = {source["client_message_id"] for entry in entries if entry.get("kind") == KIND_OWNER_TEXT
+                and "origin_message_ref" not in entry and not entry.get("origin_suppressed")
+                for source in owner_deliveries.get(str(entry.get("msg_id") or ""), {}).values()}
+        try:
+            legacy = annotation_sources(root, weak)
+        except (OSError, StoreError):
+            legacy = {}
         for i, entry in enumerate(entries, 1):
             row = {**entry, "task_id": task_id}
             if entry.get("kind") in {KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED}:
@@ -198,9 +289,23 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
                 deliver_task_message(entry, task_id, None, rendered.append)
                 row["text"] = "\n".join(rendered)
             projected = _row_projection(row, "mailbox", i, mailbox_root or root)
-            original = owner_deliveries.get(str(entry.get("msg_id") or "")) if entry.get("kind") == KIND_OWNER_TEXT else None
+            if entry.get("kind") == KIND_CARD_INPUT:
+                _opening_evidence(projected, opening_input(row, root))
+            original = None
+            if entry.get("kind") == KIND_OWNER_TEXT and not entry.get("origin_suppressed"):
+                candidates = owner_deliveries.get(str(entry.get("msg_id") or ""), {})
+                if "origin_message_ref" in entry:
+                    ref = entry["origin_message_ref"]
+                    if owner_message_ref_is_valid(ref) and ref.get("row_sha256"):
+                        candidate = candidates.get(_physical_key(ref))
+                        if candidate and ref["client_message_id"] == candidate["client_message_id"]:
+                            original = candidate
+                elif len(candidates) == 1:
+                    (key, candidate), = candidates.items()
+                    if legacy.get((key[0], candidate["client_message_id"])) == (key[0], candidate["row_address"]):
+                        original = candidate
             if original is not None:
-                if projected["text"] == original["text"]:
+                if projected["text"] == original.get("display_text", original["text"]):
                     projected.pop("text")  # Same proven source id and exact bytes.
                 original.setdefault("mailbox_deliveries", []).append(projected)
             else:
@@ -208,7 +313,7 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     seen, unique = set(), []
     for row in source_rows:
         identity = str(row.get("client_message_id") or row.get("msg_id") or "")
-        key = (str(row.get("task_id") or ""), identity) if identity else None
+        key = (str(row.get("task_id") or ""), identity) if identity and row["stream"] not in {"chat", "retained_origin"} else None
         if key and key in seen:
             continue
         if key:

@@ -57,16 +57,16 @@ def _decode(raw):
 def collection_pending(entry, root=None) -> bool:
     """Collection debt, never retry eligibility. Only custody facts, even with a root."""
     from ouroboros.delegate_capture_attempt import capture_required, named_required
+    from ouroboros.delegate_registration_policy import evidence_only
 
     if entry is None or entry.review_owned:
         return False
-    if entry.terminal_source and (not entry.ledger_recorded or not entry.settled
+    return bool(entry.terminal_source and (not entry.ledger_recorded or not entry.settled
         or not entry.output_source or not entry.output_complete
         or entry.output_terminal_sha != entry.terminal_source.get("sha256")
-        or (capture_required(entry) and not entry.patch_captured)
-        or (named_required(entry) and entry.named_evidence.get("status") != "retained")):
-        return True
-    return False
+        or (capture_required(entry) and (not entry.patch_captured or entry.capture_job.get("state") == "ready"
+            or (entry.resource_ref.get("workspace_kind") == "directory" and evidence_only(entry))))
+        or (named_required(entry) and entry.named_evidence.get("status") != "retained")))
 
 
 def _held(entry) -> bool:
@@ -195,9 +195,17 @@ def held_runs(root, also: str = "", params: tuple = ()):
     """The held runs, narrowed by ALSO (a predicate over the row with PARAMS); a row this process read at its
     current stamp is not fetched or parsed again (``_held_listing``)."""
     with store.open_store(root, write=False) as txn:
-        listing = _held_listing(txn, root, also, params)
-        raw = None if listing is not None else txn.custody_raw_rows(
-            f"{HELD_WHERE} AND ({also})" if also else HELD_WHERE, (HELD, *params))
+        listing, raw = _capture_held(txn, root, also, params)
+    return _read_held(root, listing, raw)
+
+
+def _capture_held(txn, root, also, params=()):
+    listing = _held_listing(txn, root, also, params)
+    return listing, None if listing is not None else txn.custody_raw_rows(
+        f"{HELD_WHERE} AND ({also})" if also else HELD_WHERE, (HELD, *params))
+
+
+def _read_held(root, listing, raw):
     if listing is None:
         return _decode_all({rid: json_loads(text) for rid, text in raw.items()})
     return _decode_all(_held_facts(root, listing))
@@ -214,6 +222,41 @@ def open_held_runs(root):
     (an undisposed patch, an owned registration, collection debt) are neither fetched nor decoded; the caller's
     ``not settled`` decides (``delegate_custody_reconcile.open_runs``)."""
     return held_runs(root, _MAYBE_OPEN)
+
+
+def open_work_custody(root):
+    """Activity's open runs and ordinary unbound starts at the same read boundary.
+
+    Closed/refused history is not fetched. STARTED removes the request and inserts the run in one commit.
+    An unbound request is not an observed run; only a lookup-only decision in the open set supplies Stop custody.
+    """
+    from ouroboros.delegate_registration_policy import review_owned_source
+
+    with store.open_store(root, write=False) as txn:
+        held = _capture_held(txn, root, _MAYBE_OPEN)
+        rows = txn.conn.execute("SELECT id, facts FROM obligations WHERE set_name='custody_open' "
+                                "AND id GLOB 'invocation:*' ORDER BY id").fetchall()
+    starts, unreadable = {}, False
+    for row in rows:
+        try:
+            facts = json_loads(row["facts"])
+        except ValueError:
+            unreadable = True
+            continue
+        request = facts.get("request") if isinstance(facts, dict) else None
+        if not isinstance(request, dict):
+            unreadable = True
+            continue
+        if review_owned_source(request.get("source")):
+            continue
+        invocation, task = row["id"].removeprefix("invocation:"), str(request.get("task_id") or "")
+        tree = str(request.get("root_task_id") or task)
+        if not (invocation and task and tree) or request.get("invocation_id") not in (None, "", invocation):
+            unreadable = True
+            continue
+        decisions = facts.get("resume_decisions")
+        starts.setdefault(tree, []).append((invocation, isinstance(decisions, dict) and bool(decisions)))
+    return _read_held(root, *held), starts, unreadable
 
 
 def _any_of(*terms: str) -> str:
@@ -301,6 +344,95 @@ def pending(root):
     with store.open_store(root, write=False) as txn:
         rows = txn.set_rows("custody_open")
     return current_rows(root, [facts for key, facts in rows.items() if key.startswith("invocation:")])
+
+
+def _cascade_members(txn, target):
+    """Follow only persisted parent edges, including bridges whose tasks have finished."""
+    return {row[0] for row in txn.conn.execute(
+        "WITH RECURSIVE branch(id) AS (VALUES (?) UNION SELECT t.task_id FROM branch "
+        "JOIN tasks AS t INDEXED BY tasks_parent ON t.parent_task_id=branch.id) SELECT id FROM branch", (target,))}
+
+
+def _cascade_requests(txn, target, members):
+    from ouroboros.store_hot_facts import VERSION, own_document, tree_requests
+
+    if int(txn.meta("schema_version") or VERSION) >= VERSION:
+        tree, role = txn.row(target, "root_task_id", "delegation_role") or (None, None)
+        if not tree or (tree == target and role != "root"):
+            # The derived root defaults to the task itself. An old helper that never
+            # stated a root can still own a request indexed under its actual tree.
+            document, _ = own_document(target, txn.body_text(target))
+            if document:
+                meta = document.get("metadata")
+                tree = document.get("root_task_id") or (meta.get("root_task_id") if isinstance(meta, dict) else None)
+            else:
+                tree = None
+        if isinstance(tree, str) and tree:
+            # A request without a stated root is indexed by its owner. The empty
+            # bucket includes damaged requests whose owner cannot be read.
+            for _, _, facts in tree_requests(txn, tree, "", *members):
+                yield facts
+            return
+    # Without a tree index or lineage, only the open requests themselves can
+    # answer. Never infer absence from an unreadable or missing task result.
+    for row in txn.conn.execute(
+        "SELECT facts FROM obligations WHERE set_name='custody_open' AND "
+        "CASE WHEN json_valid(facts) THEN json_type(facts, '$.resume_decisions')='object' ELSE 1 END"
+    ):
+        yield json_loads(row[0])
+
+
+def _cascade_runs(txn, target, members):
+    owners = "task_id IN (SELECT value FROM json_each(?))"
+    where, params = _selected(txn,
+        f"run_id IN (SELECT run_id FROM custody_runs INDEXED BY custody_task WHERE {owners} AND state='held' "
+        "UNION ALL SELECT run_id FROM custody_runs INDEXED BY custody_root WHERE root_task_id=? AND state='held')",
+        "unlikely(state='held') AND CASE WHEN json_valid(facts) THEN "
+        f"{owners} OR json_extract(facts, '$.root_task_id')=? ELSE 1 END",
+        (json_dumps(sorted(members)), target))
+    query = f"SELECT facts FROM custody_runs WHERE ({where}) AND {_MAYBE_OPEN} ORDER BY run_id"
+    for row in txn.conn.execute(query, params):
+        facts = json_loads(row[0])
+        if not facts.get("settled") and (facts.get("task_id") in members or facts.get("root_task_id") == target):
+            yield facts
+
+
+def cascade_open_runs(root, target):
+    if not target:
+        return []
+    with store.open_store(root, write=False) as txn:
+        rows = list(_cascade_runs(txn, target, _cascade_members(txn, target)))
+    return [_decode(facts) for facts in rows]
+
+
+def cascade_work_open(root, target):
+    """One snapshot across pending → STARTED, for both Stop admission and its physical postcondition."""
+    if not target:
+        return False
+    with store.open_store(root, write=False) as txn:
+        members = _cascade_members(txn, target)
+        if next(_cascade_runs(txn, target, members), None) is not None:
+            return True
+        for facts in _cascade_requests(txn, target, members):
+            decisions = facts.get("resume_decisions")
+            if isinstance(decisions, dict) and decisions:
+                request = facts.get("request")
+                if not isinstance(request, dict) or not (request.get("task_id") or request.get("root_task_id")):
+                    raise ValueError("accepted delegated start has no task or tree")
+                if request.get("task_id") in members or request.get("root_task_id") == target:
+                    return True
+        return False
+
+
+def tree_unbound_starts(root, tree: str) -> list:
+    """The ordinary, still unbound starts of this tree, from the same open set that STARTED removes them from."""
+    from ouroboros.delegate_registration_policy import review_owned_source
+    from ouroboros.store_hot_facts import tree_requests
+
+    with store.open_store(root, write=False) as txn:
+        rows = tree_requests(txn, tree)
+    return sorted({str(row["invocation_id"]) for _, key, facts in rows if key.startswith("invocation:")
+                   and (row := facts["request"]).get("invocation_id") and not review_owned_source(row.get("source"))})
 
 
 def task_snapshot(root, task_id: str = "", *, root_task_id: str = "", wait_sec=store.STORE_WAIT_SEC):
@@ -433,6 +565,10 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
         if (txn.get_row("custody_open", key) is None and txn.get_row("custody_refused", iid) is None
                 and not inv.bound_runs(txn, iid)):  # a replayed request of an answered invocation re-opens nothing
             txn.put_row("custody_open", key, {"request": event, **({"pending": pending} if pending is not None else {})})
+    elif kind == c.START_RISK_ACCEPTED:
+        key = f"invocation:{iid}"
+        if (opened := txn.get_row("custody_open", key)) is not None:
+            txn.put_row("custody_open", key, {**opened, **inv.decision_facts(invocation_row)})
     before = {run_id: deepcopy(vars(entry)) for run_id, entry in state.items()}
     c._apply(state, event)
     if kind == c.STARTED and rid in state:
@@ -462,10 +598,14 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
                 txn.put_row("delegated_runs", entry.task_id, {**debt, "task_id": entry.task_id, "closed_runs": receipts})
             if run_id == late:
                 owed = entry.task_id
-    if iid and (kind == c.STARTED or (kind == c.START_FAILED and event.get("definite") is True)):
+    if iid and (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and event.get("definite") is True)):
         request = txn.get_row("custody_open", f"invocation:{iid}")
         txn.delete_row("custody_open", f"invocation:{iid}")
-        if kind == c.START_FAILED and request is not None:
+        if kind == c.START_FAILED and request is None:
+            previous = txn.get_row("custody_refused", iid) or {}
+            if (previous.get("failure") or {}).get("type") == c.START_UNSENT:
+                request = previous  # cleanup now has a result; keep the original requested envelope
+        if kind != c.STARTED and request is not None:
             txn.put_row("custody_refused", iid, {"request": request["request"], "failure": event})
     if tid and (kind in MARK_TYPES or (not rid and kind in (_NUDGE, *_ATTEMPTS))):
         mark = marks_by_task.setdefault(tid, txn.get_row("custody_marks", tid) or {"task_id": tid})
@@ -486,7 +626,7 @@ def _cost_targets(event, state, invocation_row):
     """Custody-only changes owe own/root cost refresh, even without a money row."""
     from ouroboros import delegate_custody as c
 
-    if event.get("type") not in (c.START_REQUESTED, c.STARTED, c.START_FAILED, c.TERMINAL_OBSERVED,
+    if event.get("type") not in (c.START_REQUESTED, c.STARTED, c.START_FAILED, c.START_UNSENT, c.TERMINAL_OBSERVED,
                                  c.LEDGER_RECORDED, c.SETTLED, c.CLOSED_ABSENT):
         return set()
     entry = state.get(str(event.get("run_id") or ""))
@@ -544,19 +684,45 @@ def publish(root, event: Dict[str, Any], *, propagate_contention: bool = False) 
     A failed append keeps the outbox for the next flush, so the chain never leads the store.
     Transaction/append ordering: module docstring."""
     from ouroboros import delegate_invocation as inv
+    from ouroboros.delegate_resume import ACTIVE, can_reserve_cancel, hold_active_start, owe_risk_notice, publication_lock, still_pending
 
-    owed = ""
-    from ouroboros.delegate_custody import START_REQUESTED
+    owed = changed_tree = ""
+    from ouroboros.delegate_custody import (CANCEL_HANDOFF, CLOSED_ABSENT, SETTLED, START_REQUESTED,
+                                            START_RISK_ACCEPTED, START_STATE_OBSERVED, TERMINAL_STATES)
     from ouroboros.delegate_pending import pending_invocations
     # Keep the canonical reference, never a replay-authorizing copy of its body.
     pending = pending_invocations(root, [event], materialize=False) if event.get("type") == START_REQUESTED else None
     try:
         while True:
-            with store.open_store(root, write=True) as txn:
+            with publication_lock(root, event), store.open_store(root, write=True) as txn:
                 if int(txn.meta("schema_version") or 1) >= store.SCHEMA_VERSION:
                     if not event.get("event_id") or txn.get_row(inv.EVENTS, str(event["event_id"])) is None:
+                        if event["type"] == START_RISK_ACCEPTED and not still_pending(txn, event):
+                            return False
                         event = {**event, "custody_ordinal": int(txn.meta(inv.ORDINAL) or 0) + 1}
-                        owed = _reduce(txn, event, _loaded(txn, event), {}, pending)
+                        loaded = _loaded(txn, event)
+                        entry = loaded.get(event.get("run_id"))
+                        if event["type"] == CANCEL_HANDOFF and (
+                                not entry or entry.task_id != event["task_id"] or entry.invocation_id != event["invocation_id"]
+                                or entry.settled or entry.terminal_state or entry.resume_start_state in TERMINAL_STATES
+                                or entry.resume_start_state is None or entry.daemon_store_id != event["daemon_store_id"]
+                                or not can_reserve_cancel(entry, event)):
+                            return False
+                        if (event.get("resume_start_state") and entry and
+                                (entry.task_id != event.get("task_id") or entry.invocation_id != event.get("invocation_id"))):
+                            return False
+                        if event["type"] == START_STATE_OBSERVED:
+                            if not entry or entry.resume_start_state is None:
+                                return False
+                            if entry.settled or entry.terminal_state or entry.resume_start_state != "unknown":
+                                return True  # A previous observer won. Its committed observation is authoritative.
+                        if (event["type"] in (SETTLED, CLOSED_ABSENT) and entry and entry.resume_start_state in ACTIVE):
+                            changed_tree = entry.root_task_id or entry.task_id
+                        owed = _reduce(txn, event, loaded, {}, pending)
+                        if event["type"] == START_RISK_ACCEPTED:
+                            owe_risk_notice(txn, event)
+                        if event.get("resume_start_state") in ACTIVE:
+                            changed_tree = hold_active_start(txn, event)
                         txn.outbox_put(event)
                     break
             # Prepare an old child before reducing anything, like store.update_task.
@@ -571,6 +737,9 @@ def publish(root, event: Dict[str, Any], *, propagate_contention: bool = False) 
         return False
     with _HELD_LOCK:
         _LOCAL_WRITES[0] += 1
+    if changed_tree:
+        from ouroboros.delegate_resume import recovered_writer_changed
+        recovered_writer_changed(root, changed_tree)
     flush_outbox(root)
     if owed:
         _refresh_owed_receipt(root, owed)
@@ -722,7 +891,7 @@ def fold(rows) -> Dict[str, Any]:
         if kind == c.START_REQUESTED:
             key = inv.operation_key(str(row.get("operation_id") or ""), str(row.get("slot_id") or ""))
             operations.setdefault(key, {"invocation_id": iid, "request_ordinal": ordinal})
-        if iid and kind in (c.START_REQUESTED, c.STARTED, c.START_FAILED):
+        if iid and kind in (c.START_REQUESTED, c.STARTED, c.START_UNSENT, c.START_FAILED, c.START_RISK_ACCEPTED):
             invocations[iid] = inv.advance(invocations.get(iid), row, ordinal)
         if kind == c.START_REQUESTED and iid and iid not in requests:
             requests[iid] = row
@@ -734,11 +903,13 @@ def fold(rows) -> Dict[str, Any]:
             state[rid].request_event = dict(requests[iid])
             group = requests[iid].get("billing_group")
             state[rid].billing_group = dict(group) if isinstance(group, dict) else {}
-        if iid and iid in requests and (kind == c.STARTED or (kind == c.START_FAILED and row.get("definite") is True)):
+        if iid and iid in requests and (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and row.get("definite") is True)):
             if iid in pending_ids:
                 pending_ids.remove(iid)
-                if kind == c.START_FAILED:
+                if kind != c.STARTED:
                     refused[iid] = {"request": requests[iid], "failure": row}
+            elif kind == c.START_FAILED and ((refused.get(iid) or {}).get("failure") or {}).get("type") == c.START_UNSENT:
+                refused[iid]["failure"] = row
         if tid and (kind in MARK_TYPES or (not rid and kind in (_NUDGE, *_ATTEMPTS))):
             _mark(marks_by_task.setdefault(tid, {"task_id": tid}), row)
         for target in _cost_targets(row, state, invocations.get(iid)):
@@ -752,7 +923,8 @@ def fold(rows) -> Dict[str, Any]:
                        (requests[iid].get("task_id"), requests[iid].get("root_task_id")))
     return {
         "runs": {rid: (vars(entry), HELD if _held(entry) else CLOSED) for rid, entry in state.items()},
-        "open": {f"invocation:{iid}": {"request": requests[iid]} for iid in pending_ids},
+        "open": {f"invocation:{iid}": {"request": requests[iid], **inv.decision_facts(invocations[iid])}
+                 for iid in pending_ids},
         "refused": refused,
         "marks": {tid: mark for tid, mark in marks_by_task.items() if set(mark) - {"task_id"}},
         "invocations": invocations, "operations": operations, "event_ordinals": event_ordinals,
@@ -788,6 +960,9 @@ def write_fold(txn, folded: Dict[str, Any], *, replace: bool) -> None:
     for key in set(held) - set(merged):
         txn.delete_row("custody_open", key)
     for key, facts in merged.items():
+        if key.startswith("invocation:") and key in folded["open"]:
+            # A cached request body survives a non-replacing import alongside its replayed decisions.
+            facts = {**facts, **inv.decision_facts(folded["open"][key])}
         if held.get(key) != facts:
             txn.put_row("custody_open", key, facts)
     if any(key.startswith("invocation:") and "pending" not in facts for key, facts in merged.items()):

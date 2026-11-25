@@ -6,7 +6,8 @@ import pytest
 from ouroboros import subagent_worktrees as trees
 from ouroboros.workspace_copies import same_directory, source_is_system_repo, copy_apply_refusal
 from ouroboros.tools.subagent_integration import _integrate_subagent_patch
-from tests.test_isolated_project_copies import case as copy_case, admit, capture, parent_context, git, repo
+from tests._isolated_copy_shared import admit, case as copy_case, parent_context
+from tests._workspace_git import git, publish_capture, seeded_repository as repo
 
 
 def late_native_case(case, *, original=False, run_id="late-run"):
@@ -23,12 +24,21 @@ def late_native_case(case, *, original=False, run_id="late-run"):
     return folder, task, late_run(case, folder, run_id)
 
 
-def late_run(case, folder, run_id, path="late.txt", *, task_id="native", parent_id="parent", explicit_selection=False):
+def late_run(case, folder, run_id, path="late.txt", *, task_id="native", parent_id="parent", explicit_selection=False,
+             evidence=False, capture=True, snapshot_id=None):
     from ouroboros import delegate_custody as custody
     from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
     data = case[2]
-    handle = trees.provision_execution_snapshot(target_root=folder, task_id=task_id, snapshot_id=run_id)
-    (Path(handle.path) / path).write_bytes(b"late delegated edit\n")
+    handle = trees.provision_execution_snapshot(target_root=folder, task_id=task_id, snapshot_id=snapshot_id or run_id)
+    if path is not None:
+        (Path(handle.path) / path).write_bytes(b"late delegated edit\n")
+    if evidence:
+        from ouroboros.review_checking import EVIDENCE_DIRNAME
+        report = Path(handle.path) / EVIDENCE_DIRNAME / "report.txt"
+        report.parent.mkdir()
+        report.write_bytes(b"independent evidence\n")
+        # A nested repository cannot enter the capture and legitimately keeps the source copy.
+        repo(Path(handle.path) / "vendor" / "kept", {"input.txt": b"retained input\n"})
     if explicit_selection:
         git(handle.path, "add", "-f", path)  # explicit selection by this fixture's original leaf author
     entry = custody.RunCustody(run_id=run_id, task_id=task_id, route_id="fake",
@@ -38,7 +48,8 @@ def late_run(case, folder, run_id, path="late.txt", *, task_id="native", parent_
     assert custody.record_started(data, entry)
     assert custody.emit(data, custody.SETTLED, {"run_id": run_id, "task_id": task_id})
     entry = custody.replay(data)[run_id]
-    assert capture_terminal_patch_for_drive(data, entry)["status"] == "ready_with_changes"
+    if capture:
+        assert capture_terminal_patch_for_drive(data, entry)["status"] == "ready_with_changes"
     return entry
 
 
@@ -77,6 +88,187 @@ def finish_native(case, task, status="completed"):
 
     write_task_result(Path(task.get("child_drive_root") or case[2]), "native", status, result="child finished")
     return headless.prepare_terminal_task_files(case[2], task)
+
+
+@pytest.mark.parametrize("decision", ["apply", "reject"])
+@pytest.mark.parametrize("evidence_state", ["saved", "changed", "uncaptured"])
+def test_native_disposition_retains_named_evidence_under_custody(case, monkeypatch, decision, evidence_state):
+    from ouroboros import delegate_custody_current as current, headless
+    from ouroboros.delegate_named_evidence import saved_named_evidence
+    from ouroboros.review_checking import EVIDENCE_DIRNAME
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.subagent_integration import _integrate_delegated_patch
+    from ouroboros.tools import subagent_integration_delegated as integration
+
+    folder, task = admit(case, "native", "parent")
+    write_task_result(case[2], "native", "completed", **{k: v for k, v in task.items() if k != "id"})
+    headless.finalize_task_artifacts(case[2], task)
+    entry = late_run(case, folder, "evidence-run", evidence=True, capture=evidence_state != "uncaptured")
+    source = Path(entry.execution_root)
+    assert source.is_dir()
+    old_path, old = saved_named_evidence(case[2], entry)
+    assert old.get("status") == (None if evidence_state == "uncaptured" else "retained")
+    expected = b"changed evidence\n" if evidence_state == "changed" else b"independent evidence\n"
+    if evidence_state == "changed":
+        (source / EVIDENCE_DIRNAME / "report.txt").write_bytes(expected)
+    retain = integration.run_named_evidence
+    calls = []
+
+    def observe(*args, **kwargs):
+        calls.append(kwargs["custody_held"])
+        return retain(*args, **kwargs)
+
+    monkeypatch.setattr(integration, "run_named_evidence", observe)
+    out = _integrate_delegated_patch(parent_context(case, task_id="orphan-disposer"), entry.run_id,
+                                     decision=decision, reason="consume checked capture")
+    assert calls == [(case[2], "native")]
+    if evidence_state == "uncaptured" and decision == "apply":
+        assert "INTEGRATE_DELEGATED_INSPECT_CAPTURE" in out and not (folder / "late.txt").exists(), out
+        out = _integrate_delegated_patch(parent_context(case, task_id="orphan-disposer"), entry.run_id,
+                                         decision=decision, reason="inspected new capture")
+    assert ("✅ Integrated" if decision == "apply" else "Rejected") in out, out
+    assert "snapshot cleanup deferred" in out and "private copy and pins are released" not in out
+    fresh = current.run(case[2], entry.run_id)
+    path, retained = saved_named_evidence(case[2], fresh)
+    assert retained["status"] == "retained"
+    assert (path.parent / "files" / EVIDENCE_DIRNAME / "report.txt").read_bytes() == expected
+    assert (path != old_path) == (evidence_state == "changed")
+    assert fresh.patch_disposed == ("applied" if decision == "apply" else "rejected")
+    assert (folder / "late.txt").exists() == (decision == "apply")
+    row = load_task_result(case[2], "native")
+    assert not row.get("native_capture_pending"), row
+    # Cleanup runs later, outside native custody, and still honors the owner's Keep.
+    write_task_result(case[2], "native", "completed", owner_keep={"at": "now", "scope": "task"})
+    assert not trees.remove_execution_snapshot(entry.snapshot_id)
+    assert source.is_dir()
+    write_task_result(case[2], "native", "completed", owner_keep=None)
+    assert trees.remove_execution_snapshot(entry.snapshot_id)
+    assert not source.exists() and (path.parent / "files" / EVIDENCE_DIRNAME / "report.txt").read_bytes() == expected
+    if decision == "apply":
+        result = _integrate_subagent_patch(parent_context(case), task_id="native")
+        assert "✅ Integrated" in result and (case[1] / "late.txt").read_bytes() == b"late delegated edit\n", result
+
+
+def empty_native_run(case, *, recovered, guard=None):
+    """A terminal run, optionally interrupted after saving its manifest but before retention."""
+    from ouroboros import delegate_custody as custody, delegate_custody_current as current
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
+
+    folder, task = admit(case, "native", "parent")
+    write_task_result(case[2], "native", "completed", **{k: v for k, v in task.items() if k != "id"})
+    entry = late_run(case, folder, "run 42", path=None, capture=False, snapshot_id="empty-fixture")
+    if guard == "unsaved_paths":
+        repo(Path(entry.execution_root) / "vendor" / "kept", {"input.txt": b"unsaved work\n"})
+    elif guard == "head_moved":
+        git(entry.execution_root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--allow-empty", "-qm", "empty leaf commit")
+    manifest = custody.delegated_capture_dir(case[2], entry.task_id, custody.capture_key(entry)) / "workspace_patch.json"
+    if recovered:
+        block = capture_terminal_patch_for_drive(case[2], entry, retain_investigation=False)
+        assert block["status"] == "ready_no_changes" and not block.get("disposition")
+        assert not guard or block.get(guard), block
+        entry = current.run(case[2], entry.run_id)
+        assert manifest.is_file() and entry.patch_captured and not entry.patch_disposed
+    return folder, task, entry, manifest
+
+
+@pytest.fixture
+def disposition_tool(case, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **kw: (True, ""))
+    def call(run_id, decision, *, starter=None):
+        ctx = (parent_context(case, task_id="native", source=starter[0], task=starter[1]) if starter else
+               parent_context(case, task_id="orphan-disposer"))
+        registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+        registry.set_context(ctx)
+        return registry.execute_result("integrate_delegated_patch", {"run_id": run_id, "decision": decision, "paths": []})
+
+    return call
+
+
+def disposition_trace(result):
+    from ouroboros.loop_tool_execution import _typed_execution_failure, _typed_result_metadata
+
+    tool = "integrate_delegated_patch"
+    error = _typed_execution_failure(True, result)
+    return {"tool_calls": [{"tool": tool, "is_error": error, **_typed_result_metadata(tool, result.text, error, result)}]}
+
+
+@pytest.mark.parametrize("decision", ["apply", "reject"])
+@pytest.mark.parametrize("recovered,guard", [(False, None), (True, None), (True, "unsaved_paths"), (True, "head_moved")],
+                         ids=["fresh", "recovered", "unsaved", "moved-head"])
+def test_native_empty_disposition_keeps_custody_separate_from_target_effect(case, monkeypatch, disposition_tool,
+                                                                         decision, recovered, guard):
+    from ouroboros import delegate_custody as custody, delegate_custody_current as current, headless
+    from ouroboros._outcome_tool_errors import _classify_tool_errors
+    from ouroboros.outcomes import reviewable_effect_projection
+
+    folder, task, entry, _ = empty_native_run(case, recovered=recovered, guard=guard)
+    before = git(folder, "status", "--porcelain"), (folder / "a.txt").read_bytes()
+    refresh = headless.refresh_native_capture
+    monkeypatch.setattr(headless, "refresh_native_capture", lambda *a, **kw: refresh(*a, **kw) or "Native note.")
+    result = disposition_tool(entry.run_id, decision)
+    expected = ("applied" if decision == "apply" else "rejected") if guard else custody.NO_CHANGES
+    assert current.run(case[2], entry.run_id).patch_disposed == expected, result
+    assert ("closed as no_changes" in result.text) == (not guard)
+    assert "paths=[]" in result.text and result.text.endswith("\nNative note.")
+    if not guard:
+        replay = disposition_tool(entry.run_id, decision, starter=(folder, task))
+        assert "so it closed itself (no_changes)" in replay.text, replay
+        assert [row["disposition"] for row in custody.custody_rows(case[2])
+                if row["type"] == custody.PATCH_DISPOSED and row["run_id"] == entry.run_id] == [expected]
+    for output in (result,) if guard else (result, replay):
+        assert output.status == "ok" and output.meta["target_files_changed"] is False, output
+        assert output.meta.get("operation_outcome") != "completed_no_effect"
+        trace = disposition_trace(output)
+        assert reviewable_effect_projection(trace) == [] and not any(_classify_tool_errors(trace).values())
+    assert (git(folder, "status", "--porcelain"), (folder / "a.txt").read_bytes()) == before
+    assert Path(entry.execution_root).is_dir()  # retirement stays outside native custody
+
+
+@pytest.mark.parametrize("decision", ["apply", "reject"])
+@pytest.mark.parametrize("recovered,fault", [(False, "row"), (True, "row"), (True, "evidence")], ids=[
+    "fresh-row-refused", "recovered-row-refused", "recovered-evidence-write",
+])
+def test_native_empty_capture_failure_leaves_a_retriable_disposition(case, monkeypatch, disposition_tool,
+                                                                     decision, recovered, fault):
+    from ouroboros import delegate_custody as custody, delegate_custody_current as current, delegate_named_evidence as named
+    from ouroboros.outcomes import reviewable_effect_projection
+
+    folder, _, entry, manifest = empty_native_run(case, recovered=recovered)
+    saved = manifest.read_bytes() if recovered else None
+    source = Path(entry.execution_root)
+    attempted = []
+    emit = custody.emit
+
+    def record(drive, kind, payload, **kwargs):
+        if kind == custody.PATCH_DISPOSED and payload["run_id"] == entry.run_id:
+            attempted.append(payload["disposition"])
+            if fault == "row" and len(attempted) == 1:
+                return False  # record_patch_disposed changes its in-memory object only after its row lands
+        return emit(drive, kind, payload, **kwargs)
+
+    monkeypatch.setattr(custody, "emit", record)
+    with monkeypatch.context() as failing:
+        if fault == "evidence":
+            def refuse(*_args, **_kwargs):
+                raise OSError("fixture evidence summary could not be written")
+            failing.setattr(named, "atomic_write_json", refuse)
+        failed = disposition_tool(entry.run_id, decision)
+    assert not reviewable_effect_projection(disposition_trace(failed))
+    if fault == "row":
+        assert "INTEGRATE_DISPOSITION_UNWRITTEN" in failed.text and failed.status != "ok", failed
+        assert "read back the durable disposition" in failed.text and attempted == [custody.NO_CHANGES]
+    else:
+        assert "INTEGRATE_DELEGATED_EVIDENCE_UNRETAINED" in failed.text and failed.code == "INTEGRATION_BLOCKED", failed
+        assert "fixture evidence summary could not be written" in failed.text and not attempted
+    assert not current.run(case[2], entry.run_id).patch_disposed and source.is_dir()
+    assert not recovered or manifest.read_bytes() == saved
+    assert git(folder, "status", "--porcelain") == b""
+    assert disposition_tool(entry.run_id, decision).status == "ok"  # a new call rereads the durable row
+    assert current.run(case[2], entry.run_id).patch_disposed == custody.NO_CHANGES
 
 
 @pytest.mark.parametrize("decision", ["apply", "reject"])
@@ -237,12 +429,11 @@ def test_native_decision_binds_consumed_capture_during_orphan_apply(case, monkey
 
 def assert_current_consumers(case, task, expected_status, *, expected_path="", old_bytes=()):
     import json
-    from types import SimpleNamespace
     from ouroboros import cli, copy_capture_proof, headless, owner_stop_receipt
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.control_task_results import _get_task_result
     from ouroboros.tools.subagent_integration import _compare_subagent_patches
-    from tests.test_owner_stop_retained_work import _client
+    from tests._task_file_http import task_file_client, use_cli_http
     ctx = parent_context(case)
     data = case[2]
     row = load_task_result(data, "native")
@@ -252,21 +443,18 @@ def assert_current_consumers(case, task, expected_status, *, expected_path="", o
     assert view["artifact_facts"]["status"] == expected_status, view
     comparison = _compare_subagent_patches(ctx, ["native"])
     assert f"patch status: {expected_status}" in comparison, comparison
-    with _client(data) as client:
+    with task_file_client(data) as client, pytest.MonkeyPatch.context() as monkeypatch:
+        reader, _ = use_cli_http(monkeypatch, client)
         response = client.get("/api/tasks/native")
         assert response.status_code == 200, response.text
         public = response.json()
         assert public["artifact_status"] == public["artifact_bundle"]["status"] == expected_status
         assert public["status"] == row["status"]
-        def get_bytes(path):
-            answer = client.get(path)
-            assert answer.status_code == 200, answer.text
-            return answer.content
         if expected_status == "failed":
             with pytest.raises(cli.PatchCLIError):
-                cli._patch_from_result(SimpleNamespace(get_bytes=get_bytes), "native", public, strict=False)
+                cli._patch_from_result(reader, "native", public, strict=False)
         else:
-            assert expected_path in cli._patch_from_result(SimpleNamespace(get_bytes=get_bytes), "native", public, strict=True)
+            assert expected_path in cli._patch_from_result(reader, "native", public, strict=True)
             assert expected_path in comparison
         for path, content in dict(old_bytes).items():
             relpath = Path(path).relative_to(headless.task_artifacts_dir(data, "native")).as_posix()
@@ -1079,7 +1267,7 @@ def test_clean_copies_synthesize_disjoint_hunks_on_same_file(case, commit_first)
     assert ta["workspace_copy"]["source_index_clean"]
     assert ta["workspace_copy"]["baseline_sha"] == ta["workspace_copy"]["target_head"]
     edit_line(a, "line 2", "A"); edit_line(b, "line 25", "B")
-    capture(case, a, ta); capture(case, b, tb)
+    publish_capture(case[2], ta); publish_capture(case[2], tb)
     ctx = parent_context(case)
     assert "✅ Integrated" in _integrate_subagent_patch(ctx, task_id="a")
     if commit_first:
@@ -1094,7 +1282,7 @@ def test_clean_copies_real_conflict_retains_both_results(case):
     seed_lines(case[1])
     a, ta = admit(case, "a", "parent"); b, tb = admit(case, "b", "parent")
     edit_line(a, "line 2", "A"); edit_line(b, "line 2", "B")
-    capture(case, a, ta); artifacts, _ = capture(case, b, tb)
+    publish_capture(case[2], ta); artifacts, _ = publish_capture(case[2], tb)
     ctx = parent_context(case)
     assert "✅ Integrated" in _integrate_subagent_patch(ctx, task_id="a")
     out = _integrate_subagent_patch(ctx, task_id="b")
@@ -1110,7 +1298,7 @@ def test_index_dirty_worktree_matches_head_keeps_current_tree_apply(case):
     a, ta = admit(case, "a", "parent")
     assert ta["workspace_copy"]["baseline_sha"] == ta["workspace_copy"]["target_head"]
     assert ta["workspace_copy"]["source_index_clean"] is False
-    (a / "a.txt").write_bytes(b"base\nchild\n"); capture(case, a, ta)
+    (a / "a.txt").write_bytes(b"base\nchild\n"); publish_capture(case[2], ta)
     out = _integrate_subagent_patch(parent_context(case), task_id="a")
     assert "✅ Integrated" in out, out
     assert (source / "a.txt").read_bytes() == b"base\nchild\n"
@@ -1132,7 +1320,7 @@ def test_parent_returns_named_source_under_existing_write_rights(case, monkeypat
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(runtime))
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(case[1].parent))
     child, task = admit(case, "child", "parent")
-    (child / "BIBLE.md").write_bytes(b"foreign project docs\n"); capture(case, child, task)
+    (child / "BIBLE.md").write_bytes(b"foreign project docs\n"); publish_capture(case[2], task)
     ctx = parent_context(case)
     if parent_focus in {"main", "room"}:
         ctx.workspace_root = None; ctx.workspace_mode = ""; ctx.is_direct_chat = True
@@ -1169,7 +1357,7 @@ def test_named_source_never_mints_parent_write_authority(case, monkeypatch, rest
         assert copy_apply_refusal(ctx, case[1], ["a.txt"]) == ""
         assert "VCS control directory" in copy_apply_refusal(ctx, case[1], [".git/config"])
         return
-    capture(case, child, task)
+    publish_capture(case[2], task)
     ctx = parent_context(case, source=case[0])
     if restriction in {"readonly", "acting"}:
         ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent" if restriction == "readonly" else "acting_subagent",
@@ -1186,7 +1374,7 @@ def test_named_source_never_mints_parent_write_authority(case, monkeypatch, rest
 def test_actual_body_policy_survives_false_child_label(case, monkeypatch):
     child, task = admit(case, "child", "parent", case[0])
     task["workspace_copy"]["source_is_system_repo"] = False
-    (child / "system.txt").write_bytes(b"body change\n"); capture(case, child, task)
+    (child / "system.txt").write_bytes(b"body change\n"); publish_capture(case[2], task)
     ctx = parent_context(case)  # parent is focused on the foreign project
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     out = _integrate_subagent_patch(ctx, task_id="child")
@@ -1200,7 +1388,7 @@ def test_apply_rechecks_presence_after_lock(case, monkeypatch):
     from tests.frozen_presence_authority import build_presence_capability_ceiling
     from tests.test_presence_authority import _resolution
     child, task = admit(case, "child", "parent")
-    (child / "a.txt").write_bytes(b"child\n"); capture(case, child, task)
+    (child / "a.txt").write_bytes(b"child\n"); publish_capture(case[2], task)
     ctx = parent_context(case)
     lock = git_tools._acquire_git_lock
     def acquire(*args, **kwargs):
@@ -1239,3 +1427,43 @@ def test_real_schedule_supervisor_stamps_copy_metadata(case, monkeypatch):
     assert binding == load_task_result(case[2], task["id"])["workspace_copy"]
     assert task["task_contract"]["workspace"]["root"] == task["workspace_root"]
     assert (Path(task["workspace_root"]) / "a.txt").read_bytes() == b"uncommitted source\n"
+
+
+@pytest.mark.parametrize(("mode", "grant", "capped", "admitted"), [
+    ("advanced", True, False, False), ("pro", False, False, False), ("pro", True, False, True),
+    # Owner decision 6A (21.11.2026): Cyber Pro needs no grant, as at the dispatcher; the light cap still binds.
+    ("cyber_pro", False, False, True), ("cyber_pro", False, True, False),
+])
+def test_the_copy_door_reads_the_dispatchers_protected_rule(tmp_path, monkeypatch, mode, grant, capped, admitted):
+    """The third integration door (an isolated copy's result into the Ouroboros body) asks the same
+    ``protected_write_admitted`` as the dispatcher and the two patch doors, refuses in their words (the mode
+    that refuses, or the applying task's missing grant), and keeps ordinary paths admitted."""
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.workspace_copies import protected_write_admitted
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    body = tmp_path / "body"
+    (body / "ouroboros").mkdir(parents=True)
+    drive = tmp_path / "data"
+    drive.mkdir()
+    ctx = ToolContext(repo_dir=body, drive_root=drive, system_repo_dir=body, task_id="acting",
+                      workspace_root=body, workspace_mode="self_worktree",
+                      task_metadata={"initiator": "consciousness", "consciousness_autonomy": "act",
+                                     "runtime_mode_cap": "light"} if capped else {},
+                      task_constraint=TaskConstraint(mode="acting_subagent", surface="self_worktree",
+                                                     write_root=str(body), protected_paths_grant=grant))
+    refusal = copy_apply_refusal(ctx, body, ["ouroboros/safety.py"])
+    assert (refusal == "") is admitted, refusal
+    if not admitted:
+        assert refusal.startswith("LIGHT_MODE_BLOCKED" if capped else "CORE_PROTECTION_BLOCKED"), refusal
+    if not admitted and not capped:
+        assert "ouroboros/safety.py" in refusal and f"runtime_mode={mode!r}" in refusal, refusal
+        # Pro without the grant names the grant; a mode that refuses names the mode to switch to.
+        assert ("protected_paths_grant" in refusal) is (mode == "pro"), refusal
+        assert ("Switch to runtime_mode" in refusal) is (mode != "pro"), refusal
+    if not capped:
+        assert copy_apply_refusal(ctx, body, ["README.md"]) == ""
+    effective = "light" if capped else mode
+    assert protected_write_admitted(effective, acting=True, grant=grant) is admitted
+    assert protected_write_admitted(effective, acting=False, grant=False) is (effective in ("pro", "cyber_pro"))

@@ -589,24 +589,41 @@ def test_retry_refuses_typed_when_the_stored_prompt_diverges(tmp_path, fake_rout
                               root="/tmp/other-repo")
 
 
-def test_definite_refusal_retires_the_registration_it_orphaned(tmp_path, fake_route):
-    """A DEFINITE 4xx proves no run bound this registration, so the project this
-    start created is retired. Only then: an unknown outcome must never destroy state
-    a live run may still be using."""
+@pytest.mark.parametrize("stage", ["launch_fence", "answered_400"])
+def test_only_a_start_that_never_entered_its_post_retires_the_registration_it_orphaned(tmp_path, fake_route,
+                                                                                    monkeypatch, stage):
+    """A start the launch fence refused before its POST provably bound no run, so the project it created is
+    retired and its token dies. An engine 400 answering an entered POST is no such proof (#3138: an accepted
+    command can answer its own start with a 4xx): the registration and the token stay, the outcome unknown."""
+    from ouroboros import review_execution
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.owner_pause import OwnerPauseRefused
+    from ouroboros.review_execution import ReviewRouteUnavailable
 
     # This start registers the project itself (nothing pre-existing to reuse).
     fake_route.project_unregistered = True
-    fake_route.start_error = ClaudexorUnavailable("bad_request", "nope", status_code=400)
+    if stage == "launch_fence":
+        def fenced(*_args, **_kwargs):
+            raise OwnerPauseRefused("owner_pause_fenced")
+        monkeypatch.setattr(review_execution, "run_operation", fenced)
+    else:
+        fake_route.start_error = ClaudexorUnavailable("bad_request", "nope", status_code=400)
     state: dict = {}
-    with pytest.raises(ClaudexorUnavailable):
+    with pytest.raises((ClaudexorUnavailable, ReviewRouteUnavailable)):
         _run_session_directly(tmp_path, retry_state=state)
 
     gateway = fake_route.instances[-1]
     assert gateway.registrations == ["/tmp/fake-repo"]
-    assert gateway.removals == ["proj-new"], gateway.removals
-    # A definitely refused invocation is retired, never replayed.
-    assert "pending_invocation_id" not in state
+    [token] = [row["invocation_id"] for row in custody.custody_rows(tmp_path) if row["type"] == custody.START_REQUESTED]
+    fate = custody.invocation_record(tmp_path, token)["state"]
+    if stage == "launch_fence":  # a definitely unsent invocation is retired, never replayed
+        assert (gateway.removals, fate, "pending_invocation_id" in state) == (["proj-new"], "failed_definite", False)
+        assert gateway.start_requests == []
+    else:
+        assert (gateway.removals, fate, state.get("pending_invocation_id")) == ([], "pending", token)
+        failed = [r for r in custody.custody_rows(tmp_path) if r.get("type") == custody.START_FAILED]
+        assert [(r["definite"], r["project_retention_reason"]) for r in failed] == [
+            (False, "start_outcome_unknown_run_may_exist")]
 
 
 @pytest.mark.parametrize("code,status", [("daemon_unreachable", 0), ("daemon_busy", 503),
@@ -1025,3 +1042,315 @@ def test_a_started_run_blind_to_its_deadline_stays_in_flight_through_the_real_su
     assert ctx._review_pending_invocations[key]["pending_invocation_id"] == worker.usage["pending_invocation_id"]
     assert key not in (getattr(ctx, "_review_settled_attempts", None) or {}), \
         "an unobserved live run is not a replayable settled verdict"
+
+
+class _InterruptedLLM(FakeLLM):
+    """The host's separate extraction call dies after the run's whole answer was fetched (the #2989 loss window)."""
+
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError("model_outcome_unknown: response stream was interrupted or malformed")
+
+
+def _answers(root):
+    return sorted(path.name for path in (root / "observability" / "calls").rglob("*review_session_answer*"))
+
+
+def test_a_runs_whole_answer_is_kept_before_the_host_reads_a_verdict_from_it(tmp_path, fake_route):
+    from ouroboros.review_dispatch import review_operation_binding
+    from ouroboros.review_session_custody import read_session_answer_checkpoint
+
+    words = "The second return path leaks the lock.\nEverything else reads fine."
+    full = words + "\n" + "detail " * 40
+    fake_route.manifest_capabilities = {}
+    fake_route.detail = _terminal_detail(full[:20], truncated=True, path="primary.md", reported_bytes=len(full.encode()))
+    fake_route.artifact_bytes = full.encode()
+    fake_route.detail["summary"]["id"] = "run-1"  # the engine's detail names its run, as a real one does
+    request = _agent_request(surface="multi_model_review", call_type="multi_model_review")
+    slot = _agent_slot()
+    llm = _InterruptedLLM()
+    run_review_request(request, slots=[slot], drive_root=tmp_path, llm=llm)
+    assert llm.calls  # the host's own extraction ran and was interrupted, whatever the seat's outcome became
+    assert sum(len(inst.start_requests) for inst in fake_route.instances) == 1  # and nothing was sent again
+    [name] = _answers(tmp_path)
+    operation = name.removesuffix("_review_session_answer.json")
+    binding = review_operation_binding(request, slot, operation)
+    kept = read_session_answer_checkpoint(tmp_path, binding)
+    assert kept["text"] == full and kept["run_id"] == "run-1"
+    assert kept["words"]["provenance"] == "redacted_copy" and kept["words"]["checked_by"] == "size"
+    assert kept["words"]["words_identity"] == "unknown" and kept["words"]["masked"] == []
+    with pytest.raises(ValueError):  # another operation's binding never reads this answer
+        read_session_answer_checkpoint(tmp_path, {**binding, "slot_id": "another"})
+
+
+def test_a_preview_or_a_run_that_did_not_succeed_keeps_no_answer(tmp_path, fake_route):
+    fake_route.detail = _terminal_detail("head…", truncated=True, path="primary.md", reported_bytes=999_999)
+    fake_route.detail["summary"]["id"] = "run-1"
+    fake_route.artifact_error = __import__("ouroboros.gateways.claudexor", fromlist=["x"]).ClaudexorUnavailable(
+        "http_410", "reclaimed", status_code=410)
+    run_review_request(_agent_request(surface="multi_model_review", call_type="multi_model_review"),
+                       slots=[_agent_slot()], drive_root=tmp_path, llm=FakeLLM())
+    assert _answers(tmp_path) == []
+    fake_route.detail = _terminal_detail("partial…", state="failed")
+    fake_route.detail["summary"]["id"] = "run-1"
+    run_review_request(_agent_request(surface="multi_model_review", call_type="multi_model_review", task_id="t-2"),
+                       slots=[_agent_slot()], drive_root=tmp_path, llm=FakeLLM())
+    assert _answers(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# #2989: an already completed run's answer, read through the owning reference
+# ---------------------------------------------------------------------------
+
+_WORDS = "I found a problem with the second return path.\nEverything else reads fine."
+_MASKABLE = "The retry keeps auth_token = compute_digest(payload) after rotation.\nEverything else reads fine."
+_SUBJECT, _RETRY, _CONTRACT, _TASK = "d" * 64, "round-answer", "contract-1", "task-coll"
+
+
+def _sha(text):
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _answered_wave(root, repo, *, text=_WORDS, checkpoint="verified", reviewed=_SUBJECT, outcome="custody_lost",
+                   primary=None):
+    """One session seat whose host collection died while its delegated run succeeded: the run's custody started and
+    terminal, the answer kept by the live executor's own reader (``checkpoint`` "verified"), or bound to no identity
+    ("unbound"), or to another one ("foreign"), or kept by an older producer only as its bound failed-extraction
+    receipt ("none", ``outcome`` "unknown"); then the wave's settled record and the attempt row it names."""
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from ouroboros import delegate_collection, delegate_custody_current
+    from ouroboros import review_ledger as ledger
+    from ouroboros.observability import persist_call
+    from ouroboros.review_dispatch import review_operation_binding, review_reconciliation_identity
+    from ouroboros.review_execution import ReviewRouteKind, _full_session_text
+    from ouroboros.review_records import ReviewActorRecord, ReviewRequest, ReviewSlot
+    from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, update_state
+
+    op, token, run_id = "op-answer", "inv-answer", "run-answer"
+    slot = ReviewSlot(slot_id="a", model="opus", route=ReviewRouteKind.AGENT_SESSION)
+    request = ReviewRequest(surface="multi_model_review", task_id=_TASK, goal="g", retry_key=_RETRY,
+                            call_type="multi_model_review")
+    request.reconciliation_identity = review_reconciliation_identity(request, [slot], root_task_id=_TASK,
+                                                                     contract=_CONTRACT)
+    binding = review_operation_binding(request, slot, op)
+    persist_call(root, task_id=_TASK, call_id=f"{op}_prompt", call_type="multi_model_review_prompt",
+                 payload={"request": asdict(request), "slot": asdict(slot)}, manifest={"review_operation_binding": binding})
+    custody.emit(root, custody.START_REQUESTED, {
+        "task_id": _TASK, "root_task_id": _TASK, "surface": "multi_model_review", "slot_id": "a", "operation_id": op,
+        "invocation_id": token, "request": {"prompt": "g"}})
+    custody.emit(root, custody.STARTED, {
+        "task_id": _TASK, "root_task_id": _TASK, "source": "review_substrate:multi_model_review",
+        "surface": "multi_model_review", "run_id": run_id, "invocation_id": token})
+    entry = delegate_custody_current.run(root, run_id)
+    primary = {"text": text, "truncated": False} if primary is None else primary
+    detail = {"summary": {"state": "succeeded", "id": run_id}, "primaryOutput": primary}
+    bound = {**binding, "pending_invocation_id": token}
+    if checkpoint == "verified":
+        assert _full_session_text(None, run_id, detail, checkpoint=(root, entry, binding)) == text
+    elif checkpoint == "none":
+        actor = ReviewActorRecord("a", "opus", "error", error="Light extraction outcome unknown", operation_id=op,
+                                  operation_state="custody_lost", failure_code="provider_outcome_unknown",
+                                  recovery_binding=bound, usage={"delegated_run_id": run_id, "delegated_run_started": True})
+        produced = {k: v for k, v in asdict(actor).items() if k not in {"raw_text", "usage", "prompt_ref", "response_ref"}}
+        persist_call(root, task_id=_TASK, call_id=f"{op}_error", call_type="multi_model_review_error",
+                     payload={"error": actor.error, "usage": actor.usage, "producer_outcome": produced},
+                     manifest={"surface": "multi_model_review", "slot_id": "a", "model": "opus",
+                               "producer_complete": True, "status": "error", "review_operation_binding": bound})
+    else:  # the same address and payload, naming no identity of its words, or another one
+        persist_call(root, task_id=_TASK, call_id=f"{op}_review_session_answer", call_type="review_session_answer",
+                     keep_raw=False, payload={"run_id": run_id, "invocation_id": token, "text": text},
+                     manifest={"review_operation_binding": binding, **({"verified_answer": {
+                         "sha256": _sha(text + "!"), "chars": len(text) + 1, "checked_by": "untruncated"}}
+                         if checkpoint == "foreign" else {})})
+    assert delegate_collection.observe_run(root, entry, detail)
+    closed = {"custody_lost": {"operation_state": "custody_lost", "failure_code": "review_custody_lost"},
+              "unknown": {"operation_state": "late_settled", "failure_code": "provider_outcome_unknown"}}[outcome]
+    seat = {"slot_id": "a", "model_id": "opus", "status": "error", "raw_text": "The producer ended without a verdict.",
+            "parsed_items": [], "cost_usd": 0.01, "parts": ["change"], "recovery_binding": bound, "operation_id": op,
+            "pending_invocation_id": token, **closed}
+    facts = {"task_id": _TASK, "root_task_id": _TASK, "repo_dir": "/nowhere", "goal": "g", "scope": "s",
+             "enforcement": "advisory", "blocked": False, "block_reason": "", "triad_raw": [seat],
+             "structured": {"started_ts": "2026-11-18T00:00:00+00:00", "brief_texts": {"sha": "BRIEF"},
+                            "rows": [{"slot_id": "a", "model": "opus", "route": "agent_session", "effort": "high",
+                                      "parts": ["change"], "retrieves": False, "brief_sha": "sha"}]},
+             "binding": {"tree_sha": "t" * 40, "parents": ["p" * 40], "diff_sha256": _SUBJECT},
+             "binding_fingerprint": _SUBJECT, "review_contract_fingerprint": _CONTRACT, "review_wave_id": "wave-1",
+             "retry_key": _RETRY, "lost_seat_terminal": True}
+    record = ledger.write_record(root, ledger.build_wave_record(facts, surface="change", drive_root=root))
+    attempt = CommitAttemptRecord(
+        ts="2026-11-18T00:00:00Z", commit_message="m", status="reviewing", task_id=_TASK, root_task_id=_TASK,
+        repo_key=make_repo_key(repo), tool_name="review_change", attempt=1, paid=True,
+        review_record_id=record["record_id"], review_retry_key=_RETRY, review_contract_fingerprint=_CONTRACT,
+        pre_review_fingerprint=reviewed, triad_raw_results=[seat])
+    update_state(root, lambda state: state.record_attempt(attempt))
+    return record, load_state(root).attempts[-1], SimpleNamespace(
+        task_id=_TASK, drive_root=root, budget_drive_root=root, repo_dir=repo, task_metadata={}, pending_events=[],
+        _review_wait_selection=None)
+
+
+def _no_send(monkeypatch):
+    """Every way out of a passive read fails the test: a gateway, an extractor, a model or a wave."""
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("a passive read contacted a transport, an extractor, a model or a wave")
+
+    for target in ("ouroboros.claudexor_daemon.read_owned_gateway", "ouroboros.claudexor_daemon.ensure_owned_gateway",
+                   "ouroboros.review_verdict_extraction._extract_verdict_via_light_model", "ouroboros.llm.LLMClient.chat",
+                   "ouroboros.review_substrate.run_review_request"):
+        monkeypatch.setattr(target, forbidden)
+
+
+def _read(ctx, record, attempt):
+    from ouroboros.tools.review_collection import collect_change, reference_for
+
+    return collect_change(ctx, reference_for(record, attempt))
+
+
+@pytest.mark.parametrize(("text", "masks"), [(_WORDS, []), (_MASKABLE, ["secret_literal_assignment"])],
+                         ids=["plain", "masked"])
+def test_the_owning_reference_reads_a_completed_runs_answer_without_replay_and_keeps_the_failure(
+        tmp_path, monkeypatch, text, masks):
+    from ouroboros import review_ledger as ledger
+    from tests._usage_store_testing import ledger_rows
+
+    root, repo = tmp_path / "data", tmp_path / "repo"
+    root.mkdir(), repo.mkdir()
+    record, attempt, ctx = _answered_wave(root, repo, text=text)
+    _no_send(monkeypatch)
+    money = ledger_rows(root)
+    seat = _read(ctx, record, attempt)["rows"][0]
+    found = seat["original_run_answer"]
+    shown = text.replace("compute_digest(payload)", "***REDACTED***")  # what the stored projection keeps
+    assert {key: found[key] for key in ("provenance", "words_identity", "checked_by", "masked", "run_id",
+                                        "operation_id", "invocation_id")} == {
+        "provenance": "redacted_copy", "words_identity": "unknown", "checked_by": "untruncated", "masked": masks,
+        "run_id": "run-answer", "operation_id": "op-answer", "invocation_id": "inv-answer"}
+    assert found["text"] == shown and (found["copy_sha256"], found["copy_chars"]) == (_sha(shown), len(shown))
+    assert "sha256" not in found and "chars" not in found  # the delivered source's own identity is never offered
+    [source] = [ref for ref in seat["source_refs"] if ref["role"] == "redacted_run_answer"]
+    assert source["ref"]["sha256"] == found["copy_sha256"]
+    assert ledger.read_source(root, _TASK, source).decode() == shown  # the standard reader returns exactly those bytes
+    # The original failed collection and its verdict stay as they were, beside the answer.
+    after = ledger.load_record(root, record["record_id"])
+    assert (seat["status"], seat["failure_code"], seat["operation_state"]) == ("error", "review_custody_lost", "custody_lost")
+    assert {key: after[key] for key in ("state", "cost", "verdict")} == {key: record[key] for key in ("state", "cost", "verdict")}
+    assert after["revision"] == record["revision"] + 1
+    # Reading again changes nothing and spends nothing.
+    assert _read(ctx, record, attempt)["rows"][0] == seat
+    assert ledger.load_record(root, record["record_id"])["revision"] == after["revision"]
+    assert ledger_rows(root) == money
+
+
+def test_an_older_producers_run_is_read_from_its_bound_receipt_and_terminal_output(tmp_path, monkeypatch):
+    from ouroboros import review_ledger as ledger
+
+    root, repo = tmp_path / "data", tmp_path / "repo"
+    root.mkdir(), repo.mkdir()
+    record, attempt, ctx = _answered_wave(root, repo, checkpoint="none", outcome="unknown")
+    _no_send(monkeypatch)
+    seat = _read(ctx, record, attempt)["rows"][0]
+    assert seat["original_run_answer"]["text"] == _WORDS and seat["failure_code"] == "provider_outcome_unknown"
+    assert ledger.load_record(root, record["record_id"])["revision"] == record["revision"] + 1
+
+
+@pytest.mark.parametrize("case", ["unbound", "foreign", "other_attempt_subject"])
+def test_words_no_identity_or_no_attempt_binds_are_never_shown_or_retained(tmp_path, monkeypatch, case):
+    from ouroboros import review_ledger as ledger
+
+    root, repo = tmp_path / "data", tmp_path / "repo"
+    root.mkdir(), repo.mkdir()
+    record, attempt, ctx = _answered_wave(
+        root, repo, checkpoint="verified" if case == "other_attempt_subject" else case,
+        reviewed="other-subject" if case == "other_attempt_subject" else _SUBJECT)
+    _no_send(monkeypatch)
+    seat = _read(ctx, record, attempt)["rows"][0]
+    assert "original_run_answer" not in seat
+    assert not [ref for ref in seat.get("source_refs") or [] if ref["role"].endswith("run_answer")]
+    assert ledger.load_record(root, record["record_id"])["revision"] == record["revision"]
+
+
+class _ReadOnlyEngine:
+    """The engine as a passive read meets it: only the run's artifact may be read; any other use is recorded."""
+
+    def __init__(self, served=None, error=None):
+        self.served, self.error, self.calls = served, error, []
+
+    def get_run_artifact(self, run_id, path):
+        self.calls.append(("get_run_artifact", run_id, path))
+        if self.error:
+            raise self.error
+        return self.served
+
+    def close(self):
+        self.calls.append(("close",))
+
+    def __getattr__(self, name):  # a start, a POST, a cancel or a second read: all recorded, none served
+        def used(*_a, **_k):
+            self.calls.append((name,))
+            raise AssertionError(f"a passive read used the engine's {name}")
+        return used
+
+
+def _preview_wave(root, repo, monkeypatch, engine, *, full=_WORDS, reported=None):
+    """A succeeded run whose retained terminal observation kept only a truncated preview, no checkpoint (an older
+    producer), with ``engine`` standing behind the run's invocation."""
+    record, attempt, ctx = _answered_wave(
+        root, repo, checkpoint="none", outcome="unknown",
+        primary={"text": full[:12], "truncated": True, "path": "review.md",
+                 "bytes": len(full.encode()) if reported is None else reported})
+    _no_send(monkeypatch)
+    monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway", lambda: engine)
+    return record, attempt, ctx
+
+
+@pytest.mark.parametrize(("full", "masks"), [(_WORDS, []), (_MASKABLE, ["secret_literal_assignment"])],
+                         ids=["plain", "masked"])
+def test_a_preview_only_run_is_read_whole_from_the_engine_as_a_masked_copy(tmp_path, monkeypatch, full, masks):
+    from ouroboros import review_ledger as ledger
+    from tests._usage_store_testing import ledger_rows
+
+    root, repo = tmp_path / "data", tmp_path / "repo"
+    root.mkdir(), repo.mkdir()
+    engine = _ReadOnlyEngine(served=full.encode())
+    record, attempt, ctx = _preview_wave(root, repo, monkeypatch, engine, full=full)
+    money = ledger_rows(root)
+    seat = _read(ctx, record, attempt)["rows"][0]
+    found, shown = seat["original_run_answer"], full.replace("compute_digest(payload)", "***REDACTED***")
+    assert found["text"] == shown and found["provenance"] == "redacted_copy" and found["masked"] == masks
+    assert found["checked_by"] == "size" and found["words_identity"] == "unknown"
+    assert (found["copy_sha256"], found["copy_chars"]) == (_sha(shown), len(shown))
+    [source] = [ref for ref in seat["source_refs"] if ref["role"] == "redacted_run_answer"]
+    assert ledger.read_source(root, _TASK, source).decode() == shown  # the bytes hashed are the bytes kept
+    assert [call[0] for call in engine.calls] == ["get_run_artifact", "close"]  # one GET of the run's artifact only
+    assert engine.calls[0][1:] == ("run-answer", "review.md")
+    after = ledger.load_record(root, record["record_id"])  # the original failed collection stands independently
+    assert (seat["status"], seat["failure_code"]) == ("error", "provider_outcome_unknown")
+    assert {key: after[key] for key in ("state", "cost", "verdict")} == {key: record[key] for key in ("state", "cost", "verdict")}
+    assert ledger_rows(root) == money
+
+
+@pytest.mark.parametrize("case", ["engine_down", "artifact_gone", "wrong_size"])
+def test_a_preview_whose_whole_text_the_engine_cannot_verify_stays_a_named_gap(tmp_path, monkeypatch, case):
+    from ouroboros import review_ledger as ledger
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    root, repo = tmp_path / "data", tmp_path / "repo"
+    root.mkdir(), repo.mkdir()
+    engine = {"engine_down": None, "artifact_gone": _ReadOnlyEngine(error=ClaudexorUnavailable("http_410", "gone", status_code=410)),
+              "wrong_size": _ReadOnlyEngine(served=b"entirely different bytes")}[case]
+    record, attempt, ctx = _preview_wave(root, repo, monkeypatch, engine, reported=len(_WORDS.encode()) + 40)
+    if engine is None:
+        def down():
+            raise ConnectionError("no daemon")
+        monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway", down)
+    seat = _read(ctx, record, attempt)["rows"][0]
+    found = seat["original_run_answer"]
+    assert found["provenance"] == "unavailable" and "text" not in found
+    assert _WORDS[:12] not in str(found)  # nothing of the preview is offered as words
+    assert not [ref for ref in seat["source_refs"] if ref["role"].endswith("run_answer")]
+    assert ledger.load_record(root, record["record_id"])["verdict"] == record["verdict"]
+    if engine is not None:
+        assert [call[0] for call in engine.calls] == ["get_run_artifact", "close"]

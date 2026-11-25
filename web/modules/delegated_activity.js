@@ -392,13 +392,13 @@ export function delegatedLineView(item) {
 
 // -- presentation --------------------------------------------------------------------------
 
-function countsLine(technical) {
+function countsLine(technical, seq = true) {
     const count = Number(technical?.count || 0);
     if (!count) return '';
     const labels = technical.labels instanceof Map ? [...technical.labels] : technical.labels || [];
     const kinds = labels.map(([label, n]) => `${label} ×${n}`);
     if (technical.otherKinds) kinds.push(`+${technical.otherKinds} other kinds`);
-    const head = `${count} technical event${count === 1 ? '' : 's'}${technical.since ? ` since seq ${technical.since}` : ''}`;
+    const head = `${count} technical event${count === 1 ? '' : 's'}${seq && technical.since ? ` since seq ${technical.since}` : ''}`;
     const note = technical.partial ? ` (${technical.of - count} of this observation's shown above; kinds cover all ${technical.of})`
         : technical.inexact ? ' (may include events counted above)' : '';
     return [head + note, ...kinds].join(' · ');
@@ -578,14 +578,15 @@ export function delegatedActivityBodyHtml(view, { expanded = false } = {}) {
     return html.join('');
 }
 
-/** The summarizer's view of one observation frame, or null for any other frame. */
-export function delegatedActivityView(evt) {
+/** The summarizer's view of one observation frame, or null for any other frame. Logs reads it without the journal's
+ *  sequence numbers (`seq: false`; "since seq N"): the event's record keeps them. */
+export function delegatedActivityView(evt, { seq = true } = {}) {
     const activity = delegatedActivityOf(evt);
     const type = evt?.type || evt?.event || '';
     if (!activity || !(evt.is_progress || type === 'send_message')) return null;
     const view = project(activity, [], [], []);
     const messages = view.parts.filter(({ part }) => part.kind === 'message').map(({ text }) => text);
-    const counts = countsLine(view.technical);
+    const counts = countsLine(view.technical, seq);
     const gaps = view.gaps.map((gap) => gapLine(gap, activity));
     const run = String(activity.run_id);
     return {

@@ -28,6 +28,7 @@ import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros import work_domain
+from ouroboros.utils import json_dumps_utf8, path_for_prose
 
 RESULT_WORDS_SOURCE = "the produced files named above by path and content hash"
 _EXCERPT_FLOOR = 1200  # characters one text file may take of the excerpt budget before the rest is divided
@@ -57,7 +58,7 @@ def _file_identity(path: pathlib.Path) -> Dict[str, Any]:
         if work_domain.kind(path) == "link" if work else path.is_symlink():
             text = os.fsencode(work_domain.readlink(path)) if work else os.readlink(os.fsencode(path))
             return {"size": len(text), "sha256": hashlib.sha256(text).hexdigest(),
-                    "link": json.dumps(os.fsdecode(text), ensure_ascii=False)}
+                    "link": json_dumps_utf8(os.fsdecode(text), ensure_ascii=False)}
         return work_domain.measure(path) if work else stream_artifact_file(path)
     except (OSError, ValueError) as exc:
         gone = isinstance(exc, FileNotFoundError) and not getattr(exc, "process_not_started", False)
@@ -76,9 +77,18 @@ def _retained_copy(root: Any, task_id: str, item: Dict[str, Any], registration: 
     the live path never changes what its subject names; else why no copy exists. Its cost: on APFS, btrfs or XFS a
     clone shares the original's blocks; elsewhere (ext4, a Docker overlay, Windows) each distinct content takes its
     full size once more. The copy belongs to the task's records under ``source_handles/tool_results``: no age bound,
-    ``record_compression`` shrinks it where the filesystem compresses, and nothing removes it apart from them."""
+    ``record_compression`` shrinks it where supported. An owner release of its address also binds later copies."""
     from ouroboros.artifacts import actor_source_reference, copy_artifact_file, stream_artifact_file, task_artifact_dir_path
+    from ouroboros.payload_release_state import file_release_gap
+    from ouroboros.task_custody import task_custody_lock
+    from ouroboros.temp_sweep import atomic_temp_path
 
+    source = pathlib.Path(str(item.get("path") or ""))
+    try:
+        if gap := file_release_gap(source, anchor=root):
+            return {"retained_gap": gap}
+    except Exception as exc:
+        return {"retained_gap": f"release record unavailable ({type(exc.__cause__ or exc).__name__})"}
     sha = str(item.get("sha256") or "")
     if sha == "deleted" or sha.startswith("unreadable"):
         return {"retained_gap": "the file is gone" if sha == "deleted" else sha}
@@ -89,17 +99,39 @@ def _retained_copy(root: Any, task_id: str, item: Dict[str, Any], registration: 
         ref = actor_source_reference(category="tool_results", source_id=f"result-material-{sha[:16]}", data=b"",
                                      extension=pathlib.Path(item["path"]).suffix.lstrip(".") or "bin", measured=identity)
         target = task_artifact_dir_path(root, task_id, create=True).joinpath(*pathlib.PurePosixPath(ref["path"]).parts)
-        try:  # write-once by digest: an intact copy of these bytes IS this one
+        if gap := file_release_gap(target, anchor=root):
+            return {"retained_gap": gap}
+        try:
             present = target.is_file() and not target.is_symlink() and bool(stream_artifact_file(target, expected=identity))
         except OSError:
             present = False
-        if not present and work_domain.is_work(item["path"]):  # its bytes received from the work, then verified
-            with tempfile.TemporaryFile() as spool:
-                work_domain.measure(item["path"], spool)
-                spool.flush()
-                copy_artifact_file(spool, target, expected=identity, mode=0o444)
-        elif not present:
-            copy_artifact_file(pathlib.Path(item["path"]), target, expected=identity, mode=0o444)
+        if not present:
+            temporary = atomic_temp_path(target)
+            try:
+                if work_domain.is_work(item["path"]):
+                    with tempfile.TemporaryFile() as spool:
+                        work_domain.measure(item["path"], spool)
+                        spool.flush()
+                        copy_artifact_file(spool, temporary, expected=identity, mode=0o444)
+                else:
+                    copy_artifact_file(source, temporary, expected=identity, mode=0o444)
+                with task_custody_lock(root, task_id) as locked:
+                    if not locked:
+                        return {"retained_gap": "task custody busy"}
+                    if gap := file_release_gap(target, anchor=root) or file_release_gap(source, anchor=root):
+                        return {"retained_gap": gap}
+                    if target.exists():
+                        stream_artifact_file(target, expected=identity)
+                    else:
+                        temporary.replace(target)
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except PermissionError:
+                    if os.name != "nt":
+                        raise
+                    temporary.chmod(0o600)  # an unpublished, task-owned read-only copy
+                    temporary.unlink()
     except Exception as exc:  # changed while it was copied, a full disk, a closed publication: a stated gap
         return {"retained_gap": f"its copy could not be retained ({type(exc).__name__}: {exc})"}
     return {"retained": str(target)}
@@ -130,7 +162,7 @@ def _written_paths(ctx: Any, root: Any, task_id: str, effect: Dict[str, Any]) ->
     if isinstance(call, dict) and call:
         from ouroboros.artifacts import materialize_tool_args_source
 
-        full, complete, _gap = materialize_tool_args_source(root, call)
+        full, complete, _gap = materialize_tool_args_source(root, call, task_id=task_id)
         args = full if complete and isinstance(full, dict) else args
     named = [str(args["path"])] if isinstance(args.get("path"), str) and args["path"] else []
     for entries in (args.get("files"), args.get("edits")):
@@ -140,7 +172,7 @@ def _written_paths(ctx: Any, root: Any, task_id: str, effect: Dict[str, Any]) ->
         from ouroboros.tools.edit_ops import normalize_patch_paths
 
         normalize_patch_paths(args["patch"], lambda path: named.append(path) or path)
-    named_text = ", ".join(dict.fromkeys(named)) or "paths its retained arguments do not name"
+    named_text = ", ".join(map(path_for_prose, dict.fromkeys(named))) or "paths its retained arguments do not name"
     if where in _WRITE_ROOTS:  # a record without its writer's receipt: what it resolved then is unknown now
         return [], (f"{tool} wrote {named_text} under {where}, but its call record carries no receipt of the targets "
                     "it resolved; its arguments are not resolved again now, so those bytes are not listed here")
@@ -178,6 +210,11 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
         if key in covered:
             return None
         covered.add(key)
+        from ouroboros.payload_release_state import file_release_gap
+
+        if gap := file_release_gap(key, anchor=root):
+            out["issues"].append(f"{gap}: {key}")
+            return None
         out["files"].append({"path": key, "kind": kind, **_file_identity(pathlib.Path(key))})
         return out["files"][-1]
 
@@ -205,6 +242,14 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
                     covered.add(source)
     except Exception as exc:
         out["issues"].append(f"task artifacts could not be listed ({type(exc).__name__}: {exc})")
+    try:  # a file the owner released in Storage is a named gap, never silently absent production
+        from ouroboros.payload_release_state import released_files
+        from ouroboros.task_store import read_document
+
+        for rel, receipt in sorted(released_files(read_document(root, task_id)).items()):
+            out["issues"].append(f"released by the owner in Storage at {receipt.get('at')}: {rel} ({receipt.get('loss') or 'loss not said'})")
+    except Exception as exc:
+        out["issues"].append(f"released files could not be read ({type(exc).__name__}: {exc})")
     try:
         from ouroboros.mutation_attribution import attributed_commit_paths, attributed_git_candidates
 
@@ -262,16 +307,16 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
 def answer_text(*, reply: str, produced: Dict[str, Any], verification: str) -> str:
     """The answer half of a result subject (the reply, what the task produced, the verification): its digest
     is the subject's ``tree_sha``, the answer's own identity apart from what was asked."""
-    files = [f"- {item['path']} ({item['kind']}; sha256 {item['sha256']}; {item['size']} bytes; "
+    files = [f"- {path_for_prose(item['path'])} ({item['kind']}; sha256 {item['sha256']}; {item['size']} bytes; "
              + (f"symbolic link, its exact link text {item['link']})" if "link" in item else
-                f"exact copy: {item['retained']})" if item.get("retained") else
-                f"no exact copy: {item.get('retained_gap') or 'not retained'})")
+                f"exact copy: {path_for_prose(item['retained'])})" if item.get("retained") else
+                f"no exact copy: {path_for_prose(str(item.get('retained_gap') or 'not retained'))})")
              for item in produced.get("files") or []]
     effects = [f"- effect declared by {item['tool']}: {item['receipt']}"
-               + (f"\n  host notes on this call: {json.dumps(item['host_notes'], ensure_ascii=False)}"
+               + (f"\n  host notes on this call: {json_dumps_utf8(item['host_notes'], ensure_ascii=False)}"
                   if item.get("host_notes") else "")
                for item in produced.get("effects") or []]
-    gaps = [f"- not captured: {issue}" for issue in produced.get("issues") or []]
+    gaps = [f"- not captured: {path_for_prose(str(issue))}" for issue in produced.get("issues") or []]
     return "\n".join([
         "## The reply", "", reply.strip() or "(no reply text)", "",
         "## What the task produced", "",
@@ -296,9 +341,10 @@ def _contents_section(files: List[Dict[str, Any]], budget: int) -> str:
                       "Exact bytes from each file's retained copy, its first lines within this packet's budget."], []
     remaining = max(0, int(budget))
     for position, item in enumerate(candidates):
+        label = path_for_prose(item["path"])
         share = min(remaining, max(_EXCERPT_FLOOR, remaining // (len(candidates) - position)))
         if share <= 0:
-            unread.append(str(item["path"]))
+            unread.append(label)
             continue
         try:
             with open(item["retained"], "rb") as handle:
@@ -311,7 +357,7 @@ def _contents_section(files: List[Dict[str, Any]], budget: int) -> str:
         try:  # exact bytes or nothing: text that is not UTF-8 is named, never shown with bytes dropped; a character
             text = codecs.getincrementaldecoder("utf-8")().decode(head, final=whole)  # cut by the read stays unread
         except UnicodeDecodeError:
-            blocks += ["", f"### {item['path']} (not shown: not UTF-8 text; it is in its retained copy)"]
+            blocks += ["", f"### {label} (not shown: not UTF-8 text; it is in its retained copy)"]
             continue
         lines = text.splitlines(keepends=True)
         if not whole and lines and lines[-1].splitlines()[0] == lines[-1]:
@@ -328,7 +374,7 @@ def _contents_section(files: List[Dict[str, Any]], budget: int) -> str:
         omitted = ("the whole file shown" if whole and excerpt == text else
                    f"its first {len(shown)} lines shown; the rest is in its retained copy" if shown else
                    f"its first {len(excerpt)} characters shown; the rest is in its retained copy")
-        blocks += ["", f"### {item['path']} ({omitted})"] + ([fence, excerpt.rstrip("\n"), fence] if excerpt else [])
+        blocks += ["", f"### {label} ({omitted})"] + ([fence, excerpt.rstrip("\n"), fence] if excerpt else [])
     if unread:
         blocks += ["", "Not shown: this packet's excerpt budget is spent; each is in its retained copy above: "
                    + ", ".join(unread)]
@@ -387,9 +433,10 @@ def _workspace_words(repo: Any, snapshot: dict, candidates: list[str], budget: i
 def _declared_effects(ctx: Any, root: Any, task_id: str, issues: List[str]) -> List[Dict[str, Any]]:
     """Extension tools' own execution receipts (``PluginAPI.register_tool``): read exactly as the producer
     wrote them, never inferred from a method or backend name. A call whose producer reported its own failure
-    (``TOOL_REPORTED_FAILURE``) may still declare what ran before it failed; a host-owned outcome (a timeout,
-    a refusal, a raised handler) declares nothing. Host notes trail the payload the model saw, so a noted
-    call is read from its retained producer payload, verified, and its notes ride beside the receipt."""
+    (``TOOL_REPORTED_FAILURE``) may still declare what ran before it failed; so may a call the host refused a
+    further action (``refused_step``), from the producer payload it kept. Any other host-owned outcome (a
+    timeout, a refusal, a raised handler) declares nothing. Host notes trail the payload the model saw, so a
+    noted call is read from its retained producer payload, verified, and its notes ride beside the receipt."""
     from ouroboros.artifacts import materialize_tool_result_source, read_actor_source_bytes
     from ouroboros.extension_surface_names import parse_extension_surface_name
     from ouroboros.store import StoreError
@@ -397,8 +444,12 @@ def _declared_effects(ctx: Any, root: Any, task_id: str, issues: List[str]) -> L
     effects: List[Dict[str, Any]] = []
     trace = getattr(ctx, "_execution_trace", None) or {}
     for call in trace.get("tool_calls") or []:
+        refused_step = (isinstance(call, dict) and call.get("tool_result_code") == "OWNER_OPERATION_REFUSED"
+                        and isinstance(call.get("tool_result_meta"), dict)
+                        and call["tool_result_meta"].get("refused_step") is True and "producer_source_ref" in call)
         if (not isinstance(call, dict) or not parse_extension_surface_name(str(call.get("tool") or ""))
-                or (call.get("is_error") and call.get("tool_result_code") != "TOOL_REPORTED_FAILURE")):
+                or (call.get("is_error") and call.get("tool_result_code") != "TOOL_REPORTED_FAILURE"
+                    and not refused_step)):
             continue
         tool = str(call.get("tool") or "")
         try:

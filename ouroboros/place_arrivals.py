@@ -50,6 +50,8 @@ _ALL_PLACE_ROOMS = (
 # A place's newest arrival, and its newest 50 for the account candidates (``account_candidates``).
 _RECENT = f"FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} AND {_PLACE}=? ORDER BY ts DESC"
 _NEWEST = f"SELECT ts {_RECENT} LIMIT 1"
+_NEWEST_BEFORE = (f"SELECT ts FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} AND {_PLACE}=? AND ts<? "
+                  "ORDER BY ts DESC LIMIT 1")
 _CANDIDATES = ("SELECT json_extract(body,'$.sender_session_id') AS actor, "
                "json_extract(body,'$.sender_label') AS label, json_extract(body,'$.transport.actor.is_bot') AS bot, "
                "json_extract(body,'$.transport.actor.kind') AS kind, "
@@ -125,6 +127,22 @@ def heard_replay(root, task_id, identity="", continuation_version=0):
     return PresenceTurnResult(outcome='silent', text='', task_id=task_id,
                               delivery_reporting_version=0 if imported else facts.get('delivery_reporting_version', 0),
                               continuation_version=continuation_version)
+
+
+def heard_attention(root, seqs):
+    """``{seq: place_attention}`` of these chat rows' heard decisions from their dedup records, in one read transaction
+    (batched under SQLite's parameter floor), decoded after it closes. A row without one is absent from the answer:
+    undecided, or a focus started (its task says so), never inferred."""
+    seqs, retained = sorted({int(seq) for seq in seqs}), []
+    if not seqs:
+        return {}
+    with dialogue_store.transaction(root, write=False) as conn:
+        for start in range(0, len(seqs), 500):
+            batch = seqs[start:start + 500]
+            retained += conn.execute("SELECT seq,dispatch_input FROM dialogue WHERE stream='chat' AND seq IN ("
+                                     + ','.join('?' for _ in batch) + ')', batch).fetchall()
+    heard = {row['seq']: json.loads(row['dispatch_input'] or '{}').get('place_attention') for row in retained}
+    return {seq: facts for seq, facts in heard.items() if isinstance(facts, dict) and facts.get('decision') == 'heard'}
 
 
 def record_heard(root, task, event, reason, *, captured_task_id=None, recipient=''):
@@ -400,6 +418,18 @@ def place_facts(root, places, *, full=True):
     return facts
 
 
+def newest_arrivals(root, place_ids, *, before=""):
+    """``{place_id: ts}`` of each place's newest arrival stamped before ``before`` (any, when empty), one seek of
+    ``dialogue_place_recent`` each, in one read; a place with none is absent."""
+    place_ids = list(dict.fromkeys(str(place_id) for place_id in place_ids))
+    if not place_ids or not _dialogue_indexes(root):
+        return {}
+    with dialogue_store.transaction(root, write=False) as conn:
+        found = {place_id: conn.execute(_NEWEST_BEFORE, (place_id, before)).fetchone() if before
+                 else conn.execute(_NEWEST, (place_id,)).fetchone() for place_id in place_ids}
+    return {place_id: row[0] for place_id, row in found.items() if row}
+
+
 def recent_identity(root, place_id, account_id=""):
     """First valid credential declaration among the place's newest 50 captured arrivals (of one account when the call
     names it); None when nothing was declared there or the room cannot be read."""
@@ -445,12 +475,47 @@ def account_candidates(root, place_id):
     return _people(rows)
 
 
-def _people(rows):
-    """``account_candidates`` of one place's newest 50 arrival rows."""
+_SINCE = ("SELECT json_extract(body,'$.sender_session_id') AS actor, json_extract(body,'$.sender_label') AS label, "
+          "json_extract(body,'$.transport.actor.is_bot') AS bot, "
+          "json_extract(body,'$.transport.actor.kind') AS kind, "
+          "json_extract(body,'$.transport.message.reaction.schema_version') AS reaction, json_extract(body,'$.text') AS text, "
+          f"json_extract(body,'$.historical_import.authorship') AS authorship FROM dialogue INDEXED BY dialogue_place_recent "
+          f"WHERE {_ARRIVAL} AND {_PLACE}=? AND ts>=? ORDER BY ts DESC LIMIT ?")
+PEOPLE_ROW_CAP = 2000  # per place: a busier week says «at least»
+
+
+def recent_people(root, place_ids, *, days: int, now: float | None = None, services: dict | None = None) -> dict | None:
+    """The people who wrote in these places in the last ``days`` (the switch's preview: «how many people wrote there
+    lately»): ``{"by_place": {id: n}, "total": distinct across places, "capped": bool, "capped_places": [id]}``, or
+    ``None`` when the index is unreadable. A reaction with no words is no writing (``dialogue_provenance``). ``services`` (place id → its service) keeps the same raw sender id on two services two people. One
+    index range per place, at most ``PEOPLE_ROW_CAP`` newest rows each (``capped`` then); the same filter as
+    ``account_candidates``: no bots, no connected account's own imports, no chat or anonymous actor."""
+    import time as _time
+    from datetime import datetime, timezone
+
+    if not _dialogue_indexes(root):
+        return None
+    since = datetime.fromtimestamp((now or _time.time()) - days * 86400, timezone.utc).isoformat()
+    by_place, everyone, capped_places = {}, set(), []
+    with dialogue_store.transaction(root, write=False) as conn:
+        for place_id in dict.fromkeys(place_ids):
+            rows = conn.execute(_SINCE, (place_id, since, PEOPLE_ROW_CAP)).fetchall()
+            if len(rows) >= PEOPLE_ROW_CAP:
+                capped_places.append(place_id)
+            wrote = [row for row in rows if not (row["reaction"] == 1 and not str(row["text"] or "").strip())]
+            people = {person["platform_actor_id"] for person in _people(wrote, limit=None)}
+            by_place[place_id] = len(people)
+            service = str((services or {}).get(place_id) or "")
+            everyone |= {(service, actor) for actor in people}
+    return {"by_place": by_place, "total": len(everyone), "capped": bool(capped_places), "capped_places": capped_places}
+
+
+def _people(rows, limit=20):
+    """``account_candidates`` of one place's newest 50 arrival rows (``limit=None``: every person among ``rows``)."""
     people = {}
     for row in rows:
         actor = str(row['actor'] or '')
         if (actor and not row['bot'] and row['authorship'] != 'platform_account' and actor not in people
                 and row['kind'] not in {'chat', 'anonymous'}):
             people[actor] = {'platform_actor_id': actor, 'label': str(row['label'] or actor)}
-    return list(people.values())[:20]
+    return list(people.values())[:limit]

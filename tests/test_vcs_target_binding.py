@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import functools
 import pathlib
 import subprocess
 
 import pytest
+
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 
 def _git(repo: pathlib.Path, *args: str) -> str:
@@ -12,16 +16,20 @@ def _git(repo: pathlib.Path, *args: str) -> str:
     ).strip()
 
 
-def _repo(path: pathlib.Path, marker: str) -> pathlib.Path:
-    path.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    _git(path, "config", "user.email", "test@example.com")
-    _git(path, "config", "user.name", "Test")
+def _lay_repo(folder: pathlib.Path, marker: str) -> None:
+    path = git_repository(folder / "repo", unborn=True)
+    world_git(path, "config", "user.email", "test@example.com")
+    world_git(path, "config", "user.name", "Test")
     (path / "BIBLE.md").write_text(f"{marker} base\n", encoding="utf-8")
     (path / f"{marker}.txt").write_text("base\n", encoding="utf-8")
-    _git(path, "add", ".")
-    _git(path, "commit", "-qm", "base")
-    return path
+    world_git(path, "add", ".")
+    world_git(path, "commit", "-qm", "base")
+
+
+def _repo(path: pathlib.Path, marker: str) -> pathlib.Path:
+    """One commit "base" of the marker's two files, copied from that marker's world."""
+    template = world(f"vcs-target-binding-{marker}", functools.partial(_lay_repo, marker=marker))
+    return clone_repository(template / "repo", path)
 
 
 def _registry(tmp_path: pathlib.Path):
@@ -232,12 +240,12 @@ def test_review_exempt_revert_keeps_child_authority(tmp_path, monkeypatch, const
 
 
 def test_pull_uses_the_same_selected_binding_as_other_generic_vcs(tmp_path, monkeypatch):
-    from ouroboros.tools import git as git_tools
+    from ouroboros.tools import git_vcs_ops
 
     registry, _ctx, system, project = _registry(tmp_path)
     seen = []
     monkeypatch.setattr(
-        git_tools,
+        git_vcs_ops,
         "_ff_pull",
         lambda repo: seen.append(pathlib.Path(repo)) or "pull simulated",
     )

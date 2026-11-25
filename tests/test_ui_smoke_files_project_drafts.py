@@ -602,7 +602,7 @@ def test_files_project_actions_fit_available_viewport(direct_server_with_data, e
                 page.evaluate("window.openGeometryProject(); undefined")
                 page.locator('[name="np-source"][value="attach"]').check()
                 expect(page.locator("[data-np-path]")).to_contain_text("long-folder-name")
-                for selector in [".new-project-dialog", "[data-np-create]", ".new-project-dialog .marketplace-modal-actions [data-np-cancel]"]:
+                for selector in [".new-project-dialog", "[data-np-create]", ".new-project-dialog .ui-modal-actions [data-np-cancel]"]:
                     result = _hit_target(page, selector)
                     if not result["visible"] or (selector != ".new-project-dialog" and not result["hit"]):
                         failures.append({"surface": "Project", "width": width, "height": height, "selector": selector, **result})
@@ -615,16 +615,19 @@ def test_files_project_actions_fit_available_viewport(direct_server_with_data, e
 
 _PANES = """() => {
     const shown = (el) => Boolean(el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+    // One column: the folder's list and its filter scroll in the list's pane, and a file shown alone takes the
+    // shell's round Back to that folder (docs/DESIGN.md "Page header").
     const list = document.querySelector('#files-list'), active = document.activeElement;
+    const back = document.querySelector('#page-files [data-shell-back]');
     return {view: document.querySelector('.files-layout').dataset.filesView,
         list: shown(document.querySelector('.files-sidebar')), file: shown(document.querySelector('.files-preview')),
-        back: shown(document.querySelector('[data-files-back]')), listHeight: list.getBoundingClientRect().height,
+        back: shown(back), listHeight: document.querySelector('.files-sidebar').getBoundingClientRect().height,
         status: shown(document.querySelector('#files-preview-status')) ? document.querySelector('#files-preview-status').textContent : '',
         statusAboveList: Boolean(document.querySelector('#files-preview-status').compareDocumentPosition(list)
             & Node.DOCUMENT_POSITION_FOLLOWING) && list.parentElement.contains(document.querySelector('#files-preview-status')),
         unsaved: [...document.querySelectorAll('.files-entry')].filter((row) => shown(row.querySelector('.files-entry-unsaved')))
             .map((row) => row.querySelector('.files-entry-name, .files-entry-untitled').textContent),
-        focus: active === document.body ? 'body' : (active.matches('[data-files-back]') ? 'back'
+        focus: active === document.body ? 'body' : (active === back ? 'back'
             : active.closest('.files-entry')?.querySelector('.files-entry-name, .files-entry-untitled')?.textContent
             || active.getAttribute('aria-label') || active.id || active.className),
         focusShown: shown(active), sideways: document.scrollingElement.scrollWidth > innerWidth + 1,
@@ -634,7 +637,7 @@ _PANES = """() => {
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direct_server_with_data, engine):  # noqa: F811
-    """#7 on a phone: the list owns the page, a chosen file replaces it with Back to folder above it, Back keeps an
+    """#7 on a phone: the list owns the page, a chosen file replaces it with the round Back to its folder, Back keeps an
     unsaved draft that the file's row (or a new file's row) reopens, leaving it still asks, and the desk keeps both."""
     pytest.importorskip("playwright.sync_api")
     from playwright.sync_api import expect, sync_playwright
@@ -665,7 +668,7 @@ def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direc
             expect(page.locator("#files-save")).to_be_enabled()
 
             # Back keeps the draft, says so on the file's row and returns focus there; nothing is asked or written.
-            page.get_by_role("button", name="Back to folder", exact=True).click()
+            page.get_by_role("button", name="Back to Files", exact=True).click()
             panes = page.evaluate(_PANES)
             assert (panes["view"], panes["list"], panes["file"], panes["focus"], panes["unsaved"], panes["layers"]) == (
                 "list", True, False, "sample.txt", ["sample.txt"], []), panes
@@ -675,7 +678,7 @@ def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direc
             expect(editor).to_be_visible()
             _same_draft(page, "Draft typed on a phone")
             assert page.evaluate(_PANES)["focus"] == "back"
-            page.get_by_role("button", name="Back to folder", exact=True).click()
+            page.get_by_role("button", name="Back to Files", exact=True).click()
 
             # Leaving the draft for another file still asks; Stay keeps the list, the draft and its mark.
             page.locator(".files-entry").filter(has_text="other.txt").click()
@@ -701,7 +704,7 @@ def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direc
             name.fill("phone-notes.md")
             editor.fill("A new draft")
             editor.evaluate("el => { window.filesEditor = el; }")
-            page.get_by_role("button", name="Back to folder", exact=True).click()
+            page.get_by_role("button", name="Back to Files", exact=True).click()
             panes = page.evaluate(_PANES)
             assert (panes["view"], panes["focus"], panes["unsaved"]) == ("list", "phone-notes.md", ["phone-notes.md"]), panes
             expect(page.locator(".files-entry").first).to_contain_text("phone-notes.md")
@@ -722,7 +725,7 @@ def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direc
             assert (panes["view"], panes["list"], panes["file"], panes["back"]) == ("file", False, True, True), panes
             assert page.evaluate("document.activeElement === window.filesEditor")
             _same_draft(page, "A new draft")
-            page.get_by_role("button", name="Back to folder", exact=True).focus()
+            page.get_by_role("button", name="Back to Files", exact=True).focus()
             _resize(page, 1280, 800)
             panes = page.evaluate(_PANES)
             assert panes["focusShown"] and panes["focus"] != "body", panes
@@ -731,7 +734,7 @@ def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direc
             assert (panes["view"], panes["focus"], panes["focusShown"]) == ("file", "back", True), panes
 
             # Without a draft, an image opens straight away and Back returns to its row.
-            page.get_by_role("button", name="Back to folder", exact=True).click()
+            page.get_by_role("button", name="Back to Files", exact=True).click()
             page.locator(".files-entry").filter(has_text="picture.png").click()
             page.get_by_role("button", name="Discard", exact=True).click()
             expect(page.locator(".files-preview-image")).to_be_visible()
@@ -746,7 +749,7 @@ def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direc
             page.wait_for_function("window.__ouroLayers.ids().includes('files-file')")
             panes = page.evaluate(_PANES)
             assert (panes["view"], panes["list"], panes["file"], panes["back"]) == ("file", False, True, True), panes
-            page.get_by_role("button", name="Back to folder", exact=True).click()
+            page.get_by_role("button", name="Back to Files", exact=True).click()
             panes = page.evaluate(_PANES)
             assert (panes["view"], panes["focus"], panes["unsaved"], panes["sideways"]) == (
                 "list", "picture.png", [], False), panes
@@ -928,8 +931,7 @@ def _working_folder(ui, project_id):
                   "clientX": box["x"] + box["width"] / 2, "clientY": box["y"] + box["height"] / 2}
         target.dispatch_event("pointerdown", finger)
         ui.page.locator(MENU).wait_for()  # the long press, held still
-        target.dispatch_event("pointerup", finger)
-        ui.page.wait_for_timeout(450)  # the lifting finger's click guard
+        target.dispatch_event("pointerup", finger)  # the next press acts at once (gesture_tail.js)
     else:
         row.hover()
         row.locator(".nav-project-kebab").click()
@@ -959,10 +961,10 @@ def _geometry(ui, dialog) -> dict:
     """What eyes miss: the dialog inside the window, no sideways scroll anywhere in it, every control reachable."""
     facts = dialog.evaluate("""(el) => {
         const box = el.getBoundingClientRect();
-        const body = el.querySelector('.marketplace-modal-body');
+        const body = el.querySelector('.ui-modal-body');
         const wide = [...el.querySelectorAll('*')].filter((node) => node.scrollWidth > node.clientWidth + 1
             && getComputedStyle(node).overflowX !== 'visible').map((node) => node.className || node.tagName);
-        const buttons = [...el.querySelectorAll('.marketplace-modal-actions button:not([hidden])')].map((button) => {
+        const buttons = [...el.querySelectorAll('.ui-modal-actions button:not([hidden])')].map((button) => {
             const b = button.getBoundingClientRect();
             const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
             return {text: button.textContent.trim(), height: b.height, inside: b.left >= box.left - 0.5 && b.right <= box.right + 0.5,

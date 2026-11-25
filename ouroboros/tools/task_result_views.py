@@ -6,6 +6,8 @@ import json
 from pathlib import PurePath
 from typing import Any, Dict, Mapping
 
+from ouroboros.utils import json_dumps_utf8
+
 RESULT_VIEWS = ("answer", "summary", "evidence", "full")
 _EVIDENCE_ARTIFACT_LIMIT = 10
 
@@ -82,7 +84,7 @@ def authority_selection_response(ctx: Any, data: Dict[str, Any], drive_root: Any
             end=selectors["source_end_char"], presence_scope=str(selectors["presence_scope"] or ""))
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc)))
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    text = json_dumps_utf8(payload, ensure_ascii=False, sort_keys=True)
     if payload.get("authority_source", {}).get("reason") == "source_range_invalid":
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
     return text
@@ -92,15 +94,15 @@ def authority_selection(authority: Dict[str, Any], task_id: str, fields: Any, *,
                         digest: str, start: Any, end: Any, presence_scope: str = "") -> Dict[str, Any]:
     """Exact mechanical view of the SAME current authority, never a new dossier/store.
 
-    All digests/ranges describe sorted ensure_ascii=False JSON in Unicode code
-    points, not bytes. The full projection identity is separate from the chosen
+    Digests bind sorted JSON with POSIX surrogateescape units escaped. Ranges
+    count code points of that text. The projection identity is separate from the chosen
     fields' serialization and child_result_sha256; receipts/plans may change
     while that result identity stays fixed. Re-reads are current, not immutable.
     """
     from ouroboros.artifacts import text_source_range_projection
 
     def encode(value):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return json_dumps_utf8(value, ensure_ascii=False, sort_keys=True)
 
     full_text = encode(authority)
     projection_sha = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
@@ -186,7 +188,7 @@ def retained_call_source(ctx, root, data, task_id, call_id, digest, start, end):
     if not isinstance(projection, dict) or not projection:
         raise FileNotFoundError("retained call has no redacted projection")
     raw = read_blob_ref(root, projection, expected_kind=str(projection.get("kind") or "json"),
-                        max_bytes=16 * 1024 * 1024, raw_bytes=True, admit=admit)
+                        max_bytes=16 * 1024 * 1024, raw_bytes=True, admit=admit, task_id=task_id)
     source, reason = text_source_range_projection(
         raw.decode("utf-8"), kind="redacted_dispatch_projection" if dispatch else "redacted_call_projection",
         start_char=start, end_char=end,
@@ -341,8 +343,16 @@ def render_result_view(
         payload["unread_mail_notice"] = unread
     if gap := raw_evidence_notice(data):
         payload["test_evidence_gap"] = gap
+    from ouroboros.payload_release_state import notice as released_notice
+
+    if released := released_notice(data):  # the owner's Storage release, typed, with where its bytes are now
+        payload["released_payloads"] = released
     if effort:
         payload["effort"] = dict(effort)
+    from ouroboros.helper_receipt import task_result_line
+
+    if receipt := task_result_line(data):  # the same repeat as the full and the compact handoff, only when observed
+        payload["receipt"] = receipt
 
     reread_arguments = {"task_id": task_id, "view": "answer"}
     authority_arguments = {"task_id": task_id, "include_authority": True}
@@ -365,7 +375,7 @@ def render_result_view(
             payload["result_source"] = current_answer
         else:
             payload["answer"] = answer
-        return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        return json_dumps_utf8(payload, ensure_ascii=False, indent=2, default=str)
 
     # Dynamic views deliberately do not take the unchanged-body branch.
     payload["known_result_matches"] = bool(
@@ -374,7 +384,7 @@ def render_result_view(
     summary = _add_dynamic_summary(payload, data, outcome_summary)
     if view == "summary":
         payload["answer_source"] = current_answer
-        return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        return json_dumps_utf8(payload, ensure_ascii=False, indent=2, default=str)
 
     # Evidence layers current authorized recipes on the same dynamic summary;
     # no trace_refs, manifest paths, or copied stored rows.  Both recipes stay
@@ -392,7 +402,7 @@ def render_result_view(
             "coverage": "current_authorized_projection_only",
         },
     ]
-    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    return json_dumps_utf8(payload, ensure_ascii=False, indent=2, default=str)
 
 
 __all__ = ["RESULT_VIEWS", "render_result_view", "validate_result_view"]

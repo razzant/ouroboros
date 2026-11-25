@@ -20,6 +20,7 @@ from ouroboros.storage_free import FreeSpace
 from ouroboros.task_results import load_task_result
 from tests._shared import retire_synthetic_retention
 from tests._store_shared import seed_result
+from tests._workspace_git import git_repository
 from tests.test_body_candidate_retention import candidate  # noqa: F401 -- the body fixture
 from tests.test_storage_free import _fake_sizer, _join, _owner, _preview, _run
 from tests.test_storage_free_safety import _capture, _copy, _git, _prune, copies  # noqa: F401 -- the plain copies fixture
@@ -222,6 +223,10 @@ def test_a_producer_retained_handoff_is_sized_by_the_scratch_it_holds(tmp_path, 
 
     data, scratch = _producer_retained(tmp_path, REASON)
     (scratch / "held" / "blob.bin").write_bytes(b"x" * 262_144)
+    assert scratch.name == session_scratch.SCRATCH_WORKSPACE
+    container = scratch.parent
+    assert (container / session_scratch.SCRATCH_MARKER).is_file()
+    (container / "owner-note.bin").write_bytes(b"m" * 65_536)  # the released allocation includes bytes beside w/
     _started(tmp_path, task_id="task-2", status="running")  # a task whose own scratch record stays in its drive
     judged = []
     real_hold = session_scratch.task_hold
@@ -234,8 +239,9 @@ def test_a_producer_retained_handoff_is_sized_by_the_scratch_it_holds(tmp_path, 
         assert session_scratch.scratch_records(data) and judged == ["task-2"], "the ordinary listing still judges it"
         [row] = _page(owner, (data, data.parent))["items"]
         measured = lambda path: sum(part["bytes"] for part in storage.size_paths([str(path)], sleep=lambda _s: None))  # noqa: E731
-        assert [Path(path).resolve() for path in row["manual"]["paths"]] == [scratch.resolve()]
-        assert row["bytes"] == measured(scratch) > measured(Path(row["path"])), "the scratch it holds, not its entry"
+        assert [Path(path).resolve() for path in row["manual"]["paths"]] == [container.resolve()]
+        assert row["bytes"] == measured(container) > measured(scratch) > measured(Path(row["path"])), \
+            "the whole allocation it holds, including its marker and sibling bytes, not its workspace or entry"
         assert plan["pool"]["manual"] == {"count": 1, "bytes": row["bytes"], "bytes_complete": True, "retained": 1}
         [folder] = _group(plan, "work_folders")["items"]
         assert folder["bytes"] == measured(data / "task_drives" / "task-1"), "an ordinary item keeps its own folder's size"
@@ -385,9 +391,7 @@ def test_a_detached_head_with_its_own_commits_is_not_offered(copies):  # noqa: F
 
 def test_a_nested_repository_is_not_offered(copies):  # noqa: F811
     handle = _copy(copies)
-    nested = Path(handle.path) / "vendor"
-    nested.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=nested, check=True)
+    nested = git_repository(Path(handle.path) / "vendor", unborn=True)
     (nested / "f").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "f"], cwd=nested, check=True)
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "own history"], cwd=nested, check=True)

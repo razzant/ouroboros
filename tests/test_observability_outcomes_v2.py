@@ -1102,6 +1102,44 @@ def test_latest_llm_response_text_salvages_newest_assistant_text(tmp_path):
     assert latest_llm_response_text(tmp_path, "t-salvage") == "newest real progress"
 
 
+
+def test_salvage_never_passes_off_an_older_text_while_the_newest_cannot_be_read(tmp_path, monkeypatch):
+    """The newest response may hold the latest text even when its bytes cannot be located now
+    (``EvidenceUnavailable``: the packs catalog cannot answer): the salvage stops there with nothing
+    rather than presenting an older text as the last one; once the bytes can be read, the newest text
+    is salvaged. Each read names the task, the reader's cost hint."""
+    import json as _json
+    import pathlib as _pathlib
+    import time as _time
+
+    from ouroboros import evidence_packs
+    from ouroboros.observability import latest_llm_response_text, persist_call
+
+    persist_call(
+        tmp_path, task_id="t-unknown", call_id="llm_a_response", call_type="llm_response",
+        payload={"message": {"content": "older progress"}, "usage": {}},
+    )
+    _time.sleep(0.02)
+    newest = persist_call(
+        tmp_path, task_id="t-unknown", call_id="llm_b_response", call_type="llm_response",
+        payload={"message": {"content": "newest real progress"}, "usage": {}},
+    )
+    manifest = _json.loads(_pathlib.Path(newest["manifest_ref"]["path"]).read_text(encoding="utf-8"))
+    digest, real, tasks = manifest["full_payload_ref"]["sha256"], evidence_packs.blob_bytes, []
+
+    def unlocatable(root, ref, **kwargs):
+        tasks.append(kwargs.get("task_id"))
+        if ref.get("sha256") == digest:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        assert latest_llm_response_text(tmp_path, "t-unknown") == ""
+    assert tasks == ["t-unknown"], tasks  # stopped at the newest; its task named
+    assert latest_llm_response_text(tmp_path, "t-unknown") == "newest real progress"
+
 def test_latest_llm_response_text_strips_trailing_protocol_object(tmp_path):
     """Salvage lockstep with the loop's trailing-object parse: a body of prose
     plus a trailing delivery-control object salvages the PROSE only; a body
@@ -1358,6 +1396,40 @@ def test_has_failures_true_for_failed_receipt():
         {"status": "ready", "artifacts": [], "errors": []},
     )
     assert refreshed["summary"]["has_failures"] is True
+
+
+def test_a_plain_step_refusal_is_no_ledger_failure_while_an_independent_error_stays_one():
+    """Build and refresh preserve the recorded status and only classify the non-error refusal as a control."""
+    refused = {"tool": "ext_send_parts", "status": "blocked", "is_error": True,
+               "tool_result_code": "OWNER_OPERATION_REFUSED",
+               "tool_result_meta": {"refused_step": True, "control_reason": "cancelled",
+                                    "physical_dispatch": True}}
+    failed = {"tool": "ext_send_parts", "status": "extension_error", "is_error": True,
+              "tool_result_code": "EXTENSION_ERROR",
+              "tool_result_meta": {"refused_step": True, "control_reason": "cancelled"}}
+    plain_blocked = {"tool": "ext_send_parts", "status": "blocked", "is_error": True}
+
+    def ledger_for(*calls):
+        built = build_verification_ledger(task={}, loop_outcome={"outcome_axes": {}},
+                                          llm_trace={"tool_calls": list(calls)}, artifact_bundle={})
+        refreshed = refresh_verification_ledger_artifacts(
+            built, {"status": "ready", "artifacts": [], "errors": []})
+        assert refreshed["summary"]["has_failures"] == built["summary"]["has_failures"]
+        return built
+
+    led = ledger_for(refused)
+    entry = next(item for item in led["entries"] if item.get("kind") == "tool_call")
+    assert entry["status"] == "blocked"
+    assert entry["tool_result_meta"] == {"refused_step": True, "control_reason": "cancelled"}
+    assert led["summary"]["has_failures"] is False
+
+    failed_led = ledger_for(failed)
+    failed_entry = next(item for item in failed_led["entries"] if item.get("kind") == "tool_call")
+    assert failed_entry["status"] == "extension_error" and failed_entry["tool_result_meta"]["refused_step"] is True
+    assert failed_led["summary"]["has_failures"] is True
+    assert ledger_for(refused, plain_blocked)["summary"]["has_failures"] is True
+    assert ledger_for({**failed, "status": "timeout", "tool_result_code": "EXTENSION_TIMEOUT"})["summary"]["has_failures"] is True
+    assert ledger_for({**failed, "status": "tool_reported_failure", "tool_result_code": "TOOL_REPORTED_FAILURE"})["summary"]["has_failures"] is False
 
 
 def test_omitted_ledger_stub_keeps_the_real_summary_across_artifact_finalization(tmp_path):

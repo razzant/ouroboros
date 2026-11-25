@@ -20,28 +20,17 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from ouroboros._usage_response import _reported_token_count, processing_receipt, observed_processing_mode, provider_cost_value
+from ouroboros._usage_response import (
+    _reported_token_count, cache_write_split, cache_write_total, nontext_counts, observed_processing_mode,
+    processing_receipt, provider_cost_value, text_token_counts,
+)
 
 
 def has_nontext_usage(usage) -> bool:
     """Aggregate prompt totals cannot price reported audio/image usage as text. A null count is unreported (an SDK
     model fills its absent detail fields with None), not usage; any other nonzero value, or a non-text modality
     without a zero count, is."""
-    if isinstance(usage, Mapping):
-        if "modality" in usage and str(usage["modality"]).upper() != "TEXT":
-            return usage.get("tokenCount", usage.get("token_count")) != 0
-        for key, value in usage.items():
-            if key in {"audio_input_tokens", "audio_output_tokens", "image_input_tokens", "image_output_tokens",
-                       "audio_tokens", "image_tokens", "input_audio_tokens", "output_audio_tokens",
-                       "input_image_tokens", "output_image_tokens", "cached_audio_input_tokens",
-                       "cached_image_input_tokens", "video_input_tokens", "thinking_tokens", "connected_seconds"} \
-                    and value is not None and value != 0:
-                return True
-            if has_nontext_usage(value):
-                return True
-    elif isinstance(usage, (list, tuple)):
-        return any(has_nontext_usage(item) for item in usage)
-    return False
+    return any(count != 0 for count in nontext_counts(usage))
 
 
 _MALFORMED = object()
@@ -59,8 +48,8 @@ def _billed_tokens(usage: Mapping[str, Any]) -> Tuple[Optional[Tuple[int, int, i
     """``(prompt, cache hit, completion)`` when the reply states its whole billed split, else why not. An absent
     hit count is unknown, never zero; DeepSeek states it twice (top level and details), and both must agree. A
     stated total must be prompt plus completion, and stated reasoning lies within completion (priced there once);
-    an absent total or reasoning count is not required. Validate the pre-coercion witness when present; the ledger's
-    legacy counter projection must not turn a malformed reported count into a known tariff."""
+    an absent total or reasoning count is not required. Validate the pre-coercion witness when present: exact
+    integers only, so a malformed reported count never becomes a known tariff."""
     nontext = has_nontext_usage(usage)
     usage = usage.get("_reported_token_usage", usage)
     counts = {key: _exact(usage, key) for key in ("prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens",
@@ -175,12 +164,50 @@ def settled_cost_facts(reply_usage: Mapping[str, Any]) -> Dict[str, Any]:
             **{key: row[key] for key in ("price_source", "cost_basis") if row.get(key)}}
 
 
-def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost_optional) -> Dict[str, Any]:
+def attempt_money_fact(drive_root: Any, attempt_id: Any) -> Dict[str, Any]:
+    """What the ledger settled for one attempt, for the display event that names it (``ledger_attempt_ids``): its
+    amount (None: unknown), whether that is the provider's final amount or the ledger's own estimate, whether the
+    row found a reported amount unreadable (``cost_invalid``, the settlement's own fact) and the row's counts.
+    The reader prices nothing itself. A display read (``usage_store.read(allow_stale=True)``): it never holds its
+    caller for the money wait. Empty when the row cannot be read in that wait or is not settled: the event then
+    states none of these."""
+    from ouroboros import usage_store
+
+    try:
+        with usage_store.read(drive_root, allow_stale=True) as txn:
+            row = txn.attempt(str(attempt_id))
+    except Exception:
+        return {}
+    if not row or row.get("state") != "settled":
+        return {}
+    cost = provider_cost_value(row.get("cost_usd"))
+    counts = ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens")
+    return {"cost": cost, "cost_final": cost is not None and bool(row.get("cost_final")),
+            "cost_estimated": cost is not None and bool(row.get("cost_estimated")),
+            "cost_invalid": cost is None and bool(row.get("cost_invalid")),
+            **{key: row.get(key) for key in counts}}
+
+
+def frame_estimate_ttl(reservation, request, exc) -> Optional[str]:
+    """An OpenRouter failure frame may use its own measured send's tier for an estimate. Empty means unbound."""
+    if reservation.provider != "openrouter":
+        return None
+    receipt = getattr(exc, "stream_receipt", None)
+    if (request is not None and request.candidate_measurement_kind == "canonical_json_v1" and request.candidate_raw_sha256
+            and isinstance(receipt, dict) and receipt.get("attempt_id") == reservation.attempt_id):
+        return request.prompt_cache_ttl or ""
+    return ""
+
+
+def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost_optional,
+                      estimate_cache_ttl: Optional[str] = None) -> Dict[str, Any]:
     """Normalize reported usage before the monetary transaction; no live pricing I/O."""
     normalized = dict(usage or {})
     evidence = copy.deepcopy(normalized.get("cost_evidence") or {})
     if not isinstance(evidence, dict):
         evidence = {"provider_evidence": evidence}
+    if reservation.provider == "openrouter":
+        evidence.pop("cache_write_ttl", None)  # only the measured send below can supply this source
     pinned = str(reservation.provider or "").lower() == "deepseek"
     if pinned:  # the reserved row's pin stays the attempt's evidence; a reply's own price claims are not
         own, dispatched_at = _pinned_attempt(reservation)
@@ -194,10 +221,19 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
                                  submitted_native=reservation.submitted_processing_mode)
     if receipt is not None:
         normalized["processing"] = receipt
-    prompt_tokens = _reported_token_count(normalized, "prompt_tokens", "input_tokens")
-    completion_tokens = _reported_token_count(normalized, "completion_tokens", "output_tokens")
+    prompt_tokens, completion_tokens = text_token_counts(normalized)
     cached_tokens = _reported_token_count(normalized, "cached_tokens")
-    cache_write_tokens = _reported_token_count(normalized, "cache_write_tokens")
+    split = cache_write_split(normalized)
+    cache_write_tokens, invalid_write = cache_write_total(normalized, split)
+    if invalid_write:
+        normalized["cache_write_tokens_invalid"] = True
+    if split:
+        normalized["cache_write_tokens_by_ttl"] = split
+    reported_ttl = str(normalized.get("prompt_cache_ttl") or "")
+    pricing_ttl = reported_ttl or estimate_cache_ttl
+    # A failure frame needs an observation or the explicit tier on this send to price aggregate writes.
+    frame_tier_missing = (estimate_cache_ttl is not None and cache_write_tokens and not split
+                          and pricing_ttl not in ("5m", "1h"))
     cost = provider_cost_value(cost_usd)
     if cost_usd is not None and cost is None:
         normalized["cost_invalid"] = True
@@ -211,21 +247,29 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
             cost_final = False
             if cost is not None:
                 normalized["price_source"] = f"litellm@{evidence['tariff_quote']['fetched_at']}"
+        elif (cost is None and cost_usd is None and normalized.get("cost_invalid")
+              and evidence.get("operation") == "chat" and evidence.get("input") == "text"):
+            # A rejected charge must not be estimated. The raw counters can still explain why pricing is unknown.
+            _, reason = _billed_tokens(normalized)
+            if reason == "usage_malformed":
+                evidence["tariff_pricing"] = {"unpriced": reason}
     elif (cost is None and cost_usd is None and not normalized.get("cost_invalid") and has_usage
-          and normalized.get("cost_coverage") != "partial" and not has_nontext_usage(normalized)):
+          and not reservation.provider_reported_cost_only and not reservation.unpriced_add_on
+          and not normalized.get("cache_write_tokens_invalid")
+          and not frame_tier_missing and normalized.get("cost_coverage") != "partial" and not has_nontext_usage(normalized)):
         cost = estimate_cost_optional(
             reservation.model,
-            int(prompt_tokens or 0),
-            int(completion_tokens or 0),
-            cache_usage={"cached_tokens": int(cached_tokens or 0),
-                         "cache_write_tokens": int(cache_write_tokens or 0),
-                         "cache_write_tokens_by_ttl": normalized.get("cache_write_tokens_by_ttl"),
-                         "prompt_cache_ttl": str(normalized.get("prompt_cache_ttl") or "")},
+            prompt_tokens,  # an unreported count stays None: both base text rates stay required
+            completion_tokens,
+            cache_usage={"cached_tokens": cached_tokens, "cache_write_tokens": cache_write_tokens,
+                         "cache_write_tokens_by_ttl": split, "prompt_cache_ttl": pricing_ttl},
             allow_live_fetch=False,
             provider=reservation.provider,
             **({"processing_mode": pricing_mode} if pricing_mode else {}),
         )
         cost_final = False
+        if cost is not None and estimate_cache_ttl and cache_write_tokens and not (reported_ttl or split):
+            evidence["cache_write_ttl"] = {"source": "sent_candidate", "ttl": estimate_cache_ttl}
         quote = getattr(cost, "quote", None)
         if quote:
             evidence["tariff_quote"] = copy.deepcopy(quote)
@@ -244,10 +288,11 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
         completion_tokens=completion_tokens,
         cached_tokens=cached_tokens,
         cache_write_tokens=cache_write_tokens,
-        prompt_cache_ttl=str(normalized.get("prompt_cache_ttl") or ""),
+        prompt_cache_ttl=reported_ttl,
         # ``response_provider``: the upstream that served the call, as the response named it (a cache is one
         # upstream's); ``cache_write_tokens_by_ttl``: the provider's own split of the writes by lifetime.
         **{key: copy.deepcopy(normalized[key]) for key in (
             "effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis", "cost_coverage",
-            "price_source", "cost_invalid", "response_provider", "cache_write_tokens_by_ttl") if key in normalized},
+            "price_source", "cost_invalid", "response_provider", "cache_write_tokens_by_ttl", "cache_write_tokens_invalid")
+           if key in normalized},
     )

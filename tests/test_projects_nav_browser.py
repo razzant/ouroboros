@@ -162,7 +162,7 @@ def test_reads_in_one_millisecond_keep_their_request_order(pins_ui):
     ui["client"].post('/api/projects/archive-301/update', json={"name": "Archive renamed before the pin"}).raise_for_status()
     with page.expect_request(is_list):
         changed(control, "archive-301")
-    # Use the real keyboard menu: a frozen wall clock deliberately cannot expire a touch lift's click guard.
+    # Pin by the row's own menu, opened and pressed from the keyboard.
     target = row(page, "archive-000").locator('.nav-project-row')
     target.focus()
     target.press("Shift+F10")
@@ -435,14 +435,17 @@ def test_reference_beyond_both_caps_opens_its_own_room_and_a_superseded_or_faile
     expect()(title).to_have_text(b["name"])
     settle(page)
     assert not reads_of(reads, "/api/chat/history", chat_id=str(a["chat_id"]))
-    # A close or another page while a lookup waits: the late answer opens nothing.
+    # A close or another page while a lookup waits: the late answer opens nothing. B was reached by a jump from the
+    # deep room, so its × returns there, and the deep room's × to Main (DESIGN "Layers and dismissal").
     click_reference(page, a)
     until(page, lambda: len(control["held_lookups"]) == 1)
     page.locator('#project-panel-close').click()
-    expect()(page.locator('#project-panel')).to_be_hidden()
+    expect()(title).to_have_text(deep["name"])
     ui["forward_get"](control["held_lookups"].pop(0))
     page.evaluate("0")
     settle(page)
+    expect()(title).to_have_text(deep["name"])
+    page.locator('#project-panel-close').click()
     expect()(page.locator('#project-panel')).to_be_hidden()
     assert not reads_of(reads, "/api/chat/history", chat_id=str(a["chat_id"]))
     control["hold_lookups"] = False
@@ -740,7 +743,6 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
         return {
             height: box(find).height, rowHeight: box(row).height, radius: parseFloat(style.borderTopLeftRadius),
             glyphX: box(find.querySelector('.nav-find-glyph')).left,
-            iconX: box(document.querySelector('#primary-sidebar [data-nav-page="circles"] > svg')).left,
             textX: box(input).left + parseFloat(getComputedStyle(input).paddingLeft),
             labelX: box(row.querySelector('.nav-row-label')).left,
                 above: box(find).top - box(document.querySelector('.nav-projects-header')).top,
@@ -755,7 +757,9 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
     # The find capsule keeps the compact control height; Project rows now spend their second line on the newest fact.
     assert geometry["rowHeight"] >= geometry["height"], geometry
     assert geometry["radius"] >= geometry["height"] / 2, geometry  # a capsule, as every one-line control
-    assert geometry["glyphX"] == pytest.approx(geometry["iconX"], abs=1), geometry
+    # The magnifier leads on the line where the names of the Projects it finds start (a row's 1px border, then
+    # --space-3); the foot's cards keep their own inset (owner 21.11), so their glyphs are not this field's line.
+    assert geometry["glyphX"] == pytest.approx(geometry["labelX"], abs=1), geometry
     # The field's words follow its magnifier; Project names have no leading glyph in the approved two-line rows.
     assert geometry["textX"] == pytest.approx(geometry["glyphX"] + 30, abs=1), geometry
     assert geometry["shadow"] != "none" and geometry["inputBorder"] == "0px", geometry
@@ -1026,12 +1030,12 @@ SHOWS = """(el) => {
 
 @pytest.mark.parametrize("how", ["escape", "clear-button", "clear-command"])
 def test_short_window_clear_and_escape_return_to_the_browse_row_with_visible_focus(pins_ui, how):
-    """Real presses in a short window, where the whole column scrolls. The find begins with the field in view (a
-    click brings it there), so Escape, the field's × and Clear search put the row that was first in view back at its
-    place, and the keyboard stays in the field, which shows; nothing scrolls after that. Escape is pressed after the
-    owner scrolled the column on through the matches, the field gone from view."""
+    """Real presses in a short window, where the whole column scrolls (480 px: a desk's zones fit from 500). The find
+    begins with the field in view (a click brings it there), so Escape, the field's × and Clear search put the row
+    that was first in view back at its place, and the keyboard stays in the field, which shows; nothing scrolls after
+    that. Escape is pressed after the owner scrolled the column on through the matches, the field gone from view."""
     ui, page = pins_ui, pins_ui["page"]
-    page.set_viewport_size({"width": ui["width"], "height": 500})
+    page.set_viewport_size({"width": ui["width"], "height": 480})
     seed_archive(ui["root"])
     refresh(page)
     find = page.locator('#nav-projects .nav-find-input')

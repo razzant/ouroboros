@@ -230,6 +230,7 @@ def test_pending_recovery_reuses_held_original_request_without_history_scan(tmp_
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     record = {"invocation_id": "inv-recover", "task_id": "task", "route": "codex", "project_id": "",
         "project_owned": False, "idempotency_key": "key", "selected_subagent_id": "worker",
+        "daemon_store_id": "fixture-store",  # receipt-bound; the test varies history/row identity
         "request": {"model": "original-model", "credentialProfileId": "original-account", "effort": "",
                     "access": "readonly"}, "processing": {"requested": "economy", "submitted": None}}
     monkeypatch.setattr(custody, "_CUSTODY", {})
@@ -239,6 +240,7 @@ def test_pending_recovery_reuses_held_original_request_without_history_scan(tmp_
     monkeypatch.setattr(custody, "_iter_rows", _no_history_scan)
 
     class Gateway:
+        store_identity = "fixture-store"
         def start_run(self, body, *, idempotency_key):
             assert body == record["request"] and idempotency_key == "inv-recover"
             if refused:
@@ -250,7 +252,8 @@ def test_pending_recovery_reuses_held_original_request_without_history_scan(tmp_
 
     custody._recover_pending_invocation(tmp_path, Gateway(), record)
     row = subagent_last_delegation(tmp_path)
-    assert row["outcome"] == ("not_started" if refused else "succeeded")
+    # A refusal answering the replay's POST proves no non-admission (#3138): the attempt is unknown, never "not started".
+    assert row["outcome"] == ("unknown" if refused else "succeeded")
     assert row["requested_profile"] == "original-account"
     assert row["identity"]["effort"] == "" and row["identity"]["processing_preference"] == "economy"
     assert row["applied_profile"] == ""

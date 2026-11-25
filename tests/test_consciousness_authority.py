@@ -20,6 +20,7 @@ import types
 import pytest
 
 from ouroboros import consciousness_authority as ca
+from ouroboros.tool_policy import initial_tool_schemas
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._store_shared import seed_result
 from tests._cases import case_folders
@@ -145,7 +146,8 @@ def test_consciousness_contract_keeps_the_full_schema_set_and_refuses_at_dispatc
     # Same schemas, same advertised names, same initial envelope, same omission manifest.
     assert wake.schemas() == main.schemas()
     assert wake.available_tools() == main.available_tools()
-    assert wake.initial_tool_names() == main.initial_tool_names()
+    for mode in ("nano", "max"):  # the arrays the first request really carries
+        assert initial_tool_schemas(wake, context_mode=mode) == initial_tool_schemas(main, context_mode=mode)
     assert wake.capability_omissions() == main.capability_omissions()
     assert not any(item.get("reason") == "disabled_by_contract" for item in wake.capability_omissions())
     assert "toggle_evolution" in wake.available_tools()
@@ -763,7 +765,7 @@ def test_campaign_keeps_the_origin_and_its_cycle_tasks_inherit_it(tmp_path, monk
     assert pending == [] and state.load_state()["evolution_cycle"] == 1
     paused = evolution_lifecycle._read_evolution_campaign()
     assert paused["status"] == "paused" and paused["pause_reason"] == "admission_refused:consciousness_allowance_exhausted"
-    assert len(sent) == 1 and "Evolution paused" in sent[0] and "consciousness_allowance_exhausted" in sent[0]
+    assert len(sent) == 1 and sent[0] == "Evolution is paused: its next cycle was not admitted."  # the code: its notice
     assert not state.load_state().get("evolution_mode_enabled")
 
 

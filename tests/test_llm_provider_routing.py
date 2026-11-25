@@ -1308,3 +1308,246 @@ def test_pin_fact_follows_the_terminal_candidate_not_the_built_one(monkeypatch):
     assert len(sent) == 2
     assert "allow_fallbacks" not in sent[-1].get("extra_body", {}).get("provider", {})
     assert "reasoning_pin" not in usage
+
+
+# Local-compatible leading reasoning and literal code tags.
+REASONING_TARGET = {"provider": "openai-compatible", "supports_openrouter_extensions": False,
+          "supports_generation_cost": False, "usage_model": "openai-compatible::qwen-stand"}
+
+
+def _normalize_reasoning(content, *, provider="openai-compatible", finish="stop", **message):
+    from ouroboros.llm import LLMClient
+
+    resp = {"id": "chatcmpl-1", "choices": [{"finish_reason": finish, "message": {
+        "role": "assistant", "content": content, **message}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+    return LLMClient(api_key="x")._normalize_remote_response(resp, {**REASONING_TARGET, "provider": provider},
+                                                             skip_cost_fetch=True)
+
+
+@pytest.mark.parametrize("content,answer,reasoning", [
+    ("The user asks for a sum.\n120 + 80 = 200.\n</think>\n\nThe sum is 200.", "The sum is 200.",
+     "The user asks for a sum.\n120 + 80 = 200."),
+    ("<think>plan the reply</think>\n\nПривет!", "Привет!", "plan the reply"),
+    ("<think>\n\n</think>\n\nПривет!", "Привет!", ""),
+])
+def test_leading_reasoning_is_split_off_the_answer(content, answer, reasoning):
+    msg, _usage = _normalize_reasoning(content)
+    assert msg["content"] == answer
+    assert msg.get("reasoning", "") == reasoning
+    assert "</think>" not in msg["content"]
+
+
+@pytest.mark.parametrize("content", [
+    "Use the </think> tag to close reasoning in Qwen templates.",  # a sentence that mentions the tag
+    "Plain answer, no reasoning.",
+])
+def test_an_answer_without_leading_reasoning_is_kept_whole(content):
+    msg, _usage = _normalize_reasoning(content)
+    assert msg["content"] == content and "reasoning" not in msg
+
+
+def test_a_tool_call_and_another_provider_are_not_touched():
+    call = [{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]
+    msg, _usage = _normalize_reasoning("thinking\n</think>\n", tool_calls=call)
+    assert msg["content"] == "thinking\n</think>\n"
+    msg, _usage = _normalize_reasoning("thinking\n</think>\nanswer", provider="openrouter")
+    assert msg["content"] == "thinking\n</think>\nanswer"
+
+
+def test_a_reply_that_is_only_reasoning_takes_the_empty_response_recovery():
+    from ouroboros.loop_llm_call import _classify_empty_response
+
+    msg, usage = _normalize_reasoning("I should answer briefly.\n</think>\n", finish="length")
+    assert msg["content"] == "" and msg["reasoning"] == "I should answer briefly."
+    assert _classify_empty_response(usage, msg)[0] == "llm_empty_response"  # output exhausted: the existing path
+
+
+# --- Only the reply's first think tag outside code ends reasoning; tool calls split for display only ---
+
+@pytest.mark.parametrize("content", [
+    "Вот сырой шаблон:\n```text\ninternal plan\n</think>\nVisible answer\n```",  # a template quoted in a code block
+    "Qwen's template looks like this:\n<think>\nthe plan\n</think>\nThen the answer follows.",  # an explanation
+    "`<think>example</think>` marks reasoning, and a lone\n`</think>`\ncloses it.",  # literal examples in inline code
+])
+def test_a_tag_the_answer_quotes_or_explains_is_the_answer(content):
+    msg, _usage = _normalize_reasoning(content)
+    assert msg["content"] == content and "reasoning" not in msg
+
+
+def test_a_reply_with_its_own_reasoning_field_is_not_read_again():
+    details = [{"type": "reasoning.text", "text": "plan"}]
+    msg, _usage = _normalize_reasoning("plan\n</think>\n\nAnswer.", reasoning_details=details)
+    assert msg["content"] == "plan\n</think>\n\nAnswer." and "reasoning" not in msg
+
+
+def test_the_stands_reasoning_beside_a_tool_call_stays_in_history_and_leaves_the_display():
+    """Nine progress messages on the stand showed <think> blocks; this is a real streamed reply (see the fixture
+    README)."""
+    import json
+    from pathlib import Path
+
+    from ouroboros.loop_messages import _emit_round_progress
+
+    witness = json.loads((Path(__file__).parent / "fixtures" / "local_reasoning"
+                          / "llama-b12421-qwen35-9b-think-tool-call.json").read_text(encoding="utf-8"))["message"]
+    msg, _usage = _normalize_reasoning(witness["content"], finish="tool_calls", tool_calls=witness["tool_calls"])
+    assert msg["content"] == witness["content"]  # history keeps the reply as the server sent it
+    shown, trace = [], {"reasoning_notes": []}
+    _emit_round_progress(msg["content"], msg, lambda text, **kw: shown.append((text, kw)), trace)
+    assert shown == [("Понял. Работаю в изолированном стенде. Проверяю структуру папок через реальные инструменты.",
+                      {"narration": True})]
+    assert "think>" not in str(trace) and msg["content"] == witness["content"]
+
+
+def test_a_tool_call_round_of_reasoning_only_is_shown_as_reasoning(monkeypatch):
+    from ouroboros.loop_messages import _emit_round_progress
+
+    call = [{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]
+    msg, _usage = _normalize_reasoning("secret plan\n</think>\n", finish="tool_calls", tool_calls=call)
+    assert msg["content"] == "secret plan\n</think>\n"  # history keeps the bytes; the lane stamped their display
+    shown = []
+    _emit_round_progress(msg["content"], msg, lambda text, **kw: shown.append((text, kw)), {"reasoning_notes": []})
+    assert shown == [("secret plan", {"narration": True, "reasoning": True})]
+    # Core parses no provider grammar: the same bytes without the lane's projection are shown as they came.
+    shown.clear()
+    _emit_round_progress(msg["content"], {"content": msg["content"], "tool_calls": call},
+                         lambda text, **kw: shown.append((text, kw)), {"reasoning_notes": []})
+    assert shown == [("secret plan\n</think>", {"narration": True})]
+
+
+def test_provider_failure_salvage_shows_no_reasoning_and_skips_a_reasoning_only_reply(tmp_path):
+    """Panel 7 (Astra): the stand's reasoning-beside-a-call reply, then provider death. The salvaged final is the
+    reply's visible text; a reply of reasoning alone yields to earlier visible text. History keeps its bytes."""
+    import json
+    from pathlib import Path
+
+    from tests.test_delivery_forced_finalization import _forced_test_context
+
+    witness = json.loads((Path(__file__).parent / "fixtures" / "local_reasoning"
+                          / "llama-b12421-qwen35-9b-think-tool-call.json").read_text(encoding="utf-8"))["message"]
+    message, _usage = _normalize_reasoning(witness["content"], finish="tool_calls", tool_calls=witness["tool_calls"])
+    loop, _registry, context, _trace = _forced_test_context(tmp_path / "stand")
+    context.messages.extend([message, {"role": "tool", "tool_call_id": message["tool_calls"][0]["id"],
+                                       "content": "File listing completed."}])
+    terminal, usage, _ = loop._provider_unavailable_result(context, error_kind="provider_unavailable",
+                                                           wait_cause="transport_unavailable")
+    assert terminal == "Понял. Работаю в изолированном стенде. Проверяю структуру папок через реальные инструменты."
+    assert usage["terminal_origin"] == "host_salvage" and context.messages[-2]["content"] == witness["content"]
+
+    call = [{"id": "c2", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]
+    thinking, _usage = _normalize_reasoning("only a plan\n</think>\n", finish="tool_calls", tool_calls=call)
+    loop, _registry, context, _trace = _forced_test_context(tmp_path / "earlier")
+    context.messages.extend([{"role": "assistant", "content": "Visible progress so far."}, thinking,
+                             {"role": "tool", "tool_call_id": "c2", "content": "ok"}])
+    terminal, _usage, _ = loop._provider_unavailable_result(context, error_kind="provider_unavailable",
+                                                            wait_cause="transport_unavailable")
+    assert terminal == "Visible progress so far." and "only a plan" not in terminal
+
+
+@pytest.mark.parametrize("fence", ["```python", "~~~python"])
+@pytest.mark.parametrize("tool_call", [False, True])
+def test_unclosed_fence_in_reasoning_does_not_hide_its_end(fence, tool_call):
+    from ouroboros.loop_messages import _emit_round_progress
+
+    raw = f"Let me check the sandbox.\n{fence}\nprint(1)\n</think>\nThe answer is 42."
+    calls = [{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]
+    msg, _usage = _normalize_reasoning(raw, **({"tool_calls": calls} if tool_call else {}))
+    if tool_call:
+        shown, trace = [], {"reasoning_notes": []}
+        _emit_round_progress(msg["content"], msg, lambda text, **kw: shown.append((text, kw)), trace)
+        assert shown == [("The answer is 42.", {"narration": True})]
+        assert msg["content"] == raw
+        assert "</think>" not in str(trace)
+    else:
+        assert msg["content"] == "The answer is 42."
+        assert msg["reasoning"] == raw.split("\n</think>")[0]
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_closed_fence_keeps_a_literal_closing_think_tag(fence):
+    raw = f"Here is code:\n{fence}text\n</think>\n{fence}\nThe answer is 42."
+    msg, _usage = _normalize_reasoning(raw)
+    assert msg["content"] == raw and "reasoning" not in msg
+
+
+# --- Reasoning ends at its own closing line; a sentence that mentions the tag does not end it ---
+
+def test_reasoning_ends_at_its_own_closing_line_and_a_mention_does_not_end_it():
+    """The first ``</think>`` on a line of its own and outside code ends reasoning, unless an opening tag outside code
+    comes before it; mentions of the tag inside sentences or code are reasoning (or answer) text."""
+    cases = [  # (reply, answer, reasoning)
+        # The review's probe (panel 7, split_inline_mention_probe.py): template-opened reasoning about the tag itself.
+        ("The user asks what </think> does. Explain briefly.\n</think>\n\nThe </think> tag closes reasoning.",
+         "The </think> tag closes reasoning.", "The user asks what </think> does. Explain briefly."),
+        ("I must not write </think> inside the answer.\n</think>\nThe answer is 42.", "The answer is 42.",
+         "I must not write </think> inside the answer."),
+        ("Plan: quote `</think>` literally, then close.\n</think>\n\nDone.", "Done.",
+         "Plan: quote `</think>` literally, then close."),
+    ]
+    whole = "Templates use <think> to open reasoning.\n</think>\nSo the answer follows."  # an opening tag before it
+    for content, answer, reasoning in [*cases, (whole, whole, "")]:
+        msg, _usage = _normalize_reasoning(content)
+        assert (msg["content"], msg.get("reasoning", "")) == (answer, reasoning), content
+
+
+@pytest.mark.parametrize("text", [
+    "Here is the result: " + "`" * 20000,
+    "Here is the result: " + "`" * 20000 + "\n</think>\nAnswer.",
+    " ".join("`" * length for length in range(1, 121)),
+    " ".join("`" * length for length in range(1, 121)) + "\n</think>\nAnswer.",
+    "</think> " * 32000,  # review 8 (Fable): a looping small model's closing tags, 288 thousand characters on a line
+    "plan\n" + "</think> " * 32000,
+], ids=["one-run", "one-run-then-answer", "growing-runs", "growing-runs-then-answer", "closing-tags",
+        "plan-then-closing-tags"])  # a whole parameter as the id outgrows Windows' 32,767-character environment value
+def test_backtick_runs_are_read_in_linear_time(text):
+    """A reply of backtick runs once took minutes in the inline-code scan (a backtracking pattern). An inline span
+    still closes at the next run of its own length; a run without a partner is text. The budget is this process's
+    CPU time, which a loaded machine's waiting does not inflate."""
+    import time
+
+    from ouroboros.llm_local import _code_spans, _split_leading_reasoning
+
+    for read in (_code_spans, _split_leading_reasoning):
+        began = time.process_time()
+        read(text)
+        assert time.process_time() - began < 0.2, read.__name__
+    sample = "a ``x ` y`` b `c` d ``` e"
+    assert [sample[start:end] for start, end in _code_spans(sample)] == ["``x ` y``", "`c`"]
+
+
+# --- The paired form ends at the first closing tag outside code (review 8, Kimi) ---
+
+@pytest.mark.parametrize("content,answer,reasoning", [
+    # Kimi: the reasoning quotes a closing tag in a fence; the real one comes after it.
+    ("<think>\nПокажу шаблон:\n```text\n</think>\n```\nещё рассуждение\n</think>\nОтвет — 42.", "Ответ — 42.",
+     "Покажу шаблон:\n```text\n</think>\n```\nещё рассуждение"),
+    ("<think>коротко</think>Ответ", "Ответ", "коротко"),  # small models close on the same line
+    ("<think>use `</think>` literal\nmore</think>\nAnswer", "Answer", "use `</think>` literal\nmore"),
+])
+def test_the_paired_form_ends_at_the_first_closing_tag_outside_code(content, answer, reasoning):
+    msg, _usage = _normalize_reasoning(content)
+    assert (msg["content"], msg.get("reasoning", "")) == (answer, reasoning)
+
+
+@pytest.mark.parametrize("content", [
+    "<think>plan\n```\n</think>\n```\nand no closing tag outside code",  # the closing tag only quoted in code
+    "<think>plan that never closes",  # how an opening tag without a closing one has always read
+])
+def test_a_paired_form_without_a_closing_tag_outside_code_stays_whole(content):
+    msg, _usage = _normalize_reasoning(content)
+    assert msg["content"] == content and "reasoning" not in msg
+
+
+def test_the_stands_text_answer_is_kept_without_its_reasoning():
+    """Both halves of the contract on real server replies (fixture README): a text answer is stored without its think
+    block, the reasoning beside it; a reply with tool calls keeps its bytes
+    (``test_the_stands_reasoning_beside_a_tool_call_stays_in_history_and_leaves_the_display``)."""
+    import json
+    from pathlib import Path
+
+    witness = json.loads((Path(__file__).parent / "fixtures" / "local_reasoning"
+                          / "llama-b12421-qwen35-9b-think-text-answer.json").read_text(encoding="utf-8"))["message"]
+    msg, _usage = _normalize_reasoning(witness["content"])
+    assert msg["content"].startswith("Готово! Вот итоги выполнения задачи:") and "think>" not in msg["content"]
+    assert msg["reasoning"].startswith("Команда python3 была успешно выполнена") and "think>" not in msg["reasoning"]
+    assert witness["content"].endswith(msg["content"])

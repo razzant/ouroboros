@@ -38,7 +38,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from ouroboros.contracts.schema_versions import read_schema_version, with_schema_version
-from ouroboros.utils import append_jsonl, iter_jsonl_objects, utc_now_iso, write_text_atomic
+from ouroboros.utils import append_jsonl, iter_jsonl_objects, json_dumps_utf8, utc_now_iso, write_text_atomic
 
 log = logging.getLogger(__name__)
 
@@ -298,7 +298,7 @@ def _payload(record: Any) -> Dict[str, Any]:
 
 
 def _write_and_index(drive_root: Any, path: pathlib.Path, payload: Dict[str, Any]) -> None:
-    write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    write_text_atomic(path, json_dumps_utf8(payload, ensure_ascii=False, indent=2) + "\n")
     _keep_preflight_head(drive_root, payload)  # first, so a rotation cannot archive what the heads seed from
     _rotate_index_if_needed(drive_root)
     append_jsonl(index_path(drive_root), index_row(drive_root, payload))
@@ -480,13 +480,13 @@ def _rotate_index_if_needed(drive_root: Any) -> None:
     while target.exists():
         suffix += 1
         target = ledger_dir(drive_root) / f"index.{_stamp()}_{suffix}.jsonl"
-    write_text_atomic(target, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in archive))
-    write_text_atomic(hot, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in keep))
+    for path, rows in ((target, archive), (hot, keep)):
+        write_text_atomic(path, "".join(json_dumps_utf8(row, ensure_ascii=False) + "\n" for row in rows))
 
 
-def _newest_rows(paths: Iterable[pathlib.Path]) -> Iterator[Dict[str, Any]]:
+def _newest_rows(paths: Iterable[pathlib.Path], gap_reasons: set[str] | None) -> Iterator[Dict[str, Any]]:
     for path in paths:
-        yield from reversed([row for row in iter_jsonl_objects(path) if isinstance(row, dict)])
+        yield from reversed(list(iter_jsonl_objects(path, gap_reasons=gap_reasons)))
 
 
 def archived_segments_exist(drive_root: Any) -> bool:
@@ -521,11 +521,11 @@ def newest_rotation_ts(drive_root: Any) -> str:
 
 
 def _index_rows(drive_root: Any, *, task_id: str = "", surface: str = "", limit: Optional[int] = None,
-                hot_only: bool = False, exact_task: bool = False) -> List[Dict[str, Any]]:
+                hot_only: bool = False, exact_task: bool = False, gap_reasons: set[str] | None = None) -> List[Dict[str, Any]]:
     seen: Dict[str, int] = {}
     out: List[Dict[str, Any]] = []
     paths = [index_path(drive_root)] + ([] if hot_only else [*reversed(_index_segments(drive_root))])
-    for row in _newest_rows(paths):
+    for row in _newest_rows(paths, gap_reasons):
         record_id = str(row.get("record_id") or "")
         if not record_id or (task_id and task_id not in (row.get("task_id"), row.get("root_task_id"))):
             continue
@@ -553,15 +553,15 @@ def task_record_page(drive_root: Any, task_id: str, *, offset: int = 0, limit: i
 
 
 def recent_records(drive_root: Any, task_id: str = "", limit: int = 20, *, hot_only: bool = False,
-                   surface: str = "") -> List[Dict[str, Any]]:
+                   surface: str = "", gap_reasons: set[str] | None = None) -> List[Dict[str, Any]]:
     """Newest-first index rows (junction for context assembly): the hot index, then
     archived segments newest-first, one row per record at its highest revision.
     ``task_id`` matches the record's task OR root task; empty matches all; ``surface``
     keeps one surface's records. ``hot_only`` reads the bounded hot index alone
-    (``INDEX_MAX_BYTES``) and never opens an archived segment: the read a per-task
-    context capture can afford."""
-    wanted = max(1, int(limit))
-    return _index_rows(drive_root, task_id=task_id, surface=surface, limit=wanted, hot_only=hot_only)[:wanted]
+    (``INDEX_MAX_BYTES``) and leaves archived segments unopened. If supplied,
+    ``gap_reasons`` collects parse gaps from the segments actually read."""
+    return _index_rows(drive_root, task_id=task_id, surface=surface, limit=max(1, int(limit)),
+                       hot_only=hot_only, gap_reasons=gap_reasons)
 
 
 def surface_records(drive_root: Any, surface: str) -> List[Dict[str, Any]]:
@@ -992,7 +992,7 @@ def _apply_raw(seat: Dict[str, Any], raw: Dict[str, Any]) -> None:
     from ouroboros.reviewer_slot_config import review_cost_facts
 
     outcome = raw.get("outcome") or {}
-    status = str(outcome.get("status") or raw.get("status") or "") or seat["status"]
+    status = str(outcome.get("status") or raw.get("status") or seat["status"])
     answered = status in ANSWERED_STATUSES
     answers = outcome.get("answers") or (raw.get("answers") if isinstance(raw.get("answers"), dict) else {})
     for part in answer_keys(seat["parts"]):
@@ -1021,8 +1021,7 @@ def _apply_raw(seat: Dict[str, Any], raw: Dict[str, Any]) -> None:
         seat.pop(key, None)  # A settling answer must not inherit a pending timeout's failure facts.
     seat.update({key: raw[key] for key in TYPED_FAILURE_FACT_KEYS if key in raw})
     if not answered and not seat_open(seat) and not seat.get("reported_cause"):
-        # The row outlives the raw answer and the side files: a failed seat keeps its producer's own
-        # words here (no code or sentence is invented for a seat whose producer said nothing).
+        # Keep only the producer's words in the row that outlives the side files.
         from ouroboros.review_records import review_failure_facts
 
         cause = review_failure_facts({**raw, "status": status, "failure_code": "x"})["reported_cause"]
@@ -1035,11 +1034,9 @@ def _apply_raw(seat: Dict[str, Any], raw: Dict[str, Any]) -> None:
         seat["coverage"] = str(coverage or "unobserved")
     if raw.get("capability_delta"):
         seat["capability_delta"] = list(raw["capability_delta"])
-    # An api row runs the model the request named; a session reports its own (or
-    # nothing, which stays unknown). Nothing answered: nothing observed.
-    model = str(raw.get("model_id") or raw.get("model") or "") or seat["requested"]["model"]
-    if answered and model and "session" not in seat["requested"]["route"]:
-        seat["observed_model"] = model
+    # An answered API row may use its requested model; sessions need their own report.
+    if answered and "session" not in seat["requested"]["route"]:
+        seat["observed_model"] = str(raw.get("model_id") or raw.get("model") or seat["requested"]["model"] or UNKNOWN)
     for role in ("prompt_ref", "response_ref"):
         if isinstance(raw.get(role), dict):
             seat["source_refs"].append({"role": f"observability_{role[:-4]}", "part": ",".join(seat["parts"]),
@@ -1047,20 +1044,24 @@ def _apply_raw(seat: Dict[str, Any], raw: Dict[str, Any]) -> None:
 
 
 def _apply_execution(seat: Dict[str, Any], executions: Dict[str, Any], since_ts: str) -> None:
-    execution = executions.get(seat["seat_id"]) if isinstance(executions, dict) else None
-    if not isinstance(execution, dict) or (since_ts and str(execution.get("ts") or "") < since_ts):
-        return
-    effective = dict(execution.get("effective") or {})
+    from ouroboros.reviewer_slot_config import review_cost_facts  # last line: the cost kind follows the route the seat ran on
     requested = seat["requested"]
-    seat["effective"] = {"route": str(effective.get("route") or requested["route"]), "model": str(effective.get("model") or ""),
-                         "effort": str(execution.get("effort") or requested["effort"]),
-                         "profile": str(effective.get("profile_id") or requested["profile"]),
-                         "delivery": requested["delivery"], "verdict_method": str(effective.get("verdict_method") or ""),
-                         "source": "reviewer_slot_last_execution"}
-    if execution.get("capability_delta"):
-        seat["capability_delta"] = list(execution["capability_delta"])
-    if _answered(seat) and effective.get("model") and seat["observed_model"] == UNKNOWN:
-        seat["observed_model"] = str(effective["model"])
+    execution = executions.get(seat["seat_id"]) if isinstance(executions, dict) else None
+    if seat["operation_state"] == "not_dispatched":  # any route: nothing was witnessed sending
+        seat["effective"] = {**dict.fromkeys(seat["effective"], ""), "source": "not_dispatched"}
+    elif isinstance(execution, dict) and not (since_ts and str(execution.get("ts") or "") < since_ts):
+        effective = dict(execution.get("effective") or {})  # an explicit '' route is proven unsent (released before its send); a missing key is a legacy row
+        seat["effective"] = {"route": str(effective.get("route") or "") if "route" in effective else str(requested["route"]), "model": str(effective.get("model") or ""),
+                             "effort": str(execution.get("effort") or requested["effort"]),
+                             "profile": str(effective.get("profile_id") or requested["profile"]),
+                             "delivery": requested["delivery"], "verdict_method": str(effective.get("verdict_method") or ""),
+                             "source": "reviewer_slot_last_execution",
+                             **({"provider": effective["provider"]} if "provider" in effective else {})}
+        if execution.get("capability_delta"):
+            seat["capability_delta"] = list(execution["capability_delta"])
+        if _answered(seat) and effective.get("model") and seat["observed_model"] == UNKNOWN:
+            seat["observed_model"] = str(effective["model"])
+    seat.update(review_cost_facts(seat.get("usd"), route=requested["route"], model=requested["model"], observed=seat["effective"]))
 
 
 def build_rows(facts: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1080,16 +1081,13 @@ def build_rows(facts: Dict[str, Any]) -> List[Dict[str, Any]]:
         for r in raws]
     rows = []
     for i, plan in enumerate(plans):
-        parts = tuple(plan.get("parts") or seat_parts(plan))
-        seat = _seat_from_plan(str(plan.get("slot_id") or f"seat-{i + 1}"), parts, plan)
+        seat = _seat_from_plan(str(plan.get("slot_id") or f"seat-{i + 1}"), plan.get("parts") or seat_parts(plan), plan)
         raw = next((r for r in raws if str(r.get("slot_id") or "") == seat["seat_id"]), None)
         if raw is None and len(plans) == len(raws) and not str(raws[i].get("slot_id") or ""):
             raw = raws[i]  # positional join for records that carry no slot id
         if raw is not None:
             _apply_raw(seat, raw)
         _apply_execution(seat, executions, since)
-        from ouroboros.reviewer_slot_config import review_cost_facts
-        seat.update(review_cost_facts(seat.get("usd"), route=seat["requested"]["route"], model=seat["requested"]["model"]))
         rows.append(seat)
     return rows
 
@@ -1465,6 +1463,7 @@ def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[s
     take an answer, the dispatch provenance stays, their FAIL items (``seat_findings``) join
     the ones already recorded, and the verdict is reduced over the assigned seats. A seat still in flight keeps the record pending. ``None`` when no
     such record exists; a settled record is returned as it is."""
+    from ouroboros.reviewer_slot_config import collected_slot_execution  # what ran, by the collected operation's own saved usage
     by_slot = {str(raw.get("slot_id") or ""): raw for raw in raws if isinstance(raw, dict)}
 
     def _mutate(prior: Dict[str, Any]) -> Dict[str, Any]:
@@ -1485,6 +1484,7 @@ def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[s
                                               for part, answer in raw["answers"].items()}}
                 seat["source_refs"] = []  # the collected reply's own refs; the merge keeps dispatch and history
                 _apply_raw(seat, raw)
+                _apply_execution(seat, collected_slot_execution(seat, raw, surface=str(prior.get("surface") or ""), record_id=record_id), "")
                 applied.append(raw)
                 _retain_seat_text(drive_root, task_id, record_id, seat)
                 seat.update(_settled_sources(row, seat))

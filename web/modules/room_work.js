@@ -20,6 +20,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { createStartFailure, startFailureCause, startingStatus } from './host_starting_status.js';
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
+import { readBand } from './project_read_state.js';
 import { fmt, tr } from './i18n.js';
 import { questionPresentation, questionWords } from './question_presentation.js';
 import { taskCancelPending } from './log_events.js';
@@ -27,14 +28,15 @@ import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js'
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
 import { closeTaskControlMenu, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
 import {
-    OUTCOME_TONES, amberNote, clock, openWorkControls, resumeAttemptWords, workControls, workMenuActions, workQuestion,
-    workRowView,
+    OUTCOME_TONES, amberNote, behindWords, clock, openWorkControls, resumeAttemptWords, workControls, workMenuActions,
+    workQuestion, workRowView,
 } from './work_status.js';
 import { showToast } from './toast.js';
 import { errorWords } from './ui_primitives.js';
 import { motionMs, reducedMotion } from './motion.js';
 import { roomCoversMain } from './layout.js';
 import { closingLine } from './settled_card.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { closeModelSheet } from './model_sheet.js';
 
 // The closed list rises back as it fades (room_work.css rw-unfold, reversed).
@@ -102,6 +104,44 @@ export function hangUnderCapsules(bar, anchor) {
     anchor.style.setProperty('--rw-top', px(capsule.bottom - edge.top));
 }
 
+// What a press on an unloaded row found out about where its message is (DESIGN "Room work status").
+function whereText(row) {
+    const ended = row.settled || Boolean(row.view.outcome);
+    return { loading: tr('room_work.lookup.loading', 'Loading its message…'),
+        absent: ended ? tr('room_work.lookup.absent_ended', 'No message saved in this chat.') : tr('room_work.lookup.absent', 'No message yet.'),
+        moved: tr('room_work.lookup.moved', 'This work is in another room.'),
+        unknown: tr('room_work.lookup.unknown', 'Its message could not be checked.') }[row.lookup] || '';
+}
+
+/** A row's details, label and words per line (DESIGN "Room work status"). */
+export function rowDetailLines(row) {
+    const lines = [];
+    if (row.settled && !row.latest) lines.push(row.outcomeKnown
+        ? [tr('room_work.detail.finished', 'Finished'),
+            tr('room_work.detail.finished_text', 'Its recorded outcome is shown above. This row stays until the list closes.')]
+        : [tr('room_work.detail.activity', 'Activity'),
+            tr('room_work.detail.ended_text', 'No longer listed as active; its outcome is not known here. This row stays until the list closes.')]);
+    const where = whereText(row);
+    if (where) lines.push([tr('room_work.detail.where', 'Where'), where]);
+    const uncontrolled = !row.confirmed && !row.canMenu && !row.resume && !row.settled && !row.latest;
+    if (uncontrolled) lines.push([tr('room_work.detail.why', 'Why no controls'),
+        tr('room_work.detail.why_text', 'The latest update did not confirm this work, so nothing here can be paused or stopped.')]);
+    // The work's latest refused Resume, or its own refused start, in the door's words (its line keeps the date).
+    const attempt = row.confirmed ? resumeAttemptWords(row.work?.last_resume) : '';
+    if (attempt) lines.push([row.work.last_resume.by?.actor === 'host' ? tr('room_work.detail.last_start', 'Last start')
+        : tr('room_work.detail.last_resume', 'Last Resume'), attempt]);
+    // The work a queued one stands behind now: its id and the lane (its line names it); never on an ended row.
+    const behind = row.confirmed && !row.settled ? behindWords(row.work) : '';
+    if (behind) lines.push([tr('room_work.detail.behind', 'Behind'), behind]);
+    const what = row.kind === 'pending' ? tr('room_work.what.pending', 'Your message, being sent')
+        : row.kind === 'question' ? tr('room_work.what.question', 'A question that waits for you')
+        : row.kind === 'direct' ? (row.cmid ? tr('room_work.what.reply', 'A reply to your message')
+            : tr('room_work.what.turn', 'A turn in this chat'))
+            : tr('room_work.what.task', 'A task');
+    lines.push([tr('room_work.detail.what', 'What'), what]);
+    return lines;
+}
+
 export function createRoomWork({
     page, asPanel = false, ws = null, statusBadge, messagesDiv, reading, stateSnapshots = null, revealQuestion = null,
     works = () => null, liveCardRecords: records = new Map(),
@@ -145,6 +185,9 @@ export function createRoomWork({
     // One bar per room: the Project panel bar, or Main's header. The status follows the room's own title in the
     // bar's title row, so a changing word takes the title's room and never moves a neighbour.
     const bar = panel?.querySelector?.('.project-panel-bar') || (asPanel ? null : page.querySelector('.chat-page-header'));
+    // A room mounted without a bar (a bare instance in a panel of its own) has no frosted edge, so its first row's reserve
+    // is the measured one alone (style.css --chat-top-reserve).
+    if (!bar) page.style?.setProperty?.('--edge-reach', '0px');
     trigger.append(statusBadge, mark, waitNote, caret);
     const titleRow = bar?.querySelector('.app-page-title-row');
     if (titleRow) titleRow.appendChild(trigger);
@@ -153,7 +196,7 @@ export function createRoomWork({
     const name = panel && bar?.querySelector('.app-page-title');
 
     // ---- the surface: one floating list in every room, hung under the room's bar (room_work.css)
-    const surface = element('div', 'rw-surface rw-shade');
+    const surface = element('div', 'rw-surface scroll-fade-y rw-shade');
     surface.id = `${uid}-surface`;
     surface.hidden = true;
     surface.tabIndex = -1;  // where a pointer open lands: a landing point, never a control
@@ -226,6 +269,7 @@ export function createRoomWork({
     const detailNames = new Map();
     const detailReads = new Set();
     const disposers = [];
+    disposers.push(bindScrollFade(surface));
     const listen = (target, type, fn, options) => {
         if (!target?.addEventListener) return;
         target.addEventListener(type, fn, options);
@@ -425,40 +469,6 @@ export function createRoomWork({
         return out;
     }
 
-    // What a press on an unloaded row found out about where its message is (DESIGN "Room work status").
-    function whereText(row) {
-        const ended = row.settled || Boolean(row.view.outcome);
-        return { loading: tr('room_work.lookup.loading', 'Loading its message…'),
-            absent: ended ? tr('room_work.lookup.absent_ended', 'No message saved in this chat.') : tr('room_work.lookup.absent', 'No message yet.'),
-            moved: tr('room_work.lookup.moved', 'This work is in another room.'),
-            unknown: tr('room_work.lookup.unknown', 'Its message could not be checked.') }[row.lookup] || '';
-    }
-
-    function describe(row) {
-        const lines = [];
-        if (row.settled && !row.latest) lines.push(row.outcomeKnown
-            ? [tr('room_work.detail.finished', 'Finished'),
-                tr('room_work.detail.finished_text', 'Its recorded outcome is shown above. This row stays until the list closes.')]
-            : [tr('room_work.detail.activity', 'Activity'),
-                tr('room_work.detail.ended_text', 'No longer listed as active; its outcome is not known here. This row stays until the list closes.')]);
-        const where = whereText(row);
-        if (where) lines.push([tr('room_work.detail.where', 'Where'), where]);
-        const uncontrolled = !row.confirmed && !row.canMenu && !row.resume && !row.settled && !row.latest;
-        if (uncontrolled) lines.push([tr('room_work.detail.why', 'Why no controls'),
-            tr('room_work.detail.why_text', 'The latest update did not confirm this work, so nothing here can be paused or stopped.')]);
-        // The work's latest refused Resume, or its own refused start, in the door's words (its line keeps the date).
-        const attempt = row.confirmed ? resumeAttemptWords(row.work?.last_resume) : '';
-        if (attempt) lines.push([row.work.last_resume.by?.actor === 'host' ? tr('room_work.detail.last_start', 'Last start')
-            : tr('room_work.detail.last_resume', 'Last Resume'), attempt]);
-        const what = row.kind === 'pending' ? tr('room_work.what.pending', 'Your message, being sent')
-            : row.kind === 'question' ? tr('room_work.what.question', 'A question that waits for you')
-            : row.kind === 'direct' ? (row.cmid ? tr('room_work.what.reply', 'A reply to your message')
-                : tr('room_work.what.turn', 'A turn in this chat'))
-                : tr('room_work.what.task', 'A task');
-        lines.push([tr('room_work.detail.what', 'What'), what]);
-        return lines;
-    }
-
     // ---- rows
     function viewFor(row) {
         let view = views.get(row.key);
@@ -582,7 +592,7 @@ export function createRoomWork({
         view.where.hidden = !detailable;
         view.detail.hidden = !isOpen;
         if (isOpen) {
-            const lines = describe(row);
+            const lines = rowDetailLines(row);
             const key = lines.map((line) => line.join('\u0000')).join('\u0001');
             if (view.detailKey !== key) {
                 view.detailKey = key;
@@ -731,6 +741,7 @@ export function createRoomWork({
             : tr('room_work.scope.main', 'Work in this chat');
         if (surface.getAttribute('aria-label') !== label) surface.setAttribute('aria-label', label);
         rows = arrange(collect()).map((row) => Object.assign(row, { lookup: lookupOf(row) }));
+        placeChip();
         paintTrigger();
         paintNote();
         if (!open) return;
@@ -775,20 +786,75 @@ export function createRoomWork({
     // name still cut there makes the consciousness chip show its brain alone (its name keeps the whole state); a desk's
     // panel beside Main keeps the chip's word and the name ellipsizes.
     // Panic never yields.
+    // In Telegram's shared row (style.css) Main's title also goes whole or not at all, as Ouroboros's card in the sidebar
+    // names it: it wins while it fits whole beside the status's mark; a "Main Chat" that would still be cut gives the
+    // capsule to the room's state, whose word may then come back, whole.
     let fittedWord = null, fittedWidth = null, fitNeeded = false;
+    // Whether a box that ellipsizes its line cuts it, to the fraction of a pixel: an ellipsis shows for any overflow,
+    // while scrollWidth rounds a word a fraction too wide down to its box (a "Sendi…" measured as fitting on a 393 pt
+    // phone). The box's whole width is read by letting it take that width for a moment (room_work.css .rw-measure-whole),
+    // in the same task, so nothing paints between.
+    function cuts(box) {
+        if (!box) return false;
+        if (box.scrollWidth > box.clientWidth + 1) return true;
+        if (!box.getClientRects?.().length) return false;
+        const given = box.getBoundingClientRect().width;
+        box.classList.add('rw-measure-whole');
+        const whole = box.getBoundingClientRect().width;
+        box.classList.remove('rw-measure-whole');
+        return whole > given + 0.01;
+    }
     function fitWord() {
         if (destroyed) return;
         delete trigger.dataset.word;
         delete trigger.dataset.step;
-        const chip = name && bar.querySelector('.cx-chip');
+        if (titleRow) delete titleRow.dataset.title;
+        const chip = name && [...bar.querySelectorAll('.cx-chip')].find((node) => !extras.contains(node));
         if (chip) delete chip.dataset.fit;
-        const cut = () => statusBadge.scrollWidth > statusBadge.clientWidth + 1;
+        const cut = () => cuts(statusBadge);
         if (statusBadge.dataset.step && cut()) trigger.dataset.step = 'off';
         if (cut()) trigger.dataset.word = 'off';
-        if (chip && roomCoversMain({ root: doc.documentElement }) && name.scrollWidth > name.clientWidth + 1) {
+        const mainTitle = !name && inSharedRow() && titleRow?.querySelector('.app-page-title');
+        if (mainTitle && cuts(mainTitle)) {
+            titleRow.dataset.title = 'off';
+            delete trigger.dataset.word;
+            if (cut()) trigger.dataset.word = 'off';
+        }
+        if (chip && roomCoversMain({ root: doc.documentElement }) && cuts(name)) {
             chip.dataset.fit = 'mark';
         }
         fittedWidth = titleRow?.clientWidth;
+    }
+
+    // In Telegram's shared row (style.css "Telegram's shared row") the bar keeps the room's name and Panic beside
+    // Telegram's own controls, and the consciousness chip becomes a row of the commands that close the work list, before
+    // Restart and the budget, as those two leave a narrow bar (page_header.js). One node: it returns to the bar's end group
+    // when the row is the page's own again or the room leaves the screen.
+    function inSharedRow() {
+        const root = doc.documentElement;
+        return root?.dataset?.telegramFullscreen === 'active' && root.dataset.layout === 'stack';
+    }
+    function chipHome() {
+        return [...(bar?.children || [])].find((node) => node.classList?.contains('app-page-actions')
+            || node.classList?.contains('app-page-trailing')) || null;
+    }
+    function placeChip() {
+        if (destroyed || !bar) return;
+        const listed = inSharedRow() && !page.hidden && page.isConnected;
+        const chip = listed ? [...bar.querySelectorAll('.cx-chip')].find((node) => !extras.contains(node))
+            : extras.querySelector('.cx-chip');
+        if (!chip) return;
+        if (listed) {
+            if (chip.parentNode !== extras) { delete chip.dataset.fit; extras.prepend(chip); }
+        } else {
+            const home = chipHome();
+            if (home && chip.parentNode !== home) home.prepend(chip);
+        }
+        // While the chip is a row of the list, the room's capsule is the drawn way to its sheet and names that sheet too,
+        // so a return from a page the sheet opened (page_places.js follows aria-controls) lands on the capsule, not on the
+        // folded row or the sheet's empty anchor.
+        const controls = listed ? `${uid}-surface ${chip.getAttribute('aria-controls') || ''}`.trim() : `${uid}-surface`;
+        if (trigger.getAttribute('aria-controls') !== controls) trigger.setAttribute('aria-controls', controls);
     }
 
     function paintTrigger() {
@@ -909,10 +975,10 @@ export function createRoomWork({
 
     function scrollToNode(node) {
         reading.cancel();
-        // Main's measured reserve includes its error note; Project's in-flow bars already clear the feed.
-        const reserve = asPanel
-            ? Math.max(0, (bar?.getBoundingClientRect().bottom || 0) - messagesDiv.getBoundingClientRect().top)
-            : parseFloat(page.style?.getPropertyValue?.('--chat-header-reserve')) || 0;
+        // A row lands below the bar and its frosted edge (readBand), in Main below its error note too (the measured
+        // reserve); a Project's in-flow status bar already clears the feed.
+        const clear = readBand(messagesDiv, bar, null).top - messagesDiv.getBoundingClientRect().top;
+        const reserve = asPanel ? clear : Math.max(clear, parseFloat(page.style?.getPropertyValue?.('--chat-header-reserve')) || 0);
         messagesDiv.scrollTop += node.getBoundingClientRect().top - messagesDiv.getBoundingClientRect().top - reserve;
         reading.stick = false;
         reading.scroll();
@@ -926,8 +992,9 @@ export function createRoomWork({
         arrive(row, target, departure());
     }
 
-    const departure = () => (history ? history.departure(captureVisibleTimelineAnchor())
-        : { anchor: captureVisibleTimelineAnchor() });
+    const captureReturnAnchor = () => captureVisibleTimelineAnchor(null, { inPlace: false });
+    const departure = () => (history ? history.departure(captureReturnAnchor())
+        : { anchor: captureReturnAnchor(), present: reading?.stick === true && reading.nearBottom?.() === true });
 
     function arrive(row, target, place) {
         close({ restoreFocus: false });
@@ -968,11 +1035,15 @@ export function createRoomWork({
     // Goes to the exact waited question and focuses the question itself, never its answer field.
     async function viewQuestion(row) {
         const intent = ++navigationIntent;
-        const anchor = captureVisibleTimelineAnchor();
+        const place = departure();
         close({ restoreFocus: false });
         // The task that asked (a Continue or a helper), never the work's first root.
         const shown = await revealQuestion?.(row.question.taskId || row.id, row.question.quizId, { focus: 'question' });
-        if (shown && !destroyed && intent === navigationIntent && !page.hidden && page.isConnected) showBack(anchor);
+        // Its Back returns to the passage, or to the present the reader followed; it never reads a let-go page
+        // again (DESIGN "Room work status"): only a work's own Back revisits one.
+        if (shown && !destroyed && intent === navigationIntent && !page.hidden && page.isConnected) {
+            showBack(place.anchor, place.present ? { present: true } : null);
+        }
     }
 
     function showBack(anchor, place = null) {
@@ -1029,8 +1100,10 @@ export function createRoomWork({
     // ---- wiring
     listen(globalThis.window, 'ouro:language-changed', schedule);
     // Whether a cut Project name takes the chip's word depends on the layout and the input (fitWord), so a switch fits
-    // again.
-    if (name) listen(globalThis.window, 'ouro:layout-changed', () => { fitNeeded = true; schedule(); });
+    // again; Telegram's shared row comes and goes with the layout and with Telegram's fullscreen (host_telegram.js), and
+    // the consciousness chip's place and Main's title follow it.
+    listen(globalThis.window, 'ouro:layout-changed', () => { fitNeeded = true; schedule(); });
+    listen(globalThis.window, 'ouro:host-chrome', () => { fitNeeded = true; schedule(); });
     // A click with detail 0 is Enter or Space on the focused control: a keyboard open lands in the list.
     listen(trigger, 'click', (event) => { if (open) close(); else openSurface(event?.detail === 0); });
     listen(trigger, 'keydown', (event) => {
@@ -1130,6 +1203,7 @@ export function createRoomWork({
         const away = Boolean(page.hidden) || !page.isConnected;
         if (away) { navigationIntent += 1; close({ restoreFocus: false }); showBack(null); }
         trigger.hidden = away;
+        placeChip();
         if (!away) fitWord();
     }) : null;
     watcher?.observe(page, { attributes: true, attributeFilter: ['hidden'] });
@@ -1184,8 +1258,11 @@ export function createRoomWork({
             sizer?.disconnect();
             for (const dispose of disposers.splice(0)) dispose();
             openHost?.removeAttribute('data-rw-open');
-            // The badge returns where the product put it; this module's nodes go.
+            // The badge returns where the product put it, and the consciousness chip to its bar (a Project's bar outlives
+            // its rooms); this module's nodes go.
             if (badgeParent?.isConnected) badgeParent.insertBefore(statusBadge, badgeNext?.parentNode === badgeParent ? badgeNext : null);
+            const listedChip = extras.querySelector('.cx-chip');
+            if (listedChip) chipHome()?.prepend(listedChip);
             trigger.remove();
             (shadeAnchor || surface).remove();
             back.remove();

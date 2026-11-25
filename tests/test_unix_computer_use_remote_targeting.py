@@ -15,7 +15,7 @@ import urllib.request
 
 import pytest
 
-from tests.test_unix_computer_use_targeting import API, KEYNOTE, SAFARI, load_plugin, receipt
+from tests._unix_computer_use import API, CONTINUE, KEYNOTE, SAFARI, STOPPED, StopAPI, load_plugin, receipt
 
 # --- remote targets: OSWorld guest and a Mac over SSH ------------------------------------------
 
@@ -168,6 +168,56 @@ def test_osworld_guest_precheck_withholds_an_input_when_the_target_left_the_fron
     assert out["front"]["pid"] == 4242 and "nothing more was sent" in out["error"]
 
 
+def test_osworld_a_stop_between_chords_withholds_the_next_remote_input(tmp_path, monkeypatch):
+    """The host's Stop of the call is read last before each chord's remote call; a refusal never reaches the guest."""
+    def answer(code, index):
+        if "wmctrl -lpxG" in code:
+            return 0, listing(KEYNOTE_FRONT)
+        return 0, f"__FRONT_BEFORE__{KEYNOTE_FRONT}\n__FRONT_AFTER__{KEYNOTE_FRONT}\n"
+    module, _plain, guest = osworld(tmp_path, monkeypatch, answer)
+    reads: list = []
+    api = StopAPI(tmp_path / "state", reads, [CONTINUE, STOPPED])
+    module.register(api)
+    out = receipt(api.tools["key"](keys="down return", app="Keynote"))
+    assert out.get("status") == out["reason"] == "stopped" and "ok" not in out and "error" not in out, out
+    assert out["dispatched"] is False
+    assert out["steps_done"] == 1 and out["observed_effect"] is True and "cancelled" in out["note"]
+    actions = [command for command in guest.commands if "pyautogui" in command[-1]]
+    assert len(actions) == 1 and "pyautogui.press('down')" in actions[0][-1], "the second chord never reached the guest"
+    assert reads == [["get_stop_state"], ["get_stop_state"]]
+
+
+def test_osworld_a_stop_before_the_first_chord_sends_nothing_and_the_switch_keeps_its_mark(tmp_path, monkeypatch):
+    """The first chord asks too, after the guest switch: no input reaches the guest, the observed switch keeps its
+    mark, and an untargeted refusal makes no guest call at all."""
+    def answer(code, index):
+        if "wmctrl -lpxG" in code:
+            return 0, listing(FIREFOX_FRONT)
+        if "wmctrl -i -a" in code:
+            return 0, "__FRONT_AFTER__" + KEYNOTE_FRONT + "\n"
+        return 0, f"__FRONT_BEFORE__{KEYNOTE_FRONT}\n__FRONT_AFTER__{KEYNOTE_FRONT}\n"
+    module, _plain, guest = osworld(tmp_path, monkeypatch, answer)
+    reads: list = []
+    api = StopAPI(tmp_path / "state", reads, [STOPPED, CONTINUE, STOPPED, STOPPED])
+    module.register(api)
+    early = receipt(api.tools["key"](keys="right", app="Keynote"))
+    assert early["status"] == "stopped" and early["dispatched"] is False
+    assert early["backend"] == "osworld_http" and early["front"]["pid"] == 4242
+    assert "observed_effect" not in early and "activation_done" not in early
+    assert len(guest.commands) == 1 and "wmctrl -lpxG" in guest.commands[0][-1]
+    out = receipt(api.tools["key"](keys="right", app="Keynote"))
+    assert out.get("status") == out["reason"] == "stopped" and "ok" not in out and "error" not in out, out
+    assert out["dispatched"] is False
+    assert out["backend"] == "osworld_http" and out["observed_effect"] is True and out["activation_done"] is True
+    assert "the switch to Keynote ran before it" in out["note"] and "cancelled" in out["note"]
+    assert len(guest.commands) == 3 and not any("pyautogui" in command[-1] for command in guest.commands)
+    plain = receipt(api.tools["key"](keys="return"))
+    assert plain.get("status") == plain["reason"] == "stopped" and "ok" not in plain and "error" not in plain, plain
+    assert "observed_effect" not in plain
+    assert plain["note"].startswith("the input was not sent; ") and len(guest.commands) == 3
+    assert len(reads) == 4
+
+
 def test_osworld_window_list_failure_is_not_an_empty_desktop(tmp_path, monkeypatch):
     module, api, guest = osworld(tmp_path, monkeypatch, lambda code, index: (127, "\n__ACTIVE__\n"))
     rows = receipt(api.tools["window_list"]())
@@ -186,6 +236,17 @@ def info_line(triple) -> str:
     return f'"pid"={pid} "CFBundleIdentifier"="{bid}" "LSDisplayName"="{name}" '
 
 
+SH_SCRIPT_RUNNER = """/bin/sh -c 'script=$(cat); eval "$script" </dev/null'"""  # remote._SH_SCRIPT_RUNNER, written out
+
+
+def sent_command(argv: list[str], data: bytes | None) -> list[str]:
+    """The ssh call with the command the Mac runs in last place: the skill's own commands go on stdin to sh (the
+    runner is the argument), so a script answering by the command's words reads those bytes."""
+    if data is not None and argv and argv[-1] == SH_SCRIPT_RUNNER:
+        return [*argv[:-1], data.decode("utf-8")]
+    return argv
+
+
 def ssh(tmp_path, monkeypatch, script):
     """A Mac over SSH: ``script(command)`` -> (rc, stdout[, stderr]) for every ssh call."""
     module = load_plugin()
@@ -195,7 +256,7 @@ def ssh(tmp_path, monkeypatch, script):
     calls = []
 
     def run(cmd, *a, **k):
-        argv = [str(part) for part in cmd]
+        argv = sent_command([str(part) for part in cmd], k.get("input"))
         calls.append(argv)
         answer = script(argv[-1])
         rc, out, err = (answer + ("",))[:3]
@@ -208,8 +269,8 @@ def ssh(tmp_path, monkeypatch, script):
 
 
 def is_input(command: str) -> bool:
-    """The remote input stage: a cliclick input, or the paste chord program (osascript JavaScript, #2589)."""
-    return "cliclick" in command or "osascript -l JavaScript" in command
+    """The remote input stage: the input program or the paste chord program (both osascript JavaScript, #63, #2589)."""
+    return "osascript -l JavaScript" in command
 
 
 def mac_over_ssh(front, after=None, input_stderr=""):
@@ -227,12 +288,41 @@ def mac_over_ssh(front, after=None, input_stderr=""):
     return script
 
 
+def test_ssh_a_stop_between_chords_keeps_a_non_error_partial_receipt(tmp_path, monkeypatch):
+    module, _plain, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(KEYNOTE))
+    reads: list = []
+    api = StopAPI(tmp_path / "state", reads, [CONTINUE, STOPPED])
+    module.register(api)
+    out = receipt(api.tools["key"](keys="down return", app="Keynote"))
+    assert out.get("status") == out["reason"] == "stopped" and "ok" not in out and "error" not in out, out
+    assert out["steps_done"] == 1 and out["steps_total"] == 2 and out["dispatched"] is False
+    assert out["observed_effect"] is True and "cancelled" in out["note"]
+    assert len([argv for argv in calls if is_input(argv[-1])]) == 1
+    assert reads == [["get_stop_state"], ["get_stop_state"]]
+
+
+@pytest.mark.parametrize("after_switch", [False, True])
+def test_ssh_key_checks_after_inventory_and_again_before_input(tmp_path, monkeypatch, after_switch):
+    module, _, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI, KEYNOTE))
+    api = StopAPI(tmp_path / "state", [], [CONTINUE, STOPPED] if after_switch else [STOPPED])
+    module.register(api)
+    out = receipt(api.tools["key"](keys="right", app=KEYNOTE[0]))
+    assert out["status"] == "stopped" and out["dispatched"] is False
+    assert out["target"]["activated"] is after_switch
+    assert out.get("observed_effect", False) is after_switch and out.get("activation_done", False) is after_switch
+    assert "lsappinfo list" in calls[0][-1] and len(calls) == (2 if after_switch else 1)
+    assert not any(is_input(argv[-1]) for argv in calls)
+    if after_switch:
+        assert "unix id is 200" in calls[1][-1]
+
+
 def test_ssh_targeted_input_resolves_from_lsappinfo_and_activates_by_pid(tmp_path, monkeypatch):
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI, KEYNOTE))
     out = receipt(api.tools["key"](keys="right", app="Keynote"))
     assert out["ok"] is True and out["observed_effect"] is True, out
     assert "lsappinfo list" in calls[0][-1] and "unix id is 200" in calls[1][-1] and "to activate" not in calls[1][-1]
-    assert "cliclick kp:arrow-right" in calls[2][-1] and '"$P" != "200"' in calls[2][-1], "the same ssh call checks the pid before the input"
+    assert '{"op":"keys","mods":[],"code":124}' in calls[2][-1] and '"$P" != "200"' in calls[2][-1], "the same ssh call checks the pid before the input"
+    assert out["method"] == "cg_events"
     assert out["delivered_to"]["app"] == "Keynote" and out["target"]["activated"] is True and out["front_before"]["app"] == "Safari"
     assert out["output"] == "", "the probe markers never reach the model as command output"
     assert "error" not in out
@@ -257,23 +347,176 @@ def test_ssh_refuses_a_not_running_app_before_any_activation(tmp_path, monkeypat
     assert len(calls) == 1 and "System Events" not in calls[0][-1] and "to activate" not in calls[0][-1], "nothing is launched"
     stuck = receipt(api.tools["type_text"](text="x", app="Keynote"))
     assert stuck["ok"] is False and stuck["reason"] == "not_frontmost_after_activate" and "observed_effect" not in stuck
-    assert not any("cliclick" in argv[-1] for argv in calls)
+    assert not any(is_input(argv[-1]) for argv in calls)
 
 
 def test_ssh_already_front_sends_without_a_switch_and_marks_no_activation(tmp_path, monkeypatch):
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(KEYNOTE))
     out = receipt(api.tools["key"](keys="right", app="Keynote"))
     assert out["ok"] is True and out["target"]["already_front"] is True and "front_before" not in out
-    assert len(calls) == 2 and "cliclick" in calls[1][-1]
+    assert len(calls) == 2 and is_input(calls[1][-1])
     again = receipt(api.tools["activate_app"](app="Keynote"))
     assert again["ok"] is True and again["activated"] is False and "observed_effect" not in again
 
 
-def test_ssh_input_dropped_by_the_remote_mac_is_an_honest_failure(tmp_path, monkeypatch):
-    warning = "WARNING: Accessibility privileges not enabled. Many actions may fail.\n"
+def test_ssh_input_refused_by_the_remote_mac_is_an_honest_failure(tmp_path, monkeypatch):
+    warning = "WARNING: Accessibility privileges not enabled (no right to post input events); nothing was sent\n"
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI, input_stderr=warning))
     out = receipt(api.tools["key"](keys="right"))
     assert out["ok"] is False and out["reason"] == "permission_denied" and "observed_effect" not in out, out
+    assert out["dispatched"] is False and out["refusal"]["permission"] == "post_events" and out["refusal"]["repair"] == "owner"
+
+
+def test_ssh_cursor_position_answers_fields_as_locally_and_dispatches_nothing(tmp_path, monkeypatch):
+    module, api, calls = ssh(tmp_path, monkeypatch, lambda command: (0, '{"x":140,"y":-26}\n'))
+    out = receipt(api.tools["cursor_position"]())
+    assert (out["ok"], out["x"], out["y"]) == (True, 140, -26) and out["coordinate_space"] == "input (macOS logical points)", out
+    assert "dispatched" not in out and "observed_effect" not in out and '"op":"position"' in calls[-1][-1]
+    module, api, calls = ssh(tmp_path, monkeypatch, lambda command: (0, "not a position\n"))
+    unread = receipt(api.tools["cursor_position"]())
+    assert unread["ok"] is False and unread["reason"] == "position_unread" and "x" not in unread, unread
+    assert "not a position" in unread["error"]
+
+
+def test_an_ssh_lookup_that_times_out_is_a_refusal_with_its_receipt(tmp_path, monkeypatch):
+    def script(command):
+        if '"op":"resolve"' in command:
+            raise subprocess.TimeoutExpired(["ssh"], 30)
+        return 0, ""
+    module, api, calls = ssh(tmp_path, monkeypatch, script)
+    out = receipt(api.tools["key"](keys="return a"))
+    assert out["ok"] is False and out["reason"] == "layout_unread" and out["dispatched"] is False, out
+    assert "TimeoutExpired" in out["error"] and not any('"op":"keys"' in argv[-1] for argv in calls)
+
+
+def test_an_ssh_text_that_posts_nothing_has_no_mark_and_one_that_posts_does(tmp_path, monkeypatch):
+    def answering(posted):
+        def script(command):
+            if "lsappinfo list" in command:
+                return 0, LISTING + "__FRONT__" + info_line(SAFARI)
+            answer = json.dumps({"posted": posted, "method": "unicode_events", "chars_total": posted // 2,
+                                 "chars_sent": posted // 2, "override_only": 0})
+            return 0, f"__FRONT_BEFORE__{info_line(SAFARI)}\n{answer}\n__FRONT_AFTER__{info_line(SAFARI)}\n"
+        return script
+    module, api, calls = ssh(tmp_path, monkeypatch, answering(0))
+    empty = receipt(api.tools["type_text"](text=""))
+    assert empty["ok"] is True and "observed_effect" not in empty and empty["posted"] == 0, empty
+    module, api, calls = ssh(tmp_path, monkeypatch, answering(4))
+    typed = receipt(api.tools["type_text"](text="hi"))
+    assert typed["observed_effect"] is True and (typed["chars_sent"], typed["method"]) == (2, "unicode_events"), typed
+
+
+@pytest.mark.parametrize("spent", [0, 15])
+def test_an_ssh_typing_deadline_counts_the_time_the_switch_took(tmp_path, monkeypatch, spent):
+    """Over SSH the program's deadline and ssh's timeout come from what the call has left once the target is in front
+    (the inventory and the switch are round trips of their own), with 3 s for the reply: 15 s spent there leave the
+    program 152 s and ssh 155 s, below the 165 s the host has left."""
+    clock = [1000.0]
+
+    def script(command):
+        if "lsappinfo list" in command:
+            clock[0] += spent  # a slow inventory and switch
+            return 0, LISTING + "__FRONT__" + info_line(KEYNOTE)
+        answer = json.dumps({"posted": 9000, "chars_total": 4500, "chars_sent": 4500})
+        return 0, f"__FRONT_BEFORE__{info_line(KEYNOTE)}\n{answer}\n__FRONT_AFTER__{info_line(KEYNOTE)}\n"
+    module, api, calls = ssh(tmp_path, monkeypatch, script)
+    mac_input = sys.modules[module.__name__ + ".mac_input"]
+    monkeypatch.setattr(mac_input, "_clock", lambda: clock[0])
+    fake, waits = module.subprocess.run, []
+
+    def timed(cmd, *a, **k):
+        if is_input(sent_command([str(part) for part in cmd], k.get("input"))[-1]):
+            waits.append(k["timeout"])
+        return fake(cmd, *a, **k)
+    monkeypatch.setattr(module.subprocess, "run", timed)
+    out = receipt(api.tools["type_text"](text="x" * 4500, interval_ms=40, app="Keynote"))
+    assert out["ok"] is True and out["chars_sent"] == 4500, out
+    sent = [argv[-1] for argv in calls if is_input(argv[-1])]
+    budget = (170 - spent) * 1000 - 3000
+    assert len(sent) == len(waits) == 1 and f'"budget_ms":{budget}' in sent[0] and '"until"' not in sent[0], (waits, out)
+    assert budget + 3000 <= waits[0] * 1000 <= (mac_input.TYPE_HOST_SEC - spent) * 1000 - 10_000, waits
+    # Only typed text counts from the call's start: a click after the same slow inventory keeps its own 30 s and the
+    # program its 27 s, as before, so an answer that takes 16 s is still a success.
+    del calls[:], waits[:]
+    clicked = receipt(api.tools["click"](x=10, y=20, raw=True, app="Keynote"))
+    assert clicked["ok"] is True, clicked
+    sent = [argv[-1] for argv in calls if is_input(argv[-1])]
+    assert waits == [30] and len(sent) == 1 and '"budget_ms":27000' in sent[0] and '"until"' not in sent[0], (waits, clicked)
+
+
+def test_a_command_longer_than_a_host_command_line_goes_on_ssh_stdin(tmp_path, monkeypatch):
+    """The skill's own commands always go as UTF-8 bytes on ssh's stdin to sh; a raw remote_exec script too when the host
+    cannot start it as an argument, then to the account's own shell (bytes: no LF becomes CRLF on Windows). On
+    Windows the measure is the command line as the launcher quotes it, in UTF-16 units: 5,000 double quotes in a
+    29,000-character command make a line over 33,000 units, which a plain count of characters would have passed."""
+    module = load_plugin()
+    remote = sys.modules[module.__name__ + ".remote"]
+    seen = []
+
+    def run(cmd, *a, **k):
+        seen.append((list(cmd), k.get("input")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(module.subprocess, "run", run)
+    impl = module._ComputerUse(API(tmp_path / "state"))
+    conn = {"backend": "ssh_macos", "host": "mac.invalid", "user": "owner"}
+    impl._ssh_run(conn, "echo short")
+    long_command = "printf %s 'line\nnext' " + "x" * 140_000
+    impl._ssh_run(conn, long_command)
+    impl._ssh_run(conn, long_command, raw=True)
+    impl._ssh_run(conn, "echo short", raw=True)
+    (short_argv, short_input), (long_argv, long_input), (raw_argv, raw_input), (own_argv, own_input) = seen
+    # The skill's own commands, short or long, go to /bin/sh on stdin whatever the account's shell (tcsh cannot run
+    # them, not even the short inventory); -T: no terminal.
+    for argv, data, command in ((short_argv, short_input, "echo short"), (long_argv, long_input, long_command)):
+        assert argv[:2] == ["ssh", "-T"] and argv[-1] == remote._SH_SCRIPT_RUNNER == SH_SCRIPT_RUNNER, argv
+        assert data == command.encode("utf-8") and command not in argv
+    # A user's short script stays ssh's argument, for the account's own shell to parse.
+    assert own_argv[-1] == "echo short" and own_input is None
+    # A user's own script goes to the account's own shell, not as a login, its stdin closed.
+    assert raw_argv[:2] == ["ssh", "-T"] and raw_argv[-1] == remote._RAW_SCRIPT_RUNNER and raw_input == long_command.encode("utf-8")
+    quotes = "printf %s " + '"' * 5000 + " " + "q" * 23_900
+    dest = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "owner@mac.invalid"]
+    assert len(quotes) < 30_000 and remote._fits_command_line([*dest, quotes], windows=False)  # a POSIX host carries it
+    assert not remote._fits_command_line([*dest, quotes], windows=True) and remote._fits_command_line([*dest, "echo short"], windows=True)
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("sh"), reason="the runner is a POSIX shell command")
+@pytest.mark.parametrize("login_shell", ["sh", "zsh", "tcsh"])
+def test_the_skills_own_command_runs_in_sh_whatever_the_accounts_shell(login_shell):
+    """The skill's commands are POSIX (RC=$?, $(...)): the runner line as the account's shell parses it hands them to
+    sh, so a tcsh account runs the inventory too; its exit code comes back, and a command reading stdin gets nothing."""
+    shell = shutil.which(login_shell)
+    if not shell:
+        pytest.skip(f"{login_shell} is not installed here")
+    remote = sys.modules[load_plugin().__name__ + ".remote"]
+    script = remote._SSH_INVENTORY.replace("lsappinfo list", "echo listed").format(read="echo front") + "\n"
+    done = subprocess.run([shell, "-c", remote._SH_SCRIPT_RUNNER], input=script.encode("utf-8"), capture_output=True,
+                          timeout=20, env={"PATH": "/usr/bin:/bin", "SHELL": shell})
+    assert (done.returncode, done.stdout.decode()) == (0, "listed\n\n__FRONT__\nfront\n"), (login_shell, done)
+    failing = subprocess.run([shell, "-c", remote._SH_SCRIPT_RUNNER], input=b"cat\nX=$(printf two); echo $X\nexit 5\n",
+                             capture_output=True, timeout=20, env={"PATH": "/usr/bin:/bin", "SHELL": shell})
+    assert (failing.returncode, failing.stdout.decode()) == (5, "two\n"), (login_shell, failing)
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("sh"), reason="the runner is a POSIX shell command")
+@pytest.mark.parametrize("login_shell", ["sh", "zsh", "tcsh"])
+def test_a_raw_script_runs_in_the_accounts_shell_with_its_stdin_closed(tmp_path, login_shell):
+    """The runner line as the account's login shell parses it (sh, zsh, tcsh: single quotes mean the same), then sh
+    reads the whole script and runs it in $SHELL: a command reading stdin gets nothing, so the script's later lines
+    still run, and the account shell's own syntax works (zsh's ${(U)s})."""
+    shell = shutil.which(login_shell)
+    if not shell:
+        pytest.skip(f"{login_shell} is not installed here")
+    remote = sys.modules[load_plugin().__name__ + ".remote"]
+    script = "echo one; cat; echo two; exit 7\n"
+    done = subprocess.run([shell, "-c", remote._RAW_SCRIPT_RUNNER], input=script.encode("utf-8"), capture_output=True,
+                          timeout=20, env={"PATH": "/usr/bin:/bin", "SHELL": shell})
+    assert (done.returncode, done.stdout.decode()) == (7, "one\ntwo\n"), (login_shell, done)
+    zsh = shutil.which("zsh")
+    if login_shell == "zsh" and zsh:
+        upper = subprocess.run([shell, "-c", remote._RAW_SCRIPT_RUNNER], input=b's=abc; echo ${(U)s}\n', capture_output=True,
+                               timeout=20, env={"PATH": "/usr/bin:/bin", "SHELL": zsh})
+        assert upper.stdout.decode() == "ABC\n", upper
 
 
 def test_ssh_paste_writes_the_remote_clipboard(tmp_path, monkeypatch):
@@ -282,10 +525,10 @@ def test_ssh_paste_writes_the_remote_clipboard(tmp_path, monkeypatch):
     assert out["ok"] is True and out["method"] == "paste" and out["clipboard_replaced"] is True
     remote = calls[-1][-1]
     # One ssh call (#2589): front read, the clipboard told the bytes are UTF-8, the stage marker, the local chord
-    # program through the Mac's own osascript (never cliclick t:v), front read.
+    # program through the Mac's own osascript (never a typed "v"), front read.
     assert (remote.index("__FRONT_BEFORE__") < remote.index("LC_ALL=en_US.UTF-8 pbcopy") < remote.index("echo __CLIPBOARD_WRITTEN__")
             < remote.index("osascript -l JavaScript -e") < remote.index("__FRONT_AFTER__")), remote
-    assert "cliclick kd:" not in remote and "t:v" not in remote and len([c for c in calls if is_input(c[-1])]) == 1
+    assert '"ops":' not in remote and len([c for c in calls if is_input(c[-1])]) == 1
 
 
 def run_guest_program(command: list[str], *, fronts: list[str], raise_probe: bool = False) -> tuple[list[str], str, int]:
@@ -451,15 +694,19 @@ def test_ssh_stage_facts_survive_a_transport_failure_and_an_empty_inventory_is_u
     assert empty["ok"] is False and empty["reason"] == "apps_unread" and len(calls) == 1
     module, api, calls = ssh(tmp_path, monkeypatch, lambda command: (127, "", "lsappinfo: command not found"))
     assert receipt(api.tools["window_list"]())["reason"] == "apps_unread"
-    # A snippet cliclick cannot express is refused before any switch.
+    # A snippet the input program cannot express is refused before any switch.
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI, KEYNOTE))
-    refused = receipt(api.tools["scroll"](clicks=2, app="Keynote"))
-    assert refused["ok"] is False and calls == [], "nothing reached the Mac, no switch for an input that cannot be sent"
+    impl = module._ComputerUse(api)
+    refused = impl._remote_input(dict(backend="ssh_macos", host="mac.invalid"), "pyautogui.write('x')", target="Keynote")
+    assert refused["ok"] is False and "unsupported pyautogui snippet" in refused["error"] and calls == [], refused
+    # The wheel is no longer such a snippet (#63): it reaches the Mac after the switch.
+    sent = receipt(api.tools["scroll"](clicks=2, app="Keynote"))
+    assert sent["ok"] is True and '{"op":"scroll","dy":-2}' in calls[-1][-1], sent
 
 
 def test_ssh_paste_reports_the_clipboard_stage_truthfully(tmp_path, monkeypatch):
     def pbcopy_failed(command):
-        if "cliclick" in command or "pbcopy" in command:
+        if "pbcopy" in command:
             return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__FRONT_AFTER__{info_line(SAFARI)}\n", "pbcopy: not found"
         return 0, ""
     module, api, calls = ssh(tmp_path, monkeypatch, pbcopy_failed)
@@ -467,7 +714,7 @@ def test_ssh_paste_reports_the_clipboard_stage_truthfully(tmp_path, monkeypatch)
     assert out["ok"] is False and out["clipboard_replaced"] is False and "observed_effect" not in out
 
     def chord_failed(command):
-        return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n__FRONT_AFTER__{info_line(SAFARI)}\n", "cliclick died"
+        return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n__FRONT_AFTER__{info_line(SAFARI)}\n", "osascript died"
     module, api, calls = ssh(tmp_path, monkeypatch, chord_failed)
     out = receipt(api.tools["type_text"](text="x", via="paste"))
     assert out["ok"] is False and out["clipboard_replaced"] is True and "__CLIPBOARD" not in out["output"]
@@ -488,7 +735,7 @@ def test_a_marker_shaped_title_in_the_guest_inventory_forges_nothing(tmp_path, m
 
 def test_ssh_a_failed_paste_chord_keeps_the_clipboard_effect_without_a_switch(tmp_path, monkeypatch):
     def chord_failed(command):
-        return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n__FRONT_AFTER__{info_line(SAFARI)}\n", "cliclick died"
+        return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n__FRONT_AFTER__{info_line(SAFARI)}\n", "osascript died"
     module, api, calls = ssh(tmp_path, monkeypatch, chord_failed)
     out = receipt(api.tools["type_text"](text="x", via="paste"))
     assert out["ok"] is False and out["clipboard_replaced"] is True and out["observed_effect"] is True and out["clipboard_done"] is True
@@ -507,7 +754,7 @@ def test_ssh_window_list_says_when_the_inventory_or_the_front_is_unread(tmp_path
 def test_ssh_negative_coordinates_are_absolute_points_on_the_remote_mac(tmp_path, monkeypatch):
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI))
     out = receipt(api.tools["click"](x=-250, y=200, raw=True))
-    assert out["ok"] is True and "cliclick c:=-250,200" in calls[-1][-1]
+    assert out["ok"] is True and '{"op":"click","x":-250,"y":200,"button":"left","count":1}' in calls[-1][-1]
 
 
 def test_osworld_a_lost_answer_after_a_paste_is_not_retyped_and_negative_points_are_refused_for_a_guest(tmp_path, monkeypatch):
@@ -702,3 +949,47 @@ def test_osworld_an_unread_front_before_a_later_step_says_so(tmp_path, monkeypat
     out = receipt(api.tools["key"](keys="right down", app="Keynote"))
     assert out["ok"] is False and out["steps_done"] == 1 and out["reason"] == "front_unread" and out["dispatched"] is False, out
     assert "before the next step" in out["error"] and "nothing more was sent" in out["error"] and "switch was requested" not in out["error"], out["error"]
+
+
+@pytest.mark.parametrize("probe", ["unread", "read"])
+def test_an_ssh_sequence_names_no_recipient_when_its_first_step_could_not_read_the_front(tmp_path, monkeypatch, probe):
+    """Keynote is verified in front, then the probe before the first key of `a b` cannot read the front: the receipt
+    says so and names no application, not the Keynote read before. A probe that reads another front names it."""
+    def script(command):
+        if "lsappinfo list" in command:
+            return 0, LISTING + "__FRONT__" + info_line(KEYNOTE)
+        if '"op":"resolve"' in command:
+            return 0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}\n'
+        if is_input(command):
+            return (3, "\n__FRONT_BEFORE__\n__FRONT_UNREAD__\n") if probe == "unread" else \
+                (3, f"\n__FRONT_BEFORE__{info_line(SAFARI)}\n__TARGET_LOST__\n")
+        return 0, ""
+    module, api, calls = ssh(tmp_path, monkeypatch, script)
+    out = receipt(api.tools["key"](keys="a b", app="Keynote"))
+    assert out["ok"] is False and out["steps_done"] == 0 and out["dispatched"] is False, out
+    if probe == "unread":
+        assert out["reason"] == "front_unread" and "front" not in out and "delivered_to" not in out, out
+    else:
+        assert out["reason"] == "target_lost" and out["front"]["app"] == "Safari", out
+
+
+@pytest.mark.parametrize("where", ["stdout", "stderr", "nowhere"])
+def test_an_ssh_input_whose_script_never_ran_is_not_a_success(tmp_path, monkeypatch, where):
+    """ssh exits 0 in all three cases. With the wrapper's lines on either stream the click ran (a forced command can
+    send the remote stdout to stderr); with none of them the remote sh read no script (a StdinNull yes for this host
+    gives it no stdin), so nothing was sent and the receipt says why."""
+    lines = f"__FRONT_BEFORE__{info_line(SAFARI)}\n__FRONT_AFTER__{info_line(SAFARI)}\n"
+
+    def script(command):
+        if is_input(command):
+            return {"stdout": (0, lines), "stderr": (0, "", lines), "nowhere": (0, "")}[where]
+        return 0, ""
+    module, api, calls = ssh(tmp_path, monkeypatch, script)
+    out = receipt(api.tools["click"](x=10, y=20, raw=True))
+    if where == "stdout":
+        assert out["ok"] is True and out["dispatched"] is True and out["observed_effect"] is True, out
+    elif where == "stderr":
+        assert out["ok"] is True and out["dispatched"] is True and out.get("reason") != "remote_script_not_run", out
+    else:
+        assert out["ok"] is False and out["dispatched"] is False and out["reason"] == "remote_script_not_run", out
+        assert "StdinNull" in out["error"] and "transport_failed" not in out and not out.get("observed_effect"), out

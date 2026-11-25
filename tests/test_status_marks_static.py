@@ -69,7 +69,7 @@ warning | web/style.css | @container files (max-width: 700px) » .files-entry:is
 warning | web/style.css | .harness-account-meta .meta-fact[data-tone="warn"] | color
 warning | web/style.css | :root[data-theme="light"] .harness-account-row.harness-exhausted | background
 warning | web/style.css | .harness-maintenance-notice[data-tone="warn"] | color
-warning | web/style.css | .log-entry .log-phase:is(.warn, .empty):not([data-chip-tone]) | background, border-color, color
+warning | web/style.css | .harness-model-program [data-tone="warn"] | color
 warning | web/style.css | .message-share-status[data-tone="warn"] | color
 warning | web/style.css | .model-fallback | color
 warning | web/style.css | .msg-attachment-outcome | color
@@ -80,6 +80,7 @@ warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-metric[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-table-status[data-tone="warn"] | color
 warning | web/settings.css | #page-settings :is(.ui-row-meta, .models-main-meta, [data-setting-meta])[data-tone="warn"] | color
+warning | web/settings.css | #page-skills :is(.ui-row-meta, [data-setting-meta])[data-tone="warn"] | color
 warning | web/settings.css | .available-subagent-status-reason | color
 warning | web/settings.css | .available-subagents-review-copies | color
 warning | web/settings.css | .available-subagents-review-empty | color
@@ -117,9 +118,7 @@ system | web/consciousness.css | .place-convo-row.is-system | background
 system | web/consciousness.css | .place-convo-row.is-system .place-convo-text | color
 system | web/consciousness.css | .place-convo-row.is-system .place-convo-who | color
 system | web/consciousness.css | .place-sheet-section p.place-silent-card | background, color
-# Data categories, not statuses: the Logs task category, code highlighting, the Storage temporary segment, the
-# fourth default chart series.
-data | web/style.css | .log-type.tasks | color
+# Data categories, not statuses: code highlighting, the Storage temporary segment, the fourth default chart series.
 data | web/style.css | .md-code-block .hljs-class .hljs-title | color
 data | web/style.css | .md-code-block .hljs-type | color
 data | web/style.css | :is(.storage-bar-seg, .storage-key)[data-group="temporary"] | background
@@ -134,8 +133,8 @@ palette | web/ui.css | :root[data-theme="light"] | --tone-amber-hover
 """
 
 # How many amber references each first-party script may hold, all data categories: the fourth default chart series
-# (theme_palette.js, which host charts draw from) and Logs' task category.
-SCRIPT_AMBER = {"web/modules/log_events.js": 1, "web/modules/theme_palette.js": 1}
+# (theme_palette.js, which host charts draw from).
+SCRIPT_AMBER = {"web/modules/theme_palette.js": 1}
 
 
 def _decommented(css: str) -> str:

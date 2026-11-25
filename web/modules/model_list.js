@@ -59,7 +59,7 @@ export function modelSearchField(doc, listId) {
  * `{ paint, destroy }`.
  */
 export function createModelList({ el, input, id, store, main, current, recents, follows = () => false, mainRow = 'follow',
-    mainFacts = null, tierOf = () => '', onRoute, onPin = () => {}, onSettings = () => {}, onLeave = () => {},
+    mainFacts = null, tierOf = () => undefined, onRoute, onPin = () => {}, onSettings = () => {}, onLeave = () => {},
     onPaint = () => {} }) {
     // `key` is the active row's model (its data-row), `nav` whether the arrows made it active, `shown` the row and cell
     // last scrolled into view.
@@ -127,7 +127,7 @@ export function createModelList({ el, input, id, store, main, current, recents, 
             if (recent.length) { section(tr('model.section.recent', 'Recent')); recent.forEach((route) => add(route)); }
             const others = index.rows.filter((entry) => !shown.has(entry.key));
             if (status.reading && !status.read) note('Reading models…');
-            else if (!index.rows.length && !index.sources.some((entry) => entry.problems.length)) {
+            else if (!index.rows.length && (status.failed || !index.problems?.length) && !index.sources.some((entry) => entry.problems.length)) {
                 // Nothing but Main can lead: say so and offer the way to where a source is added.
                 note(status.failed ? 'The model catalog could not be read.' : 'Only Main\'s model can lead work here.');
                 picks.set('accounts', { settings: true });
@@ -181,6 +181,7 @@ export function createModelList({ el, input, id, store, main, current, recents, 
             if (status.failed) note('The model catalog could not be read; earlier suggestions are kept.');
             else if (gaps.length) note(fmt('Could not read every list: {sources}.', { sources: gaps.map((entry) => entry.label).join(', ') }));
         }
+        if (!status.failed && !search.only) for (const problem of index.problems || []) note(problem);
         // A state read that changes nothing here writes nothing: the list keeps its scroll and its active row.
         const html = `<div class="chat-model-rows" role="rowgroup">${parts.join('')}</div>`;
         search.picks = picks;

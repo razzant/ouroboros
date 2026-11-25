@@ -131,10 +131,15 @@ def test_mind_closes_and_reopens_with_one_durable_system_row_per_change(room):
     for event in events:
         assert event["role"] == "system" and event["system_type"] == "project_closure"
         assert event["chat_id"] == before["chat_id"] and not event.get("task_id")
-        assert "Ouroboros (one)" in event["text"]
+        assert event["text"].startswith("Ouroboros ") and "(one)" not in event["text"], "which work: the notice's detail"
+        assert event["progress_meta"]["notice"]["details"] == "by task one"
     assert closed["closed"]["at"] not in events[0]["text"]
-    assert "Finished." in events[0]["text"] and "message from you" in events[0]["text"]
+    assert "Finished." in events[0]["text"] and "message from you" not in events[0]["text"]
+    # Reopening is the closure's step; the mind's note is a value put back as written, never translated (RV4 3, 11).
+    assert events[0]["progress_meta"]["notice"]["step"] == "reopen_project"
+    assert events[0]["progress_meta"]["notice"]["values"] == {"note": "Finished."}
     assert "reopened" in events[1]["text"] and "More work." in events[1]["text"]
+    assert "step" not in events[1]["progress_meta"]["notice"]
 
 
 def test_owner_and_mind_share_one_idempotent_closure_transition(room, monkeypatch):
@@ -197,6 +202,11 @@ def test_open_projects_are_listed_oldest_first_after_dialogue_activity_and_befor
     assert "last_active_at=2026-02-01" in text and "closed=false" in text
     text = _list_projects(context(room), closed=True)
     assert '"note": "The work is finished."' in text and '"by": "ouroboros:one"' in text
+    # Every listed room here has held activity (owner-made rooms, one with a fresh message), and none has
+    # a task running: the reader says when each was last active and whether it is closed, never "running".
+    everything = _list_projects(context(room))
+    assert "closed=false" in everything and '"note": "The work is finished."' in everything
+    assert "running" not in everything
 
 
 @pytest.mark.parametrize("closed,oldest_first,limit", [
@@ -239,6 +249,129 @@ def test_project_reader_pages_reach_every_match_and_stop_on_the_last_page(room, 
 @pytest.mark.parametrize("start", [-1, True, 1.5, "1", None])
 def test_project_reader_refuses_invalid_offsets(room, start):
     assert "TOOL_ARG_ERROR" in _list_projects(context(room), start=start)
+
+
+def test_list_projects_reports_an_unreadable_registry_instead_of_claiming_no_projects(room):
+    """An unproved emptiness is a typed error (``GET /api/projects``' own readability check), never
+    an authoritative "no projects": the registry lost beside its commit witness, and one holding no
+    readable room, both answer PROJECTS_ERROR."""
+    path = room / "state/projects.json"
+    data = json.loads(path.read_text())
+    path.unlink()  # lost beside the witness ``create_project`` touched: unreadable, not provably empty
+    text = _list_projects(context(room))
+    assert "PROJECTS_ERROR" in text and "No matching projects" not in text
+    app = Starlette(routes=collect_routes(data_dir=room))
+    app.state.drive_root = room
+    with TestClient(app) as client:
+        assert client.get("/api/projects?all=1").status_code == 500
+    path.write_text(json.dumps({**data, "projects": [{"id": "../not-a-project"}]}))  # no readable room
+    text = _list_projects(context(room))
+    assert "PROJECTS_ERROR" in text and "No matching projects" not in text
+
+
+def test_list_projects_still_answers_no_projects_for_a_provably_empty_registry(tmp_path):
+    path = tmp_path / "state/projects.json"
+    app = Starlette(routes=collect_routes(data_dir=tmp_path))
+    app.state.drive_root = tmp_path
+    with TestClient(app) as client:
+        assert "No matching projects" in _list_projects(context(tmp_path))
+        assert client.get("/api/projects?all=1").json() == {"projects": []}
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('{"projects": []}')
+        assert "No matching projects" in _list_projects(context(tmp_path), closed=True)
+        response = client.get("/api/projects?all=1")
+        assert response.status_code == 200 and response.json()["projects"] == []
+
+
+def test_list_projects_reports_a_damaged_lifecycle_instead_of_claiming_no_projects(room):
+    """The tool never mistakes a damaged lifecycle for a filter match count of zero."""
+    from ouroboros.project_admission import display_registry_snapshot
+
+    path = room / "state/projects.json"
+    data = json.loads(path.read_text())
+    template = data["projects"][0]
+
+    def write(rows):
+        path.write_text(json.dumps({**data, "projects": rows}))
+
+    write([{**template, "id": "damaged", "chat_id": 50001, "lifecycle": "unknown"}])
+    text = _list_projects(context(room))
+    assert "PROJECTS_ERROR" in text and "No matching projects" not in text
+    assert "PROJECTS_ERROR" in _list_projects(context(room), closed=True)  # the closed filter masks no damage
+    assert registry.list_sidebar_projects(room) == []  # the lenient read (no require_readable) is unchanged
+    write([{**template, "id": "damaged", "chat_id": 50001, "lifecycle": "unknown"},
+           {**template, "id": "gone", "chat_id": 50002, "lifecycle": "tombstoned"}])
+    assert "PROJECTS_ERROR" in _list_projects(context(room))
+    write([{**template, "id": "gone", "chat_id": 50002, "lifecycle": "tombstoned"}])
+    assert "No matching projects" in _list_projects(context(room))
+    assert "No matching projects" in _list_projects(context(room), closed=False)
+    write([{**template, "id": "healthy", "chat_id": 50003},
+           {**template, "id": "damaged", "chat_id": 50001, "lifecycle": "unknown"}])
+    text = _list_projects(context(room))
+    assert "healthy" in text and "PROJECTS_ERROR" not in text
+    rows = {row["id"]: row for row in display_registry_snapshot(room)["projects"]}
+    assert rows["damaged"]["chat_id"] == 50001 and rows["damaged"]["lifecycle"] == "unknown"
+
+
+@pytest.mark.parametrize("unreadable", [None, {"chat_id": 50001}, {"id": "damaged", "chat_id": 0},
+                                       {"id": "damaged", "chat_id": 50001, "lifecycle": "unknown"}])
+def test_skipped_project_beside_tombstone_does_not_prove_empty_sidebar(room, unreadable, monkeypatch):
+    from ouroboros import project_admission
+
+    path = room / "state/projects.json"
+    data = json.loads(path.read_text())
+    healthy = {**data["projects"][0], "last_active_at": "2026-01-01T00:00:00Z"}
+    gone = {**healthy, "id": "gone", "chat_id": 50002, "lifecycle": "tombstoned"}
+    another = {**healthy, "id": "beta", "chat_id": 50003, "last_active_at": "2099-01-01T00:00:00Z"}
+    app = Starlette(routes=collect_routes(data_dir=room))
+    app.state.drive_root = room
+    with TestClient(app) as client:
+        path.write_text(json.dumps({**data, "projects": [gone, unreadable]}))
+        assert client.get("/api/projects?all=1").status_code == 500
+        assert "PROJECTS_ERROR" in _list_projects(context(room))
+        reserved = {gone["chat_id"]}
+        if isinstance(unreadable, dict) and unreadable.get("lifecycle") == "unknown":
+            reserved.add(50001)  # the unreadable sidebar row still reserves its valid chat identity
+        assert registry.readable_rooms(room) == reserved
+
+        path.write_text(json.dumps({**data, "projects": [gone, unreadable, healthy]}))
+        response = client.get("/api/projects?all=1")
+        assert response.status_code == 200
+        assert [row["id"] for row in response.json()["projects"]] == [healthy["id"]]
+
+    reads, snapshot = [], project_admission._registry_snapshot
+
+    def observed(*args, **kwargs):
+        reads.append(True)
+        return snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(project_admission, "_registry_snapshot", observed)
+
+    def page(**kwargs):
+        text = _list_projects(context(room), **kwargs)
+        assert len(reads) == 1  # filtered and paged results must not re-open the registry for completeness
+        reads.clear()
+        assert not any(word in text for word in ("damaged", "50001", "gone"))
+        return text
+
+    everything = page()
+    assert "- alpha —" in everything and "Project registry read is incomplete" in everything
+    closed = page(closed=True)
+    assert "No readable projects match on this page" in closed and "Project registry read is incomplete" in closed
+    assert "No matching projects" not in closed and "PROJECTS_ERROR" not in closed
+
+    path.write_text(json.dumps({**data, "projects": [gone, unreadable, healthy, another]}))
+    first = page(closed=False, oldest_first=True, limit=1)
+    assert "- alpha —" in first and "Next: list_projects(start=1, limit=1, oldest_first=True, closed=False)" in first
+    last = page(closed=False, oldest_first=True, limit=1, start=1)
+    assert "- beta —" in last and "Next:" not in last and "Project registry read is incomplete" in last
+    past = page(closed=False, oldest_first=True, limit=1, start=2)
+    assert "No readable projects match on this page" in past and "Next:" not in past
+    assert "Project registry read is incomplete" in past
+
+    path.write_text(json.dumps({**data, "projects": [gone, healthy, another]}))
+    assert page(closed=True).startswith("No matching projects.")
+    assert page(closed=False, start=2).startswith("No matching projects.")
 
 
 def test_closure_tool_matches_move_access_and_publishes_its_arguments(tmp_path, monkeypatch):

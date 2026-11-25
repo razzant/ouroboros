@@ -58,7 +58,7 @@ def test_a_card_tree_indexes_its_commit_controls_with_their_drawn_labels():
     ])
     assert checked["actions"] == {
         "book": {"kind": "action", "once": False, "label": "Book it"},
-        "dates": {"kind": "form", "once": True, "label": "Dates", "fields": ["from", "to"]},
+        "dates": {"kind": "form", "once": True, "label": "Submit", "form_title": "Dates", "bubble_label": "Dates", "fields": ["from", "to"]},
     }
     assert checked["components"][1]["components"][0] == ACTION
 
@@ -244,6 +244,9 @@ def test_media_the_renderer_draws_or_may_lawfully_hide_is_shown(tmp_path, compon
     ({"type": "group", "components": [{"type": "gallery", "items": [{"src": "a.png"}]}]}, None,
      "components[0].components[0].items[0]: this image has no source"),
     ({"type": "image", "path": "shots.00", "src": "x"}, {"shots": [PNG_URI]}, "components[0]: this image has no source"),
+    pytest.param({"type": "image", "path": "photos.url"}, {"photos": [{"url": PNG_URI}]},
+                 "components[0]: this image has no source a card can draw; path 'photos.url' reads a value of "
+                 "data, not a file. Give it file: the path of a PNG", id="missing-array-property"),
     ({"type": "image", "path": "shot", "src": PNG_URI}, {"shot": "x.png"}, "components[0]: this image has no source"),
     ({"type": "image", "src": PNG_URI.replace("base64", "ba\u017fe64")}, None, "components[0]: this image has no source"),
     ({"type": "tabs", "tabs": [{"label": "Summary", "components": [{"type": "image", "src": PNG_URI}]},

@@ -9,7 +9,7 @@ every imported pack.
 What gets translated, and when:
 
 * **Catalog codes** — the host's closed code→sentence tables (task headline words, cause
-  sentences, question status, routing refusal causes; Telegram's own lines register
+  sentences, question status, routing refusal causes, a notice's next steps; Telegram's own lines register
   through ``register_catalog``). They are enumerable, so a language choice, a regenerate
   or a boot re-check queues every code the memory lacks and every generated code whose
   English changed (``source_hash``), and an owner pin is never touched.
@@ -68,7 +68,6 @@ USAGE_CATEGORY = "ui_translation"
 UI_TRANSLATION_MAX_TOKENS = 16384
 BATCH_KEYS = 100
 MAX_ATTEMPTS = 3
-_OUTPUT_LIMIT_STOPS = frozenset({"length", "max_tokens"})
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 CatalogTable = Callable[[], Dict[str, str]]
@@ -111,8 +110,10 @@ def register_catalog(prefix: str, table: CatalogTable, note: str) -> None:
 
 def _core_catalogs() -> Dict[str, Tuple[Dict[str, str], str]]:
     from ouroboros import project_dialogue as pd
+    from ouroboros.host_notice import step_catalog
 
     return {
+        "notice.step": (step_catalog(), "the next step said after a System notice: a control or a place in the interface"),
         "task.headline": ({**pd.OUTCOME_PHASE_HEADLINE, "quiet": pd.QUIET_RUN_HEADLINE},
                           "the one-word status headline of a task card (Working, Done, Failed…)"),
         "task.cause": (pd.TASK_CAUSE_PHRASES,
@@ -201,13 +202,33 @@ def _usage_scope(drive_root: pathlib.Path):
                       global_limit_usd=resolve_total_budget_usd())
 
 
+def _finish_label(usage: Any, msg: Any) -> str:
+    """One reply's finish label, read the way every caller reads it (``response_finish_reason``): the operation's own
+    fact in the usage before the nested message's, so a message saying ``stop`` never outranks it."""
+    from ouroboros._usage_response import response_finish_reason
+
+    return str(response_finish_reason(usage, msg)[1] or "").strip().lower()
+
+
+def _output_cut(stop: str) -> bool:
+    """Whether a finish label says the reply reached its output limit (the vocabulary every finish reader shares)."""
+    from ouroboros._usage_response import OUTPUT_LIMIT_FINISH_REASONS
+
+    return stop in OUTPUT_LIMIT_FINISH_REASONS
+
+
 def _call_light(drive_root: pathlib.Path, messages: List[Dict[str, Any]], *, client: Any = None,
                 cache_affinity: str = "") -> Tuple[str, str]:
     """One accounted call; one deadline covers preparation, slot waiting and recovery.
 
-    Returns ``(content, stop)``; raises on transport failure so the batch can requeue.
+    No ``response_format`` is requested: Claudexor refuses it and the local, Anthropic-native and GigaChat routes
+    ignore it (``LLMClient.chat``), so both prompts ask for JSON and the answer is read from the reply's text.
+    Returns ``(text, stop)``: the reply's visible text (``_visible_text``) and its finish label. A reply cut at its
+    output limit has no text, however it parses: its ``stop`` tells the caller. Raises on transport failure, and on an
+    operation that ended ``incomplete`` for any other reason (no final answer), so the batch can requeue.
     """
     from ouroboros import model_concurrency
+    from ouroboros._usage_response import UnusableReplyError
     from ouroboros.llm import LLMClient
     from ouroboros.llm_observability import chat_observed
     from ouroboros.usage_accounting import usage_scope
@@ -221,23 +242,51 @@ def _call_light(drive_root: pathlib.Path, messages: List[Dict[str, Any]], *, cli
         if remaining <= 0:
             raise TimeoutError("the translation ceiling was spent waiting for a model slot")
         with usage_scope(_usage_scope(drive_root)):
-            msg, usage = chat_observed(
-                client or LLMClient(), drive_root=drive_root, task_id=SYSTEM_TASK_ID, call_type=USAGE_CATEGORY,
-                messages=messages, model=model, tools=None, reasoning_effort="low", model_role="light",
-                max_tokens=UI_TRANSLATION_MAX_TOKENS, use_local=use_local, timeout=remaining,
-                caller_deadline_ts=deadline_ts,
-                response_format={"type": "json_object"}, cache_affinity=cache_affinity)
+            try:
+                msg, usage = chat_observed(
+                    client or LLMClient(), drive_root=drive_root, task_id=SYSTEM_TASK_ID, call_type=USAGE_CATEGORY,
+                    messages=messages, model=model, tools=None, reasoning_effort="low", model_role="light",
+                    max_tokens=UI_TRANSLATION_MAX_TOKENS, use_local=use_local, timeout=remaining,
+                    caller_deadline_ts=deadline_ts, cache_affinity=cache_affinity)
+            except UnusableReplyError as refused:
+                # The direct Responses lane refuses a tool-less reply cut at its output limit (``unfinished``) before it
+                # returns one: the same cut, with its text left unread. No other refusal is a cut.
+                stop = _finish_label(refused.usage, refused.reply_message)
+                if refused.usability != "unfinished" or not _output_cut(stop):
+                    raise
+                return "", stop
     body_error = (usage or {}).get("provider_error")
     if isinstance(body_error, dict) and body_error:
         raise RuntimeError(f"provider body error (code={body_error.get('code')}): {body_error.get('message')}")
-    stop = str((msg or {}).get("finish_reason") or (msg or {}).get("stop_reason")
-               or (usage or {}).get("response_finish_reason") or "").strip().lower()
-    return str((msg or {}).get("content") or ""), stop
+    # Claudexor marks an operation that ended incomplete in the usage (``_ModelInvocation.finish``): ``length`` for the
+    # output limit, ``incomplete`` for any other reason. That marker stands whatever the nested message's own finish
+    # says: the text of such an operation is no final answer.
+    stop = _finish_label(usage, msg)
+    if stop == "incomplete":
+        raise UnusableReplyError("unfinished", msg, usage)
+    return ("" if _output_cut(stop) else _visible_text((msg or {}).get("content"))), stop
+
+
+# A part's ``type`` that makes it reply text. ``None`` and ``""`` are untyped, as a Gemini part is; any other value,
+# a falsy one (``False``, ``0``, ``[]``, ``{}``) included, is malformed. A tuple, not a set: a type may be unhashable.
+_TEXT_PART_TYPES = (None, "", "text", "output_text")
+
+
+def _visible_text(content: Any) -> str:
+    """A reply's text: its string, or the joined ``text`` of its plain parts (untyped like a Gemini part, ``text`` or
+    ``output_text``). A part flagged ``thought`` or of any other or malformed type is never read, whatever fields it
+    carries."""
+    if isinstance(content, list):
+        return "".join(
+            part["text"] for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str) and part.get("thought") is not True
+            and part.get("type") in _TEXT_PART_TYPES)
+    return content if isinstance(content, str) else ""
 
 
 def _json_object(content: str) -> Optional[Dict[str, Any]]:
-    """The JSON object in a model answer: the whole text, or the outermost braces (the
-    ``response_format`` hint is optional on some routes, so a text parse stays)."""
+    """The JSON object in a model answer: the whole text, or the outermost braces of a fenced or
+    prefaced one. The only reader: no call asks for a structured-output mode (``_call_light``)."""
     text = str(content or "").strip()
     for candidate in (text, text[text.find("{"): text.rfind("}") + 1] if "{" in text and "}" in text else ""):
         if not candidate:
@@ -434,7 +483,7 @@ def _translate_taken(drive_root: pathlib.Path, tag: str, taken: List[Tuple[str, 
         memory.requeue_pending(drive_root, tag, back)
         facts["error"] = error[:200]
         return facts
-    if stop in _OUTPUT_LIMIT_STOPS:
+    if _output_cut(stop):
         _requeue(batch, error=f"output budget hit ({stop})", count=False)
         memory.requeue_pending(drive_root, tag, back)
         facts["error"] = "output_truncated"
@@ -679,9 +728,9 @@ def resolve_language_request(text: str, *, drive_root: Optional[pathlib.Path] = 
     except Exception as exc:  # noqa: BLE001 — the gateway answers a typed 502
         raise LanguageResolveError("language_resolve_failed",
                                    f"the model could not be asked about this language ({type(exc).__name__})") from exc
-    parsed = _json_object(content)
-    if stop in _OUTPUT_LIMIT_STOPS and not parsed:
+    if _output_cut(stop):  # a reply cut at its output limit is no profile, however much of it parses
         raise LanguageResolveError("language_resolve_failed", "the model's answer was cut by the output budget")
+    parsed = _json_object(content)
     if not parsed or not isinstance(parsed.get("label"), str) or not parsed["label"].strip():
         # No profile in the answer: the host does not invent a language the model did not name.
         raise LanguageResolveError("language_resolve_failed", "the model's answer was not a language profile")

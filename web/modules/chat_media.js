@@ -13,6 +13,7 @@ import { buildAttachmentBlock } from './chat_attachments.js';
 import { createDocumentReader, documentReaderKind } from './document_reader.js';
 import { createChatCards } from './chat_cards.js';
 import { recordCardSource } from './message_actions.js';
+import { artifactNameText } from './result_files.js';
 
 // Player controls draw the house stroke vectors; each button's aria-label names its
 // current action and is rewritten with the icon whenever the state flips.
@@ -61,8 +62,8 @@ function humanSize(value) {
     return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
-function fileExtension(filename) {
-    const match = String(filename || '').match(/\.([^.\s]+)$/);
+function fileExtension(filename) {  // a raw POSIX name byte is no type: it reads as a plain file
+    const match = String(filename || '').match(/\.([^.\s\uD800-\uDFFF]+)$/u);
     return match ? match[1].slice(0, 10).toUpperCase() : 'FILE';
 }
 
@@ -125,11 +126,12 @@ export async function cleanupUploadedAttachments(uploaded) {
     }
 }
 
-/** A delivered file's whole name on one line (its type is read from it) and the part its card shows. Its bubble
- *  (below) and the room's search (chat_search_words.js) read it. */
+/** A delivered file's name for type detection, display/search, and the existing download suggestion.
+ *  Display quotes bytes and literal backslashes like the Files row. */
 export function fileNames(msg) {
     const full = String(msg?.filename || 'file').replace(/[\r\n]+/g, ' ');
-    return { full, shown: full.slice(0, 200) };
+    const shown = artifactNameText(full).slice(0, 200);
+    return { full, shown, download: /[\uD800-\uDFFF]/u.test(full) ? shown : full.slice(0, 200) };
 }
 
 /** A delivered links row's `.message`: its title and a button per safe address (an address itself is never
@@ -165,6 +167,10 @@ export function safeHttpUrl(value) {
     }
 }
 
+/** A place's label as an attribution reads it: one stored before its connector stopped doubling its word reads once
+ *  ("Telegram · Telegram · …"). The contact's voice line (below) and a work card's origin (task_origin.js) share it. */
+export const placeLabelOnce = (label) => String(label || '').split(' · ').filter((part, i, all) => part !== all[i - 1]).join(' · ');
+
 // Host-held source attribution belongs to the voice line, never the author's words.
 export function decorateContactSource(bubble, contact) {
     const sender = bubble.querySelector('.sender');
@@ -172,8 +178,7 @@ export function decorateContactSource(bubble, contact) {
     const href = safeHttpUrl(contact.url);
     const source = document.createElement(href ? 'a' : 'span');
     source.dataset.contactSource = contact.task_id;
-    // A label stored before its connector stopped doubling its word reads once ("Telegram · Telegram · …").
-    source.textContent = String(contact.label || tr('Connected place')).split(' · ').filter((part, i, all) => part !== all[i - 1]).join(' · ');
+    source.textContent = placeLabelOnce(contact.label || tr('Connected place'));
     source.title = fmt('Source work: {task_id}', { task_id: contact.task_id });
     if (href) {
         source.className = 'md-link';
@@ -472,7 +477,7 @@ export function createChatMedia({
         async open(file) {
             if (file.display) return openImage(file.source, file.display, file.filename);
             try {
-                await openViaHostBridge(file.source.bridge || file.source.durable, file.filename, { browserUrl: file.source.durable });
+                await openViaHostBridge(file.source.bridge || file.source.durable, file.downloadName || file.filename, { browserUrl: file.source.durable });
                 return true;
             } catch (error) {
                 showToast(`Could not open file: ${error?.message || error}`, 'error');
@@ -481,7 +486,7 @@ export function createChatMedia({
         },
         async download(file) {
             try {
-                await downloadSource(file.source, file.filename, file.mime);
+                await downloadSource(file.source, file.downloadName || file.filename, file.mime);
                 return true;
             } catch (error) {
                 showToast(`Could not download file: ${error?.message || error}`, 'error');
@@ -740,6 +745,14 @@ export function createChatMedia({
         listen(action('copy'), 'click', () => copyImage(sourceRef, mime), undefined, item);
     }
 
+    function captionMarker(msg, caption) {
+        return caption.trim() && msg.row_address?.startsWith('row:') && !msg.text_placeholder
+            && (msg.role === 'assistant' || msg.role === 'user')
+            ? ` data-reply-caption data-row-address="${escapeHtmlAttr(msg.row_address)}"`
+                + ` data-source-ts="${escapeHtmlAttr(msg.ts || '')}" data-source-author="${escapeHtmlAttr(msg.reply_author_label || messageSender(msg, msg.role))}"`
+            : '';
+    }
+
     function buildMediaBubble(msg) {
         if (destroyed) return null;
         const type = msg.msg_type || msg.type;
@@ -748,13 +761,13 @@ export function createChatMedia({
         const mimePattern = type === 'photo' ? /^image\/[a-z0-9.+-]+$/i : /^video\/[a-z0-9.+-]+$/i;
         const mime = mimePattern.test(String(msg.mime || '')) ? String(msg.mime) : fallback;
         const source = mediaSource(msg, type, mime);
-        if (!source) return null;
         const caption = String(msg.caption || '');
+        const captionBody = caption ? `<div class="message"${captionMarker(msg, caption)}>${escapeHtml(caption)}</div>` : '';
+        if (!source) return captionBody ? bubbleFrame(msg, captionBody) : null;
         if (type === 'video') {
             const extension = (mime.split('/')[1]?.split('+')[0] || '').slice(0, 10) || 'mp4';
             const sourceRef = mediaSourceRef(msg, source);
-            const body = `${caption ? `<div class="message">${escapeHtml(caption)}</div>` : ''}
-                <div class="message">${playerHtml({ src: source })}</div>`;
+            const body = `${captionBody}<div class="message">${playerHtml({ src: source })}</div>`;
             const bubble = bubbleFrame(msg, body);
             const player = bubble.querySelector('.chat-media-player');
             wirePlayer(bubble, bubble.querySelector('video'), {
@@ -766,7 +779,7 @@ export function createChatMedia({
         const body = `<div class="message"><div class="chat-gallery-grid">
             <figure class="chat-gallery-item">
                 ${photoHtml(source, 'Photo attachment')}
-                ${caption ? `<figcaption>${escapeHtml(caption)}</figcaption>` : ''}
+                ${caption ? `<figcaption${captionMarker(msg, caption)}>${escapeHtml(caption)}</figcaption>` : ''}
             </figure>
         </div></div>`;
         const bubble = bubbleFrame(msg, body);
@@ -775,12 +788,16 @@ export function createChatMedia({
         return bubble;
     }
 
-    function buildDocumentBubble(msg) {
+    function buildDocumentBubble(msg, { displayName, saveAs } = {}) {
         if (destroyed) return null;
         const mime = cleanMime(msg.mime, 'application/octet-stream');
         const source = fileSource(msg, mime);
-        // The type is read from the whole name; only its display is cut.
-        const { full: fullName, shown: filename } = fileNames(msg);
+        // The type is read from the whole name; only its display is cut. `msg.filename` stays the retained
+        // copy's name — the reader's type and the canonical address; `displayName` is display text and
+        // `saveAs` the explicit safe save suggestion, falling back to the name's own download spelling.
+        const { full: fullName, shown, download } = fileNames(msg);
+        const filename = displayName?.slice(0, 200) ?? shown;
+        const saveName = saveAs?.slice(0, 200) ?? download;
         const caption = String(msg.caption || '');
         const explicitSize = msg.size_bytes !== null && msg.size_bytes !== undefined
             && msg.size_bytes !== '' && Number.isFinite(Number(msg.size_bytes));
@@ -807,19 +824,19 @@ export function createChatMedia({
             </button>`;
         }
         const body = `<div class="message"><div class="chat-file-grid">
-            <div class="chat-file-item">${content}${caption ? `<div class="chat-file-caption">${escapeHtml(caption)}</div>` : ''}</div>
+            <div class="chat-file-item">${content}${caption ? `<div class="chat-file-caption"${captionMarker(msg, caption)}>${escapeHtml(caption)}</div>` : ''}</div>
         </div></div>`;
         const bubble = bubbleFrame(msg, body);
         if (mime.startsWith('audio/') && source.src) {
             wirePlayer(bubble, bubble.querySelector('audio'), {
-                audio: true, source, filename, mime,
+                audio: true, source, filename: download, mime,
             });
         } else {
             const card = bubble.querySelector('.chat-file-card');
             // The item, not the bubble: a grouped file moves into an earlier bubble's grid.
             const item = bubble.querySelector('.chat-file-item');
             const file = { source, filename, mime, meta, kind: readable, reader: source.reader, src: source.src, size,
-                canOpen: Boolean(source.durable) };
+                canOpen: Boolean(source.durable), downloadName: saveName };
             if (card && source.src) listen(card, 'click', (event) => (readable
                 ? openReader(file, item, card, event)
                 : openFileDialog(file, item)));
@@ -860,11 +877,13 @@ export function createChatMedia({
         const map = kind === 'photos' ? photoGroups : fileGroups;
         const selector = kind === 'photos' ? '.chat-gallery-item' : '.chat-file-item';
         const gridSelector = kind === 'photos' ? '.chat-gallery-grid' : '.chat-file-grid';
-        const ownItem = bubble.querySelector(selector);
-        if (ownItem && bubble.dataset.messageKey) ownItem.dataset.messageKey = bubble.dataset.messageKey;
-        if (ownItem && msg.history_id) {
-            ownItem.dataset.historyId = msg.history_id;
-            stampNodeTimestamp(ownItem, msg.ts);
+        const item = bubble.querySelector(selector);
+        if (!item) return insertMessageNode(bubble) !== false; // caption only
+        if (bubble.dataset.messageKey) item.dataset.messageKey = bubble.dataset.messageKey;
+        if (bubble.dataset.rowAddress) item.dataset.rowAddress = bubble.dataset.rowAddress;
+        if (msg.history_id) {
+            item.dataset.historyId = msg.history_id;
+            stampNodeTimestamp(item, msg.ts);
             delete bubble.dataset.historyId;
         }
         if (!taskId) {
@@ -877,9 +896,8 @@ export function createChatMedia({
             || Number(existing?.dataset.ts) === Date.parse(msg.ts || '')
                 && Number(existing?.dataset.historyOffset) <= Number(msg.history_position?.offset);
         if (existing && isFeedTailWrapper(existing) && sourceAfter) {
-            const item = bubble.querySelector(selector);
             const grid = existing.querySelector(gridSelector);
-            if (!item || !grid) return false;
+            if (!grid) return false;
             grid.appendChild(item);
             existing.classList.add('is-multiple');
             if (!existing.querySelector('.chat-group-title')) {

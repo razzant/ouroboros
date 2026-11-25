@@ -178,8 +178,14 @@ def test_a_restored_stand_measures_what_its_build_measured(built_small, small):
     tags = [tag for tag, entry in small.items() if isinstance(entry, dict) and "counts" in entry and not tag.startswith("T:")]
     assert {"B1", "B2_ready", "B3", "B5", "R_late"} <= set(tags)
     for tag in tags:
-        assert not contract_breaches(built_small[tag]["counts"], small[tag]["counts"], K_SMALL), tag
-        assert not contract_breaches(small[tag]["counts"], built_small[tag]["counts"], K_SMALL), tag
+        for before, after in ((built_small[tag], small[tag]), (small[tag], built_small[tag])):
+            breaches = contract_breaches(before["counts"], after["counts"], K_SMALL)
+            if breaches:
+                counts = (before.get("callers", {}), after.get("callers", {}))
+                readers = {source: (counts[0].get(source, 0), counts[1].get(source, 0))
+                           for source in sorted(counts[0].keys() | counts[1].keys())
+                           if source.partition(" <- ")[0] in breaches and counts[0].get(source, 0) != counts[1].get(source, 0)}
+                pytest.fail(f"{tag}: {breaches}; changed callers: {readers}")
 
 
 def boundary(measured: Dict[Any, Any], tag: str, k: int) -> Dict[str, Any]:
@@ -802,6 +808,7 @@ COMPANION_COUNTERS = {
     "held_continuation_recheck": ("writes",),
     "pause_notice_replay": ("writes",),
     "post_task_synthesis_recovery": ("writes",),
+    "subscription-census": ("open",),  # the engine's descriptor, read once a census file exists
 }
 
 

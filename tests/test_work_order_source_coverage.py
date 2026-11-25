@@ -67,13 +67,14 @@ def _fixture(tmp_path):
     return ctx, request, full_text, prompt
 
 
-def _started_entry(tmp_path, request, sha):
+def _started_entry(tmp_path, request, sha, *, invocation_id=""):
     from ouroboros import delegate_custody as custody
 
     custody._CUSTODY.pop("source-run", None)
     entry = custody.RunCustody(
         run_id="source-run",
         task_id="source-child",
+        invocation_id=invocation_id,
         route_id="claude",
         model="claude-fable-5",
         work_order_fingerprint=sha,
@@ -186,12 +187,13 @@ def test_orphaned_pending_recovery_preserves_partial_source_gate(tmp_path, monke
         route="claude",
         work_order_fingerprint=request["complete_sha256"],
         work_order_coverage="partial",
-        work_order_source_request=request,
+        work_order_source_request=request, daemon_store_id="fixture-store",
     )
     record = custody.pending_invocations(tmp_path)[0]
     monkeypatch.setattr(custody, "_reconcile_one", lambda *_args, **_kwargs: {"ok": True})
 
     class Gateway:
+        store_identity = "fixture-store"  # receipt-bound; the test varies the partial-source gate
         def start_run(self, _request, *, idempotency_key=""):
             assert idempotency_key == "source-invocation"
             return {"runId": "source-recovered"}
@@ -465,6 +467,116 @@ def test_terminal_partial_is_cannot_verify_and_apply_is_refused_but_reject_remai
     assert "no captured file changes to apply" in apply_after_complete
     assert custody.replay(tmp_path)[entry.run_id].patch_disposed == "applied"
     custody._CUSTODY.clear()
+
+
+def test_a_settled_success_with_unverified_source_never_reads_as_a_succeeded_first_attempt(tmp_path):
+    """R2 (Carbon): the run settled 'succeeded' but the canonical brief's coverage stayed
+    cannot_verify. The producer already discards that success; the FIRST attempt's typed
+    state must say so too — never a plain 'succeeded' (a false outright success on the
+    card) and never 'failed' (unverified work does not rename the physical outcome), so
+    the sentence stays the conservative one."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros import subagent_bootstrap as bootstrap
+    from ouroboros.delegate_bootstrap_identity import claim_initial_invocation
+    from ouroboros.delegate_evidence import task_execution_evidence
+    from ouroboros.project_dialogue import _completion_verdict
+    from ouroboros.tool_error_words import configured_actor_cause_key
+
+    ctx, request, _full_text, _prompt = _fixture(tmp_path)
+    with custody.actor_decision_lock(tmp_path, "source-child"):
+        assert not claim_initial_invocation(tmp_path, "source-child", {"invocation_id": "initial-inv"})
+    entry = _started_entry(tmp_path, request, request["complete_sha256"], invocation_id="initial-inv")
+    detail = {"summary": {"state": "succeeded", "model": "claude-fable-5", "effectiveAccess": "readonly"}, "lastSeq": 1}
+    assert custody.settle_run(tmp_path, None, entry, detail)["settled"]
+    custody._CUSTODY.clear()
+    entry = custody.replay(tmp_path)[entry.run_id]
+    assert entry.settled and entry.terminal_state == "succeeded"
+    assert custody.work_order_source_verification(entry)["status"] == "cannot_verify"
+
+    evidence = task_execution_evidence(tmp_path, "source-child")
+    assert evidence["delegated_runs_succeeded"] == 0
+    assert evidence["delegated_runs_source_unresolved"] == 1
+    assert "source_incomplete" in evidence["delegated_run_failure_states"]
+    assert evidence["initial_execution"]["state"] == "succeeded_source_unverified"
+    assert evidence["initial_execution"]["run_id"] == "source-run"
+
+    actor_ctx = SimpleNamespace(task_id="source-child", drive_root=tmp_path, budget_drive_root=tmp_path,
+                                _configured_actor_bootstrap={"physical_started": True}, task_metadata={})
+    fact = bootstrap.actor_first_unresolved_fact(actor_ctx, task_id="source-child", drive_root=tmp_path)
+    assert fact["status"] == "incomplete" and fact["reason"] == "delegated_runs_failed_without_success"
+    assert fact["initial_execution"]["state"] == "succeeded_source_unverified"
+    execution = {"actor_first_terminal": fact}
+    assert (
+        configured_actor_cause_key("configured_actor_incomplete", execution) == "configured_actor_first_succeeded_source_unverified"
+    )
+    record = {"status": "completed", "reason_code": "configured_actor_incomplete", "outcome_axes": {"execution": {
+        "status": "degraded", "reason_code": "configured_actor_incomplete", "actor_first_terminal": fact}}}
+    assert _completion_verdict(record, {}) == "First coding session ended; brief coverage unverified."
+
+
+def test_a_later_qualified_success_keeps_the_source_unverified_first_witness_display_only(tmp_path):
+    """R6: the first run settled ``succeeded`` with the canonical brief's coverage still
+    ``cannot_verify`` (the producer already discards that success from the aggregate), and a
+    LATER run succeeded fully verified with no open obligations. The first witness must stay
+    display-only — ``initial_execution_display_only``, status unknown, no axis moved — while
+    the first-attempt sentence still reads the producer's typed ``succeeded_source_unverified``
+    state. Old behavior: the guard matched only ``interrupted``, so this fact returned None
+    and the first witness vanished beside the qualified success."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros import subagent_bootstrap as bootstrap
+    from ouroboros.delegate_bootstrap_identity import claim_initial_invocation
+    from ouroboros.delegate_evidence import task_execution_evidence
+    from ouroboros.outcomes import _apply_actor_first_terminal_projection
+    from ouroboros.project_dialogue import _completion_verdict
+    from ouroboros.tool_error_words import first_attempt_clause_key
+
+    ctx, request, _full_text, _prompt = _fixture(tmp_path)
+    with custody.actor_decision_lock(tmp_path, "source-child"):
+        assert not claim_initial_invocation(tmp_path, "source-child", {"invocation_id": "initial-inv"})
+    entry = _started_entry(tmp_path, request, request["complete_sha256"], invocation_id="initial-inv")
+    detail = {"summary": {"state": "succeeded", "model": "claude-fable-5", "effectiveAccess": "readonly"}, "lastSeq": 1}
+    assert custody.settle_run(tmp_path, None, entry, detail)["settled"]
+    later = custody.RunCustody(
+        run_id="later-run",
+        task_id="source-child",
+        invocation_id="later-inv",
+        route_id="claude",
+        model="claude-fable-5",
+        work_order_fingerprint=request["complete_sha256"],
+        work_order_coverage="complete",
+        execution_root=str(tmp_path / "snapshot"),
+        target_root=str(tmp_path / "repo"),
+        authority_source="external_workspace_root",
+    )
+    assert custody.record_started(tmp_path, later)
+    custody._CUSTODY[later.run_id] = later
+    assert custody.settle_run(tmp_path, None, later, detail)["settled"]
+    custody._CUSTODY.clear()
+
+    evidence = task_execution_evidence(tmp_path, "source-child")
+    assert evidence["delegated_runs_succeeded"] == 1  # the source-unverified first run is not counted
+    assert evidence["initial_execution"]["state"] == "succeeded_source_unverified"
+    assert evidence["initial_execution"]["run_id"] == "source-run"
+    actor_ctx = SimpleNamespace(task_id="source-child", drive_root=tmp_path, budget_drive_root=tmp_path,
+                                _configured_actor_bootstrap={"physical_started": True}, task_metadata={})
+    fact = bootstrap.actor_first_unresolved_fact(actor_ctx, task_id="source-child", drive_root=tmp_path)
+    assert fact is not None, "the first witness must not vanish beside the qualified success"
+    assert set(fact) == {"status", "reason", "initial_execution", "delegated_runs_succeeded"}
+    assert fact["status"] == "unknown" and fact["reason"] == "initial_execution_display_only"
+    assert fact["delegated_runs_succeeded"] == 1
+    assert fact["initial_execution"]["state"] == "succeeded_source_unverified"
+    assert fact["initial_execution"]["run_id"] == "source-run"
+
+    outcome = {"reason_code": "final_message", "finish_reason": "final_message",
+               "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"},
+                                "objective": {"status": "pass", "source": "author_acceptance"}}}
+    projected = _apply_actor_first_terminal_projection(outcome, {"actor_first_terminal": fact})
+    assert (projected["reason_code"], projected["finish_reason"]) == ("final_message", "final_message")
+    assert projected["outcome_axes"]["objective"]["status"] == "pass"  # display-only: no axis moves
+    execution = projected["outcome_axes"]["execution"]
+    assert first_attempt_clause_key("final_message", execution) == "configured_actor_first_succeeded_source_unverified"
+    clean = {"status": "completed", "reason_code": "final_message", "outcome_axes": projected["outcome_axes"]}
+    assert _completion_verdict(clean, {}) == "First coding session ended; brief coverage unverified."
 
 
 @pytest.mark.parametrize("delivery,read", [("async", True), (None, False)], ids=["async-handoff", "unread-row"])

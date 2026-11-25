@@ -12,6 +12,7 @@ from ouroboros import (
     llm,
     llm_anthropic,
     llm_attempt,
+    llm_helper_window,
     llm_capability_policy,
     llm_claudexor,
     llm_fallback,
@@ -32,6 +33,7 @@ PKG = REPO / "ouroboros"
 
 _LEAVES = (
     llm_attempt,
+    llm_helper_window,
     llm_capability_policy,
     llm_claudexor,
     llm_substitution,

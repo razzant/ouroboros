@@ -68,6 +68,8 @@ class MainFitMeasurement:
     required_book_tokens: int = 0
     preferred_mode: str = ""  # the plan's owner mode at this measurement
     mode_cause: str = ""  # why ``rendered_mode`` is lower than it (``mode_cause``); "" when it is not
+    # Low's missed target: the start's request with no memory at all, reply reserve included (``floor.no_memory_tokens``).
+    no_memory_tokens: Optional[int] = None
 
     @property
     def probes_reply_reservation(self) -> bool:
@@ -235,6 +237,7 @@ def measure_main_fit(
         window_witness_bound=plan.window_witness_bound,
         window_observation_fp=current.route_fp,
         required_book_tokens=book, preferred_mode=str(plan.preferred_mode or ""), mode_cause=mode_cause(plan, rendered_mode),
+        no_memory_tokens=_no_memory_tokens(plan, rendered_mode),
     )
     action: Literal["send", "send_target_miss"] = (
         "send_target_miss" if target_deficit and target_deficit > 0 else "send")
@@ -246,10 +249,19 @@ def measure_main_fit(
     )
 
 
+def _no_memory_tokens(plan: Any, rendered_mode: str) -> Optional[int]:
+    """The start's own receipt of a missed Low target: what the request took with no memory (``memory_floor``)."""
+    projection = getattr(plan, "projection", None)
+    if not callable(projection):
+        return None
+    value = ((getattr(projection(rendered_mode), "memory_facts", None) or {}).get("floor") or {}).get("no_memory_tokens")
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def mode_cause(plan: Any, rendered_mode: str) -> str:
     """Why a candidate renders below the plan's owner mode, from the plan's own facts: ``""`` when it does not; the
     start's own mode carries the start's cause (``ContextFitPlan.start``, ``memory_floor.start_cause``: ``memory``,
-    ``route`` or ``window``), which no reprojection or route rebind replaces; any other lower mode, or a start
+    ``request``, ``route`` or ``window``), which no reprojection or route rebind replaces; any other lower mode, or a start
     lowered by no mode switch, is ``after_start`` (taken by the task after its start). A restored task whose start
     was not carried (``context_fit.UNKNOWN_START``) names no cause: ``""`` beside a lower mode is unknown."""
     from ouroboros.memory_floor import start_cause
@@ -262,4 +274,5 @@ def mode_cause(plan: Any, rendered_mode: str) -> str:
     if not started:  # a plan no start fit built: its current selection and that projection's facts
         started = str(getattr(plan, "initial_mode", "") or "")
         cause = start_cause(plan.projection(started).memory_facts) if started else ""
+    cause = "" if cause == "unmeasured" else cause  # a Max start no window measured lowers nothing: never a ledger cause
     return cause if rendered_mode == started and cause else "after_start"

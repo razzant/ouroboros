@@ -181,3 +181,21 @@ def test_the_request_under_way_reading_is_named_for_a_main_work_only(tmp_path):
     proved = resolve_window(ce.CapabilityEvidence(300_000, "confirmed", "local_health", "r"), 65_536, root=tmp_path)
     assert "under way" not in window_projection(proved, under_way=True)["text"]  # one reading: nothing to name
 
+
+
+def test_settings_serving_window_preview_leaves_store_unchanged(tmp_path, monkeypatch):
+    route = dict(provider='openai-compatible', model='openai-compatible::fixture', base_url='https://fixture.invalid/v1')
+    settings = dict(OUROBOROS_MODEL=route['model'], OPENAI_COMPATIBLE_BASE_URL=route['base_url'],
+                    OPENAI_COMPATIBLE_API_KEY='fixture', OUROBOROS_MODEL_CONTEXT_WINDOWS={})
+    monkeypatch.setattr(gateway, 'settings_read_view', lambda: (settings, {}))
+    monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
+    fp = ce.route_fingerprint(**route)
+    ce._store_evidence(tmp_path, 'probes', fp, ce.CapabilityEvidence(80000, 'confirmed',
+        ce.SOURCE_SERVER_METADATA, fp, route['model'], route['provider'], ts=ce.utc_now_iso()).to_json())
+    before = ce._store_path(tmp_path).read_bytes()
+    app = Starlette(routes=[Route('/api/settings', gateway.api_settings_get)])
+    app.state.drive_root = tmp_path
+    with TestClient(app) as client:
+        response = client.get('/api/settings', params={'response_limit_preview': '1', 'model': route['model']})
+    assert response.status_code == 200 and response.json()['window']['tokens'] == 80000
+    assert ce._store_path(tmp_path).read_bytes() == before

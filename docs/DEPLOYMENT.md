@@ -64,7 +64,7 @@ keeps its factory value:
 | Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
 | Access level | `advanced` | the level chosen |
 | Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
-| Consciousness | off; $20 over 24 hours once started | off unless ticked |
+| Consciousness | off ($15 over 24 hours once started); on when a copied settings document carries the setup choice | on unless switched off |
 
 Reviewers and helpers are proposed from the reachable Main at each read (none while
 the keys present do not settle which provider serves Main) until they are edited on
@@ -88,20 +88,18 @@ coverage.
 
 ## Unknown model role at startup
 
-An error such as `OUROBOROS_MODEL_CONTEXT_WINDOWS: unknown model role(s)`
-means the code reading that setting does not recognize a role name. Current
-diagnostics name the setting and offending roles, without dumping their values.
-Older packages print `OUROBOROS_MODEL_CONTEXT_WINDOWS must contain only known
-model roles` without identifying the role; the same recovery below applies.
-Check for a misspelling or a version mismatch. The same strict rule applies to account pins
-and processing preferences: unknown entries are not silently ignored or changed
-to Auto, even when a context window is zero.
+**Main Ultrafast.** Confirm a move in Main or Settings → Models. For one waiting task, leave “Also save this role” off.
+Before rollback save Standard or Default. Older readers reject the whole settings file with `"main":"ultrafast"` in `OUROBOROS_MODEL_PROCESSING_PREFERENCES`.
+After an unexpected rollback, back up, restore a compatible reader and change the tier.
 
-The packaged launcher and the managed repository are separate. Updating the
-repository, including a manual `git pull` in a fork, does not replace an older
-executable. Current launchers can hand off to updated source after an import
-probe, but an older executable without that handoff still needs an application
-package update. New source cannot repair its frozen settings parser or logging.
+`OUROBOROS_MODEL_CONTEXT_WINDOWS: unknown model role(s)` identifies an unfamiliar
+role by name without logging its value. Older packages say `OUROBOROS_MODEL_CONTEXT_WINDOWS
+must contain only known model roles`. Check spelling and reader version. Account pins,
+processing preferences and context windows (including zero) all require known roles.
+
+The packaged launcher and managed checkout have separate readers. Current launchers
+can hand off to updated source after an import probe. A launcher without that handoff
+needs a compatible package even after a manual `git pull`.
 
 To recover without resetting the installation:
 
@@ -136,6 +134,71 @@ path. Default logs are in `~/Ouroboros/data/logs/`; use the actual data root if
 overridden. Share only the relevant traceback and package identity, never the
 whole settings file or credentials. Repeated restarts do not fix a parser mismatch.
 
+## Moving an installed app to a new bundled Python
+
+Packages built from this source bundle CPython 3.12.15; 7.11.0 and earlier
+bundle Python 3.10. Pillow 13, which carries the image-decoder security
+fixes, needs Python 3.11 or newer, so an app on 3.10 keeps Pillow 12.3 after
+Dashboard → Updates: it keeps working, and stays exposed until the app itself
+is replaced. Only a new application package or image changes the interpreter.
+
+Desktop (macOS, Windows, Linux):
+
+1. In the installed app, run Dashboard → Updates. It stays on Python 3.10.
+2. Quit Ouroboros. For a way back, keep the old app: rename `Ouroboros.app`, or
+   rename the old Windows ZIP or Linux tar.gz folder and extract the new one into
+   an empty folder, never over the old one. `.deb`, `.rpm` and Homebrew replace
+   the app in place; their way back is the previous package (or a copy of
+   `Ouroboros.app` made before `brew upgrade`).
+3. Install and start the new app. It keeps the checkout, data and settings,
+   runs on the packages it bundles and installs only what the checkout's lock
+   adds, into `state/python-userbase/lib/python3.12` (Windows `Python312`).
+   Packages you or Ouroboros installed by hand into the app's own Python stay
+   with 3.10 and are installed again when needed. If the new app does not
+   start, start the old one again, run Update, then start the new one.
+4. Run Dashboard → Updates once in the new app. If step 1 was skipped, or a
+   package manager such as Homebrew replaced the app, the old checkout's Pillow
+   12.3 is still in use until this Update, and on Windows that old code cannot
+   copy files on Python 3.12 ("changed during read" on attachments, generated
+   images and delegated results); when nothing is newer, this Update
+   changes nothing. To check, run the app's interpreter with your data directory's user
+   packages and expect 3.12.15 and Pillow 13. On macOS:
+
+   ```bash
+   PYTHONUSERBASE="$HOME/Ouroboros/data/state/python-userbase" \
+     /Applications/Ouroboros.app/Contents/Frameworks/python-standalone/bin/python3 \
+     -B -c "import sys, PIL; print(sys.version.split()[0], PIL.__version__, PIL.__file__)"
+   ```
+
+   On Linux the interpreter is `_internal/python-standalone/bin/python3` in the
+   app folder (`/opt/ouroboros` for `.deb`/`.rpm`; an AppImage has no fixed path,
+   so this step's Update is the check there); on Windows, in PowerShell, set
+   `$env:PYTHONUSERBASE` the same way and run `_internal\python-standalone\python.exe`
+   from the app folder with the same `-B -c` argument.
+
+Each skill's Python environment is rebuilt from its declared packages under the
+new interpreter: enabled skills at the first start, others when enabled.
+Packages added to a skill environment by hand are not carried over. A fresh 3.12
+environment has no setuptools, and neither has the app's own Python any more: a
+skill that uses setuptools or its `distutils` shim must declare `setuptools`,
+and code that imports `pkg_resources`, which current setuptools no longer ships,
+moves to `importlib.metadata` or `importlib.resources`. Without network, or when
+a declared package has no Python 3.12 wheel, the rebuild fails and is retried at
+the next start (the latter until the skill moves its pin). To go back, quit the
+new app and start the kept one: it reads its own 3.10 packages and environments
+rebuild again. A managed container moves the same way: Update on the current
+image, then start the new image on the same volumes (Containers below).
+Android's Ubuntu 24.04 environment already runs Python 3.12, so its Update alone
+brings Pillow 13. A source checkout on Python 3.10 keeps Pillow 12.3; recreating
+its environment on Python 3.12
+(`uv sync --locked --extra browser --group dev --python 3.12`) brings Pillow 13.
+
+The move leaves what only the old app reads; delete it once that app is gone:
+`state/python-userbase/lib/python3.10` (Windows `Python310`; usually a few MB)
+and the managed container's `/ouroboros/body/venv` (the whole old lock, hundreds
+of MB). The `cpython-310` files in `state/pycache.noindex` are compiled bytecode,
+often hundreds of MB; deleting them, or the whole folder, is safe at any time.
+
 ## Containers
 
 Two images, one recipe file: [`packaging/docker/compose.yaml`](../packaging/docker/compose.yaml)
@@ -150,15 +213,18 @@ profile per volume set; never point two containers at one data volume.
 | Volumes | data, work, `HOME` | one parent volume, or body/data/work/home |
 
 **Interpreter.** The image's Python is python-build-standalone release 20261009:
-CPython 3.10.22 and SQLite 3.53.1, the same assets
+CPython 3.12.15 and SQLite 3.53.1, the same assets
 `scripts/download_python_standalone.sh` and `scripts/download_python_standalone.ps1`
-pin for the desktop packages. It is not Debian's `python:3.10-slim` (SQLite 3.46.1).
+pin for the desktop packages. It is not a Debian `python:*-slim` image.
 Desktop installs receive that interpreter only by installing the app again.
 Dashboard → Updates replaces the repository and its packages; it does not replace
-the bundled interpreter. A managed container keeps its runtime venv on a volume.
-A venv whose interpreter no longer matches this image is left untouched, and the
-log names the recovery step: stop, move that directory aside, start again. Code
-and data stay; packages that lived only in the old venv do not.
+the bundled interpreter. A managed container keeps its runtime venv on a volume,
+named for the image's Python minor (`/ouroboros/body/venv-3.12`): a volume prepared
+by an image with another Python keeps that venv untouched beside the new one, so the
+old image still starts on it. A venv passed with `--runtime-venv` whose interpreter
+no longer matches this image is left untouched, and the log names the recovery
+step: stop, move that directory aside or pass another path, start again. Code and
+data stay; packages that lived only in the old venv do not.
 
 **Exposure.** Both images bind `0.0.0.0` and set no `OUROBOROS_NETWORK_PASSWORD`:
 a missing password only warns and the gate then admits every request, so a
@@ -171,7 +237,7 @@ ouroboros-seed=<dir> .` takes a released seed, the `repo.bundle` and
 `repo_bundle_manifest.json` that `scripts/build_repo_bundle.py` emits from a clean
 annotated release tag; the build refuses a bundle without complete history. The
 image keeps only the launcher; its layout puts the body at
-`/ouroboros/body/{repo,venv}`, data at `/ouroboros/data`, work at
+`/ouroboros/body/repo` and `/ouroboros/body/venv-3.12`, data at `/ouroboros/data`, work at
 `/ouroboros/work` and `HOME` at `/ouroboros/home`. First boot clones the seed into
 the body and prepares `--runtime-venv` (`ouroboros/runtime_venv.py`): it needs
 network for the dependency lock, and an interrupted preparation resumes on the
@@ -235,10 +301,19 @@ marks the container unhealthy.
 
 ## Trusted Docker / Kubernetes Non-Local Binds
 
-By default, saving `OUROBOROS_SERVER_HOST=0.0.0.0` through the Settings UI
-requires `OUROBOROS_NETWORK_PASSWORD` in the same save. This keeps desktop and
-local-network launches from accidentally exposing the full Ouroboros HTTP and
-WebSocket surface without the built-in password gate.
+A Settings save changes `OUROBOROS_SERVER_HOST` and `OUROBOROS_NETWORK_PASSWORD` only
+when it assigns or unsets them. Any other save, such as an API-key update, keeps what
+`settings.json` holds for the two and copies in neither a bind nor a password that
+only the launch environment sets (a container's, for example), so it needs no flag.
+A save that cannot read `settings.json` is refused and leaves the file untouched.
+
+By default, saving a non-loopback `OUROBOROS_SERVER_HOST` such as `0.0.0.0`
+through the Settings UI requires a durable `OUROBOROS_NETWORK_PASSWORD` in the
+same save: one `settings.json` already holds or the save writes. A password that only
+the launch environment sets does not count, because the saved bind outlives that
+environment. Save the password with the bind, or keep the bind on loopback. This
+keeps desktop and local-network launches from accidentally exposing the full
+Ouroboros HTTP and WebSocket surface without the built-in password gate.
 
 Trusted container deployments may opt out with:
 
@@ -254,10 +329,9 @@ infrastructure, for example:
 - private Kubernetes service/network policy
 - an authenticated reverse proxy
 
-With the flag enabled, Ouroboros still warns when saving a non-localhost bind
-without `OUROBOROS_NETWORK_PASSWORD`, but the Settings UI no longer blocks
-ordinary settings saves such as API-key updates. Do not use this flag on an
-open LAN or public port.
+With the flag enabled, the Settings UI no longer requires the password to save a
+non-localhost bind, and Ouroboros warns when it is saved without one. Do not use
+this flag on an open LAN or public port.
 
 ## The Main Interface and a Separately Hosted One
 
@@ -443,8 +517,8 @@ Supervisor route checks.
 - `extensions.when_unmet` is required with any row. `hold` (the sample): queued work stays queued
   while the server's own copy does not run a requirement, and each process that starts work (a
   pool worker or the server) checks the extensions it has loaded itself; a turn it cannot serve
-  ends before any model call with a typed notice (`deployment_requirement_unmet`). Stop, Panic,
-  Settings and Skills stay available. `warn`: work goes on and the gap is shown. Either way each
+  ends before any model call with a typed notice (`deployment_requirement_unmet`); Stop, Panic,
+  Settings and Extensions stay. `warn`: work goes on and the gap is shown. Either way each
   process logs a change of its gap once (`deployment_requirement_unmet`, `deployment_requirement_met`
   in `logs/events.jsonl`); nothing polls, retries or repairs.
 - `settings` fixes custom settings (`A_KEY`, never a built-in or `OUROBOROS_` one) for that

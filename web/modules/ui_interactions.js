@@ -2,6 +2,7 @@
 // their callers; each binding has an explicit, synchronous lifetime.
 
 import { leaveAsPicture, motionMs } from './motion.js';
+import { bindScrollFade } from './scroll_fade.js';
 
 // A closed menu's picture shrinks a little toward where it grew from as it fades (ui.css ui-popup-in, reversed).
 const POPUP_LEAVES = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(0.96)' }];
@@ -142,8 +143,11 @@ export function bindPopoverPosition(popup, { anchor, field, point, align = 'star
         let rect = size();
         let below = true;
         if (target && !point) {
-            const spaces = () => [Math.min(height, Math.max(0, bottomEdge - protectedBox.bottom - 4)),
-                Math.min(height, Math.max(0, protectedBox.top - 4 - topEdge))];
+            // Measured from the whole pixel the popup will stand on next to its anchor (its top below it, its foot above it;
+            // the top is placed rounded, below): one that fills the space ends on the edge with a whole-pixel height, and
+            // nothing at its far end moves when its anchor moves by a fraction of a pixel.
+            const spaces = () => [Math.min(height, Math.max(0, bottomEdge - Math.round(protectedBox.bottom + 4))),
+                Math.min(height, Math.max(0, Math.round(protectedBox.top - 4) - topEdge))];
             let [spaceBelow, spaceAbove] = spaces();
             if (scroller && rect.height > Math.max(spaceBelow, spaceAbove)) {
                 // Move only the field's scroller, toward the side needing the least movement that can fit it.
@@ -174,6 +178,21 @@ export function bindPopoverPosition(popup, { anchor, field, point, align = 'star
         const oy = point ? point.y - top : (below ? 0 : rect.height);
         popup.style.setProperty('--ui-popup-origin', `${clamp(ox, rect.width)}px ${clamp(oy, rect.height)}px`);
     }
+    // Popups are portalled to the document body, outside the faded scroller that owns their anchor. Their own
+    // bounded list still uses the shared edge decoration, so a menu never gets cut by its opener's mask.
+    const noFade = () => {};
+    let disposeFade = noFade;
+    let fadeFrame = null;
+    const maybeBindFade = () => {
+        fadeFrame = null;
+        if (disposed) return;
+        const scrollHeight = Number(popup.scrollHeight);
+        const clientHeight = Number(popup.clientHeight);
+        if (disposeFade !== noFade || !Number.isFinite(scrollHeight) || !Number.isFinite(clientHeight)
+            || scrollHeight <= clientHeight + 1) return;
+        popup.classList?.add?.('scroll-fade-y');
+        disposeFade = bindScrollFade(popup);
+    };
     const onScroll = (event) => {
         if (event.target?.nodeType && popup.contains(event.target)) return;
         if (onAnchorScroll) onAnchorScroll(event);
@@ -184,16 +203,60 @@ export function bindPopoverPosition(popup, { anchor, field, point, align = 'star
     win.visualViewport?.addEventListener('resize', reposition);
     win.visualViewport?.addEventListener('scroll', reposition);
     reposition();
+    maybeBindFade();
+    if (disposeFade === noFade && win.requestAnimationFrame) fadeFrame = win.requestAnimationFrame(maybeBindFade);
     return {
         reposition,
         destroy() {
             disposed = true;
+            if (fadeFrame !== null) win.cancelAnimationFrame?.(fadeFrame);
+            disposeFade();
             win.removeEventListener('scroll', onScroll, true);
             win.removeEventListener('resize', reposition);
             win.visualViewport?.removeEventListener('resize', reposition);
             win.visualViewport?.removeEventListener('scroll', reposition);
         },
     };
+}
+
+/** Commit the exact option pressed in a live list whose rows can move before release.
+ * Bind while the list is open. A pointer cancellation leaves scrolling native; an accessibility click addresses its own row. */
+export function bindOptionPress(list, selector, choose) {
+    let press = null;
+    function releasedRow(x, y) {
+        if (!press?.row || !list.contains(press.row)) return null;
+        const atStart = x >= press.bounds.left && x <= press.bounds.right && y >= press.bounds.top && y <= press.bounds.bottom;
+        const stationary = x === press.x && y === press.y;
+        return stationary || atStart || press.row.contains(list.ownerDocument.elementFromPoint(x, y)) ? press.row : null;
+    }
+    function pick(row) {
+        if (row && list.contains(row) && row.getAttribute('aria-disabled') !== 'true') choose(row);
+    }
+    const listeners = [
+        ['pointerdown', event => {
+            const row = event.target.closest(selector);
+            press = { row, bounds: row?.getBoundingClientRect(), x: event.clientX, y: event.clientY };
+            if (row) row.setPointerCapture(event.pointerId);
+        }],
+        ['pointerup', event => {
+            if (press) press.row = releasedRow(event.clientX, event.clientY);
+        }],
+        ['pointercancel', () => { press = { row: null }; }],
+        ['touchend', event => {
+            if (event.touches.length || !press?.row) return;
+            const touch = event.changedTouches[0], row = releasedRow(touch.clientX, touch.clientY);
+            // The browser's compatibility click can target the row or control now under the finger.
+            event.preventDefault(); press = null;
+            pick(row);
+        }, { passive: false }],
+        ['click', event => {
+            const row = event.detail && press ? press.row : event.target.closest(selector);
+            press = null;
+            pick(row);
+        }],
+    ];
+    for (const [type, listener, options] of listeners) list.addEventListener(type, listener, options);
+    return () => { for (const [type, listener] of listeners) list.removeEventListener(type, listener); };
 }
 
 /**

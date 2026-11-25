@@ -28,6 +28,7 @@ from ouroboros.cost_projection import (
     with_cost_aliases,
 )
 from ouroboros.deadline_utils import parse_deadline_ts
+from ouroboros.install_identity import TASK_ROOT_FIELDS
 from ouroboros.task_results import (
     TASK_COST_META_FIELDS,
     STATUS_COMPLETED,
@@ -167,6 +168,40 @@ def post_task_attempt_matches(task: dict, current: dict) -> bool:
     return not (current.get("started_at") and task.get("started_at")) or current["started_at"] == task["started_at"]
 
 
+_UNREADABLE = object()  # a named attempt that is no exact non-negative int: it confirms nothing
+
+
+def _named_attempt(row: dict) -> Any:
+    """The attempt a row names: the first set slot of its typed witness (``terminal_time.task_attempt_witness``: the
+    slots and order ``post_task_attempt_matches`` reads) decides. An exact int >= 0 (0 is a real attempt, never 1);
+    None when no slot is set (a legacy row); ``_UNREADABLE`` when that slot is anything else (a bool, float or text)."""
+    from ouroboros.terminal_time import task_attempt_witness
+
+    witness = task_attempt_witness(row)
+    for key in ("task_attempt", "_attempt", "metadata_task_attempt", "metadata_attempt"):
+        if witness[key] is not None:
+            return witness[key] if type(witness[key]) is int and witness[key] >= 0 else _UNREADABLE
+    return None
+
+
+def replica_attempt_matches(canonical: dict, replica: dict) -> bool:
+    """Whether REPLICA records CANONICAL's own attempt: the same named attempt, or two rows that name none (a legacy
+    pair); starts compare when both rows name one (an assignment mirror names none). An empty CANONICAL takes its
+    first well-formed result; an unreadable attempt on either side confirms nothing. ``post_task_attempt_matches``
+    keeps the post-task phase."""
+    if not isinstance(canonical, dict) or not isinstance(replica, dict):
+        return False
+    seen = _named_attempt(replica)
+    if seen is _UNREADABLE:
+        return False
+    if not canonical:
+        return True
+    held = _named_attempt(canonical)
+    if held is _UNREADABLE or held != seen:
+        return False
+    return not (canonical.get("started_at") and replica.get("started_at")) or canonical["started_at"] == replica["started_at"]
+
+
 def begin_root_post_task(env, task, *, expected_record=None,
                         owner_liveness=None, claim_guard=None, stop_requested=None, event_queue=None):
     """Acquire the phase's existing physical owner and confirm its running record before paid work."""
@@ -236,6 +271,18 @@ def post_task_model_waits(drive_root: Any) -> list:
     return [owner for owner in owners if owner is not None and not owner.closed]
 
 
+def _stated_rounds(fields: Dict[str, Any]) -> int | None:
+    """The physical round count this record says it observed, or ``None`` when it recorded none.
+
+    ``loop_outcome.usage.total_rounds`` is the loop's own tally: a stored ``None`` (a capture the ledger
+    could not read) and an absent usage are both unobserved, and neither is a zero.
+    """
+    loop_outcome = fields.get("loop_outcome")
+    usage = loop_outcome.get("usage") if isinstance(loop_outcome, dict) else None
+    value = usage.get("total_rounds") if isinstance(usage, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
 def _delegated_receipt_counts(value: Any) -> tuple[int, int] | None:
     if not isinstance(value, dict) or value.get("evidence_read_failed"):
         return None
@@ -245,10 +292,43 @@ def _delegated_receipt_counts(value: Any) -> tuple[int, int] | None:
     return counts
 
 
-# Local custody rows are written only by their owners and the retirement writers on the canonical
-# result (``tool_custody``, ``local_custody_repair``); a child's replica carries results, not custody.
+# A replica carries results, not canonical drive placement, copy-back provenance or local custody.
 CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "retired_model_consumers",
-                          "native_capture_pending", "received_file_outputs")
+                            "native_capture_pending", "received_file_outputs", *TASK_ROOT_FIELDS)
+# A rejected ending lends none of its answer, execution or delivery fields, even where canonical has no value.
+# The ending facts a card reads beside the words (``project_completion_facts``) belong to that ending too:
+# whether an answer exists (``_result_text_present``), the stop it names (``cancel_origin``), the schedule it
+# ran for (``schedule_name``), the review gate it passed (``review_overrides``), the finalization recovery and
+# the adoptions it settled (``body_adoptions``). Files, independently published review, and custody have their
+# own owners.
+_ENDING_FIELDS = (
+    "status", "result", "error", "ts", "reason_code", "outcome_axes", "loop_outcome", "review_status",
+    "final_answer", "terminal_origin", "terminal_host_notice", "terminal_provider_notice", "terminal_provider_cause",
+    "terminal_salvage_path",
+    "trace_summary", "trace_refs", "model_execution", "completion_observations", "tool_calls", "resource_limit",
+    "child_status", "wake_summary", "suggested_name", "wake_silent", "fold_read", "owner_message_sent",
+    "_result_text_present", "cancel_origin", "schedule_name", "review_overrides", "finalization_recovery",
+    "body_adoptions",
+    *_TERMINAL_ACCOUNTING_SCRUB_FIELDS,
+)
+
+
+def canonical_keeps_replica_ending(canonical: dict, replica: dict) -> bool:
+    """For a same-attempt replica, keep a settled status and any concrete contrary non-success ending.
+
+    Completed/completed retains ordinary replica enrichment. A missing value is not a contradiction;
+    known ending values compare exactly, never as a surrogate for physical attempt identity."""
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
+
+    held, seen = canonical.get("status"), replica.get("status")
+    if held not in _TRULY_TERMINAL_STATUSES:
+        return False
+    if seen and seen != held:
+        return True
+    return held != STATUS_COMPLETED and any(
+        canonical.get(key) and replica.get(key) and canonical[key] != replica[key]
+        for key in ("terminal_origin", "result", "reason_code", "error")
+    )
 
 
 def canonical_name_fields(canonical_fields: Dict[str, Any]) -> tuple:
@@ -274,8 +354,10 @@ def project_replica_task_result_fields(
     A terminal canonical post-task checkpoint owns its synthesis fields and
     accounting snapshot. Canonical custody also retains non-regressing delegation
     receipts and canonical-if-present reconciliation disclosures under the narrow
-    rules below, and a titled record's name (``canonical_name_fields``). The
-    replica continues to own result and trace fields;
+    rules below, and a titled record's name (``canonical_name_fields``). A
+    replica of the same attempt supplies result and trace unless canonical keeps its ending
+    (``canonical_keeps_replica_ending``). Then none of the rejected ending fields are applied,
+    including fields absent from canonical. A foreign attempt lends only metadata and mail;
     review snapshots retain the newest host publication of each panel, and a
     verification ledger stays canonical while the replica carries the same capture.
     ``updated_at`` is monotonic metadata only; it never selects field authority.
@@ -283,9 +365,18 @@ def project_replica_task_result_fields(
     from ouroboros.terminal_time import preserve_terminal_attempt, replica_terminal_time
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
 
-    overlay = preserve_terminal_attempt(canonical_fields, replica_fields)
+    own = replica_attempt_matches(canonical_fields, replica_fields)
+    overlay = preserve_terminal_attempt(canonical_fields, replica_fields, foreign=not own)
+    if not own:
+        overlay = {key: overlay[key] for key in ("metadata", "unread_mailbox") if key in overlay}
+    elif canonical_keeps_replica_ending(canonical_fields, replica_fields):
+        for key in _ENDING_FIELDS:
+            overlay.pop(key, None)
+        status = replica_fields.get("status")
+        if isinstance(status, str) and status in _TRULY_TERMINAL_STATUSES and status != canonical_fields["status"]:
+            overlay["child_status"] = status  # record the worker's distinct terminal status, never a same-status echo
     if (canonical_fields.get("status") in _TRULY_TERMINAL_STATUSES
-            or replica_fields.get("status") in _TRULY_TERMINAL_STATUSES):
+            or (own and replica_fields.get("status") in _TRULY_TERMINAL_STATUSES)):
         overlay["terminal_time"] = replica_terminal_time(canonical_fields, replica_fields)
     # The receiving drive's first accepted terminal transition owns provenance,
     # including its absence on historical rows; replicas cannot originate it.
@@ -293,8 +384,28 @@ def project_replica_task_result_fields(
     overlay.pop("pause_notices", None)  # confirmed host transitions alone own pending chat disclosure
     for field in CANONICAL_CUSTODY_FIELDS:  # a replica never revives a retired claim nor erases a live one
         overlay.pop(field, None)
+    if "metadata" in overlay:
+        # Legacy placement readers consult metadata too. Keep CURRENT's placement (including absence)
+        # without dropping other replica metadata, such as the execution's outcome references.
+        canonical_meta = canonical_fields.get("metadata")
+        replica_meta = overlay["metadata"]
+        roots = {k: canonical_meta[k] for k in TASK_ROOT_FIELDS if k in canonical_meta} if isinstance(canonical_meta, dict) else {}
+        if isinstance(replica_meta, dict):
+            overlay["metadata"] = {**{k: v for k, v in replica_meta.items() if k not in TASK_ROOT_FIELDS}, **roots}
+        elif roots:
+            overlay.pop("metadata")
     for field in canonical_name_fields(canonical_fields):
         overlay.pop(field, None)
+    # A compatible replica may enrich the loop, but an unobserved count cannot erase a measured one (including zero).
+    held_rounds = _stated_rounds(canonical_fields)
+    if held_rounds is not None and "loop_outcome" in overlay and _stated_rounds(overlay) is None:
+        replica_loop = overlay["loop_outcome"]
+        if isinstance(replica_loop, dict):
+            usage = replica_loop.get("usage")
+            overlay["loop_outcome"] = {**replica_loop, "usage": {
+                **(usage if isinstance(usage, dict) else {}), "total_rounds": held_rounds}}
+        else:
+            overlay.pop("loop_outcome")
     # Unread-mail custody is a union: a stale replica never drops a canonical row.
     from ouroboros.task_custody import merge_unread_mail
 
@@ -373,6 +484,10 @@ def project_replica_task_result_fields(
         # replica marker would claim a Project row nobody appended here.
         "canonical_terminal_projection",
         "canonical_terminal_projection_ready",
+        # The exact late results a row keeps of other attempts are copy-back's canonical custody
+        # (``history_retention.retain_late_result``): a matching replica's stale copy never ages or
+        # drops the kept list, while a row without one still adopts its first record.
+        "late_attempt_results",
     ):
         if field in canonical_fields:
             overlay.pop(field, None)

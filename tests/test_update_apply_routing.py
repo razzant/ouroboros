@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -167,18 +168,21 @@ def test_preflight_returns_plan_and_target_bound_effects(monkeypatch):
 
 
 def test_fetching_update_endpoints_leave_the_event_loop(monkeypatch):
+    loop_thread = threading.get_ident()
     calls = []
 
-    async def fake_to_thread(fn, *args, **kwargs):
-        calls.append((fn, args, kwargs))
+    def fetch_payload(*, fetch, include_tags):
+        calls.append((threading.get_ident(), fetch, include_tags))
         return {"available": False}
 
-    monkeypatch.setattr(control.asyncio, "to_thread", fake_to_thread)
-
+    monkeypatch.setattr(control, "_managed_update_payload", fetch_payload)
     response = asyncio.run(control.api_update_check(None))
 
     assert response.status_code == 200
-    assert calls == [(control._managed_update_payload, (), {"fetch": True, "include_tags": True})]
+    assert _body(response) == {"available": False}
+    [(fetch_thread, fetch, include_tags)] = calls
+    assert fetch_thread != loop_thread
+    assert fetch is True and include_tags is True
 
 
 def test_update_apply_keeps_the_event_loop_responsive(monkeypatch):
@@ -443,6 +447,44 @@ _UNPRICED_ROW = {"kind": "api_model", "target_id": "openai/gpt-unpriced"}
 _SESSION_ROW = {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}
 
 
+@pytest.mark.parametrize(("model", "local", "tier", "pays", "estimate"), [
+    ("vendor/fixture", True, "fast", False, 0.0),
+    ("vendor/fixture", False, "standard", False, 0.0),
+    ("vendor/fixture", False, "fast", True, 0.065536),
+    ("vendor/fixture", False, "ultrafast", True, 0.000001 * 65_536 / 1e6),  # positive charge below display precision
+    ("vendor/fixture (local)", False, "", True, None),  # explicitly remote despite the model spelling
+])
+def test_assisted_update_admits_and_prices_the_selected_review_seat(monkeypatch, tmp_path, model, local,
+                                                                   tier, pays, estimate):
+    from ouroboros import pricing, reviewer_slot_config
+    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.review_substrate import ReviewSlot
+    from ouroboros.tools.review_admission import managed_update_wave_estimate
+    from supervisor import state, worker_assignment
+
+    monkeypatch.setattr(worker_assignment, "needs_paid_admission", lambda task: False)
+    monkeypatch.setattr(state, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 0.0)
+    monkeypatch.setenv("OUROBOROS_OR_PROVIDER", "")
+    monkeypatch.delenv("OUROBOROS_REVIEW_MAX_TOKENS", raising=False)
+    slots = [ReviewSlot("session", "codex=fixture", route=ReviewRouteKind.AGENT_SESSION),
+             ReviewSlot("critic", model, use_local=local, processing_preference=tier)]
+    monkeypatch.setattr(reviewer_slot_config, "review_pool_slots", lambda: slots)
+    key = ("openrouter", "vendor/fixture")
+    # Both accelerated tiers can fall back to Standard. Ultra can also fall back to Fast.
+    fast_rate = 0.000001 if tier == "ultrafast" else 1
+    rows = {mode: pricing.PricingSchedule((0, 0, 0, rate), source={"processing": mode})
+            for mode, rate in [("standard", 0), ("fast", fast_rate)]}
+    monkeypatch.setattr(pricing, "_cached_pricing", {key: rows})
+    monkeypatch.setattr(pricing, "_pricing_fetched_at", {key: time.time()})
+    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *args: pytest.fail(f"unexpected fetch {args}"))
+
+    assert control._assisted_update_pays() is pays
+    event = managed_update_wave_estimate(0.0)
+    assert event["estimated_wave_usd"] == estimate
+    assert event["unpriced_slots"] == int(estimate is None) and event["session_slots"] == 1
+
+
 @pytest.mark.parametrize(("pool", "wave"), [
     ((_SESSION_ROW,), {"estimated_wave_usd": None, "unpriced_slots": 0, "session_slots": 1}),
     # 920K input tokens under the OpenAI-family 1.10 envelope at $1/M + the 65,536-token reserve at $4/M.
@@ -464,11 +506,12 @@ def test_assisted_resolver_boots_before_conflicts_reach_live_tree(
     # priced (it rides a subscription, not USD budget). No live tariff read, no model call.
     monkeypatch.setenv("OUROBOROS_SUBAGENTS", _review_catalog(*pool))
     monkeypatch.delenv("OUROBOROS_REVIEW_MAX_TOKENS", raising=False)
-    for name in ("_cached_pricing", "_pricing_fetched_at", "_pricing_retry_after"):
-        monkeypatch.setattr(pricing, name, {})
-    tariffs = []
-    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda provider, model="": tariffs.append((provider, model))
-                        or {"openai/gpt-test": (1.0, 0.1, None, 4.0)})
+    monkeypatch.setenv("USE_LOCAL_MAIN", "0")
+    key = ("openrouter", _PRICED_ROW["target_id"])
+    tariff = pricing.PricingSchedule((1.0, 0.1, None, 4.0), source={"processing": "standard"})
+    monkeypatch.setattr(pricing, "_cached_pricing", {key: {"vendor": tariff}})
+    monkeypatch.setattr(pricing, "_pricing_fetched_at", {key: time.time()})
+    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *args: pytest.fail(f"unexpected tariff fetch {args}"))
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path)
     (tmp_path / "logs").mkdir()
     calls = []
@@ -559,7 +602,6 @@ def test_assisted_resolver_boots_before_conflicts_reach_live_tree(
     [estimate] = [e for e in events if str(e.get("type")).startswith("managed_update_wave_estimate")]
     assert estimate == {"ts": estimate["ts"], "type": "managed_update_wave_estimate",
                         "exceeds_known_remaining": False, "remaining_usd": 10.0, **wave}
-    assert tariffs == ([("openrouter", "")] if wave["estimated_wave_usd"] else [])
 
 
 def test_stash_lookup_unknown_keeps_the_durable_tx_for_boot(monkeypatch):

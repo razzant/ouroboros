@@ -158,6 +158,7 @@
     --control-h: 34px;
     --control-h-sm: 28px;
     --control-h-float: 30px;
+    --page-header-row-h: calc(var(--control-h-float) + 36px);  /* the desktop shell's measured band: style.css */
     --control-pad-x: var(--space-4);
     --control-pad-y: 0px;
     --control-radius: var(--pill-radius);
@@ -469,7 +470,7 @@
     --tone-chosen-answer: var(--tone-green);
     --tone-chosen-answer-ink: var(--status-ok-fg);
     --tone-chosen-answer-detail: var(--text-meta);
-    --tone-chosen-answer-shadow: none;
+    --tone-chosen-answer-shadow: 0 0 transparent;  /* flat, yet a shadow layer: a quote's ring can join it */
     --chosen-answer-cue-display: none;
     --tone-recommended: var(--status-ok-fg);
     --tone-recorded-answer: var(--text-meta);
@@ -869,11 +870,87 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
     font-size: var(--button-font-size) !important;
 }
 
-/* ---- The shared parts (DESIGN.md principles 6 and 7; the 06.11 convergence) -------------------------------------
-   Five decisions each have one owner here and screens compose them: the result of an action (.ui-action-row +
-   .ui-result, ui_primitives.js setResult / errorWords), main vs Details (details.ui-disclosure), a row of one fact
-   (.ui-row), the length of a list (.ui-list-more), and the one primary action of a place (the [data-primary] slot).
-   The contract of each part is its comment here and its home test (web/tests/ui_primitives.test.js). */
+/* ---- The register of parts (DESIGN.md principle 8) ------------------------------------------------------------------
+   The one list of the parts this sheet holds: each entry names a part's classes (or the attribute that marks it),
+   then its job, variants and states, and what a page may not do with it. Screens compose the parts and lay them out
+   in their own containers; a look two screens need changes once, in its part, every consumer shown before and after;
+   a part no entry covers is added here with its recipe. The home test (web/tests/ui_primitives.test.js) reads this
+   list both ways: what an entry names is selected in this sheet, and every class this sheet selects, and every part
+   it draws by an attribute alone, is named by an entry, each part by one entry.
+   - .btn .btn-default .btn-primary .btn-ghost .btn-danger .btn-save .btn-float .btn-sm — a command, a capsule on the
+     rest shadow: neutral, the crimson primary, ghost (no body), danger, save; float is glass over moving content and
+     .btn-sm the small capsule in a row. Hover and press change its colour, never its height; focus wears the ring;
+     disabled lies flat; one held with its reason stands in a .ui-hint-host. A page sizes it only by a --control-*
+     token on a scope (the lock above) and adds no tone or outline.
+   - .app-tab .app-tab-pill .active .is-active — a view of one page, in the page's own strip: the chosen tab is the
+     soft crimson, its count a neutral pill. A section's pages are never tabs.
+   - .filter-chip — a quiet filter with no body; chosen (.active), the soft crimson.
+   - .ui-segment-group .ui-segment .ui-segment-fill — one choice among a few short words (page_header.js
+     renderSegmentedField; a lone .ui-segment stands as a capsule); the soft crimson travels to the chosen word
+     (segment_fill.js). It wraps and never scrolls sideways; a page never measures or writes its layout.
+   - .theme-choice-group .theme-choice .theme-choice-label .theme-status — Appearance's three choices (theme.js), one
+     control in the app and in setup.
+   - .ui-card — an object on the room: one fill on the rest shadow; a group or row inside it is a tray, fills never
+     stack. A page adds no edge, gradient or material of its own.
+   - .ui-field .ui-field-inline .ui-field-help .ui-control .ui-control-readonly .ui-control-code — a field: label,
+     control and help; focus wears the field's ring; invalid (aria-invalid), disabled, read-only (a whole, selectable
+     value). A page class on a field is a layout hook, never a second box.
+   - .ui-source-field .ui-source-picker .ui-source-backing .ui-source-options — a model source: a live menu standing
+     in for a hidden native select.
+   - .ui-model-chooser .ui-model-options .ui-model-option .ui-model-option-name .ui-model-option-meta
+     .ui-model-option-priced .ui-model-empty — the editable model chooser (model_chooser.js): its suggestions never
+     become an allowlist.
+   - .ui-checkbox — a choice its form's own Save applies.
+   - .ui-switch .ui-switch-track .ui-switch-thumb .is-locked — a change that acts at once: a label around an input
+     with role="switch", then its track and thumb. Green when on; locked or disabled, it loses its colour, never its
+     size; a write in flight is disabled and aria-busy, in its value's colour, dimmed. A page never draws a switch of
+     its own or repaints the track and thumb.
+   - .ui-action-row .ui-result .ui-result-details — the result of an action: its trigger, then a reserved meta line
+     that ui_primitives.js setResult writes (errorWords words a failure, the raw text behind Details). An
+     acknowledgement ends by itself; a warning or a failure stays until the next result or an edit in its subject. A
+     page never hides the reserved line or words a result by hand.
+   - .ui-disclosure — main vs Details, on a details element: a quiet summary with one caret. A page draws no marker
+     of its own.
+   - .ui-row .ui-row-title .ui-row-meta .ui-row-actions — one fact as a tray in its object: a title clamped to two
+     lines, one meta line, the actions at the end, under the words when the row itself is narrow. The caller gives the
+     words; a page never re-lays it by the viewport.
+   - .ui-list-more — a list's one length control, "Show all (N)": a quiet small capsule at the list's start.
+   - .ui-section-actions .app-page-actions [data-primary] — with an action row and a dialog's foot, the slots of a
+     place's one primary action: the first [data-primary] in a slot is crimson, a second neutral, so two crimsons in
+     one place cannot be expressed.
+   - .section-place .section-shell .section-rail .section-pane .section-lead .section-lead-col .section-lead-page
+     .section-lead-rail .section-list .section-group .section-group-title .section-rows .section-row .section-row-glyph
+     .section-row-words .section-row-title .section-row-answer .section-row-end — a place's own pages (Settings,
+     Dashboard): one list whose layout the place's box decides (one column below 40rem, from it the rail beside the
+     page, where the chosen row is the soft crimson). A page never measures or re-lays it.
+   - .ui-chip .status-badge .mcp-server-status — a status chip, .ui-chip[data-tone]: the tone's full triple, for the
+     chip is the status; it lies flat, since a shadow says pressable. The two older names keep their own geometry.
+   - .ui-status .settings-inline-status .wizard-runtime-status — a status sentence, .ui-status[data-tone]: a dot and
+     words in the tone's ink, never a fill.
+   - .ui-popup .danger .files-context-item-danger — the floating sheet of a menu, a listbox or a popover: one backed
+     material on the float shadow, placed by ui_interactions.js and mounted outside clipping. A role chooses its
+     layout, never its paint; a menu's row keeps only its domain's meaning (danger).
+   - .ui-modal-backdrop .ui-modal .ui-modal-head .ui-modal-body .ui-modal-actions — the shared dialog
+     (confirm_dialog.js and the dialogs drawn on these classes): one veil, one backed box clear of the bars, a head, a
+     scrolling body and a foot that is a primary slot. A dialog's own class sets its width and its body (the secret
+     form keeps its opaque reading backing); a page never repaints the veil or the box.
+   - .ui-hint .ui-hint-line .ui-hint-rule .ui-hint-fact .ui-hint-word .ui-hint-action .ui-hint-host — what a control
+     says about itself (ui_hint.js), above it and out of the flow, so showing, rewording or hiding it moves nothing.
+   - .ui-hit-area — a small control's reach under a finger, out to the touch minimum: the shared control families have
+     it by selector, and a page's own small control adds this class.
+   - .ui-chrome-group .ui-chrome-control — controls floating over scrolling content (Main's header): one box, baseline
+     and pill corner; the group is invisible and moves no control.
+   - .status-mark — what a work or a room is doing (status_mark.js creates and paints it): its shape says what the
+     work does, its hue whether the owner has a move. A surface changes its marks' ink only through --mark-ink, and
+     its ok dot's only through --mark-ok (a settled question's recorded answer).
+   - .muted — quiet words in the meta ink.
+   - svg[data-glyph="fluent"] — a glyph of the Fluent set (page_icons.js fillIcon, the shell's SHELL_ICONS): filled
+     with the text colour and never stroked wherever it sits, so a selector that strokes hand-drawn icons never
+     outlines it.
+   - .ouro-ui .keyboard-open .chat-bubble .assistant .user .chat-live-card .settings-voice .md-code-block
+     .app-page-header .app-page-title-block .app-page-title-row .app-page-lead .shell-back .settings-gauge — context,
+     not parts: their owners' classes that recipes here read (the product documents' root, a phone keyboard's state,
+     the voices' materials, a code block's hover, the page header a section list lays out, Back, the Settings gauge). */
 
 /* The action row: the trigger, then its result as the next sibling, 8px apart. The result keeps one meta line of
    height from the start (reserved, never display: none), so a late word never moves the control or its neighbours;
@@ -1203,21 +1280,21 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
    control crimson; a second [data-primary] in the same slot is neutral, so two crimsons in one place cannot be
    expressed. Any other crimson there is a page-level choice the review sees. */
 .ui-section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
-:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] {
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .ui-modal-actions) > [data-primary] {
     background: var(--tone-crimson);
     color: var(--tone-crimson-ink);
     box-shadow: var(--elev-rest);
     --press: var(--press-solid);
 }
-:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary]:not(:disabled):hover {
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .ui-modal-actions) > [data-primary]:not(:disabled):hover {
     background: var(--tone-crimson-hover);
 }
-:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] ~ [data-primary] {
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .ui-modal-actions) > [data-primary] ~ [data-primary] {
     background: var(--surface-capsule);
     color: var(--text-primary);
     --press: brightness(1.12);
 }
-:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] ~ [data-primary]:not(:disabled):hover {
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .ui-modal-actions) > [data-primary] ~ [data-primary]:not(:disabled):hover {
     background: var(--surface-capsule-hover);
 }
 
@@ -1361,7 +1438,7 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
 /* WebKit (the packaged desktop shell) computes `overflow: visible` on a native
    select, so a long selected option paints past the control and turns the page
    scroller into a horizontal one; the clip keeps it inside the control's box. */
-select.ui-control {
+select.ui-control, .ui-source-picker {
     -webkit-appearance: none;
     appearance: none;
     overflow: hidden;
@@ -1370,6 +1447,36 @@ select.ui-control {
     background-image: var(--select-arrow);
     background-repeat: no-repeat;
     background-position: right var(--space-3) center;
+}
+.ui-source-picker { text-align: start; white-space: nowrap; cursor: pointer; }
+.ui-source-field { position: relative; }
+select.ui-source-backing {
+    position: absolute;
+    inset-inline-start: 0;
+    top: 0;
+    width: 1px;
+    max-width: 1px;
+    height: 1px;
+    padding: 0;
+    border: 0;
+    clip-path: inset(50%);
+    /* The menu button stands in for it: no pointer, no tab stop, nothing to see (opacity says so to layout gates). */
+    opacity: 0;
+    pointer-events: none;
+}
+.ui-source-options { width: var(--ui-popup-anchor-width); padding: var(--space-1); }
+.ui-source-options [role="group"]::before {
+    display: block;
+    content: attr(aria-label);
+    padding: var(--space-2) var(--space-3) var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    font-weight: 600;
+}
+.ui-source-options [data-active] { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
+.ui-source-options [aria-disabled="true"] { color: var(--text-disabled); cursor: default; }
+@media (pointer: coarse) {
+    .ui-source-options [role="option"] { min-height: 44px; align-content: center; }
 }
 textarea.ui-control { resize: vertical; }
 /* A read-only multiline value (renderSafeField's output): whole and wrapped in the field's box, selectable, in the value's
@@ -1568,6 +1675,74 @@ textarea.ui-control { resize: vertical; }
 @media (prefers-reduced-motion: reduce) {
     .ui-popup:not([hidden]) { animation: none; }
 }
+
+/* ---- The shared dialog (confirm_dialog.js and every dialog drawn on these classes) ---------------------------------
+   One veil and one box. The backdrop is the theme's --scrim over the whole window (U020), and it scrolls a dialog
+   taller than the window. The box stands in the window's middle, clear of the bars (U024), on the popups' backed
+   material and the float shadow, so no words bleed through (DESIGN principle 2); one taller than the window starts at
+   its top and scrolls (the auto margins centre only while there is room). While a phone's keyboard is up the window
+   keeps its height under it, so a dialog stands at the top instead, its foot above the keyboard (M12). Inside: a head
+   (a long title wraps; Close never leaves the dialog), the body that scrolls, and the foot, whose [data-primary] is the
+   dialog's one primary action (the primary slot above). A dialog's own class sets its width and what its body holds;
+   the veil, the box and its material are this part's. */
+.ui-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    overflow-y: auto;
+    padding: calc(4vh + var(--inset-top)) 16px 4vh;
+    background: var(--scrim);
+}
+.ui-modal {
+    width: 100%;
+    max-width: 900px;
+    max-height: calc(var(--vvh) - 8vh - var(--inset-top));
+    min-height: 0;
+    margin-block: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-object);
+    background: var(--popup-float);
+    box-shadow: var(--elev-float);
+    -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
+}
+body.keyboard-open .ui-modal { margin-block: 0 auto; }
+.ui-modal-head {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.ui-modal-head > h3 { min-width: 0; overflow-wrap: anywhere; }
+.ui-modal-head > button { flex: 0 0 auto; }
+.ui-modal-body {
+    min-height: 0;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    overflow-y: auto;
+}
+.ui-modal-body > * { flex-shrink: 0; }
+.ui-modal-actions {
+    display: flex;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+}
+/* Hidden or closed, the dialog takes no room and catches no press, in an author frame too, which loads this sheet
+   alone (the product's own sheet hides [hidden] for every element). */
+.ui-modal-backdrop[hidden], .ui-modal[hidden], .ui-modal-head[hidden], .ui-modal-body[hidden],
+.ui-modal-actions[hidden], dialog.ui-modal:not([open]) { display: none; }
 
 /* ---- The one hint (DESIGN "Hints", ui_hint.js) ---------------------------------------------------------------------
    What a control says about itself, on the popups' floating material: it stands above its control and over the page,

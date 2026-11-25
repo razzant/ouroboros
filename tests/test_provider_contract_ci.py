@@ -11,6 +11,7 @@ import pytest
 
 from ouroboros.provider_models import (
     OPENAI_DIRECT_DEFAULTS,
+    OPENAI_RESPONSES_DIRECT_DEFAULTS,
     normalize_deepseek_reasoning_effort,
     normalize_model_identity,
     tool_schema_limit,
@@ -26,6 +27,7 @@ from tests.provider_contract_ci import (
     CANARY_CONTINUATION_MAX_TOKENS,
     CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS,
     CANARY_MAX_TOKENS,
+    CANARY_REASONING_MAX_TOKENS,
     CANARY_SUBAGENT_ID,
     CANARY_TIMEOUT_SEC,
     CANARY_TOOL_NAME,
@@ -206,18 +208,21 @@ def test_provider_alarm_output_sanitizes_token_shaped_evidence(capsys):
 def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
     matrix = provider_canary_matrix()
     assert [(row.canary_id, row.model) for row in matrix] == [
-        ("openrouter_gemini", "google/gemini-3.8-flash"),
+        ("openrouter_gemini", "google/gemini-4-hydrogen"),
         ("openrouter_opus", "anthropic/claude-opus-5"),
         ("openrouter_fable", "anthropic/claude-fable-5.1"),
-        ("openrouter_gpt", "openai/gpt-5.6-luna"),
+        ("openrouter_gpt", "openai/gpt-6.1-terra"),
         ("openrouter_grok", "x-ai/grok-4.6"),
         ("openrouter_deepseek", "deepseek/deepseek-v4-pro-0813"),
         ("openai_direct_main", "openai::gpt-5.6-terra"),
         ("openai_direct_light", "openai::gpt-5.6-luna"),
         ("openai_direct_fallback", "openai::gpt-5.6-sol"),
-        ("anthropic_direct", "anthropic::claude-sonnet-5"),
+        ("openai_responses_main", "openai::gpt-6.1-terra"),
+        ("openai_responses_light", "openai::gpt-6-luna"),
+        ("openai_responses_fallback", "openai::gpt-6.1-sol"),
+        ("anthropic_direct", "anthropic::claude-sonnet-5-5"),
         ("minimax_direct", "minimax::MiniMax-M3"),
-        ("deepseek_direct", "deepseek::deepseek-v4-flash"),
+        ("deepseek_direct", "deepseek::deepseek-flash"),
         ("cloudru_direct", "cloudru::zai-org/GLM-5.3"),
         ("gigachat_direct", "gigachat::GigaChat-2-Max"),
     ]
@@ -234,23 +239,36 @@ def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
         "openai_direct_main",
         "openai_direct_light",
         "openai_direct_fallback",
+        "openai_responses_main",
+        "openai_responses_light",
+        "openai_responses_fallback",
         "anthropic_direct",
         "deepseek_direct",
     }
+    # Each direct OpenAI row runs on the API whose shipped profile it qualifies; no other route names one.
+    assert {row.canary_id: row.api_surface for row in matrix if row.api_surface} == {
+        **dict.fromkeys(("openai_direct_main", "openai_direct_light", "openai_direct_fallback"), "chat_completions"),
+        **dict.fromkeys(("openai_responses_main", "openai_responses_light", "openai_responses_fallback"), "responses"),
+    }
     assert [row.canary_id for row in matrix if row.continue_to_final] == [
-        "openai_direct_main", "deepseek_direct"
+        "openrouter_gemini", "openai_direct_main", "openai_responses_main", "anthropic_direct", "deepseek_direct"
     ]
+    # Sonnet 5.5 refuses a forced tool_choice on every request: its row calls through auto as Main does.
     assert [row.canary_id for row in matrix if not row.named_tool_choice] == [
-        "openrouter_fable", "gigachat_direct"
+        "openrouter_fable", "anthropic_direct", "gigachat_direct"
     ]
+    # Only that row reasons before an unforced call, so only it gets the larger ceiling.
+    assert {row.canary_id: row.max_tokens for row in matrix if row.max_tokens != CANARY_MAX_TOKENS} == {
+        "anthropic_direct": CANARY_REASONING_MAX_TOKENS,
+    }
     logical_turns = sum(1 + int(row.continue_to_final) for row in matrix)
-    assert logical_turns == 16
-    assert logical_turns * CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS == 32
+    assert logical_turns == 22
+    assert logical_turns * CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS == 44
     assert sum(
         1 + int(row.continue_to_final)
         for row in matrix
         if row.credential_required
-    ) == 11
+    ) == 17
     # The routes to Google, Anthropic and OpenAI read a secret of their own: the shared CI key is refused
     # there (HTTP 403, provider terms). The rest of OpenRouter keeps the shared key; every route is required.
     assert {row.canary_id: (row.credential_env, row.credential_required)
@@ -273,9 +291,20 @@ def test_direct_anthropic_named_tool_choice_projects_without_type_error():
     }
     assert LLMClient._build_anthropic_tool_choice("required") == {"type": "any"}
     assert LLMClient._build_anthropic_tool_choice("none") == {"type": "none"}
+    # An explicit forced choice reaches Sonnet 5.5 as asked, never quietly as auto: that
+    # model's 400 is the caller's fact. Only the canary row itself asks for auto.
+    target = {"provider": "anthropic", "resolved_model": "claude-sonnet-5-5",
+              "usage_model": "anthropic/claude-sonnet-5-5", "base_url": "https://api.anthropic.example/v1"}
+    payload = LLMClient(api_key="unused")._build_remote_candidate(
+        target, [{"role": "user", "content": "hi"}], "high", 64, named, None, full_registry_canary_tools(),
+    )
+    assert payload["tool_choice"] == {"type": "tool", "name": CANARY_TOOL_NAME}
+    assert not next(row for row in provider_canary_matrix() if row.canary_id == "anthropic_direct").named_tool_choice
 
 
-def test_openai_models_follow_default_ssot_without_allowlist(monkeypatch):
+@pytest.mark.parametrize(("surface", "defaults"), [("chat_completions", OPENAI_DIRECT_DEFAULTS),
+                                                   ("responses", OPENAI_RESPONSES_DIRECT_DEFAULTS)])
+def test_openai_models_follow_default_ssot_without_allowlist(monkeypatch, surface, defaults):
     expected = tuple(dict.fromkeys(model for model in OPENAI_DIRECT_DEFAULTS.values() if model))
     assert unique_openai_direct_defaults() == expected
     assert OPENAI_DIRECT_DEFAULTS["main"] in expected
@@ -283,15 +312,11 @@ def test_openai_models_follow_default_ssot_without_allowlist(monkeypatch):
     assert all(model.startswith("openai::") for model in expected)
 
     future = "openai::future-direct-model"
-    monkeypatch.setitem(OPENAI_DIRECT_DEFAULTS, "future_ci_role", future)
-    monkeypatch.setitem(OPENAI_DIRECT_DEFAULTS, "future_ci_duplicate", future)
-    assert unique_openai_direct_defaults()[-1] == future
-    assert unique_openai_direct_defaults().count(future) == 1
-    assert [
-        row.model
-        for row in provider_canary_matrix()
-        if row.expected_provider == "openai"
-    ][-1] == future
+    monkeypatch.setitem(defaults, "future_ci_role", future)
+    monkeypatch.setitem(defaults, "future_ci_duplicate", future)
+    rows = [row.model for row in provider_canary_matrix() if row.api_surface == surface]
+    assert rows[-1] == future and rows.count(future) == 1
+    assert [row.model for row in provider_canary_matrix() if row.api_surface == surface][0] == defaults["main"]
 
 
 def test_required_and_optional_credential_policy(monkeypatch):
@@ -345,6 +370,38 @@ def test_each_openrouter_check_sends_its_own_secret_and_only_while_it_runs(monke
     routes = {"openrouter_gemini", "openrouter_opus", "openrouter_fable", "openrouter_gpt"}
     assert sent == {canary_id: "provider-routes-ci-key" if canary_id in routes else "shared-ci-key"
                     for canary_id in [*sorted(routes), "openrouter_grok", "openrouter_deepseek"]}
+
+
+def test_each_direct_openai_check_runs_on_the_api_it_names_and_only_while_it_runs(monkeypatch, request, tmp_path):
+    """The live check, offline: under its binding the real client resolves each direct OpenAI row on its own API,
+    whatever the environment chose, and the environment's choice is back once the check ends."""
+    import os
+
+    from ouroboros import config
+    from ouroboros.llm import LLMClient
+    from tests import provider_contract_diagnostics
+    from tests import test_provider_integration as integration
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")  # the CI lane saves no document
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-ci-key")
+    monkeypatch.setenv("OPENAI_API_SURFACE", "responses")  # an environment's own choice never decides a row
+    monkeypatch.setattr(provider_contract_diagnostics, "provider_evidence",
+                        lambda request, canary: contextlib.nullcontext())
+    monkeypatch.setattr(integration, "_get_llm_client", LLMClient)
+    sent = {}
+
+    def send(client, *, canary, **kwargs):
+        sent[canary.canary_id] = client.resolve_remote_target(canary.model)["api_surface"]
+        return {}, {}, None, None
+
+    monkeypatch.setattr(integration, "run_provider_contract_canary", send)
+    rows = [canary for canary in provider_canary_matrix() if canary.expected_provider == "openai"]
+    for canary in rows:
+        with pytest.MonkeyPatch.context() as check:
+            integration.test_full_registry_provider_contract(canary, [], request, check)
+        assert os.environ["OPENAI_API_SURFACE"] == "responses", canary.canary_id
+    assert sent == {canary.canary_id: canary.api_surface for canary in rows}
+    assert set(sent.values()) == {"chat_completions", "responses"}
 
 
 def _bind_candidate(model, tools, messages, tool_choice):
@@ -696,7 +753,7 @@ def _fake_usage(canary: ProviderCanary, ordinal: int):
         "requested_effort": "medium",
         "applied_effort": "medium",
         "requested_tool_dialect": "function",
-        "applied_tool_dialect": "openai_chat_custom",
+        "applied_tool_dialect": "function" if canary.api_surface == "responses" else "openai_chat_custom",
         "reason_code": "requested_wire_form",
         "source_profile_fingerprint": "a" * 64,
         "accepted_profile_fingerprint": "b" * 64,
@@ -1012,7 +1069,7 @@ def test_public_chat_builds_full_registry_request_for_every_matrix_row():
         first = client.calls[0]
         assert first["model"] == canary.model
         assert first["reasoning_effort"] == canary.reasoning_effort
-        assert first["max_tokens"] == CANARY_MAX_TOKENS
+        assert first["max_tokens"] == canary.max_tokens  # CANARY_MAX_TOKENS unless the row names its own
         assert first["stream"] is True  # the transport Main actually sends
         assert first["no_proxy"] is True
         assert first["bypass_response_cache"] is False
@@ -1041,10 +1098,9 @@ def test_public_chat_builds_full_registry_request_for_every_matrix_row():
             # Non-stream on purpose: continuation rows keep the non-stream transport covered at zero extra sends.
             assert "stream" not in second
             assert second["bypass_response_cache"] is False
-            assert second["max_tokens"] == CANARY_CONTINUATION_MAX_TOKENS
-            assert [tool["function"]["name"] for tool in second["tools"]] == [
-                CANARY_TOOL_NAME,
-            ]
+            assert second["max_tokens"] == max(canary.max_tokens, CANARY_CONTINUATION_MAX_TOKENS)
+            # The same fitted registry: the signed reasoning this turn replays is bound to it.
+            assert second["tools"] == first["tools"]
             assert [message["role"] for message in second["messages"]] == [
                 "user", "assistant", "tool", "tool",
             ]

@@ -28,7 +28,7 @@ ALLOWANCE = "OUROBOROS_CONSCIOUSNESS_DAILY_USD"
 
 @pytest.fixture
 def client(install, monkeypatch):
-    """Both HTTP writers over a real settings file; Main rows are captured, never delivered."""
+    """Exercise the HTTP writers over a real settings file and capture their room rows."""
     import supervisor.message_bus as bus
     import supervisor.state as state
     from ouroboros import config
@@ -37,13 +37,14 @@ def client(install, monkeypatch):
     rows = []
     monkeypatch.setattr(bus, "send_with_budget", lambda *args, **kwargs: rows.append((args, kwargs)))
     monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 77})
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    config.initialize_runtime_mode_baseline("light")
     monkeypatch.setattr(settings, "_apply_settings_save_side_effects", lambda *a, **kw: None)
     monkeypatch.setattr(settings, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     install.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-router", ALLOWANCE: 20,
                                    "OUROBOROS_MODEL": "openrouter/old-main"}), encoding="utf-8")
     app = Starlette(routes=[Route("/api/owner/chat-model", owner_effort.api_owner_chat_model, methods=["POST"]),
                             Route("/api/owner/chat-processing", owner_effort.api_owner_chat_processing, methods=["POST"]),
+                            Route("/api/owner/context-mode", settings.api_owner_context_mode, methods=["POST"]),
                             Route("/api/settings", settings.api_settings_post, methods=["POST"]),
                             Route("/api/owner/safety-model", safety_settings.api_owner_safety_model, methods=["POST"])])
     app.state.drive_root = app.state.repo_dir = install.parent
@@ -253,3 +254,43 @@ def test_composer_owner_endpoints_record_app_origin_without_echo(client, endpoin
     assert record["surface"] == ("app" if declared else "api")
     assert record["actor"] == ("owner" if declared else "not declared")
     assert len(rows) == (0 if declared else 1)
+
+
+def test_context_mode_receipt_names_the_change_and_declared_actor_in_its_room(client, monkeypatch):
+    from unittest.mock import patch
+
+    from ouroboros import utils
+    from ouroboros.gateway.owner_settings import _settings_document_lock
+    from ouroboros.projects_registry import create_project
+    from supervisor import message_bus, state
+
+    test_client, install, rows = client
+    room = create_project(install.parent, "room-a", name="Room A")
+    commit_time = "2084-05-06T07:08:09+00:00"
+    clock = utils.utc_now_iso
+    monkeypatch.setattr(utils, "utc_now_iso", lambda: commit_time if _settings_document_lock.locked() else clock())
+    endpoint = "/api/owner/context-mode"
+    project_save = {"mode": "nano", "project_id": "room-a"}
+    assert test_client.post(endpoint, json={"mode": "low"}).status_code == 200  # unbound Main
+    monkeypatch.setattr(state, "control_in_copy", lambda _path, _key: (True, 77))  # bound primary chat
+    assert test_client.post(endpoint, json={"mode": "low"}).status_code == 200  # repeat
+    assert test_client.post(endpoint, json={"mode": "max"}, headers=_SCRIPT).status_code == 200
+    assert test_client.post(endpoint, json=project_save, headers=APP).status_code == 200
+    assert test_client.post(endpoint, json=project_save, headers=APP).status_code == 200
+    assert test_client.post(endpoint, json={"mode": "huge"}).status_code == 400
+    assert test_client.post(endpoint, json={"mode": "low", "project_id": "missing-room"}).status_code == 404
+    typed = {"role": "system", "system_type": "context_mode_changed", "ts": commit_time}
+    reach = "New work in this room uses the updated context mode"
+    assert rows == [
+        ((1, f"{reach} (Max → Low)."), typed),
+        ((77, f"{reach} (Low → Max, changed by Ouroboros)."), typed),
+        ((room["chat_id"], f"{reach} (Max → Nano, changed by the owner)."), typed),
+    ]
+    audits = [json.loads(line) for line in (install.parent / "logs" / "events.jsonl").read_text().splitlines()]
+    assert [row["previous_context_mode"] for row in audits if row.get("action") == "context_mode"] == [
+        "max", "low", "low", "max", "nano"]
+
+    with patch.object(message_bus, "send_with_budget", side_effect=OSError("room write failed")) as failed_send:
+        assert test_client.post(endpoint, json={"mode": "low"}).status_code == 200
+    failed_send.assert_called_once()
+    assert json.loads(install.read_text(encoding="utf-8"))["OUROBOROS_CONTEXT_MODE"] == "low"

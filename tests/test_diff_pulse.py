@@ -5,6 +5,7 @@ reviewer's brief of a body subject; never a threshold, a warning or a block
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -61,11 +62,12 @@ def test_the_pulse_counts_every_wave_since_the_contribution_base(tmp_path):
     # What the last wave alone shows hides the module wave 1 created.
     assert "custody.py" not in _git(repo, "diff", "--name-only", "HEAD")
 
-    fact, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")
+    fact, shape, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")
     assert fact.startswith(f"Diff pulse since canonical/ouroboros merge-base {base[:12]}: ")
     assert "files 3, lines +295/-0 (net +295)" in fact
     assert "new files: ouroboros/custody.py, ouroboros/fresh.py;" in fact
     assert fact.endswith("module lines (target 1000, cap 1600): ouroboros/core.py 16 (+6/-0).")
+    assert shape == "Code shape: module handles +0/-0, calls through them +0/-0, re-exported names +0/-0."
     assert question == DIFF_PULSE_QUESTION
 
     # The index a commit or a review subject holds: the untracked module is not in it.
@@ -120,9 +122,9 @@ def test_one_shape_and_one_question_for_any_size(tmp_path):
         repo = _body(tmp_path / name)
         _write(repo, "ouroboros/core.py", 10 + grown)
         pulse = diff_pulse(repo)
-        fact, question = pulse.split("\n")
+        fact, shape, question = pulse.split("\n")
         assert question == DIFF_PULSE_QUESTION and "⚠" not in pulse and f"+{grown}/-0" in fact
-        shapes.append(re.sub(r"\d+", "N", re.sub(r"merge-base [0-9a-f]{12}", "merge-base SHA", fact)))
+        shapes.append(re.sub(r"\d+", "N", re.sub(r"merge-base [0-9a-f]{12}", "merge-base SHA", fact + shape)))
     assert shapes[0] == shapes[1]
 
 
@@ -194,6 +196,15 @@ def test_a_changed_test_source_adds_what_the_suite_declares_and_records(tmp_path
     assert "4 recorded test-seconds of changed modules (1 not recorded), test module lines: " in diff_pulse(repo)
     table.write_text("{", encoding="utf-8")
     assert "recorded test-seconds unknown" in diff_pulse(repo)  # unknown is never zero
+    for value in ('"2500"', "true", "NaN", '{"ms": 1}', "9" * 310, "-3000", "[" * 10000 + "]" * 10000):  # unknown, no raise
+        table.write_text('{"format": 1, "platforms": {"darwin": {"tests/test_old.py": %s}}}' % value, encoding="utf-8")
+        assert "recorded test-seconds unknown" in diff_pulse(repo)
+        # A valid sample on another system never hides the unreadable one.
+        table.write_text('{"format": 1, "platforms": {"darwin": {"tests/test_old.py": %s}, '
+                         '"linux": {"tests/test_old.py": 2000}}}' % value, encoding="utf-8")
+        assert "recorded test-seconds unknown" in diff_pulse(repo)
+    table.write_text('{"format": 1, "platforms": {"darwin": [], "linux": {"tests/test_old.py": 2000}}}', encoding="utf-8")
+    assert "recorded test-seconds unknown" in diff_pulse(repo)  # a system without a file map is no table
     table.unlink()
 
     # An edit shows its own files, and a shown file outside the suite adds nothing.
@@ -255,6 +266,133 @@ def test_test_lines_are_a_fact_for_any_size_and_no_module_limit_names_them(tmp_p
         assert "⚠" not in pulse and "module lines (target 1000, cap 1600): none; tests:" in pulse
         shapes.append(re.sub(r"\d+", "N", re.sub(r"merge-base [0-9a-f]{12}", "merge-base SHA", pulse)))
     assert shapes[0] == shapes[1]
+
+
+LEAF = '''def _core():
+    """The parent, read at call time."""
+    from ouroboros import core
+
+    return core
+
+
+def step():
+    return _core().x
+'''
+
+
+def test_a_changed_python_source_adds_its_code_shape_and_an_unparsed_one_is_unknown(tmp_path):
+    """Module handles and the calls through them, re-exports, a test's patched product-module names and
+    `git init` runs, since the contribution base (``code_shape_facts``): facts beside the sizes, never a gate."""
+    repo = _body(tmp_path / "body")
+    _write(repo, "ouroboros/leaf.py", 1, LEAF)
+    _write(repo, "ouroboros/facade.py", 1, "from ouroboros.leaf import step  # noqa: F401\n")
+    _write(repo, "tests/test_leaf.py", 1, "def test_step(monkeypatch):\n    pass\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "leaf")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    _write(repo, "ouroboros/leaf.py", 1, LEAF + "\n\ndef twice():\n    return _core().x + _core().y\n")
+    _write(repo, "ouroboros/again.py", 1, LEAF)  # an untracked new leaf
+    (repo / "ouroboros/facade.py").unlink()
+    _write(repo, "tests/test_leaf.py", 1, 'import subprocess\n\n\ndef test_step(monkeypatch, tmp_path):\n'
+                                          '    monkeypatch.setattr("ouroboros.core.x", 2)\n'
+                                          '    subprocess.run(["git", "init", "-q"], cwd=tmp_path)\n')
+
+    fact, shape, question = diff_pulse(repo).split("\n")
+    assert shape == ("Code shape: module handles +1/-0, calls through them +3/-0, re-exported names +0/-1; "
+                     "tests: patched product-module names +1/-0, git init call sites +1/-0.")
+    assert "⚠" not in shape and question == DIFF_PULSE_QUESTION
+    # An edit shows its own files; a file outside Python adds no line.
+    assert "\nCode shape: module handles +0/-0, calls through them +2/-0, re-exported names +0/-0.\n" in diff_pulse(
+        repo, ["ouroboros/leaf.py"])
+    assert "Code shape" not in diff_pulse(repo, ["notes.md"])
+    # The index a commit or a review subject holds: the untracked leaf and the unstaged test are not in it.
+    _git(repo, "add", "ouroboros/leaf.py", "ouroboros/facade.py")
+    assert "\nCode shape: module handles +0/-0, calls through them +2/-0, re-exported names +0/-1.\n" in diff_pulse(
+        repo, staged=True)
+    # A module that does not parse mid-edit is unknown, never zero.
+    _write(repo, "ouroboros/leaf.py", 1, "def broken(:\n")
+    unknown = "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: ouroboros/leaf.py)."
+    assert unknown in diff_pulse(repo, ["ouroboros/leaf.py"])
+
+
+def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns_from_no_handle(
+        tmp_path, monkeypatch):
+    """A side Git does not give, on a delete-only or mode-only edit, is unknown, not removals; a module
+    the change deletes is no module its handles return; an ordinary source parses to known counts while
+    MemoryError or RecursionError from ast.parse leaves both suite and shape unknown."""
+    from ouroboros import review
+
+    repo = _body(tmp_path / "body")
+    _write(repo, "ouroboros/leaf.py", 1, LEAF)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "leaf")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    _write(repo, "ouroboros/leaf.py", 1, LEAF.replace('    """The parent, read at call time."""\n', ""))  # -1 line
+    _git(repo, "add", "-A")
+    unread = "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: ouroboros/leaf.py)."
+    real = review._blob_texts
+
+    def index_unread(root, specs):
+        return {spec: None if spec.startswith(":") else text for spec, text in real(root, specs).items()}
+
+    monkeypatch.setattr(review, "_blob_texts", index_unread)
+    assert unread in diff_pulse(repo, staged=True)
+    monkeypatch.setattr(review, "_blob_texts", real)
+    assert "Code shape: module handles +0/-0, calls through them +0/-0, re-exported names +0/-0." in diff_pulse(
+        repo, staged=True)
+    (repo / "ouroboros/core.py").unlink()
+    _git(repo, "add", "-A")
+    assert "Code shape: module handles +0/-1, calls through them +0/-1, re-exported names +0/-0." in diff_pulse(
+        repo, staged=True)
+
+    test_src, product_src = "def test_ok():\n    pass\n", "X = 1\n"
+    _write(repo, "tests/test_sample.py", 1, test_src)
+    _write(repo, "ouroboros/sample.py", 1, product_src)
+    known_fact, known_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+    assert "tests: items +1/-0," in known_fact and "unreadable" not in known_fact
+    assert known_shape == (
+        "Code shape: module handles +0/-0, calls through them +0/-0, re-exported names +0/-0; "
+        "tests: patched product-module names +0/-0, git init call sites +0/-0.")
+
+    real_parse = ast.parse
+
+    def fail_parse(*args, **kwargs):
+        source = args[0] if args else kwargs.get("source")
+        if source == product_src:
+            raise MemoryError("simulated parse memory limit")
+        if source == test_src:
+            raise RecursionError("simulated parse recursion limit")
+        return real_parse(*args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(ast, "parse", fail_parse)
+        unknown_fact, unknown_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+    assert "tests: items +0/-0 (1 unreadable)," in unknown_fact
+    assert unknown_shape == (
+        "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: "
+        "ouroboros/sample.py); tests: patched product-module names, git init call sites unknown (1 unreadable: "
+        "tests/test_sample.py).")
+
+
+def test_the_suite_reads_the_same_side_presence_as_the_shape_line(tmp_path, monkeypatch):
+    """A test module's side that exists but was not read is unreadable to the suite's items, as to the shape
+    line, never zero items; only a real deletion removes what it declared."""
+    from ouroboros import review
+
+    repo = _suite_repo(tmp_path / "body")
+    _write(repo, "tests/test_old.py", 1, SUITE + "# one more line\n")
+    _git(repo, "add", "-A")
+    real = review._blob_texts
+    for index_side in (True, False):  # the index side unread, then the base side
+        monkeypatch.setattr(review, "_blob_texts", lambda root, specs, index_side=index_side: {
+            spec: None if spec.startswith(":") == index_side else text for spec, text in real(root, specs).items()})
+        pulse = diff_pulse(repo, ["tests/test_old.py"], staged=True)
+        assert "tests: items +0/-0 (1 unreadable), new modules 0," in pulse
+        assert "git init call sites unknown (1 unreadable: tests/test_old.py)." in pulse
+    monkeypatch.setattr(review, "_blob_texts", real)
+    assert "tests: items +0/-0, new modules 0," in diff_pulse(repo, ["tests/test_old.py"], staged=True)
+    _git(repo, "rm", "-q", "tests/test_gone.py")
+    assert "tests: items +0/-2, new modules 0," in diff_pulse(repo, ["tests/test_gone.py"], staged=True)
 
 
 CODE = {

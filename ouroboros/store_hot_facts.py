@@ -278,22 +278,64 @@ def request_columns(facts: dict) -> dict:
     return {"request_root_task_id": request_root(facts)}
 
 
-def tree_requests(txn, tree: str, *, refused: bool = False) -> list:
-    """Tree-local pending/refused requests, preserving each set's insertion order."""
+def tree_requests(txn, tree: str, *also: str, refused: bool = False) -> list:
+    """The named trees' pending/refused requests, preserving each set's insertion order."""
     names = REQUEST_SETS if refused else REQUEST_SETS[:1]
+    trees = dict.fromkeys((tree, *also))
+    # A cascade can name a whole branch of starters whose legacy requests omitted their root.
+    keys = json.dumps(list(trees))
     rows = []
     for name in names:
         if int(txn.meta("schema_version") or VERSION) < VERSION:
-            rows.extend((name, key, facts) for key, facts in txn.set_rows(name).items() if request_root(facts) == tree)
+            rows.extend((name, key, facts) for key, facts in txn.set_rows(name).items() if request_root(facts) in trees)
             continue
         records = txn.conn.execute(
-            "SELECT id,facts FROM obligations WHERE set_name=? AND id IN ("
-            "SELECT id FROM obligations WHERE set_name IN ('custody_open','custody_refused') "
-            "AND set_name=? AND request_root_task_id=? UNION SELECT id FROM obligations "
+            "SELECT id,facts FROM obligations WHERE rowid IN ("
+            "SELECT rowid FROM obligations INDEXED BY custody_request_root "
+            "WHERE set_name IN ('custody_open','custody_refused') AND set_name=? "
+            "AND request_root_task_id IN (SELECT value FROM json_each(?)) "
+            "UNION ALL SELECT rowid FROM obligations "
             f"INDEXED BY custody_request_underived WHERE {REQUEST_UNDERIVED} AND set_name=?) ORDER BY rowid",
-            (name, name, tree, name)).fetchall()
-        rows.extend((name, row["id"], facts) for row in records if request_root(facts := json.loads(row["facts"])) == tree)
+            (name, keys, name)).fetchall()
+        rows.extend((name, row["id"], facts) for row in records if request_root(facts := json.loads(row["facts"])) in trees)
     return rows
+
+
+def _recovered_start_root(row) -> str:
+    """The tree an underived row's body-kept fence addresses, or "" when the row holds none.
+    Mirrors the derived-column predicate: the fence must be closed and its active
+    delegated start must name this task as its own tree."""
+    if not (row and row.get("control_valid") and str(row.get("owner_pause_state") or "")
+            in ("requested", "paused")):
+        return ""
+    try:
+        fence = json.loads(row["owner_pause_facts"])
+    except (KeyError, TypeError, ValueError):
+        return ""  # the body was read; a fact row that does not parse names no root
+    start = fence.get("active_delegated_start") if isinstance(fence, dict) else None
+    return str(start.get("root_task_id") or "") if isinstance(start, dict) and str(
+        start.get("root_task_id") or "") == row["task_id"] else ""
+
+
+def recovered_owner_pause_roots(root) -> list[str]:
+    """Boot's addresses for closed recovered-writer fences, from the existing active state index."""
+    from ouroboros import store
+
+    with store.open_store(root, write=False) as txn:
+        if int(txn.meta("schema_version") or VERSION) < VERSION:
+            return []  # The writer that stamps recovered activity uses the projected schema.
+        roots = {row[0] for row in txn.conn.execute(
+            "SELECT task_id FROM tasks INDEXED BY tasks_owner_pause WHERE owner_pause_state<>'' "
+            "AND owner_pause_state IN ('requested','paused') AND CASE WHEN json_valid(owner_pause_facts) THEN "
+            "json_extract(owner_pause_facts, '$.active_delegated_start.root_task_id')=task_id ELSE 0 END")}
+        # A supported older writer keeps a closed fence in the task body while its derived columns stay
+        # NULL: the indexed underived rows alone pay their body read (the cold_custody_rows pattern).
+        underived = [row[0] for row in txn.conn.execute(
+            f"SELECT task_id FROM tasks INDEXED BY tasks_underived_hot WHERE {TASK_UNDERIVED}")]
+        bodies = _read_rows(txn, underived)
+    roots.update(task_id for task_id, row in bodies.items()
+                 if _recovered_start_root(row) == task_id)
+    return sorted(roots)
 
 
 def _read_rows(txn, ids) -> dict:
@@ -424,8 +466,7 @@ def controls(root, task_id: str) -> dict:
     row = read(root, task_id)
     if row is None:
         return {}
-    return {"status": row["status"], "present": True,
-            "owner_pause": json.loads(row["owner_pause_facts"]),
+    return {"status": row["status"], "present": True, "owner_pause": json.loads(row["owner_pause_facts"]),
             "budget_pause": json.loads(row["budget_pause_facts"])}
 
 
@@ -493,6 +534,24 @@ _COLD_ROWS = ("SELECT task_id, budget_pause_facts FROM tasks INDEXED BY tasks_bu
               "WHERE budget_pause_state<>'' AND budget_pause_state IN ('pausing','paused','resume_granted') "
               "AND control_valid=1 AND CASE WHEN json_valid(budget_pause_facts) THEN "
               "json_extract(budget_pause_facts,'$.external_custody.state') IN ('requested','accepted') ELSE 1 END")
+
+
+def pausing_envelopes(root):
+    """Direct turns whose saved source can precede their first queue snapshot, by the pause index."""
+    from ouroboros import store
+
+    with store.open_store(root, write=False) as txn:
+        if int(txn.meta("schema_version") or VERSION) < VERSION:
+            return {}
+        rows = txn.conn.execute("SELECT task_id,budget_pause_facts FROM tasks INDEXED BY tasks_budget_pause "
+                                "WHERE budget_pause_state<>'' AND budget_pause_state='pausing' AND control_valid=1")
+        saved = {}
+        for task_id, facts in rows:
+            pause = json.loads(facts)
+            task = pause.get("park_task") or {}
+            if pause.get("source_ref") and task.get("id") == task_id and task.get("_is_direct_chat"):
+                saved[task_id] = task
+    return saved
 
 
 def cold_custody_rows(root, task_ids) -> dict:

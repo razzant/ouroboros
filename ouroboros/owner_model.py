@@ -132,7 +132,7 @@ def admit(task_id: str, body: dict, *, source: str = "owner") -> tuple[dict, dic
     Receipts live with the task. Even an older request repeated after a newer
     decision returns its original answer without rewriting either carrier.
     """
-    if source not in {"owner", "owner_words"}:
+    if source != "owner" and source not in route_choice.CITED_LEAD_SOURCES:
         raise ValueError("A work model act requires an owner source")
     from ouroboros.lead_fact import project_lead
     from ouroboros.task_store import patch_document
@@ -161,12 +161,12 @@ def admit(task_id: str, body: dict, *, source: str = "owner") -> tuple[dict, dic
             elif action in {"set", "keep"}:
                 chosen = body if action == "set" else fact
                 carrier = {"source": source, "model": chosen["model"], "use_local": chosen.get("use_local", False)}
-                if source == "owner_words":
+                if source in route_choice.CITED_LEAD_SOURCES:
                     carrier["cited"] = body["cited"]
             metadata = {**(row.get("metadata") or {}), **({"lead": carrier} if carrier else {})}
             if action == "follow":
                 metadata["model_role"] = "main"
-            projected = project_lead(fact, {"metadata": metadata, "owner_model": {"request_id": request_id}}, queued=not running)
+            projected = project_lead(fact, {"metadata": metadata, "owner_model": {"request_id": request_id, "action": action}}, queued=not running)
             if not projected:
                 projected = project_lead(task={"metadata": metadata}, queued=True)
             receipt = {"ok": True, "task_id": task_id, "applied": "next_step" if running else "at_start",
@@ -352,6 +352,10 @@ def apply_current(ctx: Any) -> bool:
         ctx._lead_return_from = ctx._lead_episode = ctx._lead_role = ctx._primary_view = None
     else:
         primary_action(ctx, action)
+    if ctx.active_model_override != getattr(ctx, "active_model", None):
+        # The same durable writer serves the card and the mind's work switch with a stamped cite.
+        cited_switch = action == "set" and carrier and carrier["source"] in route_choice.CITED_LEAD_SOURCES
+        ctx._pending_handover_reason = "mind_switch" if cited_switch else "owner_model"
     ctx._owner_model_primary_changed = changed_primary
     ctx._owner_model_request_id = request_id
     words = {"follow": "set this work to follow Main", "return": "requested a return to this work's primary",

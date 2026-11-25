@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Callable, Collection, Iterable, List, Literal, Mapping, Tuple
+from typing import Any, Callable, Collection, Iterable, List, Literal, Tuple
 
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
+from ouroboros.host_notice import mind_text as notice_text
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -449,7 +451,9 @@ def run_origin(record: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def dialogue_speaker(entry: Mapping[str, Any]) -> str:
+def recorded_speaker_name(entry: Mapping[str, Any]) -> str:
+    """The name a row records for its speaker: its sender label, username or author, else the actor its transport
+    recorded (display name, username, platform id); ``""`` when it records none, never a default."""
     transport = entry.get("transport") if isinstance(entry.get("transport"), Mapping) else {}
     actor = transport.get("actor") if isinstance(transport.get("actor"), Mapping) else {}
     return str(
@@ -460,8 +464,13 @@ def dialogue_speaker(entry: Mapping[str, Any]) -> str:
         or actor.get("username")
         or actor.get("platform_actor_id")
         or actor.get("id")
-        or ("author not recorded" if row_provenance(entry) == "place" else "User")  # "User" is my human's own door
+        or ""
     )
+
+
+def dialogue_speaker(entry: Mapping[str, Any]) -> str:
+    return recorded_speaker_name(entry) or (
+        "author not recorded" if row_provenance(entry) == "place" else "User")  # "User" is my human's own door
 
 
 def recorded_speaker(entry: Mapping[str, Any]) -> str:
@@ -606,10 +615,10 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
 
     A task summary without text is the host's typed facts row: its recorded facts are
     its text (``_host_facts_text``), the same words in chat history, its search and
-    memory rows."""
+    memory rows. A host notice's step and raw details follow its phrase (``host_notice``)."""
     if entry.get("type") == "task_summary" and not _text(entry.get("text")):
         return _host_facts_text(entry)
-    text = _with_reaction(entry, str(entry.get("text", "")))
+    text = _with_reaction(entry, str(entry.get("text", ""))) + notice_text(entry)
     transport = _mapping(entry.get("transport"))
     message = _mapping(transport.get("message"))
     if entry.get("type") == "presence_delivery" and message:
@@ -630,12 +639,16 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
 
 def place_message_facts(entry: Mapping[str, Any]) -> str:
     """What the connector reported about an inbound place row's message (``presence_message_facts``), as its own
-    labelled block for a reader to set beside the row's words, never inside them; ``""`` for any other row. A cut
-    names the row's recorded context (``chat_chain.context_address``), which holds its message whole."""
+    labelled block for a reader to set beside the row's words, never inside them; ``""`` for any other row and for a
+    call's utterance, which keeps its opening's (``presence_call.call_utterance``). A cut names the row's recorded
+    context (``chat_chain.context_address``), which holds its message whole."""
     if not (entry.get("direction") == "in" and row_provenance(entry) == "place"):
         return ""
+    from ouroboros.presence_call import call_utterance
     from ouroboros.presence_message_facts import connector_facts, cut
 
+    if call_utterance(entry):
+        return ""
     message = _mapping(_mapping(entry.get("transport")).get("message"))
     source = ""
     if cut(message):
@@ -683,11 +696,24 @@ def relay_quotes(entry: Mapping[str, Any]) -> List[Mapping[str, Any]]:
     return [_mapping(quote) for quote in quotes if _text(_mapping(quote).get("text"))]
 
 
+def excerpt_citation(ref: Mapping[str, Any]) -> str:
+    """Label the sender's complete citation independently of source speech and newly typed words."""
+    excerpt = _mapping(ref.get("excerpt"))
+    if not isinstance(excerpt.get("text"), str) or type(excerpt.get("start_utf16")) is not int or not ref.get("address"):
+        return ""
+    author = ref.get("author") or ref.get("author_label") or "author not recorded"
+    return (f"[Sender-selected passage of {author} at {ref['address']}; client-reported rendered text, "
+            f"UTF-16 offset {excerpt['start_utf16']}, citation only] "
+            + json.dumps(excerpt["text"], ensure_ascii=False))
+
+
 def relation_text(entry: Mapping[str, Any]) -> str:
     """The relations the host resolved for a row, as labelled lines after its words: what it
     replies to and, on a relay, the owner's words it quotes, complete, with where they were said
     and what they replied to. History keeps these fields; every text reader shows them too."""
     def reference(ref: Mapping[str, Any]) -> str:
+        if citation := excerpt_citation(ref):
+            return citation
         if ref.get("unresolved"):
             return f"[Reply to {_text(ref.get('address'))}: not resolved]"
         chars = ref.get("chars")  # a cut preview's whole length: the model reads how much the address holds
@@ -700,8 +726,15 @@ def relation_text(entry: Mapping[str, Any]) -> str:
         lines.append(reference(_mapping(entry.get("reply_to"))))
     for quote in relay_quotes(entry):
         place = _mapping(quote.get("source"))
-        lines.append(f"[Owner words quoted from {_text(place.get('label')) or 'a chat'} "
-                     f"{_text(place.get('address'))}]\n{_text(quote.get('text'))}")
+        location = f"{_text(place.get('label')) or 'a chat'} {_text(place.get('address'))}"
+        text = str(quote.get("text") or "")
+        # Older quiz envelopes kept the host question frame without a separate act/words type.
+        if quote.get("input_source") == "owner_press" or (quote.get("question_frame") and not quote.get("input_source")):
+            lines.append(f"[Owner card answer from {location}]\n{quote.get('question_frame') or text}")
+        elif quote.get("input_source") == "owner_card_input":
+            lines.append(f"[Owner card input from {location}]\n{text}")
+        else:
+            lines.append(f"[Owner words quoted from {location}]\n{text}")
         if _mapping(quote.get("reply_to")):
             lines.append(reference(_mapping(quote.get("reply_to"))))
     return "".join("\n" + line for line in lines)
@@ -991,14 +1024,36 @@ def render_row_text(row: Mapping[str, Any]) -> str:
     return dialogue_text(row)
 
 
-def quote_words(row: Mapping[str, Any]) -> str:
+def quote_parts(row: Mapping[str, Any], root: Any = None) -> tuple[str, ...]:
     """The words an exact quote may take from one chat row (``chronicle_quotes``, ``memory_mark``): its
-    ``render_row_text``, except inbound place rows and reaction carriers offer only their own ``text``.
+    accepted card words, plain text for inbound place rows, reactions and rows carrying sender-reported citations,
+    else ``render_row_text``.
     Connector facts and delivery details shown beside those words are the host's labels, never the speaker's."""
-    if (row.get("direction") == "in" and row_provenance(row) == "place"
+    from ouroboros.answer_facts import living_card_input, word_spans
+    if carried := _mapping(row.get("corpus_answer")):
+        if carried.get("source") in ("owner_press", "owner_card_input"):
+            return ()
+        return word_spans(str(row.get("text") or ""), _mapping(carried.get("reply_to")))
+    if living := living_card_input(row, row.get("_owner_source_root") or root):
+        return word_spans(living["content"], living["reply_to"]) if living["source"] == "owner_mailbox" else ()
+    if row.get("type") == "quiz_answer" or row.get("late_answer"):
+        from ouroboros.owner_words import answered_card_source
+
+        quiz, _ = answered_card_source(row, row.get("_owner_source_root") or root)
+        quiz = _mapping(quiz)
+        return () if quiz.get("secret_request") else (str(quiz.get("comment") or ""),)
+    if (_mapping(row.get("reply_to")).get("excerpt")
+            or any(_mapping(quote.get("reply_to")).get("excerpt") for quote in relay_quotes(row))
+            or row.get("direction") == "in" and row_provenance(row) == "place"
             or reaction_fact(_mapping(row.get("transport")).get("message"))):
-        return str(row.get("text") or "")
-    return render_row_text(row)
+        return (str(row.get("text") or ""),)
+    return (render_row_text(row),)
+
+
+def quote_words(row: Mapping[str, Any], root: Any = None) -> str:
+    """The row's single continuous quote source, if it has one. Forms can have several (quote_parts)."""
+    parts = quote_parts(row, root)
+    return parts[0] if len(parts) == 1 else ""
 
 
 def memory_row_header(address: Mapping[str, Any], row: Mapping[str, Any], *, author: Mapping[str, Any]) -> str:
@@ -1227,7 +1282,8 @@ class RoomLabelResolver:
             _text(facts.get(key)) for key in ("provider", "account_id", "conversation_id", "thread_id"))
         scalars = _mapping(facts.get("conversation"))
         clean = lambda value: " ".join(str(value).replace("[", " ").replace("]", " ").split())  # noqa: E731
-        name = next((clean(scalars[key]) for key in ("title", "name", "full_name", "username") if _text(scalars.get(key))), "")
+        name = next((clean(scalars[key]) for key in ("title", "name", "full_name", "username")
+                     if isinstance(scalars.get(key), str) and scalars[key].strip()), "")  # a list or a reference is no name
         place = next((p for p in self._places if p.place_id == place_id), None) or next(
             (p for p in sorted(self._places, key=lambda p: not p.conversation_id) if p.provider == provider
              and p.conversation_id in ("", conversation) and p.account_id in ("", account)), None)
@@ -1249,7 +1305,7 @@ def _derives(facts: Mapping[str, Any], chat_id: int) -> bool:
     from ouroboros.presence_runner import _stable_numeric_id
 
     provider, account, conversation, thread = (
-        _text(facts.get(key)) for key in ("provider", "account_id", "conversation_id", "thread_id"))
+        facts.get(key) for key in ("provider", "account_id", "conversation_id", "thread_id"))
     return bool(provider and conversation) and _stable_numeric_id(
         "presence-conversation", conversation_key(provider, account, conversation, thread)) == chat_id
 

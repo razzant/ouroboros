@@ -4,9 +4,9 @@ chat's confirm and tier, and a paused work without a model control.
 Owner 12.11 «A» (docs/DESIGN.md "Composer owner controls", "A work's model on its card"): a press on the Model capsule
 or on a work's model fact opens one floating sheet, a bottom sheet in the stack layout: the field, Main, Pinned,
 Recent, the sources, and at its foot the processing tier strip. The real server on its own port and data root, the
-real page, and the loopback provider of tests/_model_choice_browser.py: no paid call, no account, no key, and nothing
-of the server answered by the test. The loopback openai-compatible transport is sent no tier, so every call's receipt
-says `processing_not_submitted` and a card names what it asked beside how it was sent.
+real page, and the loopback provider of tests/_model_choice_browser.py: no paid call or live account. Some cases
+project an older discovery response without transport evidence so that Fast and Flex can be requested but not assumed
+supported. The actual loopback transport sends no tier: receipts distinguish the request from what went over HTTP.
 """
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from tests._model_choice_browser import (
     _SHEET,
     MAIN,
     NEXT_STEP,
-    OFFERED,
     OTHER,
     ROOM_SCOPE_OWN,
     SOURCE,
@@ -39,6 +38,7 @@ from tests._model_choice_browser import (
     _preferences,
     _row,
     _send,
+    _sheet_pick,
     _state,
     _work_of,
 )
@@ -52,6 +52,7 @@ PHONE = {"viewport": {"width": 390, "height": 844}, "is_mobile": True, "has_touc
 MAIN_CAPSULE = "#chat-model-mode"
 MARK = "ROOM_WIRE_TIER"
 _SEG = '.ui-popup.model-sheet .model-tier-seg[data-tier="{}"]'
+_LEGACY_OFFERED = ["economy", "standard", "fast"]
 _PINNED = "() => [...document.querySelectorAll('.ui-popup.model-sheet .chat-model-row[data-pinned=\"true\"]')].map((row) => row.dataset.row)"
 # The tier words after a work's model on its card: the words alone (the line's separator rides at their end).
 _CARD_TIER = """(sel) => { const node = document.querySelector(sel + ' .card-model-tier');
@@ -88,6 +89,23 @@ def _serve(server: dict, monkeypatch) -> Provider:
     monkeypatch.setattr(fixtures_mock_llm._Handler, "do_GET", lambda handler: provider.get(handler), raising=False)
     server["start_server"]()
     return provider
+
+
+def _legacy_catalog(page) -> None:
+    """Only this page sees the old catalog shape for the compatible endpoint; its POSTs and model calls are real."""
+    def without_ceiling(route):
+        response = route.fetch()
+        if not response.ok:
+            route.fulfill(response=response)
+            return
+        catalog = response.json()
+        catalog.pop("api_sources", None)  # a current source descriptor would still give the compatible adapter's ceiling
+        for item in catalog["items"]:
+            if item.get("provider_id") == SOURCE:
+                item.pop("processing_transport", None)
+        route.fulfill(json=catalog)
+
+    page.route("**/api/model-catalog", without_ceiling)
 
 
 def _record(page) -> list:
@@ -194,6 +212,7 @@ def test_a_works_tier_switches_at_its_next_call_and_a_paused_work_has_no_model_c
         browser, page = _launch(pw, engine, viewport=DESK)
         writes = _record(page)
         try:
+            _legacy_catalog(page)
             _load(page, server["url"])
             room = _post(page, "/api/projects", {"name": "Fixture · Tiers"})["project"]
             prefix = _open_project(page, room)
@@ -232,7 +251,9 @@ def test_a_works_tier_switches_at_its_next_call_and_a_paused_work_has_no_model_c
             recorded = len(_wait_usage(page, server["data_dir"], task, 1))
             in_flight = len(provider.models_of(MARK))
             assert in_flight == 2, ("one call answered, the next one in flight", provider.models_of(MARK))
-            page.wait_for_timeout(500)
+            # The card paints the receipt on the next state body it receives: wait for its words, never a fixed pause
+            # (an absent fact would also read as nothing).
+            page.wait_for_function(f"(sel) => ({_CARD_TIER})(sel) === 'Standard asked · sent with no tier'", arg=card, timeout=30_000)
             seen["standard_words"] = page.evaluate(_CARD_TIER, card)
 
             # Fast, pressed on the card while that call is in flight: one act, applied from the next call.
@@ -240,7 +261,8 @@ def test_a_works_tier_switches_at_its_next_call_and_a_paused_work_has_no_model_c
             page.wait_for_selector(".ui-popup.model-sheet .card-model-head", timeout=20_000)
             sheet = page.evaluate(_SHEET)
             seen["card_sheet"] = sheet
-            assert sheet["offered"] == OFFERED and sheet["chosen"] == "standard", ("no Ultrafast where the source lists none", sheet)
+            assert sheet["offered"] == _LEGACY_OFFERED and sheet["chosen"] == "standard", sheet
+            assert page.get_attribute(_SEG.format("fast"), "data-support") == "unknown", sheet
             assert sheet["scope"].startswith(f"Standard · {WORK_SCOPE_OWN}"), sheet
             seen["standard_scope"] = sheet["scope"]
             _shot(page, evidence, f"tier-card-sheet-{engine}")
@@ -280,10 +302,10 @@ def test_a_works_tier_switches_at_its_next_call_and_a_paused_work_has_no_model_c
             assert _receipt(third) == ("fast", None, "unknown", "processing_not_submitted"), ("the next call asked Fast", third)
             assert {key: third["processing"].get(key) for key in ("choice", "source")} == {"choice": "fast", "source": "owner"}, third
             assert not any("service_tier" in body or "speed" in body for body in provider.received), "the loopback transport is sent no tier"
-            page.wait_for_function(f"(sel) => ({_CARD_TIER})(sel) === 'Fast · Fast asked · sent as Standard'", arg=card, timeout=30_000)
+            page.wait_for_function(f"(sel) => ({_CARD_TIER})(sel) === 'Fast · Fast asked · sent with no tier'", arg=card, timeout=30_000)
             # The open sheet says it in its head, above the field: the strip at its foot keeps its words and place.
             page.wait_for_function("(words) => document.querySelector('.ui-popup.model-sheet .card-model-served')?.innerText === words",
-                                   arg="Fast asked · sent as Standard", timeout=30_000)
+                                   arg="Fast asked · sent with no tier", timeout=30_000)
             seen["strip_top_after_receipt"] = page.evaluate(strip_at)
             assert seen["strip_top_after_receipt"] == seen["strip_top_before_receipt"], \
                 ("the receipt filled its held line: the strip at the sheet's foot did not move", seen)
@@ -316,9 +338,9 @@ def test_a_works_tier_switches_at_its_next_call_and_a_paused_work_has_no_model_c
             _shot(page, evidence, f"tier-card-paused-{engine}")
             assert not _sent(writes, "owner/chat-model") and len(_sent(writes, f"tasks/{task}/model")) == 1, writes
             # DESIGN "A work's model on its card": a tier other than Standard is named, and what the newest call was
-            # served as only when it was served otherwise. Standard sent with no tier is the ordinary service.
-            assert (seen["standard_words"], seen["standard_scope"]) == ("", f"Standard · {WORK_SCOPE_OWN}"), \
-                ("an explicit Standard sent with no tier is no deviation", seen["standard_words"], seen["standard_scope"])
+            # served as only when it was served otherwise. An omission leaves the explicit Standard request unsubmitted.
+            assert (seen["standard_words"], seen["standard_scope"]) == ("Standard asked · sent with no tier", f"Standard · {WORK_SCOPE_OWN}"), \
+                ("the unsent Standard request stays visible", seen["standard_words"], seen["standard_scope"])
         finally:
             provider.release_all()
             (evidence / f"tier-seen-{engine}.json").write_text(json.dumps(seen, indent=1, default=str), encoding="utf-8")
@@ -353,6 +375,9 @@ def test_a_pin_reaches_every_window_survives_a_reload_and_chooses_nothing(direct
             for page in (one, two):
                 _open_sheet(page, capsule)
                 assert page.evaluate(_PINNED) == [], "nothing is pinned yet"
+            # Unmodified discovery includes the compatible adapter's ceiling: Default and Standard are redundant.
+            one.wait_for_function("() => document.querySelector('.ui-popup.model-sheet .model-tier-row')?.hidden === true")
+            assert one.evaluate(_SHEET)["offered"] == []
 
             # One window pins with the mouse: an unpinned row's Pin shows on the row's hover.
             one.hover(f"{_row(OTHER)} .chat-model-cell")
@@ -425,6 +450,7 @@ def test_the_main_chat_a_finger_and_the_keyboard(direct_server_with_data, monkey
         browser, page = _launch(pw, engine, viewport=DESK)
         writes = _record(page)
         try:
+            _legacy_catalog(page)
             _load(page, server["url"])
 
             # --- (e) The Main chat: a pick of another model asks first; a tier posts at once, with no dialog.
@@ -441,7 +467,7 @@ def test_the_main_chat_a_finger_and_the_keyboard(direct_server_with_data, monkey
 
             for tier, word in (("fast", "Fast"), ("economy", "Flex"), ("", "")):
                 _open_sheet(page, MAIN_CAPSULE)
-                assert page.evaluate(_SHEET)["offered"] == OFFERED, "Main's strip offers Flex, Standard and Fast, never Ultrafast"
+                assert page.evaluate(_SHEET)["offered"] == _LEGACY_OFFERED
                 with page.expect_response(lambda r: r.url.endswith("/api/owner/chat-processing")) as reply:
                     page.click(_SEG.format(tier) if tier else ".ui-popup.model-sheet .model-tier-default")
                 answer = reply.value.json()
@@ -452,7 +478,7 @@ def test_the_main_chat_a_finger_and_the_keyboard(direct_server_with_data, monkey
                 sheet = page.evaluate(_SHEET)
                 seen[f"main_tier_{tier or 'default'}"] = sheet
                 assert not page.query_selector(".confirm-dialog") and sheet is not None, ("a tier asks nothing first and leaves the sheet open", tier)
-                assert sheet["scope"] == f"{word or 'Default · Standard'} · for Main and its new subagents; no running work follows it now", sheet
+                assert sheet["scope"].startswith(f"{word or 'Default'} · for Main and work that inherits its tier"), sheet
                 assert sheet["reset"] is bool(tier), ("Default stands beside the strip only while there is a choice to leave", sheet)
                 _close_sheet(page)
                 closed = page.evaluate(_CAPSULE, MAIN_CAPSULE)
@@ -468,6 +494,7 @@ def test_the_main_chat_a_finger_and_the_keyboard(direct_server_with_data, monkey
             #     Pin is a finger's size and shows; a Pin leaves the sheet open; the field takes focus on its own tap.
             phone = browser.new_context(**PHONE).new_page()
             phone_writes = _record(phone)
+            _legacy_catalog(phone)
             _load(phone, server["url"])
             assert phone.evaluate("() => [document.documentElement.dataset.layout, document.documentElement.dataset.pointer]") == ["stack", "coarse"]
             composer = phone.evaluate(_COMPOSER, "chat")
@@ -554,8 +581,8 @@ def test_the_main_chat_a_finger_and_the_keyboard(direct_server_with_data, monkey
             page.keyboard.press(tab)
             sheet = page.evaluate(_SHEET)
             assert sheet["focus"] == "tier:standard", ("Tab leaves the list for the tier; Default's Standard holds its stop", sheet)
-            assert sheet["chosen"] == "" and [tier["tier"] for tier in sheet["tiers"] if tier["resolved"]] == ["standard"], sheet
-            assert sheet["offered"] == OFFERED, ("no Ultrafast where the source lists none", sheet)
+            assert sheet["chosen"] == "" and [tier["tier"] for tier in sheet["tiers"] if tier["resolved"]] == [], sheet
+            assert sheet["offered"] == _LEGACY_OFFERED, sheet
             moves = []
             for key in ("ArrowLeft", "ArrowRight", "ArrowRight"):
                 page.keyboard.press(key)
@@ -643,14 +670,19 @@ def test_the_main_chat_a_finger_and_the_keyboard(direct_server_with_data, monkey
             active = [row for group in sheet["groups"] for row in group["rows"] if row["active"]]
             if [(row["row"], row["cell"]) for row in active] != [(target["row"], "1")]:
                 problems.append(("the active Pin follows the model it pinned", target["row"], active))
-            # Back with the room's sheet open on the desk: the room leaves and takes its sheet with it, nothing stays
-            # over Main.
+            # Back with the room's sheet open on the desk: one Back for every input, a popup first (layers.js; RULING
+            # §1, as on the phone above), so the sheet closes and the room stays; the next Back closes the room and
+            # nothing stays over Main.
             page.evaluate("() => history.back()")
-            page.wait_for_function("() => !document.querySelector('#project-panel-backdrop').classList.contains('open')", timeout=20_000)
             page.wait_for_function("() => !document.querySelector('.ui-popup.model-sheet') && !document.querySelector('.model-sheet-scrim')",
                                    timeout=10_000)
+            page.wait_for_timeout(400)
+            if not page.evaluate("() => document.querySelector('#project-panel-backdrop').classList.contains('open')"):
+                problems.append(("Back closed the sheet over the room, not the room under it", "desk"))
             if page.evaluate(_CAPSULE, capsule)["expanded"] != "false":
                 problems.append(("the room's capsule says its sheet is closed", page.evaluate(_CAPSULE, capsule)))
+            page.evaluate("() => history.back()")
+            page.wait_for_function("() => !document.querySelector('#project-panel-backdrop').classList.contains('open')", timeout=20_000)
             assert not problems, problems
         finally:
             (evidence / f"keys-seen-{engine}.json").write_text(json.dumps(seen, indent=1, default=str), encoding="utf-8")
@@ -677,6 +709,7 @@ def test_default_fallback_tier_matches_the_real_call_and_explicit_standard(direc
     with sync_playwright() as pw:
         browser, page = _launch(pw, engine, viewport=DESK)
         try:
+            _legacy_catalog(page)
             _load(page, server['url'])
             room = _post(page, '/api/projects', {'name': 'Fixture · Fallback tier'})['project']
             prefix = _open_project(page, room)
@@ -713,3 +746,559 @@ def test_default_fallback_tier_matches_the_real_call_and_explicit_standard(direc
         finally:
             provider.release_all()
             browser.close()
+
+
+def test_unavailable_inherited_ultrafast_can_be_left_by_keyboard(direct_server_with_data, monkeypatch):  # noqa: F811
+    from playwright.sync_api import expect, sync_playwright
+
+    server = direct_server_with_data
+    _serve(server, monkeypatch)
+    server["stop_server"]()
+    path = server["data_dir"] / "settings.json"
+    settings = json.loads(path.read_text())
+    settings["OUROBOROS_MODEL_PROCESSING_PREFERENCES"] = json.dumps({"main": "ultrafast"})
+    path.write_text(json.dumps(settings))
+    server["start_server"]()
+
+    with sync_playwright() as pw, pw.chromium.launch(headless=True) as browser:
+        page = browser.new_page(viewport=DESK)
+        writes = _record(page)
+        _load(page, server["url"])
+        room = _post(page, "/api/projects", {"name": "Fixture · inherited Ultra"})["project"]
+        prefix = _open_project(page, room)
+        _open_sheet(page, f"#{prefix}-model-mode")
+        ultra = page.locator(_SEG.format("ultrafast"))
+        standard = page.locator(_SEG.format("standard"))
+        expect(page.locator(_SEG.format("fast"))).to_have_attribute("data-support", "unlisted")
+        assert page.evaluate(_SHEET)["offered"] == ["standard", "ultrafast"]
+        expect(ultra).to_have_attribute("data-resolved", "true")
+        expect(ultra).to_have_attribute("aria-disabled", "true")
+        ultra.click(force=True)
+        ultra.press("Enter")
+        ultra.press("Space")
+        ultra.press("Home")
+        expect(standard).to_be_focused()
+        page.keyboard.press("ArrowRight")
+        expect(ultra).to_be_focused()
+        page.keyboard.press("ArrowLeft")
+        expect(standard).to_be_focused()
+        assert not _sent(writes, "owner/chat-processing"), writes
+        with page.expect_response(lambda r: r.url.endswith("/api/owner/chat-processing")) as saved:
+            page.keyboard.press("Space")
+        assert saved.value.json()["processing_choice"] == "standard"
+        assert _sent(writes, "owner/chat-processing") == [{"processing": "standard", "project_id": room["id"]}]
+        expect(ultra).to_be_hidden()
+        expect(standard).to_have_attribute("aria-checked", "true")
+
+
+def _main_ultrafast_tabs(server, browser, extra: tuple = (), *, context_options=None, processing=None):
+    """Two pages share the real local Settings document and writers. Only discovery and preview are canned; `extra`
+    lists more Codex models the catalog offers beside Main's `gpt-test`."""
+    path = server["data_dir"] / "settings.json"
+    server["stop_server"]()
+    initial = json.loads(path.read_text())
+    initial.update({"OUROBOROS_MODEL": "claudexor::codex=gpt-test", "OUROBOROS_MODEL_ACCOUNTS": '{}',
+                    "OUROBOROS_MODEL_PROCESSING_PREFERENCES": json.dumps(processing or {}), "USE_LOCAL_MAIN": False})
+    path.write_text(json.dumps(initial))
+    server["start_server"]()
+
+    fixture = json.loads((pathlib.Path(__file__).resolve().parents[1] / "web/tests/fixtures/subscription_setup.json").read_text())
+    catalog = fixture["catalog"]
+    catalog["model_sources"][0]["processingPreferences"] = ["standard", "fast", "ultrafast"]
+    catalog["store_id"] = "fixture-store"
+    first = catalog["items"][0]
+    catalog["items"] += [{**first, "id": model, "name": model, "value": f"claudexor::codex={model}"} for model in extra]
+    context = browser.new_context(**(context_options or {"viewport": DESK}))
+    context.route("**/api/model-catalog*", lambda route: route.fulfill(json=catalog))
+    context.route("**/api/settings?response_limit_preview=*", lambda route: route.fulfill(json={}))
+    context.route("**/api/claudexor/status*", lambda route: route.fulfill(json=fixture["status"]))
+    return path, context.new_page(), context.new_page()
+
+
+def test_reopening_model_sheet_reads_a_pin_changed_in_another_tab(direct_server_with_data):  # noqa: F811
+    from playwright.sync_api import expect, sync_playwright
+    from tests.settings_browser_helpers import open_settings, press_editor_save
+
+    server = direct_server_with_data
+    with sync_playwright() as pw, pw.chromium.launch(headless=True) as browser:
+        path, first, other = _main_ultrafast_tabs(server, browser)
+        other.goto(server["url"], wait_until="domcontentloaded")
+        editor = open_settings(other, "models/role/main").locator('[data-model-role="main"]')
+        account = editor.locator("[data-model-role-account]")
+        account.select_option("personal")
+        assert press_editor_save(other).startswith("Saved")
+        _load(first, server["url"])
+        sheet = first.locator(".ui-popup.model-sheet")
+        means = sheet.locator(".model-tier-means")
+        _open_sheet(first, MAIN_CAPSULE)
+        expect(means).to_contain_text("Pinned account personal")
+        _close_sheet(first)
+
+        account.select_option("work")
+        assert press_editor_save(other).startswith("Saved")
+        saved = json.loads(path.read_text())
+        assert saved["OUROBOROS_MODEL"] == "claudexor::codex=gpt-test"
+        assert json.loads(saved["OUROBOROS_MODEL_ACCOUNTS"])["main"] == "work"
+
+        with first.expect_response("**/api/settings") as refreshed:
+            _open_sheet(first, MAIN_CAPSULE)
+        assert refreshed.value.ok
+        expect(means).to_contain_text("Pinned account work")
+        expect(sheet).to_have_count(1)
+        expect(sheet.locator(".chat-model-query")).to_be_focused()
+
+
+@pytest.mark.parametrize("race", [
+    "unchanged", "edited_model", "before_save_model", "before_save_account", "after_read", "edited_model_already_saved",
+])
+def test_settings_main_ultrafast_is_bound_across_two_tabs(direct_server_with_data, race):  # noqa: F811
+    """Real Settings pages, GET tokens and owner writes to the case's settings.json."""
+    from playwright.sync_api import expect, sync_playwright
+    from tests.settings_browser_helpers import open_settings, press_editor_save
+
+    server = direct_server_with_data
+    model_key = "OUROBOROS_MODEL"
+    account_key = "OUROBOROS_MODEL_ACCOUNTS"
+    tier_key = "OUROBOROS_MODEL_PROCESSING_PREFERENCES"
+    target = "claudexor::codex="
+    checker = "**/api/owner/safety-model"
+
+    with sync_playwright() as pw, pw.chromium.launch(headless=True) as browser:
+        path, first, other = _main_ultrafast_tabs(server, browser)
+
+        def main_editor(page):
+            page.goto(server["url"], wait_until="domcontentloaded")
+            return open_settings(page, "models/role/main").locator('[data-model-role="main"]')
+
+        form, second = main_editor(first), main_editor(other)
+        model = '[data-model-role-model]'
+        account = '[data-model-role-account]'
+        def edit_model(row, value):
+            field = row.locator(model)
+            field.fill(value)
+            field.press("Tab")
+
+        level = form.locator('[data-model-role-processing]')
+        form.locator("summary").click()
+        expect(form.locator(account)).to_have_value("")
+        expect(second.locator(account)).to_have_value("")
+        own_edit = race in ("edited_model", "edited_model_already_saved")
+        succeeds = race in ("unchanged", "edited_model")
+        if own_edit:
+            edit_model(form, "gpt-next")
+
+        # Cancel authors nothing. One subsequent confirmation suffices through Save.
+        writes = []
+        first.on("request", lambda req: writes.append(req.post_data_json)
+                 if req.method == "POST" and req.url.endswith("/api/owner/safety-model") else None)
+        level.select_option("ultrafast")
+        dialog = first.get_by_role("dialog", name="Ultrafast for Main")
+        expect(dialog).to_contain_text("Account: Auto")
+        expect(dialog).to_contain_text("settings file")
+        expect(dialog).to_contain_text("even on a fallback model")
+        expect(dialog).to_contain_text("subagents inherit the work")
+        expect(dialog).to_contain_text("costs on this route is not known")
+        dialog.get_by_role("button", name="Cancel").click()
+        expect(level).to_have_value("")
+        assert not writes
+        level.select_option("ultrafast")
+        expect(dialog).to_contain_text("gpt-next" if own_edit else "gpt-test")
+        dialog.get_by_role("button", name="Use Ultrafast").click()
+        expect(form.locator("summary")).to_contain_text("Ultrafast (override)")
+
+        before_save = race.startswith("before_save")
+        if before_save or race == "edited_model_already_saved":
+            if race == "before_save_account":
+                second.locator(account).select_option("work")
+            else:
+                edit_model(second, "gpt-next")
+            assert press_editor_save(other).startswith("Saved")
+
+        if race in ("after_read", "edited_model_already_saved"):
+            # Hold tab one's real POST after its GET. Tab two saves only the pin, or only the same field
+            # tab one edited and the fresh GET already matched. Both must invalidate the pending write.
+            held = []
+            first.route(checker, lambda route: held.append(route))
+            with first.expect_request(checker):
+                form.locator("[data-editor-save]").click()
+            if race == "after_read":
+                second.locator(account).select_option("work")
+            else:
+                edit_model(second, "gpt-third")
+            assert press_editor_save(other).startswith("Saved")
+            assert len(held) == 1
+            with first.expect_response(checker) as response:
+                held[0].continue_()
+            assert response.value.status == 409
+            expect(form.locator("[data-editor-result]")).to_contain_text(re.compile("changed", re.I))
+        else:
+            line = press_editor_save(first)
+            assert line.startswith("Saved" if succeeds else "Not saved")
+
+        assert len(writes) == (0 if before_save else 1)
+        if writes:
+            expected = {tier_key: {"main": "ultrafast"}}
+            if race == "edited_model":
+                expected[model_key] = target + "gpt-next"
+            assert writes[0]["settings"] == expected
+            assert set(writes[0]["if_unchanged"]) == {model_key, account_key, "USE_LOCAL_MAIN", tier_key, "ultrafast"}
+        stored = json.loads(path.read_text())
+        assert json.loads(stored[tier_key]).get("main", "") == ("ultrafast" if succeeds else "")
+        assert json.loads(stored[account_key]).get("main", "") == ("work" if race in ("before_save_account", "after_read") else "")
+        final_model = {"before_save_model": "gpt-next", "edited_model": "gpt-next", "edited_model_already_saved": "gpt-third"}
+        assert stored[model_key] == target + final_model.get(race, "gpt-test")
+
+
+@pytest.mark.parametrize(
+    "engine, change_binding", [("chromium", False), ("chromium", True), ("webkit", False)],
+    ids=["unchanged", "delayed-post", "phone-webkit"],
+)
+def test_composer_main_ultrafast_is_bound_across_two_tabs(direct_server_with_data, engine, change_binding, tmp_path):  # noqa: F811
+    from playwright.sync_api import expect, sync_playwright
+    from tests.settings_browser_helpers import open_settings, press_editor_save
+
+    server = direct_server_with_data
+    post = "**/api/owner/chat-processing"
+    model, pin, tier = "OUROBOROS_MODEL", "OUROBOROS_MODEL_ACCOUNTS", "OUROBOROS_MODEL_PROCESSING_PREFERENCES"
+    phone = engine == "webkit"
+    processing = {"light": "standard"}
+    evidence = _evidence(tmp_path)
+    with sync_playwright() as pw, getattr(pw, engine).launch(headless=True) as browser:
+        path, first, other = _main_ultrafast_tabs(server, browser, context_options=PHONE if phone else None, processing=processing)
+        writes = _record(first)
+        _load(first, server["url"])
+        if change_binding:
+            other.goto(server["url"], wait_until="domcontentloaded")
+            editor = open_settings(other, "models/role/main").locator('[data-model-role="main"]')
+            account = editor.locator("[data-model-role-account]")
+            expect(account).to_have_value("")
+        dialog = first.get_by_role("dialog", name="Ultrafast for Main")
+        press = first.tap if phone else first.click
+        before = path.read_bytes()
+
+        def choose():
+            _open_sheet(first, MAIN_CAPSULE, finger=phone)
+            expect(first.locator(".ui-popup.model-sheet .model-tier-means")).to_contain_text("Account: Auto")
+            with first.expect_response("**/api/settings") as read:
+                press(_SEG.format("ultrafast"))
+            expect(dialog).to_be_visible()
+            expect(dialog).to_contain_text("gpt-test")
+            expect(dialog).to_contain_text("Account: Auto")
+            expect(dialog).to_contain_text("even on a fallback model")
+            expect(dialog).to_contain_text("subagents inherit the work")
+            expect(dialog).to_contain_text("Safety falling back to Main")
+            expect(dialog).to_contain_text("Not confirmed for gpt-test here")
+            expect(dialog).to_contain_text("What Ultrafast costs on this route is not known here.")
+            expect(dialog).to_contain_text("Before rolling back, choose Standard or Default for Main.")
+            return read.value.json()
+
+        choose()
+        dialog.get_by_role("button", name="Cancel").click()
+        expect(dialog).to_have_count(0)
+        assert _sent(writes, "owner/chat-processing") == [] and path.read_bytes() == before
+
+        shown = choose()
+        assert shown[model] == "claudexor::codex=gpt-test" and not json.loads(shown[pin]).get("main")
+        tokens = {key: shown["_meta"]["tokens"][key] for key in (model, "USE_LOCAL_MAIN", pin, tier)}
+        tokens["ultrafast"] = json.dumps([shown[model], False, "", "", ""], separators=(",", ":"))
+        confirm = dialog.get_by_role("button", name="Use Ultrafast")
+        if change_binding:
+            held = []
+            first.route(post, lambda route: held.append(route))
+            with first.expect_request(post):
+                confirm.click()
+            field = editor.locator("[data-model-role-model]")
+            field.fill("gpt-next")
+            field.press("Tab")
+            account.select_option("work")
+            assert press_editor_save(other).startswith("Saved")
+            after_other = path.read_bytes()
+            saved = json.loads(after_other)
+            assert saved[model] == "claudexor::codex=gpt-next" and json.loads(saved[pin])["main"] == "work"
+            assert not json.loads(saved[tier]).get("main")
+            assert len(held) == 1
+            with first.expect_response(post) as response:
+                held[0].continue_()
+            assert response.value.status == 409
+            refusal = response.value.json()
+            assert refusal["code"] == "settings_changed_elsewhere" and refusal["saved"] is False
+            _said(first, "Main changed")
+            assert path.read_bytes() == after_other
+        else:
+            _shot(first, evidence, f"main-ultrafast-warning-{engine}")
+            with first.expect_response(post) as response:
+                confirm.click()
+            assert response.value.status == 200 and response.value.json()["main_processing"] == "ultrafast"
+            saved = json.loads(path.read_bytes())
+            assert saved[model] == shown[model] and not json.loads(saved[pin]).get("main")
+            assert json.loads(saved[tier]) == {**processing, "main": "ultrafast"}
+        expect(dialog).to_have_count(0)
+        confirmed = {"processing": "ultrafast", "if_unchanged": tokens}
+        assert _sent(writes, "owner/chat-processing") == [confirmed]
+
+        if not change_binding:
+            first.reload(wait_until="domcontentloaded")
+            _capsule_ready(first, MAIN_CAPSULE)
+            expect(first.locator(MAIN_CAPSULE)).to_have_attribute("data-tier", "ultrafast")
+            _open_sheet(first, MAIN_CAPSULE, finger=phone)
+            ultra = first.locator(_SEG.format("ultrafast"))
+            expect(ultra).to_have_attribute("aria-checked", "true")
+            reset = ".ui-popup.model-sheet .model-tier-default"
+            # One press, one real POST and no second confirmation. Default removes Main's own override.
+            with first.expect_response(post) as response:
+                press(reset)
+            assert response.value.status == 200 and response.value.json()["main_processing"] == ""
+            expect(first.locator(reset)).to_be_hidden()
+            expect(ultra).to_have_attribute("aria-checked", "false")
+            expect(first.locator(MAIN_CAPSULE)).to_have_attribute("data-tier", "default")
+            expect(first.locator(".confirm-dialog")).to_have_count(0)
+            assert _sent(writes, "owner/chat-processing") == [confirmed, {"processing": ""}]
+            after = json.loads(path.read_bytes())
+            assert json.loads(after[tier]) == processing, "the literal main override is gone; Light's preference remains"
+            assert all(after[key] == saved[key] for key in (model, pin, "USE_LOCAL_MAIN")), "the route and account are unchanged"
+            _shot(first, evidence, f"main-ultrafast-default-{engine}")
+
+
+MAIN_BINDING = {"OUROBOROS_MODEL", "USE_LOCAL_MAIN", "OUROBOROS_MODEL_ACCOUNTS", "OUROBOROS_MODEL_PROCESSING_PREFERENCES"}
+
+
+def _role_editor(server, page, role: str = "main"):
+    from tests.settings_browser_helpers import open_settings
+
+    page.goto(server["url"], wait_until="domcontentloaded")
+    return open_settings(page, f"models/role/{role}").locator(f'[data-model-role="{role}"]')
+
+
+def _type_model(row, value: str) -> None:
+    field = row.locator("[data-model-role-model]")
+    field.fill(value)
+    field.press("Tab")
+
+
+def _save_main_tier(server, page, tier: str) -> None:
+    """The second tab's one real Settings write: Main's own tier, through its page's Save."""
+    from tests.settings_browser_helpers import press_editor_save
+
+    editor = _role_editor(server, page)
+    editor.locator("summary").click()
+    editor.locator("[data-model-role-processing]").select_option(tier)
+    assert press_editor_save(page).startswith("Saved")
+
+
+def _save_light(server, page, model: str) -> None:
+    """The second tab's one real unrelated write: Light's model, through its own page's Save."""
+    from tests.settings_browser_helpers import press_editor_save
+
+    _type_model(_role_editor(server, page, "light"), model)
+    assert press_editor_save(page).startswith("Saved")
+
+
+def test_settings_main_model_save_stands_on_the_tier_shown_across_two_tabs(direct_server_with_data):  # noqa: F811
+    """Tab one types a new Main model with Main's tier shown as Default; tab two's real write sets Fast. Tab one's Save
+    says why it is not saved and writes nothing, instead of carrying Fast to the new model unasked. Typed again, its
+    Save succeeds although tab two's unrelated write (Light) lands between tab one's read and its held POST."""
+    from playwright.sync_api import expect, sync_playwright
+    from tests.settings_browser_helpers import press_editor_save
+
+    server = direct_server_with_data
+    model, tier = "OUROBOROS_MODEL", "OUROBOROS_MODEL_PROCESSING_PREFERENCES"
+    checker = "**/api/owner/safety-model"
+    with sync_playwright() as pw, pw.chromium.launch(headless=True) as browser:
+        path, first, other = _main_ultrafast_tabs(server, browser)
+        writes = []
+        first.on("request", lambda req: writes.append(req.post_data_json)
+                 if req.method == "POST" and req.url.endswith(("/api/owner/safety-model", "/api/settings")) else None)
+        form = _role_editor(server, first)
+        _type_model(form, "gpt-next")
+        _save_main_tier(server, other, "fast")
+        assert json.loads(json.loads(path.read_text())[tier])["main"] == "fast"
+        before = path.read_bytes()
+        line = press_editor_save(first)
+        assert line.startswith("Not saved. Main's processing is Fast now, set on another device."), line
+        assert not writes and path.read_bytes() == before, "nothing of the refused save is sent or stored"
+
+        _type_model(form, "gpt-next")
+        held = []
+        first.route(checker, lambda route: held.append(route))
+        with first.expect_request(checker):
+            form.locator("[data-editor-save]").click()
+        _save_light(server, other, "gpt-test")
+        assert len(held) == 1
+        with first.expect_response(checker) as response:
+            held[0].continue_()
+        assert response.value.status == 200, response.value.text()
+        expect(form.locator("[data-editor-result]")).to_contain_text("Saved")
+        stored = json.loads(path.read_text())
+        assert stored[model] == "claudexor::codex=gpt-next" and json.loads(stored[tier])["main"] == "fast"
+        # Light keeps its own source (this fixture seeds ``openai-compatible``): the other tab typed only its model.
+        assert stored["OUROBOROS_MODEL_LIGHT"] == "openai-compatible::gpt-test", "the unrelated write stands too"
+        assert set(writes[-1]["if_unchanged"]) == MAIN_BINDING, writes[-1]
+
+
+@pytest.mark.parametrize("second", ["before_pick", "while_asked", "unrelated"])
+def test_composer_main_model_change_stands_on_the_tier_shown_across_two_tabs(direct_server_with_data, second):  # noqa: F811
+    """Tab one changes Main's model in the composer; tab two makes one real Settings write. Set before the pick, the
+    confirming sheet says the tier the new model keeps; set while the sheet asks, the write is refused and said, and
+    nothing of it lands; an unrelated write while it asks lets it land."""
+    from playwright.sync_api import expect, sync_playwright
+
+    server = direct_server_with_data
+    model, tier = "OUROBOROS_MODEL", "OUROBOROS_MODEL_PROCESSING_PREFERENCES"
+    target = "claudexor::codex=gpt-next"
+    with sync_playwright() as pw, pw.chromium.launch(headless=True) as browser:
+        path, first, other = _main_ultrafast_tabs(server, browser, extra=("gpt-next",))
+        writes = _record(first)
+        _load(first, server["url"])
+        dialog = first.get_by_role("dialog", name="Change Main")
+        if second == "before_pick":
+            _save_main_tier(server, other, "fast")
+        _sheet_pick(first, MAIN_CAPSULE, target)
+        expect(dialog).to_have_count(1)
+        if second == "before_pick":
+            expect(dialog).to_contain_text("Main keeps its tier, Fast")
+        elif second == "while_asked":
+            _save_main_tier(server, other, "fast")
+        else:
+            _save_light(server, other, "gpt-test")
+        before = path.read_bytes()
+        with first.expect_response("**/api/owner/chat-model") as response:
+            dialog.locator("[data-confirm-ok]").click()
+        posted = _sent(writes, "owner/chat-model")
+        assert len(posted) == 1 and set(posted[0]["if_unchanged"]) == MAIN_BINDING, posted
+        stored = json.loads(path.read_text())
+        if second == "while_asked":
+            assert response.value.status == 409 and response.value.json()["saved"] is False
+            _said(first, "Main changed on another device")
+            assert path.read_bytes() == before and stored[model] == "claudexor::codex=gpt-test"
+        else:
+            assert response.value.status == 200, response.value.text()
+            assert stored[model] == target
+            assert json.loads(stored[tier]).get("main", "") == ("fast" if second == "before_pick" else "")
+            if second == "unrelated":
+                assert stored["OUROBOROS_MODEL_LIGHT"] == "openai-compatible::gpt-test"  # Light's own source, as seeded
+
+
+@pytest.mark.parametrize("engine, premium", [("chromium", True), ("webkit", False)], ids=["wide-priced", "phone-unknown"])
+def test_main_model_confirmation_prices_only_the_refreshed_tier(direct_server_with_data, engine, premium, tmp_path):  # noqa: F811
+    """The old view quotes Standard, but the confirming read names Ultra. Neither old rate nor cache price belongs in it."""
+    from playwright.sync_api import expect, sync_playwright
+
+    server, target = direct_server_with_data, "fixture/next-model"
+    phone = engine == "webkit"
+    with sync_playwright() as pw, getattr(pw, engine).launch(headless=True) as browser:
+        path, page, _ = _main_ultrafast_tabs(server, browser, context_options=PHONE if phone else None, processing={"main": "ultrafast"})
+        writes = _record(page)
+        picked = False
+
+        def as_seen(route):
+            response = route.fetch()
+            shown = response.json()
+            if not picked:
+                shown["OUROBOROS_MODEL_PROCESSING_PREFERENCES"] = json.dumps({"main": "standard"})
+            shown["OUROBOROS_PROMPT_CACHE_TTL"] = "5m"
+            shown["_meta"]["connections"] = [{"id": "openrouter", "configured": True, "revision": "openrouter#fixture"}]
+            route.fulfill(response=response, json=shown)
+
+        def state_before_confirmation(route):
+            response = route.fetch()
+            shown = response.json()
+            shown["processing_tiers"] = {"main": "standard", "default": "standard"}
+            route.fulfill(response=response, json=shown)
+
+        page.route("**/api/settings", as_seen)
+        page.route("**/api/state*", state_before_confirmation)
+        page.route("**/api/model-catalog", lambda route: route.fulfill(json={
+            "items": [{"id": target, "value": target, "provider_id": "openrouter", "context_window": 128000,
+                       "price": {"input": 2, "output": 5, "cache_write": 7, "cache_write_ttl": "5m"}}],
+            "api_sources": [{"id": "openrouter", "label": "Fixture key", "processing_transport": ["standard", "ultrafast"]}],
+        }))
+        page.route("**/api/model-catalog?processing_model=*", lambda route: route.fulfill(json={
+            "value": target, "processing": {"complete": True, "modes": ["standard", "ultrafast"],
+                                            "endpoints": [{"mode": "ultrafast", "price": {"input": 17, "output": 31} if premium else None}]},
+        }))
+        _load(page, server["url"])
+        _open_sheet(page, MAIN_CAPSULE, finger=phone)
+        expect(page.locator(".model-tier-means")).to_contain_text("Account: Auto")  # the opening GET has answered
+        row = page.locator(_row(target))
+        expect(row).to_contain_text("$2 in / $5 out")
+        expect(page.locator(MAIN_CAPSULE)).to_have_attribute("data-tier", "standard")
+        choose = page.tap if phone else page.click
+        dialog = page.get_by_role("dialog", name="Change Main")
+        choose(f"{_row(target)} .chat-model-cell")
+        expect(dialog).to_contain_text("Cache write: $7 per 1M tokens.")
+        dialog.locator("[data-confirm-cancel]").click()
+        expect(dialog).to_have_count(0)
+
+        _open_sheet(page, MAIN_CAPSULE, finger=phone)
+        expect(page.locator(".model-tier-means")).to_contain_text("Account: Auto")
+        picked = True
+        choose(f"{_row(target)} .chat-model-cell")
+        expect(dialog).to_contain_text("Fixture key · paid by key · 128K window")
+        expect(dialog).to_contain_text("Main keeps its tier, Ultrafast")
+        expect(dialog).to_contain_text("$17 in / $31 out per 1M tokens" if premium else "Price unknown.")
+        expect(dialog).not_to_contain_text(re.compile(r"\$2 in|\$5 out|Cache write: \$7"))
+        _shot(page, _evidence(tmp_path), f"main-ultrafast-fresh-price-{engine}")
+        before = path.read_bytes()
+        dialog.locator("[data-confirm-cancel]").click()
+        expect(dialog).to_have_count(0)
+        assert not _sent(writes, "owner/chat-model") and path.read_bytes() == before
+
+
+def test_settings_pinned_ultrafast_conflict_rereads_the_catalog_without_resubmitting(direct_server_with_data):  # noqa: F811
+    from playwright.sync_api import expect, sync_playwright
+    from tests.settings_browser_helpers import press_editor_save
+
+    server = direct_server_with_data
+    with sync_playwright() as pw, pw.chromium.launch(headless=True) as browser:
+        path, page, _ = _main_ultrafast_tabs(server, browser)
+        writes, reads = [], []
+
+        def catalog_for(route):
+            replaced = bool(writes)
+            query = route.request.url.partition("?")[2]
+            kind = "scoped" if "credential_profile_id=work" in query else "other" if query else "general"
+            reads.append((replaced, kind))
+            route.fulfill(json={
+                "store_id": "replacement-store" if replaced else "initial-store",
+                "items": [{"value": "claudexor::codex=gpt-test", "id": "gpt-test", "credential_profile_id": "work"}],
+                "model_sources": [{"id": "codex", "label": "Codex", "credentialHarness": "codex",
+                                   "processingPreferences": ["standard", "fast", "ultrafast"]}],
+                "account_catalogs": [{"source": "codex", "accounts": [{"credentialProfileId": "work", "catalog": {
+                    "source": "codex", "credentialProfileId": "work", "accountFingerprint": "work-new" if replaced else "work-old",
+                    "provenance": "live", "models": [{"id": "gpt-test", "processing": {
+                        "modes": ["standard", "fast"] if replaced else ["standard", "fast", "ultrafast"],
+                    }}],
+                }}]}],
+            })
+
+        def refuse(route):
+            writes.append(route.request.post_data_json)
+            route.fulfill(status=409, json={"ok": False, "saved": False, "code": "settings_changed_elsewhere", "error": "The pinned account changed."})
+
+        page.route("**/api/model-catalog*", catalog_for)
+        page.route("**/api/owner/safety-model", refuse)
+        before = path.read_bytes()
+        form = _role_editor(server, page)
+        form.locator("[data-model-role-account]").select_option("work")
+        form.locator("summary").click()
+        tier = form.locator("[data-model-role-processing]")
+        expect(tier.locator("option[value=ultrafast]")).to_have_text("Ultrafast")
+        tier.select_option("ultrafast")
+        dialog = page.get_by_role("dialog", name="Ultrafast for Main")
+        expect(dialog).to_contain_text("Pinned account work")
+        dialog.get_by_role("button", name="Use Ultrafast").click()
+        assert "changed" in press_editor_save(page).lower()
+        assert len(writes) == 1 and path.read_bytes() == before
+        assert json.loads(writes[0]["if_unchanged"]["ultrafast"])[2:] == ["work", "initial-store", "work-old"]
+        assert (True, "general") in reads
+
+        # Existing conflict recovery restores the saved form. Re-select the same pin: it no longer confirms Ultra.
+        form.locator("[data-model-role-account]").select_option("work")
+        form.locator("summary").click()
+        expect(tier.locator("option[value=fast]")).to_have_text("Fast")  # the new scope answered, not merely absent
+        expect(tier.locator("option[value=ultrafast]")).to_have_text("Ultrafast · not confirmed")
+        assert (True, "scoped") in reads
+        tier.select_option("ultrafast")
+        expect(dialog).to_contain_text("Not confirmed for gpt-test here")
+        dialog.get_by_role("button", name="Cancel").click()
+        assert len(writes) == 1, "only the refused save was sent"

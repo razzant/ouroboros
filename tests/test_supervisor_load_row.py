@@ -57,6 +57,7 @@ def test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row(monkeypat
         bus.put({"type": "llm_usage", "task_id": "t", "ts": _ago(5)})
     for n in range(40):
         bus.put({"type": f"kind_nobody_declared_{n}", "task_id": "t"})
+    time.sleep(0.2)  # the batch's real wait in the bus; its producers stamped it 5 s before the put
     assert sl.publish_supervisor_load(bus, tmp_path) is None, "an open window writes nothing"
     liveness = [time.monotonic(), {}, time.thread_time(), None]
     assert sl.drain_worker_events(bus, SimpleNamespace(DRIVE_ROOT=tmp_path), liveness,
@@ -78,7 +79,7 @@ def test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row(monkeypat
     control, telemetry = row["lanes"]["control"], row["lanes"]["telemetry"]
     assert control["depth"] == 0 and control["oldest_age_sec"] is None
     assert telemetry["depth"] == 2 and telemetry["oldest_age_sec"] >= 0
-    assert control["max_lag_sec"] == pytest.approx(5, abs=3) and telemetry["max_lag_sec"] == pytest.approx(5, abs=3)
+    assert 0.2 <= control["max_lag_sec"] < 4 and 0.2 <= telemetry["max_lag_sec"] < 4, "the bus's wait, never a stamp"
     assert row["max_event_lag_sec"] == max(control["max_lag_sec"], telemetry["max_lag_sec"])
     q = row["queue_lock"]
     assert q["count"] == 1 and q["hold_max_sec"] >= 0.02
@@ -98,7 +99,7 @@ def test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row(monkeypat
     following = sl.publish_supervisor_load(bus, tmp_path)
     assert following["handlers"]["send_message"]["count"] == 1 and following["handlers"]["llm_usage"]["count"] == 1
     assert following["queue_lock"]["count"] == 1, "the folded stretch keeps its Q facts"
-    assert following["max_event_lag_sec"] is None, "no event of the window carried a producer stamp"
+    assert 0 <= following["max_event_lag_sec"] < 4, "an unstamped event's wait is the bus's own as well"
     assert following["lanes"]["telemetry"]["depth"] == 0
     assert len(_rows(tmp_path)) == 2
 

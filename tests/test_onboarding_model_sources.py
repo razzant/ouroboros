@@ -295,20 +295,22 @@ def test_finish_preserves_visible_empty_inheritance_and_shipped_value(onboarding
     assert saved["OUROBOROS_MODEL_FALLBACKS"] == ""
 
 
-def test_explicit_preset_recovery_previews_main_reviews_then_saves_visible_draft(onboarding, pool_seams):
+@pytest.mark.parametrize("main_tier", ["standard", "ultrafast"])
+def test_explicit_preset_recovery_previews_main_reviews_then_saves_visible_draft(onboarding, pool_seams, monkeypatch, main_tier):
     """A broken CLI inventory does not replace a working Main with keyless API defaults:
     every reviewer row the preview proposes runs on Main, and the visible draft is saved
     as shown, not recomputed."""
     from ouroboros.subscription_install_presets import PRESET_MARKER_KEY
 
     model = "claudexor::codex=chosen-model"
+    monkeypatch.setitem(FACTORY_ROWS[0], "processing_preference", "economy")
     onboarding.calls["snapshot_payload"] = RuntimeError("model inventory unavailable")
     draft = {
         "subscriptionsConnected": True, "skipSubscriptionPresets": True,
         "OUROBOROS_MODEL": model, "OUROBOROS_MODEL_LIGHT": "",
         "OUROBOROS_MODEL_FALLBACKS": "", "TOTAL_BUDGET": 25,
         "OUROBOROS_MODEL_ACCOUNTS": {"main": "chosen-account"},
-        "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {"main": "standard"},
+        "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {"main": main_tier},
     }
     preview = onboarding.client.post("/api/onboarding/subagents/preview", json=draft)
     assert preview.status_code == 200, preview.text
@@ -318,14 +320,25 @@ def test_explicit_preset_recovery_previews_main_reviews_then_saves_visible_draft
     reviewers = [row for row in visible["items"] if row["subagent_id"] in {r["subagent_id"] for r in FACTORY_ROWS}]
     assert [row["effort"] for row in reviewers] == [row["effort"] for row in FACTORY_ROWS]
     assert all(row["route"] == {"kind": "api_model", "target_id": model, "credential_profile_id": "chosen-account"}
-               and row["processing_preference"] == "standard" for row in reviewers)
+               for row in reviewers)
+    assert [row.get("processing_preference", "") for row in reviewers] == [
+        row.get("processing_preference", "") if main_tier == "ultrafast" else main_tier for row in FACTORY_ROWS]
 
     # A later owner edit to the displayed proposal is saved as shown, not recomputed.
     reviewers[0]["recommended_use"] = "Owner refinement."
     completed = onboarding.client.post("/api/onboarding/complete", json={**draft, "OUROBOROS_SUBAGENTS": visible})
+    if main_tier == "ultrafast":
+        # A preview cannot confirm an expensive Main binding. Nothing is persisted on refusal.
+        assert completed.status_code == 400, completed.text
+        assert completed.json()["saved"] is False and completed.json()["code"] == "invalid_onboarding_settings"
+        assert "Confirm Ultrafast" in completed.text
+        assert not onboarding.settings_path.exists() and onboarding.calls["supervisor"] == 0
+        draft["OUROBOROS_MODEL_PROCESSING_PREFERENCES"] = {"main": "standard"}
+        completed = onboarding.client.post("/api/onboarding/complete", json={**draft, "OUROBOROS_SUBAGENTS": visible})
     assert completed.status_code == 200, completed.text
     assert onboarding.calls["snapshot"] == 0
     saved = onboarding.saved()
+    assert json.loads(saved["OUROBOROS_MODEL_PROCESSING_PREFERENCES"])["main"] == "standard"
     assert json.loads(saved["OUROBOROS_SUBAGENTS"])["items"] == visible["items"]
     assert not saved.get(PRESET_MARKER_KEY)
     assert saved[ONBOARDING_COMPLETED_KEY]
@@ -364,3 +377,27 @@ def test_named_only_api_connections_survive_atomic_completion(onboarding, subscr
     assert (saved["OUROBOROS_MODEL"], saved["OUROBOROS_MODEL_LIGHT"], saved["OUROBOROS_MODEL_FALLBACKS"]) == (main, light, "")
     assert saved[ONBOARDING_COMPLETED_KEY]
     assert onboarding.calls["snapshot"] == (2 if subscriptions else 0)
+
+
+LUNA_CATALOG = [
+    {"value": "claudexor::codex=gpt-6.1-sol", "id": "gpt-6.1-sol", "source_id": "codex", "is_default": True,
+     "input_modalities": ["text"]},
+    {"value": "claudexor::codex=gpt-6-luna", "id": "gpt-6-luna", "source_id": "codex", "input_modalities": ["text"]},
+]
+
+
+@pytest.mark.parametrize("main, light", [
+    # Main left to its proposal: an empty Light takes its proposal too, the one the preview showed.
+    ("", "claudexor::codex=gpt-6-luna"),
+    # The owner chose Main: a blank Light beside it stays the owner's "Uses Main".
+    ("claudexor::codex=gpt-6.1-sol", ""),
+], ids=["proposed-main", "authored-main"])
+def test_an_empty_light_takes_its_proposal_only_beside_an_empty_main(onboarding, main, light):
+    onboarding.calls["snapshot_payload"] = {**LIVE_SNAPSHOT, "model_catalog": LUNA_CATALOG}
+    draft = {"subscriptionsConnected": True, "OUROBOROS_MODEL": main, "OUROBOROS_MODEL_LIGHT": ""}
+    preview = onboarding.client.post("/api/onboarding/subagents/preview", json=draft)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["model_settings"].get("OUROBOROS_MODEL_LIGHT", "") == light
+    response = onboarding.client.post("/api/onboarding/complete", json=draft)
+    assert response.status_code == 200, response.text
+    assert onboarding.saved()["OUROBOROS_MODEL_LIGHT"] == light

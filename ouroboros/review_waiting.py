@@ -337,3 +337,114 @@ def append_helper_notice(ctx, messages):
     if questions := question_sources(ctx):
         messages.append({"role": "user", "content": "[Responsible child questions] " + json.dumps(questions)})
         record_question_notice(ctx, questions)
+
+
+def _call(tool, **arguments):
+    return {"tool": tool, "arguments": arguments}
+
+
+def _reference_gap(reason, *, reader=None):
+    return {"status": "reference_unavailable", "reason": reason, **({"reader": reader} if reader else {}),
+            "note": "Read the original review's tool result or settlement notice if retained; do not start a replacement review."}
+
+
+def _plan_wait_redirect(ctx, entry, operation):
+    from ouroboros.plan_record import load_plan_record
+    from ouroboros.tools.plan_ask import state_location
+
+    root, task_id = state_location(ctx)
+    record = load_plan_record(root, task_id)
+    matches = [ask for ask in record.get("asks", ()) if ask.get("retry_key") == entry.review_wave_id and any(
+        seat.get("seat_id") == entry.review_slot_id and seat.get("operation_id") == operation
+        for seat in ask.get("participants", ()))]
+    reader = _call("plan_task")  # no ask/continuation: the existing task's free plan read collects recorded pending seats
+    if len(matches) != 1:
+        return _reference_gap("plan_ask_binding_unavailable", reader=reader)
+    return {"status": "read_existing", "surface": "intention", "ask_id": matches[0]["ask_id"], **reader}
+
+
+def _recorded_wait_wave(ctx, drive, entry, operation):
+    """Joined by exact task/wave/seat/operation, never by the latest review or the shape of a run id."""
+    from ouroboros.review_ledger import load_record, task_record_page
+
+    def matching(record_id):
+        record = load_record(drive, record_id) or {}
+        if (record.get("record_id") == record_id and record.get("task_id") == entry.task_id
+                and record.get("review_wave_id") == entry.review_wave_id and any(
+                    isinstance(row, dict) and row.get("seat_id") == entry.review_slot_id
+                    and row.get("operation_id") == operation for row in record.get("rows") or ())):
+            return record
+        return None
+
+    left = getattr(ctx, "_left_review_wait", None) or {}
+    if (isinstance(left, dict) and left.get("task_id") == entry.task_id and left.get("retry_key") == entry.review_wave_id
+            and left.get("record_id") and (found := matching(left["record_id"]))):
+        return found  # exact checkpoint address, even after rotation
+    # Reuse the task-card's bounded hot projection; never search the archival index or attempt history.
+    page, _ = task_record_page(drive, entry.task_id, hot_only=True)
+    matches = [record for hint in page if hint.get("review_wave_id") == entry.review_wave_id
+               and (record := matching(hint["record_id"])) is not None]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _review_wait_redirect(ctx, entry):
+    from pathlib import Path
+
+    from ouroboros import delegate_custody
+    from ouroboros.review_ledger import ledger_root
+    from ouroboros.store import StoreError
+    from ouroboros.tools.review_collection import reference_for
+
+    try:
+        root = delegate_custody.custody_root(ctx)
+        if entry.ledger_root and Path(entry.ledger_root).resolve() != root.resolve():
+            return _reference_gap("invocation_store_mismatch")
+        invocation = delegate_custody.invocation_record(root, entry.invocation_id) or {}
+        wave, slot = entry.review_wave_id, entry.review_slot_id
+        operation, surface = invocation.get("operation_id"), invocation.get("surface")
+        if not (wave and slot and operation and surface and invocation.get("state") == "started"
+                and invocation.get("task_id") == entry.task_id and invocation.get("run_id") == entry.run_id
+                and invocation.get("review_wave_id") == wave and invocation.get("review_slot_id") == slot
+                and invocation.get("slot_id") == slot and invocation.get("review_skill", "") == entry.review_skill):
+            return _reference_gap("review_invocation_binding_unavailable")
+        if surface == "plan_review":
+            return _plan_wait_redirect(ctx, entry, operation)
+        if surface not in {"multi_model_review", "scope_review", "skill_review"}:
+            return _reference_gap("review_surface_has_no_reference_reader")
+        record = _recorded_wait_wave(ctx, ledger_root(ctx), entry, operation)
+    except (OSError, StoreError, TypeError, ValueError):
+        return _reference_gap("review_evidence_unreadable")
+    if record is None:
+        return _reference_gap("review_wave_binding_unavailable",
+                              reader=_call("review_status", task_id=entry.task_id, include_raw=True))
+    stored = _call("query_data", op="json", kind="review_ledger", ids=[record["record_id"]])
+    kind = record.get("surface")
+    if kind == "skill":
+        # skill_review(reference-only) currently enters normal review, NOT the continuation collector.
+        return {"status": "read_existing", "surface": "skill", **stored,
+                "note": "This reads the saved skill review; it does not collect a still-running seat."}
+    if kind not in {"commit_gate", "change", "preflight", "result"}:
+        return _reference_gap("review_surface_has_no_reference_collector", reader=stored)
+    reference = reference_for(record)
+    if kind == "commit_gate":
+        # This is the original handback's minimal shape. The collector still resolves the original attempt
+        # and repository, and refuses rather than dispatches when those facts are no longer available.
+        reference["surface"] = "commit"
+        wait = record.get("waiting") or {}
+        if (isinstance(wait, dict) and wait.get("record_id") == record["record_id"] and wait.get("task_id") == entry.task_id
+                and wait.get("retry_key") == wave and type(wait.get("attempt")) is int and wait["attempt"] > 0):
+            reference["attempt"] = wait["attempt"]
+    return {"status": "collect_existing", "surface": kind, **_call(
+        "commit_reviewed" if kind == "commit_gate" else "review_change", review_reference=reference),
+        "reader": stored}
+
+
+def review_wait_refusal(ctx, tool, entries):
+    """Refuse a selected owned reviewer before the ordinary sleep; never collect or change its panel here."""
+    from ouroboros.delegate_shared import _fail
+
+    return _fail(tool, "review_panel_owns_run", (
+        "No selected source was waited on. Review runs belong to their panel, not ordinary supervision. "
+        "Use the reported collector or reader for the existing review; wait again on ordinary sources separately."),
+        slept=False, review_runs=[{"run_id": run.run_id, "collection": _review_wait_redirect(ctx, run)}
+                                  for run in entries if run.review_owned and run.task_id == str(ctx.task_id)])

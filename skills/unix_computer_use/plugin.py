@@ -4,10 +4,11 @@ Platform requirements, coordinate mapping, human-observation and input receipt c
 live in SKILL.md; this module discovers installed tools rather than downloading binaries.
 WXGA capture follows Anthropic's computer-use guidance.
 
-Permissions (honest): ``screencapture``/``cliclick`` exit 0 even when a macOS grant is
-missing (capturing only the wallpaper, or dropping synthetic input). ``capabilities``
-reads the grants through prompt-free preflights in the native helper, and an input
-receipt is demoted to a failure when cliclick itself warns that the event was dropped.
+Permissions (honest): ``screencapture`` exits 0 even when the Screen Recording grant is
+missing (capturing only the wallpaper), so a local display capture first reads that grant
+(prompt-free, with the display list) and refuses without it. macOS input is posted as
+CoreGraphics events by ``input_events.js`` (``mac_input``), which checks the right to post
+before anything and refuses without it; ``capabilities`` reads all grants the same way.
 Wayland support depends on ydotool (input) and grim/gnome-screenshot (capture); X11
 uses xdotool/scrot. Windows desktops use the separate windows_computer_use skill.
 
@@ -16,9 +17,9 @@ Input receipt semantics and partial-failure limits: see SKILL.md, "Input receipt
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-import hashlib
 import os
 import pathlib
 import platform
@@ -32,10 +33,19 @@ import uuid
 from types import MappingProxyType
 from typing import Any
 
+from . import mac_input
+from .capture import CaptureMixin
 from .place import PlaceMixin
 from .remote import (  # noqa: F401 - re-exported names the tests and the key/hold_key remote branches use
-    _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, PASTE_CHORD_ARGV,
-    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys, command_chord_argv, PBCOPY_LOCALE,
+    _MAX_REMOTE_SHOT_BYTES,
+    _OSWORLD_PKGS_PREFIX,
+    _PYAUTOGUI_BASE_ALIASES,
+    _PYAUTOGUI_MODS,
+    PASTE_CHORD_ARGV,
+    PBCOPY_LOCALE,
+    RemoteBackends,
+    _osworld_result_ok,
+    command_chord_argv,
 )
 
 _TIMEOUT_SEC = 10
@@ -48,6 +58,7 @@ _TRANSFORM_FILE = "coord_transform.json"
 _CONNECTIONS_FILE = "connections.json"
 _ACTIVE_CONNECTION_FILE = "active_connection.txt"
 _REMOTE_BACKENDS = {"osworld_http", "ssh_macos"}
+_DISPLAY_CAPTURE = object()  # Only an omitted window selects the display. A malformed target never widens capture.
 
 
 def _png_dimensions(path: pathlib.Path) -> tuple[int, int]:
@@ -94,7 +105,7 @@ def _png_intact(path: pathlib.Path) -> bool:
 def _macos_logical_size() -> tuple[int, int]:
     """Logical (point) DESKTOP size via AppleScript; (0, 0) on failure.
 
-    cliclick consumes logical points while ``screencapture`` writes physical
+    macOS input consumes logical points while ``screencapture`` writes physical
     pixels; exposing both recovers the Retina scale. On a MULTI-DISPLAY Mac
     this is the union of all displays while a no-argument ``screencapture``
     captures only the main display — the derived scale is then approximate.
@@ -196,9 +207,6 @@ def _coerce_point(x: Any, y: Any) -> tuple[int, int]:
     raise ValueError(f"cannot parse coordinates from x={x!r}, y={y!r}")
 
 
-_cc = cliclick_point  # the same cliclick point format locally and on a Mac over SSH
-
-
 def _run(cmd: list[str], *, timeout: int = _TIMEOUT_SEC) -> tuple[int, str, str]:
     proc = subprocess.run(
         cmd,
@@ -263,7 +271,7 @@ _MAC_MODS = {
 _ALL_MODS = {**_MAC_MODS, "super": "super", "meta": "meta"}
 
 
-class _ComputerUse(PlaceMixin, RemoteBackends):
+class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
     _MAX_IMAGE_W = _MAX_IMAGE_W
     _MAX_IMAGE_H = _MAX_IMAGE_H
 
@@ -485,7 +493,7 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                 "grim": bool(_which("grim")),
             },
             "input": {
-                "cliclick": bool(_which("cliclick")),
+                "input_events": bool(_which("osascript")),
                 "xdotool": bool(_which("xdotool")),
                 "ydotool": bool(_which("ydotool")),
                 "wtype": bool(_which("wtype")),
@@ -497,11 +505,10 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             },
             "notes": [
                 "ALL actions are for supervised, low-risk local workflows under human observation.",
-                "macOS requires Screen Recording for screenshot and Accessibility for input.",
-                "macOS grants are read by prompt-free preflights (see permissions); a dropped input is reported "
-                "from the helper's own warning. Nothing here prompts for a grant.",
-                "macOS scroll is unsupported (cliclick has no scroll-wheel command); use key paging instead.",
-                "macOS middle-click and mouse_down/up for non-left buttons are unsupported via cliclick.",
+                "macOS requires Screen Recording for screenshot and Accessibility (post_events) for input; "
+                "input is posted as CoreGraphics events by the skill's own JavaScript for Automation program.",
+                "macOS grants are read by prompt-free preflights (see permissions); without one the tool refuses "
+                "before capturing or posting (refusal says which grant). Nothing here prompts for a grant.",
                 "Linux X11 needs xdotool (input) + gnome-screenshot/scrot (capture).",
                 "Linux Wayland needs ydotool (input; ydotoold running) or wtype (typing only) "
                 "+ grim or gnome-screenshot (capture). xdotool does NOT work on Wayland.",
@@ -750,11 +757,14 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         return dest, (got_w or new_w), (got_h or new_h)
 
     def screenshot(self, *, job_id: str = "manual", max_width: int = _MAX_IMAGE_W,
-                   max_height: int = _MAX_IMAGE_H, app: str = "") -> str:
+                   max_height: int = _MAX_IMAGE_H, app: str = "", window: Any = _DISPLAY_CAPTURE) -> str:
         connection = self._connection_snapshot()
         _conn_name, conn = connection
         if conn.get("disabled"):
             return self._disabled_connection_error(_conn_name, conn)
+        if window is not _DISPLAY_CAPTURE:  # before any remote or display path
+            return self._window_screenshot(connection=connection, job_id=job_id, app=app, window=window,
+                                           max_width=max_width, max_height=max_height)
         backend = str(conn.get("backend") or "local").lower()
         if backend in ("osworld_http", "ssh_macos"):
             shot = (self._osworld_screenshot if backend == "osworld_http" else self._ssh_macos_screenshot)(
@@ -776,7 +786,8 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         if plat == "macos" and _which("screencapture"):
             display = self._capture_display(app)
             if "error" in display:
-                return _json({"ok": False, "error": display["error"]})
+                return _json({"ok": False, **{k: display[k] for k in ("reason", "error", "note") if k in display},
+                              **({"refusal": display["refusal"]} if "refusal" in display else {})})
             cmd = ["screencapture", "-x", *(["-D", str(display["index"])] if not display.get("main", True) else []), str(out_path)]
         elif plat == "linux" and session == "wayland" and _which("grim"):
             cmd = ["grim", str(out_path)]
@@ -831,13 +842,12 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                     "image pixels to logical points."
                 )
             else:
-                # Logical size unavailable (e.g. Automation TCC denied): the
-                # pixel-based transform would be 2x off for cliclick's logical
-                # points on Retina. Flag it honestly instead of silently lying.
+                # Logical size unavailable (e.g. Automation TCC denied): the pixel-based
+                # transform would be 2x off for logical-point input on Retina. Say so.
                 approx = True
                 scale_note = (
                     "WARNING: macOS logical desktop size unavailable — the "
-                    "transform maps to PIXELS, but cliclick consumes LOGICAL "
+                    "transform maps to PIXELS, but macOS input consumes LOGICAL "
                     "points (2x off on Retina). Grant Automation access or "
                     "prefer ax_tree marks with raw=true."
                 )
@@ -896,42 +906,11 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                     + scale_note
                     + (" Multi-display scale is approximate; prefer ax_tree marks." if approx else "")
                 )
-        return _json(result)
+        return _json(mac_input.proved(result, "screen_recording") if display.get("screen_recording") == "granted" else result)
 
     # ------------------------------------------------------------------
     # pointer actions
     # ------------------------------------------------------------------
-
-    def _capture_display(self, app: str = "") -> dict[str, Any]:
-        """The display to capture: the main one, or the one holding ``app``'s front window (bounds from CoreGraphics).
-
-        The answer says how the display was chosen (``selected_by``: default, app, or fallback when the RESOLVED app's
-        window could not be located) so a main-display capture is never presented as the named app's display. With a
-        display list, an app not resolved (refused, or no answer naming its ``target``) is an ``error``, uncaptured;
-        without one the app is not looked up (``app_display_unread``): the default capture stays capture-only."""
-        res = self._native("displays", timeout=10)
-        displays = res.get("displays") if res.get("ok") else None
-        query = str(app or "").strip()
-        if not displays:
-            reason = res.get("error") or "no display list"
-            return {"display_unread": reason, **({"app_display_unread": reason} if query else {})}
-        chosen = {**next((d for d in displays if d.get("main")), displays[0]), "selected_by": "default"}
-        if query:
-            tree = self._native("observe", json.dumps({"app": query, "max_nodes": 1, "timeout_ms": 1500}), timeout=15)
-            target = tree.get("target")
-            if tree.get("stage") == "resolve" or not isinstance(target, dict):  # unresolved or unknown: never a fallback
-                return {"error": self._target_error(query, tree)}
-            node = (tree.get("nodes") or [{}])[0] if tree.get("ok") else {}
-            if "x" in node and "w" in node:
-                cx, cy = node["x"] + node["w"] // 2, node["y"] + node["h"] // 2
-                for d in displays:
-                    if d["x"] <= cx < d["x"] + d["width"] and d["y"] <= cy < d["y"] + d["height"]:
-                        return {**d, "selected_by": "app", "app": target}
-                chosen["app_window_unread"] = f"the window's centre ({cx},{cy}) lies on no active display"
-            else:
-                chosen["app_window_unread"] = str(tree.get("error") or tree.get("reason") or "the window's bounds could not be read")
-            chosen["selected_by"] = "fallback"
-        return chosen
 
     def _backend_unavailable(self, action: str) -> str:
         return _json({
@@ -961,18 +940,8 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                 f"pyautogui.click({ix}, {iy}, clicks={repeat}, interval=0.1, button={button!r})",
                 note=note, target=app, raise_policy=raise_policy,
             )
-        if plat == "macos" and _which("cliclick"):
-            if button == "middle":
-                return _json({"ok": False, "error": "middle-click unsupported on macOS (cliclick has no middle button)"})
-            if button == "right":
-                op = "rc"
-            elif triple:
-                op = "tc"
-            elif double:
-                op = "dc"
-            else:
-                op = "c"
-            cmd = ["cliclick", f"{op}:{_cc(ix, iy)}"]
+        if plat == "macos" and _which("osascript"):
+            cmd = mac_input.argv([{"op": "click", "x": ix, "y": iy, "button": button, "count": repeat}])
         elif plat == "linux" and _session_type() == "wayland" and _which("ydotool"):
             button_code = {"left": "0xC0", "middle": "0xC2", "right": "0xC1"}[button]
             return self._exec_sequence([
@@ -996,8 +965,8 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             return _json({"ok": False, "reason": "invalid_observation", "error": str(exc), "dispatched": False})
         if name != "local":
             return self._remote_pyautogui(conn, f"pyautogui.moveTo({ix}, {iy})", note=note)
-        if plat == "macos" and _which("cliclick"):
-            cmd = ["cliclick", f"m:{_cc(ix, iy)}"]
+        if plat == "macos" and _which("osascript"):
+            cmd = mac_input.argv([{"op": "move", "x": ix, "y": iy}])
         elif plat == "linux" and _session_type() == "wayland" and _which("ydotool"):
             cmd = ["ydotool", "mousemove", "--absolute", "-x", str(ix), "-y", str(iy)]
         elif plat == "linux" and _which("xdotool"):
@@ -1023,8 +992,8 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                 f"pyautogui.moveTo({sx_}, {sy_}); pyautogui.dragTo({ex_}, {ey_}, duration=0.5, button='left')",
                 note=note, target=app, raise_policy=raise_policy,
             )
-        if plat == "macos" and _which("cliclick"):
-            cmd = ["cliclick", f"dd:{_cc(sx_, sy_)}", f"dm:{_cc(ex_, ey_)}", f"du:{_cc(ex_, ey_)}"]
+        if plat == "macos" and _which("osascript"):
+            cmd = mac_input.argv([{"op": "drag", "from": [sx_, sy_], "to": [ex_, ey_], "button": "left"}])
         elif plat == "linux" and _session_type() == "wayland" and _which("ydotool"):
             # ydotool encodes press/release in the button byte: 0x40|btn=down,
             # 0x80|btn=up (0xC0|btn = full click). There are no --down/--up flags.
@@ -1080,12 +1049,8 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             code = (f"pyautogui.{fn}(x={ix}, y={iy}, button={button!r})" if has_xy
                     else f"pyautogui.{fn}(button={button!r})")
             return self._remote_pyautogui(conn, code, note=note, target=app, raise_policy=raise_policy)
-        if plat == "macos" and _which("cliclick"):
-            if button != "left":
-                return _json({"ok": False, "error": "mouse_down/up supports only the left button on macOS (cliclick dd/du)"})
-            op = "dd" if press else "du"
-            target = f"{op}:{_cc(ix, iy)}" if has_xy else f"{op}:."
-            cmd = ["cliclick", target]
+        if plat == "macos" and _which("osascript"):
+            cmd = mac_input.argv([{"op": "button", "down": press, "button": button, **({"x": ix, "y": iy} if has_xy else {})}])
         elif plat == "linux" and _session_type() == "wayland" and _which("ydotool"):
             # press = 0x40|btn, release = 0x80|btn (left +0, right +1, middle +2).
             offset = {"left": 0, "right": 1, "middle": 2}[button]
@@ -1111,17 +1076,14 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         plat = _platform()
         if name != "local":
             return self._remote_pyautogui(conn, "print('pos', pyautogui.position())", input_effect=False)
-        if plat == "macos" and _which("cliclick"):
-            try:
-                rc, out, err = _run(["cliclick", "p"])
+        if plat == "macos" and _which("osascript"):
+            try:  # the pointer is read, never moved: no event is posted and no grant is needed
+                rc, out, err = _run(mac_input.argv([{"op": "position"}]))
+                at = json.loads(out) if rc == 0 else {}
+                return _json({"ok": True, "x": int(at["x"]), "y": int(at["y"]), "coordinate_space": "input (macOS logical points)"})
             except Exception as exc:  # noqa: BLE001
-                return _json({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
-            if rc == 0:
-                nums = [p for p in out.replace(",", " ").split() if p.lstrip("-").isdigit()]
-                if len(nums) >= 2:
-                    return _json({"ok": True, "x": int(nums[0]), "y": int(nums[1]),
-                                  "coordinate_space": "input (macOS logical points)"})
-            return _json({"ok": False, "error": err.strip() or out.strip() or f"exit {rc}"})
+                return _json({"ok": False, "error": f"{type(exc).__name__}: {exc}" if not isinstance(exc, KeyError)
+                              else (err.strip() or out.strip() or f"exit {rc}")})
         if plat == "linux" and _which("xdotool"):
             try:
                 rc, out, err = _run(["xdotool", "getmouselocation"])
@@ -1155,8 +1117,7 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         if name != "local":
             return self._remote_type_text(conn, text, interval_ms, target=app, via=via, raise_policy=raise_policy)
         if via == "paste":
-            # The model's choice for long or non-ASCII text (cliclick types ~70 chars/s and hit the 18 s cap on
-            # 1,281 characters): write the clipboard, then paste. The clipboard is replaced, and said so; it is
+            # The model's choice for long text or an application that ignores typed Unicode: write the clipboard, then paste. The clipboard is replaced, and said so; it is
             # written only after the target was verified in front, so a refusal leaves the clipboard alone. The
             # chord is Command + the key that gives V under Command in the active layout (paste_chord.js, the same
             # program over SSH), never the layout's typed "v".
@@ -1168,8 +1129,13 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                                         raise_policy=raise_policy, connection=connection,
                                         extra={"method": "paste", "clipboard_replaced": True, "chars": len(text)})
             return _json({"ok": False, "error": f"via=paste is supported on local and SSH macOS only (platform={plat})"})
-        if plat == "macos" and _which("cliclick"):
-            cmd = ["cliclick", f"t:{text}"]
+        if plat == "macos" and _which("osascript"):
+            # Each grapheme is one key event pair carrying its own string (#63): any layout, any script; the receipt
+            # says so (method, chars_sent, override_only). The program has its own deadline below the helper timeout.
+            seconds = mac_input.type_seconds(text, interval_ms)
+            cmd = mac_input.argv([{"op": "type", "text": text, "interval_ms": max(0, int(interval_ms or 0))}],
+                                 budget_ms=seconds * 1000 - 2000, until=mac_input.deadline_in(seconds))
+            return self._exec_input(cmd, timeout=seconds, app=app, raise_policy=raise_policy, connection=connection)
         elif plat == "linux" and _session_type() == "wayland" and (_which("ydotool") or _which("wtype")):
             # `--` terminates option parsing so text starting with '-' is typed,
             # not parsed as flags.
@@ -1231,8 +1197,6 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             # A capital under a held modifier would add an unnamed Shift (cmd+S = cmd+s); OSWorld keeps its pyautogui letter.
             base = low if mods and len(low) == 1 and backend != "osworld_http" else base
             if backend in ("macos", "ssh_macos"):
-                if backend == "ssh_macos" and hold_ms is not None:
-                    raise ValueError("hold_key unsupported on ssh_macos")
                 aliases = {**_MAC_MODS, "super": "cmd", "meta": "cmd"} if backend == "ssh_macos" else _MAC_MODS
                 if any(m not in aliases for m in mods):
                     raise ValueError(f"modifier(s) {mods} are not available on macOS")
@@ -1241,8 +1205,9 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                     # Menus match the Command plane, not the typing plane; reuse paste's layout resolver.
                     prepared.append(command_chord_argv(base, remote=backend == "ssh_macos"))
                 else:
-                    args = cliclick_keys(held, aliases.get(low, low) if hold_ms else base, hold_ms=hold_ms)
-                    prepared.append(["cliclick", *args])
+                    op = mac_input.key_op(held, aliases.get(low, low) if hold_ms or low in aliases else base, hold_ms=hold_ms)
+                    timeout = max(12, hold_ms // 1000 + 8) if hold_ms else (30 if backend == "ssh_macos" else _TIMEOUT_SEC)
+                    prepared.append(mac_input.argv([op], remote=backend == "ssh_macos", budget_ms=timeout * 1000 - 2000))
                 if name == "local" and not _which(prepared[-1][0]):
                     raise ValueError(f"no supported key backend found ({prepared[-1][0]} is not installed)")
             elif backend == "osworld_http":
@@ -1270,17 +1235,19 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             self._validate_remote_keys(conn, remote_tokens)
         return prepared
 
-    def _send_key(self, prepared, connection, *, ctx, recheck=False, raise_policy="allow", timeout=None, keys=""):
+    def _send_key(self, prepared, connection, *, ctx, recheck=False, raise_policy="allow", timeout=None, keys="", ask_stop=False):
         timeout = timeout or (30 if connection[0] != "local" else _TIMEOUT_SEC)
         # A Command chord's receipt says so: its refusal (no key, no right to post) is a known "nothing was posted".
-        method = {"method": "command_chord"} if isinstance(prepared, list) and prepared[0] == "osascript" else {}
+        ops = mac_input.ops_of(prepared)
+        method = {"method": mac_input.method_of(ops)} if ops else (
+            {"method": "command_chord"} if isinstance(prepared, list) and prepared[0] == "osascript" else {})
         if connection[0] != "local":
             import shlex
             ssh = shlex.join(prepared) if isinstance(prepared, list) else ""
             return self._remote_input(connection[1], prepared if not ssh else "", ssh_command=ssh, note=method or None,
-                                      ctx=ctx, later=recheck, raise_policy=raise_policy, timeout=timeout)
+                                      ctx=ctx, later=recheck, ask_stop=ask_stop, raise_policy=raise_policy, timeout=timeout)
         return self._exec_input_dict(prepared, ctx=ctx, recheck=recheck, extra={"keys": keys, **method},
-                                     raise_policy=raise_policy, timeout=timeout)
+                                     raise_policy=raise_policy, timeout=timeout, ask_stop=ask_stop)
 
     def key(self, *, keys: str, app: str = "", raise_policy: str = "allow") -> str:
         combo = str(keys or "").strip()
@@ -1293,18 +1260,23 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         except ValueError as exc:
             return _json({"ok": False, "reason": "invalid_key_sequence", "error": str(exc),
                           "steps_done": 0, "steps_total": len(steps), "dispatched": False, "note": "the input was not sent"})
-        # The target is brought forward once; before every later step the front is read again and a targeted
-        # call stops, sending nothing more, when its application is no longer in front. The aggregate names
-        # every step's recipient when they differ: the 27.10 shape (cmd+tab, then an arrow) must not read as
-        # "both went to the same app".
-        refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection)
+        # Raising the target and sending each chord are independent actions of this call.
+        refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection, ask_stop=True)
         if refusal:
-            return _json(refusal)
+            if refusal.get("reason") == "stopped" and len(steps) > 1:
+                refusal.update(steps_done=0, steps_total=len(steps), keys=combo)
+            return self._key_result(refusal)
+        looked = len(prepared) > 1 and mac_input.resolve_argv(prepared)[0] is not None  # a lookup between switch and step 1
+        if looked and (unknown := self._unresolved_keys(prepared, connection)):  # the target's layout, before any step
+            if (ctx.get("target") or {}).get("activated"):
+                unknown.update(observed_effect=True, activation_done=True)  # the switch ran before the refusal
+            unknown = self._finish(unknown, ctx, **({"after": None} if connection[0] != "local" else {}))
+            return _json({**unknown, "steps_done": 0, "steps_total": len(steps), "keys": combo})
         if len(prepared) == 1:
-            return _json(self._send_key(prepared[0], connection, ctx=ctx, raise_policy=raise_policy, keys=combo))
+            return self._key_result(self._send_key(prepared[0], connection, ctx=ctx, raise_policy=raise_policy, keys=combo, ask_stop=True))
         results: list[dict[str, Any]] = []
         for index, command in enumerate(prepared):
-            results.append(self._send_key(command, connection, ctx=ctx, recheck=index > 0,
+            results.append(self._send_key(command, connection, ctx=ctx, recheck=index > 0 or looked, ask_stop=True,
                                            raise_policy=raise_policy, keys=steps[index]))
             if not results[-1].get("ok"):
                 break
@@ -1312,7 +1284,7 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                       for r in results if r.get("dispatched") is True]  # the dispatched steps, whether or not their front was read
         last = results[-1]
         if last.get("ok"):
-            payload: dict[str, Any] = {"ok": True, "sequence": steps, "steps": len(steps), "keys": combo, "dispatched": True}
+            payload: dict[str, Any] = mac_input.with_grants({"ok": True, "sequence": steps, "steps": len(steps), "keys": combo, "dispatched": True}, results)
         else:
             done = len(results) - 1
             dispatched = last.get("dispatched")  # the failing step's helper ran (its outcome may be partial)
@@ -1321,7 +1293,7 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
             outcome = "failed" if dispatched else ("not sent" if dispatched is False else "outcome unknown, the remote call did not answer")
             payload = {"ok": False, "error": f"step {steps[done]!r} {outcome}: {last.get('error')}",
                        "steps_done": done, "steps_total": len(steps), "keys": combo, "dispatched": dispatched}
-            for key in ("reason", "candidates", "front", "cmd", "returncode", "permission", "untyped", "transport_failed"):
+            for key in ("reason", "candidates", "front", "cmd", "returncode", "permission", "refusal", "untyped", "transport_failed"):
                 if key in last:
                     payload[key] = last[key]
         # Each step's own receipt mark survives the sequence, a failed step's included; so does the switch that
@@ -1333,8 +1305,7 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         elif (ctx.get("target") or {}).get("activated"):
             payload["observed_effect"] = True
             payload["activation_done"] = True
-        if not isinstance(ctx.get("delivered_to"), dict) and isinstance(results[0].get("delivered_to"), dict):
-            ctx["delivered_to"] = results[0]["delivered_to"]  # a remote probe read it in the first step
+        self._first_front(ctx, results[0], reread=looked and connection[0] == "local")  # who got (or refused) step 1
         stderr = "\n".join(r.get("helper_stderr") or "" for r in results).strip()
         payload = self._finish(payload, ctx, stderr, after=ctx.get("front_last"))
         if not last.get("ok") and last.get("reason") in ("permission_denied", "untypable_characters") and last.get("note"):
@@ -1349,7 +1320,21 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                 payload["note"] = last["note"]
         if len({json.dumps(r, sort_keys=True) if isinstance(r, dict) else "unknown" for r in recipients}) > 1:
             payload["steps_delivered_to"] = recipients
-        return _json(payload)
+        return self._key_result(payload)
+
+    def _unresolved_keys(self, prepared, connection) -> dict[str, Any] | None:
+        """A Mac key sequence's characters, all looked up by one call that posts nothing in the layout of the target
+        now in front, so a character no key gives (or an unread lookup) refuses the sequence before its first step."""
+        name, conn = connection
+        cmd, _chars, _command = mac_input.resolve_argv(prepared, remote=name != "local")
+        if cmd is None:
+            return None
+        import shlex
+        try:
+            rc, out, err = self._try(cmd) if name == "local" else self._ssh_run(conn, shlex.join(cmd), timeout=30)
+        except Exception as exc:  # noqa: BLE001 - a lost lookup is a refusal with its receipt, never a crashed tool
+            rc, out, err = 1, "", f"{type(exc).__name__}: {exc}"
+        return mac_input.resolve_refusal(rc, out, err)
 
     def hold_key(self, *, keys: str, duration_ms: int = 500, app: str = "", raise_policy: str = "allow") -> str:
         connection = self._connection_snapshot()
@@ -1411,16 +1396,13 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                 delta = amount if direction == "right" else -amount
                 return self._remote_pyautogui(conn, f"pyautogui.hscroll({delta})", target=app, raise_policy=raise_policy)
             return _json({"ok": False, "error": f"unknown scroll direction {direction!r} (use up/down/left/right)"})
-        if plat == "macos":
-            # cliclick has NO scroll-wheel command — its `w:` is WAIT. Faking it
-            # returned ok:true while nothing scrolled. Be honest: page via the
-            # `key` tool (page-down / arrow keys) on macOS instead.
-            return _json({
-                "ok": False,
-                "error": "scroll is unsupported on macOS (no cliclick scroll-wheel command); "
-                         "use the key tool with page-down/page-up or arrow keys instead",
-                "capabilities": self._capabilities(),
-            })
+        if plat == "macos" and _which("osascript"):
+            # Wheel lines at the pointer, one per detent (the X11 and pyautogui step): positive dy is up, dx left.
+            delta = {"up": {"dy": amount}, "down": {"dy": -amount}, "left": {"dx": amount}, "right": {"dx": -amount}}.get(direction)
+            if delta is None:
+                return _json({"ok": False, "error": f"unknown scroll direction {direction!r} (use up/down/left/right)"})
+            return self._exec_input(mac_input.argv([{"op": "scroll", **delta}]), app=app, raise_policy=raise_policy,
+                                    connection=connection)
         if plat == "linux" and _session_type() == "wayland" and _which("ydotool"):
             # ydotool wheel: positive y = up, negative = down (REL_WHEEL units).
             delta = amount if direction == "up" else -amount
@@ -1458,13 +1440,15 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                                            raise_policy=raise_policy, connection=connection))
 
     def _exec_input_dict(self, cmd: list[str], *, timeout: int = _TIMEOUT_SEC, extra: dict[str, Any] | None = None,
-                         app: str = "", ctx: dict[str, Any] | None = None, recheck: bool = False,
+                         app: str = "", ctx: dict[str, Any] | None = None, recheck: bool = False, ask_stop: bool = False,
                          before: Any = None, raise_policy: str = "allow", connection=None) -> dict[str, Any]:
         """One input process. Its successful exit is the receipt (``observed_effect``); a failed or timed-out
         process has an unknown outcome and carries none. With ``app`` the target is brought forward and verified
-        first; nothing is sent when that fails. With ``ctx`` (a later step of one call) the earlier switch is
-        reused and ``recheck`` reads the front again first. ``before`` runs after the target is verified and
-        before the input (the clipboard write of via=paste); its error message cancels the input."""
+        first; nothing is sent when that fails. With ``ctx`` (a later step of one call) the earlier switch is reused
+        and ``recheck`` reads the front again first. ``before`` runs after the target is verified and before the input
+        (the clipboard write of via=paste); its error cancels the input. ``ask_stop``: a key chord asks the Stop last."""
+        if ops := mac_input.ops_of(cmd):  # the macOS input program: its receipt names the method, its refusal is "not sent"
+            extra = {"method": mac_input.method_of(ops), **(extra or {})}
         if ctx is None:
             refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection)
             if refusal:
@@ -1487,10 +1471,13 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                     payload["observed_effect"] = True  # the switch ran before the input was cancelled
                     payload["activation_done"] = True
                 return self._finish(payload, step)
+        if ask_stop and (stopped := self._stop_refusal(step, first=not recheck)):
+            return stopped  # a key chord, the first included: the host's Stop, read last before its input
+        cmd, timeout = mac_input.fit(cmd, timeout)  # what is left of the call's time after the switch
         rc, stdout, stderr = self._try(cmd, timeout=timeout)
         if rc != 0:
-            payload = {"ok": False, "error": stderr.strip() or stdout.strip() or f"exit {rc}", "cmd": cmd,
-                       "dispatched": rc != _NOT_LAUNCHED}
+            payload = {"ok": False, "error": stderr.strip() or stdout.strip() or f"exit {rc}", "cmd": mac_input.shown(cmd),
+                       "dispatched": rc != _NOT_LAUNCHED, **mac_input.answer_fields("", stderr)}
             if rc != _NOT_LAUNCHED:
                 payload["returncode"] = rc
             else:
@@ -1506,10 +1493,11 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
                     payload["observed_effect"] = True
                     payload["clipboard_done"] = True
         else:
-            payload = {"ok": True, "cmd": cmd, "observed_effect": True, "dispatched": True}
+            payload = {"ok": True, "cmd": mac_input.shown(cmd), "observed_effect": True, "dispatched": True,
+                       **mac_input.answer_fields(stdout)}
             if extra:
                 payload.update(extra)
-        payload = self._finish(payload, step, stderr)
+        payload = mac_input.posted_effect(self._finish(mac_input.posted_effect(payload), step, stderr))
         ctx["front_last"] = step.get("front_last")  # the call's last front read, for a sequence's aggregate
         return payload
 
@@ -1570,7 +1558,7 @@ def register(api: Any) -> None:
     api.register_tool("activate_connection", impl.activate_connection, description="Select a configured connection as the active target for screenshot/input tools.", schema={"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, timeout_sec=5)
     api.register_tool("use_local", lambda: impl.use_local(), description="Return computer-use tools to the local desktop backend.", schema={"type": "object", "properties": {}}, timeout_sec=5)
     api.register_tool("capabilities", lambda: impl.capabilities(), description="Who is in front, which OS grants this process holds (prompt-free preflights on macOS), whether app= targeting works here, and the installed backends.", schema={"type": "object", "properties": {}}, timeout_sec=45)
-    api.register_tool("screenshot", impl.screenshot, description="Capture the main display (or, with app=, the display holding that app's window on macOS; display.selected_by says which was captured), downscale to <=WXGA. mapped_input_available=true supplies an observation_id for coordinate input; otherwise capture-only, without a mapping. The image is attached automatically; an engine without vision gets its path.", schema={"type": "object", "properties": {"job_id": {"type": "string", "default": "manual"}, "max_width": {"type": "integer", "default": _MAX_IMAGE_W}, "max_height": {"type": "integer", "default": _MAX_IMAGE_H}, **_app}}, timeout_sec=90)
+    api.register_tool("screenshot", impl.screenshot, description="Capture the main display (or, with app=, the display holding that app's window on macOS; display.selected_by says which was captured), downscale to <=WXGA. mapped_input_available=true supplies an observation_id for coordinate input; otherwise capture-only, without a mapping. window= with app= (local macOS 14+) captures that one window even when covered, capture-only, never a display. The image is attached automatically; an engine without vision gets its path.", schema={"type": "object", "properties": {"job_id": {"type": "string", "default": "manual"}, "max_width": {"type": "integer", "default": _MAX_IMAGE_W}, "max_height": {"type": "integer", "default": _MAX_IMAGE_H}, **_app, "window": {"type": ["integer", "string"], "description": "Positive integer window ID or exact title string. Omit for a display capture."}}}, timeout_sec=90)
     # y is deliberately NOT in `required` for click/move: models recurringly emit the
     # whole point inside x ("663, 500") with y omitted, and a required-field rejection
     # then fires BEFORE the handler's _coerce_point can recover the pair.
@@ -1583,13 +1571,13 @@ def register(api: Any) -> None:
     # start_y/end_y are recoverable from a pair packed into start_x/end_x, so only
     # the x-side fields stay required (same rationale as click/move above).
     api.register_tool("left_click_drag", impl.left_click_drag, description="Drag with the left button from start to end; observation_id required unless raw=true. " + _targeted, schema={"type": "object", "properties": {"start_x": {"type": "integer"}, "start_y": {"type": "integer"}, "end_x": {"type": "integer"}, "end_y": {"type": "integer"}, "raw": {"type": "boolean", "default": False}, "observation_id": {"type": "string", "default": ""}, **_input_app}, "required": ["start_x", "end_x"]}, timeout_sec=90)
-    api.register_tool("mouse_down", impl.mouse_down, description="Press and hold a mouse button (left only on macOS) at the pointer or at screenshot-space coordinates. " + _targeted + " With coordinates, observation_id is required unless raw=true.", schema={"type": "object", "properties": {**_xy, "button": {"type": "string", "default": "left"}, **_input_app}}, timeout_sec=90)
+    api.register_tool("mouse_down", impl.mouse_down, description="Press and hold a mouse button (left, right or middle) at the pointer or at screenshot-space coordinates. " + _targeted + " With coordinates, observation_id is required unless raw=true.", schema={"type": "object", "properties": {**_xy, "button": {"type": "string", "default": "left"}, **_input_app}}, timeout_sec=90)
     api.register_tool("mouse_up", impl.mouse_up, description="Release a held mouse button at the pointer without coordinates or observation_id. With screenshot-space coordinates, observation_id is required unless raw=true. Never changes which app is in front.", schema={"type": "object", "properties": {**_xy, "button": {"type": "string", "default": "left"}}}, timeout_sec=60)
     api.register_tool("cursor_position", lambda: impl.cursor_position(), description="Report the current pointer position in native input coordinates.", schema={"type": "object", "properties": {}}, timeout_sec=10)
-    api.register_tool("type_text", impl.type_text, description="Type text into the focused field of the frontmost app, or of app=. raise_policy=never requires app already in front and never activates it. via=paste writes the clipboard and pastes (long or non-ASCII text on a local or SSH Mac; the clipboard is replaced); an OSWorld guest pastes such text through its clipboard by itself.", schema={"type": "object", "properties": {"text": {"type": "string"}, "interval_ms": {"type": "integer", "default": 0}, **_input_app, "via": {"type": "string", "default": ""}}, "required": ["text"]}, timeout_sec=180)
-    api.register_tool("key", impl.key, description="Press keys in the front app or app= (verified; else nothing sent). Result: who was in front, not that the app reacted. Combos with '+', sequences with spaces (cmd+s, ctrl+l, page-down, 'down down return'); on a Mac, Command plus one character presses the key giving it under Command (cmd+g, not a layout's own cmd+п); other combos type through the layout and may differ; all steps are validated before activation/input and a targeted sequence stops when its app leaves the front. raise_policy=never requires app already in front and never activates it. Scriptable apps are better driven by their own commands through run_command.", schema={"type": "object", "properties": {"keys": {"type": "string"}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
+    api.register_tool("type_text", impl.type_text, description="Type text into the focused field of the frontmost app, or of app=. raise_policy=never requires app already in front and never activates it. On a local or SSH Mac text goes as Unicode key events in any layout (method, chars_sent, override_only say how); via=paste writes the clipboard and pastes there instead (long text, or an app that ignores typed text; the clipboard is replaced); an OSWorld guest pastes such text through its clipboard by itself.", schema={"type": "object", "properties": {"text": {"type": "string"}, "interval_ms": {"type": "integer", "default": 0}, **_input_app, "via": {"type": "string", "default": ""}}, "required": ["text"]}, timeout_sec=180)
+    api.register_tool("key", impl.key, description="Press keys in the front app or app= (verified; else nothing sent). Result: who was in front, not that the app reacted. Combos with '+', sequences with spaces (cmd+s, ctrl+l, page-down, 'down down return'); on a Mac, Command plus one character presses the key giving it under Command (cmd+g, not a layout's own cmd+п), other combos the key giving the character alone or with Shift/Option, media names (play-pause, volume-up, mute, brightness-up, keys-light-up, ...) the system key; all steps are validated before activation/input, their characters after the switch in the target's layout and before the first key and a targeted sequence stops when its app leaves the front. raise_policy=never requires app already in front and never activates it. Scriptable apps are better driven by their own commands through run_command.", schema={"type": "object", "properties": {"keys": {"type": "string"}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
     api.register_tool("hold_key", impl.hold_key, description="Hold a key or modifier combo for a duration (50-10000 ms). " + _targeted, schema={"type": "object", "properties": {"keys": {"type": "string"}, "duration_ms": {"type": "integer", "default": 500}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
-    api.register_tool("scroll", impl.scroll, description="Scroll 1-20 wheel steps; app= acts in that app (verified first, else nothing is sent). X11/OSWorld: up/down/left/right; Wayland: up/down; macOS: unsupported, page with key. The result names who was in front at dispatch.", schema={"type": "object", "properties": {"clicks": {"type": "integer", "default": 3}, "direction": {"type": "string", "default": "down"}, **_input_app}}, timeout_sec=90)
+    api.register_tool("scroll", impl.scroll, description="Scroll 1-20 wheel steps; app= acts in that app (verified first, else nothing is sent). up/down/left/right (Wayland: up/down); on macOS the window under the pointer receives the wheel, app= only checks who is in front (move the pointer over the window first). The result names who was in front at dispatch.", schema={"type": "object", "properties": {"clicks": {"type": "integer", "default": 3}, "direction": {"type": "string", "default": "down"}, **_input_app}}, timeout_sec=90)
     api.register_tool("wait", impl.wait, description="Sleep up to 10s so the UI can settle before the next observation.", schema={"type": "object", "properties": {"ms": {"type": "integer", "default": 500}}}, timeout_sec=12)
     api.register_tool("activate_app", impl.activate_app, description="Bring a running application to the front (name, bundle id / WM_CLASS, or pid:<n> from window_list; resolved from the running list, never launched) and report who is in front afterwards. Inputs with app= do this themselves; use this to switch before several inputs or to check that a switch works.", schema={"type": "object", "properties": {"app": {"type": "string"}, "wait_ms": {"type": "integer", "default": 2000}}, "required": ["app"]}, timeout_sec=90)
     api.register_tool("window_list", impl.window_list, description="Running applications with their windows: who is in front, titles, bounds, pid, and on macOS whether the app has its own scripting commands (scriptable). app= filters; limit caps the rows (truncated says so).", schema={"type": "object", "properties": {**_app, "limit": {"type": "integer", "default": 50}}}, timeout_sec=60)

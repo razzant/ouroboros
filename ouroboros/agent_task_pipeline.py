@@ -76,13 +76,13 @@ from ouroboros.post_task_checkpoint import (
 )
 from ouroboros.skill_publish_result import apply_skill_publish_receipt_veto
 from ouroboros.task_finalization import (
-    TERMINAL_ORIGIN_HOST_NOTICE,
+    OWED_REGISTERED, TERMINAL_ORIGIN_HOST_NOTICE,
     build_sealed_final_package,
     set_terminal_host_notice,
     model_execution_projection,
     build_swarm_efficiency as _build_swarm_efficiency,  # moved (module ceiling); tests import it here
     deliver_final_message_live, prepare_terminal_send_event, register_final_answer_owed,
-    stamp_root_final_phase,
+    stamp_root_final_phase, schedule_report_run,
     sealed_final_prompt_section, terminal_result_fields, terminal_notice_text,  # noqa: F401 -- the pipeline module keeps its historical import surface for the synthesis leaf
 )
 from ouroboros.dialogue_provenance import is_presence_task, presence_provenance_fields  # noqa: F401 -- the pipeline module keeps its historical import surface for the synthesis leaf
@@ -798,9 +798,6 @@ def _record_project_letters_home(env: Any, task: Dict[str, Any], outcome_axes: D
     # Record the cycle in its project journal; project_digest only
     # touches recency. Unified memory already includes the project thread.
     _pid = resolve_project_id(task)
-    # The journal bounds long objectives with a pointer to task_results,
-    # which retains the full objective and outcome.
-    _objective = str(task.get("objective") or task.get("description") or task.get("text") or "")
     _exec_status = str((outcome_axes.get("execution") or {}).get("status") or "unknown")
     try:
         # One fail-soft seam (project_journal.record_task_finalization) for
@@ -814,7 +811,6 @@ def _record_project_letters_home(env: Any, task: Dict[str, Any], outcome_axes: D
         record_task_finalization(
             _pid,
             task,
-            objective=_objective,
             kind="done" if _exec_status in (EXECUTION_OK, EXECUTION_BEST_EFFORT) else "blocked",
             exec_status=_exec_status,
             # Registry lives on the canonical drive; stamps the durable
@@ -834,6 +830,49 @@ def _record_project_letters_home(env: Any, task: Dict[str, Any], outcome_axes: D
         log.debug("project digest emission failed", exc_info=True)
 
 
+def _build_task_done_event(
+    task: Dict[str, Any], stored_result: Dict[str, Any], send_event: Dict[str, Any],
+    outcome_axes: Dict[str, Any], reason_code: str, task_cost_fields: Dict[str, Any],
+    usage: Dict[str, Any], typed_routing_action: str,
+) -> Dict[str, Any]:
+    """Build the self-describing buffered ``task_done`` event from the stored durable row."""
+    artifact_bundle = stored_result.get("artifact_bundle") if isinstance(stored_result.get("artifact_bundle"), dict) else {}
+    review_projection = stored_result.get("review_projection") or {}
+    return {
+        "type": "task_done", "task_id": task.get("id"), "task_type": task.get("type"),
+        **{key: task.get(key) or stored_result[key] for key in ("root_task_id", "parent_task_id")
+           if task.get(key) or stored_result.get(key)},  # #1578: producer-known lineage only
+        # GR2-3c: the DURABLE status rides the event for honesty — the
+        # supervisor validates every task_done against the durable row;
+        # a stamped status makes the event self-describing.
+        "status": str(stored_result.get("status") or ""),
+        "_is_direct_chat": bool(task.get("_is_direct_chat")),
+        "execution_owner": stored_result.get("execution_owner") or task.get("_execution_owner") or {},
+        **({"typed_routing_action": typed_routing_action} if typed_routing_action else {}),
+        **({"model_execution": send_event["progress_meta"]["model_execution"]}
+           if "model_execution" in send_event.get("progress_meta", {}) else {}),
+        # Carry the thread so the terminal card finalizes in its project panel
+        # (per-thread fan-out), not just the main chat.
+        "chat_id": int(task.get("chat_id") or 0),
+        "outcome_axes": outcome_axes, "reason_code": reason_code,
+        **_custody_debt_event_fields(stored_result),
+        "artifact_status": artifact_bundle.get("status") or stored_result.get("artifact_status") or "",
+        "artifact_bundle": artifact_bundle,
+        "review_status": stored_result.get("review_status") if isinstance(stored_result.get("review_status"), dict) else {},
+        **({"review_projection": review_projection} if review_projection.get("panels") or review_projection.get("gaps") or review_projection.get("review_records_omitted") else {}),
+        **task_cost_fields,
+        # v6.57.0 (P6b): recursive cost incl. children (from the stored rollup) so the
+        # parent card / Logs can show the true subtree cost, not just this task's own.
+        # ABI-3: honest name only; a legacy stored spelling still resolves.
+        "accounted_upper_bound_usd_with_children": resolve_cost_pair(
+            stored_result, "accounted_upper_bound_usd_with_children", "cost_usd_with_children")[1],
+        "cost_with_children_partial": bool(stored_result.get("cost_with_children_partial")),
+        **({"resource_limit": dict(usage.get("resource_limit") or {})}
+           if isinstance(usage.get("resource_limit"), dict) else {}),
+        "ts": utc_now_iso(),
+    }
+
+
 @finalization_child_scope()
 def emit_task_results(
     env: Any, memory: Any, llm: Any,
@@ -845,11 +884,9 @@ def emit_task_results(
 ) -> None:
     """Emit all end-of-task events to supervisor and run post-task processing.
 
-    Order (owner 1A(1), "answer first"): the final frame is built and stamped,
-    owed in the durable outbox, and put on the live bus — THEN cost reconstruction,
-    evidence capture and the result store run; ``task_done`` stays buffered after
-    the store. Pre-store carriers state the pre-store observation; post-store
-    carriers use the stored status (W10).
+    A registered root answer goes live before cost and result storage (owner 1A(1)).
+    A selected answer without that debt commits its result before sending.
+    The buffered task_done reports the stored status.
     """
     from ouroboros.subagent_bootstrap import actor_first_terminal_projection
     actor_fact, usage, llm_trace = actor_first_terminal_projection(ctx, task, usage, llm_trace, task.get("budget_drive_root") or getattr(env, "drive_root", None))
@@ -863,10 +900,17 @@ def emit_task_results(
     loop_outcome = _derive_host_bound_loop_outcome(env, task, text, usage, llm_trace)
     # A silent run's words stay internal. Clean, it publishes nothing (no chat row, owed outbox
     # row, live send or delivery subject); otherwise only a host notice of its outcome.
-    notice = _wake_outcome_notice(text, loop_outcome, custody_audit) if usage.get("wake_silent") is True else ""
+    legacy_schedule = schedule_report_run(task)
+    if legacy_schedule:
+        # Its report is a record on every exit, forced ones before any selection included: keep the quiet fact
+        # stored, and explain a non-clean end with the host's own notice (unless the refused door already did).
+        usage["wake_silent"] = True
+    notice = (_wake_outcome_notice(text, loop_outcome, custody_audit)
+              if usage.get("wake_silent") is True
+              and not (legacy_schedule and (llm_trace or {}).get("schedule_report_refused")) else "")
     if notice:
         set_terminal_host_notice(usage, str(usage.get("terminal_host_notice") or ""), notice)
-    quiet, published = usage.get("wake_silent") is True and not notice, notice or text
+    quiet, published = legacy_schedule or (usage.get("wake_silent") is True and not notice), notice or text
     receipt_root = pathlib.Path(str(getattr(env, "drive_root", None) or "."))
     verification_receipts = task_verification_receipts(ctx, receipt_root, task)
     # Apply FR3 once so events and the durable result share the same flagged outcome.
@@ -885,6 +929,8 @@ def emit_task_results(
         if stop_origin := owner_stop_origin(custody_root, str(task.get("id") or "")):
             usage["cancel_origin"] = stop_origin
     # Pre-store carriers state the status observed now, as the outbox stamp does (a later race may differ).
+    from ouroboros.delegate_resume import answer_publication
+    publication = answer_publication(ctx)
     terminal_status = _durable_terminal_status(env, task, execution_status, usage=usage, reason_code=reason_code)
     outcome_axes = lifecycle_named(outcome_axes, terminal_status)
     failed_or_forced = (
@@ -922,7 +968,7 @@ def emit_task_results(
         # Final frames carry their own durable identity; replay must not depend
         # on a nearby progress row that may age out independently.
         send_event["progress_meta"] = dict(_message_meta)
-    send_event = prepare_terminal_send_event(env.drive_root, task, published, usage, send_event,
+    send_event = prepare_terminal_send_event(env.drive_root, task, text if legacy_schedule else published, usage, send_event,
                                              presence=not (_ordinary or _room_owed), custody_audit=custody_audit)
     if notice:  # the host's words, never the model's: a System row with its own delivery identity
         from supervisor.terminal_delivery import project_terminal_result_event
@@ -933,11 +979,20 @@ def emit_task_results(
         send_event.pop("chat_id", None)
         send_event.update(address=PROJECT_ROOM_ADDRESS, **{key: task[key] for key in ("parent_task_id", "root_task_id")
                                                            if task.get(key)})
+    buffered, prior_events = pending_events, len(pending_events)
+    if publication:
+        pending_events = list(buffered)
     if _presence:
         pending_events.append(build_presence_result_event(
             task, text, ctx, terminal_origin=str(usage.get("terminal_origin") or ""),
             retain_scheduled_handoff=failed_or_forced, silent=usage.get("wake_silent") is True,
         ))
+        if (pending_events is not buffered and pending_events[-1].get("outcome") == "silent"
+                and not str(pending_events[-1].get("text") or "")):
+            # A CONFIRMED silence carries no words: it may leave before the store, even while the
+            # answer itself is still held. A speech-bearing result is a delivery of its own: it
+            # waits for the confirmed handoff below, and a store that dies takes it with it.
+            buffered.append(pending_events.pop())
         # Its conversation's own delivery rides the local final this root owes: a recovery that
         # finalizes from that final (``adopt_registered_answer``) keeps it, never the final's text.
         send_event["presence_delivery"] = {key: task["metadata"][key] for key in PRESENCE_DELIVERY_KEYS
@@ -961,37 +1016,53 @@ def emit_task_results(
             send_event, task, terminal_status=terminal_status,
             post_task_open=not task.get("_skip_post_task_synthesis") and not _root_post_task_already_completed(env, task),
         )
-        register_final_answer_owed(task, send_event, env_drive_root=env.drive_root)
-    # Answer first (owner 1A(1)): the owner's answer is on the live bus before
-    # the heavy tail below (cost ledger, evidence capture, the result store).
-    _live_delivered = _root_outbox and not quiet and _deliver_answer_first(
-        env, task, event_queue, pending_events, register=not _ordinary,
-        undrained=bool(_presence and _ordinary and task.get("_presence_turn")))
-    # A failed live put keeps its owed/buffered answer and skips optional annotation.
-    # Children and silent runs retain their existing buffered/no-chat lifecycle.
-    if _live_delivered or not _root_outbox or quiet:
-        with timed_phase("custody_annotation", timing=usage.get("_finalization_timing") or {}):
-            record_terminal_reconciliation(custody_root, str(task.get("id") or ""), custody_audit,
-                                           addressed=True, emit_evidence=True)
+        if register_final_answer_owed(task, send_event, env_drive_root=env.drive_root,
+                                      **({"publication": publication} if publication else {})) == OWED_REGISTERED:
+            if publication:  # an already owed or delivered answer needs no new rename
+                ctx._selected_answer_context = None
+                publication = None
+    from ouroboros.terminal_time import source_task_attempt
+
     duration_sec = round(time.time() - start_time, 3)
+    attempt = source_task_attempt(task)
+    attempt_field = {"task_attempt": attempt} if attempt is not None else {}
+    _live_delivered = False
+
+    def complete_publication() -> None:
+        """Flush staged events after a confirmed handoff, deliver live (1A(1)), and record completion."""
+        nonlocal pending_events, _live_delivered
+        if pending_events is not buffered:
+            buffered.extend(pending_events[prior_events:])
+            pending_events = buffered
+        _live_delivered = bool(_root_outbox and not quiet and _deliver_answer_first(
+            env, task, event_queue, pending_events, register=not _ordinary,
+            undrained=bool(_presence and _ordinary and task.get("_presence_turn"))))
+        if _live_delivered or not _root_outbox or quiet:
+            with timed_phase("custody_annotation", timing=usage.get("_finalization_timing") or {}):
+                record_terminal_reconciliation(custody_root, str(task.get("id") or ""), custody_audit,
+                                               addressed=True, emit_evidence=True)
+        try:
+            append_jsonl(drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "task_eval", "ok": execution_status not in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED},
+                "task_id": task.get("id"), "task_type": task.get("type"),
+                **attempt_field,
+                "outcome_axes": outcome_axes,
+                "reason_code": reason_code, "review_eligibility": str(loop_outcome.get("review_eligibility") or ""),
+                "review_trigger": str(loop_outcome.get("review_trigger") or ""), "duration_sec": duration_sec,
+                **tool_metrics, "response_len": len(text),
+            })
+        except Exception:
+            log.warning("Failed to log task eval event", exc_info=True)
+
+    # Answer first (owner 1A(1)) once outbox debt is registered; without outbox debt the local
+    # result write below commits the selected publication first before any live put.
+    if not publication:
+        complete_publication()
     task_cost_fields = _task_cost_fields(env, task)
-    try:
-        append_jsonl(drive_logs / "events.jsonl", {
-            "ts": utc_now_iso(), "type": "task_eval", "ok": execution_status not in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED},
-            "task_id": task.get("id"), "task_type": task.get("type"),
-            "outcome_axes": outcome_axes,
-            "reason_code": reason_code,
-            "review_eligibility": str(loop_outcome.get("review_eligibility") or ""),
-            "review_trigger": str(loop_outcome.get("review_trigger") or ""),
-            "duration_sec": duration_sec,
-            **tool_metrics,
-            "response_len": len(text),
-        })
-    except Exception:
-        log.warning("Failed to log task eval event", exc_info=True)
     pending_events.append({
         "type": "task_metrics",
         "task_id": task.get("id"), "task_type": task.get("type"),
+        **attempt_field,
         "rounds": loop_rounds,
         "outcome_axes": outcome_axes,
         "reason_code": reason_code,
@@ -1005,11 +1076,12 @@ def emit_task_results(
 
     review_evidence = _collect_review_evidence_bundle(env, ctx, task, receipt_root, verification_receipts)
 
-    # The durable result write happens AFTER the answer left (owner 1A(1)); the
-    # outbox row registered above is the crash insurance for this window.
     with timed_phase("result_store", timing=usage.get("_finalization_timing") or {}):
         _store_task_result(env, task, text, usage, llm_trace, review_evidence=review_evidence,
-                           loop_outcome=loop_outcome, cost_fields=task_cost_fields)
+                           loop_outcome=loop_outcome, cost_fields=task_cost_fields,
+                           **({"publication": publication} if publication else {}))
+    if publication:
+        complete_publication()
     if _live_delivered:
         # The live copy's timing snapshot was frozen at its enqueue; the store span
         # completed after it and is journaled as its own correlated row.
@@ -1017,50 +1089,21 @@ def emit_task_results(
     stored_result = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
     if stored_result.get("status"):  # post-store carriers state the stored row's word
         outcome_axes = lifecycle_named(outcome_axes, str(stored_result["status"]))
+    # A split root may dispatch on the parent drive before its actor result is copied back.
+    post_usage = ({  # the terminal seam's host notice row stays with the answer, never with post-task work
+        **{k: v for k, v in (usage or {}).items() if k != "host_notice_row"}, "rounds": loop_rounds, "outcome_axes": outcome_axes, "reason_code": reason_code,
+        **({"typed_routing_action": _typed_routing_action} if _typed_routing_action else {}),
+    } if _root_outbox else {})
     if _root_outbox and task.get("_skip_post_task_synthesis"):
         # Stop before post-task dispatch forbids paid synthesis, not the free
         # factual row. Record it after durable result write; the structural
         # root predicate deliberately excludes stopped roots from recovery.
-        fact_usage = {**usage, "rounds": loop_rounds, "outcome_axes": outcome_axes, "reason_code": reason_code}
-        if _typed_routing_action:
-            fact_usage["typed_routing_action"] = _typed_routing_action
-        _record_task_facts(env, task, _pre_synthesis_usage_snapshot(env, task, fact_usage),
+        _record_task_facts(env, task, _pre_synthesis_usage_snapshot(env, task, post_usage),
                            llm_trace, drive_logs)
-    artifact_bundle = stored_result.get("artifact_bundle") if isinstance(stored_result.get("artifact_bundle"), dict) else {}
-    review_projection = stored_result.get("review_projection") or {}
-    pending_events.append({
-        "type": "task_done", "task_id": task.get("id"), "task_type": task.get("type"),
-        **{key: task.get(key) or stored_result[key] for key in ("root_task_id", "parent_task_id")
-           if task.get(key) or stored_result.get(key)},  # #1578: producer-known lineage only
-        # GR2-3c: the DURABLE status rides the event for honesty — the
-        # supervisor validates every task_done against the durable row;
-        # a stamped status makes the event self-describing.
-        "status": str(stored_result.get("status") or ""),
-        "_is_direct_chat": bool(task.get("_is_direct_chat")),
-        "execution_owner": stored_result.get("execution_owner") or task.get("_execution_owner") or {},
-        **({"typed_routing_action": _typed_routing_action} if _typed_routing_action else {}),
-        **({"model_execution": send_event["progress_meta"]["model_execution"]}
-           if "model_execution" in send_event.get("progress_meta", {}) else {}),
-        # Carry the thread so the terminal card finalizes in its project panel
-        # (per-thread fan-out), not just the main chat.
-        "chat_id": int(task.get("chat_id") or 0),
-        "outcome_axes": outcome_axes, "reason_code": reason_code,
-        **_custody_debt_event_fields(stored_result),
-        "artifact_status": artifact_bundle.get("status") or stored_result.get("artifact_status") or "",
-        "artifact_bundle": artifact_bundle,
-        "review_status": stored_result.get("review_status") if isinstance(stored_result.get("review_status"), dict) else {},
-        **({"review_projection": review_projection} if review_projection.get("panels") or review_projection.get("gaps") or review_projection.get("review_records_omitted") else {}),
-        **task_cost_fields,
-        # v6.57.0 (P6b): recursive cost incl. children (from the stored rollup) so the
-        # parent card / Logs can show the true subtree cost, not just this task's own.
-        # ABI-3: honest name only; a legacy stored spelling still resolves.
-        "accounted_upper_bound_usd_with_children": resolve_cost_pair(
-            stored_result, "accounted_upper_bound_usd_with_children", "cost_usd_with_children")[1],
-        "cost_with_children_partial": bool(stored_result.get("cost_with_children_partial")),
-        **({"resource_limit": dict(usage.get("resource_limit") or {})}
-           if isinstance(usage.get("resource_limit"), dict) else {}),
-        "ts": utc_now_iso(),
-    })
+    pending_events.append(_build_task_done_event(
+        task, stored_result, send_event, outcome_axes, reason_code,
+        task_cost_fields, usage, _typed_routing_action,
+    ))
     # NOTE: task_done is NOT written to events.jsonl here.
     # It goes through EVENT_Q → supervisor _handle_task_done → append_jsonl.
     # This ensures causal ordering: send_message reaches the UI before task_done,
@@ -1080,13 +1123,6 @@ def emit_task_results(
         ctx.pending_restart_is_evolution = False
 
     if _is_root_post_task(task):
-        post_usage = dict(usage or {})
-        # A split root may dispatch on the parent drive before its actor result is copied back.
-        post_usage["rounds"] = loop_rounds
-        post_usage["outcome_axes"] = outcome_axes
-        post_usage["reason_code"] = reason_code
-        if _typed_routing_action:
-            post_usage["typed_routing_action"] = _typed_routing_action
         from ouroboros.project_facts import resolve_project_id
 
         _project_scoped = bool(resolve_project_id(task))
@@ -1208,7 +1244,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
                        usage: Dict[str, Any], llm_trace: Dict[str, Any],
                        review_evidence: Dict[str, Any] | None = None,
                        loop_outcome: Dict[str, Any] | None = None,
-                       cost_fields: Dict[str, Any] | None = None) -> None:
+                       cost_fields: Dict[str, Any] | None = None, publication=None) -> None:
     """Store task result for parent task retrieval.
 
     ``loop_outcome``, when supplied by ``emit_task_results``, is the SINGLE already-
@@ -1248,7 +1284,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         from ouroboros.task_finalization import build_completion_observations
 
         observations = build_completion_observations(
-            env.drive_root, {**task, "started_at": existing.get("started_at")}, llm_trace,
+            env.drive_root, {**task, "started_at": existing.get("started_at")}, llm_trace, final_text=text,
         )
         task_contract = build_task_contract(task)
         task = {**task, "task_contract": task_contract}
@@ -1333,6 +1369,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             str(task.get("id") or ""),
             status,
             _terminal_observed=True,
+            **({"_publication": publication} if publication else {}),
             reason_code=reason_code,
             outcome_axes=outcome_axes,
             # Compatibility mirror consumed by the gateway and task_done event.
@@ -1400,6 +1437,8 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             ts=utc_now_iso(),
         )
     except Exception as e:
+        if publication:
+            raise  # a buffered result alone cannot commit a selected answer past the tree fence
         log.warning("Failed to store task result: %s", e)
         return
     try:

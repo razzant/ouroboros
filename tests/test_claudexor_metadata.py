@@ -49,6 +49,7 @@ def test_catalog_and_model_handshake_cache_follow_descriptor(tmp_path, monkeypat
         state.update(generation=generation, store=store)
         if generation > 1:
             publish()
+        assert metadata.current_engine() is None, "no handshake of the descriptor's generation is remembered yet"
         for _round in range(3):
             with metadata.model_gateway(ensure) as gateway:
                 assert gateway.operations() == [{"id": str(generation)}]
@@ -57,6 +58,9 @@ def test_catalog_and_model_handshake_cache_follow_descriptor(tmp_path, monkeypat
                 gateway.operations()[0]["id"] = "changed"
         assert calls.count("/v2/handshake") == generation
         assert calls.count("/v2/operations") == generation
+        assert metadata.current_engine() == (wire.CLAUDEXOR_MIN_VERSION, str(generation)), "read without a request"
+        assert calls.count("/v2/handshake") == generation
     descriptor.unlink()
     assert gateway.store_identity == "", "a stale endpoint cannot certify a replacement's store"
+    assert metadata.current_engine() is None
     assert len(reconciled) == 6, "cached calls retain the owner's settings reconcile"

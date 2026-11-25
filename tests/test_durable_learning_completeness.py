@@ -112,11 +112,14 @@ def _wake_context(tmp_path, *, chat_rows=None):
     return "\n\n".join(block["text"] for block in messages[0]["content"])
 
 
-def _write_schedules(tmp_path, count):
+def _write_schedules(tmp_path, count, one_shots=0):
     tasks = [{
         "id": f"schedule-{idx}", "name": f"schedule {idx}", "enabled": True,
         "trigger": {"type": "cron", "expr": "0 * * * *"},
-    } for idx in range(count)]
+    } for idx in range(count)] + [{
+        "id": f"once-{idx}", "name": f"once {idx}", "enabled": True,
+        "trigger": {"type": "once", "run_at": "2099-01-01T00:00:00+00:00"},
+    } for idx in range(one_shots)]
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
     (tmp_path / "state" / "scheduled_tasks.json").write_text(
         json.dumps({"tasks": tasks}), encoding="utf-8",
@@ -176,8 +179,11 @@ def test_wake_context_discloses_a_durable_dialogue_gap(tmp_path):
     assert "memory_read(node_id='legacy-b00-rlegacy')" in _story(context)
 
 
-def test_wake_context_discloses_an_omitted_schedule_count(tmp_path):
-    _write_schedules(tmp_path, 9)
+def test_wake_context_lists_every_enabled_standing_schedule_and_discloses_an_omitted_count(tmp_path):
+    """Nine standing schedules all stand, past the bound the one-shots keep; the one-shot past it is counted."""
+    _write_schedules(tmp_path, 9, one_shots=9)
     context = _wake_context(tmp_path)
     runtime = json.loads(context.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])
-    assert runtime["scheduled_tasks"]["omitted_count"] == 1
+    schedules = runtime["scheduled_tasks"]
+    assert [entry["id"] for entry in schedules["standing"]] == [f"schedule-{idx}" for idx in range(9)]
+    assert len(schedules["one_shots"]) == 8 and schedules["omitted_count"] == 1

@@ -297,9 +297,9 @@ def test_an_install_whose_light_box_now_decides_hears_once_which_calls_moved(not
 
 @pytest.mark.parametrize("seeded", [False, True])
 def test_the_light_rule_is_judged_at_the_first_start_even_with_no_owner_to_tell_yet(notice_world, seeded):
-    """An install with no owner chat bound at the first start of this version (a fresh one, before setup or seeded
-    with its settings) ran no work under the old rule: it is judged at once, so the box it has or gets is never told
-    as news of an update once an owner is bound. The other notices stay owed until there is an owner to tell."""
+    """An upgraded install with no owner chat bound at the first start of this version (its setup never finished,
+    seeded with its settings or not; a first state is born with the mark) ran no work under the old rule: it is judged
+    at once, so the box it has or gets is never told as news once an owner is bound. The others stay owed till then."""
     moved = {"OUROBOROS_MODEL": "openai/main", "USE_LOCAL_LIGHT": True, "LOCAL_MODEL_SOURCE": "org/model"}
     said = notice_world.notices.light_local_notice(moved)
     owner_chat = notice_world.state.pop("owner_chat_id")
@@ -370,16 +370,88 @@ def test_the_retired_per_call_ceiling_has_no_getter_and_a_stored_value_is_stripp
     assert int(loaded["OUROBOROS_MAX_WORKERS"]) == 7 and key not in loaded
 
 
-def test_a_document_without_the_key_hears_only_what_is_true_on_a_fresh_install_too(notice_world, monkeypatch):
-    """Opus R1: an install that ran under the implicit 1800 s default need not have saved the key, so any settings
-    document still owes the notice (3A: every old install), and a fresh install hears it once its first document
-    exists. Its words therefore claim no ceiling of this install: they say what earlier versions did."""
-    monkeypatch.setattr(notice_world.notices, "_raw_settings_document", lambda: {"OUROBOROS_MAX_WORKERS": 5})
-    notice_world.notices.startup_upgrade_notices({})
-    [text] = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "command_timeout_notice"]
+def _boot(monkeypatch, root, prior=None):
+    """Point the real state writers at ``root``, boot it through ``init_state`` and bind an owner chat.
+
+    ``prior`` is a readable legacy state the boot adopts; without it the boot mints a first state."""
+    import supervisor.message_bus as bus
+    from ouroboros.launch_roots import BASIS_ENV
+    from ouroboros.startup_migrations import prepare_startup_state
+    from supervisor import state as ss
+
+    for name, path in {"DRIVE_ROOT": root, "STATE_PATH": root / "state/state.json",
+                       "STATE_LAST_GOOD_PATH": root / "state/state.last_good.json",
+                       "STATE_LOCK_PATH": root / "locks/state.lock"}.items():
+        monkeypatch.setattr(ss, name, path)
+    monkeypatch.setattr(ss, "check_openrouter_ground_truth", lambda: None)
+    monkeypatch.delenv(BASIS_ENV, raising=False)  # init_state pins the basis into the environment
+    monkeypatch.setattr(bus, "DATA_DIR", root)
+    prepare_startup_state(root)
+    if prior is not None:
+        raw = json.dumps(prior).encode("utf-8")
+        ss.STATE_PATH.write_bytes(raw)
+        ss.STATE_LAST_GOOD_PATH.write_bytes(raw)
+    assert ss.init_state().quality == "current"
+    ss.update_state(lambda st: st.update(owner_id=1, owner_chat_id=7))
+    return ss
+
+
+def test_a_created_first_state_owes_no_ceiling_notice_and_an_adopted_one_hears_it_once(monkeypatch, tmp_path):
+    """A fresh install never ran under the per-call ceiling: its first state is born with the notice settled, so a
+    settings document and a bound owner owe it nothing (owner decision 2026-11-20). An upgraded install that ran
+    under the implicit 1800 s default need not have saved the key (Opus R1): an adopted state without the marker
+    still hears it once, in words that claim no ceiling of this install, only what earlier versions did."""
+    import supervisor.message_bus as bus
+    from ouroboros import upgrade_notices as notices
+
+    sent = []
+    monkeypatch.setattr(bus, "send_with_budget", lambda chat, text, **kw: sent.append((kw["system_type"], text)))
+    monkeypatch.setattr(notices, "_raw_settings_document", lambda: {"OUROBOROS_MAX_WORKERS": 5})
+    unbounded = {"OUROBOROS_MAX_ROUNDS": "unlimited", "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}
+    _boot(monkeypatch, tmp_path / "fresh")
+    notices.startup_upgrade_notices(unbounded)
+    assert [kind for kind, _text in sent] == []
+    ss = _boot(monkeypatch, tmp_path / "upgraded", prior={
+        "created_at": "2026-07-30T00:00:00+00:00", "session_id": "old-session", "owner_id": 1, "owner_chat_id": 7,
+        "owner_external_id": None, "owner_external_chat_id": None, "evolution_mode_enabled": False,
+        "evolution_owner_stopped": False, "bg_consciousness_enabled": False})
+    assert notices.COMMAND_TIMEOUT_NOTICE_KEY not in ss.load_state()
+    notices.startup_upgrade_notices(unbounded)
+    notices.startup_upgrade_notices(unbounded)
+    [text] = [text for kind, text in sent if kind == "command_timeout_notice"]
     assert text.startswith("⏱️ The separate per-call ceiling of earlier versions (1800 s by default) is retired. ")
     assert "this install" not in text and "on this install" not in text
-    assert "command_timeout_notified" in notice_world.state
+    assert ss.load_state()[notices.COMMAND_TIMEOUT_NOTICE_KEY]
+
+
+def test_a_minted_state_is_still_told_once_what_its_facts_show(monkeypatch, tmp_path):
+    """Only news of an earlier release is born settled: a task bound set by the environment of a brand-new install
+    is a fact about this install, judged when an owner is there to tell, once."""
+    import supervisor.message_bus as bus
+    from ouroboros import upgrade_notices as notices
+
+    sent = []
+    monkeypatch.setattr(bus, "send_with_budget", lambda chat, text, **kw: sent.append((kw["system_type"], text)))
+    monkeypatch.setattr(notices, "_raw_settings_document", lambda: {})
+    ss = _boot(monkeypatch, tmp_path)
+    minted = ss.load_state()
+    assert all(minted[key] for key in notices.BORN_SETTLED_NOTICE_KEYS)
+    assert not any(key in minted for key in notices.JUDGED_BY_FACTS_NOTICE_KEYS)
+    settings = {"OUROBOROS_MAX_ROUNDS": 150, "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"}
+    notices.startup_upgrade_notices(settings)
+    notices.startup_upgrade_notices(settings)
+    assert [kind for kind, _text in sent] == ["optional_bounds_notice"]
+    assert "Max Rounds per Task = 150 rounds (set by an environment variable)" in sent[0][1]
+
+
+def test_every_notice_key_is_born_settled_or_judged_by_facts():
+    """A new notice must choose: news of an earlier release (stamped on a first state) or a fact of this install."""
+    from ouroboros import upgrade_notices as notices
+
+    keys = {getattr(notices, name) for name in dir(notices) if name.endswith("_NOTICE_KEY")}
+    born, judged = notices.BORN_SETTLED_NOTICE_KEYS, notices.JUDGED_BY_FACTS_NOTICE_KEYS
+    assert len(born) + len(judged) == len(set(born) | set(judged)) == len(keys)
+    assert set(born) | set(judged) == keys and not set(born) & set(judged)
 
 
 def test_an_install_that_never_ran_under_the_command_ceiling_hears_nothing(notice_world, monkeypatch):
@@ -541,3 +613,25 @@ def test_an_install_whose_saved_3_reads_as_not_set_hears_it_once(notice_world, m
     texts = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "model_cap_notice"]
     assert len(texts) == (1 if owed else 0) and ("model_cap_notified" in notice_world.state) is owed
     assert not owed or ("reads as not set" in texts[0] and "If 3 was your choice" in texts[0])
+
+
+@pytest.mark.parametrize("document, view, owed", [
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": ""}, True),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "6"}, {}, True),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6, "_subagent_cap_format": 1}, {}, False),  # the owner's own 6
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 64}, {}, False),  # any other saved number stays and is not news
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": ""}, {}, False),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 4}, False),
+    ({}, {}, False),  # a document that never saved the key
+    (None, {}, False),  # a fresh install
+])
+def test_an_install_whose_saved_6_helpers_read_as_no_number_hears_it_once(notice_world, monkeypatch, document, view,
+                                                                         owed):
+    """Owner 21.11.2026: the 6 every earlier release saved in "At once, for one task" reads as no number on existing
+    installs too, and the install hears one sentence about it once, in the same place as the model-limit notice."""
+    monkeypatch.setattr(notice_world.notices, "_raw_settings_document", lambda: document)
+    notice_world.notices.startup_upgrade_notices(view)
+    notice_world.notices.startup_upgrade_notices(view)
+    texts = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "subagent_cap_notice"]
+    assert len(texts) == (1 if owed else 0) and ("subagent_cap_notified" in notice_world.state) is owed
+    assert not owed or ("is lifted" in texts[0] and "At once, for one task." in texts[0])

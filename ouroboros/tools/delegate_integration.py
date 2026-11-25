@@ -11,6 +11,7 @@ reference — sibling code, the tests, the convergence census — still finds th
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import pathlib
@@ -210,8 +211,8 @@ def _validated_invocation(drive: Any, retry_token: str, task_id: str,
                            retry_of=retry_token, run_id=record["run_id"])
     if record["state"] == "failed_definite":
         return None, _fail("delegate_start", "invocation_definitely_refused",
-                           "That invocation was definitively refused by the daemon; its "
-                           "id is retired. Start a new run with a plain "
+                           "That invocation is recorded as definitively refused (failed_definite); "
+                           "its id is retired. Start a new run with a plain "
                            "delegate_start(subagent_id=..., prompt=...).",
                            retry_of=retry_token)
     body = record.get("request")
@@ -233,7 +234,7 @@ def _validated_invocation(drive: Any, retry_token: str, task_id: str,
     return record, None
 
 
-def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any]) -> Optional[ToolResult]:
+def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any], lineage: Any = None) -> Optional[ToolResult]:
     """An explicit retry first reads what its recorded start already holds in the engine (#3138).
 
     It runs once ownership and the stored body are proven (``_validated_invocation``) and before any
@@ -245,7 +246,6 @@ def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any]) -> Opt
     leaving the replay path and its unchanged send rule.
     """
     from ouroboros.delegate_accepted import NO_REPLAY, recover
-    from ouroboros.delegate_shared import delegate_result
     from ouroboros.execution_domain import start_engine
 
     try:
@@ -266,14 +266,52 @@ def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any]) -> Opt
             "The engine answered for this start, but no run could be bound to it now, so nothing was re-sent: "
             "its outcome stays unknown and the invocation pending. This is no evidence that it started nothing.",
             retry_of=retry_token, pending_invocation_id=retry_token, lookup=read)
+    return _accepted_result(held, read, retry_token, record.get("request"), (
+        "The engine had already accepted this invocation's start; its run is now in custody and nothing was "
+        "re-sent. Poll with delegate_wait; the run's own claims are evidence to check, not a verified result."),
+        record.get("input_files"), lineage)
+
+
+def accepted_refused_start(drive: Any, gateway: Any, invocation_id: str, error: BaseException,
+                           request: Any, selected: Any = None, lineage: Any = None) -> Optional[ToolResult]:
+    """A start whose POST the engine answered with an error: the run it nonetheless accepted, read and bound
+    once on the start's own gateway (``delegate_accepted.accepted_after_refusal``), answered as started, naming the
+    start's own selection and lineage fact; else ``None`` and the start keeps its pending token, registration and
+    snapshot, its outcome unknown."""
+    from ouroboros.delegate_accepted import accepted_after_refusal
+
+    held, read = accepted_after_refusal(drive, gateway, invocation_id, error)
+    return None if held is None else _accepted_result(held, read, invocation_id, request, (
+        "The engine answered this start with an error, yet it had accepted the start: its run is now in custody "
+        "and nothing was sent again. Poll with delegate_wait; the run's own claims are evidence to check."),
+        selected, lineage)
+
+
+def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, request: Any, note: str,
+                     selected: Any = None, lineage: Any = None) -> ToolResult:
+    """The started result of the run custody bound for ``invocation_id`` from the engine's own read: ``selected``
+    is the invocation's recorded copies (a binding made by this read carries no request row), ``lineage`` what
+    the caller may state of automatic lineage copies (``_start_lineage``; None says nothing)."""
+    from ouroboros.delegate_shared import delegate_result
+
+    from ouroboros.helper_receipt import NO_RECORD, PREPARED, build, render, start_facts
+
+    scope = (request.get("scope") if isinstance(request, dict) else None) or {}
+    rows = selected if isinstance(selected, list) else (held.request_event or {}).get("input_files")
+    facts = {**(start_facts(request, lineage) if isinstance(request, dict) else {"assignment": (NO_RECORD, PREPARED),
+                                                                                  "lineage": lineage}),
+             "access": [("access", held.access, None)] + ([(  # its key found an investigation: say so, briefly
+                 "investigation", "evidence-only investigation: nothing from it is applied", False)]
+                 if evidence_only(held) and held.mode == "agent" else [])}
+    if isinstance(rows, list):  # this invocation's recorded copies
+        facts.update(inputs=rows, inputs_when="prepared before the first send", inputs_outside=sum(
+            1 for row in rows if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
+    note = f"{note}\n{render(build(facts))}"
     return delegate_result({
-        "status": "started", "run_id": held.run_id, "invocation_id": retry_token, "idempotent_recovery": True,
+        "status": "started", "run_id": held.run_id, "invocation_id": invocation_id, "idempotent_recovery": True,
         "recovered_without_start": True, "custody_durable": True, "route": held.route_id, "model": held.model,
         "effort": held.effort or "", "access": held.access, "mode": held.mode, "isolation": held.isolation or "envelope",
-        "root": held.execution_root or str(((record.get("request") or {}).get("scope") or {}).get("root") or ""),
-        "lookup": read,
-        "note": ("The engine had already accepted this invocation's start; its run is now in custody and nothing was "
-                 "re-sent. Poll with delegate_wait; the run's own claims are evidence to check, not a verified result."),
+        "root": held.execution_root or str(scope.get("root") or ""), "lookup": read, "note": note,
     })
 
 
@@ -339,8 +377,16 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         return None, _fail("delegate_start", "retry_selector_conflict",
                            f"A retry replays its recorded max_seconds={seconds}; omit max_seconds to retry.",
                            retry_of=retry_token, recorded_max_seconds=seconds)
-    if (accepted := _accepted_retry(drive, retry_token, record)) is not None:
+    from ouroboros.delegate_readonly_inputs import replayed_lineage
+
+    lineage = replayed_lineage(request_body, retry_token, record.get("authority_source") == INVESTIGATION_AUTHORITY,
+                               record.get("input_files"))
+    if (accepted := _accepted_retry(drive, retry_token, record, lineage)) is not None:
         return None, accepted  # the start the engine already holds: a receipt, never a second POST
+    if record.get("resume_decisions"):
+        from ouroboros.delegate_resume import LOOKUP_ONLY
+        return None, _fail("delegate_start", LOOKUP_ONLY, "Resume accepted the unknown outcome. Only lookup is allowed.",
+                           pending_invocation_id=retry_token)
     execution = (request_body.get("execution")
                  if isinstance(request_body.get("execution"), dict) else {})
     scope = request_body.get("scope") if isinstance(request_body.get("scope"), dict) else {}
@@ -578,7 +624,7 @@ def _capture_block(entry: _RunCustody, cap_dir: pathlib.Path, manifest: Dict[str
     read_prefix = f"delegated_runs/{cap_dir.name}"
     unsaved = [str(row.get("path") or "") for row in manifest.get("untracked_excluded") or []
                if isinstance(row, dict) and row.get("reason") in UNSAVED_REASONS] if not evidence_only(entry) else []
-    checkout = ("the copy's checkout itself is released once the capture is saved" if not unsaved else
+    checkout = ("the checkout is eligible for release after capture and evidence retention; custody may defer cleanup" if not unsaved else
                 f"the copy's checkout is KEPT until then: {len(unsaved)} path(s) in it could not be saved in the "
                 f"result (Git repositories or checked-out submodules inside it, or folders Git could not open): "
                 f"{', '.join(unsaved[:8])}. A submodule's own commits live in its separate Git directory "
@@ -636,8 +682,14 @@ def _capture_block(entry: _RunCustody, cap_dir: pathlib.Path, manifest: Dict[str
     return block
 
 
-def _write_result_commit_artifacts(entry: _RunCustody, clone: pathlib.Path, cap_dir: pathlib.Path,
-                                   evidence: str) -> Dict[str, Any]:
+def capture_receipt_unwritten(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Bytes exist, but the capture is still owed; retain its readers and custody."""
+    return {**block, "status": "failed", "retry": "transient",
+            "note": "Capture files were saved, but this manifest has no confirmed durable capture row. "
+                    "The result and any private copy and pins are kept. Inspect the readers; the capture is still owed."}
+
+
+def _write_result_commit_artifacts(entry: _RunCustody, snapshot: Dict[str, Any], cap_dir: pathlib.Path) -> Dict[str, Any]:
     """Capture a Git snapshot as its result commit C (parent B) with the ordinary manifest.
 
     The patch is B..C from git's plumbing; large and binary files ride in it as
@@ -653,8 +705,8 @@ def _write_result_commit_artifacts(entry: _RunCustody, clone: pathlib.Path, cap_
     from ouroboros.utils import atomic_write_json, utc_now_iso
     from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION
 
-    patch_path = cap_dir / "workspace.patch"
-    base = entry.baseline_sha
+    patch_path, base = cap_dir / "workspace.patch", entry.baseline_sha
+    clone, evidence = _capture_root(entry, snapshot)
     manifest: Dict[str, Any] = {
         "schema_version": 1, "created_at": utc_now_iso(), "workspace_root": str(clone),
         "patch_name": "workspace.patch", "manifest_name": "workspace_patch.json",
@@ -721,14 +773,101 @@ def _capture_terminal_patch(ctx: ToolContext, entry: Optional[_RunCustody], *, g
     if entry is None:
         return None
     block = capture_terminal_patch_for_drive(custody.custody_root(ctx), entry, gateway=gateway)
-    if block and entry.task_id != str(getattr(ctx, "task_id", "") or ""):
-        # Relative handles name the starter's prefix, not the successor's.
-        # The capture reader validates this exact canonical product, also after
-        # disposition and from a split execution drive.
-        for kind in ("patch", "manifest"):
-            if block.get(f"{kind}_read") and block.get(f"{kind}_artifact"):
-                block[f"{kind}_read"] = {"root": "artifact_store", "path": block[f"{kind}_artifact"]}
-    return block
+    from ouroboros.delegate_collection import capture_readers
+
+    return capture_readers(block, entry, str(getattr(ctx, "task_id", "") or "")) if block else block
+
+
+def _declared_capture_gap(entry: _RunCustody, cap_dir: pathlib.Path, raw: bytes,
+                          manifest: Dict[str, Any], drive: Any = None) -> tuple[str, str]:
+    """Why saved ready Git capture bytes are not proven this run's own pinned attempt (``""`` when they are),
+    with the retry class of an unreadable fact. Proof: no receipt names other bytes, a prepared child result
+    names these manifest bytes, the manifest binds the run's baseline and its pinned result commit (a copy its
+    record positively names as older, captured without one: the run's own bound prepared result, or else its own
+    copy captured again, ``_legacy_recapture_gap``), and the patch file holds exactly the bytes the manifest names."""
+    from ouroboros.subagent_worktrees import find_execution_snapshot
+
+    if entry.patch_captured:
+        return "its durable capture row names other manifest bytes", ""
+    owed = str(entry.capture_job.get("manifest_sha256") or "")
+    if owed and owed != hashlib.sha256(raw).hexdigest():
+        return "the prepared capture result names other manifest bytes", ""
+    from ouroboros.delegate_capture_job import ready_result_owed
+
+    try:
+        record = find_execution_snapshot(entry.snapshot_id) or {}
+    except Exception as exc:  # noqa: BLE001 - an unreadable record proves nothing either way
+        return f"the run's pinned result could not be read ({type(exc).__name__})", "transient"
+    if "file_baseline" in record or "untracked_baseline" in record:
+        if not (owed and ready_result_owed(entry)) and (gap := _legacy_recapture_gap(drive, entry, record, cap_dir, manifest))[0]:
+            return gap
+    elif (not record.get("result_sha") or str(manifest.get("result_commit") or "") != str(record["result_sha"])
+            or str(manifest.get("base_ref") or "") != str(entry.baseline_sha or "")):
+        return "it does not name the run's baseline and pinned result commit", ""
+    patch, size = cap_dir / "workspace.patch", manifest.get("patch_size")
+    try:
+        if not size:
+            return ("", "") if not patch.exists() else ("a patch file beside it is not named by it", "")
+        digest = hashlib.sha256()
+        with patch.open("rb") as stream:  # as the apply's own corruption check reads it
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != str(manifest.get("sha256") or ""):
+            return "its patch file differs from the bytes it names", ""
+    except OSError as exc:
+        return f"its patch file could not be read ({type(exc).__name__})", "transient"
+    return "", ""
+
+
+def _legacy_recapture_gap(drive: Any, entry: _RunCustody, record: Dict[str, Any], cap_dir: pathlib.Path,
+                          manifest: Dict[str, Any]) -> tuple[str, str]:
+    """Why saved older-copy bytes are not this run's own result (``""`` when they are): record and hand-over bind the
+    present copy to the run's own ended generation (``copy_generation_hold``), retained file results hold the bytes
+    they name, and that copy, captured again the same way into scratch, yields the same manifest (every decision input:
+    patch bytes, root, base, file results with modes and preimages, exclusions; ``baseline_entries``, ``capture_kind``,
+    never emitted by the older writer, stay absent; 7.11's rules label 3 and its two renamed exclusion reasons pass
+    too). Nothing is written over them."""
+    import tempfile
+    from ouroboros.delegate_continuation import copy_generation_hold
+    from ouroboros.workspace_file_outputs import file_output_changes, verify_retained_outputs
+    from ouroboros.workspace_patch_rules import legacy_manifest_mismatch
+
+    if hold := copy_generation_hold(drive, entry, record):
+        return f"an older copy's capture is published only from this run's own prepared result or copy, and {hold}", ""
+    try:  # ValueError: a retained file result differs from what its record names
+        verify_retained_outputs(file_output_changes(manifest, cap_dir))
+        with tempfile.TemporaryDirectory(prefix="ouroboros-legacy-capture-") as scratch:
+            again = _legacy_copy_capture(entry, record, pathlib.Path(scratch), scratch_dir=cap_dir)
+    except ValueError as exc:
+        return f"its saved file results do not verify ({exc})", ""
+    except Exception as exc:  # noqa: BLE001 - an unreadable copy or file proves nothing either way
+        return f"its files or copy could not be read again ({type(exc).__name__})", "transient"
+    if legacy_manifest_mismatch(again, manifest):
+        return "its copy, captured again, does not yield these bytes", ""
+    return "", ""
+
+
+def _capture_root(entry: _RunCustody, snapshot: Dict[str, Any]) -> tuple[pathlib.Path, str]:
+    """The whole recorded copy a capture diffs (a Git-subdirectory investigation runs in a folder of it) and the
+    run's untracked named-evidence folder, retained beside the capture, never carried in it (#2070)."""
+    from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
+    exec_root = pathlib.Path(entry.execution_root)
+    clone = pathlib.Path(str(snapshot.get("path") or exec_root))
+    try:
+        return clone, (exec_root.resolve().relative_to(clone.resolve()) / EVIDENCE_DIRNAME).as_posix()
+    except ValueError:
+        return clone, ""
+
+
+def _legacy_copy_capture(entry: _RunCustody, snapshot: Dict[str, Any], out_dir: pathlib.Path,
+                         scratch_dir: Optional[pathlib.Path] = None) -> Dict[str, Any]:
+    """A copy provisioned before the one-primitive update keeps its own capture: its file inputs live outside
+    Git and would read as new files in C."""
+    from ouroboros.headless import write_workspace_patch_artifacts
+    clone, evidence = _capture_root(entry, snapshot)
+    return write_workspace_patch_artifacts(clone, out_dir, scratch_dir=scratch_dir, task={"metadata": {
+        "workspace_preflight": {"git": {"head": entry.baseline_sha}},
+        "file_baseline": snapshot.get("file_baseline") or {}, "host_evidence": evidence}})[1]
 
 
 def _restored_from_pin(entry: _RunCustody, record: Dict[str, Any]) -> bool:
@@ -755,18 +894,15 @@ def _restored_from_pin(entry: _RunCustody, record: Dict[str, Any]) -> bool:
 
 def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=None,
                                      retain_investigation: bool = True, publish: bool = True) -> Optional[Dict[str, Any]]:
-    """The drive-rooted core of the terminal capture — same contract, no ToolContext.
+    """Capture for collection, maintenance and explicit disposition; reviewers own their capture.
 
-    One ordinary capture author for foreground collection, the body and disposition;
-    startup/control reconciliation leaves its work pending. Reviewers use their native owner. The
-    apply/reject DECISION stays with a live owner, never taken here — an evidence-only investigation has
-    none to take, so its ready capture is retained as evidence at once (#1609). ``patch_captured`` MEANS
-    "a usable patch artifact exists" (C1-R3): the custody row is minted only over a ready-status
-    manifest; a failure manifest is returned as the failed block but leaves the row uncaptured (every
-    retry point stays open), and a pre-R3 row over a failed manifest falls through to a fresh capture.
+    Publish a custody row only for a ready manifest; legacy failed captures may be retried.
+    Maintenance with ``publish=False`` stages bytes but owes publication. Evidence-only
+    investigations may settle after publication (#1609); the live owner decides writer results.
     """
     from ouroboros.delegate_directory import is_directory_run, capture_directory_result, directory_capture_block
     from ouroboros.delegate_capture_attempt import failure_retry
+    from ouroboros.delegate_capture_job import manifest_recorded
     from ouroboros.tools.subagent_integration_delegated import retain_run_evidence
 
     if entry is None or entry.review_owned:
@@ -778,7 +914,15 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         block = in_place_block(entry)  # no run patch, disposition or fictitious apply
         return {**block, "native_capture": note} if note else block
 
-    def finish(block, transport=None):
+    def finish(block, transport=None, *, record=False):
+        if publish and record:
+            try:
+                sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            except OSError:
+                return capture_receipt_unwritten(block)
+            if not custody.record_patch_captured(drive, entry, status=block["status"], sha256=block["sha256"],
+                    patch_size=block["patch_size"], capture_dir=str(cap_dir), manifest_sha256=sha):
+                return capture_receipt_unwritten(block)
         return retain_run_evidence(drive, entry, block, transport) if retain_investigation and publish else block
 
     if entry is not None and entry.mode == "plan":
@@ -817,17 +961,36 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
     manifest_path = cap_dir / "workspace_patch.json"
     if manifest_path.exists():
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
-            manifest = {}
+            raw = manifest_path.read_bytes()
+            manifest = json.loads(raw.decode("utf-8"))
+        except OSError as exc:
+            if entry.authority_source != "skill_payload":  # an unreadable Git result is unknown, never absent
+                return {"status": "failed", "retry": "transient", "baseline_id": entry.baseline_sha,
+                        "execution_root": entry.execution_root, "authority_target_root": entry.target_root,
+                        "patch_artifact": None, "manifest_artifact": str(manifest_path),
+                        "note": f"The saved capture manifest could not be read ({type(exc).__name__}: {exc}), so "
+                                "nothing is captured over it. Its files, the private copy and the pins are kept; "
+                                "nothing was applied."}
+            raw, manifest = b"", {}
+        except (json.JSONDecodeError, ValueError):
+            raw, manifest = b"", {}
         manifest = manifest if isinstance(manifest, dict) else {}
         if isinstance(manifest.get("authority_drift"), dict) and str(manifest.get("status") or "") == "failed":
             # A legacy failed no-change capture (drift evidence of releases 7.4.1 to
             # this one) is durable forensic custody that never minted PATCH_CAPTURED;
             # it stays rejectable and is never recaptured.
             return _capture_block(entry, cap_dir, manifest)
-        if entry.patch_captured and str(manifest.get("status") or "") in ready:
+        if str(manifest.get("status") or "") in ready and manifest_recorded(entry, raw):
             return finish(_capture_block(entry, cap_dir, manifest))
+        if str(manifest.get("status") or "") in ready and entry.authority_source != "skill_payload":
+            # Ready Git bytes readers were already shown are never captured over (the caller holds the
+            # disposition lock): proven as this run's pinned attempt they get their receipt, else they stay.
+            gap, retry = _declared_capture_gap(entry, cap_dir, raw, manifest, drive)
+            if not gap:
+                return finish(_capture_block(entry, cap_dir, manifest), record=True)
+            return {**_capture_block(entry, cap_dir, manifest), "status": "failed", "retry": retry,
+                    "note": f"A saved ready capture exists, but {gap}, so it is neither published nor captured "
+                            "over. Its files, the private copy and the pins are kept; nothing was applied."}
     from ouroboros.subagent_worktrees import find_execution_snapshot
     snapshot = find_execution_snapshot(entry.snapshot_id) or {}
     from ouroboros import work_domain  # a work copy's presence through the confined descent
@@ -837,13 +1000,8 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         saved = manifest if manifest_path.exists() else {}
         if (str(saved.get("status") or "") in ready and saved.get("result_commit")
                 and saved.get("result_commit") == snapshot.get("result_sha")):
-            # The copy was released after this capture was saved but its row did not
-            # land: the saved result itself is the capture.
-            if publish:
-                custody.record_patch_captured(drive, entry, status=str(saved.get("status") or ""),
-                                              sha256=str(saved.get("sha256") or ""),
-                                              patch_size=saved.get("patch_size"), capture_dir=str(cap_dir))
-            return finish(_capture_block(entry, cap_dir, saved))
+            # The saved result still binds the pin even after checkout release.
+            return finish(_capture_block(entry, cap_dir, saved), record=True)
     if not work_domain.exists(exec_root) and not _restored_from_pin(entry, snapshot):
         # A legacy capture saves file outputs before its diff: a later failure keeps them (#1651).
         kept = len(saved.get("file_output_changes") or []) if saved.get("status") == "failed" else 0
@@ -876,27 +1034,8 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
             manifest = (capture_work_payload(exec_root, cap_dir, entry, _write_payload_patch_artifacts)
                         if work_domain.is_work(exec_root) else _write_payload_patch_artifacts(exec_root, cap_dir, entry))
         else:
-            from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
-            # A Git-subdirectory investigation runs in a folder of its copy; the
-            # capture always diffs the whole recorded copy. The run's untracked
-            # named evidence is retained beside the capture, never carried in it (#2070).
-            clone = pathlib.Path(str(snapshot.get("path") or exec_root))
-            try:
-                evidence = (exec_root.resolve().relative_to(clone.resolve()) / EVIDENCE_DIRNAME).as_posix()
-            except ValueError:
-                evidence = ""
-            if "file_baseline" in snapshot or "untracked_baseline" in snapshot:
-                # A copy provisioned before the one-primitive update keeps its own capture:
-                # its file inputs live outside Git and would read as new files in C.
-                from ouroboros.headless import write_workspace_patch_artifacts
-                _, manifest = write_workspace_patch_artifacts(
-                    clone, cap_dir,
-                    task={"metadata": {"workspace_preflight": {"git": {"head": entry.baseline_sha}},
-                                       "file_baseline": snapshot.get("file_baseline") or {},
-                                       "host_evidence": evidence}},
-                )
-            else:
-                manifest = _write_result_commit_artifacts(entry, clone, cap_dir, evidence)
+            manifest = (_legacy_copy_capture if "file_baseline" in snapshot or "untracked_baseline" in snapshot
+                        else _write_result_commit_artifacts)(entry, snapshot, cap_dir)
     except Exception as exc:
         log.warning("Delegated run patch capture failed for %s", entry.run_id, exc_info=True)
         return {
@@ -910,15 +1049,8 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
             "note": f"patch capture failed ({type(exc).__name__}: {exc}); the private copy "
                     "is kept — inspect it directly.",
         }
-    if publish and str(manifest.get("status") or "") in ready:
-        custody.record_patch_captured(
-            drive, entry,
-            status=str(manifest.get("status") or ""),
-            sha256=str(manifest.get("sha256") or ""),
-            patch_size=manifest.get("patch_size"),
-            capture_dir=str(cap_dir),
-        )
-    return finish(_capture_block(entry, cap_dir, manifest))
+    block = _capture_block(entry, cap_dir, manifest)
+    return finish(block, record=block["status"] in ready)
 
 
 def capture_stranded_patch(drive_root: Any, run: _RunCustody) -> Dict[str, Any]:
@@ -1238,7 +1370,7 @@ def claimed_start_request(drive: pathlib.Path, *, actor_ctx: Any = None,
 
 def _payload_mutation_authority(
     ctx: ToolContext, drive: pathlib.Path, bucket: str, skill_name: str,
-    binding: Any, access: str = "workspace_write",
+    binding: Any, access: str = "workspace_write", *, prior: Optional[_RunCustody] = None,
 ) -> Tuple[Optional[Any], Optional[Dict[str, Any]], Optional[ToolResult]]:
     """The payload counterpart of ``_mutation_authority`` (R1 item 1).
 
@@ -1250,12 +1382,25 @@ def _payload_mutation_authority(
     from ouroboros.subagents import delegated_run_shape
     from ouroboros.tool_access import active_tool_profile, build_resolved_resource_binding
 
-    if access == "readonly":
+    if access == "readonly" and prior is None:
         return None, None, _fail(
             "delegate_start", "payload_delegation_forbidden",
             "The skill-payload selector requires write access; omit the selector for a readonly run.",
             definitely_unrun=True)
     b, s = str(bucket or "").strip(), str(skill_name or "").strip()
+    if prior is not None:
+        # An explicit selector is only a consistency assertion. Both forms
+        # revalidate current rights to the same semantic and physical target.
+        from ouroboros.presence_authority import presence_ceiling_allows_binding, presence_ceiling_from_context
+
+        _target, binding, refusal = _rebind_payload_reference(
+            ctx, prior.resource_ref, prior.target_root,
+            tool="delegate_start", context=f"continue_from={prior.run_id}")
+        if refusal:
+            return None, None, refusal
+        if (ceiling := presence_ceiling_from_context(ctx)) is not None and not presence_ceiling_allows_binding(ceiling, binding):
+            return None, None, _fail("delegate_start", "payload_delegation_forbidden",
+                "The recorded payload is outside this task's current Presence ceiling.", definitely_unrun=True)
     if binding is None:
         # Policy BEFORE lookup (Fable F4): a caller whose profile cannot hold
         # payload-write authority gets an authority denial, not a target-
@@ -1316,7 +1461,7 @@ def _payload_mutation_authority(
         # The host-minted semantic reference: replayed by retry, consumed by the
         # owned apply rebind. ``payload_hash`` is filled by snapshot provisioning
         # (the pre-copy loader hash is the CAS baseline).
-        "resource_ref": {
+        "resource_ref": dict(prior.resource_ref) if prior is not None else {
             "root": "skill_payload",
             "source": str(binding.source or ""),
             "skill_name": str(binding.skill_name or ""),

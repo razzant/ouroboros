@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
+from tests._wizard_walk import untick_starter_skills, walk
 
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
@@ -191,7 +192,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
 
         # Models: the legacy server is a usable source with its own discovery; official OpenAI stays a choice. The step
         # opens with its own read of the draft's catalog, which lists that server once with the key saved for it.
-        with page.expect_response('**/api/onboarding/model-catalog') as step_read:
+        with page.expect_response('**/api/onboarding/model-catalog?provider_id=openai-compatible') as step_read:
             page.click('#next-btn')
         assert step_read.value.status == 200, step_read.value.text()
         assert [call["authorization"] for call in _listed(legacy_calls)] == [f"Bearer {LEGACY_KEY}"]
@@ -222,16 +223,14 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         expect(light).to_have_value('second-model')
         report["frames"]["models"] = _frame(page, evidence, "models-980x780", page.locator('#compatible-model-loader'))
 
-        page.click('#next-btn')  # Review
-        page.click('#next-btn')  # Budget
-        page.click('#next-btn')  # Summary
+        walk(page, 'models', 'summary')  # Review, Consciousness where offered, Budget, Summary
         summary = _summary(page)
         report["summary"] = summary
         assert summary["Connected access"] == "OpenAI-compatible endpoint"
-        assert summary["OpenAI"] == f"configured · also used by the legacy address {legacy_url}"
+        # The saved OpenAI key never chose an API, so the summary says the one it keeps.
+        assert summary["OpenAI"] == f"configured · also used by the legacy address {legacy_url} · Chat Completions API"
         report["frames"]["summary"] = _frame(page, evidence, "summary-980x780")
-        page.locator('[data-starter-toggle]').click()  # no public starter install from this isolated root
-        page.locator('[data-starter-all="0"]').click()
+        untick_starter_skills(page)  # no public starter install from this isolated root
         sent = {}
 
         def keep_body(route):
@@ -301,7 +300,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         expect(meta).to_contain_text(legacy_url)
         base.fill(dedicated_url)
         expect(status).to_have_text('Not saved')
-        with page.expect_response('**/api/onboarding/model-catalog') as step_read:
+        with page.expect_response('**/api/onboarding/model-catalog?provider_id=openai-compatible') as step_read:
             page.click('#next-btn')
         assert step_read.value.status == 200, step_read.value.text()
         listed_before, dedicated_before = len(_listed(legacy_calls)), len(_listed(dedicated_calls))
@@ -449,10 +448,8 @@ def test_both_pairs_test_and_discovery_follow_the_cleared_dedicated_address(dire
 
         # Finish from the cleared draft saves the pair Test probed: the legacy pair untouched, the dedicated address
         # blank, and no key moved or copied between pairs.
-        for _ in range(4):
-            page.click('#next-btn')
-        page.locator('[data-starter-toggle]').click()  # no public starter install from this isolated root
-        page.locator('[data-starter-all="0"]').click()
+        walk(page, 'accounts', 'summary')
+        untick_starter_skills(page)  # no public starter install from this isolated root
         with page.expect_response('**/api/onboarding/complete') as completion:
             page.click('#next-btn')
         assert completion.value.status == 200, completion.value.text()

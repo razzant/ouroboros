@@ -3,8 +3,8 @@
 Split verbatim out of ``tests/test_context.py`` by theme. This module owns the
 legacy metadata that must not rewrite the user's text, the light-mode rule and filesystem affordances the runtime section states,
 the workspace rules that preserve system review/commit authority, the host routing
-manifest and manual contract, the improvement backlog digest, and the runtime_env
-block.
+manifest and manual contract, the improvement backlog digest, the runtime_env
+block, and the setup facts (``context_first_hour``).
 """
 
 from __future__ import annotations
@@ -59,9 +59,26 @@ def test_schedule_digest_distinguishes_unreadable_from_empty(tmp_path, root_only
     assert unreadable["unavailable"] and "standing" not in unreadable
     assert unreadable["pointer"] == "manage_schedules(action='list')"
     path.write_text('{"tasks": []}', encoding="utf-8")
-    empty = _scheduled_tasks_digest(env)
-    assert "unavailable" not in empty
-    assert empty["standing"] == empty["attention"] == empty["one_shots"] == []
+    assert _scheduled_tasks_digest(env) == {}  # nothing to show, which an unreadable table never reads as
+
+
+def test_an_install_with_nothing_to_show_has_no_schedule_block(tmp_path):
+    """No schedule, or only consumed history, prints no block; one switched-off standing row prints its count."""
+    env = _make_health_env(tmp_path)
+    path = tmp_path / "state" / "scheduled_tasks.json"
+
+    def runtime():
+        return json.loads(build_runtime_section(env, {"id": "turn", "type": "task"}).split("\n\n", 1)[1])
+
+    assert "scheduled_tasks" not in runtime()  # no table at all
+    history = {"id": "once", "enabled": False, "completed_at": "2026-09-30T03:00:00+00:00",
+               "trigger": {"type": "once", "run_at": "2026-09-29T00:30:00+00:00"}}
+    path.write_text(json.dumps({"tasks": [history]}), encoding="utf-8")
+    assert "scheduled_tasks" not in runtime()
+    idle = {"id": "idle", "enabled": False, "trigger": {"type": "cron", "expr": "0 9 * * *"}}
+    path.write_text(json.dumps({"tasks": [history, idle]}), encoding="utf-8")
+    assert runtime()["scheduled_tasks"] == {"standing": [], "attention": [], "one_shots": [], "omitted_count": 0,
+                                            "inactive_standing_count": 1, "pointer": "manage_schedules(action='list')"}
 
 
 @pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
@@ -81,7 +98,7 @@ def test_managed_legacy_force_plan_leaves_exact_owner_text(obsolete_marker):
 
 def test_runtime_section_includes_light_runtime_mode_rule(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     section = build_runtime_section(env, {"id": "task-1", "type": "task"})
     payload = json.loads(section.split("\n\n", 1)[1])
 
@@ -118,7 +135,7 @@ def test_runtime_keeps_the_admitted_occurrences_due_time_after_schedule_advances
         **({"previous": previous} if previous is not None else {}),
     }
     if trigger == "once":
-        assert not any(runtime["scheduled_tasks"][group] for group in ("standing", "attention", "one_shots"))
+        assert "scheduled_tasks" not in runtime  # its consumed row is history: nothing to show
     else:
         assert runtime["scheduled_tasks"]["standing"][0]["next_run_at"] != due
 
@@ -136,7 +153,7 @@ def test_runtime_section_includes_filesystem_affordances_with_ctx(tmp_path, monk
     from ouroboros.tools.registry import ToolContext
 
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path)
 
     section = build_runtime_section(env, {"id": "task-1", "type": "task"}, ctx=ctx)
@@ -155,7 +172,7 @@ def test_runtime_section_external_workspace_includes_user_files_shell_affordance
     from ouroboros.tools.registry import ToolContext
 
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     drive = tmp_path / "data"
     repo = tmp_path / "repo"
     workspace = tmp_path / "workspace"
@@ -179,7 +196,7 @@ def test_runtime_section_external_workspace_includes_user_files_shell_affordance
 
 def test_runtime_section_workspace_rule_preserves_system_review_commit_authority(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     section = build_runtime_section(
@@ -202,7 +219,7 @@ def test_runtime_section_workspace_rule_preserves_system_review_commit_authority
 
 def test_runtime_section_omits_light_rule_for_advanced(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     section = build_runtime_section(env, {"id": "task-1", "type": "task"})
     payload = json.loads(section.split("\n\n", 1)[1])
 
@@ -212,7 +229,7 @@ def test_runtime_section_omits_light_rule_for_advanced(tmp_path, monkeypatch):
 
 def test_runtime_section_includes_non_workspace_memory_boundary(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     section = build_runtime_section(
         env,
         {
@@ -232,7 +249,7 @@ def test_runtime_section_includes_non_workspace_memory_boundary(tmp_path, monkey
 
 def test_runtime_section_exposes_host_routing_manifest_and_manual_contract(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     task = {
         "id": "decision-1",
         "type": "task",
@@ -269,7 +286,7 @@ def test_runtime_section_offers_the_rooms_own_continuation_hint(tmp_path, monkey
     own interrupted root at all and promoted again, minting a duplicate root.
     """
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     room = {
         "final_results": [{"task_id": "racer-old", "status": "completed"}],
         "active_roots": [{"task_id": "racer-live", "status": "running",
@@ -491,7 +508,7 @@ def _delegation_data_root(tmp_path, monkeypatch):
 
 def _delegation_fact(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     section = build_runtime_section(env, {"id": "task-1", "type": "task"})
     payload = json.loads(section.split("\n\n", 1)[1])
     return payload["capabilities"]
@@ -694,8 +711,10 @@ class TestStorageFact:
         storage.save_count(tmp_path, first)
         section, data = self._runtime(env)
         fact = data["storage"]
-        assert set(fact) == {"counted_at", "bytes", "unreadable", "basis", "previous_at", "growth_bytes", "free_bytes",
+        assert set(fact) - {"previous_free"} == {"counted_at", "bytes", "unreadable", "basis", "previous_at", "growth_bytes", "free_bytes",
                              "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}
+        assert fact.pop("previous_free") == {"free_bytes": first["volume"]["free_bytes"],
+                                              "observed_at": first["volume"]["observed_at"]}
         assert fact["counted_at"] == first["finished_at"] and fact["bytes"] == first["bytes"] > 0
         assert fact["unreadable"] == 0 and "growth_flag" not in fact
         assert fact["previous_at"] is None and fact["growth_bytes"] is None
@@ -912,10 +931,13 @@ class TestVitalsFact:
         monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")  # a deep self-review's pooled worker: no ring of its own
         _section, data = self._runtime(env)
         assert data["vitals"]["owner_turns_note"] == "none in the journal's tail" and "owner_turns" not in data["vitals"]
+        resumed = {"resumed": "exact_pause", "origin_accepted_at": "2026-10-24T14:00:00+00:00", "handler_wait_sec": 33.9}
         self._journal(tmp_path, [{"ts": f"2026-10-25T19:5{n}:00+00:00", "type": "direct_turn", "execution_id": f"turn_{n}",
-                                  "chat_id": 1, "owner_wait_sec": float(n), "dispatch": "observed_send"} for n in range(3)])
+                                  "chat_id": 1, **(resumed if n == 2 else {"owner_wait_sec": float(n)}),
+                                  "dispatch": "observed_send"} for n in range(3)])
         _section, data = self._runtime(env)
-        assert data["vitals"]["owner_turns"] == ["19:51 chat 1 waited 1.0 s", "19:52 chat 1 waited 2.0 s"]
+        assert data["vitals"]["owner_turns"] == ["19:51 chat 1 waited 1.0 s",
+                                                 "19:52 chat 1 resumed (exact_pause) 33.9 s from its own entry, its message accepted 10-24 14:00"]
         assert "owner_turns_note" not in data["vitals"]
 
     def test_the_journal_per_store_and_the_wal_gate_only_for_a_rollback_store(self, tmp_path, monkeypatch):
@@ -978,3 +1000,246 @@ def test_runtime_names_the_kept_services_custody_reads_now(tmp_path, monkeypatch
         assert "incomplete" not in fact
     finally:
         _settle(leader, identities=[(pid, birth)])
+
+
+# --- setup: how this install began and whether my human and I have met (context_first_hour.setup_fact) ---
+
+def _born(root, origin, **state):
+    """A data root whose first state ``origin`` minted (``first_boot`` or an owner Reset's pending identity)."""
+    from supervisor import state_initialization as witness
+
+    if origin == "owner_reset":
+        identity = witness.mark_pending(root, origin="owner_reset")
+    else:
+        identity = witness.initialization_decision(root)["initialization_id"]
+    (root / "state" / "state.json").write_text(json.dumps({"initialization_id": identity, **state}), encoding="utf-8")
+    assert witness.complete(root, identity, adopted=False)
+
+
+def _said(root, *rows, chat_id=1, kind=None):
+    from ouroboros import dialogue_store
+
+    for stamp, direction in rows:
+        dialogue_store.append(root, "chat", {"ts": f"2026-11-21T{stamp}:00.000000+00:00", "direction": direction,
+                                             "chat_id": chat_id, "text": direction, **({"type": kind} if kind else {})})
+
+
+@pytest.mark.parametrize("shape", ["first_boot", "owner_reset", "talked", "unread_binding"])
+def test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an_unreadable_binding(tmp_path, shape):
+    """Facts only, every line from its own source: a fresh first boot with an empty binding and no messages, a Reset's
+    new state (what a Reset deletes, never history), a bound install where my message followed my human's first
+    one, and a binding that cannot be read, kept apart from a known empty slot."""
+    from ouroboros.context_first_hour import setup_fact
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "settings.json").write_text(json.dumps({"OUROBOROS_ONBOARDING_COMPLETED_AT": "2026-11-21T09:58:12.000000+00:00"}),
+                                            encoding="utf-8")
+    bound = {"talked": 1, "unread_binding": 1}.get(shape)
+    _born(tmp_path, "owner_reset" if shape == "owner_reset" else "first_boot", owner_id=bound, owner_chat_id=bound,
+          bg_consciousness_enabled=shape != "talked",
+          **({"_recovery": {"unconfirmed": ["owner_chat_id"]}} if shape == "unread_binding" else {}))
+    if shape == "talked":
+        _said(tmp_path, ("10:00", "in"), ("10:01", "system"), ("10:02", "out"))
+    elif shape == "unread_binding":
+        _said(tmp_path, ("10:00", "in"))
+    fact = setup_fact(tmp_path)
+    assert fact["finished_at"] == "2026-11-21 09:58 UTC"
+    assert fact["state"].startswith("owner_reset: a new state born" if shape == "owner_reset"
+                                    else "first_boot: the first state of this data root, born")
+    assert ("a Reset deletes memory, chats" in fact["state"]) is (shape == "owner_reset")
+    assert fact["owner_chat"] == {"talked": "Main (chat 1)",
+                                  "unread_binding": "unknown: the owner chat binding is not confirmed",
+                                  }.get(shape, "none bound yet: no owner message has bound one")
+    assert fact["consciousness"] == ("off" if shape == "talked" else "on")
+    assert fact["exchange"] == {
+        "talked": "my human and I have both written",
+        "unread_binding": "my human has written to me; I have not written to them yet",
+    }.get(shape, "my human and I have not written to each other yet")
+    assert "starter_skills" not in fact and "startup_problems" not in fact  # never ran here, nothing recorded
+
+
+def test_setup_names_what_setup_left_running_and_a_first_message_of_mine_before_theirs(tmp_path):
+    """The starter installer's counts and the newest startup verification's problems join only once recorded; a wake
+    that spoke before my human wrote is my first message there, not a reply; an unreadable source says unknown."""
+    from ouroboros.context_first_hour import setup_fact
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "logs").mkdir()
+    _born(tmp_path, "first_boot", owner_id=None, owner_chat_id=None, bg_consciousness_enabled=True)
+    _said(tmp_path, ("10:05", "out"))
+    (tmp_path / "state" / "skill_starter.json").write_text(json.dumps({"state": "pending", "requested": ["a", "b", "c"],
+        "results": {"a": {"status": "installed"}, "b": {"status": "failed"}, "c": {"status": "pending"}}}), encoding="utf-8")
+    verification = {"type": "startup_verification", "ts": "2026-11-21T09:59:00.000000+00:00", "issues_count": 2,
+                    "checks": {"model": {"configured": "(not set)"}, "version_sync": {"status": "warning"},
+                               "budget": {"status": "skipped"}, "identity": {"exists": True, "non_empty": True}}}
+    (tmp_path / "logs" / "events.jsonl").write_text(json.dumps(verification) + "\n", encoding="utf-8")
+    fact = setup_fact(tmp_path)
+    assert fact["exchange"] == "I have written to my human; they have not written to me yet"
+    assert fact["starter_skills"] == "waiting to retry: 3 chosen; 1 installed, 1 pending, 1 failed (state/skill_starter.json)"
+    assert fact["startup_problems"] == ("2026-11-21 09:59 UTC, 2 issues: model not set, version_sync warning "
+                                        "(its startup_verification row in logs/events.jsonl)")
+    assert fact["finished_at"] == "none recorded"  # no setup ran here (Colab, headless, a preset)
+    clean = {**verification, "issues_count": 0, "checks": {"version_sync": {"status": "ok"}}}
+    (tmp_path / "logs" / "events.jsonl").write_text(json.dumps(clean) + "\n", encoding="utf-8")
+    (tmp_path / "state" / "skill_starter.json").write_text(json.dumps({"state": "upgrade"}), encoding="utf-8")
+    (tmp_path / "settings.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "state" / "state.initialized.json").write_text("{not json", encoding="utf-8")
+    fact = setup_fact(tmp_path)
+    assert "startup_problems" not in fact and "starter_skills" not in fact  # a clean check; an install older than it
+    assert fact["finished_at"] == "unknown: the settings document cannot be read"
+    assert fact["state"] == "unknown: the initialization record is invalid"
+    assert fact["owner_chat"].startswith("unknown: runtime state unavailable") and fact["consciousness"] == "unknown"
+
+
+def test_the_exchange_counts_only_the_words_of_my_human_and_mine_in_rooms_they_read(tmp_path):
+    """One statement of two indexed existence probes (``dialogue_store.owner_exchange``): host rows, the hidden
+    partition and correspondents' place rooms are no exchange; an untyped answer or a typed message of mine to my human
+    is one; a store that cannot be read is unknown, never no."""
+    from ouroboros import dialogue_store
+    from ouroboros.context_first_hour import setup_fact
+    from ouroboros.places import conversation_chat_id
+    from ouroboros.store import StoreLost
+
+    (tmp_path / "state").mkdir()
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)  # no store at all: nothing was written
+    _said(tmp_path, ("10:00", "system"), ("10:01", "out"), kind="task_summary")  # host rows in Main
+    _said(tmp_path, ("10:02", "out"), ("10:03", "in"), chat_id=0)  # the hidden partition
+    _said(tmp_path, ("10:04", "out"), ("10:05", "in"), chat_id=conversation_chat_id("slack:c1"))  # a place's room
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)
+    _said(tmp_path, ("10:06", "out"), chat_id=1000 + 7, kind="proactive_message")  # a message of mine, in a Project room
+    assert dialogue_store.owner_exchange(tmp_path) == (False, True)
+    _said(tmp_path, ("10:07", "in"))
+    assert dialogue_store.owner_exchange(tmp_path) == (True, True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(dialogue_store, "owner_exchange", lambda root: (_ for _ in ()).throw(StoreLost("torn page")))
+        assert setup_fact(tmp_path)["exchange"] == "unknown: the dialogue could not be read (StoreLost)"
+    # Known both ways, the answer sticks: the store is not asked again (no walk of Main's history per context).
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(dialogue_store, "transaction", lambda *a, **k: pytest.fail("asked again after both wrote"))
+        assert dialogue_store.owner_exchange(tmp_path) == (True, True)
+
+
+@pytest.mark.parametrize("kind", ["document", "photo", "video", "links", "card", "model_narration"])
+def test_what_the_message_bus_delivers_for_me_and_my_spoken_words_in_a_call_are_messages_of_mine(tmp_path, kind):
+    """A first message of mine may be a file with my caption, a links card or what I said in a live call: each is a
+    message of mine to my human; what the call heard (System) is not, nor a file in the hidden partition."""
+    from ouroboros import dialogue_store
+
+    (tmp_path / "state").mkdir()
+    _said(tmp_path, ("10:00", "out"), kind="call_heard")
+    _said(tmp_path, ("10:01", "out"), chat_id=0, kind=kind)
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)
+    _said(tmp_path, ("10:02", "out"), kind=kind)
+    assert dialogue_store.owner_exchange(tmp_path) == (False, True)
+
+
+def test_a_living_card_i_show_my_human_is_a_message_of_mine(tmp_path, monkeypatch):
+    """``show_card`` may be my first message: the supervisor's real delivery of its card into Main is a message of mine
+    to my human; the same delivery into the hidden partition is not."""
+    from types import SimpleNamespace
+
+    from ouroboros import dialogue_store
+    from ouroboros.card_store import write_card
+    from supervisor import card_delivery, message_bus, state
+
+    (tmp_path / "state").mkdir()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_id": 1})
+    monkeypatch.setattr(card_delivery, "publish_event", lambda *a, **k: None)
+    frames = []
+    bridge = SimpleNamespace(broadcast=frames.append, chat_transport=lambda chat: {})
+    for chat_id, expected in ((0, (False, False)), (1, (False, True))):
+        record = write_card(tmp_path, chat_id=chat_id, task_id="first-task", title="Your setup",
+                            fallback_text="I can help connect the repository.", kind="components", body={"components": []})
+        assert card_delivery.send_card(bridge, record, chat_id, task_id="first-task", interactive=False) == (True, "ok")
+        assert frames[-1]["role"] == "assistant" and frames[-1]["row_address"]
+        assert dialogue_store.owner_exchange(tmp_path) == expected, chat_id
+
+
+def test_a_no_while_the_history_is_still_importing_is_unknown_and_a_yes_stands(tmp_path):
+    """A store whose cutover was not planned yet (a cutover that failed after ``create``) may still hold my older
+    messages: «not written» is then unknown, never no; a message already found stands."""
+    from ouroboros import dialogue_store
+    from ouroboros.context_first_hour import setup_fact
+    from ouroboros.store import StoreMigrating
+
+    (tmp_path / "state").mkdir()
+    _said(tmp_path, ("10:00", "system"), kind="task_summary")
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)  # the history is complete: a no is a no
+    with dialogue_store.transaction(tmp_path, write=True) as conn:
+        conn.execute("DELETE FROM meta WHERE key='cutover'")
+    dialogue_store._PLANNED.discard(str(dialogue_store.path(tmp_path)))
+    with pytest.raises(StoreMigrating):
+        dialogue_store.owner_exchange(tmp_path)
+    assert setup_fact(tmp_path)["exchange"] == "unknown: the dialogue could not be read (StoreMigrating)"
+    with pytest.MonkeyPatch.context() as patch:  # a message of mine found while still importing: a yes stands
+        patch.setattr(dialogue_store, "_unimported", lambda *a, **k: pytest.fail("a yes needs no full history"))
+        with dialogue_store.transaction(tmp_path, write=True) as conn:
+            conn.execute("INSERT INTO dialogue (stream, seq, length, segment, ordinal, ts, chat_id, direction, body) "
+                         "VALUES ('chat', 999999, 1, 0, 999999, '', 1, 'out', '{}')")
+            conn.execute("INSERT INTO dialogue (stream, seq, length, segment, ordinal, ts, chat_id, direction, body) "
+                         "VALUES ('chat', 1999999, 1, 0, 1999999, '', 1, 'in', '{}')")
+        assert dialogue_store.owner_exchange(tmp_path) == (True, True)
+
+
+def test_a_no_and_the_history_s_import_are_read_in_one_snapshot(tmp_path, monkeypatch):
+    """«Not written» stands only on the read that also finds the history imported: ONE transaction holds the two probes
+    and the import ledger's, so a segment whose import commits between them cannot certify an answer it holds (rv2 C4);
+    a pending import read there is unknown."""
+    from ouroboros import dialogue_store
+    from ouroboros.store import StoreMigrating
+
+    (tmp_path / "state").mkdir()
+    _said(tmp_path, ("10:00", "system"), kind="task_summary")
+    real, opened = dialogue_store.transaction, []
+    monkeypatch.setattr(dialogue_store, "transaction", lambda *a, **k: opened.append(k.get("write")) or real(*a, **k))
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)
+    assert opened == [False], "the probes and the import ledger: one read"
+    with real(tmp_path, write=True) as conn:
+        conn.execute("DELETE FROM meta WHERE key='cutover'")
+    dialogue_store._PLANNED.discard(str(dialogue_store.path(tmp_path)))
+    opened.clear()
+    with pytest.raises(StoreMigrating):
+        dialogue_store.owner_exchange(tmp_path)
+    assert opened == [False]
+
+
+@pytest.mark.parametrize("shape", ["pressed", "written", "no_press", "unknown_exchange", "no_witness"])
+def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i_know_i_have_not_written(
+        tmp_path, shape):
+    """``prompts/FIRST_MEETING.md`` waits for the owner's yes on its text: absent, nothing is carried; present, its
+    words ride the setup facts only while a press of Start is on record (the state's ``first_meeting`` record) and I
+    know I have not written to my human. No press (Colab, headless, a legacy-adopted root) or an exchange that cannot be
+    read carries none, and once I have written they leave. The same press in a state whose initialization record is
+    missing is unknown: none either (rv2 C5)."""
+    from ouroboros import dialogue_store
+    from ouroboros.context_first_hour import setup_fact
+    from ouroboros.store import StoreLost
+
+    data, repo = tmp_path / "data", tmp_path / "repo"
+    (data / "state").mkdir(parents=True)
+    _born(data, "first_boot", **({} if shape == "no_press" else
+                                 {"first_meeting": {"state": "admitted", "pressed_at": "2026-11-21T10:00:00Z"}}))
+    if shape == "written":
+        _said(data, ("10:00", "out"))
+    if shape == "no_witness":
+        (data / "state" / "state.initialized.json").unlink()
+        assert setup_fact(data)["state"] == "unknown: no initialization record"
+    assert "first_meeting" not in setup_fact(data, repo)  # no file: nothing
+    (repo / "prompts").mkdir(parents=True)
+    (repo / "prompts" / "FIRST_MEETING.md").write_text("Owner-approved words.\n", encoding="utf-8")
+    with pytest.MonkeyPatch.context() as patch:
+        if shape == "unknown_exchange":
+            patch.setattr(dialogue_store, "owner_exchange", lambda root: (_ for _ in ()).throw(StoreLost("torn page")))
+        fact = setup_fact(data, repo)
+    assert fact.get("first_meeting") == ("Owner-approved words." if shape == "pressed" else None)
+    assert "first_meeting" not in setup_fact(data)  # a caller that names no repository carries none
+
+
+def test_runtime_carries_setup_for_shared_inputs_and_not_for_declared_ones(tmp_path):
+    env = _make_health_env(tmp_path)
+    shared = json.loads(build_runtime_section(env, {"id": "task-1", "type": "task"}).split("\n\n", 1)[1])
+    assert shared["setup"]["owner_chat"].startswith("unknown: runtime state unavailable")  # the helper env has no witness
+    declared = json.loads(build_runtime_section(env, {"id": "task-2", "type": "task", "input_sources": "declared"})
+                          .split("\n\n", 1)[1])
+    assert "setup" not in declared

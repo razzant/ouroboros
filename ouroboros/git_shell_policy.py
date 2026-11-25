@@ -76,8 +76,7 @@ _NOTES_READONLY_MODES = frozenset({"", "list", "show", "get-ref"})
 _BISECT_READONLY_MODES = frozenset({"log", "visualize", "view", "terms"})
 # git config: legacy flag-dispatched modes. `-f`/`--file`/`--blob` make config a
 # general file reader OUTSIDE the repo, so they disqualify the read-only
-# classification outright (the `--no-index` precedent: reads must not ride the
-# repo-inspection exemption at arbitrary targets).
+# classification outright: such a read is not repository inspection.
 _CONFIG_READONLY_ACTION_FLAGS = frozenset({
     "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
     "--get-color", "--get-colorbool",
@@ -298,16 +297,6 @@ def _git_output_file_args(args: list[str]) -> list[str]:
     return values
 
 
-def _git_reads_arbitrary_files(args: list[str]) -> bool:
-    """``--no-index`` turns ``git diff``/``git grep`` into a general FILE reader:
-    ``git diff --no-index /dev/null <data>/settings.json`` prints the file verbatim
-    (measured). It writes nothing, so it is not a mutation — but it is not repo
-    inspection either, and must not ride the runtime/secret read-guard exemption.
-    Disclosed residual: git IMPLIES ``--no-index`` when it runs outside a work tree,
-    and that spelling is not classified here (no shell-parser arms race)."""
-    return any(str(arg) == "--no-index" for arg in args)
-
-
 def _git_invocation_block_reason(parts: list[str], *, allow_network: bool = True) -> str:
     subcmd, args = _git_subcommand_and_args(parts)
     if not subcmd:
@@ -315,8 +304,7 @@ def _git_invocation_block_reason(parts: list[str], *, allow_network: bool = True
     if _git_subcommand_is_readonly(subcmd, args):
         # A read-only SUBCOMMAND carrying a file-WRITING flag is not a read-only
         # invocation: `git log|show|diff --output=<file>` truncates <file>. Judged
-        # here, in the one classifier every consumer asks, so the exemption key and
-        # both target resolvers get the same honest answer.
+        # here, in the one classifier every consumer asks.
         if _git_output_file_args(args):
             return f"git {subcmd} --output"
         if subcmd in GIT_NETWORK_SUBCOMMANDS and not allow_network:
@@ -437,62 +425,6 @@ def _git_explicit_destination(subcmd: str, args: list[str]) -> str:
         if _git_remote_url(token) or _git_path_shaped(token):
             return positionals[-1] if idx < len(positionals) - 1 else ""
     return ""
-
-
-def is_readonly_git_command(raw_cmd: Any) -> bool:
-    """True when EVERY segment of ``raw_cmd`` is a READ-ONLY git invocation.
-
-    The exemption key for the external-workspace runtime-read guard: read-only git
-    (status/log/diff/show/rev-parse/branch- and tag-listing) is allowed in every
-    lane INCLUDING at a runtime target, which is the owner contract and the
-    recorded false-block class (f14baf8f). Deliberately ALL-or-nothing per segment,
-    so a compound command that merely starts with git — `git status && cat
-    <data>/settings.json` — is NOT exempt and still meets the runtime-read guard.
-    Network-reaching read-only git (``ls-remote``) is unaffected here: the network
-    fence is enforced by ``external_workspace_git_violation``, which runs first.
-
-    Two flag families are NOT read-only however read-only their subcommand looks,
-    and both were measured against real git: ``--output=<file>`` (log/show/diff)
-    TRUNCATES and writes <file>, and ``--no-index`` (diff/grep) prints ANY file on
-    the host — `git diff --no-index /dev/null <data>/settings.json` dumps the
-    credentials. Neither may ride this exemption; both then meet the ordinary
-    runtime/secret guard, which refuses them only when they name a protected path.
-
-    ``cd``/``pushd``/``popd`` count as neutral: they read and write nothing, so `cd
-    <repo> && git log` is the same read-only inspection as `git -C <repo> log` and
-    must not be refused for spelling it differently. Disclosed residual: git reached
-    through a transparent wrapper (``nice``/``xargs``) or from inside interpreter
-    code is not recognised as a git segment, so such a command still meets the full
-    guard and is refused when it names a runtime path — deliberately not chased with
-    a shell parser arms race (BIBLE P5)."""
-    segments = shell_segments(raw_cmd)
-    if not segments:
-        return False
-    saw_git = False
-    for segment in segments:
-        if not segment:
-            continue
-        _env, command = collect_leading_env(segment)
-        if not command:
-            return False
-        name = pathlib.PurePath(str(command[0]).strip("`'\"")).name.lower()
-        if name in {"cd", "pushd", "popd"}:
-            continue
-        if name in {"bash", "sh", "zsh"}:
-            inline = shell_command_string(command)
-            if not inline or not is_readonly_git_command(inline):
-                return False
-            saw_git = True
-            continue
-        if name != "git":
-            return False
-        # allow_network=True so this answers ONLY "does this invocation mutate?".
-        if _git_invocation_block_reason(command, allow_network=True):
-            return False
-        if _git_reads_arbitrary_files(_git_subcommand_and_args(command)[1]):
-            return False
-        saw_git = True
-    return saw_git
 
 
 def run_shell_git_block_reason(raw_cmd: Any, *, allow_network: bool = True) -> str:

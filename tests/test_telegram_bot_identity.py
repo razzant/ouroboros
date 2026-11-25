@@ -192,7 +192,7 @@ class _World:
 def _host(world: _World):
     import uvicorn
 
-    _seed_token(world.data, skill="telegram", token="skill-token", permissions=["inject_chat"])
+    _seed_token(world.data, skill="telegram", token="skill-token", permissions=["inject_chat"], bundled=True)
     app = create_host_service_app(world.data, bridge_getter=lambda: world.bridge)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off"))
     thread = threading.Thread(target=server.run, daemon=True)

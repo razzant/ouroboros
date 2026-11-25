@@ -750,7 +750,8 @@ def _checker_targets(policy: DeploymentPolicy, served: tuple) -> str:
     targets: list = []
     for model, local, _account in policy.checker.routes():
         try:
-            targets.append(_local_binding(effective) if local else resolve_target(model, projection))
+            target = _local_binding(effective) if local else resolve_target(model, projection)
+            targets.append({key: value for key, value in target.items() if key != "capability_route"})
         except (ConnectionUnavailable, ValueError) as exc:
             targets.append(["unavailable", type(exc).__name__, str(exc)])
     return hashlib.sha256(json.dumps(targets, sort_keys=True, default=str).encode("utf-8")).hexdigest()
@@ -796,8 +797,7 @@ def prepare_write(proposed: dict, read_document: Callable[[], Mapping], environ:
     as before and no new row may take the second check: otherwise the whole write is refused with
     ``DeploymentPolicyRefusal``. A flat field a checker route reads, carried back as shown, blank over nothing
     saved or not at all, keeps the document's raw value too (``_keep_raw_field``), as does an extension's fixed
-    setting carried back unchanged or masked (``_keep_raw_fixed``). Every write keeps the global processing tier in
-    the vocabulary each packaged reader knows: Ultrafast is a room's or a work's only, never a Settings value."""
+    setting carried back unchanged or masked (``_keep_raw_fixed``). Every write validates the global processing tier."""
     from ouroboros.model_slots import PROCESSING_PREFERENCE_KEY, normalize_processing_preference
 
     normalize_processing_preference(proposed.get(PROCESSING_PREFERENCE_KEY))

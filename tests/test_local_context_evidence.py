@@ -8,7 +8,7 @@ import pytest
 
 from ouroboros import capability_evidence as ce, config, local_model
 from ouroboros.llm import LLMClient
-from ouroboros.llm_local import local_context_limits
+from ouroboros.llm_local import _endpoint_port, local_context_limits
 
 
 @pytest.fixture
@@ -19,6 +19,8 @@ def manager(monkeypatch, tmp_path):
     manager._status = "ready"
     monkeypatch.setattr(local_model, "get_manager", lambda: manager)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    # The capacity queue of the built-in server's counts, and every state file this manager reads, live here too.
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     return manager
 
 
@@ -130,6 +132,30 @@ def test_live_serving_capacity_reaches_main_and_review_consumers(manager, monkey
         assert reviewer.window_tokens == window
         assert reviewer.status == evidence.status
         assert local_context_limits(65536) == (window, window // 4 if window else 2048)
+    # Metadata and reviewer previews are read-only; a send/plan publishes order.
+    assert not ce._store_path(tmp_path).exists()
+
+
+def test_local_reviewer_keeps_its_served_window_when_its_remote_spelling_cannot_resolve(manager, monkeypatch, tmp_path):
+    """The local lane never sends to the row's remote spelling, so a connection that spelling
+    names and Settings no longer hold cannot turn the served window into an unknown one."""
+    from ouroboros.llm_attempt import ConnectionUnavailable
+    from ouroboros.llm_routing import resolve_target
+    from ouroboros.reviewer_window import resolve_reviewer_window
+
+    settings = {"OUROBOROS_MODEL_CONTEXT_WINDOWS": {}}
+    monkeypatch.setattr(config, "runtime_settings", lambda: settings)
+    monkeypatch.setattr("ouroboros.reviewer_window._LAZY_ROUTE_LOCKS", {})
+    monkeypatch.setenv("OUROBOROS_MODEL_CONTEXT_WINDOWS", "{}")
+    manager._context_length = 131072
+    manager._serving_context_length = 16384
+    removed = "openai-compatible@removed::served-model"
+    with pytest.raises(ConnectionUnavailable):
+        resolve_target(removed, settings)
+    for model in ("local-fixture", removed):
+        reviewer = resolve_reviewer_window(model, use_local=True)
+        assert reviewer.window_tokens == 16384, model
+        assert reviewer.capability_route == {}
     assert not ce._store_path(tmp_path).exists()
 
 
@@ -149,11 +175,13 @@ def test_serving_measurement_keeps_input_and_instance_binding(manager, monkeypat
     manager._context_length = 131072
     manager._serving_context_length = 16384
     manager._measurement_route = True
+    # The count may open only toward the endpoint this lane dispatches to; this server is that endpoint here.
+    monkeypatch.setenv("LOCAL_MODEL_PORT", str(manager._port))
     payload = {"model": "local-model", "messages": [{"role": "user", "content": "source"}]}
     measured = {"supported": True, "input_is_exact": True, "input_tokens": 42,
                 "context_window": 16384, "process_id": 123,
                 "native_input_sha256": input_fingerprint(payload)}
-    response = Mock()
+    response = Mock(status_code=200)
     response.json.return_value = measured
     session_scope = MagicMock()
     session_scope.__enter__.return_value.post.return_value = response
@@ -678,3 +706,192 @@ def test_owned_local_health_never_consults_ambient_proxy_configuration(monkeypat
         server.server_close()
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+def test_restarted_owned_instance_releases_prior_refusal(manager, monkeypatch, tmp_path):
+    from ouroboros.context_window import record_observation, resolve_window
+    manager._serving_context_length = 80000
+    manager._proc = SimpleNamespace(pid=123, poll=lambda: None)
+    first = ce.probe(tmp_path, provider='local', model='local-fixture', use_local=True, allow_fetch=False)
+    resolve_window(first, 8192, root=tmp_path)
+    record_observation(tmp_path, first.route_fp, refused=40000)
+    same = ce.probe(tmp_path, provider='local', model='local-fixture', use_local=True, allow_fetch=False)
+    assert resolve_window(same, 8192, root=tmp_path).total.tokens == 40000
+    manager._proc = SimpleNamespace(pid=456, poll=lambda: None)
+    restarted = ce.probe(tmp_path, provider='local', model='local-fixture', use_local=True, allow_fetch=False)
+    assert resolve_window(restarted, 8192, root=tmp_path).total.tokens == 80000
+
+
+def test_local_helper_keeps_the_plans_serving_instance(manager, monkeypatch, tmp_path):
+    from ouroboros.context_window import record_observation, resolve_window
+    from ouroboros.llm_helper_window import _helper_attempt_context
+    monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
+    monkeypatch.setattr('ouroboros.context_window.route_observation_scope', lambda *a, **k: 'r')
+    manager._serving_context_length = 80000
+    evidence = ce.probe(tmp_path, provider='local', model='local-fixture', use_local=True, allow_fetch=False)
+    resolve_window(evidence, 8192, root=tmp_path, observation_fp='r')
+    record_observation(tmp_path, 'r', refused=40000)
+    target, payload = LLMClient.__new__(LLMClient)._build_local_candidate(
+        [{'role':'user', 'content':'hi'}], None, 65536, 'auto')
+    assert _helper_attempt_context(target, payload).capacity_total_tokens == 40000
+
+
+@pytest.mark.parametrize(("dispatch_port", "counted"), [("8766", True), ("8767", False)],
+                         ids=["dispatches-to-this-server", "dispatches-to-another-endpoint"])
+def test_the_count_opens_no_connection_to_an_endpoint_this_lane_does_not_dispatch_to(
+        manager, monkeypatch, dispatch_port, counted):
+    """A count may open its connection only toward the endpoint the lane's send addresses.
+
+    ``_chat_local`` sends to ``local_dispatch_port()`` and holds that endpoint's queue (``measurement_slot``), while
+    this manager's count would post to the port ``start_server`` accepted. A server listening elsewhere is a
+    different one: its own slot is not the queue this process took, so counting there would open beside that
+    server's work — and, were another server answering the lane's address, the facts would describe a send that
+    never reaches them. There the count answers with its unsupported fact and opens nothing, so the candidate
+    keeps its own estimate; at the same endpoint the identical call still counts.
+    """
+    import requests
+    from ouroboros.local_model_server import input_fingerprint
+
+    manager._context_length = 131072
+    manager._serving_context_length = 16384
+    manager._measurement_route = True
+    manager._port = 8766
+    monkeypatch.setenv("LOCAL_MODEL_PORT", dispatch_port)
+    payload = {"model": "local-model", "messages": [{"role": "user", "content": "source"}]}
+    measured = {"supported": True, "input_is_exact": True, "input_tokens": 42,
+                "context_window": 16384, "process_id": 123,
+                "native_input_sha256": input_fingerprint(payload)}
+    response = Mock(status_code=200)
+    response.json.return_value = measured
+    session = MagicMock()
+    session.post.return_value = response
+    session_scope = MagicMock()
+    session_scope.__enter__.return_value = session
+    monkeypatch.setattr(requests, "Session", lambda: session_scope)
+    result = manager.measure_prepared_input(payload)
+    if counted:
+        assert result == measured
+        assert [call.args[0] for call in session.post.call_args_list] == ["http://127.0.0.1:8766/extras/measure_chat"]
+    else:
+        assert (result["supported"], result["input_is_exact"]) == (False, False)
+        assert result["reason"] == "measurement_endpoint_mismatch"
+        assert session.post.call_count == 0
+
+
+def test_ordinary_builtin_send_names_the_endpoint_its_sdk_client_reaches(manager, monkeypatch):
+    """The count and the queue of an ordinary send must describe the endpoint the SDK actually reaches.
+
+    ``_chat_local`` snapshots its client's base URL once; the environment the manager reads can name another
+    port afterwards (a settings/launch change). The candidate then carries the snapshotted base URL and its
+    serving facts stay uncertain instead of describing a different server, and the count is asked for that
+    same endpoint's port.
+    """
+    manager._port = 8766
+    manager._measurement_route = True
+    manager._serving_context_length = 16384
+    monkeypatch.setenv("LOCAL_MODEL_PORT", "8766")
+    client = LLMClient(api_key="unused")
+    seen = {}
+
+    def prepared(*args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop after preparation")
+
+    monkeypatch.setattr(client, "_get_local_client",
+                        lambda: SimpleNamespace(base_url="http://127.0.0.1:8767/v1"))
+    monkeypatch.setattr(client, "_prepared_local_candidate", prepared)
+    with pytest.raises(RuntimeError, match="stop after preparation"):
+        client._chat_local([{"role": "user", "content": "hi"}], None, 64, "auto")
+    assert seen["base_url"] == "http://127.0.0.1:8767/v1"
+
+
+def test_a_bound_candidate_takes_its_serving_facts_from_the_named_endpoint(manager, monkeypatch):
+    """A candidate naming another port keeps its SDK address, but not the other listener's window."""
+    manager._port = 8766
+    manager._measurement_route = True
+    manager._serving_context_length = 16384
+    monkeypatch.setenv("LOCAL_MODEL_PORT", "8766")
+    monkeypatch.setattr(manager, "serving_context_evidence",
+                        lambda bind_endpoint=False: {"confirmed": True, "context_window": 16384,
+                                                     "source": "owned_server_arguments", "port": 8766})
+    lane = LLMClient.__new__(LLMClient)
+    target, _payload = lane._build_local_candidate([{"role": "user", "content": "hi"}], None, 64, "auto",
+                                                   base_url="http://127.0.0.1:8767/v1")
+    assert target["local_dispatch_base_url"] == "http://127.0.0.1:8767/v1"
+    assert target["context_window_tokens"] is None and target["context_window_confirmed"] is False
+    _target, _payload = lane._build_local_candidate([{"role": "user", "content": "hi"}], None, 64, "auto",
+                                                    base_url="http://127.0.0.1:8766/v1")
+    assert _target["context_window_tokens"] == 16384
+    assert _endpoint_port("http://127.0.0.1:8767/v1") == 8767
+
+
+def test_a_bound_count_accepts_the_owners_own_process_without_a_service_binding(manager, monkeypatch):
+    """A live owned process keeps its window even if publishing its service binding failed."""
+    import requests
+    from ouroboros.local_model_server import input_fingerprint
+
+    manager._port = 8766
+    manager._measurement_route = True
+    manager._serving_context_length = 16384
+    monkeypatch.setenv("LOCAL_MODEL_PORT", "8766")
+    payload = {"model": "local-model", "messages": [{"role": "user", "content": "source"}]}
+    session = MagicMock()
+    session.post.return_value = Mock(status_code=200, json=lambda: {
+        "supported": True, "input_is_exact": True, "input_tokens": 42, "context_window": 16384,
+        "process_id": 123, "native_input_sha256": input_fingerprint(payload)})
+    monkeypatch.setattr(requests, "Session", lambda: MagicMock(__enter__=Mock(return_value=session)))
+
+    measured = manager.measure_prepared_input(payload, expected_port=8766)
+    assert measured["supported"] is True
+    assert session.post.call_args.args[0] == "http://127.0.0.1:8766/extras/measure_chat"
+
+    session.post.reset_mock()
+    refused = manager.measure_prepared_input(payload, expected_port=8767)
+    assert (refused["supported"], refused["reason"]) == (False, "measurement_endpoint_mismatch")
+    assert session.post.call_count == 0
+
+
+def _lookahead_setup(manager, monkeypatch, tmp_path, served, named):
+    import requests
+    from ouroboros import llm_attempt
+
+    manager._port = served
+    manager._measurement_route = True
+    manager._serving_context_length = 16384
+    manager._service_binding = None  # the optional binding write failed; health stayed ready
+    monkeypatch.setenv("LOCAL_MODEL_PORT", str(named))
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.delenv("OUROBOROS_MODEL_MAX_CONCURRENCY", raising=False)
+    monkeypatch.setattr(llm_attempt, "require_physical_dispatch_window", lambda: None)
+    session = MagicMock()
+    monkeypatch.setattr(requests, "Session", lambda: MagicMock(__enter__=Mock(return_value=session)))
+    return session
+
+
+def test_the_advisory_lookahead_counts_under_the_endpoint_it_names(manager, monkeypatch, tmp_path):
+    """Same port: bound facts survive a missing service binding and the count opens on the named endpoint."""
+    from ouroboros.local_model_server import input_fingerprint
+    from ouroboros.model_concurrency import built_in_route
+
+    session = _lookahead_setup(manager, monkeypatch, tmp_path, 8766, 8766)
+    session.post.side_effect = lambda url, json, **_k: Mock(status_code=200, json=lambda: {
+        "supported": True, "input_is_exact": True, "input_tokens": 42, "context_window": 16384,
+        "process_id": 123, "native_input_sha256": input_fingerprint(json)})
+    target, _ = LLMClient.__new__(LLMClient)._prepared_local_candidate(
+        [{"role": "user", "content": "source"}], None, 64, "auto", None, "auto")
+    assert target["local_dispatch_base_url"] == "http://127.0.0.1:8766/v1" == built_in_route(8766)["base_url"]
+    assert target["context_window_confirmed"] is True and target["context_window_tokens"] == 16384
+    assert target["local_input_measurement"]["input_tokens"] == 42
+    assert session.post.call_args.args[0] == "http://127.0.0.1:8766/extras/measure_chat"
+
+
+def test_the_advisory_lookahead_names_the_lane_endpoint_and_trusts_no_other(manager, monkeypatch, tmp_path):
+    """Different port: the queue still names the lane's canonical endpoint; a foreign manager yields no facts."""
+    from ouroboros.model_concurrency import built_in_route
+
+    session = _lookahead_setup(manager, monkeypatch, tmp_path, 8766, 8767)
+    target, _ = LLMClient.__new__(LLMClient)._prepared_local_candidate(
+        [{"role": "user", "content": "source"}], None, 64, "auto", None, "auto")
+    assert target["local_dispatch_base_url"] == built_in_route(8767)["base_url"]
+    assert target["context_window_tokens"] is None and target["context_window_confirmed"] is False
+    assert "local_input_measurement" not in target and session.post.call_count == 0

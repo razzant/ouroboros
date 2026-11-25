@@ -8,7 +8,8 @@ let activeClose = null;
 /**
  * Render one caller-supplied typed detail disclosure. Values are always text;
  * callers cannot inject markup into the shared dialog.
- * @param {{summary?: string, rows?: Array<{label?: string, value?: string}>}|null} details
+ * @param {{summary?: string, open?: boolean, rows?: Array<{label?: string, value?: string, authored?: boolean}>}|null} details
+ *   `authored`: the value is someone's own words (a place's name), which the page's translator leaves as written.
  */
 export function renderConfirmDialogDetails(details) {
     if (!details || typeof details !== 'object') return '';
@@ -19,9 +20,9 @@ export function renderConfirmDialogDetails(details) {
     const renderedRows = rows.map((row) => `
         <div class="confirm-dialog-detail-row">
             <dt>${escapeHtml(String(row.label ?? 'Detail'))}</dt>
-            <dd>${escapeHtml(String(row.value ?? ''))}</dd>
+            <dd${row.authored ? ' data-i18n-authored' : ''}>${escapeHtml(String(row.value ?? ''))}</dd>
         </div>`).join('');
-    return `<details class="confirm-dialog-details ui-disclosure">
+    return `<details class="confirm-dialog-details ui-disclosure"${details.open === true ? ' open' : ''}>
         <summary>${escapeHtml(String(details.summary ?? 'Show details'))}</summary>
         <dl class="confirm-dialog-detail-list">${renderedRows}
         </dl>
@@ -55,13 +56,13 @@ export function openConfirmDialog({
     if (activeClose) activeClose(false);
     return new Promise((resolve) => {
         const backdrop = document.createElement('div');
-        backdrop.className = 'marketplace-modal-backdrop confirm-dialog-backdrop';
+        backdrop.className = 'ui-modal-backdrop confirm-dialog-backdrop';
         backdrop.innerHTML = `
-            <div class="marketplace-modal confirm-dialog${content?.mount ? ' has-content' : ''}" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
-                <div class="marketplace-modal-head">
+            <div class="ui-modal confirm-dialog${content?.mount ? ' has-content' : ''}" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+                <div class="ui-modal-head">
                     <h3 id="confirm-dialog-title">${escapeHtml(title || 'Confirm action')}</h3>
                 </div>
-                <div class="marketplace-modal-body">
+                <div class="ui-modal-body">
                     ${content?.mount ? `<section class="confirm-dialog-content" data-confirm-content tabindex="0" aria-label="${escapeHtml(String(content.label || 'Details'))}"></section>` : ''}
                     <p>${escapeHtml(body || 'Continue?')}</p>
                     ${renderConfirmDialogDetails(details)}
@@ -69,7 +70,7 @@ export function openConfirmDialog({
                         ? `<select class="ui-control files-modal-input confirm-dialog-input" data-confirm-input aria-labelledby="confirm-dialog-title">${choices.map((choice) => `<option value="${escapeHtml(String(choice?.value ?? ''))}">${escapeHtml(String(choice?.label ?? choice?.value ?? ''))}</option>`).join('')}</select>`
                         : `<input class="ui-control files-modal-input confirm-dialog-input" data-confirm-input type="text" aria-labelledby="confirm-dialog-title" value="${escapeHtml(initialValue)}">`}
                 </div>
-                <div class="marketplace-modal-actions">
+                <div class="ui-modal-actions">
                     ${alert ? '' : `<button type="button" class="btn btn-default" data-confirm-cancel>${escapeHtml(cancelLabel)}</button>`}
                     <button type="button" class="btn${danger ? ' btn-danger' : ''}"${danger ? '' : ' data-primary'} data-confirm-ok>${escapeHtml(confirmLabel)}</button>
                 </div>

@@ -14,68 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests._budget_pause_exact_helpers import _loop_ctx
+from tests._run_wait_shared import _NANNY, _asks, _body, _ended, _nanny, _notices, _run, reads as reads
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines  # noqa: F401
-
-_NANNY = "nanny"
-
-
-def _run(root, run_id, task_id=_NANNY):
-    from ouroboros import delegate_custody as custody, delegate_custody_current as current
-
-    assert custody.emit(root, custody.STARTED, {
-        "run_id": run_id, "invocation_id": f"invoke-{run_id}", "task_id": task_id, "root_task_id": task_id,
-        "route": "route", "source": "delegate_start", "access": "readonly"})
-    return current.run(root, run_id)
-
-
-def _ended(root, run_id, state="succeeded"):
-    from ouroboros import delegate_custody_current as current
-    from ouroboros.delegate_collection import observe_run
-
-    assert observe_run(root, current.run(root, run_id), {"summary": {"runId": run_id, "state": state}, "lastSeq": 9})
-
-
-def _asks(root, run_id, question="q1"):
-    from ouroboros import delegate_custody_current as current
-    from ouroboros.delegate_collection import observe_run
-
-    assert observe_run(root, current.run(root, run_id), {"summary": {"runId": run_id, "state": "running"}, "lastSeq": 3,
-        "pendingInteractions": [{"interactionId": question, "questions": [{"id": "pick", "question": "Which?"}]}]})
-
-
-def _nanny(root, task_id=_NANNY):
-    from ouroboros.task_results import write_task_result
-
-    write_task_result(root, task_id, "running", root_task_id=task_id, chat_id=0)
-    ctx, limit = _loop_ctx(root, task_id)
-    ctx.task_metadata, ctx._loop_mailbox_seen_ids = {"root_task_id": task_id}, set()
-    limit.tool_schemas, limit.round_idx, limit.llm_trace = [], 2, {"tool_calls": []}
-    (root / "logs").mkdir(exist_ok=True)
-    return ctx, limit
-
-
-@pytest.fixture
-def reads(monkeypatch):
-    """The one addressed read a wake makes: a terminal for an ended run, its question set, else a quiet state."""
-    from ouroboros import delegate_custody_current as current
-
-    made = []
-
-    def observe(ctx, run_id, since_seq, gateway=None):
-        made.append((run_id, since_seq))
-        run = current.run(ctx.drive_root, run_id)
-        if run is not None and run.terminal_state:
-            return json.dumps({"status": "terminal", "run_id": run_id, "state": run.terminal_state, "last_seq": 9})
-        if run is not None and run.pending_interaction_ids:
-            return json.dumps({"status": "waiting_on_user", "run_id": run_id, "state": "running", "last_seq": 3,
-                               "pending_interactions": [{"interaction_id": iid, "questions": [{"id": "pick"}]}
-                                                        for iid in run.pending_interaction_ids]})
-        return json.dumps({"status": "no_progress", "run_id": run_id, "state": "running", "last_seq": since_seq})
-
-    monkeypatch.setattr("ouroboros.tools.delegate._read_run", observe)
-    return made
-
 
 def _armed(result):
     from ouroboros.delegate_shared import delegate_payload
@@ -89,14 +29,6 @@ def _pending(ctx, run_id):
     state = ds._load_state(ctx, run_id)
     return (state.get("pending_wake") or {}).get("wake_id", ""), (state.get("last_acknowledged_wake") or {}).get(
         "wake_id", "")
-
-
-def _notices(limit):
-    return [row["content"] for row in limit.messages if "[BEGIN_TASK_WAIT_OUTPUT]" in str(row.get("content"))]
-
-
-def _body(notice):
-    return json.loads(notice.split("[BEGIN_TASK_WAIT_OUTPUT]\n", 1)[1].rsplit("\n[END_TASK_WAIT_OUTPUT]", 1)[0])
 
 
 @pytest.mark.parametrize("continuation", [True, False])
@@ -155,7 +87,8 @@ def test_unselected_question_exposure_waits_for_the_exact_wake_source(tmp_path, 
     assert json.loads(next_wait["result"])["reason"] == "sleep_armed"
 
 
-def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request(tmp_path, reads):
+@pytest.mark.parametrize("sleep_mode,mode", [(None, "cold"), ("warm", "warm")])
+def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request(tmp_path, reads, sleep_mode, mode):
     """Nothing there yet: the call arms the task's ordinary sleep on its runs (no slot, no tick, no read) and owes its
     result; the run's terminal wakes the sleep, and the first request after it carries one wake, published then and
     acknowledged only after the next saved state, never before."""
@@ -165,8 +98,8 @@ def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request
 
     ctx, limit = _nanny(tmp_path)
     _run(tmp_path, "run-1")
-    armed = _armed(ds.run_wait(ctx, "run-1"))
-    assert armed["reason"] == "sleep_armed" and armed["mode"] == "cold", "the body takes the run: nothing keeps it"
+    armed = _armed(ds.run_wait(ctx, "run-1", sleep_mode=sleep_mode))
+    assert armed["reason"] == "sleep_armed" and armed["mode"] == mode, "omitted: the body takes the run, nothing keeps it"
     assert ctx._model_sleep["runs"] == ["run-1"] and ctx._model_sleep["any_mail"] and ctx._model_sleep["run_wait"]
     assert ctx._pending_task_wait["tool"] == "delegate_wait" and ctx._pending_task_wait["runs"] == ["run-1"]
     assert reads == [] and _pending(ctx, "run-1") == ("", ""), "arming reads no run and publishes no wake"
@@ -174,7 +107,7 @@ def test_a_wait_on_a_quiet_run_sleeps_and_its_result_is_owed_to_the_next_request
 
     trail = [row for row in map(json.loads, custody.event_log_path(tmp_path).read_text(encoding="utf-8").splitlines())
              if row["type"] == "delegate_supervision_wait_entered"]
-    assert [(row["run_id"], row["outcome"], row["mode"]) for row in trail] == [("run-1", "sleep_armed", "cold")]
+    assert [(row["run_id"], row["outcome"], row["mode"]) for row in trail] == [("run-1", "sleep_armed", mode)]
     chosen = dict(ctx._model_sleep)
     assert model_sleep.wake_reason(ctx, chosen) == "", "a quiet run does not wake its sleep"
     _ended(tmp_path, "run-1")
@@ -209,6 +142,91 @@ def test_what_is_already_there_answers_at_once_and_nothing_parks(tmp_path, reads
     assert [iid for row in asked["pending_interactions"] for iid in [row["interaction_id"]]] == ["q1"]
 
 
+@pytest.mark.parametrize("sleep_mode,mode", [(None, "cold"), ("cold", "cold"), ("warm", "warm")])
+def test_a_named_sleep_mode_arms_that_sleep_omitted_keeps_the_default_and_ready_answers_at_once(
+        tmp_path, reads, sleep_mode, mode):
+    """``delegate_wait`` chooses its sleep as the task waits do (``native_task_wait.sleep_choice``): warm keeps the
+    process, cold releases it, and an omitted mode keeps the owner's default (here cold: nothing keeps the process).
+    A run that already ended answers through the result in that mode, and nothing parks."""
+    from ouroboros import delegate_supervision as ds
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-done")
+    _ended(tmp_path, "run-done")
+    assert _armed(ds.run_wait(ctx, "run-done", sleep_mode=sleep_mode))["status"] == "terminal"
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    _run(tmp_path, "run-quiet")
+    armed = _armed(ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode))
+    assert armed["reason"] == "sleep_armed" and armed["mode"] == mode == ctx._model_sleep["mode"]
+    assert ctx._pending_task_wait["arguments"].get("sleep_mode") == sleep_mode and reads == [("run-done", 0)]
+
+
+@pytest.mark.parametrize("sleep_mode", ["warm", "cold"])
+def test_with_no_continuation_owner_what_is_there_answers_in_a_named_sleep_mode_and_only_a_sleep_is_refused(
+        tmp_path, reads, sleep_mode):
+    """A result already there needs nothing to sleep under: it answers in whatever mode was named, owner or not. Only
+    a call that would arm a sleep is refused when the task has no continuation owner; an unknown mode is refused
+    first, even over a ready run."""
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds
+    from ouroboros.delegate_shared import AGENT_FAULT_CODE
+
+    ctx, _limit = _nanny(tmp_path)
+    owner, ctx.owner_wait_callback = ctx.owner_wait_callback, None
+    _run(tmp_path, "run-done")
+    _ended(tmp_path, "run-done")
+    unknown = ds.run_wait(ctx, "run-done", sleep_mode="hot")
+    assert _armed(unknown)["reason"] == "sleep_mode_refused" and unknown.code == AGENT_FAULT_CODE and not reads
+    assert _armed(ds.run_wait(ctx, "run-done", sleep_mode=sleep_mode))["status"] == "terminal"
+    _run(tmp_path, "run-quiet")
+    refused = ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode, checkpoint_after_sec=300, checkpoint_reason="look")
+    assert _armed(refused)["reason"] == "sleep_mode_refused" and refused.code == AGENT_FAULT_CODE
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    assert reads == [("run-done", 0)]
+    kinds = [json.loads(line)["type"] for line in custody.event_log_path(tmp_path).read_text().splitlines()]
+    assert "delegate_supervision_checkpoint_scheduled" not in kinds, "a refused wait schedules no checkpoint"
+    ctx.owner_wait_callback = owner  # the same call that is accepted and armed does schedule one
+    assert _armed(ds.run_wait(ctx, "run-quiet", sleep_mode=sleep_mode, checkpoint_after_sec=300,
+                              checkpoint_reason="look"))["reason"] == "sleep_armed"
+    kinds = [json.loads(line)["type"] for line in custody.event_log_path(tmp_path).read_text().splitlines()]
+    assert kinds.count("delegate_supervision_checkpoint_scheduled") == 1
+
+
+def test_an_in_slot_wait_keeps_the_call_after_what_an_earlier_call_of_the_batch_armed_or_staged(
+        tmp_path, monkeypatch, reads):
+    """``in_slot`` waits in this call on the sleep's own sources although the task could sleep. What an earlier call
+    of the batch armed or staged comes first, before any slot is taken, as the task waits do: its unshown hold answers
+    at once as ``dependency_held`` in any mode (once delivered, the same wait sleeps), and its armed wait refuses the
+    next one (``armed_conflict``), which would otherwise hold that wait's wake behind this call."""
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds, model_sleep
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-1")
+    beats, waited_on = [], ["run-1"]  # each beat ends the run the slot waits on
+    monkeypatch.setattr(model_sleep, "declare_in_slot_wait", lambda *_a, **_k: None)
+    monkeypatch.setattr(model_sleep, "end_in_slot_wait", lambda *_a, **_k: None)
+    monkeypatch.setattr("supervisor.owner_stop.in_process_stop_now", lambda _ctx: False)
+    monkeypatch.setattr(ds.time, "sleep", lambda _sec: beats.append(waited_on[0]) or _ended(tmp_path, waited_on[0]))
+    assert _armed(ds.run_wait(ctx, "run-1", sleep_mode="in_slot"))["status"] == "terminal" and beats == ["run-1"]
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    _run(tmp_path, "run-2")
+    model_sleep.hold_notice(ctx, [{"task_id": "held-child", "identity": "hold-1"}])
+    for sleep_mode in ("in_slot", None):
+        waited_on[0] = "run-2"
+        held = ds.run_wait(ctx, "run-2", sleep_mode=sleep_mode, checkpoint_after_sec=300, checkpoint_reason="look")
+        assert _armed(held)["reason"] == "dependency_held" and held.meta == {model_sleep.HOLD_NOTICE: True}
+    rows = custody.event_log_path(tmp_path).read_text().splitlines()
+    assert not any(json.loads(row)["type"] == "delegate_supervision_checkpoint_scheduled" for row in rows), "held: none"
+    assert beats == ["run-1"] and not getattr(ctx, "_model_sleep", None)
+    assert not getattr(ctx, "_pending_task_wait", None)
+    ctx._held_dependencies_pending = []  # the batch delivered the hold
+    assert _armed(ds.run_wait(ctx, "run-2"))["reason"] == "sleep_armed"
+    _run(tmp_path, "run-3")
+    waited_on[0] = "run-3"
+    refused = _armed(ds.run_wait(ctx, "run-3", sleep_mode="in_slot"))
+    assert refused["reason"] == "wait_already_armed" and beats == ["run-1"]
+    assert ctx._pending_task_wait["runs"] == ["run-2"] and reads == [("run-1", 0)]
+
+
 @pytest.mark.parametrize("local_first", [False, True])
 def test_a_run_only_this_process_holds_is_read_at_once_unless_a_selected_durable_run_is_ready(tmp_path, reads,
                                                                                               local_first):
@@ -225,7 +243,20 @@ def test_a_run_only_this_process_holds_is_read_at_once_unless_a_selected_durable
             for rid, owner in (("run-local", _NANNY), ("run-sibling", "t-b"))}
     custody._CUSTODY.update(held)
     try:
-        assert _armed(ds.run_wait(ctx, "run-nobody"))["reason"] == "run_ownership_unknown"
+        nobody = _armed(ds.run_wait(ctx, "run-nobody"))
+        assert nobody["reason"] == "run_ownership_unknown" and "hint" not in nobody
+        # A task id given as a run id: the public wait names the read that answers it.
+        from ouroboros.task_results import write_task_result
+        from ouroboros.tools.control_task_results import _status_root
+
+        write_task_result(_status_root(ctx), "kidtask09", "completed", result="done")
+        task = _armed(ds.run_wait(ctx, "kidtask09"))
+        assert task["reason"] == "run_ownership_unknown" and task["hint"] == (
+            "That id names a task, not a delegated run: get_task_result(task_id='kidtask09') reads it.")
+        # An id this task's custody OWNS is never called a task, even when a task record shares it.
+        write_task_result(_status_root(ctx), "run-local", "completed", result="done")
+        mixed = _armed(ds.run_wait(ctx, ["run-local", "run-nobody"]))
+        assert mixed["reason"] == "run_ownership_unknown" and "hint" not in mixed
         assert _armed(ds.run_wait(ctx, "run-sibling"))["reason"] == "run_not_owned" and reads == []
         for durable, ready, status, woke_by in (("run-quiet", None, "no_progress", None),
                                                 ("run-done", _ended, "terminal", "run:run-done"),
@@ -283,7 +314,8 @@ def test_an_old_tick_wake_with_mail_is_delivered_once(tmp_path, reads):
     ctx, _limit = _nanny(tmp_path)
     _run(tmp_path, "run-1")
     assert write_owner_message(tmp_path, "Keep the old shape.", _NANNY, msg_id="old-mail")
-    events = ds._addressed_wakes(ctx, {})
+    events = [{"type": "addressed_message", "msg_id": "old-mail", "kind": "owner_text", "provenance": "owner",
+               "text": "Keep the old shape.", "ts": ""}]  # the tick put mail inside; a wake now carries controls only
     old = {"status": "progress", "run_id": "run-1", "wake_events": events, "supervision_wake_id": "tick-wake"}
     ds._save_state(ctx, {"run_id": "run-1", "status": "wake_pending", "pending_wake": {
         "wake_id": "tick-wake", "attempt_key": "1", "payload": old, "mailbox_ids": ["old-mail"],
@@ -523,7 +555,9 @@ def test_the_unknown_outcome_hold_parks_a_host_armed_sleep_and_its_wake_is_ackno
         tmp_path, monkeypatch, reads):
     """The hold buys no model call and holds no slot: with nothing ready the loop's round top (``round_top``) arms
     the task's own warm sleep on its leaves and parks it through the ordinary warm park; the next round top publishes
-    the wake, carries it whole as the receipt and acknowledges it synchronously before the resumed round is sent."""
+    the wake, carries it whole as the receipt and acknowledges it synchronously. That round goes back to its top
+    once (``"redrain"``), so mail that came after its drain joins the receipt in the resumed request; that top sends
+    the receipt and holds nothing, even when the latch's tombstone was not written (it may hold again after it)."""
     from ouroboros import delegate_hold, delegate_supervision as ds
 
     ctx, limit = _nanny(tmp_path)
@@ -547,31 +581,89 @@ def test_the_unknown_outcome_hold_parks_a_host_armed_sleep_and_its_wake_is_ackno
     [(reason, sleep)] = parks
     assert reason == "sleep" and sleep["mode"] == "warm" and sleep["run_wait"]["hold"] is True
     assert not getattr(ctx, "_model_sleep", None) and not ctx._owner_wait_requested, "the park ended the sleep"
-    assert top() == "resume" and len(parks) == 1
+    assert top() == "redrain" and len(parks) == 1
     receipt = limit.messages[-1]["content"]
     assert receipt.startswith("[DELEGATED LEAF WAKE / UNKNOWN-HOLD RESUME]") and '"status": "terminal"' in receipt
     assert _pending(ctx, "leaf")[0] == "" and _pending(ctx, "leaf")[1] in receipt, "acknowledged before dispatch"
     assert not ds.read_unknown_hold(ctx).get("run_id"), "the latch is a tombstone now"
+    assert top() == "", "the loop's next top drains, then sends the receipt"
+
+    _run(tmp_path, "leaf-2")
+    ds.write_unknown_hold(ctx, "leaf-2", {"run_ids": ["leaf-2"], "run_id": "leaf-2", "hold_cycles": 1})
+    _ended(tmp_path, "leaf-2")
+    real_write = delegate_hold.write_unknown_hold
+
+    def no_tombstone(ctx_, run_id, fields):
+        if not run_id:
+            raise OSError("controlled tombstone failure")
+        return real_write(ctx_, run_id, fields)
+
+    monkeypatch.setattr(delegate_hold, "write_unknown_hold", no_tombstone)
+    assert top() == "redrain" and ds.read_unknown_hold(ctx).get("run_id") == "leaf-2", "drains first, latch kept"
+    assert limit.messages[-1]["content"].startswith("[DELEGATED LEAF WAKE") and _pending(ctx, "leaf-2")[0] == ""
+    assert top() == "" and len(parks) == 1, "that top sends the receipt instead of holding again"
+
+
+def test_a_hold_resumed_on_owner_words_after_its_park_sleeps_again_on_its_next_latch(tmp_path, reads):
+    """The park marks the hold as parked; owner words at the next top resume it before its wake is read. The mark must
+    not outlive that resume: a later latch with nothing ready would read it as a woken park and publish a wake on no
+    source (``hold_wake(..., woke=True)``), buying a round on nothing."""
+    from ouroboros import delegate_hold, delegate_supervision as ds
+
+    ctx, limit = _nanny(tmp_path)
+    ctx.exact_model_route, ctx.task_metadata["configured_subagent"] = True, {"config_fingerprint": "fp"}
+    _run(tmp_path, "leaf")
+    tools, limit.messages, limit.drive_logs, limit.task_id = SimpleNamespace(_ctx=ctx), [], tmp_path, _NANNY
+    parks = []
+    ctx.owner_wait_callback = lambda _ctx, checkpoint: parks.append(checkpoint["reason"]) or "run:leaf"
+
+    def top(new_input=False):
+        return delegate_hold.round_top(tools, limit, {}, lambda *_a: None, new_input=new_input)
+
+    ds.write_unknown_hold(ctx, "leaf", {"run_ids": ["leaf"], "run_id": "leaf", "hold_cycles": 1})
+    assert top() == "park" and ctx._delegate_hold_parked is True
+    assert top(new_input=True) == "resume" and ctx._delegate_hold_parked is False, "the owner's words resumed it"
+    ds.write_unknown_hold(ctx, "leaf", {"run_ids": ["leaf"], "run_id": "leaf", "hold_cycles": 1})  # a new unknown
+    assert top() == "park" and len(parks) == 2, "nothing is ready: it sleeps again"
+    assert _pending(ctx, "leaf") == ("", ""), "no wake was published on nothing"
 
 
 def test_the_frozen_delegate_wait_contract_says_its_result_is_owed_to_the_next_request(tmp_path):
     """Frozen ABI: the five delegate verbs, delegate_wait's arguments and its str publisher are unchanged; the meaning of
-    its result changed and the description says so (a signature equality alone would not show that)."""
+    its result changed and the description says so (a signature equality alone would not show that). What each mode
+    keeps is said in the tool's own lead, in wait_task's words: the custom-tool wire drops parameter descriptions; the
+    parameter says it in the one wording the task waits splice in."""
     import inspect
 
     from ouroboros.delegate_supervision import delegate_wait_entry
+    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
     from ouroboros.tools import delegate
 
     entries = {entry.name: entry for entry in delegate.get_tools()}
     assert set(entries) == {"delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer", "delegate_message"}
+    from ouroboros.native_task_wait import SLEEP_MODE_WORDS, SLEEP_MODES, SLEEP_PARAMS
+
     wait = entries["delegate_wait"]
-    assert set(wait.schema["parameters"]["properties"]) == {
-        "run_id", "runs", "since_seq", "checkpoint_after_sec", "checkpoint_reason"}
+    properties = wait.schema["parameters"]["properties"]
+    assert set(properties) == {"run_id", "runs", "since_seq", "checkpoint_after_sec", "checkpoint_reason", "sleep_mode"}
+    assert set(properties["sleep_mode"]["enum"]) == set(SLEEP_MODES), "the task waits' modes, no other"
+    held = properties["sleep_mode"]["description"]
+    assert SLEEP_MODE_WORDS in held and SLEEP_MODE_WORDS in SLEEP_PARAMS["sleep_mode"]["description"], "one wording"
+    assert "with no continuation owner it waits in this call" in held
+    assert not any(character.isdigit() for character in held), "what stays held, in words and no numbers"
     assert list(inspect.signature(wait.handler).parameters) == list(inspect.signature(delegate_wait_entry).parameters)
     assert wait.handler.__wrapped__ is delegate_wait_entry, "the one ToolResult->str publisher wraps the entry"
     text = " ".join(wait.schema["description"].split())
+    modes = "Explicit in_slot keeps the process and same-call result while yielding acting capacity; warm/cold choose"
+    wire = project_function_tools_to_openai_custom([{"type": "function", "function": wait.schema}]).wire_tools()
+    lead = wire[0]["custom"]["description"]  # some providers see only this projection: it must say what each mode does
+    no_owner = "Without a continuation owner an omitted or in_slot mode waits in-process on the same sources, and warm"
+    for said in (modes, "(warm keeps your process, cold releases it)", no_owner):
+        assert said in text and said in lead, said
     assert "this wait's result is then owed to your next model request" in text
-    assert "it returns sleep_armed" in text and "yields acting capacity" in text and "with no further call" in text
+    assert "Otherwise a sleep returns sleep_armed" in text and "it returns sleep_armed" not in text
+    assert "unless named live custody or a conversation turn keeps it warm" in text
+    assert "yields acting capacity" in text and "with no further call" in text
     assert "Each wake is delivered once and counts as shown only when shown whole" in text
     assert "a wait_sec an old transcript passes is accepted and sizes nothing" in text
     assert "wait_sec" in inspect.signature(delegate_wait_entry).parameters, "accepted, though the schema offers none"
@@ -611,3 +703,296 @@ def test_read_coverage_of_a_wake_source_rides_the_continuation(tmp_path, monkeyp
     owner_wait.restore_continuation_state(SimpleNamespace(_ctx=restored), state, [], {}, {}, set())
     assert not delegate_output._covered_whole(key, 50, 99, 100) and delegate_output._covered_whole(key, 99, 100, 100)
     assert "wake:other|path|sha" not in delegate_output._READ_COVERAGE
+
+
+def _review_run(root, *, run_id="review-leaf", wave="review-wave", operation="review-operation",
+                surface="multi_model_review", task_id=_NANNY, requested=True):
+    from ouroboros import delegate_custody as custody
+
+    token = f"invocation-{run_id}"
+    common = {"task_id": task_id, "root_task_id": task_id, "invocation_id": token, "route": "route",
+              "source": "review_substrate", "surface": surface, "slot_id": "seat", "operation_id": operation,
+              "review_wave_id": wave, "review_slot_id": "seat"}
+    if requested:
+        assert custody.emit(root, custody.START_REQUESTED, {**common, "idempotency_key": token,
+            "request": {"prompt": "synthetic review"}})
+    assert custody.emit(root, custody.STARTED, {**common, "run_id": run_id, "ledger_root": str(root)})
+    return run_id
+
+
+def _ordinary_wait(ctx, tool, runs):
+    from ouroboros.tools import delegate
+    from ouroboros.tools.control_task_results import await_messages_entry
+
+    entry = (next(entry for entry in delegate.get_tools() if entry.name == tool)
+             if tool == "delegate_wait" else await_messages_entry())
+    return entry.handler(ctx, runs=runs)
+
+
+@pytest.fixture
+def no_review_wait_effects(monkeypatch, stub_delegate_engines):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("A review wait or exact settled collection tried to observe a leaf or dispatch a reviewer")
+
+    for name in ("ouroboros.tools.delegate._read_run", "ouroboros.delegate_supervision._wait_in_slot",
+                 "ouroboros.review_substrate.run_review_request", "ouroboros.review_substrate.ReviewCoordinator.run",
+                 "ouroboros.llm.LLMClient.chat", "ouroboros.claudexor_daemon.ensure_owned_gateway",
+                 "ouroboros.gateways.claudexor.ClaudexorGateway"):
+        monkeypatch.setattr(name, forbidden)
+
+
+@pytest.mark.parametrize("tool", ["delegate_wait", "await_messages"])
+@pytest.mark.parametrize("surface,attempt_tool,collector", [
+    ("change", "review_change", "review_change"),
+    ("commit_gate", "commit_reviewed", "commit_reviewed"),
+])
+def test_review_wait_redirect_binds_original_collector(tmp_path, no_review_wait_effects, monkeypatch, tool, surface,
+                                                      attempt_tool, collector):
+    """Even a mixed selector parks nothing. Its reference resolves in the actual collector, not a mock router."""
+    from ouroboros import review_ledger, review_state
+    from ouroboros.tools.review_change import _handle_review_change
+    from ouroboros.tools.review_collection import resolve_reference
+
+    ctx, _ = _nanny(tmp_path)
+    ctx.repo_dir = tmp_path
+    review = _review_run(tmp_path)
+    _run(tmp_path, "ordinary-leaf")
+    row = {"seat_id": "seat", "operation_id": "review-operation", "status": "responded"}
+    exact = review_ledger.ReviewLedgerRecord(
+        record_id="review-exact", task_id=_NANNY, surface=surface, review_wave_id="review-wave",
+        verdict={"aggregate": "PASS"}, rows=[row], brief={"dispute_input": {}})
+    review_ledger.write_record(tmp_path, exact)
+    # Same owner, wave and slot are not enough: the other operation must not get the pointer.
+    review_ledger.write_record(tmp_path, review_ledger.ReviewLedgerRecord(
+        record_id="review-neighbor", task_id=_NANNY, surface=surface, review_wave_id="review-wave",
+        verdict={"aggregate": "FAIL"}, rows=[{**row, "operation_id": "another-operation"}]))
+    attempt = review_state.CommitAttemptRecord(
+        ts="2026-01-01T00:00:00+00:00", commit_message="test", status="reviewed", task_id=_NANNY,
+        repo_key=review_state.make_repo_key(tmp_path), tool_name=attempt_tool, attempt=3, paid=True,
+        review_retry_key="review-wave", review_record_id=exact.record_id,
+        triad_raw_results=[{"slot_id": "seat", "operation_id": "review-operation", "status": "ok"}])
+    review_state.update_state(tmp_path, lambda state: state.record_attempt(attempt))
+
+    with monkeypatch.context() as reads:
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("Wait redirect searched historical attempts or archived review segments")
+
+        reads.setattr(review_state, "_load_state_unlocked", forbidden)
+        reads.setattr(review_ledger, "_index_segments", forbidden)
+        if tool == "delegate_wait":  # the named checkpoint address works even if the hot index no longer lists it
+            ctx._left_review_wait = {"task_id": _NANNY, "retry_key": "review-wave", "record_id": exact.record_id}
+            reads.setattr(review_ledger, "task_record_page", forbidden)
+        response = json.loads(_ordinary_wait(ctx, tool, ["ordinary-leaf", review]))
+    assert response["reason"] == "review_panel_owns_run" and response["slept"] is False
+    assert [run["run_id"] for run in response["review_runs"]] == [review]
+    assert "No selected source was waited on" in response["detail"]
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+    assert not getattr(ctx, "_owner_wait_requested", None)
+    assert not (tmp_path / "state/delegate_supervision" / f"{_NANNY}.json").exists()
+
+    recipe = response["review_runs"][0]["collection"]
+    assert recipe["status"] == "collect_existing" and recipe["tool"] == collector
+    assert set(recipe["arguments"]) == {"review_reference"}
+    _, original, retained = resolve_reference(ctx, recipe["arguments"]["review_reference"],
+                                              commit=collector == "commit_reviewed")
+    assert original.attempt == 3 and original.paid and retained["record_id"] == exact.record_id
+    if collector == "review_change":
+        result = json.loads(_handle_review_change(ctx, **recipe["arguments"]))
+        assert result["record_id"] == exact.record_id and result["aggregate"] == "PASS"
+        assert result["reused"] is True and result["cost"] == {"usd": 0.0, "unknown": False}
+
+    ordinary = json.loads(_ordinary_wait(ctx, tool, ["ordinary-leaf"]))
+    assert ordinary["reason"] == "sleep_armed"
+
+
+def test_reviewer_wait_without_continuation_owner_returns_a_gap_instead_of_waiting(tmp_path, no_review_wait_effects):
+    from ouroboros.delegate_supervision import delegate_wait_entry
+
+    ctx, _ = _nanny(tmp_path)
+    ctx.owner_wait_callback = None
+    legacy = _review_run(tmp_path, requested=False)
+    response = _armed(delegate_wait_entry(ctx, run_id=legacy))
+    gap = response["review_runs"][0]["collection"]
+    assert response["reason"] == "review_panel_owns_run" and response["slept"] is False
+    assert gap["status"] == "reference_unavailable" and "review_reference" not in gap
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+
+
+@pytest.mark.parametrize("selector", ["foreign-review", "unknown-run"])
+@pytest.mark.parametrize("tool", ["delegate_wait", "await_messages"])
+def test_ordinary_wait_unknown_or_foreign_review_does_not_offer_a_reference(tmp_path, no_review_wait_effects, tool,
+                                                                          selector):
+    ctx, _ = _nanny(tmp_path)
+    _review_run(tmp_path, run_id="foreign-review", task_id="other-task")
+    response = _ordinary_wait(ctx, tool, [selector])
+    if tool == "delegate_wait":
+        assert json.loads(response)["reason"] == (
+            "run_not_owned" if selector == "foreign-review" else "run_ownership_unknown")
+    else:
+        assert "not delegated runs of this task" in response
+    assert "review_reference" not in response and "review_runs" not in response
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+
+
+def test_review_wait_wrong_wave_never_offers_a_guessed_reference(tmp_path, no_review_wait_effects):
+    from ouroboros.review_ledger import ReviewLedgerRecord, write_record
+
+    ctx, _ = _nanny(tmp_path)
+    review = _review_run(tmp_path)
+    write_record(tmp_path, ReviewLedgerRecord(record_id="not-exact", task_id=_NANNY, surface="change",
+        verdict={"aggregate": "FAIL"}, review_wave_id="different-wave",
+        rows=[{"seat_id": "seat", "operation_id": "review-operation"}]))
+    response = json.loads(_ordinary_wait(ctx, "await_messages", [review]))
+    gap = response["review_runs"][0]["collection"]
+    assert gap["status"] == "reference_unavailable" and gap["reader"]["tool"] == "review_status"
+    assert "not-exact" not in json.dumps(response)
+
+
+def test_review_wait_skill_offers_exact_free_reader_not_a_skill_review_reissue(tmp_path, no_review_wait_effects):
+    from ouroboros.review_ledger import ReviewLedgerRecord, write_record
+
+    ctx, _ = _nanny(tmp_path)
+    review = _review_run(tmp_path, surface="skill_review")
+    write_record(tmp_path, ReviewLedgerRecord(record_id="skill-exact", task_id=_NANNY, surface="skill",
+        verdict={"aggregate": "FAIL"}, review_wave_id="review-wave",
+        rows=[{"seat_id": "seat", "operation_id": "review-operation"}]))
+    response = json.loads(_ordinary_wait(ctx, "delegate_wait", [review]))
+    action = response["review_runs"][0]["collection"]
+    assert action["status"] == "read_existing" and action["surface"] == "skill"
+    assert action["tool"] == "query_data" and action["arguments"] == {
+        "op": "json", "kind": "review_ledger", "ids": ["skill-exact"]}
+
+
+def test_review_wait_plan_offers_free_plan_read_without_an_ask(tmp_path, no_review_wait_effects):
+    from ouroboros import plan_record
+
+    ctx, _ = _nanny(tmp_path)
+    review = _review_run(tmp_path, surface="plan_review")
+    # Keep ordinary plan-record readers exercised; synthetic seats are already settled so no provider is needed.
+    plan_record.append_ask(tmp_path, _NANNY, {"ask_id": "ask-1", "revision": None,
+        "retry_key": "review-wave", "participants": [
+            {"seat_id": "seat", "status": "failed", "operation_id": "review-operation"}]})
+    response = json.loads(_ordinary_wait(ctx, "await_messages", [review]))
+    action = response["review_runs"][0]["collection"]
+    assert action == {"status": "read_existing", "surface": "intention", "ask_id": "ask-1",
+                      "tool": "plan_task", "arguments": {}}
+
+
+@pytest.mark.parametrize("differs", [True, False, None], ids=["differs", "ordinary", "undisclosed"])
+def test_a_terminal_wake_repeats_the_receipt_in_one_line(tmp_path, monkeypatch, differs):
+    """c50-4: the finished run's terminal ``delegate_wait`` payload repeats what still differs from the request,
+    from that run's custody rows: the applied access when the engine applied another, and my human's later words
+    whose last outcome is not ``delivered`` (``accepted`` is not read). In the ordinary case nothing on record
+    differs, and the line stops there. The spilled envelope keeps it."""
+    from ouroboros import delegate_message_store, delegate_supervision as ds
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-1")
+    _ended(tmp_path, "run-1")
+    effective = {True: "workspace_write", False: "readonly", None: ""}[differs]
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, rid, seq, gateway=None: json.dumps({
+        "status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 9,
+        "access_evidence": {"requested": "readonly", "effective": effective, "verified": True}}))
+    frames = [{"frame": {"owner_words": {"address": "chat 1 / a"}, "ts": "1"}, "outcome": "delivered"},
+              {"frame": {"owner_words": {"address": "chat 1 / b"}, "ts": "2"}, "outcome": "accepted" if differs else "delivered"}]
+    monkeypatch.setattr(delegate_message_store, "placed_words", lambda _ctx, run_id: frames if run_id == "run-1" else [])
+    wake = _armed(ds.run_wait(ctx, "run-1"))
+    assert wake["status"] == "terminal"
+    if differs:
+        assert wake["receipt"] == ("access applied workspace_write, requested readonly [observed]; my human's later "
+                                   "words: 1 accepted (taken by the engine, not read) [observed]")
+    elif differs is None:  # the engine finished without disclosing the profile: unknown is said, never "as asked"
+        assert wake["receipt"] == "access applied: not disclosed by the engine (requested readonly) [observed]"
+    else:
+        assert "receipt" not in wake, "nothing observed to differ: no line, no assurance"
+    spilled = ds._render_wake_payload(ctx, {**wake, "wake_events": [{"type": "x", "text": "y" * 400_000}]})
+    assert _armed(spilled).get("receipt") == wake.get("receipt"), "the shortened envelope keeps the line, or none"
+
+
+@pytest.mark.parametrize("lookup", ["raised", "answered_empty"])
+def test_a_failed_custody_lookup_is_no_proof_the_record_is_absent(tmp_path, monkeypatch, lookup):
+    """The wake's own read of the run's custody (``delegate_supervision._held_run``): a lookup that raised says the
+    record was unavailable at this read; only a lookup that answered and found no row says there is none. The
+    wait's admission keeps its ordinary lookup: only the read inside that seam is made to fail."""
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-1")
+    _ended(tmp_path, "run-1")
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, rid, seq, gateway=None: json.dumps({
+        "status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 9,
+        "access_evidence": {"requested": "readonly", "effective": "readonly", "verified": True}}))
+
+    def failing(*_a, **_k):
+        if lookup == "raised":
+            raise OSError("store busy")
+        return custody.UNKNOWN, None
+
+    real_seam = ds._held_run
+
+    def seam(ctx_, run_id):  # only this module's name for custody, only for this read: no other reader sees it
+        ds.custody = SimpleNamespace(lookup=failing, custody_root=custody.custody_root)
+        try:
+            return real_seam(ctx_, run_id)
+        finally:
+            ds.custody = custody
+
+    monkeypatch.setattr(ds, "_held_run", seam)
+    wake = _armed(ds.run_wait(ctx, "run-1"))
+    if lookup == "raised":
+        assert wake["receipt"] == "this run's custody record was unavailable at this read [observed]"
+    else:
+        assert wake["receipt"] == "no custody record of this run [observed]"
+
+
+def test_a_runs_applied_access_is_compared_with_its_own_recorded_request(monkeypatch):
+    """A run is judged against what IT recorded: its START_REQUESTED body, else its own STARTED access. An older
+    record holds neither, and the evidence's ``requested`` is then today's derivation from the live context
+    (``delegate._read_run``): nobody asked it of this run, so the line names the applied access and the gap."""
+    from types import SimpleNamespace
+
+    from ouroboros import delegate_message_store
+    from ouroboros.helper_receipt import run_result_line
+
+    monkeypatch.setattr(delegate_message_store, "placed_words", lambda _ctx, _run: [])
+    ctx = SimpleNamespace(drive_root="/nonexistent", task_id="nanny")
+    derived = {"requested": "workspace_write", "effective": "readonly"}  # the live derivation beside what ran
+    body_only = SimpleNamespace(run_id="run-2", access="", request_event={"request": {"access": "readonly"}})
+    assert run_result_line(ctx, body_only, derived) == "", "its own body asked readonly: nothing differs"
+    started_only = SimpleNamespace(run_id="run-2", access="readonly", request_event={})
+    assert run_result_line(ctx, started_only, derived) == ""
+    assert run_result_line(ctx, started_only, {"requested": "readonly", "effective": "workspace_write"}) == (
+        "access applied workspace_write, requested readonly [observed]")
+    both = SimpleNamespace(run_id="run-2", access="readonly", request_event={"request": {"access": "workspace_write"}})
+    assert run_result_line(ctx, both, {"effective": "workspace_write"}) == "", "the body is read before STARTED"
+    assert run_result_line(ctx, both, {"effective": "readonly"}) == (
+        "access applied readonly, requested workspace_write [observed]")
+    old = SimpleNamespace(run_id="run-2", access="", request_event={})
+    assert run_result_line(ctx, old, derived) == (
+        "access applied readonly; this run's original request is not on record [observed]")
+    assert run_result_line(ctx, old, {"requested": "workspace_write"}) == (
+        "access applied: not disclosed by the engine (requested not on record) [observed]")
+
+
+def test_an_old_record_without_its_request_is_not_compared_with_todays_derivation(tmp_path, monkeypatch):
+    """The real chain: a STARTED row without access and without a request body, read by today's nanny whose live
+    context derives workspace_write; the engine applied readonly. The wake names that and the missing request."""
+    from ouroboros import delegate_supervision as ds
+    from ouroboros.tools import delegate
+    from tests._delegated_transport_shared import Engine
+    from tests._run_wait_shared import held_run
+
+    ctx, _ = _nanny(tmp_path)
+    engine = Engine(tmp_path)
+    job = engine.accept("first", {"access": "readonly"}, state="succeeded")
+    rid = engine.commands[job]["run"]
+    entry = held_run(tmp_path, rid, ctx.task_id, access="")
+    assert not entry.access and not entry.request_event
+    assert delegate._derive_authority(ctx).access == "workspace_write", "today's derivation differs from what ran"
+    gateway = engine.gateway()
+    read = delegate._read_run
+    monkeypatch.setattr(delegate, "_read_run", lambda ctx_, rid_, seq=None, **_: read(ctx_, rid_, seq, gateway=gateway))
+    assert json.loads(delegate._read_run(ctx, rid)).get("status") == "terminal"  # the body collects the terminal
+    wake = _armed(ds.run_wait(ctx, rid))
+    assert wake.get("status") == "terminal", wake
+    assert wake["receipt"] == "access applied readonly; this run's original request is not on record [observed]"

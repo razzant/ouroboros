@@ -91,6 +91,10 @@ def schema_hint(db: str) -> str:
     if db == "current":
         return (f"db=current SQL reads rows of {', '.join(CURRENT_TABLES)} only; columns: PRAGMA table_info(tasks) "
                 "or SELECT * FROM pragma_table_info('tasks'); task bodies and cards: op=json kind=task_result")
+    if db == "money":
+        return ("Known spend: SELECT settled, confirmed, estimated, unknown_unmetered FROM summaries "
+                "WHERE scope='global' AND key=''. Scopes overlap. SUM(attempts.cost_usd) can miss imported "
+                "string amounts in extra. Tables: PRAGMA table_list; columns: PRAGMA table_info(<table>).")
     return "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
 
 
@@ -116,10 +120,15 @@ def _source(root, db, budget):
             raise
     else:
         from ouroboros import evidence_packs
-        # The owner rebuilds the cache and holds its one lock through the SQL read.
+        # The cache's one lock is held through the SQL read; one awaiting the packing pass's rebuild is
+        # refused (``EvidenceUnavailable``), never rebuilt here.
         with evidence_packs.open_index(root, wait_sec=budget.remaining()):
             budget.remaining()
-            yield evidence_packs.index_tier(root)
+            try:
+                yield evidence_packs.index_tier(root)
+            except ValueError as exc:  # the SQL's error (``_connection``): SQLite's verdict on the file still marks it
+                evidence_packs.mark_if_damaged(root, exc.__cause__)
+                raise
     budget.remaining()
 
 
@@ -336,11 +345,16 @@ def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec)
 
 
 def _result(request):
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     try:
         return {"status": "ok", "data": _execute(request)}
     except QueryDeadline as exc:
         return {"status": "error", "code": "deadline", "phase": exc.phase,
                 "timeout_sec": exc.timeout_sec, "elapsed_sec": exc.elapsed_sec}
+    except EvidenceUnavailable as exc:  # db=packs whose cache awaits the maintenance pass's rebuild
+        return {"status": "unavailable", "code": "evidence_unavailable", "reason": exc.reason,
+                "message": str(exc), "phase": getattr(exc, "phase", "acquire")}
     except MemoryError as exc:
         return {"status": "error", "code": "memory_limit", "exception_class": "MemoryError", "phase": getattr(exc, "phase", "acquire")}
     except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:

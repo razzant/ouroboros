@@ -49,7 +49,9 @@ def test_honest_max_selects_low_before_folding_story_and_keeps_window_budget(tmp
     floor = tight.projection("low").memory_facts["floor"]
     assert floor["target_tokens"] is None and floor["budget_allowance_tokens"] is None
     assert floor["mode_switch"] == {"from": "max", "to": "low"}
-    assert "Low with chapter maps, a disclosed fact of this route" in tight.low_projection.system_content_json
+    assert ("Low, temporarily, for the window; my human's mode is Max. With no memory and no tool schemas, whole books "
+            "beside the rest of this start (my core, the host's sections and the assignment) and the work's room need ") in (
+        tight.low_projection.system_content_json)
     assert tight.projection("low").memory_facts["max_room"]["cause"] == "route"  # the books alone overflow 200k
     assert roomy.projection("max").memory_facts["max_room"]["cause"] == "held"
     assert "word word word word" not in tight.low_projection.system_content_json
@@ -87,6 +89,23 @@ def test_larger_or_fitting_route_keeps_bytes_and_smaller_route_uses_same_snapsho
     assert enlarged.projection(enlarged.initial_mode).system_content_json == shown.system_content_json
     assert narrow.core_sha256 == plan.core_sha256
     assert narrow.core.memory_view_json == plan.core.memory_view_json
+
+
+def test_a_narrowing_keeps_what_the_starts_request_took_with_no_memory(tmp_path, monkeypatch):
+    """3A: Low's missed target names what the start's request took with no memory (``floor.no_memory_tokens``), the
+    start's fact. A route that narrows the shown view keeps it, as it keeps the start's Max room, so the mode chooser can
+    warn while later sends still miss Low, until a new start measures again; a start without it gets none."""
+    _core, build = _built(tmp_path, monkeypatch, ratio=1, page_chars=400_000)
+    plan = build(1_000_000)
+
+    def missed(projection):
+        facts = projection.memory_facts
+        return dataclasses.replace(projection, memory_facts={**facts, "floor": {**facts["floor"], "no_memory_tokens": 315_536}})
+    marked = dataclasses.replace(plan, **{f"{mode}_projection": missed(plan.projection(mode)) for mode in ("max", "low", "nano")})
+    narrow = _on_route(marked, 65_537)
+    assert narrow.projection(narrow.initial_mode).memory_facts["floor"]["no_memory_tokens"] == 315_536
+    plain = _on_route(plan, 65_537)
+    assert "no_memory_tokens" not in plain.projection(plain.initial_mode).memory_facts["floor"]
 
 
 def test_smaller_route_addresses_memory_only_when_the_compact_request_exceeds_its_room(tmp_path, monkeypatch):

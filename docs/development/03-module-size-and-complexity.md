@@ -9,23 +9,23 @@ and names its enforcement or its absence.
 P7 makes context fit a maintenance constraint, not a line-count aesthetic. Product and
 runtime Python (`devtools/` included) and first-party `web/**/*.js` (vendored and minified
 excluded) target roughly 1000 lines; test modules are outside the module band (their
-function cap stays; the diff pulse states lines per changed test module). The gates read
-exact-path debt from `ouroboros/size_ratchet_manifest.py`, the same for
-Python and JavaScript: 1600 lines per module (`GIANT_PATHS`), 200,000 canonical
-UTF-8/LF bytes (`BYTE_DEBT`, shrink-only), the 1001–1500 band (`BAND_PATHS`; a new
-entry needs a nonblank rationale), and 300 lines per non-grandfathered runtime-Python
-function (`FUNCTION_DEBT`; `FUNCTION_COUNT_EXCLUDED_FILES` names the skipped files).
+function cap stays). The gates read exact-path debt from
+`ouroboros/size_ratchet_manifest.py`, the same for Python and JavaScript: 1600 lines per
+module (`GIANT_PATHS`), 200,000 canonical UTF-8/LF bytes (`BYTE_DEBT`, shrink-only), the
+1001–1500 band (`BAND_PATHS`; a touched module of 1001–1600 lines owes a reason,
+replaceable, never dropped), and 300 lines per non-grandfathered runtime-Python function
+(`FUNCTION_DEBT`; `FUNCTION_COUNT_EXCLUDED_FILES` names the skipped files).
 A stale or newly oversized entry fails; regenerate with
 `scripts/regenerate_size_ratchet.py` (mechanics: ARCHITECTURE §6 "Review stack").
 Methods over 150 lines or eight parameters are decomposition signals, not gates
 (CHECKLISTS item 11(c); BIBLE P7). Runtime function totals are descriptive, with no
 aggregate ceiling: a repository-wide count penalizes useful decomposition.
 
-Enforcement: manual/tag CI runs `size_ratchet` (ARCHITECTURE §8). Without an event
-base its transition check compares only HEAD's parent, not all intervening commits;
-local qualification must name the contribution base. Local default lanes exclude
-this marker; readiness/health warn and the diff pulse reports growth (BIBLE P3;
-ARCHITECTURE §6 "Commit preflight").
+Enforcement: CI's `size_ratchet` lane (ARCHITECTURE §8) compares a post-merge window's
+base; a manual or tag run without it reads HEAD's parent (a merge: only its own changes),
+so local qualification names the contribution base. Local default lanes skip it;
+readiness/health warn; the diff pulse states growth (tests' too) and a split's shape
+(BIBLE P3; ARCHITECTURE §6 "Commit preflight").
 
 ### Paying down a size cap
 
@@ -47,8 +47,7 @@ contract-bearing comment, docstring, message or test; a book's reason or qualifi
 defect to report, not paydown (BIBLE P7 «first simplify what exists»). When nothing honest
 fits, the record says so: a band entry with its reason, or the owner's `book-growth` label;
 the hard cap, the function gate and the byte debt take no new record, so a change or merge
-that crosses one pays as above. Enforcement: CHECKLISTS item 27 `size_cap_paydown`,
-advisory when applicable.
+that crosses one pays as above. Enforcement: CHECKLISTS item 27 `size_cap_paydown`.
 
 ### Pragmatic SOLID
 
@@ -67,14 +66,15 @@ understand. It is a direction, not a demand for classes or framework surface:
 - **DIP — Dependency Inversion Principle:** policy depends on small host-owned
   contracts, not provider-specific or concrete details.
 
-No class hierarchy, DI container, numeric score, AST analyzer or new review pass
+No class hierarchy, DI container, numeric score or new review pass
 follows. Diff size, line count and file count alone are not findings; CHECKLISTS item
 11(d) says what a finding names (review-only).
 
 ### Shared behavior and data-flow changes
 
 For shared behavior/data changes, name the authority, fact identity/scope and affected
-producers/consumers, including unchanged consumers whose inputs or assumptions change.
+producers/consumers, including unchanged consumers whose inputs or assumptions change. A change
+that removes a reader names the producers left without one.
 Preserve live/recovery semantics at comparable freshness; explain legitimate differences.
 Verify falsifiable behavior at real consumer boundaries, not helper outputs or matching
 field names; select paths from dependencies, not a fixed inventory. Enforcement:
@@ -107,8 +107,10 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
   unchanged: `tests/test_store_journal.py`).
 - **Measure growth:** history, object count, nesting, cold caches and contention, by
   receipts (`work`, L7) and real-reader spies. Telemetry adds no
-  steady-state writes/history reads. Remove repetition or reuse a validated view before
-  adding a projection/cache. Unknown is never empty; no universal time limit, benchmark or approval gate.
+  steady-state writes/history reads. A repeating step does the work its decision, audit or recovery
+  needs; finished history, its own included, grows that work only through what they read; a computation
+  with no reader left on that path is removed from it. Unknown is never empty; no universal time limit,
+  benchmark or approval gate.
 - **Passive GET:** rendering/stored display adds no steady-state writes. Already-performed
   external discovery may store typed provider facts through their existing evidence owner;
   this permits no new network or control-state writes. `usage_store.py::read` may initialize
@@ -122,12 +124,10 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
   per reader (`delegate_custody_current.held_runs`, `task_store.owing_documents`); one batch of
   stored results (`obligations.result_rows`).
 
-CHECKLISTS item 9 `perf_lifecycle` covers changed readers, startup/shutdown, batches, endpoints, pollers, subscriptions and timers. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
+CHECKLISTS item 9 `perf_lifecycle` names the surfaces it reviews. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
 
-`tests/test_store_boot.py` fixes `prepare_startup_state` (a clean boot is one read
-transaction, no history access or writes);
-`tests/test_store_legacy_reconcile.py` covers both detector outcomes, cursor resume and the
-foreground CLI; the import/switch suites keep downgrade semantics.
+`tests/test_store_boot.py` fixes `prepare_startup_state` (ARCHITECTURE §2);
+`tests/test_store_legacy_reconcile.py` the legacy reconcile; the import/switch suites keep downgrade semantics.
 
 ### Invariant: Source-complete decision pipeline
 
@@ -158,7 +158,7 @@ invalid output contracts and delivery failures may affect review authority; wind
 sizing and reading diagnostics alone may not (BIBLE P3). Neither case blanks, rewrites
 or relabels the artifact.
 
-Enforcement: CHECKLISTS item 20 `source_completeness` (critical when applicable).
+Enforcement: CHECKLISTS item 20 `source_completeness`.
 
 #### Review presentation adapters
 
@@ -234,9 +234,9 @@ purpose: immediate room return with reading, forms and unsent work, or a Keep ru
 widget. Retained rooms suspend polling/rendering, keep send custody and still own
 their disposer; Stop, unload, reload and shutdown remain force-destroy boundaries.
 Late async results defer hidden painting and check `destroyed` before touching state
-or re-arming loops. Merely hiding a node while all its handlers keep working is a leak.
+or re-arming loops. Hiding a node while its handlers keep working is a leak.
 A module widget uses ordered dispose with acknowledgement (`WIDGET_DISPOSE_ACK_TIMEOUT_MS`;
-ARCHITECTURE §3 "Skills and Widgets").
+ARCHITECTURE §3 "Extensions and Widgets").
 
 Enforcement: the deterministic leak test runs in the release-tier `ui_browser` lane;
 commit-tier coverage is the advisory CHECKLISTS item 9 `perf_lifecycle`. The class is
@@ -256,7 +256,7 @@ verification is event-driven on the relevant engine and proves convergence to a 
 fixed point with a real consumer or production-derived fixture that crosses the known
 wrapping threshold, not two snapshots. A module widget's own faults use
 `ouro-widget-error`; the builtin page sends bounded, best-effort reports to the existing
-event log (ARCHITECTURE §3 "Skills and Widgets"). These page-reported diagnostics are not
+event log (ARCHITECTURE §3 "Extensions and Widgets"). These page-reported diagnostics are not
 task-execution evidence. Module source loading and declarative requests have a bounded
 host timeout; declarative job widgets keep their `job_id` and bounded retry/timeout
 behavior in the refresh contract, where missing or malformed job status is an immediate

@@ -75,11 +75,13 @@ CHECK_BYPRODUCTS = ("build or dependency output that only serves your checks (en
 # What the host declares about the scratch it made for one run, before the run uses it.
 # Purpose and ownership, never a promise that the contents come back byte for byte.
 DISPOSABLE_SCRATCH = (
-    "disposable by the host's declaration: never captured; it follows this task, or a reviewer's checking "
-    "copy through continuation, until release, unless the producer or owner retains it (the OS "
-    "may clear it sooner), so anything left only there may be lost: keep edits in your working tree and "
-    "return the results you need; nothing installed there is reinstalled for a later session, which "
-    "builds its own from the project's files")
+    "disposable by the host's declaration: never captured. It follows this task or its reviewer's checking "
+    "copy through continuation. A child's scratch also waits for the parent's exact decision or the end "
+    "of its continued line. Keep it deferred while another step needs a path you handed on. The producer "
+    "or owner can retain it; the OS may clear it sooner. Create a snapshot used only for measurement here. "
+    "Return the report, method, script, results, source and snapshot hash. If exact bytes matter, return "
+    "them explicitly as evidence: the hash alone cannot restore a released snapshot. Keep edits in your working "
+    "tree; a later session rebuilds its environment")
 
 
 def scratch_fact(*, launcher: bool = False, granted: str = "") -> str:
@@ -143,9 +145,9 @@ def disposable_state_instruction(evidence_root: str, *, investigation: bool = Fa
             "downloads go only to the shared download cache your host names. Keep verification evidence worth "
             f"returning under {evidence_root}: the host retains new files there before it releases the copy and "
             "never applies them; files the project already tracks there stay ordinary work product. That folder "
-            "is for reports, logs, sources, repro scripts and intended binaries of any size; its retention applies "
-            "no cache, binary, size or ignore filter, so by-products left there are kept too, and a link or special "
-            "entry is only recorded as a gap.")
+            "keeps reports, logs, sources, binaries and accidental byproducts indefinitely. The receipt gives your parent the "
+            "bytes retained. For a large reproducible file give its address, byte size and hash. A link or "
+            "special entry is recorded as a gap.")
 
 
 # Persisted with every run's instructions, which a resumed vendor session may keep from its
@@ -194,8 +196,8 @@ INVESTIGATION_INSTRUCTION = (
     " PURPOSE: this is an evidence-only investigation. Your private copy exists so you can run the "
     "checks you judge useful (tests, scripts, fixtures, temporary files); nothing in it is applied to "
     "the reviewed or researched tree or creates an obligation to apply it. Put any file worth returning "
-    "under .review-evidence/: the host retains that folder and the copy's other changes as evidence, with "
-    "no cache or binary filter."
+    "under .review-evidence/. Evidence is retained indefinitely and the receipt names its byte size. "
+    "Describe large reproducible files by address, byte size and hash."
 )
 
 

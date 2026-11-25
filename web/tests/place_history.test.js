@@ -14,6 +14,7 @@ const deferred = () => { let resolve; const promise = new Promise((done) => { re
 const unsafeText = '<img src="x" onerror="bad()"> & "hello"';
 const rawPlace = (id = 'one') => ({ place_id: id, connector: 'telegram-user-session', label: unsafeText, account_id: `account-${id}`, state: 'active' });
 const place = normalizePlace(rawPlace());
+const called = (fields = {}) => normalizePlace({ ...rawPlace(), wakes: [{ fact: 'mention', author: 'owner' }], ...fields });
 const room = { room_chat_id: 5_000_000_123, address: unsafeText, unanswered_count: null, label: null, last_at: '', conversation_id: '', thread_id: '' };
 const coverage = { discovery: 'arrivals', importing: false, gaps: false };
 const index = (rooms = [room]) => ({ place_id: place.id, rooms, coverage });
@@ -60,15 +61,31 @@ function mount(f, options = {}, currentPlace = place) {
     return reader;
 }
 
-test('the conversation\'s state card says a place only hears while consciousness is off; Paused keeps its words', () => {
-    // Owner 06.11: Off left 28 places hearing while every card still said it «hears, wakes, speaks and acts here».
-    const off = (state) => placeHistoryState(normalizePlace({ ...rawPlace(), state, only_hears: true }));
-    assert.equal(off('active'), 'Active, consciousness off: it only hears here.');
-    assert.equal(off('silent'), 'Silent, consciousness off: it only hears here.');
-    assert.equal(off('paused'), 'Paused now: it does not wake or act here; what the connector still reports is saved.');
-    assert.equal(placeHistoryState(place), 'Active now: it hears, wakes, speaks and acts here.');
-    assert.equal(placeHistoryState(normalizePlace({ ...rawPlace(), state: 'silent' })),
+test('the conversation\'s state card says why a place is quiet in the host\'s words; Paused keeps its words', () => {
+    // Owner 06.11: Off left 28 places hearing while every card still said it «hears, wakes, speaks and acts here»;
+    // owner 15.11 (5A): the same one cause the row and the sheet say.
+    const note = 'Consciousness is off: it only hears here, and nothing here wakes it until you turn it on.';
+    const quiet = { cause: 'off', word: 'Hears only · consciousness off', note, door: 'consciousness' };
+    const off = (state, extra = { quiet }) => placeHistoryState(normalizePlace({ ...rawPlace(), state, ...extra }));
+    assert.equal(off('active'), note);
+    assert.equal(off('silent'), note);
+    assert.equal(off('paused', {}), 'Paused now: it does not wake or act here; what the connector still reports is saved.');
+    assert.equal(placeHistoryState(called()), 'Active now: it hears, wakes, speaks and acts here.');
+    assert.equal(placeHistoryState(called({ state: 'silent' })),
         'Silent now: it still hears and wakes here; what it would say or change here is held.');
+});
+
+test('with no wake kind checked the state card says that setting; Paused and Off keep their own words', () => {
+    // An empty list read «hears, wakes, speaks and acts here». The card now promises neither a wake nor silence: no
+    // event starts a new conversation at once, and an ongoing one can still wake its author.
+    const none = (fields = {}) => placeHistoryState(normalizePlace({ ...rawPlace(), wakes: [], ...fields }));
+    assert.equal(none(), 'Active now, no wake kinds checked: it hears, speaks and acts here; an ongoing conversation can still wake it.');
+    assert.equal(none({ state: 'silent' }),
+        'Silent now, no wake kinds checked: it hears here, and an ongoing conversation can still wake it; what it would say or change here is held.');
+    assert.equal(none({ state: 'paused' }), 'Paused now: it does not wake or act here; what the connector still reports is saved.');
+    assert.equal(none({ quiet: { cause: 'off', word: 'Hears only · consciousness off', note: 'Consciousness is off: it only hears here, and nothing here wakes it until you turn it on.', door: 'consciousness' } }), 'Consciousness is off: it only hears here, and nothing here wakes it until you turn it on.');
+    assert.equal(placeHistoryState(called({ wakes: [{ fact: 'from_bot', author: 'owner' }] })), 'Active now: it hears, wakes, speaks and acts here.',
+        'a bot check alone is a checked kind');
 });
 
 test('role-first names and facts never infer delivery or exact wake', () => {
@@ -126,6 +143,59 @@ test('a reaction row reads as its fact, never as an empty or spoken message', as
     assert.ok(rows[0].querySelector('.place-convo-who').textContent.includes('Anonymous reactions'));
     assert.ok(rows[0].querySelector('.place-convo-meta').textContent.includes('Heard as context'));
     assert.equal(rows[1].querySelector('.chat-markdown'), null, 'no markdown body is mounted for a receipt');
+    reader.close();
+});
+
+test('a change or content without words reads as its fact beside the row, never as an empty or spoken message', async (t) => {
+    const f = fixture(t);
+    const change = (description) => ({ kind: 'state_change', description });
+    const reader = mount(f, { readHistory: async () => page([
+        { ...row('requested', ''), sender_label: 'Maya', place_history: { kind: 'message', non_text: [change('review requested from lantern-bot')] } },
+        { ...row('unknown', ''), sender_label: '', place_history: { kind: 'message', attention: { decision: 'heard', reason: 'change_actor_unknown' },
+            non_text: [change(unsafeText)] } },
+        { ...row('edited', 'The revised words.'), sender_label: 'Maya', place_history: { kind: 'message', non_text: [change('edited by Maya')] } },
+        { ...row('sticker', ''), sender_label: 'Maya', place_history: { kind: 'message',
+            non_text: [{ kind: 'sticker', description: 'sticker from the set "Cats"' }, { kind: 'poll', description: ' poll "Lunch?": Pizza; Sushi ' }] } },
+        { ...row('malformed', ''), sender_label: 'Maya', place_history: { kind: 'message',
+            non_text: [{ kind: 'state_change' }, { description: 'no kind' }, 'words', null, change('   ')] } },
+        { ...row('scalar', ''), sender_label: 'Maya', place_history: { kind: 'message', non_text: 'review requested' } },
+    ]) });
+    await tick();
+    const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
+    assert.deepEqual(rows.map((node) => [...node.querySelectorAll('.place-convo-nontext')].map((line) => line.textContent)), [
+        ['Change: review requested from lantern-bot'], [`Change: ${unsafeText}`], ['Change: edited by Maya'],
+        ['Without words: sticker from the set "Cats"', 'Without words: poll "Lunch?": Pizza; Sushi'], [], []]);
+    // No body where the row has no words of its own; words beside a change stay speech; what is not this fact changes nothing.
+    assert.deepEqual(rows.map((node) => node.querySelector('.place-convo-text')?.textContent), [undefined, undefined, 'The revised words.', undefined, '', '']);
+    assert.equal(rows[1].querySelector('.place-convo-nontext').querySelector('[data-i18n-authored]').textContent, unsafeText, 'the description is text');
+    assert.equal(f.q('img'), null);
+    // The author nobody recorded is said as a gap in host words, never as a participant; a recorded one stays authored.
+    assert.equal(rows[1].querySelector('.place-convo-who').textContent, 'Author not recorded');
+    assert.equal(rows[1].querySelector('.place-convo-who').hasAttribute('data-i18n-authored'), false);
+    assert.equal(rows[0].querySelector('.place-convo-who').hasAttribute('data-i18n-authored'), true);
+    assert.ok(rows[1].querySelector('.place-convo-meta').textContent.includes('Heard as background; who made this change is unknown'));
+    assert.equal(f.q('[data-history-status]').textContent, '', 'rows of facts alone are stored messages');
+    reader.close();
+});
+
+test('only the prefix of a wordless fact translates; a row no one named says so in the reader\'s language', async (t) => {
+    const f = fixture(t);
+    setMissTransport(() => Promise.resolve(null));
+    applyPayload({ language: 'fr', english: false, entries: {
+        'code:places.history.change': { text: 'Changement :' }, 'code:places.history.non_text': { text: 'Sans mots :' },
+        'code:places.author_unknown': { text: 'Auteur non enregistré' }, Settings: { text: 'Réglages' },
+    } });
+    t.after(() => applyPayload({ language: '', english: true, entries: {} }));
+    const reader = mount(f, { readHistory: async () => page([
+        { ...row('change', ''), sender_label: '', sender_session_id: '', place_history: { kind: 'message', non_text: [{ kind: 'state_change', description: 'Settings' }] } },
+        { ...row('poll', ''), sender_label: 'Settings', place_history: { kind: 'message', non_text: [{ kind: 'poll', description: 'Settings' }] } },
+    ]) });
+    await tick();
+    createTranslator({ skipRoots: '[data-i18n-authored]', userContent: '', excludeSelector: '' }).applyTo(f.doc.body);
+    const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
+    assert.deepEqual(rows.map((node) => node.querySelector('.place-convo-nontext').textContent), ['Changement : Settings', 'Sans mots : Settings']);
+    assert.equal(rows[0].querySelector('.place-convo-who').textContent, 'Auteur non enregistré');
+    assert.equal(rows[1].querySelector('.place-convo-who').textContent, 'Settings', 'a recorded name is never translated');
     reader.close();
 });
 

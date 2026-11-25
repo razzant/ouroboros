@@ -20,7 +20,7 @@ def settings_client(install, monkeypatch):
     from ouroboros import config
     from ouroboros.gateway import safety_settings, settings
 
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, "light")
     monkeypatch.setattr(settings, "_apply_settings_save_side_effects", lambda *a, **kw: None)
     monkeypatch.setattr(settings, "_start_supervisor_if_needed_for_request", lambda *a, **kw: False)
     install.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-router", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}))
@@ -33,29 +33,35 @@ def settings_client(install, monkeypatch):
         yield client, install
 
 
+@pytest.mark.parametrize(("chosen", "surface"), [({}, "responses"), ({"OPENAI_API_SURFACE": "chat_completions"}, "chat_completions")],
+                         ids=["new_key", "chosen_chat"])
 @pytest.mark.parametrize(("resend_shown", "mode"), [(False, "light"), (False, "pro"), (True, "advanced")])
-def test_provider_switch_reproposes_checker_but_explicit_edit_is_refused(settings_client, monkeypatch, mode, resend_shown):
+def test_provider_switch_reproposes_checker_but_explicit_edit_is_refused(settings_client, monkeypatch, mode, resend_shown,
+                                                                         chosen, surface):
     from ouroboros import config
-    from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS
+    from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS, OPENAI_RESPONSES_DIRECT_DEFAULTS
 
+    # A key new to this install is saved on Responses and proposes that profile; a chosen Chat keeps the Chat table.
+    profile = {"responses": OPENAI_RESPONSES_DIRECT_DEFAULTS, "chat_completions": OPENAI_DIRECT_DEFAULTS}[surface]
     client, path = settings_client
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
+    monkeypatch.setenv(config.BOOT_RUNTIME_MODE_ENV_KEY, mode)
     body = config.load_settings() if resend_shown else {}
-    body.update(OPENROUTER_API_KEY="", OPENAI_API_KEY="fixture-openai")
+    body.update(OPENROUTER_API_KEY="", OPENAI_API_KEY="fixture-openai", **chosen)
     before = path.read_bytes()
     # Even explicitly choosing the new provider's proposal is an authored edit.
-    denied = client.post("/api/settings", json={**body, "OUROBOROS_MODEL_LIGHT": OPENAI_DIRECT_DEFAULTS["light"]})
+    denied = client.post("/api/settings", json={**body, "OUROBOROS_MODEL_LIGHT": profile["light"]})
     assert denied.status_code == 400 and "owner-controlled" in denied.json()["error"]
     assert path.read_bytes() == before
     allowed = client.post("/api/settings", json=body)
     assert allowed.status_code == 200, allowed.json()
     stored = json.loads(path.read_text())
     assert stored["OPENAI_API_KEY"] == "fixture-openai" and not stored["OPENROUTER_API_KEY"]
+    assert stored["OPENAI_API_SURFACE"] == surface
     assert "OUROBOROS_MODEL_LIGHT" not in stored
-    assert config.safety_configuration(stored)[0] == OPENAI_DIRECT_DEFAULTS["light"]
+    assert config.safety_configuration(stored)[0] == profile["light"]
     events = [json.loads(line) for line in (path.parent / "logs" / "events.jsonl").read_text().splitlines()]
     event = next(row for row in events if row.get("action") == "safety_settings")
-    assert event["checker"] == OPENAI_DIRECT_DEFAULTS["light"]
+    assert event["checker"] == profile["light"]
     # The proposal follows access back as well; provider spelling is not an owner choice.
     restored = client.post("/api/settings", json={"OPENAI_API_KEY": "", "OPENROUTER_API_KEY": "fixture-router"})
     assert restored.status_code == 200, restored.json()

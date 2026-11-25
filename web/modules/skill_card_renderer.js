@@ -1,5 +1,5 @@
 import { tr } from './i18n.js';
-// Installed skill cards (Skills → Installed): one head shared with Browse and the
+// Installed skill cards (Extensions › Skills): one head shared with Browse and the
 // detail sheet (name that opens the sheet, marks, purpose, who line), the switch,
 // with a chip beside it only for a state the switch cannot show, Details right
 // under the head (a phone keeps the switch above it), and at most two attention trays,
@@ -21,9 +21,9 @@ import { installedTime } from './ui_helpers.js';
 import { HELD_LINES } from './holds.js';
 import { hasSemanticVerdict, lifecycleMeta } from './review_presentation.js';
 import {
-    buttonHtml, canUpdateWithoutReview, chipHtml, connectsServices, connectsText, countsAsYoursText, grantPhrases, officialMarkHtml, permissionWords,
+    buttonHtml, canUpdateWithoutReview, chipHtml, connectsServices, connectsText, countsAsYoursText, declaredPermissionWords, grantPhrases, officialMarkHtml,
     plural, relativeAge, shortDate, skillIconHtml, skipReviewButtonHtml, trayHtml, updateRejectionSentence, versionText,
-    skillTitle,
+    manifestUnread, opensDetail, skillTitle,
 } from './skill_presentation.js';
 
 function hasSkillUiTab(skill, live = {}) {
@@ -37,6 +37,7 @@ const installFacts = (skill) => (skill?.install && typeof skill.install === 'obj
 
 /** Who a skill came from, in the owner's words. */
 export function installedSourceLabel(skill) {
+    if (skill?.lifecycle_virtual) return '';  // a queue event's `source` is its caller, not where the package came from
     const install = installFacts(skill);
     const named = install?.source?.name || install?.source_name;
     if (named) return String(named);
@@ -48,9 +49,9 @@ export function installedSourceLabel(skill) {
     return 'Made here';
 }
 
-export const isBuiltIn = (skill) => installFacts(skill)?.source?.kind === 'builtin' || sourceTag(skill) === 'native';
+export const isBuiltIn = (skill) => !skill?.lifecycle_virtual && (installFacts(skill)?.source?.kind === 'builtin' || sourceTag(skill) === 'native');
 /** Created on this computer (by the owner or Ouroboros), not installed from a source. */
-export const isMadeHere = (skill) => !installFacts(skill) && ['external', 'self_authored'].includes(sourceTag(skill));
+export const isMadeHere = (skill) => !skill?.lifecycle_virtual && !installFacts(skill) && ['external', 'self_authored'].includes(sourceTag(skill));
 
 // Host reasons that admit these bytes without a critic PASS (fixture parity tests pin this list).
 export const INSTALL_ACCEPTANCE_REASONS = ['trusted_source', 'owner_skip', 'owner_edit', 'self_check'];
@@ -156,6 +157,8 @@ const LIFECYCLE_PENDING_LABELS = {
 };
 // A job kind that is not the owner's word for its action.
 const LIFECYCLE_ACTION_NAMES = { connect_mcp: 'Connect tools' };
+// A loaded skill whose background status is not known yet: the chip and Details → Running say it in these words.
+const BACKGROUND_UNKNOWN = { health_unavailable: 'Background status unavailable', companion_refresh_pending: 'Background restart pending' };
 
 function lifecyclePendingLabel(kind) {
     return LIFECYCLE_PENDING_LABELS[String(kind || '')] || 'Working…';
@@ -240,14 +243,14 @@ function requiredTray(required) {
 }
 
 /**
- * The organization's required extensions that are not running, above the list (``/api/extensions`` ``deployment``):
+ * The organization's required extension skills (type extension; MCP servers are not under this policy) that are not running, above the list (``/api/extensions`` ``deployment``):
  * a missing package has no card, so its row is said here. '' when every requirement runs or nothing is required.
  */
 export function renderRequirementNotice(deployment) {
     const rows = (deployment?.required || []).filter((row) => row?.state === 'unmet');
     if (!rows.length) return '';
     const items = rows.map((row) => `<li data-required-name="${escapeHtml(row.name)}"><code data-i18n-authored>${escapeHtml(row.name)}</code> · ${escapeHtml(boundedText(row.detail || row.reason || '', 240))}</li>`).join('');
-    const subject = rows.length === 1 ? 'an extension that isn’t' : `${rows.length} extensions that aren’t`;
+    const subject = rows.length === 1 ? 'an extension skill that isn’t' : `${rows.length} extension skills that aren’t`;
     const process = rows[0]?.process?.role ? `Seen by the ${escapeHtml(rows[0].process.role)} process; each worker checks its own before it starts work.` : '';
     return `<section class="skills-org-requirements" data-tone="warn" aria-label="Required by your organization" data-skills-org-requirements>
         <p class="skills-org-requirements-lead">Your organization requires ${subject} running here.</p>
@@ -261,9 +264,9 @@ const smallButton = (label, name, action, extra = '') => buttonHtml(label, { ton
 const skipButton = (name, label = 'Skip review') => skipReviewButtonHtml(actionAttrs(name, 'attest_review'), label);
 
 /**
- * One installed skill as owner-facing facts: its run state chip, the attention
- * trays (one sentence + actions each), whether it needs the owner, whether an
- * update waits, and why the switch is locked. Pure over the listing row.
+ * One installed skill as owner-facing facts: its run state chip, the attention trays (one sentence + actions each),
+ * whether it needs the owner, whether an update waits, whether a review of these files runs (`reviewing`, the fact its
+ * Reviewing… chip is drawn from) and why the switch is locked. Pure over the listing row.
  */
 export function installedSkillModel(skill, { reviewing = false, repairing = false, live = {}, pageModules = {} } = {}) {
     const name = String(skill.name || '');
@@ -310,21 +313,21 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         jobFailed = true;
         if (skill.lifecycle_virtual) {
             trays.push(trayHtml({ tone: 'danger', sentence: escapeHtml(skill.lifecycle_error || 'It didn’t finish.'),
-                note: 'Nothing was installed.', actions: smallButton('Find in Browse', name, 'find_in_browse') }));
+                note: skill.lifecycle_name_level ? '' : 'Nothing was installed.', actions: smallButton('Find in Browse', name, 'find_in_browse') })); // a name-level attempt cannot say what the folders of its name hold
         }
     }
     if (repairing) chip = chipHtml('Asking Ouroboros…', 'neutral', { work: true });
 
     if (skill.lifecycle_virtual) {
-        return { chip, trays, overflow: [], needs: jobFailed, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
+        return { chip, trays, overflow: [], needs: jobFailed, update: false, withdrawn: false, lockReason: '', sourceName, modified, install, reviewing: reviewRunning };
     }
 
     if (untrusted(skill)) {
         // The organization's choice, not the owner's move: a neutral fact with nothing here that would make it run.
         if (!skill.lifecycle_pending) chip = chipHtml('Doesn’t run here', 'neutral');
         trays.push(trayHtml({ sentence: escapeHtml(boundedText(trustOf(skill).detail || '', 240)),
-            note: 'New extensions and their versions come from your organization’s administrator.' }));
-        lockReason = 'Only extensions your organization delivers run here.';
+            note: 'New extension skills and their versions come from your organization’s administrator.' }));
+        lockReason = 'Only extension skills your organization delivers run here.';
     } else if (install?.pending_update) {
         chip = chipHtml('Reviewing…', 'neutral', { work: true });
         trays.push(trayHtml({ sentence: `Updating to ${escapeHtml(install.pending_update.version)}: it stays off until the review finishes.` }));
@@ -338,7 +341,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         }));
         lockReason = 'Can’t turn on until the review finishes.';
     } else if (skill.load_error && !missingGrantLoadError(skill)) {
-        if (!skill.lifecycle_pending) chip = chipHtml('Couldn’t start', 'danger');
+        if (!skill.lifecycle_pending) chip = chipHtml(companionStopped(skill) ? 'Background process stopped' : 'Couldn’t start', 'danger');
         needs = true;
         trays.push(trayHtml({ tone: 'danger', sentence: escapeHtml(boundedText(String(skill.load_error).split('\n')[0], 240)),
             actions: repairReady(skill) ? smallButton('Ask Ouroboros to fix', name, 'repair')
@@ -401,6 +404,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
             actions: smallButton('Grant access', name, 'grant', `data-keys="${escapeHtml([...keys, ...permissions].join(','))}"`) }));
     }
 
+    for (const companion of Object.keys(skill.retained_companions || {})) {
+        trays.push(trayHtml({ sentence: `Waiting for ${escapeHtml(companion)} to exit.` }));
+    }
     const secrets = secretConfigTray(skill);
     if (secrets.tray) trays.push(secrets.tray);
     if (secrets.needs) needs = true;
@@ -414,7 +420,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         const failed = servers.find((server) => server.configured && server.error);
         if (blocked) {
             trays.push(trayHtml({ sentence: `Settings already has an MCP server named ${escapeHtml(blocked.id)} that isn’t this skill’s, so its tools can’t be connected.`,
-                note: 'Remove or rename that server in Settings → Tools → MCP servers.' }));
+                note: 'Remove or rename that server in Extensions → MCP servers.' }));
         } else if (servers.some((server) => !server.configured)) {
             trays.push(trayHtml({ sentence: servers.every((server) => server.bound)
                 ? 'Its tools are off. Connect them to turn them on.'
@@ -471,13 +477,14 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         needs = true;
         pageHolds.forEach((hold) => pageTrays.push(pageTray('hold', hold)));
     }
+    if (!chip && skill.enabled && skill.live_loaded && BACKGROUND_UNKNOWN[skill.live_reason]) chip = chipHtml(BACKGROUND_UNKNOWN[skill.live_reason]);
     if (!skill.enabled && !lockReason && conflict) lockReason = `Conflicts with ${conflict}.`;
     const required = requiredBy(skill);
     const requiredTrays = required?.state === 'unmet' ? [requiredTray(required)] : [];
     if (requiredTrays.length) needs = true;
     const allTrays = [...requiredTrays, ...pageTrays, ...trays];
     return {
-        chip, trays: allTrays.slice(0, 2), overflow: allTrays.slice(2), needs, sourceName, modified, install,
+        chip, trays: allTrays.slice(0, 2), overflow: allTrays.slice(2), needs, sourceName, modified, install, reviewing: reviewRunning || Boolean(install?.pending_update),
         // The switch shows what runs; whether it may be off is the organization's (the toggle refuses it too).
         lockReason: required ? REQUIRED_LOCK : (skill.enabled ? '' : lockReason),
         update: offersChanges(skill) && Boolean(update || withdrawn || install?.update_rejected || install?.pending_update), withdrawn: Boolean(withdrawn),
@@ -488,7 +495,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
 
 /** «Ouroboros Community · installed v2.12.0 3 months ago · edited by you here (now v3.3.0)». */
 export function installedWhoHtml(skill, model = installedSkillModel(skill)) {
-    const parts = [escapeHtml(model.sourceName)];
+    const parts = model.sourceName ? [escapeHtml(model.sourceName)] : [];
     const installedVersion = model.install?.release?.version;
     const versionMoved = Boolean(model.modified && installedVersion && skill.version && installedVersion !== skill.version);
     const age = relativeAge(model.install?.installed_at || installedTime(skill));
@@ -703,26 +710,41 @@ function installRecordRows(skill) {
     ].join('');
 }
 
+function companionStopped(skill) {
+    return skill.live_loaded && /^companion_(?:failed|restart_exhausted):/.test(skill.live_reason || '');
+}
+
+function companionStoppedText(skill) {
+    if (!companionStopped(skill)) return '';
+    // The typed reason carries every open name, even when the diagnostic is bounded.
+    const names = skill.live_reason.slice(skill.live_reason.indexOf(':') + 1).split(',')
+        .map((name) => name.trim()).filter(Boolean);
+    return `background process stopped${names.length ? `: ${names.map(escapeHtml).join(', ')}` : ''}`;
+}
+
 function liveRow(skill, live) {
     if (skill.type !== 'extension' || !skill.enabled) return '';
     const process = ['server', 'worker'].includes(skill.process) ? ` · ${skill.process}` : '';
     const state = skill.live_loaded && (skill.dispatch_live || hasSkillUiTab(skill, live)) ? 'Loaded'
         : skill.live_loaded ? 'Loaded — UI tab pending' : 'Not loaded yet';
-    return detailRow('Running', `${state}${process}`);
+    const stopped = companionStoppedText(skill);
+    const unknown = !stopped && skill.live_loaded ? BACKGROUND_UNKNOWN[skill.live_reason] : '';
+    return detailRow('Running', `${state}${process}${stopped ? ` · ${stopped}` : ''}${unknown ? ` · ${unknown}` : ''}`);
 }
 
-function publicationRow(skill) {
+function publicationSection(skill) {
     const published = skill.published && typeof skill.published === 'object' ? skill.published : null;
-    if (!published) return '';
-    const line = renderSubmissionHistory({
+    const submission = published && {
         version: String(published.version || ''),
         pr_number: Number.isInteger(published.pr_number) && published.pr_number > 0 ? published.pr_number : null,
         pr_url: String(published.pr_url || ''),
         local_differs: Boolean(skill.content_hash) && skill.content_hash !== String(published.content_hash || ''),
-    });
-    if (!line) return '';
-    const destination = published.destination || published.repository;
-    return detailRow('Publication', `${line}${destination ? ` · ${escapeHtml(String(destination))}` : ''} <button type="button" class="skills-link-button ui-hit-area" ${actionAttrs(skill.name, 'forget_publication')}>Forget this record</button>`);
+    };
+    const line = renderSubmissionHistory(submission);
+    const destination = String(published?.destination || published?.repository || '');
+    const row = line && detailRow('Publication', `${line}${destination ? ` · ${escapeHtml(destination)}` : ''} <button type="button" class="skills-link-button ui-hit-area" ${actionAttrs(skill.name, 'forget_publication')}>Forget this record</button>`);
+    // Compare the facts that rendered this section, not translated text or a temporarily disabled button.
+    return `<div class="skills-details-facts" data-skill-detail-publication="${escapeHtml(JSON.stringify([submission, destination]))}">${row}</div>`;
 }
 
 function provenanceRows(skill) {
@@ -834,9 +856,15 @@ function patchContributionRows(target, source) {
     }
 }
 
+/** Card identity, not an action's skill name: a collision has one row per installed directory, a name-level attempt a row of its own (names hold no colon). */
+export function installedSkillRowKey(skill) {
+    return skill.collision_row_id ? `collision:${skill.collision_row_id}` : skill.lifecycle_name_level ? `attempt:${skill.name}` : skill.name;
+}
+
 /** One installed card. `options.githubTokenConfigured` gates Publish; `live` names loaded UI tabs. */
 export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), repairingSkills = new Set(), live = {}, options = {}) {
     const safeName = escapeHtml(skill.name);
+    const safeRowKey = skill.collision_row_id || skill.lifecycle_name_level ? escapeHtml(installedSkillRowKey(skill)) : '';
     const reviewing = reviewingSkills.has(skill.name);
     const repairing = repairingSkills.has(skill.name);
     const model = installedSkillModel(skill, { reviewing, repairing, live, pageModules: options.pageModules });
@@ -849,7 +877,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     const toggleOn = skill.lifecycle_kind === 'disable' && lifecyclePending ? false
         : (skill.lifecycle_kind === 'enable' && lifecyclePending ? true : skill.enabled);
     const toggleLocked = Boolean(lockReason) || lifecyclePending;
-    const trayId = `skill-trays-${safeName.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+    const trayId = `skill-trays-${safeRowKey || safeName.replace(/[^A-Za-z0-9_-]/g, '_')}`;
     const toggle = skill.lifecycle_virtual ? '' : `<label class="ui-switch ${toggleLocked ? 'is-locked' : ''}">
         <input type="checkbox" class="skills-toggle" role="switch" data-skill="${safeName}" ${toggleOn ? 'checked' : ''} ${toggleLocked ? 'disabled' : ''} aria-checked="${toggleOn ? 'true' : 'false'}" aria-label="${escapeHtml(skill.name)}${lifecyclePending ? ` (${escapeHtml(lifecyclePendingLabel(skill.lifecycle_kind))})` : ''}"${model.trays.length ? ` aria-describedby="${trayId}"` : ''}>
         <span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span>
@@ -869,40 +897,53 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         skill.lifecycle_status === 'failed' && skill.lifecycle_error && !skill.lifecycle_virtual ? `<div class="skills-load-error">${escapeHtml(skill.lifecycle_error)}</div>` : '',
         skill.health_regressed ? `<div class="skills-load-error">Regression: was live at ${escapeHtml(String((skill.last_known_good || {}).version || '?'))} (${escapeHtml(String((skill.last_known_good || {}).sha || '').slice(0, 12))}); broken after a code update.</div>` : '',
     ].join('');
-    // Details: two fact groups the listing re-reads in place and the review block (kept while its key holds).
-    const details = `<details class="ui-disclosure skills-details"><summary>Details</summary>
-        <div class="skills-details-body">
+    // Details: independently updated facts and the review block (kept while its key holds).
+    const details = skill.lifecycle_virtual ? '' : `<details class="ui-disclosure skills-details"><summary>Details</summary><div class="skills-details-body">
             <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(runsOver(skill) === 'no_review_verdict' ? '' : skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
             <div class="skills-review-block" data-review-key="${escapeHtml(reviewBlockKey(skill))}">${reviewHistory(skill)}${reviewFindings(skill)}</div>
             <div class="skills-details-overflow" data-skill-detail-overflow>${(model.overflow || []).join('')}</div>
             ${contributionVisibilityHtml(skill, options)}
             <div class="skills-details-facts" data-skill-detail-facts>
-                ${detailRow('Can use', escapeHtml(permissionWords(skill.permissions).join(' · ') || 'Nothing beyond its own folder'))}
-                ${accessRows(skill)}
+                ${manifestUnread(skill) ? '' : detailRow('Can use', escapeHtml(declaredPermissionWords(skill.permissions).join(' · ') || 'Nothing beyond its own folder'))}
+                ${manifestUnread(skill) ? '' : accessRows(skill)}
                 ${toolsRow(skill)}
                 ${detailRow(tr('skills.id', 'ID'), `<code data-i18n-authored>${escapeHtml(skill.name)}</code>`)}
                 ${installRecordRows(skill)}
                 ${liveRow(skill, live)}
-                ${publicationRow(skill)}
+            </div>
+            ${publicationSection(skill)}
+            <div class="skills-details-facts" data-skill-detail-source-notes>
                 ${submit.visible && submit.disabled && submit.reason ? detailRow('Publishing', escapeHtml(submit.reason)) : ''}
                 ${provenanceRows(skill)}
             </div>
-        </div>
-    </details>`;
-    return `<article class="ui-card skills-card skills-installed-card" data-skill="${safeName}"${skill.lifecycle_virtual ? ' data-lifecycle-virtual' : ''}${model.needs ? ' data-needs-you' : ''}${reviewing ? ' data-reviewing="1"' : ''}${repairing ? ' data-repairing="1"' : ''}>
+        </div></details>`;
+    const title = `<span data-i18n-authored>${escapeHtml(skillTitle(skill))}</span>`;
+    const headName = !opensDetail(skill) ? `<span class="skills-card-name" tabindex="-1">${title}</span>`
+        : `<button type="button" class="skills-card-name ui-hit-area" ${actionAttrs(skill.name, 'open_detail')}>${title}<span class="skills-card-name-more" aria-hidden="true">›</span></button>`;
+    return `<article class="ui-card skills-card skills-installed-card" data-skill="${safeName}"${safeRowKey ? ` data-skill-row="${safeRowKey}"` : ''}${skill.lifecycle_virtual ? ' data-lifecycle-virtual' : ''}${model.needs ? ' data-needs-you' : ''}${reviewing ? ' data-reviewing="1"' : ''}${repairing ? ' data-repairing="1"' : ''}>
         <header class="skills-card-head">
             <div class="skills-card-title">
-                <div class="skills-head-title">${connectsServices(skill).length ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(skill.icon, 18)}</span>` : ''}<button type="button" class="skills-card-name ui-hit-area" ${actionAttrs(skill.name, 'open_detail')}><span data-i18n-authored>${escapeHtml(skillTitle(skill))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button><span class="skills-card-marks">${marks}</span></div>
+                <div class="skills-head-title">${connectsServices(skill).length ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(skill.icon, 18)}</span>` : ''}${headName}<span class="skills-card-marks">${marks}</span></div>
                 ${description ? `<p class="skills-card-purpose">${escapeHtml(description)}</p>` : ''}
                 <div class="skills-card-who">${installedWhoHtml(skill, model)}</div>
                 ${countsAsYoursText(skill) ? `<p class="skills-card-facts">${escapeHtml(countsAsYoursText(skill))}</p>` : ''}
             </div>
             <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit, settings: model.settings })}</div>
         </header>
-        ${skill.lifecycle_virtual ? '' : details}
+        ${details}
         <div class="skills-card-trays" id="${trayId}" data-skill-trays>${model.trays.join('')}${widgetsButton}</div>
         <div data-skill-errors>${errors}</div>
     </article>`;
+}
+
+/** A changed tray keeps a focused action only while that exact action survives in the same tray. */
+function patchSkillTrays(target, source) {
+    if (target.innerHTML === source.innerHTML) return;
+    const focused = target.contains(document.activeElement) ? document.activeElement.closest('[data-skill-action]') : null;
+    const skill = focused?.dataset.skill || '', action = focused?.dataset.skillAction || '';
+    target.innerHTML = source.innerHTML;
+    if (action) [...target.querySelectorAll('[data-skill-action]')].find((node) => node.dataset.skill === skill
+        && node.dataset.skillAction === action && node.dataset.hostModuleKey === focused.dataset.hostModuleKey)?.focus({ preventScroll: true });
 }
 
 /** Patch only state-derived facts; forms, open disclosures and open menus keep their identity. */
@@ -925,14 +966,28 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
         else card.removeAttribute(name);
     }
     for (const selector of ['.skills-card-status', '[data-skill-trays]', '[data-skill-errors]', '.skills-card-who', '.skills-card-marks', '.skills-card-purpose',
-        '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-contributions]', '[data-skill-detail-facts]']) {
+        '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-contributions]', '[data-skill-detail-facts]', '[data-skill-detail-source-notes]']) {
         const target = card.querySelector(selector), source = next.querySelector(selector);
         if (!target && source) {
             if (selector === '.skills-card-purpose') card.querySelector('.skills-head-title')?.after(source);
             else if (selector === '[data-skill-detail-contributions]') card.querySelector('[data-skill-detail-overflow]')?.after(source);
         } else if (target && !source) target.remove();
         else if (target && source && selector === '[data-skill-detail-contributions]') patchContributionRows(target, source);
-        else if (target && source && target.innerHTML !== source.innerHTML) target.innerHTML = source.innerHTML;
+        else if (target && source && target.innerHTML !== source.innerHTML) {
+            // Returning to a control marks it for keyboard or pointer focus. That local mark alone is not a
+            // change in the host's facts: leave the live control (and its blur listener) where it is.
+            if (target.querySelector('[data-return-focus]')) {
+                const copy = target.cloneNode(true);
+                for (const anchor of copy.querySelectorAll('[data-return-focus]')) anchor.removeAttribute('data-return-focus');
+                if (copy.innerHTML === source.innerHTML) continue;
+            }
+            if (selector === '[data-skill-trays]') patchSkillTrays(target, source);  // a changed tray keeps its focused action
+            else target.innerHTML = source.innerHTML;
+        }
+    }
+    const publication = card.querySelector('[data-skill-detail-publication]'), nextPublication = next.querySelector('[data-skill-detail-publication]');
+    if (publication && nextPublication && publication.dataset.skillDetailPublication !== nextPublication.dataset.skillDetailPublication) {
+        publication.replaceWith(nextPublication);
     }
     const block = card.querySelector('.skills-review-block'), nextBlock = next.querySelector('.skills-review-block');
     if (block && nextBlock && block.dataset.reviewKey !== nextBlock.dataset.reviewKey) {

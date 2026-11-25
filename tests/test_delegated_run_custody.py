@@ -159,9 +159,11 @@ def test_the_invocation_id_is_reused_on_retry_and_fresh_per_intended_start(
     ghost = json.loads(delegate._delegate_start(ctx, prompt, retry_of="no-such-invocation").text)
     assert ghost["reason"] == "unknown_invocation"
 
-    # 6. A DEFINITE refusal offers no token: the id is dead, the next start is new.
+    # 6. An engine refusal answering the POST is no proof the start created nothing (#3138): its token is
+    #    offered, its outcome unknown and nothing claims it never ran; the next plain start is still new.
     refused = json.loads(delegate._delegate_start(ctx, prompt).text)
-    assert refused["status"] == "refused" and "pending_invocation_id" not in refused
+    assert (refused["status"], refused["pending_invocation_id"]) == ("refused", keys[3])
+    assert "definitely_unrun" not in refused and dc.invocation_record(tmp_path, keys[3])["state"] == "pending"
 
     # 7-8. The token replays the recorded invocation, so a divergent prompt is a
     #    confusion, not a merge.
@@ -337,8 +339,8 @@ def test_a_retry_testifies_about_the_stored_invocation_not_the_current_config(
     assert dc.replay(drive)[retried["run_id"]].model == "model-old"
     assert dc.emit(drive, dc.SETTLED, {"run_id": retried["run_id"], "task_id": "t-a"})
 
-    # 4. A DEFINITE refusal of a retry settles the STORED attempt's resources: the
-    #    project the original start registered and owned is the one retired.
+    # 4. An engine refusal answering a retry's POST retires nothing (#3138: no answer proves the key holds
+    #    no accepted run): the STORED attempt's own project stays owned, named, and its token stays pending.
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "route-a=model-old:low")
     root_c = tmp_path / "root-c"; root_c.mkdir()
     script[:] = ["transport_error", "definite_refusal"]
@@ -352,8 +354,10 @@ def test_a_retry_testifies_about_the_stored_invocation_not_the_current_config(
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "route-b=model-new:high")
     refused = json.loads(delegate._delegate_start(
         _ctx(root_b), "other work", retry_of=lost2["pending_invocation_id"]).text)
-    assert refused["status"] == "refused" and refused["project_retired"] is True
-    assert removals == [prj_c], "the retired project is the stored attempt's own"
+    assert refused["status"] == "refused" and refused["project_retired"] is False
+    assert (refused["project_id"], refused["pending_invocation_id"]) == (prj_c, lost2["pending_invocation_id"])
+    assert removals == [] and str(root_b) not in projects, "the stored attempt's project is kept, none is added"
+    assert dc.invocation_record(drive, lost2["pending_invocation_id"])["state"] == "pending"
     delegate._CUSTODY.clear()
 
 
@@ -630,15 +634,20 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
     assert dc.reconcile_orphaned_runs(tmp_path, {"t-a"}, gateway_factory=_fresh) == []
     assert len(posted) == 1
 
-    # 2. The owner is GONE: the sweep replays the stored body under the stored key,
-    #    the daemon returns the run it (now) holds, and the ordinary path collects it.
+    # 2. The owner is GONE: a positive noncreating read returns the run this exact start already
+    #    holds. Its admitting store was unknown, so the automatic sweep must not re-POST it.
     class _TerminalRecovery:
         removed: list = []
+        reads: list = []
 
         def handshake(self, **_kw): return {}
-        def start_run(self, request, *, idempotency_key=""):
-            posted.append((idempotency_key, dict(request)))
-            return {"runId": "run-recovered"}
+        def operations(self): return [{"method": "POST", "path": "/v2/runs/lookup"}]
+        def lookup_run(self, request, *, idempotency_key=""):
+            self.reads.append((idempotency_key, dict(request)))
+            return {"status": "found", "storeId": "fixture-store", "handle": {
+                "jobId": "accepted-job", "runId": "run-recovered", "state": "succeeded"}}
+        def start_run(self, *_a, **_kw):
+            pytest.fail("an unknown start must be read without a creating POST")
         def get_run(self, rid, **_kw):
             return {"lastSeq": 2, "summary": {"state": "succeeded", "spendUsd": 0.5,
                                               "effectiveAccess": "readonly"}}
@@ -646,11 +655,11 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
         def close(self): pass
 
     outcomes = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: _TerminalRecovery(),
-                                          replay_pending=lambda: True)  # the admitted sweep's shape
+                                          replay_pending=lambda: True, observe_pending=lambda: True)
     assert [o["action"] for o in outcomes] == ["settle_attempted"] and outcomes[0]["settled"] is True
-    key, body = posted[-1]
-    assert key == token, "recovery must present the invocation's own wire key"
-    assert body == posted[0][1], "recovery must replay the RECORDED canonical body"
+    (key, body), = _TerminalRecovery.reads
+    assert key == token, "recovery must read the invocation's own wire key"
+    assert body == posted[0][1] and len(posted) == 1, "the recorded body is read, never re-POSTed"
     started = [json.loads(line) for line
                in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
                if '"delegate_run_started"' in line][-1]
@@ -663,8 +672,8 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
                                        replay_pending=lambda: True)
     assert again == [], "a settled recovery does not repeat"
 
-    # 3. A DEFINITE refusal at recovery retires the invocation and the registration
-    #    the original attempt owned; an unreachable daemon leaves it pending.
+    # 3. Neither an engine refusal answering the recovery's replay (#3138) nor an unreachable daemon
+    #    retires the invocation or the registration the original attempt owned: both stay pending.
     script[:] = ["transport_error"]
     lost2 = json.loads(delegate._delegate_start(ctx, "other intended work").text)
     token2 = lost2["pending_invocation_id"]
@@ -689,16 +698,20 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
     for status in (0, 503):  # a dead socket and a busy engine are both unknown outcomes
         down = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: _Unreachable(status),
                                           replay_pending=lambda: True)
-        assert [o["action"] for o in down] == ["recovery_unreachable"]
+        assert [(o["action"], o["reason"]) for o in down] == [("invocation_retained", "invocation_store_unproven")]
         assert [r["invocation_id"] for r in dc.pending_invocations(tmp_path)] == [token2], \
             "an unknown outcome never destroys the invocation"
     refusing = _Refusing()
-    gone = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: refusing,
-                                      replay_pending=lambda: True)
-    assert [o["action"] for o in gone] == ["invocation_retired"]
-    assert refusing.removed == ["prj-owned"], "the ORIGINAL attempt's owned registration is discharged"
-    assert dc.pending_invocations(tmp_path) == []
-    assert dc.invocation_record(tmp_path, token2)["state"] == "failed_definite"
+    kept = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: refusing,
+                                      replay_pending=lambda: True)  # a replay alone is admitted: nothing is read
+    assert [(o["action"], o["reason"], o["lookup"]) for o in kept] == [
+        ("invocation_retained", "invocation_store_unproven", "not_read")]
+    assert refusing.removed == [], "the ORIGINAL attempt's owned registration is kept"
+    assert [r["invocation_id"] for r in dc.pending_invocations(tmp_path)] == [token2]
+    assert dc.invocation_record(tmp_path, token2)["state"] == "pending"
+    refused_rows = [r for r in dc.custody_rows(tmp_path) if r.get("type") == dc.START_FAILED
+                    and r.get("reason") == "recovery_refused_bad_request"]
+    assert refused_rows == [], "identity-less automatic recovery never entered another POST"
     delegate._CUSTODY.clear()
 
 
@@ -733,7 +746,8 @@ def test_a_start_whose_custody_row_did_not_land_does_not_claim_to_be_custodied(t
     assert out["invocation_id"] and out["pending_invocation_id"] == out["invocation_id"]
     assert out["status"] == "started_uncustodied", (
         "a start nothing outside this worker can name must not wear the plain name")
-    assert "CUSTODY IS NOT DURABLE" in out["note"]
+    assert out["note"].startswith("CUSTODY IS NOT DURABLE"), "c50-3: the custody warning goes before the receipt"
+    assert out["note"].index("CUSTODY IS NOT DURABLE") < out["note"].index("\nreceipt:")
     assert dc.lookup(tmp_path, "t-a", "run-live")[0] == dc.UNKNOWN, "the premise of the claim"
 
     entry = dc.RunCustody(run_id="run-2", task_id="t-a", route_id="r", model="m",
@@ -747,9 +761,11 @@ def test_a_start_whose_custody_row_did_not_land_does_not_claim_to_be_custodied(t
 @pytest.mark.parametrize("status_code,retired,remove_absent", [
     (0, False, False),      # transport error: the POST's fate is unknown, a run may be live
     (503, False, False),    # 5xx: same — an unverified outcome is not grounds to destroy state
-    # The daemon has no such registration: absence IS discharge, the same answer
-    # `retire_project` settles on, not a failure to report.
-    (422, True, True),
+    # An answered 4xx proves nothing either: an accepted command can answer its own start 400 (#3138).
+    (422, False, False),
+    # Only a start that never entered its POST (here the launch fence) is definite. The daemon has no such
+    # registration: absence IS discharge, the same answer `retire_project` settles on, not a failure to report.
+    (None, True, True),
 ])
 def test_a_failed_start_does_not_leave_the_registration_it_created(
     tmp_path, monkeypatch, status_code, retired, remove_absent,
@@ -760,6 +776,7 @@ def test_a_failed_start_does_not_leave_the_registration_it_created(
     from ouroboros import delegate_custody as dc
     import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gw
+    from ouroboros.owner_pause import OwnerPauseRefused
 
     live = {"prj-new"}
 
@@ -775,14 +792,19 @@ def test_a_failed_start_does_not_leave_the_registration_it_created(
             raise gw.ClaudexorUnavailable("daemon_busy" if status_code == 503 else "run_start_failed",
                                           "start outcome", status_code=status_code)
 
+    def fenced(*_args, **_kwargs):
+        raise OwnerPauseRefused("owner_pause_fenced")
+
     _select_transport_access(monkeypatch, "readonly")
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
+    if status_code is None:
+        monkeypatch.setattr(delegate, "run_operation", fenced)
     delegate._CUSTODY.clear()
     out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "x").text)
     delegate._CUSTODY.clear()
     assert out["status"] == "refused"
-    assert out["reason"] == ("daemon_busy" if status_code == 503 else "run_start_failed")
+    assert out["reason"] == {503: "daemon_busy", None: "owner_pause_fenced"}.get(status_code, "run_start_failed")
     assert out["project_retired"] is retired, out
     assert (live == set()) is retired, "only a definite refusal may retire the registration"
     if not retired:

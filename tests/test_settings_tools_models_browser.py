@@ -1,4 +1,4 @@
-"""Settings › Tools and Settings › Models in a browser (docs/DESIGN.md "Settings"; web/modules/mcp_settings.js,
+"""Extensions › MCP servers and Settings › Models in a browser (docs/DESIGN.md "Settings"; web/modules/mcp_settings.js,
 model_roles.js, settings_local_model.js).
 
 Both lists and their editors are opened by path at the owner's window (1087 x 740) and at a phone's (320 x 640), dark
@@ -12,6 +12,7 @@ The settings server is this file's own fake, shaped like the server's answer: it
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -153,7 +154,7 @@ def _settled(page, path):
     """The page at `path` has drawn its body and holds no write in flight."""
     level = settings_page(page, path)
     level.locator(".settings-page-body > *").first.wait_for(state="visible")
-    page.wait_for_function("() => !document.querySelector('#page-settings [aria-busy=\"true\"]')")
+    page.wait_for_function("() => !document.querySelector('.page.active [aria-busy=\"true\"]')")
     return level
 
 
@@ -184,7 +185,7 @@ def test_both_lists_and_their_editors_fit_the_window_without_sideways_scroll(sub
         level = _settled(page, path)
         level.locator(ready).first.wait_for(state="visible")
         if path == "tools":
-            page.wait_for_function("() => /tools · listed/.test(document.querySelector('#page-settings [data-entry-id=slack]')?.textContent || '')")
+            page.wait_for_function("() => /tools · listed/.test(document.querySelector('.page.active [data-entry-id=slack]')?.textContent || '')")
         if path == "models":
             page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"models:light\"] [data-row-value]')?.textContent")
         fits = level.evaluate(FITS)
@@ -202,11 +203,13 @@ def test_both_lists_and_their_editors_fit_the_window_without_sideways_scroll(sub
 @pytest.mark.parametrize("width,height", SIZES)
 def test_tools_from_the_home_a_switch_writes_one_entry_and_a_stale_list_is_refused(subscription_ui, width, height):
     page, server = _page(subscription_ui, width, height)
-    page.locator(f'{HOME} [data-settings-open="tools"]').click()
+    # MCP servers is a page of Extensions: Settings' one door leads there, and the list's row opens it.
+    page.locator(f'{HOME} [data-settings-open="page:skills"]').click()
+    page.locator('#page-skills [data-extensions-open="tools"]').click()
     level = _settled(page, "tools")
     slack = level.locator('[data-entry-id="slack"]')
     slack.wait_for(state="visible")
-    page.wait_for_function("() => /38 tools · listed/.test(document.querySelector('#page-settings [data-entry-id=slack]')?.textContent || '')")
+    page.wait_for_function("() => /38 tools · listed/.test(document.querySelector('.page.active [data-entry-id=slack]')?.textContent || '')")
     # The head: the name, the status's words, Sign in because the status asks, the switch. No refresh was started.
     assert "Slack" in slack.inner_text() and "HTTP" in slack.inner_text()
     assert slack.locator("[data-entry-sign-in]").inner_text() == "Sign in"
@@ -217,8 +220,8 @@ def test_tools_from_the_home_a_switch_writes_one_entry_and_a_stale_list_is_refus
 
     # The switch of a saved head: one write of the list with one entry changed and the token of its read.
     level.locator('[data-entry-id="browser"] .ui-switch').click()
-    page.wait_for_function("() => document.querySelector('#page-settings [data-entry-id=browser] [data-entry-switch]')?.checked === true"
-                           " && !document.querySelector('#page-settings [aria-busy=\"true\"]')")
+    page.wait_for_function("() => document.querySelector('.page.active [data-entry-id=browser] [data-entry-switch]')?.checked === true"
+                           " && !document.querySelector('.page.active [aria-busy=\"true\"]')")
     [written] = server.writes()
     assert list(written) == ["MCP_SERVERS"]
     assert [(entry["id"], entry["enabled"]) for entry in written["MCP_SERVERS"]] == [("slack", True), ("github", True), ("browser", True)]
@@ -228,7 +231,7 @@ def test_tools_from_the_home_a_switch_writes_one_entry_and_a_stale_list_is_refus
     # Another device changed the list meanwhile: the write is refused, said, and the list shows what the server holds.
     server.stale_next = True
     level.locator('[data-entry-id="github"] .ui-switch').click()
-    page.wait_for_function("() => /Changed on another device/.test(document.querySelector('#page-settings [data-entry-result]')?.textContent || '')")
+    page.wait_for_function("() => /Changed on another device/.test(document.querySelector('#page-skills [data-entry-result]')?.textContent || '')")
     assert len(server.writes()) == 2, "one attempt, never a silent retry"
     assert level.locator('[data-entry-id="github"] [data-entry-switch]').is_checked(), "its own switch is back at the stored value"
     assert not level.locator('[data-entry-id="slack"] [data-entry-switch]').is_checked(), "the other device's change is shown"
@@ -236,7 +239,7 @@ def test_tools_from_the_home_a_switch_writes_one_entry_and_a_stale_list_is_refus
     # The client's switch is a plain row that acts at once; the fold holds the two waits.
     assert commit_row_quiet(page, "MCP_ENABLED") == ""
     assert server.writes()[-1] == {"MCP_ENABLED": False}
-    page.wait_for_function("() => /All MCP servers are off/.test(document.querySelector('#page-settings [data-mcp-global]')?.textContent || '')")
+    page.wait_for_function("() => /All MCP servers are off/.test(document.querySelector('#page-skills [data-mcp-global]')?.textContent || '')")
     level.locator("details[data-settings-fold] > summary").click()
     assert commit_row(page, "MCP_TOOL_TIMEOUT_SEC", 90).startswith("Saved · was 60")
     page.close()
@@ -253,7 +256,7 @@ def commit_row_quiet(page, row_id):
     """Press a switch row that acts now and return its result line once the write settled (nothing, when it landed)."""
     row = setting_row(page, row_id)
     row.locator(".ui-switch").click()
-    page.wait_for_function("id => { const row = document.querySelector(`#page-settings [data-setting-row=\"${id}\"]`);"
+    page.wait_for_function("id => { const row = document.querySelector(`.page.active [data-setting-row=\"${id}\"]`);"
                            " return row && !row.querySelector('[aria-busy=\"true\"]'); }", arg=row_id)
     return row.locator("[data-setting-result]").inner_text().strip()
 
@@ -267,12 +270,16 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     # The header names the server's page, and its Back leads to the list it was opened from.
     assert lead_name(page) == "GitHub"
     back = header_back(page)
-    assert back.is_visible() and back.get_attribute("aria-label") == "Back to Tools"
+    assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to MCP servers"
+    back.click()
+    settings_page(page, "tools").wait_for(state="visible")
+    assert top_path(page) == "tools", "Back opens the list it names"
+    editor = open_entry(page, "github")
     name = editor.locator('[data-mcp-field="name"]')
     name.fill("GitHub (work)")
     # A status read lands while the form holds typed text: the text stays, and so does the caret.
     page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/github' } }))")
-    page.wait_for_function("() => document.querySelector('#page-settings [data-mcp-field=name]').value === 'GitHub (work)'")
+    page.wait_for_function("() => document.querySelector('#page-skills [data-mcp-field=name]').value === 'GitHub (work)'")
     assert editor.locator("[data-editor-discard]").is_visible()
     assert press_editor_save(page) == "Saved"
     [written] = server.writes()
@@ -284,10 +291,10 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     editor = settings_page(page, "tools/github")
     editor.locator('[data-mcp-field="transport"]').select_option("stdio")
     editor.locator("[data-editor-save]").click()
-    page.wait_for_function("() => /not used by Local process/.test(document.querySelector('#page-settings [data-editor-result]')?.textContent || '')")
+    page.wait_for_function("() => /not used by Local process/.test(document.querySelector('#page-skills [data-editor-result]')?.textContent || '')")
     assert len(server.writes()) == 1
     editor.locator("[data-editor-discard]").click()
-    page.wait_for_function("() => document.querySelector('#page-settings [data-mcp-field=transport]').value === 'streamable_http'")
+    page.wait_for_function("() => document.querySelector('#page-skills [data-mcp-field=transport]').value === 'streamable_http'")
     # Remove asks first; declining keeps the server, accepting removes it and returns to the list.
     editor.locator("[data-editor-remove]").click()
     dialog = page.locator(".confirm-dialog-backdrop")
@@ -299,7 +306,7 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     editor.locator("[data-editor-remove]").click()
     dialog.wait_for(state="visible")
     dialog.get_by_role("button", name="Remove").click()
-    page.wait_for_function("() => /Removed GitHub/.test(document.querySelector('#page-settings [data-settings-page=tools] [data-entry-result]')?.textContent || '')")
+    page.wait_for_function("() => /Removed GitHub/.test(document.querySelector('#page-skills [data-settings-page=tools] [data-entry-result]')?.textContent || '')")
     assert top_path(page) == "tools"
     assert [entry["id"] for entry in server.writes()[-1]["MCP_SERVERS"]] == ["slack", "browser"]
     # Add opens an unsaved server; its Save appends it, off, and the list says so.
@@ -308,8 +315,198 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     new.locator('[data-mcp-field="name"]').fill("Docs")
     new.locator('[data-mcp-field="url"]').fill("https://docs.example.com/mcp")
     new.locator("[data-editor-save]").click()
-    page.wait_for_function("() => /Added Docs/.test(document.querySelector('#page-settings [data-settings-page=tools] [data-entry-result]')?.textContent || '')")
+    page.wait_for_function("() => /Added Docs/.test(document.querySelector('#page-skills [data-settings-page=tools] [data-entry-result]')?.textContent || '')")
     assert [(entry["id"], entry["enabled"]) for entry in server.writes()[-1]["MCP_SERVERS"]] == [("slack", True), ("browser", False), ("docs", False)]
+    page.close()
+
+
+@pytest.mark.parametrize("new", [False, True], ids=["existing", "new"])
+@pytest.mark.parametrize("edit_header", [False, True], ids=["address", "header-name"])
+def test_mcp_address_typed_after_save_belongs_to_the_next_save(subscription_ui, new, edit_header):
+    from playwright.sync_api import expect
+
+    first, second = "https://first.example.test/mcp", "https://second.example.test/mcp"
+    existing = {"id": "notes", "name": "Notes", "url": "https://notes.example.test/mcp", "enabled": False}
+    page, server = _page(subscription_ui, MCP_SERVERS=[] if new else [existing])
+    editor = open_settings(page, "tools/new" if new else "tools/notes")
+    if new:
+        editor.locator('[data-mcp-field="name"]').fill("Notes")
+    address = '[data-mcp-field="url"]'
+    editor.locator(address).fill(first)
+    pending = []
+    page.route("**/api/settings", lambda route: pending.append(route) if route.request.method == "POST" else route.fallback())
+    with page.expect_request(lambda req: req.method == "POST" and req.url.endswith("/api/settings")):
+        editor.locator("[data-editor-save]").click()
+    editor.locator(address).fill(second)
+    field, start = address, len("https://")
+    if edit_header:
+        editor.locator("[data-mcp-more] > summary").click()
+        editor.locator("[data-mcp-header-add]").click()
+        field, start = '[data-mcp-header-field="name"]', len("X-")
+        editor.locator(field).fill("X-second")
+    editor.locator(field).evaluate("(el, start) => el.setSelectionRange(start, start + 6, 'backward')", start)
+    server.answer(pending.pop())
+
+    saved_page = settings_page(page, "tools/notes")
+    expect(saved_page.locator("[data-editor-result]")).to_contain_text("unsaved")
+    expect(saved_page.locator(address)).to_have_value(second)
+    expect(saved_page.locator("[data-editor-discard]")).to_be_visible()
+    assert len(server.writes()) == 1 and server.values["MCP_SERVERS"][0]["url"] == first
+    current = saved_page.locator(field)
+    expect(current).to_be_focused()
+    assert current.evaluate("el => [el.selectionStart, el.selectionEnd, el.selectionDirection]") == [start, start + 6, "backward"]
+    page.keyboard.insert_text("final")
+    final_url = second if edit_header else second.replace("second", "final")
+    expect(current).to_have_value("X-final" if edit_header else final_url)
+    page.unroute("**/api/settings")
+    assert press_editor_save(page) == "Saved"
+    assert [(row["id"], row["url"]) for row in server.values["MCP_SERVERS"]] == [("notes", final_url)]
+    if edit_header:
+        assert server.values["MCP_SERVERS"][0]["headers"] == {"X-final": ""}
+    assert [held for _, _, held in server.posts] == [{"MCP_SERVERS": f"MCP_SERVERS#{i}"} for i in (0, 1)]
+    page.close()
+
+
+@pytest.mark.parametrize("external", ["neighbour", "same-entry", "masked-value", "overlapping-header", "removed"])
+def test_mcp_draft_after_save_and_another_list_write(subscription_ui, external):
+    from playwright.sync_api import expect
+    from ouroboros.gateway.secret_rows import mask_mcp_servers, rehydrate_mcp_servers
+
+    rows = [dict(id=key, name=key, url=f"https://{key}.example.test") for key in ("notes", "other")]
+    page, server = _page(subscription_ui, MCP_SERVERS=rows)
+    pending = []
+
+    def settings(route):
+        if route.request.method == "POST":
+            if not server.posts:
+                pending.append(route)
+            else:
+                previous = server.values["MCP_SERVERS"]
+                server.answer(route)
+                server.values["MCP_SERVERS"] = rehydrate_mcp_servers(server.values["MCP_SERVERS"], previous)
+            return
+        if server.versions.get("MCP_SERVERS") == 1:
+            # Another writer commits after our receipt but before the first readback.
+            saved = server.values["MCP_SERVERS"] = deepcopy(server.values["MCP_SERVERS"])
+            saved[1]["name"] = "Other updated"
+            if external == "same-entry":
+                saved[0]["name"] = "Notes renamed elsewhere"
+            elif external in ("masked-value", "overlapping-header"):
+                saved[0]["headers"]["X-Mode"] = "external-fixture"
+            elif external == "removed":
+                saved.pop(0)
+            server.versions["MCP_SERVERS"] = 2
+        document = server.document()
+        document["MCP_SERVERS"] = mask_mcp_servers(document["MCP_SERVERS"])
+        route.fulfill(json=document)
+
+    page.route("**/api/settings", settings)
+    editor = open_settings(page, "tools/notes")
+    page.wait_for_load_state("networkidle")
+    editor.locator("[data-mcp-more] > summary").click()
+    editor.locator("[data-mcp-header-add]").click()
+    editor.locator('[data-mcp-header-field="name"]').fill("X-Mode")
+    editor.locator('[data-mcp-header-field="value"]').fill("submitted-fixture")
+    save = editor.locator("[data-editor-save]")
+    with page.expect_request(lambda req: req.method == "POST" and req.url.endswith("/api/settings")):
+        save.click()
+    address = editor.locator('[data-mcp-field="url"]')
+    latest = "https://next.example.test"
+    address.fill(latest)
+    if external == "overlapping-header":
+        editor.locator('[data-mcp-header-field="value"]').fill("next-fixture")
+    server.answer(pending.pop())
+    result = editor.locator("[data-editor-result]")
+    expect(result).to_contain_text("latest edits are unsaved")
+    expect(address).to_have_value(latest)
+    expect(save).to_be_enabled()
+    if external in ("same-entry", "overlapping-header", "removed"):
+        expect(result).to_contain_text("could not be confirmed")
+        if external == "overlapping-header":
+            field = editor.locator('[data-mcp-header-field="value"]')
+            show = editor.locator('[data-mcp-header-toggle]')
+            expect(field).to_have_value("next-fixture")
+            expect(field).to_have_attribute("type", "password")
+            expect(show).to_be_disabled()
+            expect(show).to_have_attribute("aria-expanded", "false")
+        save.click()
+        expect(result).to_contain_text("Discard changes")
+        editor.locator("[data-editor-discard]").click()
+        if external == "removed":
+            expect(editor).to_contain_text("no longer on the list")
+        elif external == "same-entry":
+            expect(editor.locator('[data-mcp-field="name"]')).to_have_value("Notes renamed elsewhere")
+        else:
+            expect(address).to_have_value("https://notes.example.test")
+            assert server.values["MCP_SERVERS"][0]["headers"] == {"X-Mode": "external-fixture"}
+        assert len(server.writes()) == 1
+    else:
+        expect(editor.locator('[data-mcp-header-field="value"]')).to_have_value("***set***")
+        assert press_editor_save(page) == "Saved"
+        notes, other = server.values["MCP_SERVERS"]
+        assert notes["url"] == latest and other["name"] == "Other updated"
+        assert notes["headers"] == {"X-Mode": "external-fixture" if external == "masked-value" else "submitted-fixture"}
+        assert server.posts[-1][2] == {"MCP_SERVERS": "MCP_SERVERS#2"}
+    page.close()
+
+
+def test_mcp_header_stored_by_one_save_is_kept_by_the_next(subscription_ui):
+    """One Save stores X-A while X-B is typed; another window then replaces X-A. The next Save keeps X-A's mask."""
+    from playwright.sync_api import expect
+    from ouroboros.gateway.secret_rows import mask_mcp_servers, rehydrate_mcp_servers
+
+    notes = {"id": "notes", "name": "Notes", "url": "https://notes.example.test/mcp",
+             "headers": {"X-A": "stored-a-fixture", "X-B": "stored-b-fixture"}}
+    page, server = _page(subscription_ui, MCP_SERVERS=[notes])
+    pending = []
+
+    def commit(route):
+        previous = server.values["MCP_SERVERS"]
+        server.answer(route)
+        server.values["MCP_SERVERS"] = rehydrate_mcp_servers(server.values["MCP_SERVERS"], previous)
+
+    def settings(route):
+        if route.request.method == "POST":
+            if server.posts or pending:
+                commit(route)
+            else:
+                pending.append(route)  # the first Save waits until the other row is typed
+            return
+        document = server.document()
+        document["MCP_SERVERS"] = mask_mcp_servers(document["MCP_SERVERS"])
+        route.fulfill(json=document)
+
+    page.route("**/api/settings", settings)
+    editor = open_settings(page, "tools/notes")
+    page.wait_for_load_state("networkidle")
+    editor.locator("[data-mcp-more] > summary").click()
+    values = editor.locator('[data-mcp-header-field="value"]')
+    values.nth(0).fill("submitted-a-fixture")
+    with page.expect_request(lambda req: req.method == "POST" and req.url.endswith("/api/settings")):
+        editor.locator("[data-editor-save]").click()
+    values.nth(1).fill("next-b-fixture")
+    commit(pending.pop())
+    expect(editor.locator("[data-editor-result]")).to_contain_text("latest edits are unsaved")
+    expect(values.nth(0)).to_have_value("***set***")
+    expect(values.nth(1)).to_have_value("next-b-fixture")
+    expect(values.nth(1)).to_be_focused()
+    assert server.values["MCP_SERVERS"][0]["headers"] == {"X-A": "submitted-a-fixture", "X-B": "stored-b-fixture"}
+
+    server.values["MCP_SERVERS"][0]["headers"]["X-A"] = "other-window-fixture"
+    server.versions["MCP_SERVERS"] += 1
+    save = editor.locator("[data-editor-save]")
+    dialog = page.locator(".confirm-dialog-backdrop")
+    save.click()
+    expect(dialog).to_contain_text("A masked value you edited or removed may have changed elsewhere")
+    dialog.get_by_role("button", name="Cancel").click()
+    expect(values.nth(1)).to_have_value("next-b-fixture")
+    assert len(server.writes()) == 1
+    save.click()
+    dialog.get_by_role("button", name="Save changes", exact=True).click()
+    expect(editor.locator("[data-editor-result]")).to_have_text("Saved")
+    assert len(server.writes()) == 2 and server.posts[-1][2] == {"MCP_SERVERS": "MCP_SERVERS#2"}
+    assert server.writes()[-1]["MCP_SERVERS"][0]["headers"] == {"X-A": "***set***", "X-B": "next-b-fixture"}
+    assert server.values["MCP_SERVERS"][0]["headers"] == {"X-A": "other-window-fixture", "X-B": "next-b-fixture"}
     page.close()
 
 
@@ -350,16 +547,15 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
     page.locator(f'{HOME} [data-settings-result="OUROBOROS_PROMPT_CACHE_TTL"]').click()
     level = _settled(page, "models")
     page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"OUROBOROS_PROMPT_CACHE_TTL\"]')?.closest('details')?.open")
-    assert [url for url in subscription_ui["reads"] if "/api/model-catalog" in url], "the catalogue is read when Models is shown"
-    # The recorder saw that read too, so its silence over the home's reads above was a real "none".
-    assert len(page.evaluate("() => window.__catalogueReaders")) > len(readers), "the recorder sees Models' catalogue read"
+    assert not [url for url in subscription_ui["reads"] if url.endswith("/api/model-catalog")], "navigating to Models does not read every provider"
     # The roles in the picture's order, each with its route.
     page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"models:light\"] [data-row-value]')?.textContent")
     assert level.locator("[data-entry-id]").evaluate_all("rows => rows.map((row) => row.dataset.entryId)") == [
         "main", "fallback/1", "fallback/2", "fallback/3", "light", "vision", "consciousness", "safety", "websearch"]
     assert "gpt-test" in level.locator('[data-entry-id="main"]').inner_text()
     values = level.locator("[data-row-value]").evaluate_all("spans => spans.map((span) => span.textContent)")
-    assert values[:6] == ["gpt-light", "Main model", "Main model", "Light model", "Auto", "Max"]
+    # An empty Safety Supervisor names the route it checks with now (Light's model) and whose it is.
+    assert values[:6] == ["gpt-light", "Main model", "Main model", "gpt-light · as Light", "Auto", "Max"]
 
     # The Context door shows the install's value, leads to Main and writes nothing.
     level.locator('[data-setting-row="models:context"]').click()
@@ -485,7 +681,7 @@ def test_the_local_model_page_saves_a_row_for_its_own_restart_and_never_offers_a
     _settled(page, "models").locator('[data-setting-row="models:local"]').click()
     level = _settled(page, "models/local")
     back = header_back(page)
-    assert back.is_visible() and back.get_attribute("aria-label") == "Back to Models"
+    assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Models"
     page.wait_for_function("() => /Ready/.test(document.querySelector('#local-model-status')?.textContent || '')")
     assert commit_row(page, "LOCAL_MODEL_CONTEXT_LENGTH", 32768) == "Saved · applies when the local model is restarted · was 16384 · Undo"
     assert server.writes() == [{"LOCAL_MODEL_CONTEXT_LENGTH": 32768}]

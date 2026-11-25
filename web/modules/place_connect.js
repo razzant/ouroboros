@@ -10,7 +10,9 @@ import { connectPlace, failureText, normalizePlace, readPlaceConnector, readPlac
 import { authorWord } from './consciousness_words.js';
 import { openPlaceSheet, openSkillsFor, sheetShell, showSheet, statusLine } from './place_sheet.js';
 
-const silentCopy = () => tr('places.connect.silent', 'It starts Silent: it hears and thinks there and sends nothing until you make it Active.');
+// Where a new place lands, in the host's words for the switch as it stands (consciousness_view.connect_note).
+const silentCopy = (view) => (view?.connectNote ? tr(view.connectNote, view.connectNote)
+    : tr('places.connect.silent', 'It starts Silent: it hears and thinks there and sends nothing until you make it Active.'));
 const wordsExample = () => tr('circles.words.example', 'A team chat: answer when asked; keep money and private matters out; bring me what matters.');
 /** The owner-words field of a circle or of a new place: the owner's voice, an example as its placeholder. */
 export const ownerWordsFieldHtml = (attrs, value = '', rows = 3) => `<textarea class="ui-control consciousness-owner-words" rows="${rows}" ${attrs} data-i18n-authored spellcheck="false" placeholder="${escapeHtml(wordsExample())}">${escapeHtml(value)}</textarea>`;
@@ -73,7 +75,7 @@ function whereHtml(view) {
         <div class="place-sheet-actions">${button('back', tr('places.connect.back', 'Back'))}</div>
         <h3>${tr('places.where', 'Where')} · <span data-i18n-authored>${escapeHtml(connector.label)}</span></h3>
         ${readiness ? statusLine(readiness.authored ? readiness : { ...readiness, text: tr(`places.readiness.${readiness.text}`, readiness.text) }) : ''}
-        <p class="place-sheet-note">${silentCopy()}</p>
+        <p class="place-sheet-note">${silentCopy(view)}</p>
         ${note ? `<p class="place-sheet-note" role="status">${escapeHtml(note)}</p>` : ''}
         ${settings || retry ? `<div class="place-sheet-actions">${settings}${retry}</div>` : ''}
         <div class="place-accounts">${rowHtml({ accountId: '', conversationId: '', label: tr('places.whole', 'Whole account') }, 'whole')}
@@ -89,14 +91,14 @@ function connectorAction(connector, count) {
 }
 
 export function connectListHtml({ connectors = null, places = [], error = '', selected = null, choices = null,
-    status = {}, busy = false, connectorStatus = null } = {}) {
+    status = {}, busy = false, connectorStatus = null, connectNote = '' } = {}) {
     if (error) return `<section class="place-sheet-section">${statusLine({ text: error, tone: 'error' })}${button('retry', tr('places.retry', 'Try again'))}</section>`;
     if (!connectors) return `<p class="place-sheet-section place-sheet-note" role="status">${tr('places.connect.loading', 'Reading the installed connectors…')}</p>`;
-    if (selected) return whereHtml({ selected, choices, places, status, busy, connectorStatus });
+    if (selected) return whereHtml({ selected, choices, places, status, busy, connectorStatus, connectNote });
     const back = `<div class="place-sheet-actions">${button('back-words', tr('places.connect.back', 'Back'))}</div>`;
     if (!connectors.length) return `<section class="place-sheet-section">${back}<p>${tr('places.connect.empty', 'No installed connector can connect a place yet.')}</p>
-        ${button('browse', tr('places.connect.browse', 'Find connectors in Skills'))}</section>`;
-    return `<section class="place-sheet-section">${back}<h3>${tr('places.where_from', 'Where is it?')}</h3><p class="place-sheet-note">${silentCopy()}</p>
+        ${button('browse', tr('places.connect.browse', 'Find connectors in Extensions'))}</section>`;
+    return `<section class="place-sheet-section">${back}<h3>${tr('places.where_from', 'Where is it?')}</h3><p class="place-sheet-note">${silentCopy({ connectNote })}</p>
         <div class="place-accounts">${connectors.map((connector) => {
             const n = places.filter((place) => place.connector === connector.connector).length;
             // Every row's meta line is its state, one family: connected (and how many places), not connected, or off,

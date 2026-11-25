@@ -1,25 +1,28 @@
-"""The one background maintenance process: history-sized named jobs, never on a server thread.
+"""Background maintenance: named jobs in separate lanes, never on a server thread.
 
 Work whose cost grows with accumulated history (evidence discovery and packing, and the other
-named jobs in ``JOBS``) runs in ONE child process at background priority: under one GIL a server
+named jobs in ``JOBS``) runs in a child process at background priority: under one GIL a server
 thread doing it turns every request's I/O into waiting. Each job keeps its facts in its
 ``maintenance_jobs`` row of ``state/current.sqlite``, so "once" is a fact of the installation,
 a restart of either process resumes from the recorded facts, and a second run over unchanged
 inputs decodes no history body, copies nothing and commits nothing.
 
-Server half: ``child`` (``MaintenanceChild``). The supervisor's maintenance dispatcher calls
-``tick`` at the end of each reconcile pass and on its first tick of a process (``owed``;
-``request`` asks again, e.g. after a boot scheduled a job). ``tick`` only reserves the one slot:
-its thread reads cheap facts (``due``: the job rows, the store revision, the terminal-write
-counter) and spawns the child only when one of them says work may wait, never because
-time passed. The spawn is the existing custodied one (``startup_historical_audit.
+Server half: ``child`` (``MaintenanceChildren``, one dispatch slot per lane). The supervisor calls
+``tick`` after reconciliation and when a look is owed (the first tick or a producer's ``request``).
+The dispatcher reserves the slot; the lane thread reads the due facts and spawns only for due work.
+The trash lane retries unchanged holds on the reconcile cadence (``request(retry=True)``), looks
+only at its own facts, and requests an ordinary look for retirement after its child runs.
+The spawn is the existing custodied one (``startup_historical_audit.
 spawn_maintenance_job``: session custody, its own process group, a parent lifeline; ``stop`` and
 ``live_children`` serve the Panic and exit census). Queue-owned work (orphan recovery, drive
 settlement under the queue lock and the supervisor's liveness probe) stays in the server: a
-fresh child owns no queue. After each child run not ended by Stop or Panic the server tells the owner
+fresh child owns no queue. After an ordinary child run not ended by Stop or Panic the server tells the owner
 once what each one-time walk did, when it is over (``delegate_result_taken``/``historical_retirement.deliver_receipt``).
 
-Child half: ``main`` (``python -m ouroboros.maintenance``) lowers its priority and runs ``JOBS``
+Lanes: ``custody_trash`` runs in a child of its own (``--lane trash``), every other job in the ordinary one, so a
+moved drive's deletion never waits behind packing; a child started without ``--lane`` runs every job.
+
+Child half: ``main`` (``python -m ouroboros.maintenance [--lane trash]``) lowers its priority and runs its lane's ``JOBS``
 in order, each asking its own facts again, and prints one bounded JSON report.
 """
 from __future__ import annotations
@@ -131,28 +134,85 @@ def _trash_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], c
     """Drives a settlement moved aside (``state/custody_trash``) wait for their deletion. An entry
     the last run could not remove is no reason to spawn the child until its identity changes, and
     the child retries it whenever it runs for another job: a released handle (Windows, a scanner)
-    changes neither its inode nor its time."""
-    from ouroboros.task_custody import custody_trash_entries
+    changes neither its inode nor its time. The trash lane's retry look (``child``: the reconcile
+    cadence) tries unchanged entries again. An unreadable identity does not prove absence. A recorded
+    ``retire_owed`` or a name missing from a whole listing may still owe its retirement wake.
+    An unreadable listing cannot settle that debt and does not itself spawn a retry."""
+    from ouroboros.task_custody import custody_trash_scan
 
-    observed, entries = {**(row.get("stuck") or {}), **(row.get("held") or {})}, custody_trash_entries(root)
-    return bool(entries) if child else any(observed.get(name) != identity for name, identity in entries)
+    observed = {**(row.get("stuck") or {}), **(row.get("held") or {})}
+    try:
+        entries, complete = custody_trash_scan(root)
+    except OSError:
+        return False  # a denied or partial listing is neither work nor provable absence
+    if row.get("retire_owed"):
+        return complete
+    listed = dict(entries)
+    gone = complete and any(name not in listed for name in observed)
+    if child:
+        return bool(entries) or gone
+    return gone or any(name not in observed or (identity is not None and observed[name] != identity)
+                       for name, identity in listed.items())
 
 
 def _trash_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
     """Delete the moved drives (each was custodied under the queue lock before its move; nothing
     serves or references it), so a child drive's tree is removed off the serving process. The row is
-    written only when something changed: a retry that leaves the same entries stuck commits nothing."""
+    written only when something changed: a retry that leaves the same entries stuck commits nothing.
+    Stop leaves the old status and aggregate holds; it does not invalidate the earlier enumeration
+    or confirmed removals. Drop only those confirmed-gone names when scheduling their retirement.
+    ``retire_owed`` is set before the first unlink attempt (except an unchanged stuck entry's retry)
+    and cleared in the transaction that schedules retirement. An unreadable enumeration cannot settle
+    that debt. The same nonblocking lock excludes the compatible manual CLI; run owns contention."""
     from ouroboros.task_custody import remove_custody_trash
 
-    report = remove_custody_trash(root, stop=should_stop)
-    state = "failed" if report["stuck"] else "done"
-    row = maintenance_jobs.job(root, "custody_trash") or {}
-    held = report.get("held") or {}
-    if report["removed"] or (row.get("state"), row.get("stuck") or {}, row.get("held") or {}, row.get("holds") or []) != (
-            state, report["stuck"], held, report["holds"]):  # a changed hold set is evidence; an unchanged one is silent
-        maintenance_jobs.record(root, "custody_trash", state=state, stuck=report["stuck"], held=held,
-                                removed=report["removed"], holds=report["holds"])
-    return {"state": state, "items": report["removed"]}
+    with store.name_lock(root, "custody_trash.lock", timeout_sec=0):
+        row = maintenance_jobs.job(root, "custody_trash") or {}
+        observed = {**(row.get("stuck") or {}), **(row.get("held") or {})}
+        owed, stopped = [bool(row.get("retire_owed"))], []
+
+        def before_unlink(entry: pathlib.Path) -> None:
+            if owed[0]:
+                return
+            with contextlib.suppress(OSError):
+                info = entry.lstat()
+                if observed.get(entry.name) == [info.st_ino, info.st_mtime_ns]:
+                    return  # an unchanged stuck entry's retry commits nothing before its attempt
+            maintenance_jobs.record(root, "custody_trash", retire_owed=True)
+            owed[0] = True
+
+        def stop() -> bool:
+            if should_stop():
+                stopped.append(True)
+            return bool(stopped)
+
+        listing: Dict[str, List[str]] = {}  # populated only after the initial enumeration succeeds
+        report = remove_custody_trash(root, stop=stop, before_unlink=before_unlink,
+                                      notify_retirement=False, listing=listing)
+        complete = not stopped and not report.get("incomplete")
+        removed, held = report["removed"], report.get("held") or {}
+        state = "failed" if report["stuck"] else "done"
+        gone = set(listing.get("gone", ()))
+        enumerated = "initial" in listing
+        if enumerated:
+            gone |= set(observed) - set(listing["initial"])
+        book = bool(gone) or (enumerated and owed[0])
+        facts: Dict[str, Any] = {"removed": removed}
+        if complete:
+            facts.update(state=state, stuck=report["stuck"], held=held, holds=report["holds"])
+        elif gone:
+            for key in ("stuck", "held"):
+                facts[key] = {name: ident for name, ident in (row.get(key) or {}).items() if name not in gone}
+        changed = complete and (row.get("state"), row.get("stuck") or {}, row.get("held") or {}, row.get("holds") or []) != (
+            state, report["stuck"], held, report["holds"])  # a changed hold set is evidence; an unchanged one is silent
+        if book or changed:
+            with store.open_store(root, write=True) as txn:
+                maintenance_jobs.record_in(txn, "custody_trash", **facts)
+                if book:
+                    maintenance_retirement.schedule_in(txn, time.time())
+                    if enumerated and owed[0]:
+                        maintenance_jobs.forget_in(txn, "custody_trash", "retire_owed")
+        return {"state": state if complete else "pending", "items": removed}
 
 
 def _release() -> str:
@@ -235,38 +295,43 @@ def _analyze_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[st
 def _packing_inputs(root: pathlib.Path) -> Dict[str, Any]:
     """The facts the packing rule reads, cheaply: the store's terminal-write counter (a task closing
     or a closed task written again moves it; a live task's writes do not; one meta row, never a read
-    over the rows), whether archived usage segments wait, and whether any loose evidence exists."""
-    from ouroboros import evidence_packer
+    over the rows), whether archived usage segments wait, whether the evidence index awaits its rebuild
+    (``evidence_packs.index_owed``: stats, nothing of the packs opened) and whether any loose evidence exists."""
+    from ouroboros import evidence_packer, evidence_packs
 
     return {"terminal": _plain(evidence_packer.terminal_revision(root)),
-            "archive_pending": evidence_packer.archive_pending(root),
+            "archive_pending": evidence_packer.archive_pending(root), "index_owed": evidence_packs.index_owed(root),
             "loose": any(_any_entry(root / rel) for rel in ("observability/calls", "task_results/artifacts"))}
 
 
 def _packing_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
-    """Evidence may wait when archived usage segments wait, or when loose evidence exists and the
+    """Evidence may wait when archived usage segments wait or the evidence index awaits its rebuild
+    (only the pass rebuilds it, so even a quiet install is due once its file is gone or a reader marked
+    it unusable), or when loose evidence exists and the
     terminal rows moved since the last pass, or the last pass unlinked (one more look is owed: it
     records the moved directories' stamps), or it left candidates unfinished (``pending``: deferred
-    by a held custody lock, busy files, faults) and the store has been written since that pass began
+    by a held custody lock, busy files, faults, a manifest a candidate wrote after the census) and the
+    store has been written since that pass began
     (the contender that held the lock or the file writes its receipt, during the pass or after it;
     nothing but a write re-arms it, so a persistent fault costs one pass per store change, never a
     tight loop); in the child the unfinished work runs whenever the child runs for another reason."""
     inputs = _packing_inputs(root)
     unfinished = bool(row.get("pending")) and (child or facts["revision"] != row.get("revision"))
-    return inputs["archive_pending"] or (inputs["loose"] and (
+    return inputs["archive_pending"] or inputs["index_owed"] or (inputs["loose"] and (
         row.get("terminal") != inputs["terminal"] or not row.get("quiet") or unfinished))
 
 
 def _packing_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
-    """Discovery (archive first, then the first changed task stamp) and, when it finds work, one
-    packing pass, both over the census the job row addresses: the rows written terminal since the
+    """Discovery (archives and an owed index rebuild first, then the first changed task stamp) and, when
+    it finds work, one packing pass, both over the census the job row addresses: the rows written terminal since the
     position the last pass recorded (``census``, the counter it read before its pass, under the store's
     body fact ``body``) and the candidates it left (``pending``); every loose folder only without a
     readable position (``evidence_packer.census_since``: the first run, an older body's pass, another
     HEAD booted on the store since, a counter that went back). The inputs are read before the pass and
     recorded after it, so a task closing during the
     pass makes the next look differ. A pass that unlinked records ``quiet: False``; one that left
-    candidates deferred, busy or faulted records their ids as ``pending`` with the store revision
+    candidates deferred, busy, faulted or written a manifest after the census records their ids as
+    ``pending`` with the store revision
     it has seen: the one its own record leaves when nothing else wrote during the pass, else the
     one the pass began at, since a write during the pass (the contender's receipt, committed after
     the deferral and before this record) is one the pass has not seen, and recording the later
@@ -385,14 +450,25 @@ JOBS: Dict[str, tuple] = {
     "evidence_packing": (_packing_due, _packing_run),  # last: its quiet fact follows every other write
 }
 JOB_NAMES = tuple(JOBS)
+TRASH_JOBS = ("custody_trash",)  # the trash lane's job; every other job is the ordinary lane's
+LANES = ("ordinary", "trash")
 
 
-def due(root: Any) -> List[str]:
-    """Read job facts, replaying owed producer wakes before dispatch; no history walk."""
-    root = pathlib.Path(root)
-    rows = maintenance_jobs.jobs(root, JOBS)
-    facts = _store_facts(root)
-    return [name for name, (is_due, _run) in JOBS.items() if is_due(root, rows.get(name) or {}, facts, False)]
+def lane_jobs(lane: Optional[str] = None) -> tuple:
+    """The jobs of LANE in ``JOBS`` order; every job for ``None`` (a child started without ``--lane``)."""
+    if lane not in (None, *LANES):
+        raise ValueError(f"unknown maintenance lane: {lane}")
+    return tuple(name for name in JOBS if lane is None or (name in TRASH_JOBS) == (lane == "trash"))
+
+
+def due(root: Any, *, lane: Optional[str] = None, child: bool = False) -> List[str]:
+    """Read job facts, replaying owed producer wakes before dispatch; no history walk. LANE limits the look to
+    its jobs; CHILD looks as the child does (only the trash lane's cadence retry asks it); the trash lane reads
+    no store facts, so its look replays no ordinary producer's owed wake."""
+    root, names = pathlib.Path(root), lane_jobs(lane)
+    rows = maintenance_jobs.jobs(root, names)
+    facts = {} if lane == "trash" else _store_facts(root)
+    return [name for name in names if JOBS[name][0](root, rows.get(name) or {}, facts, child)]
 
 
 def _contention(exc: BaseException) -> bool:
@@ -402,10 +478,12 @@ def _contention(exc: BaseException) -> bool:
 
 def run_job(root: Any, name: str, *, should_stop: Optional[Callable[[], bool]] = None) -> Optional[Dict[str, Any]]:
     """Run one named job in THIS process when its own facts say work may wait (the child's step;
-    tests and the cost contract call it); ``None`` when the job is at rest: only its facts were read."""
+    tests and the cost contract call it); ``None`` when the job is at rest: only its facts were read. A trash job
+    reads no store facts, so the trash child replays no ordinary producer's owed wake."""
     root = pathlib.Path(root)
     is_due, run_one = JOBS[name]
-    if not is_due(root, maintenance_jobs.job(root, name) or {}, _store_facts(root), True):
+    facts = {} if name in TRASH_JOBS else _store_facts(root)
+    if not is_due(root, maintenance_jobs.job(root, name) or {}, facts, True):
         return None
     return run_one(root, should_stop or (lambda: False))
 
@@ -424,11 +502,11 @@ def _last_error(root: pathlib.Path, name: str, exc: Optional[BaseException]) -> 
         log.debug("Maintenance job %s outcome not recorded", name, exc_info=True)
 
 
-def run(root: Any, *, should_stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
-    """The child's pass: every due job in order; one job's failure never skips the next."""
+def run(root: Any, *, should_stop: Optional[Callable[[], bool]] = None, lane: Optional[str] = None) -> Dict[str, Any]:
+    """The child's pass: every due job of LANE (every job without one) in order; one job's failure never skips the next."""
     root, stop = pathlib.Path(root), should_stop or (lambda: False)
     report: Dict[str, Any] = {"status": "completed", "jobs": {}}
-    for name in JOBS:
+    for name in lane_jobs(lane):
         if stop():
             break
         try:
@@ -478,31 +556,48 @@ def _report_fields(raw: bytes) -> Dict[str, Any]:
 
 
 class MaintenanceChild:
-    """The one maintenance child of this server process (module docstring)."""
+    """One lane's maintenance child of this server process (module docstring); no lane runs every job."""
 
-    def __init__(self) -> None:
+    def __init__(self, lane: Optional[str] = None) -> None:
+        lane_jobs(lane)  # a known lane
+        self._lane = lane
+        self.sibling: Optional["MaintenanceChild"] = None  # the other lane, told when the trash lane ran
+        self._retry = False  # the trash lane's next look is the reconcile cadence's retry window
         self._lock = threading.Lock()
         self._stopped = threading.Event()
         self._owed = True  # the first maintenance tick of a process looks at the job facts once
         self._process = None
         self._thread: Optional[threading.Thread] = None
 
-    def request(self) -> None:
-        """Ask the next supervisor maintenance tick to look at the job facts (a job was scheduled)."""
-        self._owed = True
+    def request(self, *, retry: bool = False) -> None:
+        """Ask the next supervisor maintenance tick to look at the job facts (a job was scheduled);
+        RETRY also asks the trash lane to retry its unchanged entries in the same publication."""
+        with self._lock:  # the same lane lock tick reserves the flags under
+            self._retry = self._retry or (retry and self._lane == "trash")
+            self._owed = True
+
+    def retry_look(self) -> None:
+        """Keep the trash lane's unspent retry window without owing a new look; other lanes ignore it."""
+        if self._lane == "trash":
+            with self._lock:
+                self._retry = True
 
     def owed(self) -> bool:
         return self._owed and not self._stopped.is_set()
 
-    def tick(self, data_root: Any, repo_dir: Any) -> bool:
+    def tick(self, data_root: Any, repo_dir: Any, *, owed_only: bool = False) -> bool:
         """Reserve the one slot; True means the dispatch thread started (it spawns the child only
-        when a job is due). No filesystem or store access on the caller's thread."""
+        when a job is due). No filesystem or store access on the caller's thread. OWED_ONLY (the
+        supervisor tick's event-driven look) reserves nothing for a lane no producer asked for, so a
+        long child of one lane never starts a fresh fact-reading thread of the other on every tick."""
         with self._lock:
-            if self._stopped.is_set() or (self._thread is not None and self._thread.is_alive()):
+            if self._stopped.is_set() or (owed_only and not self._owed) or (
+                    self._thread is not None and self._thread.is_alive()):
                 return False
-            self._owed = False
-            self._thread = threading.Thread(target=self._run, args=(pathlib.Path(data_root), pathlib.Path(repo_dir)),
-                                            name="maintenance-child", daemon=True)
+            self._owed, (retry, self._retry) = False, (self._retry, False)
+            name = "maintenance-child" if self._lane in (None, "ordinary") else f"maintenance-{self._lane}"
+            self._thread = threading.Thread(target=self._run, args=(pathlib.Path(data_root), pathlib.Path(repo_dir), retry),
+                                            name=name, daemon=True)
             self._thread.start()
         return True
 
@@ -524,32 +619,71 @@ class MaintenanceChild:
         with contextlib.suppress(OSError):
             process.kill()  # its own process group: the signal reaches only our child
 
-    def _run(self, data_root: pathlib.Path, repo_dir: pathlib.Path) -> None:
+    def _run(self, data_root: pathlib.Path, repo_dir: pathlib.Path, retry: bool = False) -> None:
         started = time.monotonic()
+        lane = self._lane
+        select = {} if lane is None else {"lane": lane, "child": retry and lane == "trash"}  # no lane: the whole catalog
+        record = _record if lane in (None, "ordinary") else (
+            lambda root, phase, **facts: _record(root, phase, lane=lane, **facts))
         try:
             try:
                 with store.acquisition_budget(0):  # contention defers to the next look, never waits
-                    names = due(data_root)
+                    names = due(data_root, **select)
             except Exception:
+                if retry:  # a look the store refused keeps its retry window
+                    self.retry_look()
                 log.debug("Maintenance job facts unavailable; the next look retries", exc_info=True)
                 return
             if not names or self._stopped.is_set():
                 return
-            process = spawn_maintenance_job(data_root, repo_dir, PURPOSE)
-            finish_maintenance_job(self, process, data_root, started, _report_fields, _record)
-            if not self._stopped.is_set():  # the one-time walks' receipts, never after Stop or Panic
+            args = {} if lane is None else {"args": ("--lane", lane)}
+            process = spawn_maintenance_job(data_root, repo_dir, PURPOSE, **args)
+            finish_maintenance_job(self, process, data_root, started, _report_fields, record)
+            if self._stopped.is_set():  # nothing more after Stop or Panic
+                return
+            if lane == "trash":  # a removal owes the ordinary lane a look (retirement of the removed tree's bytecode)
+                if self.sibling is not None:
+                    self.sibling.request()
+            else:  # the one-time walks' receipts
                 delegate_result_taken.deliver_receipt(data_root)
                 historical_retirement.deliver_receipt(data_root)
         except Exception as exc:
             with contextlib.suppress(Exception):
-                _record(data_root, phase="failed", exception_class=type(exc).__name__,
-                        duration_seconds=time.monotonic() - started)
+                record(data_root, phase="failed", exception_class=type(exc).__name__,
+                       duration_seconds=time.monotonic() - started)
         finally:
             with self._lock:
                 self._process = None
 
 
-child = MaintenanceChild()
+class MaintenanceChildren:
+    """The server's one maintenance door over its two lanes (module docstring): each call reaches both."""
+
+    def __init__(self) -> None:
+        self.ordinary, self.trash = MaintenanceChild("ordinary"), MaintenanceChild("trash")
+        self.ordinary.sibling, self.trash.sibling = self.trash, self.ordinary
+        self._lanes = (self.ordinary, self.trash)
+
+    def request(self, *, retry: bool = False) -> None:
+        """Ask both lanes to look; RETRY applies to the trash lane only."""
+        self.ordinary.request()
+        self.trash.request(retry=retry)
+
+    def owed(self) -> bool:
+        return any(lane.owed() for lane in self._lanes)
+
+    def tick(self, data_root: Any, repo_dir: Any, *, owed_only: bool = False) -> bool:
+        return any([lane.tick(data_root, repo_dir, owed_only=owed_only) for lane in self._lanes])  # a list: every lane is asked
+
+    def stop(self) -> None:
+        for lane in self._lanes:
+            lane.stop()
+
+    def live_children(self) -> list:
+        return [unit for lane in self._lanes for unit in lane.live_children()]
+
+
+child = MaintenanceChildren()
 
 
 # ---- the child half --------------------------------------------------------------------------
@@ -573,6 +707,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--custody-session", default="")
+    parser.add_argument("--lane", choices=LANES, default=None)  # no lane: every job (a manual run)
     args = parser.parse_args(argv)
     os.environ["OUROBOROS_DATA_DIR"] = str(pathlib.Path(args.data_root).resolve())
     # Roots are bound before importing readers that capture config globals.
@@ -582,7 +717,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     start_parent_lifeline(label=PURPOSE)
     _lower_priority()
     try:
-        report = run(pathlib.Path(args.data_root))
+        report = run(pathlib.Path(args.data_root), lane=args.lane)
     except Exception as exc:
         report = {"status": "failed", "jobs": {}, "exception_class": type(exc).__name__}
     print(json.dumps({key: report[key] for key in ("status", "jobs")}, separators=(",", ":")), flush=True)

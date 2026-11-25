@@ -11,6 +11,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# The host's own act, said only by this letter: the shared frame also builds the room's history row and a relayed
+# quote's frame, where it would be false. The letter may reach the asker's admitted Continue, so it names its route.
+MAILBOX_ROUTE_FACT = ("Host fact: this mailbox delivery is addressed to this work; this route does not broadcast "
+                      "the answer to unrelated work.")
+
 
 def answer_message_id(asker: str, quiz_id: str) -> str:
     """The mailbox identity ``deliver_answer`` gives a card's live answer, whichever task reads it."""
@@ -83,7 +88,7 @@ def acknowledge_answer(root, recipient: str, entry: dict) -> None:
 def deliver_answer(root, asker: str, quiz_id: str, block: dict, live_reader, fallback) -> tuple[bool, str]:
     """Return (forwarded_to_owner_ingress, reason); a living recipient's mailbox remains owed until ACK."""
     from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, mail_read_state, mailbox_holds, write_owner_message
-    from ouroboros.owner_quiz import mark_discharged, recorded_answer_frame, quiz_states
+    from ouroboros.owner_quiz import mark_discharged, quiz_states, recorded_answer_frame, secret_outcome_block
     from ouroboros.utils import utc_now_iso
     from supervisor import message_bus, queue as q
     from supervisor.workers import get_direct_chat_agent
@@ -138,7 +143,10 @@ def deliver_answer(root, asker: str, quiz_id: str, block: dict, live_reader, fal
                 # Name the owed effect BEFORE append. A crash retries that same identity.
                 _update_delivery(root, asker, quiz_id, {"recipient_task_id": recipient, "msg_id": msg_id,
                     "recipient_drive": str(drive), "state": "owed", "mailbox_at": "", "reason_code": "awaiting_recipient_read"})
-                if not write_owner_message(drive, recorded_answer_frame(block), recipient, msg_id=msg_id,
+                # A secret outcome is host metadata: no owner words to route. A pressed label is the asker's text.
+                letter = recorded_answer_frame(block, asker=asker, reader=recipient)
+                letter += "" if secret_outcome_block(block) is not None else "\n" + MAILBOX_ROUTE_FACT
+                if not write_owner_message(drive, letter, recipient, msg_id=msg_id,
                         kind=KIND_QUIZ_ANSWER, quiz_delivery={"task_id": asker, "quiz_id": quiz_id,
                                                           "canonical_root": str(root), "answer_snapshot": dict(block)}):
                     return False, "mailbox_write_failed"

@@ -211,6 +211,32 @@ def test_money_snapshot_and_direct_reads(ctx):
         assert result["status"] == "ok" and result["data"]["rows"][0][0] > 0, result
 
 
+def test_money_sql_reads_the_imported_history_from_the_summaries_not_the_typed_columns(ctx):
+    """A string amount in an imported aggregate survives in the advertised summary."""
+    from tests._usage_store_testing import write_compacted_journal
+
+    write_compacted_journal(ctx.drive_root, [{
+        "attempt_id": "fold-imported", "task_id": "t", "root_task_id": "r", "model": "m",
+        "provider": "openai", "category": "task", "source": "old", "folded_attempt_count": 7,
+        "cost_usd": "1.75", "cost_final": True}])
+    usage_store.migrate_from_journal(ctx.drive_root)
+
+    imported = run(ctx, "SELECT kind, cost_usd, extra FROM attempts WHERE kind='usage_baseline_group'",
+                   db="money")
+    assert imported["status"] == "ok", imported
+    kind, cost, extra = imported["data"]["rows"][0]
+    assert kind == "usage_baseline_group"
+    assert cost is None  # the typed money column is NULL ...
+    assert '"cost_usd":"1.75"' in extra  # ... and the amount is the string in extra
+    # The negative: the typed columns alone miss the imported history.
+    typed = run(ctx, "SELECT SUM(CAST(cost_usd AS REAL)) FROM attempts", db="money")
+    assert typed["data"]["rows"] == [[None]], typed
+    # The positive: the store's own summary carries it.
+    totals = run(ctx, "SELECT settled, confirmed, estimated FROM summaries WHERE scope='global' AND key=''",
+                 db="money")
+    assert totals["data"]["rows"] == [["1.75", "1.75", "0"]], totals
+
+
 @pytest.mark.parametrize("query,status", [("SELECT 1", "ok"), ("SELECT )", "error")])
 def test_snapshot_removes_real_temporary_directory(ctx, monkeypatch, query, status):
     usage_store.migrate_from_journal(ctx.drive_root)
@@ -437,20 +463,13 @@ def test_late_parent_observation_keeps_exited_child_answer(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("db,lock_name", [("money", "usage_attempts.lock"), ("packs", "packs_index.lock")])
 def test_name_tier_money_and_index_reads_share_writer_locks(tmp_path, monkeypatch, db, lock_name):
-    from ouroboros import platform_layer
+    from ouroboros import evidence_packs, platform_layer
+    if db == "packs":  # the cache in the tier the query's own process sees: no reader rebuilds one of another tier
+        evidence_packs.ensure_index(tmp_path)
     monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda _, **_kw: False)
     store_import.ensure_current_store(tmp_path, with_children=False)
     if db == "money":
         usage_store.migrate_from_journal(tmp_path)
-    else:
-        from ouroboros import evidence_packs
-        path = evidence_packs.packs_dir(tmp_path) / evidence_packs.INDEX_NAME
-        path.parent.mkdir(parents=True)
-        conn = sqlite3.connect(path)
-        try:
-            conn.execute("CREATE TABLE members(name TEXT)")
-        finally:
-            conn.close()
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="caller")
     assert run(ctx, "SELECT 1", db=db)["data"]["rows"] == [[1]]
     with store.name_lock(tmp_path, lock_name, timeout_sec=1):
@@ -464,16 +483,56 @@ def test_pack_sql_holds_the_index_owner_lock(ctx, monkeypatch, tier):
     from ouroboros import evidence_packs as packs
     from tests.test_evidence_packs import _task
 
+    own = packs.index_tier(ctx.drive_root)  # the tier the query's own process sees
     monkeypatch.setattr(packs, "index_tier", lambda _root: tier)
     _task(ctx.drive_root, "packed", blobs=1)
     packs.write_pack(ctx.drive_root, "packed", 1, packs.loose_members(ctx.drive_root, "packed"))
+    packs.ensure_index(ctx.drive_root)
     with packs.open_index(ctx.drive_root, write=True):
         result = run(ctx, "SELECT count(*) FROM members", db="packs", timeout_sec=0.05)
         assert result["status"] == "error" and result["code"] == "deadline" and result["phase"] == "acquire", result
-    assert run(ctx, "SELECT count(*) FROM members", db="packs")["data"]["rows"] == [[2]]
+    answer = run(ctx, "SELECT count(*) FROM members", db="packs")
+    if tier == own:
+        assert answer["data"]["rows"] == [[2]], answer
+    else:  # a cache of another tier is one the query may not use, and it rebuilds none
+        assert (answer["status"], answer["code"]) == ("unavailable", "evidence_unavailable"), answer
     # Admission retains the owner's one lock through the read-only query scope.
     with sql._source(ctx.drive_root, "packs", sql._Budget(1)) as observed:
         assert observed == tier
         with pytest.raises(store.StoreBusy):
             with store.name_lock(ctx.drive_root, packs.INDEX_LOCK_NAME, timeout_sec=0.01):
                 pytest.fail("index owner lock was released before SQL")
+
+
+def test_the_minds_sql_meeting_index_damage_marks_it_and_a_failed_statement_does_not(ctx, monkeypatch):
+    """The mind's SQL on the evidence index (``db=packs`` through the real child process) answers a failed
+    statement as ``query_failed`` either way; only SQLite's verdict that the file is damaged leaves the damage
+    mark, so the packing job owes the rebuild that heals it and the same SELECT answers again, while a mistyped
+    column on a sound index marks nothing."""
+    import contextlib
+
+    from ouroboros import evidence_packs as packs, maintenance
+    from tests._store_journal_shared import use_journal
+    from tests.test_evidence_packs import _task
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(ctx.drive_root))
+    use_journal(monkeypatch, "PERSIST")  # the damaged page lies in the file itself, not in a WAL
+    for task in ("a", "b", "c"):
+        _task(ctx.drive_root, task, blobs=1)
+    for _ in range(2):  # packs, then the one more look that records the moved stamps
+        maintenance.run_job(ctx.drive_root, "evidence_packing")
+    index, mark = packs.packs_dir(ctx.drive_root) / packs.INDEX_NAME, packs.packs_dir(ctx.drive_root) / packs.DAMAGED_MARK
+    query = "SELECT count(*) FROM members WHERE sha256 >= ''"  # through the members' key
+    mistyped = run(ctx, "SELECT nope FROM members", db="packs", timeout_sec=60.0)
+    assert (mistyped["status"], mistyped["code"], mark.exists()) == ("error", "query_failed", False), mistyped
+    with contextlib.closing(sqlite3.connect(index)) as conn:  # that key's root page, behind a sound header and meta row
+        page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='sqlite_autoindex_members_1'").fetchone()[0]
+        size = conn.execute("PRAGMA page_size").fetchone()[0]
+    with open(index, "r+b") as handle:
+        handle.seek((page - 1) * size)
+        handle.write(b"\0" * size)
+    broken = run(ctx, query, db="packs", timeout_sec=60.0)
+    assert (broken["status"], broken["code"]) == ("error", "query_failed") and "malformed" in broken["message"], broken
+    assert mark.exists() and "evidence_packing" in maintenance.due(ctx.drive_root)
+    assert maintenance.run_job(ctx.drive_root, "evidence_packing")["state"] == "done" and not mark.exists()
+    assert run(ctx, query, db="packs", timeout_sec=60.0)["data"]["rows"] == [[6]]

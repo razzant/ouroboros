@@ -197,9 +197,11 @@ def _write_failure_result(
 ) -> str:
     """Write failure result for a crashed/orphaned task.
 
-    Returns the FINAL persisted status: if the task already reached a terminal state, the monotonic
-    guard preserves it and that existing status is returned (so the UI event matches disk);
-    otherwise the written failure status.
+    Returns the FINAL persisted status: a task that already reached a terminal state keeps its whole
+    row, and that status is returned (so the UI event matches disk); otherwise the written failure
+    status. The read below only spares work: the reducer lets a rewrite with the SAME terminal status
+    through, so a writer that settles the task before this write's transaction wins there, in the
+    projector, which leaves its row untouched.
 
     ``stop_source`` is the typed cause a known stop door passes (the owner's Restart, a graceful
     server shutdown). It lands as ``cancel_origin`` — the field a settled cancel intent records —
@@ -213,7 +215,7 @@ def _write_failure_result(
     try:
         from ouroboros.task_results import (
             STATUS_FAILED, STATUS_COMPLETED, STATUS_REJECTED_DUPLICATE,
-            STATUS_CANCELLED, load_task_result, write_task_result,
+            STATUS_CANCELLED, load_task_result, observed_cancel_axes, write_task_result,
         )
         # STATUS_INTERRUPTED is not final; it is written before requeue.
         _FINAL_STATUSES = {STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE, STATUS_CANCELLED}
@@ -226,11 +228,29 @@ def _write_failure_result(
         f_cost_fields = _pool().reconstruct_task_cost(str(task_id), fields=True)
         cause = (_recorded_cancel_fields(task_id, stop_source=stop_source, reason=reason)
                  if stop_source or final_status == STATUS_CANCELLED else {})
+        def keep_settled_row(current, fields):
+            # The read above leaves a gap before this transaction, and the reducer lets a rewrite with the SAME
+            # terminal status through: a writer that settled the row meanwhile keeps its whole row (result, cause,
+            # author, stop origin). A live row's leftover code is no cause here: the cancel states its own.
+            if current.get("status") in _FINAL_STATUSES:
+                return None
+            pause = current.get("resource_limit")
+            pause = pause if isinstance(pause, dict) else {}
+            standing = current.get("reason_code") == "budget_exhausted" and pause.get("status") == "paused_before_dispatch"
+            lifted = pause.get("status") == "resumed" and pause.get("scope") == "global"  # what the explicit Resume leaves
+            if final_status != STATUS_CANCELLED or not (standing or lifted) or not pause.get("paused_at"):
+                return fields  # no dated record of a global budget pause, standing or kept by a Resume: nothing is guessed
+            # An observation only, never the cause and never read by Continue: the budget pause this work recorded, standing
+            # or lifted since (explicit Resume and global selection keep its dated record, set ``resumed`` and clear the code;
+            # other held selections write identities only, so nothing is claimed). No attempt is named: the record carries none.
+            return {**fields, "outcome_axes": observed_cancel_axes(fields["outcome_axes"], earlier_stop="budget_exhausted")}
+
         stored = write_task_result(
             _pool().DRIVE_ROOT,
             task_id,
             final_status,
             strict_existing_dict=True,
+            _field_projector=keep_settled_row,
             result=reason,
             reason_code="worker_terminal_failure" if final_status == STATUS_FAILED else str(final_status or ""),
             outcome_axes=terminal_outcome_axes(
@@ -590,13 +610,15 @@ def _open_ready_slot(
         **relation,
     })
     if owner_chat_id and relation["relation"] in {"non_descendant", "unavailable"}:
-        observation = f"baseline {expected_sha[:8]}, observed {(observed_sha or 'unknown')[:8]}"
-        detail = ("is not a descendant of the recorded baseline"
+        from ouroboros.host_notice import fields
+
+        detail = ("is not a descendant of the code it started from"
                   if relation["relation"] == "non_descendant"
-                  else "could not be compared with the recorded baseline")
-        _pool().send_with_budget(
-            owner_chat_id,
-            f"⚠️ Worker checkout sampled after initialization {detail}: {observation}.",
+                  else "could not be compared with the code it started from")
+        _pool().send_with_budget(  # both commits are the notice's details (DESIGN principle 7)
+            owner_chat_id, f"A worker's code, read after it started, {detail}.",
+            progress_meta=fields("worker_checkout_drift",
+                                 details=f"baseline {expected_sha[:12]}, observed {(observed_sha or 'unknown')[:12]}"),
             role="system", system_type="worker_readiness_notice")
     return True
 
@@ -772,10 +794,12 @@ def _replace_or_park_unready_slot(wid: int, slot: Any, owner_chat_id: int, start
         pool_admission.note_park(slot)  # count this park until the next successful worker_ready
         first_park = pool_admission.parked(_pool().WORKERS.values()) == 1
     if owner_chat_id and first_park:
-        _pool().send_with_budget(
-            owner_chat_id,
-            f"⚠️ Worker slot {wid} never confirmed ready in {attempt} attempts "
-            f"(waited {time.time() - started:.0f}s on the last attempt); the slot is parked. Use /restart.",
+        from ouroboros.host_notice import fields
+
+        _pool().send_with_budget(  # the slot, its attempts and its wait are the notice's details
+            owner_chat_id, "A worker never confirmed it was ready, so its slot is set aside.",
+            progress_meta=fields("worker_slot_parked", step="restart", details=(
+                f"worker slot {wid}: {attempt} attempts, {time.time() - started:.0f} s on the last one")),
             role="system", system_type="worker_readiness_notice")
     if is_project_slot(slot):
         _pool().disable_exhausted_worker_pool()

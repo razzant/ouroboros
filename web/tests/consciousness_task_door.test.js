@@ -9,10 +9,17 @@ function harness() {
     const calls = [], notices = [];
     const context = {
         projectNavigationGeneration: 0, state: { activePage: 'chat' }, canShow: true,
+        pageNavigation: { capture: () => ({}) },
         page: { anchor: { state: 'found', task_id: '214a31b6', history_id: 'chat:42' } },
         window: { addEventListener: (name, fn) => { assert.equal(name, 'ouro:open-task'); context.listener = fn; } },
         showPage: async name => { calls.push(name); return context.canShow; },
         apiClient: { chatHistory: async ({ chatId, around }) => { calls.push(['read', chatId, around]); return context.page; } },
+        fetchJson: async url => { calls.push(['registry', url]); return { projects: context.rooms || [] }; },
+        openProjectPanel: async (room, { sourceReveal }) => {
+            assert.equal(sourceReveal.page, context.page);
+            calls.push(['project', room.id, sourceReveal.address, sourceReveal.current()]);
+            return { state: 'found' };
+        },
         drawn: new Set(),
         mainChat: { drawsSource: address => context.drawn.has(address), revealSource: async (address, current, page) => {
             assert.equal(page, context.page, 'reuse the pre-read page');
@@ -28,14 +35,29 @@ function harness() {
 test('the Dashboard door lands through the real task anchor and keeps the pre-read page', async () => {
     const { context, calls, notices, press } = harness();
     await press();
-    assert.deepEqual(calls, ['chat', ['read', 1, 'task:214a31b6'], 'main', ['reveal', 'task:214a31b6', true]]);
+    assert.deepEqual(calls, ['chat', ['read', 1, 'task:214a31b6'], 'chat', ['reveal', 'task:214a31b6', true]]);
     assert.deepEqual(notices, []);
     calls.length = 0;
-    await press('focus', 1099511627777);
+    await press('focus', 0);
     assert.deepEqual(calls, []);
     context.canShow = false;
     await press();
     assert.deepEqual(calls, ['chat']);
+});
+
+test('a known Project receives the exact task anchor; the request never falls back to Main', async () => {
+    const { context, calls, notices, press } = harness();
+    const room = { id: 'reference', chat_id: 4132, lifecycle: 'active' };
+    context.rooms = [room];
+    await press('214a31b6', 4132);
+    assert.deepEqual(calls, [['registry', '/api/projects?chat_id=4132'], ['read', 4132, 'task:214a31b6'],
+        ['project', 'reference', 'task:214a31b6', true]]);
+    assert.deepEqual(notices, []);
+    context.rooms = [{ ...room, chat_id: 4133 }];
+    calls.length = 0;
+    await press('214a31b6', 4132);
+    assert.deepEqual(calls, [['registry', '/api/projects?chat_id=4132']]);
+    assert.deepEqual(notices, ['This task is unavailable.']);
 });
 
 test('a card Main already draws is the destination without a read; Main lands on it itself', async () => {
@@ -45,7 +67,7 @@ test('a card Main already draws is the destination without a read; Main lands on
         calls.push(['reveal', address, current(), page]); return { state: 'found' };
     };
     await press();
-    assert.deepEqual(calls, ['chat', 'main', ['reveal', 'task:214a31b6', true, null]]);
+    assert.deepEqual(calls, ['chat', 'chat', ['reveal', 'task:214a31b6', true, null]]);
     assert.deepEqual(notices, []);
 });
 

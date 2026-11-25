@@ -1,4 +1,4 @@
-// Settings › Tools and Settings › Models (docs/DESIGN.md "Settings"), against a fake settings server that answers
+// Extensions › MCP servers and Settings › Models (docs/DESIGN.md "Settings"), against a fake settings server that answers
 // like the real one (`changes` with a token per key, `_meta.effects`, `_meta.tokens`, a 409 for a stale list).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -6,9 +6,10 @@ import test from 'node:test';
 
 import '../modules/settings.js';
 import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
-import { applyMcpSettings, collectMcpSettings } from '../modules/mcp_settings.js';
+import { applyMcpSettings, collectMcpSettings, refreshStatus } from '../modules/mcp_settings.js';
 import { MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, fallbackBody, fallbackEntries, roleBody, routeWords,
     writeModelKeys } from '../modules/model_roles.js';
+import { modelCatalog } from '../modules/model_catalog_store.js';
 import { MODEL_PROCESSING_PREFERENCES_KEY } from '../modules/route_editor_primitives.js';
 import { forgetSettingRows, outcomeLine, readSettings } from '../modules/settings_controls.js';
 import { localModelStatusWords } from '../modules/settings_local_model.js';
@@ -47,9 +48,10 @@ function fakeServer(routes, values = {}) {
     server.document = () => ({ ...structuredClone(server.values), _meta: {
         effects: Object.fromEntries(Object.keys(server.values).map((key) => [key, EFFECT_OF(key)])),
         tokens: Object.fromEntries(Object.keys(server.values).map((key) => [key, token(key)])),
-        setup_contract: { modelSlots: contract.modelSlots } } });
+        setup_contract: { scopedModelCatalogs: true, modelSlots: contract.modelSlots } } });
     const write = (settings, precondition = {}) => {
-        const stale = Object.entries(precondition || {}).find(([key, held]) => held !== token(key));
+        // A connection's revision is compared with that connection as it is now (owner_settings.connection_revision).
+        const stale = Object.entries(precondition || {}).find(([key, held]) => key !== 'ultrafast' && held !== (key === 'connection' ? server.revision : token(key)));
         if (stale) return response({ saved: false, code: 'settings_changed_elsewhere', error: `${stale[0]} changed` }, 409);
         const changes = {};
         for (const [key, value] of Object.entries(settings)) {
@@ -79,7 +81,7 @@ function fakeServer(routes, values = {}) {
     return server;
 }
 
-async function open(t, path, { values = {}, meta = {} } = {}) {
+async function open(t, path, { values = {}, meta = {}, onScreen = null } = {}) {
     forgetSettingRows();
     const env = setup(t);
     const server = fakeServer(env.routes, values);
@@ -90,6 +92,7 @@ async function open(t, path, { values = {}, meta = {} } = {}) {
     const asked = [];
     const ctx = { readSettings, openSettings: (to, options) => { opened.push(to); return true; }, state: { activePage: 'settings', settingsPath: path },
         ask: async (question) => { asked.push(question); return true; } };
+    if (onScreen) ctx.onScreen = onScreen;  // the section's fact (section_levels.js): is this page the one on screen
     const container = new NodeStub();
     const handle = await settingsPageFor(path).mount(container, { path, row: '', ctx });
     await settle();
@@ -103,10 +106,14 @@ const head = (container, id) => container.querySelectorAll('[data-entry-id]').fi
 const inside = (node, selector) => node.querySelectorAll(selector)[0] || null;
 const serversPosted = (post) => post.settings.MCP_SERVERS.map((entry) => [entry.id, entry.enabled]);
 
-test('the Tools list: the client switch is a plain row, each server is a head with its state, and the fold holds the two waits', async (t) => {
+test('the MCP servers list: the client switch is a plain row, each server is a head with its state, and the fold holds the servers\' wait', async (t) => {
     const page = await open(t, 'tools');
-    assert.deepEqual(rowsOf('tools', { fold: false }).map((row) => row.id), ['MCP_ENABLED', 'tools:door:skills', 'tools:door:circles']);
-    assert.deepEqual(rowsOf('tools', { fold: true }).map((row) => row.id), ['MCP_TOOL_TIMEOUT_SEC', 'OUROBOROS_TOOL_TIMEOUT_SEC', 'tools:import', 'tools:refresh']);
+    // Skills is the page beside it in Extensions, so its door is gone; the global tool timeout is one row of This
+    // computer › Advanced, the MCP wait stays with the servers.
+    assert.deepEqual(rowsOf('tools', { fold: false }).map((row) => row.id), ['MCP_ENABLED', 'tools:door:circles']);
+    assert.deepEqual(rowsOf('tools', { fold: true }).map((row) => row.id), ['MCP_TOOL_TIMEOUT_SEC', 'tools:import', 'tools:refresh']);
+    assert.deepEqual(rowById('OUROBOROS_TOOL_TIMEOUT_SEC').page, 'computer/advanced');
+    assert.equal(inside(page.container.querySelector('[data-setting-row="MCP_SERVERS"]'), '.settings-card-title').textContent, 'Servers');
     const client = rowById('MCP_ENABLED');
     assert.deepEqual([client.control.kind, client.writer, client.codec, client.keys], ['switch', 'generic', 'bool', ['MCP_ENABLED']]);
     const row = page.container.querySelector('[data-setting-row="MCP_ENABLED"]');
@@ -206,6 +213,176 @@ test('a server\'s page saves its one entry and keeps the switch out of the form;
     assert.deepEqual(page.opened, ['tools']);
 });
 
+test('a server\'s page is drawn again only while it is the page on screen: a read that lands after it was left or covered draws nothing', async (t) => {
+    let top = 'tools/files';  // the page Extensions shows on top, '' while another place is shown
+    const page = await open(t, 'tools/files', { onScreen: (path) => top === path });
+    const card = () => page.container.querySelector('[data-mcp-card]');
+    const name = () => card().querySelectorAll('[data-mcp-field]').find((node) => node.dataset.mcpField === 'name').getAttribute('value');
+    assert.equal(name(), 'Files');
+    const real = page.routes.get('/api/settings');
+    const shown = async () => { page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/files', place: 'skills' } })); await settle(); };
+    const late = async (away) => {
+        const held = deferred();
+        page.routes.set('/api/settings', async (url, init = {}) => { if (!init.method) await held.promise; return real(url, init); });
+        await shown();  // the page's read starts while it is on screen...
+        top = away;     // ...and the owner leaves the place, or a level covers the page, before it lands
+        held.resolve();
+        await settle();
+        page.routes.set('/api/settings', real);
+    };
+    // Renamed elsewhere; the read lands after the owner left: the form stands as it was drawn.
+    page.server.values.MCP_SERVERS[1].name = 'Files (shared)';
+    const drawn = card();
+    await late('');
+    assert.equal(card(), drawn, 'a read that lands after the owner left draws nothing');
+    assert.equal(name(), 'Files');
+    // Back: the shell says "shown" for this path, and the form is read and drawn.
+    top = 'tools/files';
+    await shown();
+    assert.equal(name(), 'Files (shared)');
+    // Covered by another level: the same.
+    page.server.values.MCP_SERVERS[1].name = 'Files (team)';
+    const again = card();
+    await late('tools/files/other');
+    assert.equal(card(), again, 'a read that lands under another level draws nothing');
+    top = 'tools/files';
+    await shown();
+    assert.equal(name(), 'Files (team)');
+});
+
+test('an open MCP editor keeps its live client ID control across a neighbouring edit and status refreshes', async t => {
+    const path = 'tools/slack';
+    let top = path;
+    const page = await open(t, path, { onScreen: (candidate) => candidate === top });
+    const markShown = async () => {
+        page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path, place: 'skills' } }));
+        await settle();
+    };
+    const list = new NodeStub();
+    const handle = settingsPageFor('tools').mount(list, { path: 'tools', ctx: page.ctx });
+    t.after(() => handle.unmount());
+    await settle();
+    const listState = () => head(list, 'slack').querySelector('[data-mcp-state]').textContent;
+    const listSignIn = () => head(list, 'slack').querySelector('[data-entry-sign-in]');
+    const lead = () => list.querySelector('[data-mcp-global]').textContent;
+    const clientId = (container = page.container) => container.querySelector('[data-mcp-sign-in-client-id]');
+    const card = page.container.querySelector('[data-mcp-card]');
+    const input = clientId();
+    input.closest('details').open = true;
+    input.focus();
+    input.value = 'fixture-app-id';
+    const retained = () => {
+        assert.ok(page.container.querySelector('[data-mcp-card]') === card, 'keep the mounted form');
+        assert.ok(clientId() === input, 'keep the actual input, not an equivalent replacement');
+        assert.ok(page.document.activeElement === input, 'the same input still has focus');
+        assert.equal(input.value, 'fixture-app-id');
+        assert.equal(input.closest('details').open, true);
+    };
+
+    assert.match(listState(), /^3 tools · listed/);
+    assert.ok(listSignIn());
+    await markShown();  // an ordinary equivalent settings/status read while actively typing
+    retained();
+    assert.equal(page.handle.unsaved(), false, 'not a settings edit');
+
+    const reads = page.server.reads;
+    page.server.values.MCP_SERVERS[1].name = 'Shared files';
+    page.server.tokens.MCP_SERVERS = 1;
+    await markShown();
+    assert.ok(page.server.reads > reads);
+    assert.match(head(list, 'files').textContent, /Shared files/, 'the other server really was refreshed');
+    retained();
+    assert.equal(page.handle.unsaved(), false, 'the ephemeral value is still not a settings edit');
+
+    top = '';
+    page.routes.set('/api/mcp/status', () => response({}, 503));
+    await refreshStatus();
+    assert.equal(lead(), 'MCP status unavailable');
+    assert.equal(listState(), 'MCP status unavailable');
+    assert.equal(listSignIn(), null);
+    top = path;
+    await markShown();
+    retained();
+
+    const status = (signIn) => response({ enabled: true, sdk_available: true, servers: [{ id: 'slack', enabled: true,
+        tool_count: 5, listed_at: '2026-11-18T00:00:00Z', sign_in: signIn }] });
+    page.routes.set('/api/mcp/status', () => status({ state: 'not_signed_in', reason: 'expired' }));
+    await refreshStatus();
+    assert.match(lead(), /^1 server configured, 5 tools discovered/);
+    assert.match(listState(), /^5 tools · listed/);
+    assert.ok(listSignIn());
+    retained();
+
+    // A detached form may still be subscribed while its mount's settings read settles.
+    let connected = false;
+    Object.defineProperty(page.container, 'isConnected', { get: () => connected });
+    page.routes.set('/api/mcp/status', () => status({ state: 'signed_in' }));
+    await refreshStatus();
+    assert.equal(listSignIn(), null);
+    retained();
+    connected = true;
+    await markShown();
+    assert.equal(clientId(), null, 'a changed sign-in shape is drawn when the editor is shown again');
+
+    // Changing this server's saved address starts a new form, even with the same sign-in status.
+    page.routes.set('/api/mcp/status', () => status({ state: 'not_signed_in', reason: 'expired' }));
+    await refreshStatus();
+    const beforeAddressChange = clientId();
+    beforeAddressChange.value = 'different-fixture-id';
+    page.server.values.MCP_SERVERS[0].url = 'https://services.example.test/slack';
+    page.server.tokens.MCP_SERVERS += 1;
+    await markShown();
+    assert.ok(clientId() !== beforeAddressChange);
+    assert.equal(clientId().value || '', '');
+    assert.equal(page.container.querySelector('[data-mcp-field="url"]').getAttribute('value'), 'https://services.example.test/slack');
+
+    await typeInto(page.container.querySelector('[data-mcp-field="url"]'), 'https://example.test/edit');
+    const discarded = clientId();
+    discarded.value = 'discarded-fixture-id';
+    await page.container.querySelector('[data-editor-discard]').fire('click');
+    assert.ok(clientId() !== discarded, 'an explicit Discard rebuilds the form');
+    assert.equal(clientId().value || '', '');
+
+    clientId().value = 'closed-fixture-id';
+    page.handle.unmount();
+    const fresh = new NodeStub();
+    const reopened = await settingsPageFor(path).mount(fresh, { path, ctx: page.ctx });
+    t.after(() => reopened.unmount());
+    assert.equal(clientId(fresh).value || '', '', 'a new mount does not inherit the old form input');
+    assert.deepEqual(page.server.posts, []);
+    assert.ok(!page.calls.includes('/api/mcp/sign-in'));
+});
+
+test('removing a neighbouring MCP row keeps the open server’s public client ID and focus', async t => {
+    const path = 'tools/notes';
+    const [archive, notes] = ['archive', 'notes'].map(id => ({ id, name: id, enabled: true,
+        transport: 'streamable_http', url: `https://${id}.example.test/mcp` }));
+    const page = await open(t, path, { values: { MCP_SERVERS: [archive, notes] } });
+    page.routes.set('/api/mcp/status', () => response({ sdk_available: true, enabled: true, servers: [
+        { id: 'notes', enabled: true, tool_count: 0, sign_in: { state: 'not_signed_in', reason: 'not_signed_in' } },
+    ] }));
+    await refreshStatus();
+    const card = () => page.container.querySelector('[data-mcp-card]');
+    const input = () => card().querySelector('[data-mcp-sign-in-client-id]');
+    assert.equal(card().dataset.mcpIndex, '1');
+    input().closest('details').open = true;
+    input().focus();
+    input().value = 'fixture-notes-client';
+
+    page.server.values.MCP_SERVERS.shift();
+    page.server.tokens.MCP_SERVERS = 1;
+    page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path, place: 'skills' } }));
+    await settle();
+    assert.equal(card().dataset.mcpIndex, '0', 'the editor is rendered and bound at its current slot');
+    assert.equal(card().dataset.entryId, 'notes');
+    assert.equal(input().value, 'fixture-notes-client');
+    assert.equal(input().closest('details').open, true);
+    assert.ok(page.document.activeElement === input(), 'focus is in the current card');
+    assert.equal(page.handle.unsaved(), false, 'the client ID is not a settings draft');
+    assert.deepEqual(page.server.posts, []);
+    assert.ok(page.calls.every(url => ['/api/settings', '/api/mcp/status'].includes(url)));
+});
+
 test('a new server is saved as one more entry with an ID, and a taken ID is refused before anything is sent', async (t) => {
     const page = await open(t, 'tools/new');
     const card = page.container.querySelector('[data-mcp-card]');
@@ -225,6 +402,444 @@ test('a new server is saved as one more entry with an ID, and a taken ID is refu
     assert.deepEqual(post.settings.MCP_SERVERS.map((entry) => [entry.id, entry.enabled]), [['slack', true], ['files', false], ['git_hub', false]]);
     assert.deepEqual(page.opened, ['tools'], 'the list shows the new head');
     assert.equal(collectMcpSettings().MCP_SERVERS.length, 3);
+});
+
+for (const action of ['save', 'add', 'remove']) test(`late MCP ${action} leaves the current entry and its focus alone`, async t => {
+    let path = action === 'add' ? 'tools/new' : 'tools/files';
+    const page = await open(t, path, { onScreen: candidate => candidate === path });
+    if (action === 'save') {
+        const name = page.container.querySelector('[data-mcp-field="name"]');
+        name.value = 'Local files';
+        await name.fire('input');
+    }
+    if (action === 'add') {
+        for (const [field, value] of [['name', 'Inbox'], ['url', 'https://example.test/inbox']]) {
+            const input = page.container.querySelector(`[data-mcp-field="${field}"]`);
+            input.value = value;
+            await input.fire('input');
+        }
+    }
+    const write = deferred(), endpoint = page.routes.get('/api/settings');
+    page.routes.set('/api/settings', async (url, init) => {
+        if (init?.method === 'POST') await write.promise;
+        return endpoint(url, init);
+    });
+    const button = page.container.querySelector(action === 'remove' ? '[data-editor-remove]' : '[data-editor-save]');
+    const pending = button.fire('click', { target: button });
+    await settle();
+    path = 'tools/slack';
+    const next = new NodeStub();
+    const handle = await settingsPageFor(path).mount(next, { path, ctx: page.ctx });
+    t.after(() => handle.unmount());
+    const input = next.querySelector('[data-mcp-field="name"]');
+    if (action !== 'remove') {
+        input.value = 'My working draft';
+        await input.fire('input');
+    }
+    input.focus();
+    write.resolve();
+    await pending;
+    await settle();
+    assert.equal(page.server.posts.length, 1);
+    assert.deepEqual(page.opened, []);
+    assert.equal(next.querySelector('[data-editor-result]').textContent, '');
+    assert.equal(page.document.activeElement, input);
+    assert.equal(next.querySelector('[data-mcp-field="name"]'), input);
+    if (action !== 'remove') assert.equal(input.value, 'My working draft');
+    if (action === 'remove') return;
+    // The owner's own Discard releases this page's draft, so no typed form outlives the test.
+    await next.querySelector('[data-editor-discard]').fire('click');
+    await settle();
+    assert.equal(next.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Slack');
+});
+
+// Two windows over one settings server: this page's Save can be held on its way, and its reads answer as the backend's
+// do, a stored header value masked. Every value is an inert local fixture string.
+const MASK = '***set***';
+function sharedSettings(page) {
+    const endpoint = page.routes.get('/api/settings');
+    const gate = { held: null };
+    page.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST' && gate.held) await gate.held.promise;
+        const answer = await endpoint(url, init);
+        if (init.method === 'POST') return answer;
+        const data = await answer.json();
+        for (const entry of data.MCP_SERVERS || []) {
+            for (const name of Object.keys(entry?.headers || {})) if (entry.headers[name]) entry.headers[name] = MASK;
+        }
+        return response(data);
+    });
+    return gate;
+}
+const typeInto = async (input, text) => { input.value = text; await input.fire('input'); };
+
+test('a header value one Save stored is kept, not sent again, when another row was typed while that Save was on its way', async (t) => {
+    const docs = { id: 'docs', name: 'Docs', enabled: true, transport: 'streamable_http', url: 'https://docs.example.test/mcp',
+        headers: { 'X-A': MASK, 'X-B': MASK } };
+    const page = await open(t, 'tools/docs', { values: { MCP_SERVERS: [docs] } });
+    const gate = sharedSettings(page);
+    const value = (n) => page.container.querySelectorAll('[data-mcp-header-row]')[n].querySelector('[data-mcp-header-field="value"]');
+    const result = () => page.container.querySelector('[data-editor-result]').textContent;
+    await typeInto(value(0), 'synthetic-a');
+    gate.held = deferred();
+    const pending = page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    await typeInto(value(1), 'synthetic-b');  // the other row, while the Save is on its way
+    gate.held.resolve();
+    gate.held = null;
+    await pending;
+    await settle();
+    assert.deepEqual(page.server.posts[0].settings.MCP_SERVERS[0].headers, { 'X-A': 'synthetic-a', 'X-B': MASK });
+    assert.match(result(), /latest edits are unsaved/);
+    assert.deepEqual([value(0).getAttribute('value'), value(1).getAttribute('value')], [MASK, 'synthetic-b'],
+        'the stored row now shows its mask; the row typed meanwhile keeps its draft');
+    // Another window replaces X-A; its masked read looks the same. The next Save keeps whatever X-A now holds.
+    page.server.values.MCP_SERVERS[0].headers['X-A'] = 'other-window-a';
+    page.server.tokens.MCP_SERVERS += 1;
+    await page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    assert.equal(page.asked.length, 1, 'the newer list cannot identify which masked header changed');
+    assert.equal(page.server.posts.length, 2);
+    assert.deepEqual(page.server.posts[1].settings.MCP_SERVERS[0].headers, { 'X-A': MASK, 'X-B': 'synthetic-b' });
+    assert.deepEqual(page.server.posts[1].precondition, { MCP_SERVERS: 'MCP_SERVERS@2' });
+    assert.equal(result(), 'Saved');
+    // A Save that sent a typed value is stored, but its answer is lost: the form is held, never sent again for
+    // another field, until Discard loads what the server holds.
+    await typeInto(value(0), 'synthetic-a2');
+    page.server.answers.push((settings) => {
+        page.server.values.MCP_SERVERS = structuredClone(settings.MCP_SERVERS);
+        page.server.tokens.MCP_SERVERS += 1;
+        return response({ error: 'reply lost' }, 502);
+    });
+    await page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    assert.match(result(), /^Not confirmed: this Save may have been stored\. Your edits are kept here/);
+    await typeInto(page.container.querySelector('[data-mcp-field="url"]'), 'https://docs.example.test/v2');
+    await page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    assert.equal(page.server.posts.length, 3, 'the literal is not sent again');
+    assert.match(result(), /^Not confirmed/);
+    await page.container.querySelector('[data-editor-discard]').fire('click');
+    await settle();
+    assert.equal(value(0).getAttribute('value'), MASK);
+});
+
+for (const tokenAvailable of [true, false]) {
+    test(`clearing an opaque header asks about the observed list, version available: ${tokenAvailable}`, async t => {
+        const docs = { id: 'docs', name: 'Docs', url: 'https://docs.example.test', headers: { Mode: MASK } };
+        const page = await open(t, 'tools/docs', { values: { MCP_SERVERS: [docs] }, meta: tokenAvailable ? {} : { tokens: {} } });
+        sharedSettings(page);
+        const save = () => page.container.querySelector('[data-editor-save]').fire('click');
+        await page.container.querySelector('[data-mcp-header-clear]').fire('click');
+        page.server.values.MCP_SERVERS[0].headers.Mode = 'external-mode';
+        page.server.tokens.MCP_SERVERS = 1;
+        page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/docs' } }));
+        await settle();
+        const questions = [];
+        page.ctx.ask = async question => { questions.push(question); return false; };
+        await save();
+        await settle();
+        assert.equal(questions.length, 1);
+        assert.match(questions[0].body, tokenAvailable ? /list changed/ : /version is unavailable/);
+        assert.equal(page.server.posts.length, 0);
+        assert.equal(page.container.querySelector('[data-mcp-header-field="value"]').value, '');
+        page.ctx.ask = async () => {
+            if (tokenAvailable) page.server.tokens.MCP_SERVERS = 2;  // a third edit during confirmation
+            return true;
+        };
+        await save();
+        await settle();
+        assert.equal(page.server.posts.length, 1);
+        const [post] = page.server.posts;
+        assert.equal(post.settings.MCP_SERVERS[0].headers.Mode, '');
+        if (tokenAvailable) {
+            assert.deepEqual(post.precondition, { MCP_SERVERS: 'MCP_SERVERS@1' });
+            assert.equal(page.server.values.MCP_SERVERS[0].headers.Mode, 'external-mode');
+            assert.match(page.container.querySelector('[data-editor-result]').textContent, /Not saved/);
+            await page.container.querySelector('[data-editor-discard]').fire('click');
+        } else {
+            assert.equal(post.precondition, undefined);
+            assert.equal(page.server.values.MCP_SERVERS[0].headers.Mode, '');
+        }
+    });
+}
+
+for (const newer of [true, false]) {
+    test(`no_changes settles the submitted row to its mask, newer typing: ${newer}`, async t => {
+        const docs = { id: 'docs', name: 'Docs', url: 'https://docs.example.test', headers: { Mode: MASK, Colour: MASK } };
+        const page = await open(t, 'tools/docs', { values: { MCP_SERVERS: [docs] } });
+        const gate = sharedSettings(page);
+        page.server.values.MCP_SERVERS[0].headers.Mode = 'plain';
+        const values = () => page.container.querySelectorAll('[data-mcp-header-field="value"]');
+        const save = () => page.container.querySelector('[data-editor-save]').fire('click');
+        await typeInto(values()[0], 'plain');
+        page.server.answers.push(() => response({ status: 'saved', no_changes: true, changes: {} }));
+        gate.held = deferred();
+        await save();
+        await settle();
+        if (newer) await typeInto(values()[1], 'green');
+        gate.held.resolve();
+        gate.held = null;
+        await settle();
+        assert.equal(values()[0].getAttribute('value'), MASK);
+        assert.equal(page.handle.unsaved(), newer);
+        const result = page.container.querySelector('[data-editor-result]').textContent;
+        if (newer) {
+            assert.match(result, /latest edits are unsaved/);
+            assert.equal(values()[1].getAttribute('value'), 'green');
+            await save();
+            await settle();
+            assert.deepEqual(page.server.posts[1].settings.MCP_SERVERS[0].headers, { Mode: MASK, Colour: 'green' });
+        } else assert.equal(result, 'Already saved.');
+    });
+}
+
+test('Discard waits for the same Save after returning to the server and then loads the stored address', async t => {
+    let path = 'tools/slack';
+    const page = await open(t, path, { onScreen: candidate => path === candidate });
+    const gate = sharedSettings(page);
+    const first = 'https://docs.example.test/first';
+    await typeInto(page.container.querySelector('[data-mcp-field="url"]'), first);
+    gate.held = deferred();
+    await page.container.querySelector('[data-editor-save]').fire('click');
+    await settle();
+    assert.equal(page.container.querySelector('[data-editor-discard]').disabled, true);
+    path = 'tools/files';
+    const away = await settingsPageFor(path).mount(new NodeStub(), { path, ctx: page.ctx });
+    t.after(() => away.unmount());
+    path = 'tools/slack';
+    page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path } }));
+    await settle();
+    const field = () => page.container.querySelector('[data-mcp-field="url"]');
+    const discard = () => page.container.querySelector('[data-editor-discard]');
+    assert.equal(discard().disabled, true);
+    await discard().fire('click');
+    const second = 'https://docs.example.test/second';
+    await typeInto(field(), second);
+    gate.held.resolve();
+    gate.held = null;
+    await settle();
+    assert.equal(field().getAttribute('value'), second);
+    assert.equal(page.server.values.MCP_SERVERS[0].url, first);
+    assert.equal(discard().disabled, false);
+    await discard().fire('click');
+    assert.equal(field().getAttribute('value'), first);
+    assert.equal(page.handle.unsaved(), false);
+    assert.equal(page.server.posts.length, 1);
+});
+
+for (const body of ['invalid JSON', 'missing receipt']) test(`an address save with ${body} stays unknown through a failed Discard`, async t => {
+    const page = await open(t, 'tools/slack');
+    const endpoint = page.routes.get('/api/settings');
+    const save = () => page.container.querySelector('[data-editor-save]').fire('click');
+    const discard = () => page.container.querySelector('[data-editor-discard]').fire('click');
+    const url = () => page.container.querySelector('[data-mcp-field="url"]');
+    const result = () => page.container.querySelector('[data-editor-result]').textContent;
+    const address = 'https://edited.example.test';
+    await typeInto(url(), address);
+    page.server.answers.push(settings => {
+        page.server.values.MCP_SERVERS = structuredClone(settings.MCP_SERVERS);
+        return body === 'invalid JSON' ? { ok: true, status: 200, json: async () => { throw new SyntaxError(); } }
+            : response({ unexpected: true });
+    });
+    await save();
+    await settle();
+    assert.match(result(), /^Not confirmed/);
+    await typeInto(url(), 'https://newer.example.test');
+    await save();
+    await settle();
+    assert.equal(page.server.posts.length, 1);
+    page.routes.set('/api/settings', async () => response({ error: 'temporarily unavailable' }, 503));
+    await discard();
+    assert.match(result(), /Press Discard changes again/);
+    assert.equal(page.handle.unsaved(), true);
+    assert.equal(url().value, 'https://newer.example.test');
+    page.routes.set('/api/settings', endpoint);
+    await discard();
+    assert.equal(url().getAttribute('value'), address);
+    assert.equal(result(), 'Current settings loaded.');
+    assert.equal(page.handle.unsaved(), false);
+    assert.equal(page.server.posts.length, 1);
+});
+
+const HELD = /^Not saved: the server list changed elsewhere\. Your edits are kept here, unsaved; discard them/;
+
+for (const [how, change] of [['save', 'renamed'], ['save', 'removed'], ['read', 'renamed'], ['read', 'removed']]) {
+    test(`a typed form whose server was ${change} in another window is kept after a ${how} until Discard`, async (t) => {
+        const page = await open(t, 'tools/files');
+        sharedSettings(page);
+        const name = page.container.querySelector('[data-mcp-field="name"]');
+        const discard = page.container.querySelector('[data-editor-discard]');
+        const result = () => page.container.querySelector('[data-editor-result]').textContent;
+        await typeInto(name, 'Local files');
+        if (change === 'renamed') page.server.values.MCP_SERVERS[1].name = 'Files (other window)';
+        else page.server.values.MCP_SERVERS.pop();
+        page.server.tokens.MCP_SERVERS = 1;
+        try {
+            if (how === 'save') await page.container.querySelector('[data-editor-save]').fire('click');
+            else page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/files' } }));
+            await settle();
+            assert.equal(page.server.posts.length, 0, 'nothing is written over the other window');
+            assert.equal(page.container.querySelector('[data-mcp-field="name"]'), name, 'the form is not drawn again');
+            assert.equal(name.value, 'Local files');
+            assert.match(result(), HELD);
+            assert.equal(discard.hasAttribute('hidden'), false);
+            const toggle = page.container.querySelector('[data-entry-switch]');
+            const remove = page.container.querySelector('[data-editor-remove]');
+            for (const control of [toggle, remove, page.container.querySelector('[data-mcp-test]'), page.container.querySelector('[data-mcp-refresh]')]) {
+                assert.equal(control.disabled, true, 'a held form has no action on a saved entry');
+            }
+            await toggle.fire('change', { target: toggle });
+            await remove.fire('click', { target: remove });
+            await page.container.querySelector('[data-editor-save]').fire('click');
+            await settle();
+            assert.equal(page.asked.length, 0);
+            assert.equal(page.server.posts.length, 0, 'Save waits for Discard; it never retries with the newer list');
+            assert.match(result(), HELD);
+        } finally {
+            await discard.fire('click');  // the module's held identity never outlives this test
+            await settle();
+        }
+        if (change === 'renamed') {
+            assert.equal(page.container.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Files (other window)');
+            assert.equal(result(), 'Current settings loaded.');
+        } else assert.match(page.container.textContent, /no longer on the list/);
+    });
+}
+
+for (const typedMeanwhile of [false, true]) {
+    test(`a Save refused with a 409 holds the form as typed until Discard${typedMeanwhile ? ', with the typing done while it was refused' : ''}`, async (t) => {
+        const page = await open(t, 'tools/files');
+        const gate = sharedSettings(page);
+        const name = page.container.querySelector('[data-mcp-field="name"]');
+        const discard = page.container.querySelector('[data-editor-discard]');
+        const result = () => page.container.querySelector('[data-editor-result]').textContent;
+        const latest = typedMeanwhile ? 'Local files 2' : 'Local files';
+        await typeInto(name, 'Local files');
+        // Another window writes the list between this page's read and its write; this entry still reads the same.
+        page.server.answers.push(() => {
+            page.server.values.MCP_SERVERS[0].name = 'Slack (other window)';
+            page.server.tokens.MCP_SERVERS = 1;
+            return response({ saved: false, code: 'settings_changed_elsewhere', error: 'MCP_SERVERS changed' }, 409);
+        });
+        try {
+            gate.held = deferred();
+            const pending = page.container.querySelector('[data-editor-save]').fire('click');
+            await settle();
+            if (typedMeanwhile) await typeInto(name, latest);
+            gate.held.resolve();
+            gate.held = null;
+            await pending;
+            await settle();
+            assert.equal(page.container.querySelector('[data-mcp-field="name"]'), name, 'the form is not drawn again');
+            assert.equal(name.value, latest);
+            assert.match(result(), HELD);
+            assert.equal(discard.hasAttribute('hidden'), false);
+            // Neither another Save nor a later read that looks like the old entry releases it.
+            await page.container.querySelector('[data-editor-save]').fire('click');
+            page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/files' } }));
+            await settle();
+            assert.equal(page.server.posts.length, 1, 'one refused write and no second one');
+            assert.equal(page.container.querySelector('[data-mcp-field="name"]'), name);
+            assert.equal(name.value, latest);
+            assert.match(result(), HELD);
+        } finally {
+            await discard.fire('click');
+            await settle();
+        }
+        assert.equal(page.container.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Files');
+        assert.equal(result(), 'Current settings loaded.');
+        assert.equal(page.server.posts.length, 1);
+        // A clean form refused the same way stays clean: it is read again and says so, nothing is held.
+        page.server.answers.push(() => {
+            page.server.values.MCP_SERVERS[1].command = 'npx-other';
+            page.server.tokens.MCP_SERVERS = 2;
+            return response({ saved: false, code: 'settings_changed_elsewhere', error: 'MCP_SERVERS changed' }, 409);
+        });
+        await page.container.querySelector('[data-editor-save]').fire('click');
+        await settle();
+        assert.equal(page.server.posts.length, 2);
+        assert.equal(result(), 'Changed on another device. This is the current value.');
+        assert.equal(page.container.querySelector('[data-mcp-field="command"]').getAttribute('value'), 'npx-other');
+        assert.equal(page.container.querySelector('[data-editor-discard]').hasAttribute('hidden'), true);
+    });
+}
+
+test('a new server refused with a 409 keeps its form and its Discard; the page of its ID shows the server saved there', async (t) => {
+    const page = await open(t, 'tools/new');
+    const field = (name) => page.container.querySelector(`[data-mcp-field="${name}"]`);
+    const result = () => page.container.querySelector('[data-editor-result]').textContent;
+    await typeInto(field('name'), 'Inbox');
+    await typeInto(field('url'), 'https://inbox.example.test/mcp');
+    page.server.answers.push(() => {  // another window adds a server of the same ID first
+        page.server.values.MCP_SERVERS.push({ id: 'inbox', name: 'Inbox (other window)', enabled: false, transport: 'stdio', command: 'inbox' });
+        page.server.tokens.MCP_SERVERS = 1;
+        return response({ saved: false, code: 'settings_changed_elsewhere', error: 'MCP_SERVERS changed' }, 409);
+    });
+    const discard = page.container.querySelector('[data-editor-remove]');
+    try {
+        await page.container.querySelector('[data-editor-save]').fire('click');
+        await settle();
+        assert.equal(field('name').value, 'Inbox');
+        assert.match(result(), HELD);
+        await page.container.querySelector('[data-editor-save]').fire('click');
+        await settle();
+        assert.equal(page.server.posts.length, 1, 'Save waits for Discard');
+        assert.equal(discard.textContent, 'Discard');
+        // The page of that very ID opens the server saved there, never this unsaved form.
+        const saved = new NodeStub();
+        const handle = await settingsPageFor('tools/inbox').mount(saved, { path: 'tools/inbox', ctx: page.ctx });
+        t.after(() => handle.unmount());
+        await settle();
+        assert.equal(saved.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Inbox (other window)');
+        assert.equal(field('name').value, 'Inbox');
+    } finally {
+        await discard.fire('click');
+        await settle();
+    }
+    assert.deepEqual(page.opened, ['tools']);
+});
+
+test('a form kept for a server removed elsewhere stays reachable from the list and is not replaced by a new server of its ID', async (t) => {
+    const page = await open(t, 'tools/files');
+    const name = page.container.querySelector('[data-mcp-field="name"]');
+    const discard = page.container.querySelector('[data-editor-discard]');
+    await typeInto(name, 'Local files');
+    page.server.values.MCP_SERVERS.pop();
+    page.server.tokens.MCP_SERVERS = 1;
+    page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools/files' } }));
+    await settle();
+    const mount = async (path) => {
+        const container = new NodeStub();
+        const handle = await settingsPageFor(path).mount(container, { path, ctx: page.ctx });
+        t.after(() => handle.unmount());
+        await settle();
+        return container;
+    };
+    const fresh = await mount('tools/new');
+    const newDiscard = fresh.querySelector('[data-editor-remove]');
+    try {
+        // The list offers one opener for the kept form: its typed name, no switch, and it opens that server's page.
+        const list = await mount('tools');
+        const kept = head(list, 'files');
+        assert.match(kept.textContent, /Local files.*Unsaved changes · not on the saved list/s);
+        assert.equal(inside(kept, '[data-entry-switch]'), null);
+        await list.fire('click', { target: inside(kept, '[data-entry-open]') });
+        await settle();
+        assert.deepEqual(page.opened, ['tools/files']);
+        // A new server under the same ID is refused before anything is sent; the kept form is untouched.
+        await typeInto(fresh.querySelector('[data-mcp-field="name"]'), 'Files');
+        await typeInto(fresh.querySelector('[data-mcp-field="url"]'), 'https://files.example.test/mcp');
+        await fresh.querySelector('[data-editor-save]').fire('click');
+        await settle();
+        assert.equal(page.server.posts.length, 0);
+        assert.match(fresh.querySelector('[data-editor-result]').textContent, /Unsaved changes are kept for the ID files\. Open them from the list and discard them first\./);
+        assert.equal(name.value, 'Local files');
+    } finally {
+        await newDiscard.fire('click');
+        await discard.fire('click');
+        await settle();
+    }
 });
 
 // Which endpoint each key went to: the guard of the checker's transaction.
@@ -273,7 +888,7 @@ test('a role\'s page reads the catalogue when it opens and when it is shown agai
     fakeServer(env.routes);
     const path = 'models/role/main';
     const ctx = { readSettings, openSettings: () => true, state: { activePage: 'settings', settingsPath: path }, ask: async () => true };
-    const reads = () => env.calls.filter((url) => url === '/api/model-catalog').length;
+    const reads = () => env.calls.filter((url) => url === '/api/model-catalog?view=sources').length;
     const shown = (to) => env.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: to } });
     const handle = await settingsPageFor(path).mount(new NodeStub(), { path, row: '', ctx });
     t.after(() => handle?.unmount?.());
@@ -286,6 +901,16 @@ test('a role\'s page reads the catalogue when it opens and when it is shown agai
     shown(path);
     await settle();
     assert.equal(reads(), 2, 'shown again (a return, a reconnect), the page catches the catalogue up');
+    let release;
+    env.routes.set('/api/model-catalog?view=sources', () => new Promise(resolve => { release = resolve; }));
+    shown(path);
+    await settle();
+    const settingsReads = () => env.calls.filter(url => url === '/api/settings').length;
+    const before = settingsReads();
+    shown(path);
+    await settle();
+    assert.ok(settingsReads() > before, 'a pending descriptor cannot block the new settings document');
+    release(response({ items: [], model_sources: [], errors: [] }));
     assert.equal(handle.unsaved(), false, 'nothing is typed: the shell lets the page go when it is left');
 });
 
@@ -444,37 +1069,27 @@ test('the Models list shows each role\'s route in the picture\'s order, and the 
     assert.match(head(page.container, 'fallback/2').textContent, /2.*kimi.*OpenRouter · by API key/s);
     const value = (id) => inside(page.container.querySelector(`[data-setting-row="${id}"]`), '[data-row-value]')?.textContent;
     assert.deepEqual(['light', 'safety', 'vision', 'consciousness', 'websearch'].map((slot) => value(`models:${slot}`)),
-        ['gpt-light', 'Light model', 'Main model', 'Main model', 'Auto']);
+        ['gpt-light', 'gpt-light · as Light', 'Main model', 'Main model', 'Auto'], 'an empty Supervisor names the model it checks with');
     assert.deepEqual(rowsOf('models', { fold: false }).map((row) => row.id), ['OUROBOROS_IMAGE_INPUT_MODE', 'models:context', 'models:local', 'models:catalogue']);
     assert.deepEqual(rowsOf('models', { fold: true }).map((row) => row.id), ['OUROBOROS_PROCESSING_PREFERENCE', 'OUROBOROS_PROMPT_CACHE_TTL', 'OUROBOROS_MODEL_MAX_CONCURRENCY']);
     // A request over the limit waits in line and is never sent elsewhere for waiting: the queue names no clock of its own.
     const limit = page.container.querySelector('[data-setting-row="OUROBOROS_MODEL_MAX_CONCURRENCY"]').textContent;
     assert.match(limit, /waits in line until a slot frees.*never sent elsewhere for waiting/s);
     assert.doesNotMatch(limit, /waits up to|\{wait\}/);
-    // The catalogue is an action of its row, with its own result beside it; it is read at the owner's first touch of
-    // the page after each showing of its own path, never because the page was merely shown (Settings lands on Models).
+    // A visit, even via keyboard or touch, does not start the all-provider read. Its explicit action still does.
     const catalogue = page.container.querySelector('[data-setting-row="models:catalogue"]');
-    assert.equal(inside(catalogue, '#btn-refresh-model-catalog').textContent, 'Read again');
+    const refresh = inside(catalogue, '#btn-refresh-model-catalog');
+    assert.equal(refresh.textContent, 'Read again');
     assert.ok(inside(catalogue, '#settings-model-catalog-status'));
     const catalogueReads = () => page.calls.filter((url) => url === '/api/model-catalog').length;
-    assert.equal(catalogueReads(), 0, 'not read before the page is shown');
     page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
-    await settle();
-    assert.equal(catalogueReads(), 0, 'a page merely shown reads nothing but settings');
     await page.container.fire('pointerdown', { target: catalogue });
     await page.container.fire('focusin', { target: catalogue });
     await settle();
-    assert.equal(catalogueReads(), 1, 'read once at the first touch');
-    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'tools' } });
+    assert.equal(catalogueReads(), 0);
+    await page.container.fire('click', { target: refresh });
     await settle();
-    await page.container.fire('pointerdown', { target: catalogue });
-    await settle();
-    assert.equal(catalogueReads(), 1, 'another page being shown is not a new showing of this one');
-    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
-    await settle();
-    await page.container.fire('focusin', { target: catalogue });
-    await settle();
-    assert.equal(catalogueReads(), 2, 'read again at the first touch after its own path is shown again');
+    assert.equal(catalogueReads(), 1);
     // The door shows the install's Context and leads to Main; it never writes it.
     const door = page.container.querySelector('[data-setting-row="models:context"]');
     assert.deepEqual([rowById('models:context').keys, rowById('models:context').control], [[], { kind: 'door', to: 'main:context' }]);
@@ -539,11 +1154,67 @@ test('the fallbacks\' order and removal are written on the list: the order throu
 });
 
 test('a route is said in the owner\'s words', () => {
-    assert.deepEqual(routeWords('claudexor::codex=gpt-x'), { name: 'gpt-x', mark: 'codex', source: 'Codex subscription · your accounts in turn' });
+    assert.deepEqual(routeWords('claudexor::codex=gpt-x'), { name: 'gpt-x', mark: 'codex', label: 'Codex',
+        source: 'Codex subscription · your accounts in turn' });
     assert.equal(routeWords('anthropic@work::claude-opus').source, 'Anthropic (work) · by API key');
     assert.equal(routeWords('google/gemini-pro').name, 'gemini-pro');
-    assert.deepEqual(routeWords('', { follows: 'Light' }), { name: 'Light model', source: '', mark: '', follows: true });
+    assert.deepEqual(routeWords('', { follows: 'Light' }), { name: 'Light model', source: '', mark: '', label: '', follows: true });
     assert.equal(routeWords('openai::x', { local: true }).name, 'Local model');
+});
+
+test('a subscription is named by its held descriptor, and keeps the old generic name without one', () => {
+    // An opaque source id is no readable name; only the catalogue's descriptor names its owner.
+    const sources = [{ id: 'claude', label: 'Claude Code', credentialHarness: 'claude' }];
+    assert.deepEqual(routeWords('claudexor::claude=claude-opus-5-5', { modelSources: sources }),
+        { name: 'claude-opus-5-5', mark: 'claude', label: 'Claude Code',
+            source: 'Claude Code subscription · your accounts in turn' });
+    assert.equal(routeWords('claudexor::future=gpt-x').label, 'future',
+        'no descriptor: the old generic label stands, never a guessed product name');
+    assert.equal(routeWords('claudexor::claude=claude-opus-5-5', { account: 'studio-01', modelSources: sources }).source,
+        'Claude Code subscription · account studio-01');
+});
+
+// The Models list's Main row: its mark and its source line come from the catalogue a model sheet already holds.
+// Nothing here reads the catalogue; a descriptor adopted later reaches only those two slots.
+test('the Models Main row wears its descriptor\'s mark and name, and a later descriptor reaches only them', async (t) => {
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
+    const value = 'claudexor::agy=claude-opus-5-5';
+    const page = await open(t, 'models', { values: { OUROBOROS_MODEL: value, OUROBOROS_MODEL_ACCOUNTS: { main: 'studio-01' } } });
+    const row = () => page.container.querySelector('.models-main-row');
+    const meta = () => inside(row(), '.models-main-meta');
+    const markNode = () => inside(meta(), '.model-source-mark');
+    const catalogueReads = () => page.calls.filter((url) => String(url).startsWith('/api/model-catalog')).length;
+    // Already held: the descriptor's mark and its name at the first paint, with no read of this page's own.
+    const reads = catalogueReads();
+    assert.equal(markNode().getAttribute('viewBox'), '0 0 180 180', 'a held descriptor draws its mark at first paint');
+    assert.match(meta().textContent, /Antigravity work subscription · account studio-01/);
+    assert.equal(inside(meta(), '[data-i18n-authored]').textContent, 'Antigravity work', 'the name is authored, not chrome');
+    // A held list that names no harness: the neutral initial and the old generic name, never a brand guessed from the id.
+    const rowNode = row();
+    modelCatalog.adopt({ items: [], model_sources: [] });
+    await settle();
+    assert.equal(row(), rowNode, 'the card is not redrawn for a mark');
+    assert.match(markNode().getAttribute('class'), /model-source-initial/, 'no descriptor: a neutral initial');
+    assert.match(meta().textContent, /Antigravity subscription · account studio-01/s,
+        'without a descriptor the old generic name stands, and no brand is chosen by the id alone');
+    // A descriptor adopted later brands the route it names: only the mark and its source line change.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
+    await settle();
+    assert.equal(row(), rowNode, 'the card is not redrawn for a mark');
+    assert.equal(inside(meta(), '.model-source-mark').getAttribute('viewBox'), '0 0 180 180', 'the descriptor\'s Antigravity mark');
+    assert.match(meta().textContent, /Antigravity work subscription · account studio-01/);
+    assert.equal(catalogueReads(), reads, 'no read for a mark');
+    // The same descriptor again is a no-op: the drawn nodes stay the ones the owner sees.
+    const mark = inside(meta(), '.model-source-mark');
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
+    await settle();
+    assert.equal(inside(meta(), '.model-source-mark'), mark, 'an unchanged result writes nothing');
+    // A descriptor that names no credential harness is no evidence of one: the neutral initial stays.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: '' }] });
+    await settle();
+    assert.match(inside(meta(), '.model-source-mark').getAttribute('class'), /model-source-initial/,
+        'an unbound opaque id is never branded');
+    assert.doesNotMatch(meta().innerHTML, /viewBox="0 0 180 180"/);
 });
 
 test('a saved local-model setting says it applies when the local model is restarted, never a restart of Ouroboros', async (t) => {
@@ -565,4 +1236,93 @@ test('a saved local-model setting says it applies when the local model is restar
     assert.doesNotMatch(readFileSync(new URL('../modules/settings_local_model.js', import.meta.url), 'utf8'), /Restart (now|Ouroboros)|restart_required|['"]restart['"]/);
     assert.deepEqual(localModelStatusWords({ status: 'ready', context_length: 16384 }), { text: 'Ready · context 16384', tone: 'ok' });
     assert.deepEqual(localModelStatusWords({ status: 'error', error: 'no such file' }), { text: 'Error · no such file', tone: 'danger' });
+});
+
+test('an empty Safety Supervisor shows what the runtime gives it along Safety → Light → Main: the model, the account, the tier', async (t) => {
+    const page = await open(t, 'models', { values: { OUROBOROS_MODEL_LIGHT: '',
+        [MODEL_PROCESSING_PREFERENCES_KEY]: { main: 'fast', consciousness: 'economy' } } });
+    const value = (id) => inside(page.container.querySelector(`[data-setting-row="${id}"]`), '[data-row-value]')?.textContent;
+    assert.equal(value('models:safety'), 'gpt-main · account studio-01 · Fast · as Main, via Light');
+    // Light's own model ends the chain: Light's options, and none of Main's.
+    const light = await open(t, 'models', { values: { [MODEL_PROCESSING_PREFERENCES_KEY]: { main: 'fast' } } });
+    const lightValue = inside(light.container.querySelector('[data-setting-row="models:safety"]'), '[data-row-value]')?.textContent;
+    assert.equal(lightValue, 'gpt-light · as Light');
+});
+
+/* Two windows on Main's page: this one typed a new model; the other saved something meanwhile. */
+async function mainPage(t, values = {}, { revision = '' } = {}) {
+    forgetSettingRows();
+    const env = setup(t);
+    const server = fakeServer(env.routes, values);
+    server.revision = revision;  // the named key's revision, as the server words it now
+    const read = server.document;
+    if (revision) server.document = () => { const doc = read(); doc._meta.connections = [{ id: 'openai@work', revision: server.revision }]; return doc; };
+    const path = 'models/role/main';
+    const asked = [];
+    const ctx = { readSettings, openSettings: () => true, state: { activePage: 'settings', settingsPath: path },
+        ask: async (question) => { asked.push(question); return true; } };
+    const container = new NodeStub();
+    env.document.body.appendChild(container);  // the role editor finds its host by id in the document
+    const handle = await settingsPageFor(path).mount(container, { path, row: '', ctx });
+    await settle();
+    t.after(() => handle?.unmount?.());
+    const page = { ...env, server, ctx, container, asked, handle,
+        press: async (target) => { await container.fire('click', { target }); await settle(); } };
+    const model = page.container.querySelector('[data-model-role-model]');
+    const elsewhere = (key, value) => { page.server.values[key] = value; page.server.tokens[key] = (page.server.tokens[key] || 0) + 1; };
+    const result = () => page.container.querySelector('[data-editor-result]').textContent;
+    return { ...page, elsewhere, result,
+        // The chooser's popup is layout work this DOM stub has none of; a disabled field never opens it, and the
+        // editor's own `input` listener, which is what is typed into, does not read that flag.
+        type: async (text) => { model.disabled = true; model.value = text; await model.fire('input', { target: model }); await settle(); },
+        save: () => page.press(page.container.querySelector('[data-editor-save]')) };
+}
+
+test('two windows: a new Main model saved here never takes a tier set elsewhere meanwhile; an unrelated save elsewhere keeps it saving', async (t) => {
+    const page = await mainPage(t);
+    await page.type('gpt-next');
+    page.elsewhere(MODEL_PROCESSING_PREFERENCES_KEY, { consciousness: 'economy', main: 'ultrafast' });
+    await page.save();
+    assert.deepEqual([page.server.posts, page.server.checker], [[], []], 'nothing is sent on a binding this page did not show');
+    assert.match(page.result(), /^Not saved\. Main's processing is Ultrafast now, set on another device\./);
+    assert.equal(page.server.values.OUROBOROS_MODEL, 'claudexor::codex=gpt-main');
+    // Another window saved an unrelated setting: the model is written, standing on Main's whole binding.
+    const other = await mainPage(t);
+    await other.type('gpt-next');
+    other.elsewhere('OUROBOROS_MODEL_LIGHT', 'openai::gpt-other');
+    await other.save();
+    const sent = [...other.server.checker, ...other.server.posts].find((post) => 'OUROBOROS_MODEL' in post.settings);
+    assert.deepEqual(Object.keys(sent.precondition).sort(), ['OUROBOROS_MODEL', MODEL_ACCOUNTS_KEY, MODEL_PROCESSING_PREFERENCES_KEY, 'USE_LOCAL_MAIN'].sort());
+    assert.equal(other.server.values.OUROBOROS_MODEL, 'claudexor::codex=gpt-next');
+});
+
+test('carrying stored Ultrafast to an unlisted model asks before the write', async (t) => {
+    const page = await mainPage(t, { [MODEL_ACCOUNTS_KEY]: {}, [MODEL_PROCESSING_PREFERENCES_KEY]: { main: 'ultrafast' } });
+    await page.type('gpt-next');
+    await page.save();
+    assert.equal(page.asked.length, 1);
+    assert.equal(page.asked[0].title, 'Ultrafast for Main');
+    assert.equal(page.server.values.OUROBOROS_MODEL, 'claudexor::codex=gpt-next');
+    assert.match(page.result(), /^Saved/);
+    const sent = [...page.server.checker, ...page.server.posts].find((post) => 'OUROBOROS_MODEL' in post.settings);
+    assert.ok(!('connection' in sent.precondition), 'a subscription has no key to bind');
+    assert.deepEqual(JSON.parse(sent.precondition.ultrafast), ['claudexor::codex=gpt-next', false, '', '', '']);
+});
+
+test('two windows: Main\'s Ultrafast stands on its key as this page showed it; a key rotated elsewhere refuses, an unrelated edit does not', async (t) => {
+    const keyed = { OUROBOROS_MODEL: 'openai@work::gpt-a', [MODEL_ACCOUNTS_KEY]: {}, [MODEL_PROCESSING_PREFERENCES_KEY]: { main: 'ultrafast' } };
+    const page = await mainPage(t, keyed, { revision: 'openai@work#r1' });
+    await page.type('gpt-b');
+    page.server.revision = 'openai@work#r2';  // the other window rotated the named key (or its API surface)
+    await page.save();
+    assert.deepEqual([page.server.posts, page.server.checker], [[], []], 'nothing is sent on a key the page did not show');
+    assert.match(page.result(), /^Not saved\. The key this model goes through changed on another device\./);
+    assert.equal(page.server.values.OUROBOROS_MODEL, 'openai@work::gpt-a');
+    const other = await mainPage(t, keyed, { revision: 'openai@work#r1' });
+    await other.type('gpt-b');
+    other.elsewhere('OUROBOROS_MODEL_LIGHT', 'openai::gpt-other');
+    await other.save();
+    const sent = [...other.server.checker, ...other.server.posts].find((post) => 'OUROBOROS_MODEL' in post.settings);
+    assert.equal(sent.precondition.connection, 'openai@work#r1', 'the revision shown, sent as shown');
+    assert.equal(other.server.values.OUROBOROS_MODEL, 'openai@work::gpt-b');
 });

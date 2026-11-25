@@ -6,6 +6,9 @@ A reply with text and no typed call whose provider finish names its output limit
 ends the work as incomplete, saved as that end for any recovery. Only that typed finish is read,
 never the reply's words.
 A usable reply or new owner words ends an episode; rounds and Restart do not.
+A completed commentary reply (``reply_usability`` ``intermediate``) is no cut and no episode: kept as
+written with its custody, it continues as an ordinary paid round under the loop's own budget, Stop and
+deadline (``intermediate_reply``). Neither it nor a cut latches a FINAL ANSWER marker (``latch_final_marker``).
 Each attempt of a step is saved pending under its own id before dispatch; only a known end of the
 current attempt lets its owner's replacement (wire, image, context) follow, saved pending again.
 A saved pending claim is uncertain, never permission to repeat: a call that returned with no known
@@ -107,6 +110,38 @@ def unfinished_reply(ctx: Any, msg: dict) -> Any:
     # scope ``_save`` needs; a ready state repeats its round, and a failed write is retried before the claimed send.
     save_or_log(ctx, "ready")
     return None
+
+
+def _intermediate(tool_ctx: Any, msg: dict) -> bool:
+    """That projection's reply is healthy intermediate progress (``reply_usability`` ``intermediate``)."""
+    from ouroboros._usage_response import reply_usability
+    facts = getattr(tool_ctx, "_round_response_facts", None) or {}
+    finish = facts.get("finish_reason") if facts.get("finish_reason_present") is True else None
+    return reply_usability(finish, facts.get("response_status"), msg) == "intermediate"
+
+
+def latch_final_marker(ctx: Any, msg: dict) -> None:
+    """Latch this round's FINAL ANSWER marker (``loop_messages._latch_final_answer_marker``) from a tool round or a
+    reply the loop could deliver as final; a commentary or a cut latches (and withdraws) nothing, since a deadline,
+    budget end or Stop would publish the latched words as the answer."""
+    if not _intermediate(ctx.tools._ctx, msg) and not unfinished_finish(ctx.tools._ctx, msg):
+        _loop()._latch_final_answer_marker(ctx.llm_trace, msg.get("content"))
+
+
+def intermediate_reply(ctx: Any, msg: dict, emit_progress: Any) -> bool:
+    """Keep a healthy intermediate reply (completed commentary, no call) as written with its reasoning and custody,
+    show it as the round's update, save it, and let the caller continue the ordinary loop; ``False`` otherwise."""
+    from ouroboros.anthropic_native_custody import custody_private_key
+    from ouroboros.loop_messages import _emit_round_progress
+    from ouroboros.working_checkpoint import save_or_log
+    if not _intermediate(ctx.tools._ctx, msg):
+        return False
+    ctx.messages.append({"role": "assistant", "content": msg["content"], **{
+        key: value for key, value in msg.items() if key in ("reasoning_details", "reasoning_content")
+        or custody_private_key(key)}})
+    _emit_round_progress(msg["content"], msg, emit_progress, ctx.llm_trace)  # an interim update, like a tool round's
+    save_or_log(ctx, "ready")  # the kept words outlive a crash; the next round sends them
+    return True
 
 
 def ready_for_fallback(usage: dict) -> bool:

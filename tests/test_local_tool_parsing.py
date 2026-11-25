@@ -171,11 +171,12 @@ class TestParseToolCallsWithThink(unittest.TestCase):
 
         self.assertEqual(len(parsed["tool_calls"]), 1)
         self.assertEqual(parsed["tool_calls"][0]["function"]["name"], "read_file")
-        # reasoning preserved in content
-        self.assertEqual(parsed["content"], "I need to read the file first.")
+        # the calls are the reply; the reasoning rides beside them in ``reasoning`` (shown as reasoning, never sent)
+        self.assertIsNone(parsed["content"])
+        self.assertEqual(parsed["reasoning"], "I need to read the file first.")
 
-    def test_reasoning_preserved_in_content(self):
-        """content should be the think-text, not None."""
+    def test_reasoning_preserved_beside_the_calls(self):
+        """The think-text is kept in ``reasoning``; content holds no reasoning."""
         from ouroboros.llm import LLMClient
 
         reasoning_text = "Let me check the path."
@@ -188,8 +189,8 @@ class TestParseToolCallsWithThink(unittest.TestCase):
         }
         parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
 
-        self.assertIsNotNone(parsed.get("content"))
-        self.assertEqual(parsed["content"], reasoning_text)
+        self.assertIsNone(parsed.get("content"))
+        self.assertEqual(parsed["reasoning"], reasoning_text)
 
     def test_empty_think_block_content_is_none(self):
         """Empty <think> block → content=None (falsy, same as before)."""
@@ -308,8 +309,8 @@ class TestParseToolCallsWithThink(unittest.TestCase):
         parsed = LLMClient._parse_tool_calls_from_content(msg, {"write_file"})
 
         self.assertEqual(len(parsed["tool_calls"]), 1)
-        # Reasoning from the wrapper block is in content
-        self.assertEqual(parsed["content"], "model reasoning goes here")
+        # Reasoning from the wrapper block is beside the call
+        self.assertEqual(parsed["reasoning"], "model reasoning goes here")
         # Argument value is untouched
         args = _json.loads(parsed["tool_calls"][0]["function"]["arguments"])
         self.assertEqual(args["content"], arg_value)
@@ -334,8 +335,9 @@ class TestCurrentQwenToolCalls(unittest.TestCase):
         parsed = LLMClient._parse_tool_calls_from_content({"content": QWEN38_REPLY, "tool_calls": []}, {"get_time"})
         self.assertEqual([(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in parsed["tool_calls"]],
                          [("get_time", {})])
-        self.assertTrue(parsed["content"].startswith("The user is asking for the current time"))
-        self.assertNotIn("</think>", parsed["content"])
+        self.assertTrue(parsed["reasoning"].startswith("The user is asking for the current time"))
+        self.assertNotIn("</think>", parsed["reasoning"])
+        self.assertIsNone(parsed["content"])
 
     def test_xml_values_take_the_types_the_tool_declares(self):
         from ouroboros.llm import LLMClient
@@ -367,7 +369,7 @@ class TestCurrentQwenToolCalls(unittest.TestCase):
         reply = "I should look first.\n</think>\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\"}}\n</tool_call>"
         parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"read_file"})
         self.assertEqual(parsed["tool_calls"][0]["function"]["name"], "read_file")
-        self.assertEqual(parsed["content"], "I should look first.")
+        self.assertEqual(parsed["reasoning"], "I should look first.")
 
     def test_prose_beside_or_between_calls_keeps_the_reply_text(self):
         from ouroboros.llm import LLMClient
@@ -451,7 +453,7 @@ def test_the_local_lane_answers_without_its_reasoning_and_calls_tools_the_new_wa
 
     client = LLMClient(api_key="unused")
     monkeypatch.setattr(local_model, "get_manager", lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
-    monkeypatch.setattr(llm_local, "local_context_limits", lambda maximum: (0, maximum))
+    monkeypatch.setattr(llm_local, "local_context_limits", lambda maximum, evidence=None: (0, maximum))
     monkeypatch.setattr(client, "_get_local_client", lambda: SimpleNamespace(chat=SimpleNamespace(
         completions=SimpleNamespace(create=lambda **payload: Response(replies.pop(0))))))
     tools = [{"type": "function", "function": {"name": "read_file", "description": "Read a file.",
@@ -467,7 +469,7 @@ def test_the_local_lane_answers_without_its_reasoning_and_calls_tools_the_new_wa
     assert [m["content"] for m in quiet] == ["Hi.", "Hi again.", "", "Qwen closes it so:\n</think>\nThen it answers."]
     assert [m.get("reasoning_content") for m in quiet] == [None, None, None, "plan"]
     assert json.loads(call["tool_calls"][0]["function"]["arguments"]) == {"path": "README.md", "limit": 3}
-    assert call["content"] == "Read it."
+    assert call["content"] is None and call["reasoning"] == "Read it."
 
 
 def test_the_wizard_presets_and_the_factory_window_start_a_fresh_install():
@@ -601,7 +603,7 @@ class TestReplayedCallsAndReasoningShapes(unittest.TestCase):
                  "<tool_call>\n<function=get_time>\n</function>\n</tool_call>")
         parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"get_time"})
         self.assertEqual(parsed["tool_calls"][0]["function"]["name"], "get_time")
-        self.assertTrue(parsed["content"].startswith("I will answer with a <tool_call> block"))
+        self.assertTrue(parsed["reasoning"].startswith("I will answer with a <tool_call> block"))
         mention = "Qwen ends its reasoning with </think> and then answers."
         self.assertEqual(split(mention), (mention, ""))
         self.assertEqual(split("checking\n</think>\nIt is noon."), ("It is noon.", "checking"))
@@ -617,3 +619,21 @@ class TestReplayedCallsAndReasoningShapes(unittest.TestCase):
         typed = {"f": {"type": "object", "properties": {"flag": {"type": "boolean"}}}}
         parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"f"}, typed)
         self.assertEqual(json.loads(parsed["tool_calls"][0]["function"]["arguments"]), {"flag": False})
+
+
+def test_reasoning_beside_parsed_calls_reaches_progress_as_reasoning_only():
+    """Through the progress consumer (panel 7, Astra): reasoning extracted from a local XML or JSON call is shown as the
+    model's reasoning, never as its words, and the parsed call is kept."""
+    from ouroboros.llm import LLMClient
+    from ouroboros.loop_messages import _emit_round_progress
+
+    json_reply = ("I should look first.\n</think>\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": "
+                  "{\"path\": \"a\"}}\n</tool_call>")
+    for reply, tool in ((QWEN38_REPLY, "get_time"), (json_reply, "read_file")):
+        parsed = LLMClient._parse_tool_calls_from_content(
+            {"role": "assistant", "content": reply, "tool_calls": []}, {tool})
+        assert [call["function"]["name"] for call in parsed["tool_calls"]] == [tool]
+        shown, trace = [], {"reasoning_notes": []}
+        _emit_round_progress(parsed["content"], parsed, lambda text, **meta: shown.append((text, meta)), trace)
+        assert shown == [(reply.split("\n</think>")[0], {"narration": True, "reasoning": True})]
+        assert trace["reasoning_notes"] == []  # reasoning is not the model's narration of its work

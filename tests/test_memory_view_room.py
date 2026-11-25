@@ -650,6 +650,25 @@ def test_this_room_has_its_head_retold_records_origin_words_and_notes(tmp_path):
     assert f"note {note.record['id']} by root on " in _section(noted, "### My notes not yet sealed")
 
 
+def test_unverified_retained_opening_is_a_host_gap_in_each_project_view(tmp_path):
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    room = create_project(tmp_path, "receipt-room")
+    chat = room["chat_id"]
+    unknown = "Check the legend"
+    ref = build_owner_message_ref(chat_id=1, client_message_id="older", ts="2026-09-01T00:30:00Z", text=unknown)
+    bind_task_to_project(tmp_path, "reader", room["id"], origin={"ref": ref, "text": unknown})
+    ChronicleStore(tmp_path).ensure_activated()
+    root = {"id": "reader", "chat_id": chat}
+    child = {"id": "helper", "chat_id": chat, "delegation_role": "subagent", "parent_task_id": "reader",
+             "root_task_id": "reader"}
+    fact = "[Host fact: The visibility of a retained project opening could not be verified.]"
+    place = {**root, "metadata": PRESENCE}  # a place's work bound to the Project has no separate owner-words block
+    for text in (_view(tmp_path, root)[1], _view(tmp_path, child, origin_words=True)[1], _view(tmp_path, place)[1]):
+        assert text.count(fact) == 1 and unknown not in text
+
+
 def test_a_project_root_reads_its_humans_sealed_rows_whole_under_the_actor_frame_and_main_does_not(tmp_path):
     """In a project room (never Main) the root's own view adds one section at the origins seam: the room's rows of
     my human that left the open conversation, verbatim and dated under the actor frame, the frame line over the
@@ -1023,6 +1042,27 @@ def _moved_work(tmp_path):
 
 _READER = re.compile(r"memory_read\(room_id='(-?\d+)', rows=true, from='([^']+)', to='([^']+)'\)")
 _ROWS = re.compile(r"^\[[^;\n]+; [^\n]*?(row:-?\d+@[^\s;\]]+#[0-9a-f]{12})\]", re.M)
+
+
+def test_origin_capture_keeps_retained_source_identity_without_inventing_a_row_hash(tmp_path):
+    from ouroboros.memory_form_facts import ordinary_composition
+    from ouroboros.project_dialogue import project_origin_rows
+
+    rooms, _rows = _install(tmp_path)
+    rid = str(rooms["alpha"])
+    snapshot, _text = _view(tmp_path, {"id": "origin-root", "type": "task", "chat_id": int(rid)},
+                            room_lanes=False, room_page=False)
+    expected = project_origin_rows(tmp_path, int(rid))[0]["ref"]
+    assert snapshot.room["origins"][0]["origin_ref"] == expected
+    part = next(p for p in ordinary_composition(snapshot)["blocks"]["room"]["parts"] if p["kind"] == "origin")
+    source = part["sources"][0]
+    assert source["origin_ref"] == expected and source["read_gap"] and "read" not in source
+    assert "text" not in source and source["origin_ref"]["text_sha256"] == expected["text_sha256"]
+    old = dataclasses.replace(snapshot, room={**snapshot.room, "origins": [
+        {k: v for k, v in origin.items() if k != "origin_ref"} for origin in snapshot.room["origins"]]})
+    assert mv.render_room(old) == mv.render_room(snapshot)
+    legacy = next(p for p in ordinary_composition(old)["blocks"]["room"]["parts"] if p["kind"] == "origin")["sources"][0]
+    assert "origin_ref" not in legacy and legacy["read_gap"]
 
 
 def _returned(registry, room, first, last):

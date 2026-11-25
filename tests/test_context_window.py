@@ -30,7 +30,7 @@ def test_a_request_under_way_reads_a_total_favourably_until_a_refusal_confirms_i
     """Two readings of one record: ``usable`` sizes a work's first start (a total always leaves the whole reserve);
     ``admitted`` is the line every question about a request that exists reads, in a round's frame as
     ``admitted_equivalent``. They differ only for a stated total nothing has proved to hold the reply."""
-    evidence = ce.CapabilityEvidence(1_000_000, "confirmed", source, "r")
+    evidence = ce.CapabilityEvidence(1_000_000, "confirmed", source, "r", ts=ce.utc_now_iso())
     for kind in (refusal or "").split(",") if refusal else ():  # at the stated number itself, or (+) at the server's
         record_observation(tmp_path, "r", refused=1_048_576 if kind.endswith("+") else 1_000_000,  # own a little above
                            kind=kind.rstrip("+"))
@@ -232,6 +232,36 @@ def test_settlement_binds_main_density_and_acceptance_but_auxiliary_calls_do_not
         [observation] = ce._load(tmp_path)["main_windows"]["own-account"]["observations"]
         assert observation["reserve"] == 65_536 and observation["transmitted"] == 1234
         assert observation["kind"] == "input"
+
+
+@pytest.mark.parametrize("fresh,bins,inclusive", [
+    pytest.param(10_000, {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 7}, 30_007, id="both-bins"),
+    pytest.param(10_000, {"ephemeral_1h_input_tokens": 7}, None, id="one-bin-no-total"),
+    pytest.param(None, {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 7}, None, id="no-fresh-input"),
+    pytest.param(0, {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 7}, 20_007, id="reported-zero-fresh-input"),
+])
+def test_an_unknown_inclusive_prompt_binds_neither_density_nor_acceptance(tmp_path, fresh, bins, inclusive):
+    """A native reply of 10,000 fresh and 20,000 read tokens whose writes name one lifetime bin of 7 and no total
+    has no known inclusive prompt: its fresh subtotal is neither a density witness nor an accepted size, and its
+    reported $0.025 stays the price. With both bins the same reply measures 30,007. A reply that did not report its
+    fresh input measures nothing either, its 20,000 reads included; a reported zero of it measures 20,007."""
+    from types import SimpleNamespace
+
+    from ouroboros._usage_response import usage_from_response
+
+    request = SimpleNamespace(provider="anthropic", model="anthropic::model", prompt_tokens_bounded_estimate=15_000,
+        drive_root=tmp_path, max_completion_tokens=1234, physical_context=SimpleNamespace(view_kind="own_wake",
+        route_fp="own-route", window_observation_fp="own-account", window_witness_bound=True,
+        response_reserve_tokens=65_536))
+    usage, cost, final = usage_from_response({"type": "message", "usage": {
+        **({} if fresh is None else {"input_tokens": fresh}), "cache_read_input_tokens": 20_000, "output_tokens": 1,
+        "cache_creation": bins, "cost": 0.025}})
+    ce.observe_token_density(request, usage, drive_root_resolver=lambda root: root)
+    assert (usage["prompt_tokens"], cost, final) == (inclusive, 0.025, True)
+    _density, source = ce.resolve_main_token_density(tmp_path, "own-route", "anthropic::model",
+        estimate_tokens=15_000, view_kind="own_wake")  # both 10,000 and 30,007 would be a sane density of it
+    record = resolve_window(ce.CapabilityEvidence(0, "unprobeable", "none", "own-account"), 65_536, root=tmp_path)
+    assert (source, record.accepted) == (("fresh_route_usage", inclusive) if inclusive else ("cold_estimate", 0))
 
 
 @pytest.mark.parametrize("metadata", [0, 1_000_000])

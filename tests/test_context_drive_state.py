@@ -53,8 +53,10 @@ def test_drive_state_section_is_typed_projection_with_pointer(tmp_path):
 
     assert section.startswith("## Drive state")
     assert '"session_id": "abc123"' in section
-    assert '"budget_drift_alert": true' in section
     assert '"bg_consciousness_stop_source": "owner"' in section
+    for view in (section.full_text, section.operative_view):
+        assert '"budget_drift_alert":' not in view and '"budget_drift_pct":' not in view
+        assert "OpenRouter changes since" not in view  # the alert alone proves no pair
     # Internal caches / duplicated spend narrative are OMITTED but NAMED.
     assert '"managed_update_cache"' not in section
     assert '"usage_accounting"' not in section
@@ -68,6 +70,52 @@ def test_drive_state_section_is_typed_projection_with_pointer(tmp_path):
     empty = _drive_state_section(FakeEnv())
     assert empty.startswith("## Drive state")
     assert "read_file" not in empty
+
+
+@pytest.mark.parametrize("missing", [
+    "openrouter_checked_ledger_settled_usd", "openrouter_last_check_at", "budget_drift_pct",
+    "session_openrouter_settled_snapshot", "session_total_snapshot",
+])
+def test_drive_state_never_backfills_an_incomplete_openrouter_comparison(tmp_path, missing):
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.context import _drive_state_section
+
+    path = tmp_path / "state" / "state.json"
+    path.parent.mkdir()
+    saved = {"openrouter_checked_ledger_settled_usd": 57.0, "openrouter_ledger_settled_usd": 99.0,
+             "session_openrouter_settled_snapshot": 50.0, "openrouter_total_usd": 108.0,
+             "session_total_snapshot": 100.0, "openrouter_last_check_at": "2026-11-17T14:00:00+00:00",
+             "budget_drift_pct": 12.5, "session_id": "old-check"}
+    del saved[missing]
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    section = _drive_state_section(SimpleNamespace(drive_path=lambda rel: tmp_path / rel))
+    for view in (section.full_text, section.operative_view):
+        assert '"session_id": "old-check"' in view  # the old state really reached the projection
+        assert "OpenRouter changes since" not in view
+        assert '"budget_drift_pct":' not in view
+
+
+@pytest.mark.parametrize("local,key,local_text,key_text", [
+    pytest.param(0.00000025, -0.00000025, "<$0.0001", "down <$0.0001", id="tiny-rise-and-fall"),
+    pytest.param(-0.0025, 0, "down $0.0025", "$0.00", id="negative-subcent-and-zero"),
+    pytest.param(-1.25, 40, "$-1.25", "$40.00", id="ordinary-deltas"),
+])
+def test_drive_state_keeps_small_signed_openrouter_deltas(tmp_path, local, key, local_text, key_text):
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.context import _drive_state_section
+
+    path = tmp_path / "state" / "state.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"openrouter_checked_ledger_settled_usd": 10 + local, "session_openrouter_settled_snapshot": 10,
+                                "openrouter_total_usd": 20 + key, "session_total_snapshot": 20,
+                                "openrouter_last_check_at": "2026-11-17T14:00:00+00:00", "budget_drift_pct": 0}), encoding="utf-8")
+    section = _drive_state_section(SimpleNamespace(drive_path=lambda rel: tmp_path / rel))
+    for view in (section.full_text, section.operative_view):
+        assert f"local settled spend {local_text} (sampled before the key request); key usage {key_text}." in view
 
 
 def test_review_ledger_caps_attempts_with_omission_notes(tmp_path):
@@ -360,4 +408,72 @@ def test_a_stored_obligation_clears_where_the_retired_layer_cleared_it_in_view_a
         task_id="t", source="task_exception", stage="task_exception", open_obligations=named))
     assert shown == everywhere == open_ids
     assert held is bool(open_ids)
+
+
+
+def test_the_switch_fact_rides_both_forms_of_the_section_only_while_places_only_hear(tmp_path, monkeypatch):
+    """The seam of the mind's switch fact (owner 15.11, 5A): with consciousness off and a hearing place, the one
+    sentence is in the section's full text and in its operative view; with it on there is none, and the place store
+    is not even read (an install with consciousness on pays nothing for it)."""
+    import json
+    from types import SimpleNamespace
+
+    import ouroboros.places as places_module
+    from ouroboros.context import _drive_state_section
+
+    class FakeEnv:
+        def drive_path(self, p):
+            return tmp_path / p
+
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "state.initialized.json").write_text(
+        json.dumps({"initialization_id": "init-1", "phase": "complete"}), encoding="utf-8")
+    # The place store with its legacy import done (building context never runs that import itself, review r3).
+    (tmp_path / "state" / "places.json").write_text(json.dumps(
+        {"schema_version": 1, "places": {}, "migration": {"presence_bindings_v1": True}}), encoding="utf-8")
+    reads = []
+
+    def places(root):
+        reads.append(root)
+        return [SimpleNamespace(place_id="p1", label="Slack · Ops", state="active", provider="slack")]
+
+    monkeypatch.setattr(places_module, "load_places", places)
+    for enabled in (False, True):
+        (tmp_path / "state" / "state.json").write_text(json.dumps({
+            "initialization_id": "init-1", "bg_consciousness_enabled": enabled,
+            "bg_consciousness_stop_source": "owner"}), encoding="utf-8")
+        reads.clear()
+        section = _drive_state_section(FakeEnv())
+        fact = "Consciousness is off (my human turned it off): my own wakes"
+        if enabled:
+            assert fact not in section.full_text and fact not in section.operative_view
+            assert reads == [], "consciousness on: the place store is not read for the fact"
+        else:
+            assert fact in section.full_text and fact in section.operative_view
+            assert "In my 1 connected place what arrives is recorded and wakes nothing until it is on." in section
+            assert len(reads) == 1
+
+
+def test_the_switch_fact_reads_no_unimported_places_and_names_no_unconfirmed_stopper(tmp_path, monkeypatch):
+    """Building context never runs the legacy place import, and a stop source awaiting confirmation names nobody
+    (review r3)."""
+    import json
+    from types import SimpleNamespace
+
+    import ouroboros.places as places_module
+    from ouroboros.context_sections import _switch_fact
+
+    reads = []
+    monkeypatch.setattr(places_module, "load_places", lambda root: reads.append(root) or [
+        SimpleNamespace(place_id="p1", label="Slack · Ops", state="active", provider="slack")])
+    monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda _root: False)
+    observed = SimpleNamespace(values={"bg_consciousness_stop_source": "panic"})
+    authority = {"bg_consciousness_enabled": False, "bg_consciousness_stop_source": "panic",
+                 "_state_read": {"quality": "current", "unconfirmed": ["bg_consciousness_stop_source"]}}
+    assert _switch_fact(tmp_path, observed, authority) == "" and reads == [], "no import from building context"
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "places.json").write_text(json.dumps(
+        {"schema_version": 1, "places": {}, "migration": {"presence_bindings_v1": True}}), encoding="utf-8")
+    fact = _switch_fact(tmp_path, observed, authority)
+    assert fact.startswith("\n\nConsciousness is off: my own wakes") and "Panic" not in fact
 

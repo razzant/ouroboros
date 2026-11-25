@@ -12,7 +12,8 @@ preserved code. The material lives beside the record (``state/update_material.js
 current range), so the record every round and status read parses stays small.
 
 The prose is written by the main mind as ordinary work: on the owner's request from the
-Updates panel (one ordinary Main task, ``request_description``) or on its own initiative,
+Updates panel (one ordinary Main task: ``request_latest`` for the update the press's own check
+found, ``request_description`` for a named range) or on its own initiative,
 reading the material with ``query_data(kind='update_material')`` and unclear changes with
 ``vcs_read``, and saved through the ``record_update_description`` tool (``save_description``).
 Floor (host code): exact SHAs, the ranges a description may name, one revision every writer
@@ -107,6 +108,10 @@ class MaterialUnavailable(RuntimeError):
 
 class RecordBusy(RuntimeError):
     """The record lock stayed held past ``RECORD_LOCK_WAIT_SEC``: nothing was written."""
+
+
+class RecordUnreadable(RuntimeError):
+    """An existing description record could not be read or recognized."""
 
 
 # ---------------------------------------------------------------------------
@@ -353,9 +358,12 @@ READ_RECIPE = """How to read further (the installation's own repository holds {b
 - What one merged branch brought: vcs_read(root="system_repo", action="diff", base="<merge sha>^1", head="<merge sha>", stat=true).
 - Plain Git in that repository: git log --format='%H %s%n%n%b' {base}..{target}"""
 # Named only where the record's qualification is this very range's (a check replaces it).
-CHECK_FACTS = ("Check facts for this exact range (receipts, post-merge runs, this install's own commits in it that "
-               "landed over a review FAIL or no verdict; missing evidence is not a pass): "
-               "query_data(op=\"json\", kind=\"update_letter\", select=\"qualification\").")
+CHECK_FACTS = ('Receipts, post-merge runs and local commits that landed over a review FAIL or no verdict: '
+               'query_data(op="json", kind="update_letter", select="qualification"). After reading or exporting, '
+               'compare its returned base_sha and target_sha with this exact range '
+               'before citing receipts or giving them to a helper. If either differs or is missing, those facts '
+               'supply no evidence for this update. Read its code using the exact Git range above. '
+               'Missing evidence is not a pass.')
 
 
 def material_path(drive_root: Optional[pathlib.Path] = None) -> pathlib.Path:
@@ -401,9 +409,26 @@ def record_path(drive_root: Optional[pathlib.Path] = None) -> pathlib.Path:
     return pathlib.Path(drive_root or DATA_DIR) / RECORD_REL
 
 
-def read_record(drive_root: Optional[pathlib.Path] = None) -> Optional[Dict[str, Any]]:
-    record = read_json_dict(record_path(drive_root))
-    return record if record and isinstance(record.get("key"), dict) else None
+def read_record(drive_root: Optional[pathlib.Path] = None, *, strict: bool = False) -> Optional[Dict[str, Any]]:
+    """Writers require a readable record or an observed absence, including on the locked reread."""
+    try:
+        record = json.loads(record_path(drive_root).read_text(encoding="utf-8"))
+        key = record.get("key") if isinstance(record, dict) else None
+        if not isinstance(key, dict) or not all(isinstance(key.get(k), str) for k in ("base_sha", "target_sha")):
+            raise ValueError("invalid description key")
+        if "revision" in record and (type(record["revision"]) is not int or record["revision"] < 0):
+            raise ValueError("invalid description revision")
+        request = record.get("request")
+        if request is not None and (not _request_task_id(record) or not _range_key(request.get("key"))):
+            raise ValueError("invalid description request")
+        return record
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        if strict:
+            raise RecordUnreadable("The update description record could not be read") from exc
+        log.warning("Could not read update description", exc_info=True)
+        return None
 
 
 @contextlib.contextmanager
@@ -433,10 +458,21 @@ def runtime_status(status: Dict[str, Any]) -> Dict[str, Any]:
     Target validation belongs to git_ops_updates, including a consumed target.
     This reader never fetches or reconstructs that cache's authority.
     """
-    from ouroboros.server_process import server_source_baseline
-    from ouroboros.update_generation_facts import projection
+    try:
+        from ouroboros.server_process import server_source_baseline
 
-    return {**status, "running_sha": server_source_baseline(), "after_update": projection()}
+        running = server_source_baseline()
+    except Exception:
+        log.debug("running source unavailable", exc_info=True)
+        running = ""
+    try:
+        from ouroboros.update_generation_facts import projection
+
+        after = projection()
+    except Exception:
+        log.debug("after-update facts unavailable", exc_info=True)
+        after = None
+    return {**status, "running_sha": running, "after_update": after}
 
 
 def _key_from_status(status: Dict[str, Any]) -> Dict[str, str]:
@@ -449,7 +485,7 @@ def _key_from_status(status: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _range_key(candidate: Any) -> Optional[Dict[str, str]]:
-    """A key naming a real, non-empty range, else ``None``."""
+    """A key of two different SHAs, else ``None``; its Git range may still be empty (a merge holding its target)."""
     if not isinstance(candidate, dict):
         return None
     key = {field: str(candidate.get(field) or "") for field in _KEY_FIELDS}
@@ -458,6 +494,11 @@ def _range_key(candidate: Any) -> Optional[Dict[str, str]]:
 
 def _same_range(key: Optional[Dict[str, Any]], base_sha: str, target_sha: str) -> bool:
     return bool(key) and (key.get("base_sha"), key.get("target_sha")) == (base_sha, target_sha)
+
+
+def _has_description(record: Dict[str, Any], key: Dict[str, str]) -> bool:
+    shown, text, _ = shown_letter(record)
+    return bool(text) and _same_range(shown.get("key"), key["base_sha"], key["target_sha"])
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +538,7 @@ def _record_check(status: Dict[str, Any], drive_root: Optional[pathlib.Path], gi
     key = _key_from_status(status)
     checkout_sha = str(status.get("current_sha") or "")
     running_sha = str(status.get("running_sha", key["base_sha"]) or "")
-    before = read_record(drive_root) or {}
+    before = read_record(drive_root, strict=True) or {}
     no_update = (not key["target_sha"] or key["base_sha"] == key["target_sha"]
                  or (not status.get("available") and key["base_sha"] == checkout_sha))
     facts: Dict[str, Any] = {}
@@ -537,7 +578,7 @@ def _record_check(status: Dict[str, Any], drive_root: Optional[pathlib.Path], gi
 
     facts["post_merge_reds"] = post_merge_reds(str(status.get("official_repo_url") or ""))
     with _record_lock(drive_root):
-        current = read_record(drive_root)
+        current = read_record(drive_root, strict=True)
         record = _with_check_facts(current, key, facts, running_sha=running_sha, checkout_sha=checkout_sha,
                                    target_version=target_version)
         if material is not None and (material.get("commits") or material.get("releases")):
@@ -632,14 +673,16 @@ def _safe_text(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def legal_ranges(record: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """The ranges a description may name: the one the last check offered, the shown
-    description's own (a rephrase, an applied update's included), and the one the owner's
-    latest request named. Anything else would label text with a range nobody offered."""
+    """Ranges already offered: the last check, retained material, shown text and request.
+    Each names two different SHAs whose Git range may be empty (a merge holding its target);
+    retained material still names the update just consumed."""
     record = record or {}
     provenance, text, _last_good = shown_letter(record)
     request = record.get("request") if isinstance(record.get("request"), dict) else {}
     keys: List[Dict[str, str]] = []
-    for key in map(_range_key, (record.get("checked_key"), provenance.get("key") if text else None, request.get("key"))):
+    material = record.get("material") if isinstance(record.get("material"), dict) else {}
+    for key in map(_range_key, (record.get("checked_key"), material.get("key"),
+                                provenance.get("key") if text else None, request.get("key"))):
         if key and not any(_same_range(known, key["base_sha"], key["target_sha"]) for known in keys):
             keys.append(key)
     return keys
@@ -650,11 +693,11 @@ def save_description(text: str, base_sha: str, target_sha: str, expected_revisio
     """Save one description for one exact range; returns a typed outcome, never raises for a
     refusal. ``author`` is host-derived (``task_id``, ``model``). The writer is the owner's
     recorded request when its task is that request's own work — the requested task, a host
-    retry of it or a recorded Continue (``_acts_for``) — and the request keeps that it saved
+    retry of it or a recorded Continue — and the request keeps that it saved
     (``request_saved``) when a later description replaces this one.
 
     ``revision_conflict``: someone saved since the caller read ``expected_revision`` — the
-    newer text stays. ``range_not_offered``: the range is none of ``legal_ranges``.
+    newer text stays. ``range_not_offered``: the range is outside the request or the independent writer's offers.
     ``saved`` carries the replaced description whole, so the writer's own durable tool
     record keeps it.
     """
@@ -673,26 +716,31 @@ def save_description(text: str, base_sha: str, target_sha: str, expected_revisio
               if stored and _same_range(stored.get("key"), base_sha, target_sha) else {})
     task_id, model = str(author.get("task_id") or ""), str(author.get("model") or "")
     # Task results are read before the lock, like Git; the request is compared on write.
-    asked = _request_task_id(read_record(drive_root))
-    acts_for = asked if _acts_for(drive_root, asked, task_id) else ""
+    latest = (read_record(drive_root, strict=True) or {}).get("request")
+    try:
+        bound = _writer_request(record_path(drive_root).parent.parent, task_id, latest,
+                                expect_lineage=bool(author.get("expect_lineage")))
+    except Exception as exc:
+        raise RecordUnreadable("The writing task's original request could not be established") from exc
     with _record_lock(drive_root):
-        current = read_record(drive_root) or {}
+        current = read_record(drive_root, strict=True) or {}
         revision = _revision(current)
         shown, shown_text, _last_good = shown_letter(current) if current else ({}, "", None)
         if expected_revision != revision:
             return {"outcome": "revision_conflict", "revision": revision,
                     "saved": _public_description(shown, shown_text)}
-        key = next((k for k in legal_ranges(current) if _same_range(k, base_sha, target_sha)), None)
+        if current.get("request") != latest:
+            raise RecordUnreadable("The description request changed during the save")
+        offered = [bound["key"]] if bound else legal_ranges(current)
+        key = next((k for k in offered if _same_range(k, base_sha, target_sha)), None)
         if key is None:
-            return {"outcome": "range_not_offered", "revision": revision, "legal_ranges": legal_ranges(current)}
-        asked = _request_task_id(current)
-        requested = bool(asked) and asked in (task_id, acts_for)
+            return {"outcome": "range_not_offered", "revision": revision, "legal_ranges": offered}
         record = {**current, "schema": 1, "key": key, "state": "ready", "text": body, "revision": revision + 1,
                   "author_version": get_version(), "target_version": target_version, "model": model,
-                  "author": {"task_id": task_id, "model": model, "requested": requested},
+                  "author": {"task_id": task_id, "model": model, "requested": bool(bound)},
                   "written_at": utc_now_iso(), "source": source, "error_kind": "", "error_text": "",
                   "attempt_id": "", "attempt_ids": [], "last_good": None,
-                  **({"request_saved": asked} if requested else {})}
+                  **({"request_saved": bound["task_id"]} if bound and bound == latest else {})}
         atomic_write_json(record_path(drive_root), record)
     return {"outcome": "saved", "revision": record["revision"], "key": key, "written_at": record["written_at"],
             "replaced": _public_description(shown, shown_text)}
@@ -708,53 +756,90 @@ def _public_description(provenance: Dict[str, Any], text: str) -> Optional[Dict[
 
 def request_description(mode: str, base_sha: str, target_sha: str, *, admit: Callable[[str, str, Dict[str, Any]], str],
                         drive_root: Optional[pathlib.Path] = None) -> Dict[str, Any]:
-    """Admit ONE ordinary Main task that writes (or rewrites) the description of an offered
-    range, then record it as the owner's latest request.
+    """Record the owner's request for an offered range, then admit one ordinary Main writer.
 
     ``admit(task_id, text, metadata)`` is the producer's own admission (the gateway passes the
     queue's receipt-bearing enqueue) and returns ``""`` or the refusal reason. The task id is
     minted here, never derived from content. A request whose task has not ended refuses a
     second one; nothing repeats on its own after a stop, a failure or an unknown end.
     """
-    import uuid
-
     if mode not in ("write", "rewrite"):
         raise ValueError("mode must be write or rewrite")
+    return _admit_request({"base_sha": base_sha, "target_sha": target_sha}, mode, admit, drive_root)
+
+
+def request_latest(status: Dict[str, Any], *, admit: Callable[[str, str, Dict[str, Any]], str],
+                   drive_root: Optional[pathlib.Path] = None) -> Dict[str, Any]:
+    """The owner's Check and describe, after its own fetching check ``status``: that check's
+    update on offer (``_key_from_status``, all four fields; never the record a failed fact
+    write handed back) is described at most once.
+
+    A shown text of exactly that range is reused (``current``). A request whose task can still
+    save answers ``writing`` with its own range, which may be an earlier update than the one
+    found: each press finishes the package it found, and only a press after that task ends asks
+    for the newer one. Otherwise ONE ordinary task is admitted as ``request_description`` admits
+    it (``queued``). ``checked_key`` names what this check found in every answer; nothing is
+    cancelled, retried or chased on its own. ``range_unavailable``: an update on offer whose
+    starting and target revisions are not both known and distinct.
+    """
+    if status.get("check_ok") is not True:
+        return {"outcome": "check_failed", "checked_key": None}
+    if not status.get("available"):
+        return {"outcome": "no_update", "checked_key": None}
+    found = _range_key(_key_from_status(status))
+    if found is None:
+        return {"outcome": "range_unavailable", "checked_key": None}
+    return {**_admit_request(found, "latest", admit, drive_root), "checked_key": found}
+
+
+def _admit_request(key: Dict[str, str], mode: str, admit: Callable[[str, str, Dict[str, Any]], str],
+                   drive_root: Optional[pathlib.Path]) -> Dict[str, Any]:
+    """Read task status outside the record lock. Decide against the text and revision inside it,
+    then admit with that same record as the author's input."""
+    import uuid
+
     with _REQUEST_FLIGHT:
-        current = read_record(drive_root) or {}
-        provenance, text, _last_good = shown_letter(current) if current else ({}, "", None)
-        offered = [_range_key(current.get("checked_key")), _range_key(provenance.get("key")) if text else None]
-        key = next((k for k in offered if k and _same_range(k, base_sha, target_sha)), None)
-        if key is None:
-            return {"outcome": "range_not_offered", "legal_ranges": [k for k in offered if k]}
-        prior = _request_view(current, drive_root, with_status=True)
-        if prior and prior["status"] in _LIVE_TASK_STATUSES:
-            return {"outcome": "in_flight", "task_id": prior.get("current_task_id", prior["task_id"]), "status": prior["status"]}
-        task_id = uuid.uuid4().hex[:8]
-        request = {"task_id": task_id, "mode": mode, "key": key, "requested_at": utc_now_iso(),
-                   "revision_at_request": _revision(current)}
-        # Recorded before admission, so the task's own save already finds itself requested;
-        # a refused admission puts the previous request back.
-        _swap_request(drive_root, request, expected=current.get("request"))
-        refusal = admit(task_id, author_request_text(current, request), {"update_description": dict(request)})
+        before = read_record(drive_root, strict=True) or {}
+        if mode == "latest" and _has_description(before, key):
+            return {"outcome": "current", "key": key}
+        prior = _request_view(before, drive_root, with_status=True)
+        with _record_lock(drive_root):
+            record = read_record(drive_root, strict=True)
+            if mode != "latest":
+                offered = legal_ranges({**(record or {}), "request": None})
+                named = next((k for k in offered if _same_range(k, key["base_sha"], key["target_sha"])), None)
+                if named is None:
+                    return {"outcome": "range_not_offered", "legal_ranges": offered}
+                key = named
+            elif record and _has_description(record, key):
+                return {"outcome": "current", "key": key}
+            if record is None or record.get("request") != before.get("request"):
+                return {"outcome": "refused", "reason": "request_not_recorded"}
+            if prior and prior["status"] == "unknown":
+                return {"outcome": "refused", "reason": "task_status_unknown",
+                        "task_id": prior["current_task_id"], "status": "unknown"}
+            if prior and prior["status"] in _LIVE_TASK_STATUSES:
+                return {"outcome": "writing" if mode == "latest" else "in_flight",
+                        "task_id": prior["current_task_id"], "status": prior["status"], "key": prior["key"]}
+            task_id = uuid.uuid4().hex[:8]
+            request = {"task_id": task_id, "mode": "write" if mode == "latest" else mode, "key": key,
+                       "requested_at": utc_now_iso(), "revision_at_request": _revision(record)}
+            atomic_write_json(record_path(drive_root), {**record, "request": request})
+        refusal = admit(task_id, author_request_text(record, request), {"update_description": dict(request)})
         if refusal:
-            _swap_request(drive_root, current.get("request"), expected=request)
+            with _record_lock(drive_root):
+                latest = read_record(drive_root, strict=True)
+                if latest and latest.get("request") == request:
+                    latest.pop("request")
+                    if record.get("request"):
+                        latest["request"] = record["request"]
+                    atomic_write_json(record_path(drive_root), latest)
             return {"outcome": "refused", "reason": refusal}
-    return {"outcome": "queued", "task_id": task_id, "key": key}
+        return {"outcome": "queued", "task_id": task_id, "key": key}
 
 
-def _swap_request(drive_root: Optional[pathlib.Path], request: Any, *, expected: Any) -> None:
-    """Replace the recorded request only while it is still ``expected``. Request writers are
-    serialized by ``_REQUEST_FLIGHT``; the lock keeps a concurrent description write whole."""
-    with _record_lock(drive_root):
-        latest = read_record(drive_root)
-        if latest is not None and latest.get("request") == expected:
-            latest.pop("request", None)
-            atomic_write_json(record_path(drive_root), {**latest, **({"request": request} if request else {})})
-
-
-# Task statuses during which a request holds the door: its task may still save. Every other
-# answer — an end, a missing or an unreadable result — lets the owner ask again explicitly;
+# Known live tasks hold the door; an unreadable status refuses another author without
+# claiming liveness. A confirmed end or absence from both results and queue permits a new explicit request;
 # the revision every writer compares keeps a late author from erasing a newer description.
 _LIVE_TASK_STATUSES = frozenset({"requested", "scheduled", "running", "interrupted", "cancel_requested"})
 
@@ -764,17 +849,83 @@ def _request_task_id(record: Optional[Dict[str, Any]]) -> str:
     return str(request.get("task_id") or "") if isinstance(request, dict) else ""
 
 
-def _acts_for(drive_root: Optional[pathlib.Path], task_id: str, actor_task_id: str) -> bool:
-    """Whether ``actor_task_id`` is ``task_id``'s own work, by the existing owner of that question
-    (the task itself, its host retry attempts, recorded Continue claims). Unreadable lineage is no."""
-    from ouroboros.owner_quiz import question_task_owned_by
+def _writer_request(root: pathlib.Path, actor: str, latest: Optional[dict], *, expect_lineage: bool) -> Optional[dict]:
+    """Resolve the actor back to its own host admission. Read errors never confer independent authorship."""
+    from ouroboros.owner_continue import binding_sha
+    from ouroboros.task_results import load_task_result, resolve_task_lineage
 
-    try:
-        return bool(task_id and actor_task_id) and question_task_owned_by(
-            record_path(drive_root).parent.parent, task_id, actor_task_id)
-    except Exception:  # noqa: BLE001 — authorship that cannot be proven is not claimed
-        log.debug("update description request lineage unreadable", exc_info=True)
-        return False
+    rows = {}
+
+    def read(task_id):
+        if task_id not in rows:
+            rows[task_id] = load_task_result(root, task_id, strict=True)
+        return rows[task_id]
+
+    def claimed(predecessor):
+        claim = (read(predecessor) or {}).get("continued_by")
+        if not claim:
+            return {}
+        edge = claim["binding"]
+        if (edge.get("predecessor_task_id") != predecessor or not edge.get("successor_task_id")
+                or edge["successor_task_id"] != claim.get("successor_task_id")
+                or binding_sha(edge) != claim.get("binding_sha256")):
+            raise ValueError("unconfirmed Continue claim")
+        return edge
+
+    current, seen = actor, set()
+    while current and current not in seen:
+        seen.add(current)
+        if latest and current == latest["task_id"]:
+            return latest
+        row = read(current)
+        if row is None:
+            # A bound Continue can precede its own row. The latest request's forward claims can
+            # still establish authorship; a failed read cannot become an independent save.
+            predecessor = (latest or {}).get("task_id")
+            walked = set()
+            while predecessor and (edge := claimed(predecessor)):
+                walked.add(predecessor)
+                predecessor = edge["successor_task_id"]
+                if predecessor == current:
+                    return latest
+                if predecessor in walked:
+                    raise ValueError("cyclic Continue claims")
+            if current != actor or expect_lineage:
+                raise ValueError("missing writer lineage")
+            return None
+        if row.get("api_admission"):  # this door accepts caller-supplied metadata
+            return None
+        meta = row.get("metadata") or {}
+        lineage = resolve_task_lineage(current, metadata=meta, **{k: row.get(k) for k in (
+            "root_task_id", "parent_task_id", "delegation_role", "original_task_id", "timeout_retry_from")})
+        if lineage["is_retry_root_attempt"]:
+            parent = lineage["original_task_id"]
+            prior = read(parent) or {}
+            if prior.get("superseded_by") != current or prior.get("retry_task_id") != current:
+                raise ValueError("unconfirmed retry predecessor")
+            current = parent
+        elif admission := row.get("continuation_admission"):
+            binding = admission["binding"]
+            parent = binding["predecessor_task_id"]
+            if (binding.get("successor_task_id") != current or admission.get("binding_sha256") != binding_sha(binding)
+                    or claimed(parent) != binding):
+                raise ValueError("unconfirmed Continue predecessor")
+            current = parent
+        elif (request := meta.get("update_description")) is not None:
+            receipt = row.get("host_admission") or {}
+            if (request.get("task_id") != current or row.get("root_task_id") != current
+                    or receipt.get("status") != "accepted" or not receipt.get("token")
+                    or not _range_key(request.get("key"))):
+                raise ValueError("unconfirmed description admission")
+            return request
+        elif (meta.get("continuation") or row.get("supersedes_task_id") or lineage["timeout_retry_from"]
+              or current == actor and expect_lineage):
+            raise ValueError("incomplete writer lineage")
+        else:
+            return None
+    if current or expect_lineage:
+        raise ValueError("invalid writer lineage")
+    return None
 
 
 def _request_view(record: Optional[Dict[str, Any]], drive_root: Optional[pathlib.Path], *,
@@ -794,25 +945,47 @@ def _request_view(record: Optional[Dict[str, Any]], drive_root: Optional[pathlib
         from ouroboros.task_status import effective_task_result
 
         root = record_path(drive_root).parent.parent
+        current, seen = task_id, set()
         try:
-            current, seen = task_id, set()
             while current not in seen:
                 seen.add(current)
                 stored = load_task_result(root, current, strict=True)
-                effective = effective_task_result(root, stored, materialize_artifacts=False) if isinstance(stored, dict) else {}
-                current = str(effective.get("task_id") or current)
-                successor = admitted_successor(root, current)
-                if not successor:
+                if stored is None:
+                    view["status"] = _status_without_result(root, current)
                     break
-                current = successor
+                effective = effective_task_result(root, stored, materialize_artifacts=False)
+                current = str(effective.get("task_id") or current)
+                if effective.get("continued_by"):
+                    successor = admitted_successor(root, current)
+                    if not successor:
+                        raise ValueError("recorded Continue admission could not be confirmed")
+                    current = successor
+                    continue
+                view["status"] = str(effective.get("status") or "unknown")
+                # A Stop still being carried out rides beside the honest status (task_status's cancel projection).
+                if str(effective.get("cancel_state") or "") == "pending":
+                    view["cancel_state"] = "pending"
+                break
             else:
                 raise ValueError("cyclic description task continuation")
-            view["current_task_id"] = current
-            view["status"] = str(effective.get("status") or "unknown") if effective else "missing"
         except Exception:  # noqa: BLE001 — an unreadable result is an unknown status, never an end
             view["status"] = "unknown"
+        view["current_task_id"] = current
         view["saved"] = str(record.get("request_saved") or "") == task_id
     return view
+
+
+def _status_without_result(root: pathlib.Path, task_id: str) -> str:
+    """A host admission can retain the queue row after a failed receipt readback."""
+    from supervisor import queue
+    from supervisor.owner_pause_control import _locate_root_locked
+    from supervisor.queue_snapshot import saved_queue_unowned
+
+    if not queue.owns_live_queue(root) or saved_queue_unowned(require_readable=True):
+        return "unknown"
+    with queue._queue_lock:
+        _, lane = _locate_root_locked(queue, task_id)
+    return {"pending": "scheduled", "running": "running", "direct": "running", "": "missing"}[lane]
 
 
 def author_request_text(record: Dict[str, Any], request: Dict[str, Any]) -> str:
@@ -823,10 +996,18 @@ def author_request_text(record: Dict[str, Any], request: Dict[str, Any]) -> str:
     shown, text, _last_good = shown_letter(record) if record else ({}, "", None)
     shown_key = shown.get("key") or {}
     target_version = _target_version(record, target) if record else ""
-    saved = ("" if not text else "A description of this range is already saved (query_data(op=\"json\", kind=\"update_letter\", "
-             "select=\"text\")); my human asked for a new one, so read the range again rather than restating it. "
-             if _same_range(shown_key, base, target) else f"The saved description covers another range "
-             f"({shown_key.get('base_sha', '')}..{shown_key.get('target_sha', '')}); it stays until this one is saved. ")
+    older = str(shown_key.get("target_sha") or "")
+    if not text:
+        saved = ""
+    elif _same_range(shown_key, base, target):
+        saved = ("A description of this range is already saved (query_data(op=\"json\", kind=\"update_letter\", "
+                 "select=\"text\")); my human asked for a new one, so read the range again rather than restating it. ")
+    else:
+        saved = (f"The saved description covers another range ({shown_key.get('base_sha', '')}..{older}); it stays "
+                 "until this one is saved. ")
+        if older and shown_key.get("base_sha") == base:  # the delta may be all a writer needs; the writer judges
+            saved += (f"If {older} is an ancestor of {target}, that text plus the commits {older}..{target} may be all "
+                      "I need; that is my call. ")
     return (
         "[UPDATE DESCRIPTION REQUEST]\n"
         f"My human asked me in Dashboard → Updates to {'rewrite' if request['mode'] == 'rewrite' else 'write'} "
@@ -834,9 +1015,17 @@ def author_request_text(record: Dict[str, Any], request: Dict[str, Any]) -> str:
         f"(channel {key.get('update_channel') or 'unknown'}, ref {key.get('target_ref') or 'unknown'}"
         + (f", target version {target_version}" if target_version else "") + "). "
         + saved + "\n\n" + _request_sources(record, key) + "\n\n"
-        "Write it for my human: what changes for them and for me once this update is applied, in the language we use "
-        "together, as long and as structured as the change needs. Say honestly what was not verified where it matters; "
-        "promise nothing about how applying will go. Save it with record_update_description("
+        "Write it for my human: what this update changes for them and for me, as consequences in plain words, neither "
+        "softened nor padded, in the language we use together and as long and as structured as the change needs; they "
+        "ask when they want more. I read the sources this range needs and save as soon as they support a complete "
+        "explanation; the panel shows it at that save, so no optional check, critique or helper comes before it and no "
+        "further round is required after it, while a later save may still refine it with the revision the first returned. "
+        "It explains the update so my human can decide; "
+        "it is not a release audit and adds no check status, verification caveat or advice to wait or to apply, and a "
+        "question about installing gets its own answer. A recorded test or review is not by itself a PASS, and I promise "
+        "nothing about how applying will go. A helper I involve receives what it must read as files through input_files "
+        "(a read saved with save_as, or diffs I saved), with the exact range and how to read further in its "
+        "order; one that should run Git needs repository access of its own. Save it with record_update_description("
         f"base_sha=\"{base}\", target_sha=\"{target}\", expected_revision={request['revision_at_request']}, text=...), "
         "or text_file={\"root\": ..., \"path\": ...} in place of text for a Markdown file you wrote "
         "— enable it with enable_tools if it is not loaded. If it refuses because a newer description was saved, read "
@@ -859,15 +1048,23 @@ def _request_sources(record: Dict[str, Any], key: Dict[str, str]) -> str:
         budget = min(size, MAX_BYTES) if type(size) is int and size > 0 else MAX_BYTES
         sources = (f"Sources: query_data(op=\"json\", kind=\"update_material\", select=\"text\", max_bytes={budget}) "
                    "holds every commit of this range with the bodies it could read, the first-parent integrations, "
-                   "README release rows, local history that is not part of the target, and how to read further. When a "
-                   "message does not say what changed, read the change itself with vcs_read(root=\"system_repo\", ...).")
+                   "README release rows, local history that is not part of the target, and how to read further; with "
+                   f"format=\"text\", save_as=\"update-material-{base[:8]}-{target[:8]}.txt\" the same read also keeps "
+                   "its exact text as a file in my artifact_store. After reading or exporting, verify the material’s "
+                   f"full range is {base}..{target} before using it or giving it to a helper. A later check can "
+                   "replace this mutable material: if it moved, or the read refuses its byte budget, use the exact "
+                   "Git range below instead; never substitute the newer range or a partial read. When a message "
+                   "does not establish what my human will "
+                   "notice, read that change itself with vcs_read(root=\"system_repo\", ...).\n"
+                   + READ_RECIPE.format(base=base, target=target))
     else:
         stored = _range_text(pointer.get("key"))
         sources = ((f"The stored update material covers {stored}, not this range" if stored else
                     "No update material is stored") + "; read this range in the repository.\n"
                    + READ_RECIPE.format(base=base, target=target))
     if _same_range(facts, base, target):
-        return f"{sources}\n{CHECK_FACTS}"
+        return (f"{sources}\n{CHECK_FACTS} The panel already shows these recorded checks beside the description, so "
+                "retelling them is not required.")
     stored = _range_text(facts)
     return f"{sources}\nNo check facts for this range are recorded{f' (the recorded ones cover {stored})' if stored else ''}."
 
@@ -921,14 +1118,14 @@ def project_letter(
     both readers. Nothing here infers it from ``latest_sha``, which a passive read leaves
     empty exactly when the cached target has been consumed. ``description_current`` compares
     ranges only: a new post-merge run is a fact about the same range, never a stale text.
-    A record without a description projects only while it carries something to act on (an
-    offered range or a request); ``request`` is the caller's ``_request_view``.
+    A record without a description projects only while it carries something to act on (a
+    range ``legal_ranges`` names or a request); ``request`` is the caller's ``_request_view``.
     """
     if not record:
         return None
     provenance, text, last_good = shown_letter(record)
     if record.get("state") in ("none", None, ""):
-        if not _range_key(record.get("checked_key")) and not request:
+        if not legal_ranges(record) and not request:
             return None
         provenance, text = {}, ""
     key = provenance.get("key") if isinstance(provenance.get("key"), dict) else {}
@@ -986,7 +1183,7 @@ def project_letter_for_panel(
     movement from claiming server adoption. No git runs on either read path; the panel
     alone reads the request's task status (one result file).
     """
-    record = read_record(drive_root)
+    record = read_record(drive_root, strict=True)
     if record and "running_sha" in status:
         record = {**record, "checked_head_sha": record.get("checked_running_sha"),
                   "target_in_head": record.get("target_in_running", False)}

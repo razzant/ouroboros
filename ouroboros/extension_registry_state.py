@@ -373,6 +373,21 @@ def list_routes() -> Dict[str, Any]:
         return {k: dict(v) for k, v in _routes.items()}
 
 
+def companion_process_names(bundle: Optional[_ExtensionRegistrations]) -> List[str]:
+    """Names registered for server supervision, including registrations recorded by a worker."""
+    if bundle is None:
+        return []
+    names = []
+    for raw in bundle.companion_names:
+        name = str(raw or "").strip()
+        if name.startswith("task:"):
+            continue
+        name = name.removeprefix("worker-skip:").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def list_companion_names() -> List[str]:
     """Return host-spawnable companion names across loaded extensions.
 

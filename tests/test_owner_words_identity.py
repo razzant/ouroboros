@@ -367,6 +367,243 @@ def test_a_drafted_start_and_a_continue_successor_read_their_origin_once(tmp_pat
     assert [(row["source"], row["ref"], row["ts"]) for row in rows] == [("origin_message", "chat 1 / msg-o", stored["ts"])]
 
 
+def test_a_selected_source_and_the_door_keep_their_own_identities_for_two_generations(tmp_path):
+    """``start_task(owner_source=...)``: the selected message opens the start under its own room, client id and time,
+    the run's own door message stays beside it under its own, and another held message keeps its own, in the carried
+    corpus and in the start record's every reader. A second start from that work selects a third message: each of the
+    three keeps its identity there too, none takes the record's origin stamp (``_corpus_carrier``)."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.tools.tool_context import ToolContext
+
+    a = _stored(tmp_path, "Draw a diagram of the garden beds", "msg-a", ts="2024-04-08T13:20:00+00:00")
+    b = _stored(tmp_path, "Check the totals in the seed table", "msg-b", ts="2024-04-08T13:45:00+00:00")
+    c = _stored(tmp_path, "1. Use blue and gold", "msg-c", ts="2024-04-09T10:14:00+00:00")
+    ref_a, _words = owner_row_source(a)
+    main = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="main0001", current_task_type="task",
+                       task_metadata={"origin_message_ref": ref_a, "origin_message_text": a["text"]})
+    main._owner_directives = [{"source": "initial_user", "content": a["text"]},
+                              {"source": "owner_mailbox", "content": b["text"], "msg_id": "mail-b",
+                               "client_message_id": "msg-b", "chat_id": "1", "ts": b["ts"]}]
+    ref_b, words_b = owner_row_source(b)
+    corpus = ow.carried_owner_corpus(main, words_b, source=b)
+    identity = [(row["source"], row.get("client_message_id"), row.get("ts"), row["content"]) for row in corpus]
+    assert identity == [("origin_message", "msg-b", b["ts"], b["text"]), ("origin_message", "msg-a", a["ts"], a["text"])]
+    assert main._owner_directives[0] == {"source": "initial_user", "content": a["text"]}, "the run's own corpus stays"
+    assert ow.carried_owner_corpus(main, a["text"]) == [  # without a selection the door opens the start as before
+        {"client_message_id": "msg-a", "chat_id": "1", "ts": a["ts"], "row_sha256": ref_a["row_sha256"],
+         "source": "origin_message", "content": a["text"]},
+        {k: v for k, v in main._owner_directives[1].items()}]
+    assert [row.get("client_message_id") for row in ow.carried_owner_corpus(main, a["text"], source=a)] == [
+        "msg-a", "msg-b"], "normalize the door before deduplication, even when selecting that same opening"
+
+    first = {"id": "gen1", "origin_message_ref": ref_b, "origin_message_text": words_b,
+             "metadata": {"objective_author": {"kind": "task", "task_id": "main0001"}, "owner_corpus": corpus}}
+    rows, _absent = ow.task_owner_words(tmp_path, "gen1", task=first)
+    assert [(row["ref"], row["ts"], row["text"]) for row in rows] == [
+        ("chat 1 / msg-b", b["ts"], b["text"]), ("chat 1 / msg-a", a["ts"], a["text"])]
+    worker = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="gen1", current_task_type="task",
+                         task_metadata={**first["metadata"], "origin_message_ref": ref_b, "origin_message_text": words_b})
+    _initialize_owner_directives(worker, [{"role": "user", "content": "Check the seed table totals"}])
+    assert [(row["ref"], row["text"]) for row in ow.directive_owner_rows(worker)] == [
+        ("chat 1 / msg-b", b["text"]), ("chat 1 / msg-a", a["text"])]
+    inherited = ow.carried_owner_corpus(worker, words_b)
+    assert [(row.get("client_message_id"), row["ts"], row["content"]) for row in inherited] == [
+        ("msg-b", b["ts"], words_b), ("msg-a", a["ts"], a["text"])]
+
+    ref_c, words_c = owner_row_source(c)
+    second_corpus = ow.carried_owner_corpus(worker, words_c, source=c)
+    assert [(row.get("client_message_id"), row["content"]) for row in second_corpus] == [
+        ("msg-c", c["text"]), ("msg-b", b["text"]), ("msg-a", a["text"])]
+    second = {"id": "gen2", "origin_message_ref": ref_c, "origin_message_text": words_c,
+              "metadata": {"objective_author": {"kind": "task", "task_id": "gen1"}, "owner_corpus": second_corpus}}
+    rows, _absent = ow.task_owner_words(tmp_path, "gen2", task=second)
+    assert [(row["ref"], row["ts"], row["text"]) for row in rows] == [
+        ("chat 1 / msg-c", c["ts"], c["text"]), ("chat 1 / msg-b", b["ts"], b["text"]),
+        ("chat 1 / msg-a", a["ts"], a["text"])]
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["named", "legacy"])
+@pytest.mark.parametrize("door", ["turn_id", "no_identity"])
+def test_a_suppressed_first_message_keeps_its_words_and_never_takes_the_selected_identity(tmp_path, door, legacy):
+    """My human's first message never logged (``origin_suppressed``): an owner turn still has the id its door stamped
+    on the turn (``turn_id``); a root a direct repair request started has none at all (``no_identity``, the
+    ``/api/command`` door without a control). The run selects B: the first message's words ride beside B under that
+    turn id, or with no identity, never under B's, and the new work reads them as their own message, not its opening."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.tools.tool_context import ToolContext
+
+    first = "Draw the garden diagram without logging this"
+    b = _stored(tmp_path, "Check the totals in the seed table", "msg-b", ts="2024-04-08T13:45:00+00:00")
+    if legacy:
+        b = ds.append(tmp_path, "chat", {"direction": "in", "chat_id": 1, "text": first,
+                                       "ts": "2024-04-08T13:47:00+00:00"}).row
+    metadata = {"origin_suppressed": True, **({"client_message_id": "turn-a"} if door == "turn_id" else {})}
+    main = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="main0001", current_task_type="task",
+                       task_metadata=metadata)
+    main.current_chat_id = 1
+    main._owner_directives = [{"source": "initial_user", "content": first}]
+    ref_b, words_b = owner_row_source(b)
+    corpus = ow.carried_owner_corpus(main, words_b, source=b)
+    carried = {"turn_id": {"client_message_id": "turn-a", "chat_id": "1", "source": "origin_message", "content": first},
+               "no_identity": {"source": "initial_user", "carried": True, "content": first}}[door]
+    selected_ids = {"msg_id": format_address(row_address(b))} if legacy else {"client_message_id": "msg-b"}
+    selected_ref = format_address(row_address(b)) if legacy else "chat 1 / msg-b"
+    assert corpus == [{**selected_ids, "chat_id": "1", "ts": b["ts"], "row_sha256": ref_b["row_sha256"], "source": "origin_message",
+                       "content": b["text"]}, carried]
+    record = {"id": "gen1", "origin_message_ref": ref_b, "origin_message_text": words_b,
+              "metadata": {"objective_author": {"kind": "task", "task_id": "main0001"}, "owner_corpus": corpus}}
+    rows, _absent = ow.task_owner_words(tmp_path, "gen1", task=record)
+    first_ref = "chat 1 / turn-a" if door == "turn_id" else ""
+    assert [(row["ref"], row["text"]) for row in rows] == [(selected_ref, b["text"]), (first_ref, first)]
+    worker = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="gen1", current_task_type="task",
+                         task_metadata={**record["metadata"], "origin_message_ref": ref_b, "origin_message_text": words_b})
+    _initialize_owner_directives(worker, [{"role": "user", "content": "Check the seed table totals"}])
+    assert [(row["ref"], row["text"]) for row in ow.directive_owner_rows(worker)] == [
+        (selected_ref, b["text"]), (first_ref, first)], "never under B's identity, never in B's words"
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["addressed", "legacy"])
+def test_a_continue_successor_that_selects_another_message_keeps_its_original_under_its_own_identity(tmp_path, legacy):
+    """A Continue successor reads its original as its own opening. The current corpus stamps it; a legacy corpus
+    needs its opening reference to supply the ids. Starting separate work on C never gives the original C's ids."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_corpus_rows
+    from ouroboros.owner_relay import held_owner_messages, owner_row_source
+    from ouroboros.tools.tool_context import ToolContext
+
+    b = _stored(tmp_path, "Check the totals in the seed table", "msg-b", ts="2024-04-08T13:45:00+00:00")
+    c = _stored(tmp_path, "1. Use blue and gold", "msg-c", ts="2024-04-09T10:14:00+00:00")
+    ref_b, words_b = owner_row_source(b)
+    original = {"source": "origin_message", "content": words_b}
+    corpus = [original] if legacy else owner_corpus_rows({"original": {**original, "origin_message_ref": ref_b}, "later": []})
+    if not legacy:
+        assert corpus == [{**original, "chat_id": "1", "client_message_id": "msg-b", "ts": b["ts"],
+                           "row_sha256": ref_b["row_sha256"]}]
+    successor = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="succ0001", current_task_type="task",
+                            task_metadata={"origin_message_ref": ref_b, "origin_message_text": words_b, "owner_corpus": corpus,
+                                           "objective_author": {"kind": "continuation", "predecessor_task_id": "gen1"}})
+    _initialize_owner_directives(successor, [{"role": "user", "content": "[CONTINUE] ..."}])
+    from ouroboros.owner_relay import retain_owner_message
+    assert retain_owner_message(successor, c) and len(held_owner_messages(successor)) == 2
+    ref_c, words_c = owner_row_source(c)
+    started = ow.carried_owner_corpus(successor, words_c, source=c)
+    assert [(row["source"], row.get("client_message_id"), row.get("ts"), row["content"]) for row in started] == [
+        ("origin_message", "msg-c", c["ts"], c["text"]), ("origin_message", "msg-b", b["ts"], b["text"])]
+    record = {"id": "gen2", "origin_message_ref": ref_c, "origin_message_text": words_c,
+              "metadata": {"objective_author": {"kind": "task", "task_id": "succ0001"}, "owner_corpus": started}}
+    rows, _absent = ow.task_owner_words(tmp_path, "gen2", task=record)
+    assert [(row["ref"], row["text"]) for row in rows] == [("chat 1 / msg-c", c["text"]), ("chat 1 / msg-b", b["text"])]
+
+
+def test_shared_client_id_preserves_both_files_through_selection_evidence_and_continue(tmp_path):
+    """Two messages of one room share a client id and differ by their file. Each keeps its own address and its own file
+    where its carrier holds it: the opening's on the door's snapshot, a relayed row's on the row the work holds (its
+    corpus entry is words and physical identity, never the material), then each on the row a start that selects one of
+    them carries, and in a Continue."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_relay import held_owner_messages, inject_relay, origin_snapshot, owner_row_address, owner_row_source
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+    from tests.test_owner_relay import context
+
+    base = {"chat_id": 1, "client_message_id": "table", "direction": "in", "ts": TS, "text": "Table legend"}
+    first, selected = [{**base, "attachments": [{"name": name, "unavailable": "missing"}]}
+                       for name in ("beds.csv", "seeds.csv")]
+    ctx = context(tmp_path)
+    first_ref, words = owner_row_source(first)
+    selected_ref, _ = owner_row_source(selected)
+    ctx.task_metadata = {"origin_message_ref": first_ref, "origin_message_text": words,
+                         "origin_message_snapshot": origin_snapshot(first, tmp_path)}
+    _initialize_owner_directives(ctx, [{"role": "user", "content": words}])
+    for row in (selected, dict(selected)):
+        inject_relay(ctx, {"owner_rows": [row], "source_task_id": "table-room", "text": "Compare both files",
+                           "relay": {"relay_id": "table-note"}}, [])
+    expected = [first_ref["row_sha256"], selected_ref["row_sha256"]]
+    addresses = [owner_row_address(row) for row in (first, selected)]
+    assert [r["row_sha256"] for r in _accept_owner_directives(ctx, None, "table")] == expected
+    rows = ow.directive_owner_rows(ctx)  # the corpus: two messages under their own addresses, in the words they said
+    assert [(r["ref"], r["row_sha256"], r["text"]) for r in rows] == [
+        (address, digest, words) for address, digest in zip(addresses, expected)]
+    assert rows[0]["attachments"] == first["attachments"], "the opening's file rides its door snapshot"
+    assert "attachments" not in rows[1], "a relayed row's corpus entry is its words and identity, never its material"
+    assert held_owner_messages(ctx)[addresses[1]]["attachments"] == selected["attachments"], "its file rides its held row"
+    assert [(r["ref"], r["attachments"]) for r in ow.governing_words_for_schedule(ctx)[ow.FIELD]] == [
+        (address, row["attachments"]) for address, row in zip(addresses, (first, selected))], "a helper inherits both"
+    corpus = ow.carried_owner_corpus(ctx, words, source=selected)
+    assert [(r["row_sha256"], r["attachments"]) for r in corpus] == [
+        (expected[1], selected["attachments"]), (expected[0], first["attachments"])]
+    # An old carried opening had no address. Equal words give it neither this door's identity nor its files.
+    corpus.append({"source": "origin_message", "content": words, "carried": True})
+    record = {"origin_message_ref": selected_ref, "origin_message_text": words,
+              "owner_mailbox": {"rows": [], "read_complete": True}, "metadata": {
+                  "owner_corpus": corpus, "origin_message_snapshot": origin_snapshot(selected, tmp_path)}}
+    rendered, _ = ow.task_owner_words(tmp_path, "next-table", task=record)
+    assert [(r["ref"], r["text"]) for r in rendered] == [(owner_row_address(row), words) for row in (selected, first)] + [("", words)]
+    restored = owner_sources(tmp_path, record, "next-table")
+    assert not restored["gaps"] and restored["original"]["attachments"] == selected["attachments"]
+    assert [(r.get("row_sha256"), r.get("attachments"), r["content"]) for r in restored["later"]] == [
+        (expected[0], first["attachments"], words), (None, None, words)]
+
+
+def test_a_worded_relay_keeps_its_file_named_when_a_different_message_opens_work(tmp_path):
+    from ouroboros.chat_uploads import store_upload
+    from ouroboros.main_context_authority import project_main_task_authority
+    from ouroboros.owner_relay import inject_relay, owner_row_source
+    from tests.test_owner_relay import context
+
+    _, upload = store_upload(b"bed,seeds\nnorth,8\n", "beds.csv", data_dir=tmp_path)
+    relayed = {"chat_id": 1, "client_message_id": "garden-file", "direction": "in", "ts": TS,
+               "text": "Keep the garden table for later.", "attachments": [upload]}
+    chosen = _stored(tmp_path, "Draw a new legend.", "garden-legend", ts="2026-09-30T06:00:00+00:00")
+    ctx = context(tmp_path)
+    inject_relay(ctx, {"owner_rows": [relayed], "source_task_id": "garden-room", "text": "Garden notes",
+                       "relay": {"relay_id": "garden-note"}}, [])
+    ref, words = owner_row_source(chosen)
+    corpus = ow.carried_owner_corpus(ctx, words, source=chosen)
+    view = project_main_task_authority({"origin_message_ref": ref, "origin_message_text": words,
+                                       "metadata": {"objective_author": {"kind": "task", "task_id": ctx.task_id},
+                                                    "owner_corpus": corpus}})
+    [other] = view["task_owner_words"]["rows"]
+    assert other["content"] == relayed["text"]
+    [attachment] = other["attachments"]
+    assert attachment["name"] == "beds.csv" and "not given" in attachment["staged"]
+    assert "upload" not in attachment
+
+
+@pytest.mark.parametrize("conflict", ["words", "files", "missing_stamp"])
+def test_incomplete_seed_instruction_keeps_its_own_reply(tmp_path, conflict):
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_relay import owner_row_source
+    from tests.test_owner_relay import context
+
+    seed = _stored(tmp_path, "Count the seeds", "legend")
+    ref, words = owner_row_source(seed)
+    older = {"source": "origin_message", "content": words, "client_message_id": "legend", "chat_id": "1",
+             "ts": TS, "carried": True, "reply_to": {"address": "garden-plan", "text": "Draw the beds"}}
+    if conflict == "words":
+        older["content"] = "Count the garden beds"
+    elif conflict == "files":
+        older["attachments"] = [{"name": "beds.csv", "unavailable": "missing"}]
+    else:
+        older.pop("ts")
+    ctx = context(tmp_path)
+    ctx._owner_directives = [older]
+    corpus = ow.carried_owner_corpus(ctx, source=seed)
+    opening, retained = corpus
+    assert opening["row_sha256"] == ref["row_sha256"] and "reply_to" not in opening
+    assert retained == older
+    task = {"origin_message_ref": ref, "origin_message_text": words, "metadata": {"owner_corpus": corpus},
+            "owner_mailbox": {"rows": [], "read_complete": True}}
+    rows, _ = ow.task_owner_words(tmp_path, "seed-room", task=task)
+    assert [r["text"] for r in rows if r["source"] != ow.REPLY_TARGET] == [words, older["content"]]
+    restored = owner_sources(tmp_path, task, "seed-room")
+    assert not restored["gaps"] and "reply_to" not in restored["original"]
+    [carried] = restored["later"]
+    assert carried["content"] == older["content"] and carried["reply_to"] == older["reply_to"]
+
+
 def test_the_stored_drafted_root_reads_its_origin_once_through_the_writers_loader(tmp_path):
     """Opus N1 (E3s): the page writer's own record read (``_task_record``) of a drafted start whose context build
     persisted the held copy."""
@@ -484,3 +721,21 @@ def test_cited_owner_basis_accepts_only_my_humans_bytes_that_reached_this_run():
         assert basis is None and error.startswith("owner_words were not found verbatim"), words
     assert ow.cited_owner_basis(ctx, "") == (None, "") and ow.cited_owner_basis(SimpleNamespace(), "x")[0] is None
     assert ow.PLACE_CONFIRMED not in ow.OWNER_SOURCES and "place_owner" in ow.OWNER_SOURCES
+
+
+def test_form_citations_join_only_the_same_submission_and_one_recorded_field():
+    target = {"card_id": "card_0123456789abcdef", "submitted_values": {"from": "elm grove", "to": "reed bed"}}
+    original = {"source": "owner_mailbox", "msg_id": "elm-submission", "source_task_id": "elm-desk",
+                "content": "elm grove\nreed bed", "reply_to": target}
+    cite = {**original, "basis": "cited", "cited": "grove"}
+    for conflict in ({"cited": "grove\nreed"}, {"source": "initial_user"}, {"source_task_id": "reed-desk"},
+                     {"content": "elm grove"}, {"reply_to": {**target, "card_id": "card_fedcba9876543210"}},
+                     {"reply_to": {**target, "submitted_values": {"single": original["content"]}}}):
+        assert ow.merged_corpus([original], [{**cite, **conflict}]) == [original]
+    assert ow.merged_corpus([original], [cite]) == [cite]
+    other = {**cite, "msg_id": "second-elm-submission"}
+    assert ow.merged_corpus([original], [other]) == [original, other]
+    addressed = {**original, "client_message_id": "elm-inbox", "chat_id": "7"}
+    assert ow.merged_corpus([addressed], [{**addressed, **other}]) == [addressed]
+    anonymous = {**original, "msg_id": ""}
+    assert ow.merged_corpus([anonymous], [{**cite, "msg_id": ""}]) == [anonymous]

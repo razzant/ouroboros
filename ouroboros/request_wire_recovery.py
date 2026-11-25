@@ -99,7 +99,7 @@ _NON_COMPATIBILITY_4XX = frozenset({401, 402, 403, 408, 409, 425, 429})
 _NON_COMPATIBILITY_CODE_TOKENS = ("quota", "rate_limit", "billing", "auth", "context", "policy")
 _NON_REASONING_OPTIONAL_FIELDS = tuple(
     field for field in OPTIONAL_REQUEST_FIELDS
-    if field not in {"reasoning_effort", "output_config", "thinking"}
+    if field not in {"reasoning_effort", "reasoning", "output_config", "thinking"}
 )
 _HINT_WITHDRAWAL = {"kind": "drop_field", "fields": ["temperature"], "reason_code": HINT_WITHDRAWAL_REASON}
 
@@ -267,7 +267,7 @@ def _candidate_spec_for_action(
         fields = set(action.get("fields") or ())
         # A withdrawal composes after an earlier dropped carrier, whose payload states no effort.
         if fields & {
-            "reasoning_effort", "thinking", "output_config", NESTED_REASONING_FIELD,
+            "reasoning_effort", "reasoning", "thinking", "output_config", NESTED_REASONING_FIELD,
         } or (not effort and action.get("reason_code") == HINT_WITHDRAWAL_REASON):
             effort = "provider_default"
     return WireCandidateSpec(
@@ -297,7 +297,7 @@ def _bind_with_applications(
             elif action.get("kind") == "drop_field" and set(
                 action.get("fields") or ()
             ) & {
-                "reasoning_effort", "thinking", "output_config",
+                "reasoning_effort", "reasoning", "thinking", "output_config",
                 NESTED_REASONING_FIELD,
             }:
                 effort = "provider_default"
@@ -393,10 +393,11 @@ def _first_durable_action(
 
 
 def _direct_openai_tool_source(
-    target: Mapping[str, Any], payload: Mapping[str, Any],
+    target: Mapping[str, Any], payload: Mapping[str, Any], api_surface: str,
 ) -> bool:
+    """Direct OpenAI Chat's custom-tool rail; a connection on Responses sends its function tools as they are."""
     provider = str(target.get("provider") or "").strip().lower()
-    return provider == "openai" and infer_tool_dialect(payload) == "function" and (
+    return provider == "openai" and api_surface == "chat.completions" and infer_tool_dialect(payload) == "function" and (
         payload_effort(payload) not in {"", "none"}
     )
 
@@ -465,6 +466,7 @@ def _records_for_step(
     carrier = profiles[0].reasoning_carrier
     value_path = {
         "reasoning_effort": "reasoning_effort",
+        "reasoning": "reasoning.effort",
         NESTED_REASONING_FIELD: "extra_body.reasoning.effort",
         "anthropic.adaptive": "output_config.effort",
     }.get(carrier, "")
@@ -587,7 +589,7 @@ def prepare_wire_payload_for_send(
     try:
         candidate = (
             _prepare_direct_openai_candidate(target, detached, api_surface)
-            if _direct_openai_tool_source(target, detached)
+            if _direct_openai_tool_source(target, detached, api_surface)
             else _prepare_durable_candidate(target, detached, api_surface)
         )
     except CustomToolProjectionError:
@@ -643,13 +645,15 @@ def registered_source_payload(payload: Mapping[str, Any]) -> Optional[Mapping[st
                  if item.candidate.candidate_sha256 == digest), None)
 
 
-def note_wire_send_succeeded(capture: Any) -> None:
+def note_wire_send_succeeded(capture: Any, target: Optional[Dict[str, Any]] = None, *, unpriced_add_on: bool = False) -> None:
     state = _WIRE_CALL_STATE.get()
-    if state.current is None or not isinstance(capture, PhysicalAttemptCapture):
+    if not isinstance(capture, PhysicalAttemptCapture):
         return
-    if getattr(capture, "candidate_raw_sha256", None) != state.current.candidate.candidate_sha256:
-        return
-    _WIRE_CALL_STATE.set(replace(state, settled=(state.current, capture)))
+    if target is not None:
+        target["received_attempt_id"] = capture.attempt_id
+        target["received_unpriced_add_on"] = unpriced_add_on
+    if state.current and capture.candidate_raw_sha256 == state.current.candidate.candidate_sha256:
+        _WIRE_CALL_STATE.set(replace(state, settled=(state.current, capture)))
 
 
 def note_wire_send_failed() -> None:
@@ -875,6 +879,7 @@ def _classify_action(
     error_tokens = _error_tokens(low)
     value_path = {
         "reasoning_effort": "reasoning_effort",
+        "reasoning": "reasoning.effort",
         NESTED_REASONING_FIELD: "extra_body.reasoning.effort",
         "anthropic.adaptive": "output_config.effort",
         "anthropic.disabled": "thinking",
@@ -950,7 +955,8 @@ def _classify_action(
     named = []
     compact = low.replace(".", "_")
     for field in (*OPTIONAL_REQUEST_FIELDS, NESTED_REASONING_FIELD):
-        aliases = {field, field.replace(".", "_"), field.split(".")[-1]}
+        # Responses names its carrier's tier, not the object: a refused ``reasoning.effort`` drops ``reasoning``.
+        aliases = {field, field.replace(".", "_"), field.split(".")[-1], *(("reasoning.effort",) if field == "reasoning" else ())}
         implicated = (evidence.param in aliases if evidence.param else
                       field in error_tokens if field in {"stream", "stream_options"}
                       else any(alias in low or alias in compact for alias in aliases)
@@ -1265,12 +1271,12 @@ def plan_wire_retry_from_body_error(error: Any) -> Optional[Dict[str, Any]]:
 
 def _processing_retry(payload: Mapping[str, Any], error: Any,
                       target: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """One ordinary-speed retry after a released, typed no-start receipt."""
-    from ouroboros.llm_attempt import ProcessingNotStarted
+    """One ordinary-speed retry after a settled, typed no-start receipt."""
+    from ouroboros.transport_custody import ProcessingNotStarted
     from ouroboros.request_wire_receipts import rebind_processing_candidate
 
     capture = getattr(error, "physical_attempt_capture", None)
-    if not isinstance(error, ProcessingNotStarted) or getattr(capture, "state", None) != "released":
+    if not isinstance(error, ProcessingNotStarted) or getattr(capture, "state", None) != "settled":
         return None
     registered = _WIRE_CALL_STATE.get().current
     route = registered.target if registered is not None else target or {}
@@ -1282,9 +1288,8 @@ def _processing_retry(payload: Mapping[str, Any], error: Any,
         return None
     if provider in {"openai", "openrouter"}:
         field, standard = "service_tier", "default"
-        allowed = {"fast": {"fast", "priority"}, "economy": {"flex"}}.get(preference, set())
-        # An explicit extra_body override has precedence and must not be
-        # accidentally replaced by the top-level advisory projection.
+        allowed = {"fast": {"fast", "priority"}, "economy": {"flex"}, "ultrafast": {"ultrafast"}}.get(preference, set())
+        # The SDK merges extra_body last. Its explicit override owns this send.
         if isinstance(current.get("extra_body"), dict) and "service_tier" in current["extra_body"]:
             return None
     elif provider == "anthropic":
@@ -1313,10 +1318,11 @@ def plan_next_wire_retry(
     *,
     error: Any,
     body_error: bool = False,
+    processing_only: bool = False,
     target: Optional[Mapping[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """One exception/body-parity entrypoint for the bounded transport drivers."""
-    if getattr(error, "stream_incomplete", False):
+    if getattr(error, "stream_incomplete", False) or getattr(error, "processing_refusal_conflict", False):
         return None
     state = _WIRE_CALL_STATE.get()
     registered, physical = state.current, state.physical_payload
@@ -1330,9 +1336,9 @@ def plan_next_wire_retry(
     if capture is not None and (not digest or getattr(capture, "candidate_raw_sha256", None) != digest):
         return None
     current = physical if physical is not None else payload
-    processing = _processing_retry(current, error, target)
-    if processing is not None:
-        return processing
+    from ouroboros.transport_custody import is_processing_refusal
+    if processing_only or is_processing_refusal(error):
+        return _processing_retry(current, error, target)
     planned = (
         plan_wire_retry_from_body_error(error)
         if body_error else

@@ -294,7 +294,7 @@ def test_selected_session_visibility_failure_blocks_without_native_substitution(
     monkeypatch.setattr(agent_module, "envelope_from_task", lambda *_a, **_k: {})
     task = {"id": "child1", "configured_subagent": {"schema": 1}}
     amended, changed = agent_module.preflight_delegate_visibility(
-        SimpleNamespace(available_tools=lambda: []), task, dispatch,
+        SimpleNamespace(callable_rows=lambda namespace="": []), task, dispatch,
     )
     assert changed is True
     assert amended.executor == "blocked"
@@ -881,9 +881,9 @@ def test_atomic_start_attempt_does_not_trigger_legacy_no_delegate_nudges(tmp_pat
 
 def test_a_quiet_run_keeps_the_sleep_and_its_terminal_plus_mail_coalesce_into_one_wake(tmp_path):
     """A quiet run keeps a delegate_wait's sleep (nothing renews it and nothing reads it); its terminal and mail that
-    landed beside it are ONE wake: one read of the run, the mail whole in it."""
+    landed beside it are ONE wake: one read of the run. The mail woke it but stays the round-top drain's."""
     from ouroboros import delegate_custody as custody, delegate_supervision as ds, model_sleep
-    from ouroboros.owner_mailbox import write_task_message
+    from ouroboros.owner_mailbox import drain_owner_entries, write_task_message
     from tests._run_wait_shared import held_run, wake_now
 
     ctx = SimpleNamespace(
@@ -909,12 +909,8 @@ def test_a_quiet_run_keeps_the_sleep_and_its_terminal_plus_mail_coalesce_into_on
 
     out = json.loads(wake_now(ctx, "run-1", wait_once=wait_once, woke_by=model_sleep.wake_reason(ctx, chosen)).text)
     assert len(calls) == 1
-    assert out["status"] == "completed"
-    [message] = out["wake_events"]
-    assert message["msg_id"] == "m1"
-    assert message["provenance"] == "ancestor_task"
-    assert message["source_task_id"] == "parent1"
-    assert message["text"] == "new direction"
+    assert out["status"] == "completed" and "wake_events" not in out
+    assert [row["msg_id"] for row in drain_owner_entries(tmp_path, "child1", set(), 1)] == ["m1"]
     assert out["supervision_wake_id"]
     event_types = {
         json.loads(line)["type"]
@@ -944,12 +940,11 @@ def test_pending_wake_replays_until_post_injection_ack(tmp_path):
             "status": "no_progress", "run_id": "run-1", "last_seq": 4,
         }),
     ).text)
-    assert first["wake_events"][0]["text"] == "full durable direction"
-    assert acknowledged_task_message_ids(tmp_path, "child1") == set()
+    assert "wake_events" not in first  # the direction is the round-top drain's, not this wake's
     replay = json.loads(run_wait(ctx, "run-1").text)  # replayed before any sleep is armed or the run read
     assert replay.pop("replay_of")["fresh_observation"] is False and replay == first  # marked, else as published
     assert acknowledge_pending_wake(ctx, replay)
-    assert acknowledged_task_message_ids(tmp_path, "child1") == {"m1"}
+    assert acknowledged_task_message_ids(tmp_path, "child1") == set(), "its ACK takes no mail"
 
 
 def test_one_shot_checkpoint_is_reasoned_and_consumed(monkeypatch, tmp_path):

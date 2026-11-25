@@ -1,0 +1,15 @@
+{
+  "about": "An unread room opens on its newest arrival even when the owner's own later messages buried it, clear of the bar and the composer; a reply then stays below that place.",
+  "viewport": [1280, 860],
+  "rooms": {
+    "a": {"name": "Unread", "unread": true, "rows": [
+      {"count": 60, "words": [20, 80]},
+      {"count": 1, "words": [60, 60]},
+      {"count": 4, "role": "owner", "words": [120, 160]}
+    ]}
+  },
+  "events": [
+    {"open": "a"},
+    {"arrive": "a", "words": 30, "role": "owner"}
+  ]
+}

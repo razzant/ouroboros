@@ -24,8 +24,19 @@ COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "memory_read", "memory_mark",
 })
 
+# Where a route cannot carry every schema in one request (direct OpenAI takes 128;
+# ``tool_policy.fit_tool_schemas_to_limit``), the tools with which this mind reads and
+# revises its own memory and the work in front of it are always sent: this set, the
+# selectors and the MCP gateway. Owner administration of the installation, rescue and
+# one-off media wait in the tail (``ROUTE_TAIL_TOOL_NAMES``), and the route's notice
+# names every tool left out with its purpose. The provider's limit is the physical fact;
+# this rule only orders the default, and enable_tools still loads any permitted schema.
+# The set's size stays where it is (103), so one explicitly loaded skill (25 tools) fits beside it; a tool
+# outside the set that this task already called keeps its place ahead of a load and takes one of those 25.
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
-    "inspect_harness", "inspect_subagent", "maintain_harness", "free_storage",
+    # Installation upkeep is neither this mind's memory nor the work in front of it: inspect_harness reads in
+    # ordinary order, maintain_harness and free_storage wait in the route tail. skill_exec runs the enabled skills.
+    "inspect_subagent", "skill_exec",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -66,10 +77,13 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     *COGNITIVE_MEMORY_TOOL_NAMES,
     "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
+    # The project's progress memory and working page, the hand-written source registry of memory
+    # (memory/registry.md), and the fold of this actor's own transcript.
+    "journal_read", "journal_write", "workpad_read", "workpad_write", "memory_map", "memory_update_registry",
+    "compact_context",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
-    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
-    "generate_image", "list_image_models", "recover_image",
+    "ocr_pdf", "extract_pdf_text",
     *OWNER_DELIVERY_TOOL_NAMES,
     "escalate",
     "switch_model",
@@ -82,11 +96,24 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "submit_skill_to_hub", "skill_search",
 })
 
+# What waits behind every other schema on such a route: the installation's saved
+# settings the owner administers (interface wording, the global tool timeout, the
+# consciousness and evolution switches), its upkeep (vendor program updates, the
+# Dashboard's Free storage), and one-off media helpers with the rescue of
+# an earlier image attempt. A name this task already called or the actor loaded keeps
+# its place ahead of the tail.
+ROUTE_TAIL_TOOL_NAMES: frozenset[str] = frozenset({
+    "pin_ui_translation", "set_tool_timeout", "toggle_consciousness", "toggle_evolution",
+    "maintain_harness", "free_storage",
+    "youtube_transcript", "extract_video_frames", "generate_image", "list_image_models", "recover_image",
+})
+
 # Meta-tools: always visible alongside core tools
 META_TOOL_NAMES: frozenset[str] = frozenset({
     "list_available_tools", "enable_tools",
 })
-# Main's gateway to on-demand MCP tools: what keeps a request's tool list stable, so a route ceiling keeps it too.
+# Text tasks keep this envelope resident to inspect MCP schemas without changing their request's tools.
+# The named MCP tool retains its own permissions and Safety check.
 MCP_GATEWAY_TOOL_NAME: str = "call_mcp_tool"
 
 # An actor's own working form: which model thinks (switch_model) and how its own
@@ -147,6 +174,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # This child's own callable catalog (the name-miss answer points here) and the loader
     # of a permitted schema a route's ceiling or Nano left out; neither grants a tool.
     "list_available_tools", "enable_tools", "list_image_models",
+    MCP_GATEWAY_TOOL_NAME,
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -197,6 +225,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames", "read_archive",
     "list_available_tools", "enable_tools", "list_image_models", "generate_image", "recover_image",
+    MCP_GATEWAY_TOOL_NAME,
 })
 
 def schema_selection_tools_for_context(ctx: object) -> frozenset[str]:
@@ -242,6 +271,57 @@ PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
 # _SCHEDULE_EMIT_LOCK in tools/control.py; the supervisor still drains EVENT_Q
 # serially, so cap/dedup/enqueue remain single-threaded and safe.
 PARALLEL_SAFE_ENQUEUE_TOOLS: frozenset[str] = frozenset({"schedule_subagent"})
+
+# The legacy pool, frozen history and not a property of a tool: a response of more than one call, every one named
+# here, ran whole in the pool before calls ran in segments and still runs exactly so (``legacy_pool_response``);
+# naming a read in the sets above never changes which responses do.
+LEGACY_POOL_TOOLS: frozenset[str] = frozenset({
+    "inspect_harness", "inspect_subagent", "read_file", "list_files", "read_archive", "search_code", "query_code",
+    "query_data", "recent_tasks", "web_search", "chat_history", "vcs_read", "service_status", "service_logs",
+    "get_task_result", "list_projects", "memory_read", "search_ui_translations", "schedule_subagent",
+})
+
+# Every other response runs in segments (``call_segments``): consecutive inert reads run at the same time, every
+# other call alone, in written order. An inert read costs no money, publishes no file or record under an address a
+# call of the same response names as its input, and changes no other call's result; a tool joins only by name, after
+# its handler and its observable effects are checked, and any tool not named runs alone. It MAY lazily create a
+# runtime-internal cache or one-time import (the code-intel inventory of query_code, the chronicle activation of the
+# first memory_read, the dialogue import behind chat_history and list_projects, the usage store behind
+# get_task_result and peek_task, a pack-only file read_file or search_code materializes), and read_file stamps
+# ctx.last_read_view, which only the sequential native reviewer reads: a neighbour in the same group inspecting those
+# internals may not see them yet, as every response made only of reads has behaved in the legacy pool.
+INERT_READ_TOOLS: frozenset[str] = frozenset({
+    "read_file", "list_files", "read_archive", "search_code", "query_code", "recent_tasks", "chat_history",
+    "vcs_read", "get_task_result", "list_projects", "memory_read", "search_ui_translations", "inspect_subagent",
+    "knowledge_read", "knowledge_list", "workpad_read", "journal_read", "tree_read", "peek_task", "live_roots",
+    "memory_map", "list_skills", "youtube_transcript", "compare_subagent_patches",
+})
+
+
+def legacy_pool_response(names: Iterable[str]) -> bool:
+    """Whether this response runs whole in the pool under its old exception rule (``LEGACY_POOL_TOOLS``). Names are
+    taken lazily, as the old question took them: one is read only while every earlier one was legacy."""
+    count = 0
+    for count, name in enumerate(names, 1):
+        if name not in LEGACY_POOL_TOOLS:
+            return False
+    return count > 1
+
+
+def call_segments(names: Iterable[str]) -> list[list[int]]:
+    """One response's calls, by index, in the written order: each maximal run of consecutive ``INERT_READ_TOOLS``
+    is one group that runs at once; every other call is a segment of its own and runs alone."""
+    segments: list[list[int]] = []
+    previous = False
+    for index, name in enumerate(names):
+        together = name in INERT_READ_TOOLS
+        if together and previous:
+            segments[-1].append(index)
+        else:
+            segments.append([index])
+        previous = together
+    return segments
+
 
 # Browser tools run one at a time on the task's sticky executor.
 STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
@@ -383,12 +463,12 @@ RESULT_VIEW_PARAMS: dict[str, dict[str, Any]] = {
                            "description": "Chars of the output's tail to show in this turn (see view_head_chars)."},
 }
 
-# Declared range parameters where a non-null value means the caller chose the result's
-# form (a page, a window, a cursor): such a result is a REQUESTED form that may
+# Declared range parameters (and read_file's accepted end_line) where a non-null value means the caller
+# chose the result's form (a page, a window, a cursor): such a result is a REQUESTED form that may
 # use the free room of the frame, not an unsolicited body sharing the eighth.
 EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
     RESULT_VIEW_HEAD_ARG, RESULT_VIEW_TAIL_ARG,
-    "max_chars", "max_lines", "start_char", "end_char", "start_line",
+    "max_chars", "max_lines", "start_char", "end_char", "start_line", "end_line",
     "source_start_char", "source_end_char", "offset", "limit", "tail_lines",
     "from", "to", "start", "after_seq",  # chronicle row bounds and continuation pages
 })
@@ -440,10 +520,14 @@ def mcp_gateway_arguments(value: Any) -> Optional[dict]:
 
 
 def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
-    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns is a form the mind
-    asked for, and a call through the MCP gateway asks for the view its inner arguments name."""
+    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns, and any namespace
+    ``list_available_tools`` was asked to list by name (the connections map points there for complete MCP
+    descriptions), are forms the mind asked for; a call through the MCP gateway asks for the view its inner
+    arguments name."""
     if name == "enable_tools":
         return (None, None)
+    if name == "list_available_tools" and isinstance(tool_args, dict) and str(tool_args.get("namespace") or "").strip():
+        return requested_result_view(tool_args) or (None, None)
     if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
         tool_args = mcp_gateway_arguments(tool_args.get("arguments"))
     return requested_result_view(tool_args)
@@ -509,7 +593,7 @@ def routing_action_for_tool(name: object) -> str:
 # at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "pause_task", "resume_task", "continue_task",
-    "maintain_harness", "free_storage",
+    "maintain_harness", "free_storage", "propose_payload_release",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
     "move_to_project", "close_project", "manage_project_folder", "delegate_start", "initiate_presence",
@@ -559,9 +643,12 @@ COMPLETION_RECEIPT_TOOLS = frozenset({
 })
 
 
+SCHEMA_DISCOVERY_TOOLS = frozenset({"enable_tools", "list_available_tools"})
+
+
 def completion_observation_calls(calls: object) -> list:
     """Results a finish must observe. Exempt: successful schema bookkeeping, and a receipt
     write that answered exactly ``OK`` (a warning or a partial write is read first)."""
     return [call for call in substantive_tool_calls(calls) if call.get("is_error") or not (
-        call.get("tool") in {"enable_tools", "list_available_tools"}
+        call.get("tool") in SCHEMA_DISCOVERY_TOOLS
         or (call.get("tool") in COMPLETION_RECEIPT_TOOLS and call.get("tool_result_code") == "OK"))]

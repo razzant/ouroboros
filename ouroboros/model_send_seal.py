@@ -119,11 +119,12 @@ EXPOSURE_ATOMS_BASIS = "source_atoms_v1_pre_redaction"
 
 
 def _exposure_atoms_manifest(candidate: Dict[str, Any]) -> Dict[str, Any]:
-    """Hash/count identities of the prepared messages; empty when the candidate has none."""
-    messages = candidate.get("messages") if isinstance(candidate, dict) else None
-    if not isinstance(messages, list) or not messages:
+    """Hash/count identities of the prepared wire rows; empty when the candidate has none."""
+    from ouroboros.context_compaction import UNENCODABLE_SOURCE_ATOM, _source_atoms, physical_message_rows
+
+    messages = physical_message_rows(candidate)
+    if not messages:
         return {}
-    from ouroboros.context_compaction import UNENCODABLE_SOURCE_ATOM, _source_atoms
 
     try:
         atoms = _source_atoms([m for m in messages if isinstance(m, dict)])
@@ -134,6 +135,32 @@ def _exposure_atoms_manifest(candidate: Dict[str, Any]) -> Dict[str, Any]:
     if not atoms:
         return {}
     return {"exposure_atoms": atoms, "exposure_atoms_basis": EXPOSURE_ATOMS_BASIS}
+
+
+def _file_trace(candidate: Dict[str, Any], source: Any) -> Dict[str, Any]:
+    """Bind the captured SYSTEM file to the actual leading system part only.
+
+    ``source`` is the capture's witness as its sender carried it (``PhysicalAttemptContext.base_prompt_source``):
+    unverified, and never written as it is. Scope is intentionally narrow. A different wire shape, repriced
+    fallback or recovered transcript that cannot prove this prefix simply gets no trace.
+    No offsets are asserted in the redacted body.
+    """
+    messages = candidate.get("messages")
+    if not isinstance(source, (tuple, list)) or len(source) != 4 or not isinstance(messages, list) or not messages:
+        return {}
+    leading = messages[0]
+    if not isinstance(leading, dict) or leading.get("role") != "system":
+        return {}
+    content = leading.get("content")
+    if isinstance(content, list) and content and isinstance(content[0], dict) and content[0].get("type") == "text":
+        content = content[0].get("text")
+    path, digest, chars, text_sha = source
+    if (not isinstance(content, str) or type(chars) is not int or len(content) < chars
+            or len(content) > chars and not content.startswith("\n\n## BIBLE.md\n\n", chars)
+            or hashlib.sha256(content[:chars].encode("utf-8")).hexdigest() != text_sha):
+        return {}
+    return {"file_trace": [{"source_path": path, "source_sha256": digest,
+                            "contribution": "leading_system_prefix", "text_sha256": text_sha}]}
 
 
 def persist_physical_candidate(
@@ -148,7 +175,9 @@ def persist_physical_candidate(
 
     ``candidate_facts`` describe the pre-redaction canonical object. The normal
     ``persist_call`` refs describe the redacted-by-default CAS blob; the two
-    digest domains are deliberately labelled rather than equated.
+    digest domains are deliberately labelled rather than equated. Its optional
+    ``file_witness`` (the capture's prompt-file version) is consumed here, never
+    stored: the manifest keeps the verified ``file_trace`` alone.
 
     The manifest carries the ``model_send_seal`` block (additive key under
     the existing SCHEMA_VERSION object; readers ignore unknown keys), and the
@@ -167,6 +196,8 @@ def persist_physical_candidate(
     from ouroboros.observability import persist_call
     from ouroboros.chronicle_lead import delivered_lead_rule
 
+    facts = dict(candidate_facts)
+    witness = facts.pop("file_witness", None)  # only what ``_file_trace`` proves of it reaches the manifest
     lead_rule = delivered_lead_rule(candidate)
     projected = physical_custody_projection(candidate)
     custody_projected = projected != candidate
@@ -184,14 +215,15 @@ def persist_physical_candidate(
             "redacted_projection_digest_basis": "observability_json_v1_post_default_redaction_cas",
             "anthropic_native_custody_projected": custody_projected,
             **_exposure_atoms_manifest(candidate),
-            **dict(candidate_facts),
+            **facts,
+            **_file_trace(candidate, witness),
         },
         finalize_manifest=lambda redacted: {
             "model_send_seal": build_model_send_seal(
                 attempt_id=attempt_id,
                 candidate=candidate,
                 projected=projected,
-                candidate_facts=dict(candidate_facts),
+                candidate_facts=facts,
                 redaction=redacted,
                 custody_projected=custody_projected,
             ),
@@ -279,8 +311,9 @@ def _reconstruct_blob_bytes(candidate: Dict[str, Any]) -> bytes:
 
 
 def _read_blob_bytes(manifest: Any) -> Tuple[Optional[bytes], bool]:
-    """(raw CAS bytes, cas_digest_intact) read back from the durable record."""
-    from ouroboros.evidence_packs import blob_bytes, read_loose_gzip
+    """(raw CAS bytes, cas_digest_intact) read back from the durable record. ``EvidenceUnavailable``
+    propagates: bytes that cannot be located now are left to a later pass, never judged unreadable."""
+    from ouroboros.evidence_packs import EvidenceUnavailable, blob_bytes, read_loose_gzip
 
     ref = manifest.get("full_payload_ref") if isinstance(manifest, dict) else None
     path = pathlib.Path(str((ref or {}).get("path") or ""))
@@ -290,7 +323,9 @@ def _read_blob_bytes(manifest: Any) -> Tuple[Optional[bytes], bool]:
     if raw is not None and hashlib.sha256(raw).hexdigest() == str((ref or {}).get("sha256") or ""):
         return raw, True
     try:  # a missing or damaged loose blob: the pack of the root the ref names
-        return blob_bytes(path.parents[2], ref), True
+        return blob_bytes(path.parents[2], ref, task_id=str(manifest.get("task_id") or "") or None), True
+    except EvidenceUnavailable:
+        raise
     except Exception:
         return raw, False
 
@@ -364,8 +399,11 @@ def verify_sealed_candidate(
     else ``None``. Without an original candidate, compare attempt digest and CAS
     integrity only: excluded secret/native bytes cannot be reconstructed. Never raises: this invariant is
     observability — the in-memory identity refusal above the call keeps being
-    the only blocking authority.
+    the only blocking authority. The one exception is ``EvidenceUnavailable``: a record whose
+    bytes cannot be located now is judged by a later pass, so its caller names this one unknown.
     """
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     try:
         observed = {
             "basis": CANONICAL_BASIS,
@@ -438,6 +476,8 @@ def verify_sealed_candidate(
             fact["first_divergent_offset"] = int(first_offset)
         (record(fact) if record is not None else record_model_send_violation(drive_root, fact))
         return fact
+    except EvidenceUnavailable:
+        raise
     except Exception:
         # Fail-soft by contract: the observability invariant must never take
         # down the call it observes; the failure is still visible here.
@@ -534,6 +574,8 @@ def _reconcile_seal_directions(
     report: Dict[str, Any],
     manifest_paths: List[pathlib.Path],
 ) -> None:
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     live_ids = set(finals)
     seals: List[Tuple[Dict[str, Any], Dict[str, Any], str]] = []
     for manifest_path in manifest_paths:
@@ -552,10 +594,13 @@ def _reconcile_seal_directions(
         aid = str(seal.get("attempt_id") or manifest.get("call_id") or "")
         attempt = finals.get(aid, {})
         if attempt.get("candidate_raw_sha256"):
-            fact = verify_sealed_candidate(root, task_id=str(manifest.get("task_id") or ""),
-                attempt_id=aid, candidate=None, manifest_ref={"path": str(manifest_path)},
-                raw_sha256=attempt["candidate_raw_sha256"],
-                raw_size_bytes=int(attempt.get("candidate_raw_size_bytes") or 0), record=_write)
+            try:
+                fact = verify_sealed_candidate(root, task_id=str(manifest.get("task_id") or ""),
+                    attempt_id=aid, candidate=None, manifest_ref={"path": str(manifest_path)},
+                    raw_sha256=attempt["candidate_raw_sha256"],
+                    raw_size_bytes=int(attempt.get("candidate_raw_size_bytes") or 0), record=_write)
+            except EvidenceUnavailable:  # its bytes cannot be located now: unknown, never a verdict
+                report["status"], fact = "unknown", None
             if fact:
                 report["forward_divergences"] = report.get("forward_divergences", 0) + 1
         seals.append((manifest, seal, str(seal.get("attempt_id") or manifest.get("call_id") or "")))
@@ -594,6 +639,9 @@ def _reconcile_seal_directions(
             manifest = read_call_manifest_ref(root, ref, task_id=str(row.get("task_id") or ""))
             if isinstance(manifest, dict):
                 seal = manifest.get("model_send_seal")
+        except EvidenceUnavailable:  # the seal's version cannot be located now: unknown, never unlogged
+            report["status"] = "unknown"
+            continue
         except Exception:
             seal = None
         if not isinstance(seal, dict):

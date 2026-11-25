@@ -255,26 +255,22 @@ def _registry(env, workspace, executor_ref=None, task_id="exec-task"):
 
 
 def _docker(monkeypatch, calls):
-    real_run = subprocess.run
-
     def fake(cmd, **kwargs):
-        if list(cmd[:1]) != ["docker"]:
-            return real_run(cmd, **kwargs)
         calls.append([str(part) for part in cmd])
         if cmd[1:3] == ["inspect", "-f"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="host\n", stderr="")
-        if cmd[1] == "exec" and "_ouroboros_proc_observe" in str(cmd[-1]):
-            return subprocess.CompletedProcess(cmd, 0, stdout="exited\n", stderr="")
-        if cmd[1] == "exec" and "nohup" in str(cmd[-1]):
-            return subprocess.CompletedProcess(cmd, 0, stdout="4242\n", stderr="")
-        if cmd[1] == "exec":
+        if cmd[1] == "exec" and cmd[-1].startswith("case "):
             return subprocess.CompletedProcess(cmd, 0, stdout="completed", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[1] == "exec" and ("--workdir" in cmd or cmd[-1].startswith("rm -f -- ")):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(cmd)
 
     fake_docker_cli(monkeypatch, fake)
 
 
 def test_unmanaged_task_executor_and_host_fallback_are_unchanged(env, monkeypatch):
+    from ouroboros.tools import shell_process
+
     disable_safety(monkeypatch)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     outside = env.root / "outside"
@@ -285,12 +281,28 @@ def test_unmanaged_task_executor_and_host_fallback_are_unchanged(env, monkeypatc
     calls = []
     _docker(monkeypatch, calls)
     marker = outside / "ran-on-host"
-    text = host.execute("run_command", {"cmd": ["touch", str(marker)]})
+    cmd = ["touch", str(marker)]
+    started = []
+    launch = shell_process.contained_popen
+
+    def observe_launch(popen, argv, **kwargs):
+        proc = launch(popen, argv, **kwargs)
+        if argv == cmd:
+            started.append(proc)
+        return proc
+
+    monkeypatch.setattr(shell_process, "contained_popen", observe_launch)
+    text = host.execute("run_command", {"cmd": cmd})
     assert marker.exists(), text  # outside the task executor's mappings the command runs on the host, as before
+    proc, = started
+    assert proc.returncode == 0 and proc not in shell_process._active_subprocesses
     assert not any(call[1] == "exec" for call in calls)
-    mapped.execute("run_command", {"cmd": ["true"]})
+    result = mapped.execute_result("run_command", {"cmd": ["true"]})
+    assert result.code == "OK" and result.meta["operation_outcome"] == "completed", result
     execs = [call for call in calls if call[1] == "exec"]
-    assert execs and {call[call.index("--workdir") + 2] for call in execs} == {"task-box"}
+    launch, = [call for call in execs if "--workdir" in call]
+    assert launch[launch.index("--workdir") + 1] == "/w"
+    assert {call[call.index("sh") - 1] for call in execs} == {"task-box"}
 
 
 @posix_host
@@ -302,14 +314,16 @@ def test_managed_work_runs_only_in_the_pinned_container_and_never_falls_back(env
                 "path_mappings": [{"host_path": str(env.root), "backend_path": "/all"}]}
     outside = env.root / "outside"
     outside.mkdir()
+    # Attached work-domain probes and the foreground executor both resolve this CLI.
+    docker = fake_docker(env, monkeypatch, network="host")
     mapped, registry = _registry(env, env.work, task_box), _registry(env, outside, task_box)
-    calls = []
-    _docker(monkeypatch, calls)
-    mapped.execute("run_command", {"cmd": ["true"]})
-    execs = [call for call in calls if call[1] == "exec"]
-    assert execs and all(call[call.index("--workdir") + 1] == str(env.work) for call in execs)
-    assert {call[call.index("--workdir") + 2] for call in execs} == {"ouro-work"}  # the pin, never the task's box
-    calls.clear()
+    result = mapped.execute_result("run_command", {"cmd": ["true"]})
+    assert result.code == "OK" and result.meta["operation_outcome"] == "completed", result
+    execs = [call for call in docker.calls() if call[0] == "exec"]
+    with_cwd = [call for call in execs if "--workdir" in call]
+    assert len([call for call in with_cwd if call[1] != "-i"]) == 1
+    assert {call[call.index("--workdir") + 1] for call in with_cwd} == {str(env.work)}
+    assert {call[call.index("sh") - 1] for call in execs} == {"ouro-work"}
     marker = outside / "ran-on-host"
     for tool, args in (("run_command", {"cmd": ["touch", str(marker)]}),
                        ("run_script", {"interpreter": "sh", "script": f"touch {marker}"}),
@@ -318,7 +332,7 @@ def test_managed_work_runs_only_in_the_pinned_container_and_never_falls_back(env
         text = registry.execute(tool, args)
         assert "execution domain" in text and "nothing runs on the service" in text, (tool, text)
         assert not marker.exists(), tool
-    assert not any(call[1] == "exec" for call in calls)  # refused before any backend start, too
+    assert [call for call in docker.calls() if call[0] == "exec"] == execs  # refused before any backend start
 
 
 # --- the work engine's gateway -----------------------------------------------------------------------------------
@@ -460,7 +474,8 @@ def test_the_sweep_replays_and_settles_each_engines_work_only_through_that_engin
     started(drive, "run-w", engine_ref=ref, store=STORE)
     body = {"prompt": "p", "scope": {"kind": "project", "root": str(env.work)}}
     assert custody.record_start_requested(drive, run_id="", task_id="gone", idempotency_key="k", invocation_id="inv-w",
-                                          request=body, project_id="", route="r", engine_ref=ref)
+                                          request=body, project_id="", route="r", engine_ref=ref,
+                                          daemon_store_id=STORE)  # receipt-bound replay stays in its work engine
     seen = {"owned": [], "work": []}
 
     def engine(name, store, engine_ref):
@@ -1530,7 +1545,7 @@ def test_a_work_tree_status_and_diff_run_their_filters_in_the_work_container(env
     repo, witness = _work_git_repo_with_clean_filter(env)
     docker = fake_docker(env, monkeypatch)
     registry = _registry(env, repo)
-    binding = git_vcs_ops._git()._vcs_binding(registry._ctx, None, root="active_workspace", path=".")
+    binding = git_vcs_ops._vcs_binding(registry._ctx, None, root="active_workspace", path=".")
     diff = git_vcs_ops._git_diff(registry._ctx, _resolved_binding=binding)
     assert "two" in diff  # the worktree change is seen
     assert witness.exists() and set(witness.read_text(encoding="utf-8").split()) == {"1"}  # the filter ran, and only in the container

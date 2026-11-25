@@ -38,7 +38,8 @@ the Pause lets finish never keep it pausing (the fence lists them as
 from __future__ import annotations
 
 import logging
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
 from contextvars import ContextVar, copy_context
 import pathlib
 import threading
@@ -47,6 +48,8 @@ import uuid
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from ouroboros.store import StoreBusy, StoreError, acquisition_budget, admission_acquisition, physical_acquisition
+
+from ouroboros.work_stop import direct_selection
 
 log = logging.getLogger(__name__)
 
@@ -224,6 +227,21 @@ def _resume_outstanding(current: Dict[str, Any], fence: Dict[str, Any]) -> bool:
                 and not grant.get("revoked_at") and row.get("state") in {STATE_RESUME_GRANTED, STATE_RESUMED})
 
 
+def next_fence(root_task_id, old, request_id, attribution):
+    """One new launch generation, including its superseded fence and earlier request identities."""
+    from ouroboros.utils import utc_now_iso
+
+    requests = dict(old.get("requests") or {})
+    if old.get("request_id"):
+        requests.setdefault(old["request_id"], {"fence_id": old.get("fence_id"), "generation": old.get("generation")})
+    fence = {**attribution, "fence_id": uuid.uuid4().hex, "request_id": request_id,
+             "state": FENCE_REQUESTED, "requested_at": utc_now_iso(), "requested_at_ts": time.time(),
+             "root_task_id": str(root_task_id), "generation": int(old.get("generation") or 0) + 1,
+             **({"supersedes_fence_id": old["fence_id"]} if fence_closed(old) else {})}
+    requests[request_id] = {**attribution, "fence_id": fence["fence_id"], "generation": fence["generation"]}
+    return {**fence, "requests": requests}
+
+
 def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
                   late_work: bool = False,
                   actor_id: str = "", by: Optional[dict] = None) -> Tuple[Dict[str, Any], bool]:
@@ -250,8 +268,6 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
         _TRULY_TERMINAL_STATUSES, load_task_result, require_writable_task_result_schema, stamp_task_result_schema,
     )
     from ouroboros.task_store import patch_document
-    from ouroboros.utils import utc_now_iso
-
     from ouroboros.control_actor import control_actor, pause_author
     author = {**control_actor(), **(by or {})}
     attribution = {"by": author} if author else {}
@@ -277,21 +293,13 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
         late_open = isinstance(checkpoint, dict) and post_task_synthesis_is_open(checkpoint.get("post_task_synthesis"))
         if current.get("status") in _TRULY_TERMINAL_STATUSES and not (late_work or late_open):
             raise OwnerPauseRefused("task_terminal")
-        if fence_closed(old) and not _resume_outstanding(actor_current if actor_current is not None else current, old):
+        if (fence_closed(old) and not old.get("observe_only")
+                and not _resume_outstanding(actor_current if actor_current is not None else current, old)):
             requests[request_id] = {**attribution, "fence_id": old["fence_id"], "generation": old.get("generation")}
             fence = {**old, **({} if pause_author(old)["actor"] else attribution), "requests": requests}
             outcome.update(fence=fence, created=False)
             return stamp_task_result_schema({**current, "owner_pause": fence})
-        fence = {
-            **attribution, "fence_id": uuid.uuid4().hex, "request_id": str(request_id or ""),
-            "state": FENCE_REQUESTED, "requested_at": utc_now_iso(),
-            "requested_at_ts": time.time(), "root_task_id": str(root_task_id),
-            "generation": int(old.get("generation") or 0) + 1,
-            # Still closed here only under outstanding Resume authority: name it.
-            **({"supersedes_fence_id": old["fence_id"]} if fence_closed(old) else {}),
-        }
-        requests[request_id] = {**attribution, "fence_id": fence["fence_id"], "generation": fence["generation"]}
-        fence["requests"] = requests
+        fence = next_fence(root_task_id, old, request_id, attribution)
         outcome.update(fence=fence, created=True)
         return stamp_task_result_schema({**current, "owner_pause": fence})
 
@@ -376,6 +384,21 @@ def release_fence(root_drive: Any, root_task_id: str, *, reason: str) -> Dict[st
                            state=FENCE_RELEASED, release_reason=str(reason or "owner_resume"))
 
 
+def _keeps_newer_hold(current, fence_id):
+    if not fence_id or not fence_closed(current):
+        return False
+    return current.get("supersedes_fence_id") == fence_id or bool(
+        current.get("active_delegated_start") and any(
+            press.get("fence_id") == fence_id for press in (current.get("requests") or {}).values()))
+
+
+def recovered_start_over_latch(current, latch):
+    """A recovered writer replaced this exact owner Pause before its queue latch was projected."""
+    return bool(current.get("active_delegated_start") and latch and latch.get("cause") == "owner_pause"
+                and current.get("fence_id") != latch.get("fence_id")
+                and _keeps_newer_hold(current, latch.get("fence_id")))
+
+
 def reopen_for_resume(root_drive: Any, root_task_id: str, task_id: str, *,
                       fence_id: str, grant_id: str) -> None:
     """Consume one explicit Resume's fence authority where its work starts.
@@ -387,11 +410,13 @@ def reopen_for_resume(root_drive: Any, root_task_id: str, task_id: str, *,
     Resume is superseded, releases nothing, and the member parks at its next
     safe boundary. Any other identity change refuses.
     """
+    if not fence_id:  # A grant minted under an open tree cannot release a later hold.
+        return
     publication_gap = None
     with launch_lock(root_drive, root_task_id), acquisition_budget(0):
-        current = read_fence(root_drive, root_task_id) if fence_id else {}
-        if fence_id and current.get("fence_id") != fence_id:
-            if not fence_closed(current) or current.get("supersedes_fence_id") != fence_id:
+        current = read_fence(root_drive, root_task_id)
+        if current.get("fence_id") != fence_id:
+            if not _keeps_newer_hold(current, fence_id):
                 raise ValueError("owner_pause_fence_changed")
         elif root_actor(root_drive, root_task_id, task_id):
             try:
@@ -431,7 +456,7 @@ def _finish_resume_publication(root_drive: Any, root_task_id: str, task_id: str,
             with launch_lock(root_drive, root_task_id, wait=False), acquisition_budget(0):
                 current = read_fence(root_drive, root_task_id)
                 if current.get("fence_id") != fence_id:
-                    if fence_closed(current) and current.get("supersedes_fence_id") == fence_id:
+                    if _keeps_newer_hold(current, fence_id):
                         return  # The newer Pause keeps the original resumed work held.
                     raise OwnerPauseRefused("owner_pause_fence_changed")
                 if task_id != root_task_id and _validated_single_cancel_target(root_drive, root_task_id) != task_id:
@@ -473,7 +498,7 @@ def select_member_resume(root_drive: Any, root_task_id: str, task_id: str, *,
             or row.get("state") != STATE_RESUMED or not grant_id
             or grant.get("grant_id") != grant_id or not grant.get("consumed_at")
             or grant.get("revoked_at") or grant.get("authority") != "explicit_resume"
-            or grant.get("selected_by") != "owner"
+            or not direct_selection(grant)
             or grant.get("owner_pause_fence_id") != fence_id):
         raise OwnerPauseRefused("member_resume_authority_changed")
     fence = read_fence(root_drive, root_task_id)
@@ -533,7 +558,7 @@ def interrupted_member_resume(root_drive: Any, root_task_id: str, task_id: str, 
         grant = row.get("grant") or {}
         own = bool(row.get("state") == STATE_RESUMED and int(row.get("task_attempt") or 0) == int(attempt)
                    and grant.get("grant_id") and grant.get("consumed_at") and not grant.get("revoked_at")
-                   and grant.get("authority") == "explicit_resume" and grant.get("selected_by") == "owner")
+                   and grant.get("authority") == "explicit_resume" and direct_selection(grant))
     except Exception:
         return None
     if not own:  # the member's own facts already say no: its root is never read
@@ -832,7 +857,7 @@ def _validate_launch(source: Any, root_resume=None):
             row = controls(task_id).get("budget_pause") or {}
             grant = row.get("grant") or {}
             root_allowed = root_actor(root_drive, root_id, task_id)
-            if not root_allowed and grant.get("selected_by") == "owner":
+            if not root_allowed and direct_selection(grant):
                 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
                 root_allowed = controls(root_id).get("status") in _TRULY_TERMINAL_STATUSES
             allowed = bool(row.get("state") == STATE_RESUME_GRANTED
@@ -1109,6 +1134,32 @@ def submit_tool(source: Any, name: str, submit: Any, function: Any, *args: Any):
         return handed
 
 
+@dataclass(frozen=True)
+class CheckedSubmission:
+    """An operation with a custody decision held only across its executor handoff.
+
+    ``admission`` is entered before Pause admission and holds its own lock outside the launch lock.
+    """
+    function: Any
+    admission: Any
+
+    def __call__(self, *args, **kwargs):
+        return self.function(*args, **kwargs)
+
+    @contextmanager
+    def handoff(self):
+        released = threading.Event()
+
+        def run(*args, **kwargs):
+            released.wait()
+            return self.function(*args, **kwargs)
+
+        try:
+            yield run
+        finally:
+            released.set()  # Even an immediately scheduled worker starts I/O after both locks exit.
+
+
 def run_operation(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     """Submit an opaque synchronous call; join outside the short launch lock.
 
@@ -1121,10 +1172,13 @@ def run_operation(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="operation") as executor:
-        with operation_start(source):
+        handoff = function.handoff() if isinstance(function, CheckedSubmission) else nullcontext(function)
+        admission = function.admission() if isinstance(function, CheckedSubmission) else nullcontext()
+        # A checked submission's actor lock precedes the root's launch lock, as in every START claim.
+        with handoff as submitted, admission, operation_start(source):
             with physical_acquisition():
                 context = copy_context()
-                future = executor.submit(context.run, function, *args, **kwargs)
+                future = executor.submit(context.run, submitted, *args, **kwargs)
         return future.result()
 
 

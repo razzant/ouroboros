@@ -5,6 +5,7 @@ import { escapeHtmlAttr, sinceLocalTime } from './utils.js';
 import { isStoreMigrating, taskSourceDownloadUrl } from './api_client.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import { reconcileReviewMarkup } from './review_dom_patch.js';
+import { noticeLine } from './host_notice_text.js';
 import {
     actorAnswered, actorAwaiting, actorUnresolved, authorDoctrineLines, formatReviewProjection, seatAdviser, seatOwed,
 } from './review_record_card.js';
@@ -338,6 +339,8 @@ export function classifyReviewLifecycle(row) {
         count_is_authoritative: lifecycle.count_is_authoritative === true,
         attempts: lifecycle.job_id || lifecycle.id ? [{
             ...lifecycle,
+            // A host notice says its line (its phrase and its step, e.g. a fresh review), never its raw reason (`error`).
+            ...(noticeLine(row) ? { summary: noticeLine(row) } : {}),
             ts: timestamp,
             job_id: lifecycle.job_id || lifecycle.id,
             status: reviewStatus,
@@ -790,8 +793,8 @@ export function taskAcceptanceGroupFromTaskDetail(detail, ownerTaskId = '') {
     // A local preparation failure produces NO panel: the group has to exist on
     // the incident alone, or the owner sees nothing at all.
     if (!owner || (!panels.length && !incident)) return null;
-    const acceptanceDecision = detail?.outcome_axes?.review?.acceptance_decision
-        || detail?.review_status?.acceptance_decision;
+    const canonicalReview = detail?.outcome_axes?.review, acceptanceDecision = canonicalReview != null
+        ? canonicalReview.acceptance_decision : detail?.review_status?.acceptance_decision;
     const decisionAuthor = acceptanceDecision?.author_disposition;
     // A task's final author subject can differ from every historical panel:
     // Advisory may finish edited h2 after the critic reviewed h1. Keep this
@@ -1182,6 +1185,10 @@ const queueDetailRead = (owner, read, away) => new Promise((resolve, reject) => 
     drainDetailReads();
 });
 
+// A read that spoke for no one (`settled_card.js`: a newer answer or a newer attempt superseded it) is not evidence
+// about this card; `null` from the strict seam is another fact altogether — the record is genuinely absent.
+const NO_EVIDENCE = Symbol('review detail read spoke for no one');
+
 // Revisions are opaque SHA-256 tokens; one distinct token may trail a live GET. An owner away (`suspend`, a room that
 // left the screen) draws nothing: what a read already sent returns, its status, a retry and the owner's settling wait
 // for `resume`, in order.
@@ -1193,6 +1200,7 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
         clearTimeout(state.migrationTimer); state.migrationTimer = null;
         const generation = ++state.generation;
         state.inFlightRevision = revision;
+        const announced = state.lastStatus;  // the word the card had when this pass asked
         const draw = typeof onDomWrite === 'function' ? onDomWrite : (mutate) => mutate();
         const write = (mutate) => later(() => draw(mutate));
         // First load/retry announces; routine refresh over applied content stays quiet.
@@ -1203,14 +1211,22 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
         const request = Promise.resolve()
             .then(() => {
                 if (!state.everApplied || state.lastStatus === 'error') notify('loading');
-                return queueDetailRead(states, (signal) => fetchDetail(taskId, { signal }), () => held !== null);
+                return queueDetailRead(states, (signal) => fetchDetail(taskId, { signal, revision }), () => held !== null);
             })
             .then((detail) => {
-                // The strict seam rejects failures; null means genuinely absent (404).
-                if (detail === null || detail === undefined) return false;
+                // The strict seam rejects failures; null means genuinely absent (404), undefined a read that spoke
+                // for no one: a newer answer landed first, or a newer attempt retired this one.
+                if (detail === undefined) return NO_EVIDENCE;
+                if (detail === null) return false;
                 return write(() => applyDetail(taskId, detail));
             })
             .then((applied) => {
+                // Nothing reached this card, so nothing is claimed about it: the word it had before this pass asked
+                // stands (a Retry a real failure earned stays), and the detail stays owed to a reader (`ready`).
+                if (applied === NO_EVIDENCE) {
+                    if (state.lastStatus === 'loading') notify(announced === 'loading' ? 'idle' : announced);
+                    return false;
+                }
                 if (applied !== false && revision !== null) state.appliedRevision = revision;
                 state.everApplied = true;
                 notify('idle');
@@ -1232,7 +1248,8 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
                 state.inFlightRevision = null;
                 const pending = state.pending;
                 state.pending = null;
-                if (pending && pending.revision !== state.appliedRevision) {
+                const fresh = typeof pending?.fresh === 'function' ? pending.fresh() : pending?.fresh;
+                if (pending && (fresh || (pending.revision !== null && pending.revision !== state.appliedRevision))) {
                     start(taskId, state, pending.revision, pending.onDomWrite);
                 }
                 later(() => onSettled(taskId));
@@ -1241,29 +1258,40 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
         return request;
     };
 
+    const stateFor = (taskId) => {
+        let state = states.get(taskId);
+        if (!state) {
+            state = { appliedRevision: null, inFlightRevision: null, pending: null, inFlight: null, generation: 0,
+                everApplied: false, lastStatus: 'idle' };
+            states.set(taskId, state);
+        }
+        return state;
+    };
+
     return {
+        // A read another owner made of the same detail (the census's GET) reports its outcome here, so the card keeps
+        // one status and one Retry. A pass of this hydrator in flight speaks for itself and is never overridden.
+        note(taskIdValue, statusValue, onDomWrite = null) {
+            const taskId = text(taskIdValue), status = text(statusValue);
+            if (!taskId || (status !== 'error' && status !== 'idle') || (status === 'idle' && !states.has(taskId))) return false;
+            const state = stateFor(taskId);
+            if (state.inFlight || state.migrationTimer || state.lastStatus === status) return false;
+            state.lastStatus = status;
+            if (status === 'idle') state.everApplied = true;
+            const draw = typeof onDomWrite === 'function' ? onDomWrite : (mutate) => mutate();
+            return later(() => draw(() => onState(taskId, status)));
+        },
         // Saved Review: errors await Retry; a successful empty/404 permits fallback.
         ready(taskId) {
             const state = states.get(taskId);
             return !state || (!state.inFlight && !state.migrationTimer && state.lastStatus !== 'error');
         },
-        hydrate(taskIdValue, revisionValue = null, { onDomWrite = null } = {}) {
+        // `fresh`: one more read after an in-flight read; a predicate can say that its answer already supplied the fact.
+        hydrate(taskIdValue, revisionValue = null, { onDomWrite = null, fresh = false } = {}) {
             const taskId = text(taskIdValue);
             if (!taskId) return Promise.resolve(false);
             const revision = reviewRevision(revisionValue);
-            let state = states.get(taskId);
-            if (!state) {
-                state = {
-                    appliedRevision: null,
-                    inFlightRevision: null,
-                    pending: null,
-                    inFlight: null,
-                    generation: 0,
-                    everApplied: false,
-                    lastStatus: 'idle',
-                };
-                states.set(taskId, state);
-            }
+            const state = stateFor(taskId);
             if (revision !== null && revision === state.appliedRevision) {
                 return Promise.resolve(false);
             }
@@ -1271,8 +1299,8 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
                 if (revision !== null && revision === state.pending?.revision) {
                     return state.inFlight.then(() => state.inFlight || false);
                 }
-                if (revision !== null && revision !== state.inFlightRevision) {
-                    state.pending = { revision, onDomWrite };
+                if (fresh || (revision !== null && revision !== state.inFlightRevision)) {
+                    state.pending = { revision: revision ?? state.pending?.revision ?? null, onDomWrite, fresh };
                     return state.inFlight.then(() => state.inFlight || false);
                 }
                 return state.inFlight;

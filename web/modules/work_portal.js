@@ -28,11 +28,21 @@ import { boundActivityPreview, projectIdFromTask, refitCollapsedActivity, render
 import { DURABLE_RECEIPTS, receiptNotice } from './project_handoff.js';
 import { nameProjectReference, projectReference } from './project_reference.js';
 import { admittedSuccessor } from './task_episodes.js';
+import { noteOrigin } from './task_origin.js';
 import { continueControlSuccessor } from './task_continue.js';
-import { closingLine } from './settled_card.js';
+import { closingLine, readCardDetail } from './settled_card.js';
 
 const key = (value) => String(value || '').trim();
+const MAIN_CHAT_ID = 1;  // contracts/chat_id_policy WEB_UI_CHAT_ID (task_reference.js, notifications.js)
 export const isPortal = (record) => record?.root?.dataset?.portal === '1';
+
+// A census row's ROOM fact is its own address: the host re-homes chat_id and project_id together (a
+// durable binding, or the nearest live owner row for a nested one), so the scope ID alone is never a
+// room — a Main-addressed row's can be the lease of a registered folder (the server-side placement
+// rule reads it the same way: gateway/main_decisions.py). A real move keeps the portal through its
+// binding or its re-homed address.
+const rowRoomProject = (row) => (Number.isInteger(row?.chat_id) && row.chat_id !== MAIN_CHAT_ID
+    ? key(row.project_id) : '');
 
 /** Mark one root card as the portal of its Project. Idempotent; true when the DOM changed. */
 export function bindWorkPortal(record, project = {}) {
@@ -169,7 +179,9 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         const startedSec = Number(row.started_at);
         if (Number.isFinite(startedSec) && startedSec > 0) record.startedAt = startedSec * 1000;
         card.restore(record, row.project_admission_hold);
-        let changed = Boolean(syncParkedPhase(record, row.phase, row));
+        // Its census row also says which place called the work (task_origin.js): a portal has no frame to say it.
+        let changed = noteOrigin(record, row);
+        changed = Boolean(syncParkedPhase(record, row.phase, row)) || changed;
         const now = portalPresent(row);
         if (now.line) {
             record.collapsedActivity = boundActivityPreview(now.line);
@@ -286,7 +298,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         const pair = `${record?.groupId}|${rootId}`;
         if (!record || !rootId || asked.has(pair)) return;
         asked.add(pair);
-        void fetchTaskDetailStrict(record.groupId).then((detail) => {
+        void readCardDetail(record, { fresh: true }).then((detail) => {
             if (detail?.continued_by?.successor_task_id === rootId && !admittedSuccessor(detail)) asked.delete(pair);
             if (detail && record.root?.isConnected) onDomWrite(() => card.note(record, detail));
         }, () => asked.delete(pair));
@@ -358,7 +370,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             for (const record of records.values()) {
                 if (record.isSubagent || !record.root?.isConnected) continue;
                 const row = census.get(record.groupId);
-                const projectId = key(bindings[record.groupId]?.project_id) || key(row?.project_id);
+                const projectId = key(bindings[record.groupId]?.project_id) || rowRoomProject(row);
                 if (!isPortal(record) && projectId) {
                     changed = bind(record, { id: projectId, name: key(row?.project_name) }) || changed;
                 } else changed = present(record) || changed;

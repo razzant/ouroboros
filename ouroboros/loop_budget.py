@@ -15,11 +15,16 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from ouroboros import budget_pause
 from ouroboros import task_pacing
+from ouroboros.context_timing import measured_sections, section_spans, timed
 from ouroboros.loop_transport import TransportWaitEpisode, end_episode_budget as _end_episode_budget
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context_fit import messages_carry_native_images
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable
-from ouroboros.utils import truncate_within_limit
+from ouroboros.tools.service_stop import (
+    finalization_evidence,
+    service_identity_projection as _service_identity_projection,
+)
+from ouroboros.utils import json_dumps_utf8
 
 
 from typing import TYPE_CHECKING
@@ -82,10 +87,16 @@ def _check_budget_limits(
     task_cost = float(raw_task_cost) if raw_task_cost is not None else None
 
     if budget_remaining_usd is not None and budget_remaining_usd <= 0 and _next_round_pays(ctx):
-        finish_reason = "🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
+        from ouroboros.host_notice import STEPS, fields
+
+        phrase = "The total budget is spent, so this task stopped before its next paid call."
+        finish_reason = f"{phrase} {STEPS['raise_total_budget']}"
         accumulated_usage["execution_status"] = "failed"
         accumulated_usage["reason_code"] = "budget_exhausted"
         if ctx.round_idx <= 1 and not accumulated_usage.get("rounds"):
+            # Its row says the phrase with the step beside it whenever these words are what it publishes.
+            accumulated_usage["host_notice_row"] = {"text": phrase, "record": finish_reason, **fields(
+                "budget_exhausted", step="raise_total_budget", details="setting: TOTAL_BUDGET")}  # the key: a detail
             trace = ctx.llm_trace if isinstance(ctx.llm_trace, dict) else {}
             tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
             suffix = (
@@ -147,13 +158,14 @@ def _check_budget_limits(
             global_remaining is not None or (cost_ceiling.root_cap_usd is not None and deciding is not None)):
         finish_reason = task_pacing.wrapup_last_fit_text(deciding, cost_ceiling, global_remaining)
         forced_prompt = f"[BUDGET LIMIT] {finish_reason} {_loop()._FORCED_BEST_EFFORT_TAIL}"
-        request_args = dict(model=ctx.active_model, prompt_tokens=prompt_estimate,
-                            use_local=ctx.active_use_local)
+        request_args = dict(model=ctx.active_model, llm=ctx.llm, prompt_tokens=prompt_estimate,
+                            use_local=ctx.active_use_local, screen=True,
+                            processing_preference=task_pacing.wrapup_model_options(ctx)["processing_preference"])
         balances = dict(root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding,
                         global_remaining_usd=global_remaining)
         wrapup_args = dict(**request_args, **balances)
         wrapup_fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
-        two_fit = _second_reservation_fits(ctx, wrapup_args, wrapup_fits, relaxed=last_fit_relaxed)
+        two_fit = _second_reservation_fits(ctx, wrapup_args, wrapup_fits, relaxed=False)
         server_web = _loop()._server_web_allowed_by_task(getattr(getattr(ctx, "tools", None), "_ctx", None))
         if wrapup_fits is False or two_fit is False or (
             wrapup_fits is True and messages_carry_native_images(ctx.messages)
@@ -279,11 +291,12 @@ def _exact_reservations(ctx: "_RoundLimitContext", probe_messages: list, balance
     # the window leaves, not the whole ceiling (which over-reserved a wrap-up that fits).
     with bind_physical_attempt_context(_forced_physical_context(ctx, probe_messages)):
         probe = task_pacing.prospective_wrapup_attempt_request(
-            llm=ctx.llm, messages=probe_messages, model=ctx.active_model,
+            llm=ctx.llm, messages=probe_messages, model=ctx.active_model, task_id=ctx.task_id,
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
             allow_server_web_search=server_web, prompt_tokens=prompt_estimate,
+            use_local=ctx.active_use_local, **task_pacing.wrapup_model_options(ctx),
         )
-    wrapup_args = dict(request=probe, **balances)
+    wrapup_args = dict(request=probe, **balances, allow_ordinary_lookup=True)
     fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
     return fits, _second_reservation_fits(ctx, wrapup_args, fits, relaxed=relaxed)
 
@@ -421,7 +434,7 @@ def _soft_land_exhausted_ceiling(
     admission = dict(root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding or 0.0,
                      global_remaining_usd=_wrapup_global_remaining() if not limit_ctx.active_use_local else None,
                      use_local=limit_ctx.active_use_local)
-    if task_pacing.wrapup_reservation_fits(request=request, **admission) is False:
+    if task_pacing.wrapup_reservation_fits(request=request, **admission, allow_ordinary_lookup=True) is False:
         limit_ctx.accumulated_usage["cost_stop_rail"] = "wrapup_reservation_last_fit"
         return _loop()._forced_fallback_result(
             limit_ctx, trace, soft_land_reason, "budget_exhausted",
@@ -435,24 +448,11 @@ def _soft_land_exhausted_ceiling(
 
 
 def _service_finalization_evidence(llm_trace: Dict[str, Any]) -> list[Dict[str, Any]]:
-    """Return the stable, answer-relevant part of service finalization events."""
+    """Facade for the loop's ``_loop()`` handle: the stop-evidence reader in
+    ``tools/service_stop.py`` owns the mapping from verification events to the
+    answer's service rows (one current outcome per launch)."""
 
-    rows: list[Dict[str, Any]] = []
-    for event in llm_trace.get("verification_events") or []:
-        if not isinstance(event, dict) or str(event.get("kind") or "") not in {
-            "services_stopped",
-            "services_kept",
-            "service_finalization_error",
-        }:
-            continue
-        services = [_service_identity_projection(service)
-                    for service in event.get("services") or [] if isinstance(service, dict)]
-        rows.append({
-            "kind": str(event.get("kind") or ""),
-            "services": services,
-            "error": truncate_within_limit(str(event.get("error") or ""), 2000),
-        })
-    return rows
+    return finalization_evidence(llm_trace)
 
 
 @dataclass
@@ -673,19 +673,22 @@ def _handle_authority_unavailable(
         # The failed authority may name a billing group; the saved member keeps its own root lineage.
         budget_pause.request_pause(
             limit_ctx, rail=budget_pause.RAIL_BILLING_AUTHORITY if billing else budget_pause.RAIL_CONTROL_AUTHORITY,
-            scope="task", reason_text=str(exc))
+            scope="task", reason_text=str(exc), cause=exc.cause)
     fact = {"kind": exc.kind, "cause": exc.cause, "root_task_id": getattr(exc, "root_task_id", ""), "detail": str(exc),
             "exact_pause_unavailable": str(usage.get("exact_pause_unavailable") or "")}
     usage.update(execution_status="infra_failed", reason_code=code, billing_authority=fact)
     ctx.llm_trace["billing_authority"] = fact
-    message = (
-        f"⚠️ No new paid call was admitted at this boundary: this task's billing lineage is missing or not its own "
-        f"({exc}). This is not a budget limit, and neither waiting nor a budget change repairs it. "
-        "Work already saved stays retained."
-        if exc.kind == "refused" else
-        f"⚠️ No new paid call was admitted at this boundary: this task's {subject} could not be read ({exc}), "
-        f"and its exact pause could not be saved ({fact['exact_pause_unavailable'] or 'no actor context'}). "
-        "This is not a budget limit. Work already saved stays retained; nothing unsaved is promised back.")
+    phrase = ("No new paid call was admitted because this task's billing lineage is missing or not its own; this "
+              "is not a budget limit, neither waiting nor a budget change repairs it, and saved work stays retained."
+              if exc.kind == "refused" else
+              f"No new paid call was admitted because this task's {subject} could not be read and its exact pause "
+              "could not be saved; this is not a budget limit, saved work stays retained, and nothing unsaved is "
+              "promised back.")
+    raw = str(exc) if exc.kind == "refused" else f"{exc}; pause: {fact['exact_pause_unavailable'] or 'no actor context'}"
+    message = f"{phrase} ({raw})"  # the record keeps the raw cause; the row says the phrase with it behind Details
+    from ouroboros.host_notice import fields
+
+    usage["host_notice_row"] = {"text": phrase, "record": message, **fields(code, details=raw)}
     if limit_ctx is None:
         _loop()._finalize_task_services(ctx)
         return message, usage, ctx.llm_trace
@@ -756,40 +759,6 @@ def _cleanup_loop_resources(
         log.debug("Failed to release delegated runs for task %s", ctx.task_id, exc_info=True)
 
 
-def _service_identity_projection(service: Dict[str, Any]) -> Dict[str, Any]:
-    """Bounded identity used to deduplicate idempotent teardown observations."""
-
-    fields = (
-        "service_id",
-        "name",
-        "task_id",
-        "lifecycle",
-        "backend",
-        "pid",
-        "port",
-        "artifact_outputs",
-        "artifact_output_failed",
-        "artifact_audit_gap",
-        "log_finalization",
-        "state",
-        "stop_failed",
-        "cleanup_dispatched",
-        "stop_error",
-    )
-    projected = {}
-    for key in fields:
-        value = service.get(key)
-        if key == "stop_error" and value not in (None, ""):
-            value = truncate_within_limit(str(value), 2000)
-        if value not in (None, "", [], {}):
-            projected[key] = value
-    cleanup = service.get("process_cleanup")
-    if isinstance(cleanup, dict):  # what stayed unconfirmed (pid, birth, reason) and why a rest is unknown, whole
-        projected["process_cleanup"] = {key: cleanup[key] for key in (
-            "exit_confirmed", "census_failed", "residual", "survivors", "unverified", "custody") if key in cleanup}
-    return projected
-
-
 def _finalize_task_services(ctx: _LoopExitContext) -> bool:
     """Finalize newly observed task services and record answer-bound evidence.
 
@@ -811,7 +780,7 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
         for service in finalized:
             if not isinstance(service, dict):
                 continue
-            signature = hashlib.sha256(json.dumps(
+            signature = hashlib.sha256(json_dumps_utf8(
                 _service_identity_projection(service),
                 ensure_ascii=False,
                 sort_keys=True,
@@ -822,13 +791,16 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
                 continue
             seen.add(signature)
             fresh.append(service)
+        # The producer tags every payload with its ``lifecycle`` (and corrects legacy
+        # labels itself, ``services.stop_task_services``): teardown classifies by that
+        # tag, not by the service payload's internal stop fields.
         stopped, kept, pending = [], [], []
         for service in fresh:
-            if (service.get("lifecycle") == "cleanup_pending" or service.get("stop_failed")
-                    or service.get("cleanup_dispatched") is False or service.get("state") == "cleanup_pending"):
-                pending.append(_service_identity_projection(service))
-            elif service.get("lifecycle") == "kept":
+            lifecycle = str(service.get("lifecycle") or "")
+            if lifecycle == "kept":
                 kept.append(service)
+            elif lifecycle == "cleanup_pending":
+                pending.append(_service_identity_projection(service))
             else:
                 stopped.append(service)
         for kind, services in (("services_stopped", stopped),
@@ -838,9 +810,11 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
             details = {"services": services}
             if kind == "service_finalization_error":
                 details["error"] = "service cleanup was not confirmed"
-            _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-                "checkpoint_kind": kind, **details,
-            })
+            # Real launch receipts already reached the two checkpoints readers at the producer.
+            if legacy := [service for service in services if not service.get("launch_id") or kind == "services_kept"]:
+                _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
+                    "checkpoint_kind": kind, "services": legacy,
+                })
             ctx.llm_trace.setdefault("verification_events", []).append({"kind": kind, **details})
         return bool(fresh)
     except Exception as exc:
@@ -867,16 +841,21 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
 def _finish_tool_round_budget(
     ctx: _RoundLimitContext, budget_remaining_usd: Optional[float],
     cost_ceiling: "task_pacing.CostCeiling", active_model: str,
-    active_use_local: bool, active_effort: str,
+    active_use_local: bool, active_effort: str, *, context_prepared: bool = False, ready_finish: bool = False,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Complete the existing budget decision after warm or cold owner input.
 
     The batch's delegate requests were observed with its response, before any
     save or park, so a cold continuation owes only this decision: no old tool
-    is executed and no nanny anchor is rebuilt here.
+    is executed and no nanny anchor is rebuilt here. ``context_prepared``: the loop already read the candidate's
+    evidence for this tail. ``ready_finish``: a selected finish waits behind this call, so only money that is
+    actually gone decides here; a prospective wrap-up margin buys nothing over ready work.
     """
-    _loop()._prepare_post_tool_budget_context(
-        ctx.tools, ctx, ctx.llm_trace, active_model, active_use_local, active_effort)
+    if not context_prepared:
+        _loop()._prepare_post_tool_budget_context(
+            ctx.tools, ctx, ctx.llm_trace, active_model, active_use_local, active_effort)
+    if ready_finish and not authored_completion_budget_exhausted(ctx, budget_remaining_usd, cost_ceiling):
+        return None
     result = _loop()._check_budget_limits(ctx, budget_remaining_usd, cost_ceiling=cost_ceiling)
     if result is None:
         return None
@@ -923,6 +902,8 @@ def _prepare_post_tool_budget_context(
     unreadable fingerprint is UNKNOWN, so a retained answer is never lost here.
     """
 
+    from ouroboros.delivery_facts import evidence_notice_control
+
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if isinstance(candidate, _loop().DeliveryCandidate):
         hold_control = (
@@ -930,13 +911,16 @@ def _prepare_post_tool_budget_context(
             if candidate.finalization_control in _loop()._DELIVERY_HOLD_CONTROLS
             else ""
         )
-        evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(
-            tools, limit_ctx, llm_trace,
-        )
-        if (
-            candidate.evidence_revision != evidence_revision
-            or candidate.evidence_fingerprint != evidence_fingerprint
-        ):
+        with measured_sections():  # the post-batch read rides the next round's receipt, beside a waiting start's
+            evidence_revision, evidence_fingerprint = timed("delivery_evidence", _loop()._delivery_evidence_state,
+                                                            tools, limit_ctx, llm_trace)
+            read, start = section_spans(), getattr(tools._ctx, "_round_prologue", None) or {}
+        tools._ctx._round_prologue = {kind: {**start.get(kind, {}), **{  # one receipt: each section's ms summed by name
+            name: ms + start.get(kind, {}).get(name, 0) for name, ms in read[kind].items()}}
+            for kind in ("sections_ms", "sections_cpu_ms")}
+        if candidate.stale(evidence_revision, evidence_fingerprint) and not candidate.owes_no_selection and (
+            candidate.finalization_control != evidence_notice_control(evidence_revision, evidence_fingerprint)
+        ):  # fresh prose binds new evidence; an unchanged shown notice permits explicit reselection
             _loop()._arm_delivery_control(
                 tools,
                 limit_ctx,

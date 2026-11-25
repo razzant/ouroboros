@@ -62,6 +62,42 @@ test('createChatInstance renders a real assistant bubble without senderLabel sha
         restoreDom(prior);
     }
 });
+// A room's feed carries no fade (DESIGN principle 9): its own mask would make it one stacking context, so a card
+// could not lift over the composer, and Chromium drops the lazy-load margin of the photos inside a masked scroller.
+// A card's own scrollers inside the feed keep the shared fade.
+for (const [room, options] of [['Main', { chatId: 1, asPanel: false }], ['a Project', { chatId: 2, asPanel: true }]]) {
+    test(`${room}'s feed takes no shared fade or room-top switch; its live card's scrollers keep theirs`, async () => {
+        const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({
+            messages: [], window: { complete: true }, active_chat_activities: [], active_chat_activities_complete: true,
+            supervisor_ready: true }) }));
+        const handlers = new Map();
+        let generation = 0, instance;
+        try {
+            instance = createChatInstance({
+                ws: { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); }, isConnected: () => true, send() {} },
+                state: { activePage: 'chat', projectChatIds: new Set(options.asPanel ? [options.chatId] : []), unreadCount: 0 },
+                updateUnreadBadge() {}, idPrefix: 'chat', mountEl: mount, ...options,
+                stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+                    gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {}, fail() {}, latest: () => null },
+            });
+            const feed = globalThis.document.byId.get('chat-messages');
+            const page = mount.children.find((node) => node.id === (options.asPanel ? 'panel-chat' : 'page-chat'));
+            assert.equal(feed.classList.contains('scroll-fade-y'), false, 'the feed itself is never masked');
+            assert.equal(Object.hasOwn(page.dataset, 'roomTop'), false, 'no prototype switch on the room root');
+            listActivity(instance, 'feed-card', options.chatId);
+            handlers.get('chat')({ chat_id: options.chatId, role: 'system', is_progress: true, task_id: 'feed-card',
+                content: 'Reading the feed', ts: '2026-11-17T00:00:00Z' });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const card = walkCard(feed, 'feed-card');
+            const part = (name) => card?.children.find((node) => node.classList.contains(name));
+            assert.equal(part('chat-live-timeline')?.classList.contains('scroll-fade-y'), true);
+            assert.equal(part('chat-live-details')?.classList.contains('scroll-fade-y'), true);
+        } finally {
+            instance?.destroy();
+            restoreDom(prior);
+        }
+    });
+}
 test('first task-bound review hydrates a progress-created owner once and reconciles task truth', async () => {
     const calls = [];
     let resolveDeferredDetail = null, resolveNoopDetail = null;
@@ -726,6 +762,45 @@ test('duplicate lifecycle pointer never mints a task and enriches only an existi
         });
         assert.equal(jump.getAttribute('aria-label'), 'Scroll to latest message',
             'a consumed duplicate pointer is not visible remote activity');
+    } finally {
+        instance?.destroy();
+        restoreDom(prior);
+    }
+});
+test('a duplicate review pointer with its notice is a System row: its line, the original job behind Details (RVD4 22)', async () => {
+    const { prior, mount } = installDom();
+    const handlers = new Map();
+    const ws = {
+        on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
+        isConnected: () => true, send() {},
+    };
+    let generation = 0;
+    const stateSnapshots = {
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
+        isCurrent: () => true, apply() {},
+    };
+    let instance;
+    try {
+        instance = createChatInstance({
+            ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+            updateUnreadBadge() {}, stateSnapshots, chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const messages = globalThis.document.byId.get('chat-messages');
+        const line = 'Обзор навыка `alpha` уже идёт; ход его видно в исходном чате.';
+        handlers.get('chat')({
+            chat_id: 2, role: 'system', is_progress: true, task_id: '', system_type: 'skill_lifecycle_pointer',
+            content: 'Skill review: `alpha` — already running; progress reports in its original chat.',
+            progress_meta: { lifecycle_pointer: { kind: 'review', job_id: 'job-original', status: 'running', target: 'alpha',
+                group_id: 'task:root-pointer:alpha', presentation_owner_task_id: 'root-pointer' } },
+            notice: { code: 'skill_review_duplicate', details: 'job job-original', line },
+        });
+        const [row] = messages.children.filter((node) => node.classList.contains('chat-bubble'));
+        assert.ok(row.classList.contains('system') && !row.classList.contains('progress'), 'a System row, never a Thought');
+        assert.match(row.innerHTML, /уже идёт/);
+        assert.doesNotMatch(row.innerHTML, /already running/);
+        const details = row.children.find((child) => child.tagName === 'DETAILS');
+        assert.equal(details?.children[1].textContent, 'job job-original', 'the original job opens from Details');
     } finally {
         instance?.destroy();
         restoreDom(prior);
@@ -1583,6 +1658,32 @@ test('a parent whose evidence arrives later re-nests its child, keeping the node
         assert.equal(walkCard(messages(), 'kid-x'), child, 'the child keeps its node identity');
         assert.equal(child.parentNode?.dataset?.subagentsFor, 'par-x', 'and nests under the parent');
     } finally { instance.destroy(); restoreDom(prior); }
+});
+
+// A replayed child's card is finished by its terminal lifecycle event alone (no task_terminal_status) and a later
+// lifecycle row does not reopen it; `interrupted` is the one end that stays open (retryable).
+test('a replayed child is finished by its terminal subagent event alone, interrupted stays open (#1/#2/#20)', async () => {
+    const life = (n, event) => ({ chat_id: 2, role: 'system', is_progress: true, narration: false, task_id: 'kid-e',
+        subagent_task_id: 'kid-e', parent_task_id: 'par-e', root_task_id: 'par-e', delegation_role: 'subagent',
+        subagent_role: 'reader', subagent_event: event, content: `kid ${event}`, text: `kid ${event}`,
+        ts: `2026-11-20T10:00:0${n}Z`, history_id: `progress:${n}`, history_position: { source: 'progress', offset: n } });
+    const parentRow = { chat_id: 2, role: 'system', is_progress: true, system_type: 'host_progress', task_id: 'par-e',
+        content: 'Parent planning', text: 'Parent planning', narration: false, ts: '2026-11-20T10:00:01Z',
+        history_id: 'progress:1', history_position: { source: 'progress', offset: 1 } };
+    const finishedAfter = async (rows) => {
+        const { instance, prior, messages } = a5Instance([rows]);
+        try {
+            await instance.refreshHistory({ revision: 1 });
+            const kid = walkCard(messages(), 'kid-e');
+            assert.equal(kid.parentNode?.dataset?.subagentsFor, 'par-e', 'the child is its parent\'s nested card');
+            return kid.dataset.finished === '1';
+        } finally { instance.destroy(); restoreDom(prior); }
+    };
+    for (const event of ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected']) {
+        assert.equal(await finishedAfter([parentRow, life(2, 'scheduled'), life(3, 'running'), life(4, event)]), true, event);
+    }
+    assert.equal(await finishedAfter([parentRow, life(2, 'completed'), life(3, 'running')]), true, 'a later row does not reopen it');
+    assert.equal(await finishedAfter([parentRow, life(2, 'scheduled'), life(3, 'running'), life(4, 'interrupted')]), false);
 });
 
 // #2801: answer first. The root's final is saved before its result is stored; a reload in between replays the

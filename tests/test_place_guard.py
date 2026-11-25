@@ -218,6 +218,36 @@ def test_a_send_into_another_place_carries_its_notes_beside_the_result(published
     assert run(name, {"room": "C1"}) == "queued"
 
 
+def test_a_started_send_refused_a_further_step_carries_its_destination_facts(published_tool, places):
+    """The target of a dispatched send stays visible beside its receipt; the host does not attest delivery."""
+    from ouroboros.tools.tool_result import ToolResult
+    _, ctx = places
+    name, tool = published_tool("message", target="room", conversation="room")
+    args = {"room": "C1", "text": "hi"}
+    note = '[DESTINATION] Quiet: your human\'s notes for this place: "Owner instruction"'
+    refusal = "⚠️ OWNER_OPERATION_REFUSED: the host refused this call a further action: stop (cancelled)."
+    started = ToolResult(status="blocked", code="OWNER_OPERATION_REFUSED",
+                         text=f"part one queued\n\n{refusal}",
+                         meta={"dynamic_provider": True, "physical_dispatch": True,
+                               "refused_step": True, "control_reason": "cancelled"},
+                         producer_text="part one queued", host_annotations=(refusal,))
+    annotated = guard.with_destination_facts(ctx, name, args, started, ext_tool=tool)
+    assert annotated.text == f"part one queued\n\n{refusal}\n\n{note}"
+    assert annotated.host_annotations == (refusal, note)
+    assert annotated.producer_text == "part one queued" and annotated.status == "blocked"
+    no_report = replace(started, status="error", code="EXTENSION_ERROR", text="handler error\n\n" + refusal, producer_text=None)
+    reported = guard.with_destination_facts(ctx, name, args, no_report, ext_tool=tool)
+    assert reported.host_annotations == (refusal, note) and reported.producer_text is None
+    not_started = replace(started, meta={"dynamic_provider": True, "refused_step": True,
+                                         "control_reason": "cancelled"})
+    assert guard.with_destination_facts(ctx, name, args, not_started, ext_tool=tool) is not_started
+    ordinary = ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
+                          text="⚠️ RESOURCE_CONSTRAINT_BLOCKED: Quiet is Silent")
+    assert guard.with_destination_facts(ctx, name, args, ordinary, ext_tool=tool) is ordinary
+    ctx.task_metadata = {"focus": {"place_id": "quiet"}}  # the turn's own place: its notes are already in its frame
+    assert guard.with_destination_facts(ctx, name, args, started, ext_tool=tool) is started
+
+
 def test_actual_registry_callsite_blocks_and_allows(published_tool, places):
     _, ctx = places
     name, tool = published_tool("message", target="room")

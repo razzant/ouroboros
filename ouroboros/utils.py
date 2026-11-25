@@ -194,7 +194,7 @@ _REPLACE_RETRY_MAX_DELAY_SEC = 0.1
 
 def replace_atomic(
     src: pathlib.Path | str, dst: pathlib.Path | str, *,
-    precondition: Callable[[], bool] | None = None,
+    precondition: Callable[[], bool] | None = None, publication=None,
 ) -> bool:
     """``os.replace`` with a bounded retry on Windows sharing violations.
 
@@ -214,7 +214,10 @@ def replace_atomic(
         if precondition is not None and not precondition():
             return False
         try:
-            os.replace(src, dst)
+            if publication is None:
+                os.replace(src, dst)
+            else:
+                publication(os.replace, src, dst)  # a refused rename sleeps outside the tree's handoff
             return True
         except PermissionError:
             if attempt == _REPLACE_RETRY_ATTEMPTS - 1:
@@ -241,7 +244,7 @@ def read_text_across_replace(path: pathlib.Path | str, *, encoding: str = "utf-8
             delay = min(delay * 2, _REPLACE_RETRY_MAX_DELAY_SEC)
 
 
-def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], None]) -> None:
+def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], None], *, publication=None) -> None:
     """Run ``write_temp`` against a sibling file, then atomically replace ``path``.
 
     A crash (SIGKILL / power loss) between the temp create and the replace leaves the
@@ -276,7 +279,7 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
         if existing_mode is not None:
             with contextlib.suppress(OSError):
                 os.chmod(tmp, existing_mode)
-        replace_atomic(tmp, path)
+        replace_atomic(tmp, path, **({"publication": publication} if publication else {}))
     except Exception:
         with contextlib.suppress(OSError):
             tmp.unlink()
@@ -354,10 +357,33 @@ def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) 
     write_bytes_atomic(pathlib.Path(path), content.encode("utf-8"), fsync=fsync)
 
 
+_POSIX_SURROGATE_RE = _re.compile(r"[\udc80-\udcff]")
+
+
+def json_dumps_utf8(value: Any, **kwargs: Any) -> str:
+    """Keep POSIX name bytes in structured JSON, not in its UTF-8 carrier.
+
+    Escape after serialization so a literal backslash sequence remains distinct.
+    Leave valid Unicode and the encoder's formatting intact. Other lone surrogates
+    still fail at a strict UTF-8 boundary; this is not a prose encoder.
+    """
+    text = json.dumps(value, **kwargs)
+    return text if text.isascii() else _POSIX_SURROGATE_RE.sub(lambda match: f"\\u{ord(match[0]):04x}", text)
+
+
+def path_for_prose(path: str) -> str:
+    """Use an exact JSON string literal for POSIX byte names in UTF-8 prose.
+
+    Reserve the opening quote for that literal, so a real name cannot mimic it.
+    Ordinary paths keep their spelling; filesystem lookups use the original value.
+    """
+    return json_dumps_utf8(path, ensure_ascii=False) if path.startswith('"') or _POSIX_SURROGATE_RE.search(path) else path
+
+
 def machine_json(payload: Any) -> str:
     """The one compact text of machine JSON: state files, the current store's task bodies and every row
     ``append_jsonl`` writes (a row keeps each value; only the separators' spaces are not written)."""
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return json_dumps_utf8(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def atomic_write_json(path: pathlib.Path, payload: Any, *, trailing_newline: bool = False,
@@ -394,10 +420,16 @@ _JSON_SNAPSHOTS: Dict[str, tuple] = {}
 _RACY_NS = 2_000_000_000
 
 
+def change_stamp_ns(st: Any, *, windows: bool = os.name == "nt") -> int:
+    """``st_ctime_ns`` as every stat call reports it. On Windows CPython 3.12+ ``os.fstat`` gives the
+    change time there and ``os.stat``/``lstat``/``scandir`` the creation time (``st_birthtime_ns``)."""
+    return getattr(st, "st_birthtime_ns", st.st_ctime_ns) if windows else st.st_ctime_ns
+
+
 def file_identity(st: Any) -> tuple:
     """What every write changes: a rename-replace is a new inode, an in-place write a new change
-    time (``st_ctime_ns``, which no ``utime`` sets back on POSIX; Windows reports creation time)."""
-    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    time (which no ``utime`` sets back on POSIX; Windows reports creation time)."""
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, change_stamp_ns(st))
 
 
 def json_snapshot(path: pathlib.Path, *, strict: bool = False) -> Optional[Dict[str, Any]]:
@@ -473,6 +505,7 @@ def update_json_locked(
     strict_existing_dict: bool = False,
     reject_existing_empty_dict: bool = False,
     after_write: Any = None,
+    publication: Any = None,
 ) -> Dict[str, Any]:
     """Locked read-modify-write of a durable JSON dict file.
 
@@ -508,7 +541,12 @@ def update_json_locked(
         updated = mutator(current)
         if updated is None:
             return current
-        atomic_write_json(path, updated)
+        if publication is None:
+            atomic_write_json(path, updated)
+        else:
+            # The full payload and the writer lock are ready before ordering the one public rename.
+            data = machine_json(updated).encode("utf-8")
+            _atomic_overwrite(path, lambda tmp: tmp.write_bytes(data), publication=publication)
         if after_write is not None:
             after_write(updated)  # still under the writer lock; a crash leaves extra debt
         return updated
@@ -1322,7 +1360,20 @@ def sanitize_task_for_event(
 
         return sanitized
     except Exception:
-        return task
+        return dict(task) if isinstance(task, dict) else task  # a copy: the start record rebinds fields of the task
+
+
+def count_routing_lists(event_task: Dict[str, Any]) -> Dict[str, Any]:
+    """The event copy of a task whose start record already holds its routing lists whole (``agent``): each list
+    of a decision turn's routing facts (``server_routing_context._decision_turn_metadata``: Main's manifest, a
+    Project room's manifest, this chat's live roots) becomes its length ``<name>_len``; every other fact stays."""
+    metadata = event_task.get("metadata") if isinstance(event_task, dict) else None
+    counted = {}
+    for key in ("main_routing_manifest", "project_routing_manifest", "current_chat"):
+        if isinstance(metadata, dict) and isinstance(metadata.get(key), dict):
+            counted[key] = {(f"{name}_len" if isinstance(value, list) else name):
+                            (len(value) if isinstance(value, list) else value) for name, value in metadata[key].items()}
+    return {**event_task, "metadata": {**metadata, **counted}} if counted else event_task
 
 
 _SECRET_KEYS = frozenset([
@@ -1387,23 +1438,45 @@ def is_credential_header_name(key: Any) -> bool:
     return normalized in CREDENTIAL_HEADER_NAMES or is_secret_key_name(normalized)
 
 
-def sanitize_tool_result_for_log(result: str) -> str:
-    """Redact potential secrets before a public or durable projection."""
-    if not isinstance(result, str) or len(result) < 20:
+def sanitize_tool_result_for_log(result: str, *, walk=None, strict: bool = False) -> str:
+    """Redact potential secrets before a public or durable projection. ``walk`` — an internal
+    ``secret_masking.MaskWalk`` — keeps the selected Settings values' occurrences in view while these same rules and the
+    same projection run; None is the established behaviour, byte for byte.
+
+    ``strict`` is the durable diagnostic caller's own choice, not a mode of the rules: a projection that errors or does
+    not answer with a text raises ``secret_masking.MaskingFailed`` (which carries a fixed sentence, never the text or
+    its cause) instead of returning what the last completed step produced, and the short-text cutoff below does not
+    apply — a mask that cannot complete withholds rather than passes anything on. With no ``walk`` and no failure this
+    is the same rule sequence, byte for byte."""
+    if not isinstance(result, str):
+        if strict:
+            from ouroboros.secret_masking import MaskingFailed
+
+            raise MaskingFailed("the conventional redactor was handed a non-text")
         return result
-    redacted = _SECRET_PATTERNS.sub("***REDACTED***", result)
-    redacted = _SECRET_URL_CREDENTIAL_RE.sub(
-        lambda match: match.group(0).split("://", 1)[0] + "://***REDACTED***@",
-        redacted,
-    )
+    if not strict and len(result) < 20:
+        return result
+    from ouroboros.secret_masking import MaskingFailed
+
+    replace = walk.substitute if walk is not None else (lambda pattern, repl, text: pattern.sub(repl, text))
+    redacted = replace(_SECRET_PATTERNS, "***REDACTED***", result)
+    redacted = replace(_SECRET_URL_CREDENTIAL_RE,
+                       lambda match: match.group(0).split("://", 1)[0] + "://***REDACTED***@", redacted)
     try:
         from ouroboros.observability import redact_projection
 
-        projected = redact_projection(redacted).value
+        projected = redact_projection(redacted, walk=walk).value
+    except MaskingFailed:
+        raise  # a walk's refusal is never a licence to show or store the text it could not mask
+    except Exception:
+        if walk is not None or strict:
+            raise MaskingFailed("the conventional redactor did not complete") from None
+        log.debug("Failed to run observability redactor for tool result", exc_info=True)
+    else:
         if isinstance(projected, str):
             return projected
-    except Exception:
-        log.debug("Failed to run observability redactor for tool result", exc_info=True)
+        if strict:
+            raise MaskingFailed("the conventional redactor did not answer with a text")
     return redacted
 
 

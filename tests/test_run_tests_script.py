@@ -540,6 +540,26 @@ def test_the_node_option_runs_only_the_owned_node_lane(run_tests, monkeypatch):
             run_tests.main(combined)
 
 
+@pytest.mark.parametrize("node_exit, cleanup, expected", [(0, "", 0), (1, "", 1), (0, "reap incomplete", 2),
+                                                         (1, "reap incomplete", 2), (None, "", 2)])
+def test_node_evidence_requires_the_test_process_and_its_cleanup(
+        run_tests, monkeypatch, tmp_path, standalone_budget, node_exit, cleanup, expected):
+    from ouroboros import preflight_node, process_containment
+
+    monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda root: ["tests/one.test.js"])
+    monkeypatch.setattr(preflight_node, "resolve_node", lambda: "inert-node" if node_exit is not None else None)
+    monkeypatch.setattr(preflight_node, "probe_node_version", lambda node: "24.0.0")
+    proc = types.SimpleNamespace(wait=lambda **kwargs: node_exit)
+    monkeypatch.setattr(process_containment, "ProcessContainer", lambda **options: types.SimpleNamespace(
+        spawn=lambda *args, **kw: proc, reap=lambda: cleanup, close=lambda: None))
+    assert run_tests.main(["--node", "--evidence-dir", str(tmp_path / "node")]) == expected
+    receipt = tmp_path / "node" / "node.json"
+    if expected in (0, 1):
+        assert json.loads(receipt.read_text(encoding="utf-8")) == {"exit": expected}
+    else:
+        assert not receipt.exists()
+
+
 @pytest.mark.parametrize("tier", ["full", "selected"])
 def test_a_deferred_full_escalation_runs_the_floor_and_says_so(run_tests, monkeypatch, tmp_path, tier):
     from ouroboros import test_selection
@@ -677,7 +697,7 @@ def test_a_missing_node_is_a_red_not_run_never_a_silent_skip(run_tests, monkeypa
     from ouroboros import preflight_node
     monkeypatch.setattr(preflight_node, "resolve_node", lambda: None)
     monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda repo: ["tests/x.test.js"])
-    assert run_tests.main([]) == 1
+    assert run_tests.main([]) == run_tests._NODE_INFRA_ERROR
 
 
 def test_a_red_lane_stops_the_battery_and_an_empty_battery_is_red(run_tests, monkeypatch):

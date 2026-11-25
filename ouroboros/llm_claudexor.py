@@ -16,15 +16,16 @@ import time
 from typing import Any
 
 from ouroboros import _usage_wait, config, context_fit
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY
-from ouroboros._usage_response import model_operation_usage as _usage
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY
+from ouroboros._usage_response import model_operation_usage as _usage, provider_cost_value
 from ouroboros.anthropic_native_custody import scrub_native_custody
 from ouroboros.claudexor_daemon import ensure_owned_gateway, owned_engine_version, read_owned_gateway
 from ouroboros.deadline_utils import llm_transport_timeout_sec
 from ouroboros.gateways.claudexor import (ClaudexorUnavailable, engine_at_least, model_failure_evidence_supported,
                                           operation_query_supported, _READ_TIMEOUT_SEC)
-from ouroboros.gateways.claudexor_metadata import model_gateway
-from ouroboros.llm_attempt import _PhysicalSendNotStarted, _attempt_request, _candidate_before_dispatch, effort_request_facts
+from ouroboros.gateways.claudexor_metadata import current_engine, model_gateway
+from ouroboros.llm_attempt import (
+    _PhysicalSendNotStarted, _attempt_request, _candidate_before_dispatch, effort_request_facts, physical_attempt_headroom)
 from ouroboros.llm_capability_policy import model_catalog as model_catalog, catalog_admits_model as catalog_admits_model
 from ouroboros.send_clock import stamp_clock_note
 from ouroboros.llm_substitution import (
@@ -34,7 +35,7 @@ from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope
 from ouroboros.observability import persist_call, update_call_manifest_metadata
 from ouroboros.context_timing import host_step, mark, span_since, timed
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
-from ouroboros.transport_custody import ProviderNotDispatched
+from ouroboros.transport_custody import ProcessingNotStarted, ProviderNotDispatched, is_processing_refusal
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
 from ouroboros.usage_accounting import (
@@ -43,6 +44,7 @@ from ouroboros.usage_accounting import (
 from ouroboros.utils import append_jsonl, read_json_dict, sanitize_tool_result_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
+_PROCESSING_PREFERENCES: dict = {}  # each source's processingPreferences per exact engine build and source id
 
 
 def model_sources(*, processing_view: bool = False) -> dict:
@@ -65,12 +67,17 @@ def model_sources(*, processing_view: bool = False) -> dict:
 def prepare_processing_target(target: dict) -> dict:
     """Capture the source's advertised transport preference before building bytes.
 
-    No extra polling/cache or model eligibility inference: this reads the existing
-    model-source owner once, only for explicit intent. A retained target is reused
-    by every physical preparation of this logical call.
+    No model eligibility inference: this reads the existing model-source owner, only for explicit intent. A retained
+    target is reused by every physical preparation of this logical call. The list is a static declaration of the
+    engine build (``claudexor_run_events.declared_live_input`` keeps ``liveInput`` alike): one a read found serves later
+    calls on the build that answered it (``current_engine``, the same before and after the read); a failed read, a
+    missing list, an unknown build or one replaced during the read is asked again.
     """
     if not target.get("processing_preference") or "processing_preferences" in target:
         return target
+    known = _PROCESSING_PREFERENCES.get((engine := current_engine(), target.get("source")))  # an unknown one: none kept
+    if known is not None:
+        return {**target, "processing_preferences": list(known)}
     prepared = {**target, "processing_preferences": []}
     try:
         sources = timed("claudexor.processing", model_sources, processing_view=True)
@@ -81,11 +88,15 @@ def prepare_processing_target(target: dict) -> dict:
     preferences = source.get("processingPreferences")
     if isinstance(preferences, list):
         prepared["processing_preferences"] = [value for value in preferences if isinstance(value, str)]
+        if engine and engine == current_engine():  # the build that answered: unchanged across this read
+            _PROCESSING_PREFERENCES[(engine, target.get("source"))] = tuple(prepared["processing_preferences"])
     return prepared
 
 
 class ClaudexorModelError(RuntimeError):
     """A model-operation fact with its exact role, route and recovery identity."""
+
+    content_policy_denial = False  # Only finish may prove the received, settled denial.
 
     def __init__(self, problem: dict, *, model_role: str = "", operation_id: str = "",
                  route: dict | None = None, unknown: bool = False, same_operation_recoverable: bool = False):
@@ -114,6 +125,8 @@ class ClaudexorModelError(RuntimeError):
     @property
     def display_message(self) -> str:
         """Show typed provider details without changing exception classification text."""
+        if self.content_policy_denial:
+            return CODEX_CONTENT_POLICY_DISPLAY
         if self.code == "model_capability_refused":
             return sanitize_tool_result_for_log(capability_refusal_text(self.problem) or str(self))
         context = self.problem.get("context") or {}
@@ -132,6 +145,20 @@ class ClaudexorModelError(RuntimeError):
 
 class ClaudexorModelNotDispatched(ClaudexorModelError, ProviderNotDispatched):
     """A failed prepare before create, or an engine receipt proving dispatch.state=not_started."""
+
+
+class _ClaudexorProcessingRefused(ProcessingNotStarted, ClaudexorModelError):
+    """The provider answered without starting generation; the attempt still ran."""
+
+    def __init__(self, problem: dict, **identity):
+        ClaudexorModelError.__init__(self, problem, **identity)
+        self.processing_reason = problem["context"]["processingRefusal"]
+
+
+def _note_limit_failure(problem: Any) -> None:
+    from ouroboros.subscription_census import note_limit_failure
+
+    note_limit_failure(problem.get("code") if isinstance(problem, dict) else None, problem)
 
 
 # The install's own control daemon left unanswered before any model create (no status: not a received refusal).
@@ -159,6 +186,47 @@ def presence_refusal_unstarted(error: Exception, round_idx: int) -> bool:
     return (round_idx == 1 and isinstance(error, ClaudexorModelNotDispatched)
             and getattr(error, "presence_all_operations_not_started", False) is True
             and isinstance(capture, PhysicalAttemptCapture) and capture.state == "released")
+
+
+CODEX_CONTENT_POLICY_VENDOR_CODE = "cyber_policy"  # engine-owned typed vendor code
+CODEX_CONTENT_POLICY_CODES = ("provider_failed", "provider_content_refused")
+CODEX_CONTENT_POLICY_DENIED = "codex_content_policy_denied"
+CODEX_CONTENT_POLICY_WORDS = "a Codex content-policy denial (the request was received and declined, so it is not sent again)"
+CODEX_CONTENT_POLICY_DISPLAY = "Codex content-policy denial of this request (received and settled; not sent again)."
+
+
+def _proved_codex_content_policy_denial(problem: Any, result: Any, detail: Any, capture: Any) -> bool:
+    """Raw received shape only; absent or malformed metadata is ordinary. Read by finish."""
+    if not (isinstance(problem, dict) and isinstance(result, dict) and isinstance(detail, dict)):
+        return False
+    context, dispatch, route = problem.get("context"), detail.get("dispatch"), result.get("route")
+    sent = dispatch.get("route") if isinstance(dispatch, dict) else None
+    return (problem.get("code") in CODEX_CONTENT_POLICY_CODES and problem.get("retryable") is False
+            and isinstance(context, dict) and context.get("vendorCode") == CODEX_CONTENT_POLICY_VENDOR_CODE
+            and result.get("outcome") == "failed" and isinstance(dispatch, dict) and dispatch.get("state") == "response_received"
+            and isinstance(route, dict) and route.get("source") == "codex" and isinstance(sent, dict) and sent.get("source") == "codex"
+            and getattr(capture, "state", None) == "settled")
+
+
+def codex_content_policy_denial(error: object) -> bool:
+    """A settled typed Codex denial ends the request without retry, alternate or account penalty."""
+    return isinstance(error, ClaudexorModelError) and error.content_policy_denial is True
+
+
+def _typed_denial(invocation: _ModelInvocation, result: dict) -> bool:
+    """Read the same evidence at admission and finish, without inferring a reason from text."""
+    return invocation.detail.get("state") != "cancelled" and _proved_codex_content_policy_denial(
+        result.get("problem"), result, invocation.detail, invocation.capture)
+
+
+def _ends_on_content_denial(error: ClaudexorModelError, capability: CapabilityRetry) -> bool:
+    """Keep any earlier correlated attempt ids before ending this model call."""
+    if not codex_content_policy_denial(error):
+        return False
+    own = getattr(getattr(error, "physical_attempt_capture", None), "attempt_id", "")
+    if capability.attempts:
+        error.ledger_attempt_ids = list(dict.fromkeys([*capability.attempts, *([own] if own else [])]))
+    return True
 
 
 def propagate_model_error(error: Exception) -> None:
@@ -265,7 +333,8 @@ def cache_key_for_model(model: str) -> str:
 
 
 def _request(target: dict, messages: list, tools: list | None, parameters: dict) -> dict:
-    from ouroboros.llm_messages import _MessageShapingMixin, project_declared_system_prefix, HOST_ONLY_MESSAGE_KEYS
+    from ouroboros.llm_messages import (DISPLAY_KEY, _MessageShapingMixin, project_declared_system_prefix,
+                                        HOST_ONLY_MESSAGE_KEYS)
 
     target["requested_reasoning_effort"] = parameters.get("reasoning_effort")
     for name in ("response_format", "allow_server_web_search", "bypass_response_cache"):
@@ -278,8 +347,9 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
     prepared = project_declared_system_prefix(target, scrub_native_custody(_MessageShapingMixin._normalize_system_message_placement(messages)))
     for message in prepared:
         for name in ("_context_capsule", "acceptance_observation", "_acceptance_observation", "review_feedback",
+                     DISPLAY_KEY,
                      "reasoning", "reasoning_details", "reasoning_content", "response_id", "stop_reason", "_stable_prefix_blocks",
-                     HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, TOOL_RESULT_RECORD_KEY, REVIEW_HISTORY_MESSAGE_KEY,
+                     HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, TOOL_RESULT_RECORD_KEY, REVIEW_HISTORY_MESSAGE_KEY,
                      REVIEW_CONTEXT_INDEX_KEY, "_review_image_id", "cache_control"):  # the seal's row mark too
             message.pop(name, None)
         # A direct provider's refusal is assistant content, not routing metadata.
@@ -503,6 +573,8 @@ class _ModelInvocation:
     def error(self, problem: dict | None, detail: dict | None = None, *, unknown: bool = False, rejoinable: bool = False):
         route = ((detail or {}).get("dispatch") or {}).get("route") or {}
         cls = ClaudexorModelError if unknown else ClaudexorModelNotDispatched
+        if not unknown:  # an engine refusal on a limit asks the subscription census for a read
+            _note_limit_failure(problem)
         return cls(problem or {"code": "model_operation_failed", "message": "The engine returned no model result."}, model_role=self.role,
                    operation_id=self.operation_id, route=route, unknown=unknown, same_operation_recoverable=rejoinable)
 
@@ -553,23 +625,11 @@ class _ModelInvocation:
                         raise self.error(result.get("problem"), detail, unknown=True)
                     if (detail.get("dispatch") or {}).get("state") != "response_received" or result.get("outcome") not in {"completed", "incomplete", "failed"}:
                         raise self.error({"code": "malformed_response", "message": "The engine did not prove a terminal provider response."}, detail, unknown=True)
-                    problem = result.get("problem") or {}
-                    context = problem.get("context") or {}
-                    options = self.payload.get("options") or {}
-                    if (result.get("outcome") == "failed" and problem.get("code") == "processing_unavailable"
-                            and context.get("generationStarted") is False
-                            and context.get("processingFallback") == "standard"
-                            and context.get("processingRefusal") in {"capacity", "unsupported"}
-                            and self.target.get("processing_preference") in {"fast", "economy", "ultrafast"}
-                            and options.get("processingPreference") in {"fast", "economy", "ultrafast"}
-                            and not options.get("serviceTier")):
-                        # response_received describes the refusal envelope. The
-                        # engine separately proves generation never started.
-                        raise ClaudexorModelNotDispatched(problem, model_role=self.role,
-                            operation_id=self.operation_id, route=result.get("route") or {})
                     return result
                 outage_started = None
             except ClaudexorUnavailable as error:
+                if not self.operation_id:  # the create POST's own typed answer: a limit asks the census for a read
+                    _note_limit_failure(getattr(error, "problem", None))
                 if not self.operation_id and error.code == "model_request_invalid":
                     # This exact create refusal is minted by the engine only
                     # after its idempotency lookup proves no accepted command,
@@ -683,7 +743,7 @@ class _ModelInvocation:
 
     def finish(self, result: dict) -> tuple[dict, dict]:
         usage, cost, final = self.extract_usage(result)
-        # After the host's Standard retry of a refused tier (``_unstarted_repair``) the engine's receipt answers that
+        # After the host's Standard retry of a refused tier the engine's receipt answers that
         # Standard request; this logical call still asked the work's tier, which its receipt keeps beside what was
         # sent and served (the physical attempt's own row keeps the engine's receipt).
         wanted, sent = self.target.get("processing_preference"), (self.payload.get("options") or {}).get("processingPreference")
@@ -718,11 +778,18 @@ class _ModelInvocation:
             error.model_result = copy.deepcopy(result)
             error.route = copy.deepcopy(route)
             raise
-        if result.get("outcome") == "failed" or self.detail.get("state") == "cancelled":
+        if result.get("outcome") == "failed" or self.detail.get("state") == "cancelled" or _processing_failure(result):
             problem = ({"code": "model_operation_cancelled", "message": "The engine cancelled this model operation."}
                        if self.detail.get("state") == "cancelled" else result.get("problem") or {})
-            error = ClaudexorModelError(problem, model_role=self.role,
-                                       operation_id=self.operation_id, route=route)
+            identity = {"model_role": self.role, "operation_id": self.operation_id, "route": route}
+            _note_limit_failure(problem)  # a provider limit asks the subscription census for a read
+            if problem.get("code") == "processing_unavailable" and _proved_processing_refusal(result):
+                error = _ClaudexorProcessingRefused(problem, **identity)
+            else:
+                error = ClaudexorModelError(problem, **identity)
+                if problem.get("code") == "processing_unavailable":
+                    error.processing_refusal_conflict = True
+                error.content_policy_denial = _typed_denial(self, result)
             error.physical_attempt_capture = self.capture
             error.usage = usage
             raise error
@@ -831,8 +898,8 @@ def _accounted_request(invocation: _ModelInvocation):
     return request, reserved
 
 
-def _unstarted_retry_preparation(target: dict, payload: dict, parameters: dict, error: ClaudexorModelNotDispatched):
-    """Rebind the already-authorized un-sent repair before preparing its next attempt.
+def _retry_preparation(target: dict, payload: dict, parameters: dict, error: ClaudexorModelError):
+    """Rebind the caller's fit authority before preparing an authorized next attempt.
 
     The engine's new account receipt replaces provisional discovery. Pass the
     sanitized send copy to ordinary callers; Main re-applies an attested
@@ -853,21 +920,48 @@ def _unstarted_retry_preparation(target: dict, payload: dict, parameters: dict, 
     return waiter.reprepare(parameters.get("model_role", ""), values)
 
 
-def _processing_retry_payload(payload: dict, error: ClaudexorModelNotDispatched) -> dict | None:
-    """Read the already proved generation refusal; never convert an unknown run."""
-    context = error.problem.get("context") or {}
-    capture = getattr(error, "physical_attempt_capture", None)
-    options = payload.get("options") or {}
-    if (error.code != "processing_unavailable" or getattr(capture, "state", None) != "released"
-            or context.get("generationStarted") is not False
-            or context.get("processingFallback") != "standard"
-            or context.get("processingRefusal") not in {"capacity", "unsupported"}
-            or options.get("processingPreference") not in {"fast", "economy", "ultrafast"}
-            or options.get("serviceTier")):
+def _processing_failure(result: dict) -> bool:
+    return (result.get("problem") or {}).get("code") == "processing_unavailable"
+
+
+def _proved_processing_refusal(result: dict) -> bool:
+    """Trust the engine's typed proof only if its structured result agrees.
+
+    Null usage/amounts are not contradictions, but also never supply a zero price.
+    An acceptance, output or charge contradicts the claimed pre-generation refusal.
+    """
+    context = (result.get("problem") or {}).get("context") or {}
+    usage, cost = result.get("usage"), result.get("cost") or {}
+    processing = result.get("processing") or {}
+    return (result.get("outcome") == "failed" and context.get("generationStarted") is False
+            and context.get("processingFallback") == "standard"
+            and context.get("processingRefusal") in {"capacity", "unsupported"}
+            and result.get("message") is None and not result.get("modelMismatch")
+            and (result.get("appliedOptions") or {}).get("serviceTier") is None
+            and processing.get("observed") in {None, "unknown"} and not processing.get("observedNative")
+            and (usage is None or (isinstance(usage, dict) and all(
+                count is None or (type(count) is int and count == 0) for count in usage.values())))
+            and all(cost.get(key) is None or provider_cost_value(cost[key]) == 0
+                    for key in ("cashUsd", "estimatedUsd", "valuationUsd")))
+
+
+def _processing_repair(target: dict, payload: dict, parameters: dict, invocation: _ModelInvocation,
+                       error: ClaudexorModelError, repaired: set) -> tuple[dict, dict, Any] | None:
+    """One Standard send after settlement, with the same route and caller's bounds."""
+    options = invocation.payload.get("options") or {}
+    preference = options.get("processingPreference")
+    processing = (getattr(error, "usage", None) or {}).get("processing") or {}
+    if (not isinstance(error, _ClaudexorProcessingRefused)
+            or getattr(invocation.capture, "state", None) != "settled"
+            or "processing" in repaired or "standard" not in target.get("processing_preferences", [])
+            or preference not in {"fast", "economy", "ultrafast"}
+            or processing.get("submitted") not in {None, preference}
+            or "serviceTier" in options or physical_attempt_headroom() == 0):
         return None
-    updated = copy.deepcopy(payload)
-    updated["options"]["processingPreference"] = "standard"
-    return updated
+    repaired.add("processing")
+    updated = {**payload, "options": {**options, "processingPreference": "standard"}}
+    parameters = {**parameters, "_processing_submission": "standard"}
+    return updated, parameters, _retry_preparation(target, updated, parameters, error)
 
 
 def _unstarted_repair(target: dict, payload: dict, parameters: dict, invocation: _ModelInvocation,
@@ -878,17 +972,14 @@ def _unstarted_repair(target: dict, payload: dict, parameters: dict, invocation:
     recorded once that attempt is prepared. A repaired cause refused again, an unknown outcome and every other code
     return None: the caller's refusal path."""
     capture = getattr(error, "physical_attempt_capture", None)
-    if ("processing" not in repaired and "standard" in target.get("processing_preferences", [])
-            and (updated := _processing_retry_payload(payload, error)) is not None):
-        cause, repair = "processing", (updated, {**parameters, "_processing_submission": "standard"})
-    elif "native" not in repaired and (updated := _reset_native(payload, error, invocation)) is not None:
+    if "native" not in repaired and (updated := _reset_native(payload, error, invocation)) is not None:
         cause, repair = "native", (updated, parameters)
     elif "auth" not in repaired and error.code == "auth_changed" and getattr(capture, "state", None) == "released":
         cause, repair = "auth", (payload, parameters)
     else:
         return None
     repaired.add(cause)
-    prepared = _unstarted_retry_preparation(target, *repair, error)
+    prepared = _retry_preparation(target, *repair, error)
     if cause == "auth":
         append_jsonl(invocation.root / "logs" / "events.jsonl", {"ts": utc_now_iso(), "type": "model_operation_reissued",
             "cause": error.code, "task_id": invocation.task_id, "model_role": invocation.role, "operation_id": invocation.operation_id})
@@ -896,7 +987,7 @@ def _unstarted_repair(target: dict, payload: dict, parameters: dict, invocation:
 
 
 def chat_claudexor(target: dict, messages: list, tools: list | None, **parameters: Any) -> tuple[dict, dict]:
-    """One generation, one released no-start repair per cause, quota re-asks on Auto."""
+    """Released repairs and received tier refusals keep separate accounting."""
     target = prepare_processing_target(target)
     payload = _request(target, messages, tools, parameters)
     retry_preparation, repaired = None, set()
@@ -915,12 +1006,13 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
                 invocation.capture = last_physical_attempt_capture()
                 if capability.original is not None:
                     substitution.redos = substitution.used  # the correlated operation is the last send
-                if substitution.admit(invocation, result):
-                    # Every later request in this round leaves account selection to the engine.
-                    retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
-                    payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
-                    continue
-                adopt_turn_state((prepared or parameters).get("model_turn_state"), invocation.payload, result)
+                if not _processing_failure(result):
+                    if not _typed_denial(invocation, result) and substitution.admit(invocation, result):
+                        # Every later request in this round leaves account selection to the engine.
+                        retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
+                        payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
+                        continue
+                    adopt_turn_state((prepared or parameters).get("model_turn_state"), invocation.payload, result)
                 return capability.disclose(rotation.disclose(substitution.disclose(invocation.finish(result))))
         except ClaudexorModelNotDispatched as error:
             all_operations_not_started &= getattr(getattr(error, "physical_attempt_capture", None), "state", None) == "released"
@@ -940,6 +1032,15 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
             payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
+            if _ends_on_content_denial(error, capability):
+                raise
+            if is_processing_refusal(error):
+                repair = None if capability.ends_chain(error) else _processing_repair(
+                    target, payload, parameters, invocation, error, repaired)
+                if repair is None:
+                    raise
+                payload, parameters, retry_preparation = repair
+                continue
             updated = capability.refused(invocation, error)
             if updated is not None:
                 retry_preparation, payload = None, updated
@@ -1060,12 +1161,13 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
                 invocation.capture = last_physical_attempt_capture()
                 if capability.original is not None:
                     substitution.redos = substitution.used
-                if await invocation.offload(substitution.admit, invocation, result):
-                    # Every later request in this round leaves account selection to the engine.
-                    retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
-                    payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
-                    continue
-                adopt_turn_state((prepared or parameters).get("model_turn_state"), invocation.payload, result)
+                if not _processing_failure(result):
+                    if not _typed_denial(invocation, result) and await invocation.offload(substitution.admit, invocation, result):
+                        # Every later request in this round leaves account selection to the engine.
+                        retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
+                        payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
+                        continue
+                    adopt_turn_state((prepared or parameters).get("model_turn_state"), invocation.payload, result)
                 return capability.disclose(rotation.disclose(substitution.disclose(await invocation.offload(invocation.finish, result))))
         except ClaudexorModelNotDispatched as error:
             all_operations_not_started &= getattr(getattr(error, "physical_attempt_capture", None), "state", None) == "released"
@@ -1085,6 +1187,15 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
             payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
+            if _ends_on_content_denial(error, capability):
+                raise
+            if is_processing_refusal(error):
+                repair = None if capability.ends_chain(error) else _processing_repair(
+                    target, payload, parameters, invocation, error, repaired)
+                if repair is None:
+                    raise
+                payload, parameters, retry_preparation = repair
+                continue
             updated = await invocation.offload(capability.refused, invocation, error)
             if updated is not None:
                 retry_preparation, payload = None, updated

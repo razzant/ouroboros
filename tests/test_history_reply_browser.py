@@ -134,6 +134,23 @@ def _landed(page, address, feed):
     return facts
 
 
+def _arrived(page, address, feed):
+    """A reveal's first landing on the exact row address, as it first stands: recorded, never judged here (its place
+    is judged once the room settles, `_settled_row`). Passive: the feed's scroll and whether `Scroll to latest message`
+    shows, the observable trace of the reader following the newest message."""
+    page.wait_for_function("""([address, feed]) => {
+        const target = document.querySelector(`${feed} .is-quote-target`);
+        return target && target.dataset.rowAddress === address;
+    }""", arg=[address, feed], timeout=15_000)
+    return page.locator(f"{feed} .is-quote-target").evaluate("""(node, selector) => {
+        const feed = document.querySelector(selector), r = node.getBoundingClientRect();
+        const latest = feed.closest('.page, .chat-instance-panel')?.querySelector('.chat-scroll-bottom-btn');
+        return {address: node.dataset.rowAddress, focused: document.activeElement === node, top: r.top, bottom: r.bottom,
+                at: performance.now(), feedTop: feed.scrollTop, feedHeight: feed.scrollHeight, feedView: feed.clientHeight,
+                latestShown: Boolean(latest?.classList.contains('visible'))};
+    }""", feed)
+
+
 def _evidence(page, root, name, fixture, facts):
     destination = producer_evidence_dir(root, "quoted-navigation")
     page.screenshot(path=str(destination / f"{name}.png"), animations="disabled")
@@ -178,6 +195,201 @@ def _settled_row(page, target, feed):
         };
         requestAnimationFrame(sample);
     })""", feed)
+
+
+def _promote_second_request(data, mp, scratch, *, gap=False):
+    """Real promotion, stopping before the completion: the second of two identical requests starts the work.
+
+    Returns (a, b, words, tid, task, queue, workers) and leaves the caller's ``mp`` patches in force, so a
+    caller may open Main in front of the reader first and only then run ``_deliver_second_completion``.
+    ``gap`` keeps the neutral row ``_complete_on_second_request`` always inserted; both halves stay real."""
+    from types import SimpleNamespace
+
+    from ouroboros.agent import OuroborosAgent
+    from ouroboros.owner_relay import owner_row_address
+    from ouroboros.queue_observation import load_queue_document, pool_observation_status
+    from ouroboros.tools.control import _start_task
+    from ouroboros.tools.control_events import _promotion_pool_disabled_from_snapshot
+    from tests.test_continue_quiz_origin import _owner_turn
+
+    mp.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(scratch / "projects"))
+    queue, workers, turn, (first, second, _), _, _ = _owner_turn(data, mp, "same_words_bare")
+    a, b = owner_row_address(first), owner_row_address(second)
+    assert first["text"] == second["text"] and a != b
+
+    assert queue.publish_queue_snapshot(reason="prepared_synthetic_pool") is True
+    snapshot = load_queue_document(data)
+    assert pool_observation_status(snapshot) == "observed" and snapshot["worker_total"] == 1
+    assert _promotion_pool_disabled_from_snapshot(turn) == ""
+    receipt = _start_task(turn, "Count the seeds", title="Seed count", project_name="Seed inventory",
+                          workspace="none", owner_source=b)
+    assert receipt.startswith("OK: task"), receipt
+    if gap:
+        # Ordinary neutral chatter between B and the completion (its ts lands after B's 13:45 and long
+        # before the terminal delivery's now): the quote's target is no longer the row directly above.
+        ds.append(data, "chat", {"chat_id": 1, "ts": "2024-04-08T15:00:00+00:00", "direction": "out",
+                                 "text": "Routine note while the seed work runs."}, feed=True)
+    [task] = workers.PENDING
+    workers.PENDING.remove(task)
+    workers.RUNNING.pop(turn.task_id)
+    OuroborosAgent._persist_running_record(SimpleNamespace(env=SimpleNamespace(drive_root=data)), task)
+    return a, b, second["text"], task["id"], task, queue, workers
+
+
+def _deliver_second_completion(data, mp, b, tid, task, queue, workers):
+    """Real terminal mirroring and delivery of the promoted work; only model and transport are fixtures.
+
+    The returned frame is the producer's own unmodified bridge broadcast — the payload a running server
+    hands its ws broadcaster (test_body_adoption_card_browser feeds such captured frames to an open page,
+    filtering them by ``type == "chat"``) — so a caller may dispatch it into an open page's socket as the
+    delivery's live arrival. The dispatch, the delivery and the quote stay the real machinery's."""
+    import time
+    from collections import deque
+    from types import SimpleNamespace
+
+    from ouroboros import server_liveness
+    from ouroboros.project_dialogue import append_terminal_task_projection
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.terminal_projection import SETTLEMENT_DEFERRED, main_delivery_recorded, settle_terminal_projection
+    from ouroboros.utils import append_jsonl
+    from supervisor import events_chat_delivery, message_bus
+    from supervisor.event_observation import ObservedEventQueue
+    from tests.test_dialogue_retry import bridge
+
+    answer = "The seed table is ready to read."
+    stored = write_task_result(data, tid, STATUS_COMPLETED, result=answer, terminal_origin="model_final")
+    done = {"chat_id": 1, "status": "completed", "outcome_axes": {"execution": {"status": "ok"}}}
+    frames, bus = bridge(data, mp), ObservedEventQueue()
+    for name, empty in (("_DELIVERED_MESSAGE_IDS", deque(maxlen=256)), ("_ACTIVE_DELIVERIES", set()),
+                        ("_DEFERRED_DELIVERIES", set())):
+        mp.setattr(events_chat_delivery, name, empty)
+    mp.setattr(workers, "get_event_q", lambda **_kw: bus)
+    ctx = SimpleNamespace(DRIVE_ROOT=data, RUNNING={}, EVENT_Q=bus, append_jsonl=append_jsonl,
+                          send_with_budget=message_bus.send_with_budget)
+    assert append_terminal_task_projection(data, tid, task, stored, done)
+    assert settle_terminal_projection(data, tid, task=task, event_queue=bus) == SETTLEMENT_DEFERRED
+    server_liveness.drain_worker_events(bus, ctx, [time.monotonic(), {}, time.thread_time(), None],
+                                       on_restart=lambda *_: pytest.fail("unexpected restart"))
+    assert main_delivery_recorded(data, f"project-completion:{tid}", task_id=tid)
+    [frame] = [f for f in frames if f.get("system_type") == "project_completion_summary" and f.get("task_id") == tid]
+    assert (frame["chat_id"], frame["completion_answer"], frame["reply_to"]["address"]) == (1, answer, b)
+    assert queue.persist_queue_snapshot(reason="completed_synthetic_project")
+    return answer, frame
+
+
+def _complete_on_second_request(data, mp, scratch, *, gap=False):
+    """Drive real promotion, terminal mirroring and delivery. Only the model and transport are fixtures.
+
+    ``gap``: an ordinary neutral synthetic row in Main between the selected request and the completion, so
+    the answer's host-derived quote is not directly-above hidden (DESIGN "Replies"). The dispatch, the
+    delivery and the quote stay the real machinery's either way. Both halves share one ``mp``, so the
+    promotion's patches live until the delivery returns; the return keeps its original four values."""
+    a, b, words, tid, task, queue, workers = _promote_second_request(data, mp, scratch, gap=gap)
+    answer, _frame = _deliver_second_completion(data, mp, b, tid, task, queue, workers)
+    return a, b, words, answer
+
+
+@pytest.mark.parametrize("gap", [True, False], ids=["quote-shown", "quote-hidden-directly-above"])
+def test_main_quotes_the_request_that_started_the_completed_project(direct_server_with_data, monkeypatch, tmp_path, gap):
+    """The real completion arrives while Main stands open, then again from the persisted room after reload.
+
+    Two phases of one delivery, named in the evidence. ``live-arrival`` dispatches the producer's own
+    unmodified bridge broadcast into the open page's socket — a live-bridged arrival, not a network-socket
+    proof — and the room is proven to hold no quote of the selected row before that emit, so an initial
+    replay cannot stand in for the delivery. ``replay`` reloads and lets the same room re-read the
+    persisted row through the running server, independent of the bridged hop. Promotion, terminal
+    mirroring and delivery are the real machinery, split around the moment Main opens; only the model is a
+    mock and only the socket hop is bridged. DESIGN "Replies" holds in both: with an ordinary gap row the
+    derived quote shows and its click lands on the exact second of two identical requests, never its
+    same-words twin (the address alone tells them apart); without it the selected row is directly above
+    the answer, where the quote exists, addresses the exact row and stays hidden, never forced clickable.
+    """
+    from playwright.sync_api import sync_playwright
+
+    stand = direct_server_with_data
+    feed = "#chat-messages"
+    with monkeypatch.context() as mp:
+        a, b, words, tid, task, queue, workers = _promote_second_request(stand["data_dir"], mp, tmp_path, gap=gap)
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 850})
+                # Both witnesses go in before navigation: a script added after goto never runs, and
+                # _emit_ws_frame dispatches into the socket _CAPTURE_TEST_SOCKET recorded.
+                page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+                page.add_init_script(f"({_OBSERVE_QUOTES})()")
+                _open(page, stand["url"])
+                assert page.evaluate("() => (window.__testSockets || []).length") >= 1, "no socket to deliver into"
+                for address in (a, b):
+                    assert page.locator(f'{feed} [data-row-address={json.dumps(address)}]').count() == 1, address
+                selected_quote = f'{feed} .chat-quote[data-address={json.dumps(b)}]'
+                assert page.locator(selected_quote).count() == 0, "the completion has not been delivered yet"
+                answer, frame = _deliver_second_completion(stand["data_dir"], mp, b, tid, task, queue, workers)
+                _emit_ws_frame(page, frame)
+                page.wait_for_function(f"() => document.querySelectorAll({json.dumps(selected_quote)}).length === 1",
+                                       timeout=15_000)
+                for phase in ("live-arrival", "replay"):
+                    if phase == "replay":
+                        page.reload(wait_until="domcontentloaded")
+                        _idle(page, feed)
+                    bubble = page.locator(f"{feed} .project-answer").filter(has_text=answer)
+                    bubble.wait_for(state="visible")
+                    quote = bubble.locator(".chat-quote")
+                    assert quote.get_attribute("data-address") == b != a
+                    assert quote.locator(".chat-quote-text").inner_text() == words
+                    if gap:
+                        assert quote.is_visible(), "an ordinary row above the answer shows the derived quote"
+                        quote.locator(".chat-quote-main").click()
+                        facts = _landed(page, b, feed)
+                        assert facts["address"] == b != a
+                    else:
+                        facts = quote.evaluate("""node => {
+                            const main = node.querySelector('.chat-quote-main');
+                            return {hidden: node.hidden, mainZero: !main || main.getBoundingClientRect().width === 0,
+                                    address: node.dataset.address};
+                        }""")
+                        assert facts == {"hidden": True, "mainZero": True, "address": b}, facts
+                    _evidence(page, tmp_path, f"selected-origin-project-{phase}-{'shown' if gap else 'hidden'}-chromium",
+                              {"selected": b, "arrival": phase}, facts)
+            finally:
+                browser.close()
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_main_quote_lands_in_the_project_already_docked_beside_it(direct_server_with_data, browser_engine):
+    from playwright.sync_api import sync_playwright
+
+    data = direct_server_with_data["data_dir"]
+    project = create_project(data, "docked-source", name="Docked source", origin="owner_ui")
+    source = {"chat_id": project["chat_id"], "direction": "out", "ts": "2026-10-01T12:00:00Z",
+              "text": "Copper light, then copper light."}
+    ds.append(data, "chat", source, feed=True)
+    excerpt = {"text": "copper light", "start_utf16": source["text"].index("copper")}
+    ref = {**reference_from_row(source), "excerpt": excerpt}
+    ds.append(data, "chat", {"chat_id": 1, "direction": "out", "ts": "2026-10-01T12:01:00Z",
+                              "text": "Follow the second lamp.", "reply_to": ref}, feed=True)
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch()
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 850})
+            page.add_init_script(f"({_OBSERVE_QUOTES})()")
+            _open(page, direct_server_with_data["url"])
+            room_browser._open(page, project["id"])
+            feed = "#pchat-docked-source-messages"
+            _idle(page, feed)
+            page.locator("#pchat-docked-source-input").fill("Keep my project draft.")
+            # The docked Project's scrim takes pointer clicks. Main stays keyboard-accessible beside it.
+            _quote(page, ref["address"]).press("Enter")
+            _landed(page, ref["address"], feed)
+            page.wait_for_function("""([feed, text, start]) => {
+                const selection = getSelection();
+                const r = [...(CSS.highlights?.get('reply-excerpt') || [])][0]
+                    || (selection.rangeCount && selection.getRangeAt(0));
+                return r?.toString() === text && r.startOffset === start && r.startContainer.parentElement.closest(feed);
+            }""", arg=[feed, excerpt["text"], excerpt["start_utf16"]])
+            assert page.locator("#pchat-docked-source-input").input_value() == "Keep my project draft."
+        finally:
+            browser.close()
 
 
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
@@ -232,6 +444,226 @@ def test_exact_cross_room_quote_and_return_preserve_drafts_unread_and_history(di
             browser.close()
 
 
+CARD_QUESTION = "Which colors should the table legend use?"
+CARD_CHOICE = "1. Use blue and gold"
+CARD_WORDS = "Use stripes for the smallest plots"
+
+
+def _seed_card_answer_reply(root, answer="option", gap=0, *, block=True, selected=False):
+    """Another work asked a card in a Project room; my human chose its first option (``answer="option"``), wrote
+    their own words (``"free_text"``) or both (``"option_comment"``), after ``gap`` more messages of the room, recorded
+    as a System row whose copy the question's block keeps. Seed an existing Reply to that answer for browser
+    rendering and navigation; this fixture does not invoke ``start_task``."""
+    from unittest.mock import patch
+
+    from ouroboros.owner_quiz import mark_quiz_history_written, quiz_answer_frame, record_answered, record_asked
+    from ouroboros.task_results import load_task_result
+
+    room = create_project(root, "table-room", name="Seed table", origin="owner_ui")
+    start = datetime(2024, 4, 9, 10, tzinfo=timezone.utc)
+    for index in range(30):
+        for chat in (1, room["chat_id"]):
+            ds.append(root, "chat", {"chat_id": chat, "ts": (start + timedelta(seconds=index)).isoformat(),
+                                     "direction": "in" if index % 2 else "out", "text": f"Context {index:03}"}, feed=True)
+    asked_at = (start + timedelta(minutes=5)).isoformat()
+    with patch("ouroboros.owner_quiz.utc_now_iso", return_value=asked_at):
+        record_asked(root, "palette-asker", quiz_id="q-palette", question=CARD_QUESTION,
+                     options=["Use blue and gold", "Use gray and green"], wait_for_answer=True)
+    ds.append(root, "chat", {"chat_id": room["chat_id"], "ts": asked_at,
+                             "direction": "out", "type": "quiz", "task_id": "palette-asker", "text": CARD_QUESTION,
+                             "quiz": {"quiz_id": "q-palette", "options": [{"label": "Use blue and gold"},
+                                                                         {"label": "Use gray and green"}],
+                                      "state": "open", "wait_for_answer": True}}, feed=True)
+    index, comment = {"option": (0, ""), "free_text": (None, CARD_WORDS), "option_comment": (0, CARD_WORDS)}[answer]
+    with patch("ouroboros.owner_quiz.utc_now_iso", return_value=(start + timedelta(minutes=14)).isoformat()):
+        quiz_block = record_answered(root, "palette-asker", quiz_id="q-palette", option_index=index,
+                                     request_id="owner-choice", comment=comment)["block"]
+    for later in range(gap):  # the room goes on between the question and my human's answer
+        ds.append(root, "chat", {"chat_id": room["chat_id"], "ts": (start + timedelta(minutes=6, seconds=later)).isoformat(),
+                                 "direction": "in" if later % 2 else "out", "text": f"Later {later:03}"}, feed=True)
+    answer = {"chat_id": room["chat_id"], "ts": str(quiz_block["answered_at"]), "direction": "system", "type": "quiz_answer",
+              "source": "owner_quiz_answer", "task_id": "palette-asker", "client_message_id": "quiz_answer:palette-asker:q-palette",
+              "text": quiz_answer_frame(quiz_block, index, comment), "quiz": dict(quiz_block)}
+    mark_quiz_history_written(root, "palette-asker", "q-palette", source_row=ds.append(root, "chat", answer).row)
+    if not block:
+        from ouroboros.owner_quiz import mark_discharged, quiz_states
+        mark_discharged(root, "palette-asker", "q-palette")
+        for later in range(17):
+            record_asked(root, "palette-asker", quiz_id=f"later-{later}", question="Another question", options=["Yes"])
+        assert "q-palette" not in quiz_states(root, "palette-asker")
+    _result(root, "palette-asker", chat_id=room["chat_id"], owner_quiz=load_task_result(root, "palette-asker")["owner_quiz"])
+    _result(root, "legend-work", chat_id=1)
+    if selected:
+        from ouroboros.owner_relay import owner_row_source
+        project = create_project(root, "selected-answer", name="Table legend", origin="owner_ui")
+        ref, words = owner_row_source(answer)
+        bind_task_to_project(root, "legend-work", project["id"], origin={"ref": ref, "text": words})
+        ds.append(root, "chat", {"chat_id": project["chat_id"], "ts": (start + timedelta(minutes=21)).isoformat(),
+                                 "direction": "out", "task_id": "legend-work", "text": "The legend uses the chosen colors.",
+                                 "reply_to": reference_from_row(answer)}, feed=True)
+    ds.append(root, "chat", {"chat_id": 1, "ts": (start + timedelta(minutes=20)).isoformat(), "direction": "out",
+                             "task_id": "legend-work", "text": "The table legend is ready.",
+                             "reply_to": reference_from_row(answer)}, feed=True)
+    return room, answer
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_a_reply_to_my_humans_card_answer_reads_their_choice_in_their_voice(direct_server_with_data, browser_engine, tmp_path):
+    """An existing Reply to my human's card answer shows their choice under their name, replayed and after reload;
+    the quote keeps the answer row's address (its jump lands at the question card). The neighboring
+    ``test_main_quotes_the_request_that_started_the_completed_project`` exercises the real start path."""
+    from playwright.sync_api import sync_playwright
+
+    root = direct_server_with_data["data_dir"]
+    _room, answer = _seed_card_answer_reply(root)
+    address = format_address(row_address(answer))
+    facts = {}
+    with sync_playwright() as pw:
+        try:
+            browser = getattr(pw, browser_engine).launch(headless=True)
+        except Exception as error:  # an engine this host has not installed is named, never passed silently
+            if "Executable doesn't exist" in str(error):
+                pytest.skip(f"{browser_engine} is not installed for this Playwright")
+            raise
+        page = browser.new_page(viewport={"width": 1280, "height": 850})
+        page.add_init_script(f"({_OBSERVE_QUOTES})()")
+        try:
+            _open(page, direct_server_with_data["url"])
+            for attempt in ("replay", "reload"):
+                if attempt == "reload":  # a fresh page over the same saved rows
+                    page.reload(wait_until="domcontentloaded")
+                    page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === WebSocket.OPEN)")
+                    _idle(page, "#chat-messages")
+                quote = _quote(page, address)
+                facts[attempt] = quote.evaluate("""main => ({
+                    author: main.querySelector('.chat-quote-author').textContent,
+                    words: main.querySelector('.chat-quote-text').textContent,
+                    voice: main.closest('.chat-quote').dataset.author, label: main.getAttribute('aria-label')})""")
+                assert facts[attempt]["author"] == "You" and facts[attempt]["words"] == CARD_CHOICE, facts
+                assert "Owner quiz answer" not in facts[attempt]["label"] and CARD_QUESTION not in facts[attempt]["label"]
+                assert facts[attempt]["voice"] == "user", "the quote of a recorded choice uses the owner's ink"
+                quote.scroll_into_view_if_needed()
+                _evidence(page, tmp_path, f"card-answer-quote-{attempt}-{browser_engine}", {"address": address}, facts)
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("answer,gap,block,selected", [
+    ("option", 0, True, False), ("free_text", 0, True, False), ("option_comment", 0, True, False),
+    ("option", 200, True, False), ("option_comment", 200, False, False),
+    ("option", 200, True, True), ("option_comment", 200, False, True)],
+    ids=["option", "free_text", "option_comment", "option_far", "evicted_far", "selected_far", "selected_evicted_far"])
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_a_reply_to_my_humans_card_answer_lands_on_that_answer(direct_server_with_data, browser_engine, answer, gap, block, selected, tmp_path):
+    """Pressed, Main's Reply to work my human's card answer started opens the card's Project room and lands on the
+    answer that card already draws for the answer row (their chosen option, else their own words; a choice with words
+    lights both), carrying that row's identity: never the question, never the card as a whole, never Main's mirror of
+    it; replayed and after a reload, also when the room said much more between the question and the answer."""
+    from playwright.sync_api import sync_playwright
+
+    root = direct_server_with_data["data_dir"]
+    room, row = _seed_card_answer_reply(root, answer, gap, block=block, selected=selected)
+    address, feed = format_address(row_address(row)), f'[id="pchat-{room["id"]}-messages"]'
+    words = CARD_WORDS if answer == "free_text" else CARD_CHOICE.split(". ", 1)[1]
+    holder = ".chat-quiz-answer" if answer == "free_text" else ".chat-quiz-option.chosen"
+    facts = {}
+    with sync_playwright() as pw:
+        try:
+            browser = getattr(pw, browser_engine).launch(headless=True)
+        except Exception as error:  # an engine this host has not installed is named, never passed silently
+            if "Executable doesn't exist" in str(error):
+                pytest.skip(f"{browser_engine} is not installed for this Playwright")
+            raise
+        page = browser.new_page(viewport={"width": 1280, "height": 850})
+        page.add_init_script(f"({_OBSERVE_QUOTES})()")
+        try:
+            _open(page, direct_server_with_data["url"])
+            for attempt in ("replay", "reload"):
+                if attempt == "reload":  # a fresh page over the same saved rows
+                    page.goto(direct_server_with_data["url"], wait_until="domcontentloaded", timeout=30_000)
+                    page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === WebSocket.OPEN)")
+                    _idle(page, "#chat-messages")
+                # Main draws no node of the answer row: its Reply names it, the card in its room shows it.
+                assert page.locator(f'#chat-messages [data-row-address={json.dumps(address)}]').count() == 0
+                source_feed = "#chat-messages"
+                if selected:
+                    page.locator('.nav-project-row[data-project-id="selected-answer"]').click()
+                    source_feed = "#pchat-selected-answer-messages"
+                    _idle(page, source_feed)
+                _quote(page, address, source_feed).last.click()
+                if answer == "option_comment":  # one answer: the words beside the choice light with it, that moment
+                    page.wait_for_function("""feed => {
+                        const node = document.querySelector(`${feed} .is-quote-target`);
+                        const line = node?.closest('.chat-quiz-card')?.querySelector('.chat-quiz-answer');
+                        return Boolean(line && line !== node && getComputedStyle(line).animationName === 'chat-quote-target');
+                    }""", arg=feed, timeout=15_000)
+                # The exact holder is marked first; where it stands is judged only once the room's motion and its history
+                # reads have settled (_settled_row), passively: the test neither scrolls nor focuses anything itself.
+                facts[attempt] = _arrived(page, address, feed)
+                facts[f"{attempt}-target"] = page.locator(f"{feed} [data-row-address={json.dumps(address)}]").evaluate(
+                    """(node, holder) => {
+                    const card = node.closest('.chat-quiz-card');
+                    const stamped = [...document.querySelectorAll('[data-row-address]')].filter(
+                        n => n.dataset.rowAddress === node.dataset.rowAddress);
+                    return {inCard: Boolean(card), wholeCard: node.matches('.chat-quiz-card'), holder: node.matches(holder),
+                        inMain: Boolean(node.closest('#chat-messages')), text: node.textContent,
+                        focused: document.activeElement === node, historyId: node.dataset.historyId || '',
+                        pressable: node.matches('button') ? !node.disabled && node.getAttribute('aria-disabled') !== 'true' : null,
+                        stamped: stamped.length, retained: stamped.filter(n => n.dataset.originProjected === '1'
+                            && n.closest('#pchat-selected-answer-messages')).length}}""", holder)
+                target = facts[f"{attempt}-target"]
+                assert target["inCard"] and not target["wholeCard"] and not target["inMain"], target
+                assert target["holder"] and target["focused"] and not target["historyId"], target
+                assert target["stamped"] == 1 + target["retained"] and (selected or not target["retained"]), target
+                assert words in target["text"] and CARD_QUESTION not in target["text"], target
+                assert target["pressable"] in (None, False), "the recorded choice takes no press"
+                # Past the room's motion (its panel slides in, its newest page arrives): the answer stays focused, whole
+                # inside the window, below the header and clear of the composer, with at least a line of it in view.
+                settled = facts[f"{attempt}-settled"] = _settled_row(
+                    page, page.locator(f"{feed} [data-row-address={json.dumps(address)}]"), feed)
+                assert settled["focused"] and settled["x"] >= 0 and settled["x"] + settled["width"] <= 1280, settled
+                assert settled["top"] >= settled["clear"] - 2 and settled["bottom"] <= settled["edge"] + 2, settled
+                assert min(settled["bottom"], settled["edge"]) - settled["top"] >= 12 and not settled["overlaps"], settled
+                _evidence(page, tmp_path, f"card-answer-landing-{answer}-{gap}-{attempt}-{browser_engine}", {"address": address}, facts)
+        finally:
+            _evidence(page, tmp_path, f"card-answer-landing-{answer}-{gap}-{browser_engine}", {"address": address}, facts)
+            browser.close()
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_a_landed_card_answer_keeps_its_ring_in_light_reduced_motion(direct_server_with_data, browser_engine, tmp_path):
+    """Reduced motion holds a quote's ring still instead of fading it. On the light theme the chosen answer is flat,
+    yet its ring shows there as on the dark theme's lifted one: the theme's no-lift is a shadow layer it can join."""
+    from playwright.sync_api import sync_playwright
+
+    room, row = _seed_card_answer_reply(direct_server_with_data["data_dir"])
+    address, feed = format_address(row_address(row)), f'[id="pchat-{room["id"]}-messages"]'
+    ring = {}
+    with sync_playwright() as pw:
+        try:
+            browser = getattr(pw, browser_engine).launch(headless=True)
+        except Exception as error:  # an engine this host has not installed is named, never passed silently
+            if "Executable doesn't exist" in str(error):
+                pytest.skip(f"{browser_engine} is not installed for this Playwright")
+            raise
+        page = browser.new_page(viewport={"width": 1280, "height": 850}, color_scheme="light", reduced_motion="reduce")
+        page.add_init_script(f"({_OBSERVE_QUOTES})()")
+        try:
+            _open(page, direct_server_with_data["url"])
+            _quote(page, address).last.click()
+            ring = page.wait_for_function("""feed => {
+                const node = document.querySelector(`${feed} .chat-quiz-option.chosen.is-quote-target`);
+                if (!node || document.documentElement.dataset.theme !== 'light') return null;
+                const style = getComputedStyle(node);
+                return {shadow: style.boxShadow, animation: style.animationName, address: node.dataset.rowAddress};
+            }""", arg=feed, timeout=15_000).json_value()
+            assert ring["address"] == address and ring["animation"] == "none", ring
+            assert ring["shadow"] not in ("", "none") and "3px" in ring["shadow"], ring
+        finally:
+            _evidence(page, tmp_path, f"card-answer-light-reduced-{browser_engine}", {"address": address}, ring)
+            browser.close()
+
+
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
 @pytest.mark.parametrize("viewport", [(1280, 850), (1084, 724)], ids=["wide", "sender"])
 def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, browser_engine, viewport, tmp_path):
@@ -251,6 +683,7 @@ def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, br
             bind_task_to_project(root, "converted-source", fixture["x"]["id"], origin={"absent": "system"})
             _quote(page, address).click()
             facts["converted"] = _landed(page, address, '#pchat-quote-converted-messages')
+            assert page.evaluate("window.__ouroLayers.returnPage()?.back.label") == "Main"
             _evidence(page, tmp_path, f"converted-target-{browser_engine}", fixture, facts)
             page.locator('#project-panel-close').click()
             _idle(page, '#chat-messages')
@@ -282,11 +715,17 @@ def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, br
             _evidence(page, tmp_path, f"line-after-gesture-{browser_engine}", fixture, facts)
             page.locator('#project-panel-close').click()
             _idle(page, '#chat-messages')
-            # Ordinary reopening finds the kept room as left (PR #2951, owner 2026-11-03: DESIGN "History edges"),
-            # and `Scroll to latest message` returns it to the present; source navigation adds no global Back.
+            # Ordinary reopening from the sidebar finds the kept room as left, its reading place and draft (PR #2951,
+            # owner 2026-11-03: DESIGN "History edges"), and clears the source jump's return; `Scroll to latest message`
+            # then returns it to the present.
             page.locator('.nav-project-row[data-project-id="quote-triage"]').click()
             _idle(page, '#pchat-quote-triage-messages')
+            assert page.evaluate("window.__ouroLayers.returnPage() === null")
             assert target.count() == 1, 'the kept room still holds the passage it was left on'
+            facts["reopened"] = _settled_row(page, target, feed)
+            assert abs(target.evaluate(timeline_top) - after) <= 2, facts["reopened"]
+            assert abs(facts["reopened"]["feedTop"] - facts["after_resize"]["feedTop"]) <= 2, facts["reopened"]
+            assert page.locator('#pchat-quote-triage-input').input_value() == 'Project draft\n' * 5
             page.locator('#pchat-quote-triage-scroll-bottom').click()
             _idle(page, '#pchat-quote-triage-messages')
             assert page.locator('#pchat-quote-triage-messages').evaluate(
@@ -1647,3 +2086,184 @@ def test_search_lands_on_the_matching_photo_or_file_of_a_group(direct_server_wit
             (shots / f"{browser_engine}-group-marks.json").write_text(json.dumps(landed, indent=2))
             browser.close()
     assert not errors, errors
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_selected_passage_lands_on_second_group_item_from_project(direct_server_with_data, browser_engine):
+    from playwright.sync_api import sync_playwright
+
+    root = direct_server_with_data["data_dir"]
+    project = create_project(root, "group-quotes", name="Group quotes", origin="owner_ui")
+    sources = [{"chat_id": 1, "ts": f"2026-10-01T12:00:0{i}Z", "direction": "out", "type": "document",
+                "task_id": "field-notes", "filename": f"{stem}.txt", "caption": f"The {stem} pier", "text": f"The {stem} pier"}
+               for i, stem in enumerate(("south", "north"))]
+    for source in sources:
+        ds.append(root, "chat", source, feed=True)
+    address = format_address(row_address(sources[1]))
+    excerpt = {"text": "north", "start_utf16": 4}
+    ds.append(root, "chat", {"chat_id": project["chat_id"], "ts": "2026-10-01T12:01:00Z", "direction": "out",
+                              "text": "Read the north note.", "reply_to": {**reference_from_row(sources[1]), "excerpt": excerpt}}, feed=True)
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 850})
+            page.add_init_script(f"({_OBSERVE_QUOTES})()")
+            _open(page, direct_server_with_data["url"])
+            room_browser._open(page, project["id"])
+            _quote(page, address, "#pchat-group-quotes-messages").click()
+            _landed(page, address, "#chat-messages")
+            page.wait_for_function("""address => {
+                const target = document.querySelector('#chat-messages .chat-file-item.is-quote-target');
+                const r = [...CSS.highlights.get('reply-excerpt') || []][0];
+                return target?.dataset.rowAddress === address && target.closest('.is-multiple')
+                    && target.querySelector('.chat-file-name').textContent === 'north.txt'
+                    && target.querySelector('.chat-file-caption').contains(r?.startContainer)
+                    && r.toString() === 'north';
+            }""", arg=address)
+            assert page.evaluate("address => window.__quoteReads.some(r => r.address === address && r.body?.anchor?.state === 'found')", address)
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_selected_reply_keeps_second_rendered_passage_through_reload(direct_server_with_data, browser_engine):
+    from playwright.sync_api import expect, sync_playwright
+
+    phrase = "Silver gate"
+    row = {"chat_id": 1, "direction": "out", "ts": "2026-10-01T12:00:00+00:00",
+           "text": f"🌙 **{phrase}** then [{phrase}](https://example.invalid/atlas)."}
+    ds.append(direct_server_with_data["data_dir"], "chat", row, feed=True)
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        page = browser.new_page(viewport={"width": 1100, "height": 750})
+        try:
+            page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+            page.locator("#chat-input").fill("Keep the night route.")
+            # Native Selection spans the second occurrence. The subsequent real button press includes
+            # the shell's document-capture pointerdown and the browser's usual mousedown default.
+            link = page.locator("#chat-messages .message a", has_text=phrase)
+            link.evaluate("""node => {
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                const selection = getSelection();
+                selection.removeAllRanges(); selection.addRange(range);
+            }""")
+            action = page.get_by_role("button", name="Reply to quote", exact=True)
+            action.wait_for()
+            assert link.evaluate("""link => {
+                const r = getSelection().getRangeAt(0).getBoundingClientRect();
+                link.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, button:2,
+                    clientX:r.left+r.width/2, clientY:r.top+r.height/2}));
+                const api = window.ouroReplyToQuote;
+                const offered = api.available('menu-A');
+                const refused = !api.activate('other-menu');
+                const saved = getSelection().getRangeAt(0).cloneRange();
+                getSelection().removeAllRanges();
+                const stale = !api.activate('menu-A');
+                link.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, button:0}));
+                getSelection().addRange(saved);
+                return offered && refused && stale;
+            }""")
+            assert page.evaluate("() => sessionStorage.getItem('ouro_chat_reply')") is None
+            action.click()
+            strip = page.locator(".chat-quote--composer[data-excerpt]")
+            expect(strip.locator(".chat-quote-text")).to_have_text(phrase, use_inner_text=True)
+            kept = page.evaluate("() => JSON.parse(sessionStorage.getItem('ouro_chat_reply'))")
+            assert kept["address"] == format_address(row_address(row))
+            assert kept["excerpt"] == {"text": phrase, "start_utf16": len("🌙 Silver gate then ".encode("utf-16-le")) // 2}
+            page.reload(wait_until="domcontentloaded")
+            strip.wait_for()
+            assert page.locator("#chat-input").input_value() == "Keep the night route."
+            strip.locator(".chat-quote-main").click()
+            page.wait_for_function("""() => {
+                const range = [...(CSS.highlights?.get('reply-excerpt') || [])][0] || (getSelection()?.rangeCount ? getSelection().getRangeAt(0) : null);
+                return !!range?.startContainer.parentElement.closest('a');
+            }""")
+            strip.get_by_role("button", name="Cancel reply").click()
+            assert page.locator("#chat-input").input_value() == "Keep the night route."
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("room,direction", [("main", "in"), ("main", "out"), ("project", "in"), ("project", "out")])
+def test_selected_passage_round_trip(direct_server_with_data, room, direction):
+    """Real mouse, WS acceptance, stored owner row and the reloaded room; only the fixture's LLM is scripted."""
+    from playwright.sync_api import sync_playwright
+
+    root, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    project = create_project(root, "night-atlas", name="Night atlas", origin="owner_ui") if room == "project" else None
+    chat = project["chat_id"] if project else 1
+    prefix = f"pchat-{project['id']}" if project else "chat"
+    passage = ("The violet beacon above the winter quay guides the little survey boat past the shoals. "
+               "A chalk star beside the eastern stair marks the tide gauge that the night crew should read.")
+    opening = f"🌙 {passage} Again, "
+    row = {"chat_id": chat, "direction": direction, "text": opening + passage + " At dawn.", "ts": "2026-10-07T12:00:00Z"}
+    ds.append(root, "chat", row, feed=True)
+    address = format_address(row_address(row))
+    new_words = "Please explain the second observation."
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1100, "height": 750})
+        try:
+            page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_function("() => window.__testSockets.some(s => s.readyState === WebSocket.OPEN)")
+            if project:
+                room_browser._open(page, project["id"])
+            feed = page.locator(f"#{prefix}-messages")
+            body = feed.locator(f'.chat-bubble[data-row-address={json.dumps(address)}] .message[data-reply-body]')
+            body.scroll_into_view_if_needed()
+            # Read glyph edges to aim physical pointer events. Never program the browser's Selection.
+            points = body.evaluate("""(body, passage) => {
+                const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+                let node;
+                while ((node = walker.nextNode())) {
+                    const start = node.data.lastIndexOf(passage);
+                    if (start < 0) continue;
+                    const glyph = (i, end) => {
+                        const r = document.createRange();
+                        r.setStart(node, i); r.setEnd(node, i + 1);
+                        const box = r.getBoundingClientRect();
+                        return [end ? box.right - 0.2 : box.left + 0.2, box.top + box.height / 2];
+                    };
+                    return [glyph(start, false), glyph(start + passage.length - 1, true)];
+                }
+            }""", passage)
+            assert points
+            page.mouse.move(*points[0])
+            page.mouse.down()
+            page.mouse.move(*points[1], steps=18)
+            page.mouse.up()
+            assert page.evaluate("getSelection().toString()") == passage
+            page.get_by_role("button", name="Reply to quote", exact=True).click()
+            page.locator(f"#{prefix}-input").fill(new_words)
+            page.locator(f"#{prefix}-send").click()
+            saved = feed.locator('.chat-bubble.user[data-row-address]').filter(has_text=new_words)
+            saved.wait_for(timeout=30_000)
+            cmid = saved.get_attribute("data-client-message-id")
+            accepted = ds.accepted_row(root, chat, cmid)
+            assert accepted and accepted.row["text"] == new_words
+            excerpt = {"text": passage, "start_utf16": len(opening.encode("utf-16-le")) // 2}
+            ref = {**reference_from_row(row), "excerpt": excerpt}
+            assert accepted.row["reply_to"] == ref
+            page.reload(wait_until="domcontentloaded")
+            if project and not feed.is_visible():
+                room_browser._open(page, project["id"])
+            saved = feed.locator(f'.chat-bubble.user[data-row-address={json.dumps(format_address(row_address(accepted.row)))}]')
+            quote = saved.locator(".chat-quote[data-excerpt]")
+            jump, expand = quote.locator(".chat-quote-main"), quote.get_by_role("button", name="Show all", exact=True)
+            expand.wait_for(state="visible")
+            target_box, expand_box = jump.bounding_box(), expand.bounding_box()
+            assert target_box and expand_box
+            assert expand_box["x"] - (target_box["x"] + target_box["width"]) >= 7.5  # --space-2, as in the composer
+            expand.click()
+            assert quote.locator(".chat-quote-text").text_content() == passage
+            jump.click()
+            page.wait_for_function("""([address, expected, start]) => {
+                const r = [...(CSS.highlights?.get('reply-excerpt') || [])][0]
+                    || (getSelection().rangeCount ? getSelection().getRangeAt(0) : null);
+                return r?.toString() === expected && r.startOffset === start
+                    && r.startContainer.parentElement.closest('.chat-bubble')?.dataset.rowAddress === address;
+            }""", arg=[address, passage, excerpt["start_utf16"]])
+        finally:
+            browser.close()

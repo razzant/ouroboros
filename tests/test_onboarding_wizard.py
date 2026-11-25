@@ -442,8 +442,14 @@ def test_onboarding_steps_and_stylesheet_keep_their_owner_facing_shape():
 
     assert {"Connect your accounts", "Choose models", "Choose access", "Review limits"} <= titles
     assert {"Subscriptions + API", "model slots"} <= rails
-    assert "@media (max-width: 720px)" in css
-    assert "scroll-snap-type: x proximity;" in css
+    # The rail names each step by one short word, so seven fit one line; the step heads keep their titles.
+    assert [step["railTitle"] for step in contract["steps"]] == [
+        "Accounts", "Models", "Access", "Consciousness", "Skills", "Limits", "Review"]
+    assert all(" " not in step["railTitle"] for step in contract["steps"])
+    # A phone's rail shows the current pill alone with «N of M» (no sideways rail of clipped pills).
+    phone = css.split("@media (max-width: 720px)", 1)[1].split("\n}\n", 1)[0]
+    assert ".wizard-step {\n    display: none;" in phone and ".wizard-step.active {" in phone and ".wizard-step-of {" in phone
+    assert "scroll-snap-type" not in phone
 
 
 def test_setup_contract_exports_active_model_slots_only():
@@ -461,12 +467,17 @@ def test_setup_contract_exports_active_model_slots_only():
 # --------------------------------------------------------------------------
 
 
-def test_agents_share_accounts_in_the_five_step_onboarding():
-    """Subscriptions and API access share the first step, then the same role editors."""
+def test_agents_share_accounts_in_the_seven_step_onboarding():
+    """Subscriptions and API access share the first step, then the same role editors; Consciousness (owner decision
+    2026-11-20) and Skills (owner 2026-11-21) are their own steps between access and limits, each only where setup
+    offers it."""
     contract = build_setup_contract("web")
     ids = [step["id"] for step in contract["steps"]]
-    assert ids == ["accounts", "models", "review_mode", "budget", "summary"]
+    assert ids == ["accounts", "models", "review_mode", "consciousness", "skills", "budget", "summary"]
     assert build_setup_bootstrap({}, "web")["stepOrder"] == ids
+    assert build_setup_bootstrap({}, "web", starter_choice=False)["stepOrder"] == [i for i in ids if i != "skills"]
+    assert build_setup_bootstrap({}, "web", starter_choice=False, consciousness_first_state=False)["stepOrder"] == [
+        "accounts", "models", "review_mode", "budget", "summary"]
     assert "coding agent" not in repr(contract).lower()
     assert contract["steps"][0]["title"] == "Connect your accounts"
 
@@ -505,6 +516,7 @@ def test_setup_contract_groups_rarely_used_providers():
     assert {field["settingKey"]: field["group"] for field in fields} == {
         "OPENROUTER_API_KEY": "primary",
         "OPENAI_API_KEY": "primary",
+        "OPENAI_API_SURFACE": "more",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY": "more",
         "GIGACHAT_CREDENTIALS": "more",
         "GIGACHAT_USER": "more",
@@ -564,7 +576,7 @@ def test_setup_contract_has_no_secret_values():
     deepseek_initial = deepseek_bootstrap["initialState"]
     assert deepseek_initial["providerProfile"] == "deepseek"
     assert deepseek_initial["mainModel"] == "deepseek::deepseek-v4-pro"
-    assert deepseek_initial["lightModel"] == "deepseek::deepseek-v4-flash"
+    assert deepseek_initial["lightModel"] == "deepseek::deepseek-flash"
 
 
 # --- The served page must not hand back a stored credential -----------------
@@ -716,18 +728,13 @@ def test_api_settings_exposes_setup_contract_without_secrets(tmp_path):
     import ouroboros.gateway.settings as gw_settings
 
     secret = "sk-or-v1-super-secret-token"
-    # `server.api_settings_get` COPIES its own (patched) `load_settings` into
-    # `ouroboros.gateway.settings` so legacy `server.*` monkeypatch tests keep
-    # working. That copy is irreversible, so patching only the `server` module
-    # left a MagicMock parked on the gateway module for the rest of the pytest
-    # PROCESS — the next test to call any gateway settings route read it and
-    # saw a fabricated install (it made `GET /api/onboarding` answer 204 in
-    # `test_onboarding_complete_endpoint`). Patching BOTH namespaces makes the
-    # restore symmetric with the copy.
+    # `server.api_settings_get` copies the server module's current bindings
+    # onto `ouroboros.gateway.settings` before delegating, so the provider-defaults
+    # fake is patched in both namespaces. The gateway module binds no settings
+    # reader of its own: the route reads `settings_read_view` (patched below),
+    # and a copied loader lands on a name nothing reads.
     patches = [
-        patch.object(srv, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(srv, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
-        patch.object(gw_settings, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(gw_settings, "settings_read_view", return_value=({"OPENROUTER_API_KEY": secret}, {})),
         patch.object(gw_settings, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch("ouroboros.server_auth.get_configured_network_password", return_value=""),
@@ -1072,3 +1079,30 @@ def test_onboarding_rejects_malformed_connection_draft_without_partial_settings(
 def test_named_connection_needs_an_enabled_endpoint_for_remote_access(row):
     prepared, error = prepare_onboarding_settings({**_base_payload(), "OUROBOROS_CONNECTIONS": [row]}, {})
     assert prepared == {} and error == "Connect Codex, an API provider, or a local model before continuing."
+
+
+def test_onboarding_seeds_a_new_openai_key_on_responses_and_keeps_an_existing_choice():
+    """A key new to this install starts on Responses; a key the install already had keeps the API it ran (Chat
+    when never chosen), and a client that does not send the field never clears a saved one."""
+    from ouroboros.settings_setup_contract import derive_provider_profile
+
+    payload = {**_base_payload(), "OPENAI_API_KEY": "sk-openai-1234567890"}
+    prepared, error = prepare_onboarding_settings(payload, {})
+    assert error is None and prepared["OPENAI_API_SURFACE"] == "responses"
+    assert derive_provider_profile(prepared) == "openai-responses"
+    prepared, error = prepare_onboarding_settings(payload, {"OPENAI_API_KEY": "sk-openai-1234567890"})
+    assert error is None and prepared["OPENAI_API_SURFACE"] == ""
+    assert derive_provider_profile(prepared) == "openai"
+    kept, error = prepare_onboarding_settings(payload, {"OPENAI_API_KEY": "sk-openai-1234567890",
+                                                        "OPENAI_API_SURFACE": "responses"})
+    assert error is None and kept["OPENAI_API_SURFACE"] == "responses"
+    refused, error = prepare_onboarding_settings({**payload, "OPENAI_API_SURFACE": "auto"}, {})
+    assert refused == {} and error == "OpenAI API must be chat_completions or responses."
+
+
+def test_the_responses_profile_is_offered_beside_the_unchanged_chat_profile():
+    bootstrap = build_setup_bootstrap({}, "desktop")
+    assert bootstrap["modelDefaults"]["openai"]["main"] == "openai::gpt-5.6-terra"
+    assert (bootstrap["modelDefaults"]["openai-responses"]["main"], bootstrap["modelDefaults"]["openai-responses"]["light"],
+            bootstrap["modelDefaults"]["openai-responses"]["fallback"]) == (
+        "openai::gpt-6.1-terra", "openai::gpt-6-luna", "openai::gpt-6.1-sol")

@@ -32,6 +32,7 @@ class TestHostNoteVoice:
         monkeypatch.setattr(mb, "load_state", lambda: {"owner_id": 1})
         sent: list[dict] = []
         monkeypatch.setattr(mb, "get_bridge", lambda: type("B", (), {
+            "chat_transport": staticmethod(lambda _chat_id: {}),
             "send_message": staticmethod(lambda *a, **kw: sent.append(dict(kw))),
         })())
         return mb, sent
@@ -44,22 +45,31 @@ class TestHostNoteVoice:
         # ONE meta dict reaches the durable record and the live bridge.
         assert rows[-1]["narration"] is False
         assert sent[-1]["progress_meta"]["narration"] is False
+        assert rows[-1]["role"] == sent[-1]["role"] == "system"
+        assert sent[-1]["progress_meta"]["reply_author_label"] == "System"
 
     def test_an_explicit_voice_is_preserved_in_both_directions(self, tmp_path, monkeypatch):
         mb, sent = self._bus(tmp_path, monkeypatch)
         mb.send_with_budget(1, "the model speaking", is_progress=True, task_id="t1",
                             narration=True)
         assert sent[-1]["progress_meta"]["narration"] is True
-        mb.send_with_budget(1, "host note", is_progress=True, task_id="t1", narration=False)
+        assert sent[-1]["progress_meta"]["reply_author_label"] == "Ouroboros"
+        mb.send_with_budget(1, "host note", is_progress=True, task_id="t1", narration=False,
+                            role="system", system_type="host_progress")
         assert sent[-1]["progress_meta"]["narration"] is False
+        assert sent[-1]["role"] == "system"
+        assert sent[-1]["progress_meta"]["reply_author_label"] == "System"
         # A caller that already put the fact on its own meta keeps it.
         mb.send_with_budget(1, "carried", is_progress=True, task_id="t1",
                             progress_meta={"narration": True, "card_row": "timeline"})
         from ouroboros.chat_references import resolve_progress_row
         meta = dict(sent[-1]["progress_meta"])
-        stored = dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")[-1]
-        assert resolve_progress_row(tmp_path, meta.pop("row_address")) == stored
-        assert meta == {"narration": True, "card_row": "timeline"}
+        rows = dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")
+        assert [(row["role"], row["narration"]) for row in rows] == [
+            ("assistant", True), ("system", False), ("assistant", True),
+        ]
+        assert resolve_progress_row(tmp_path, meta.pop("row_address")) == rows[-1]
+        assert meta == {"narration": True, "card_row": "timeline", "reply_author_label": "Ouroboros"}
 
     def test_markdown_and_the_callers_other_meta_are_untouched(self, tmp_path, monkeypatch):
         mb, sent = self._bus(tmp_path, monkeypatch)
@@ -72,7 +82,10 @@ class TestHostNoteVoice:
         meta = dict(captured[-1][1]["progress_meta"])
         stored = dialogue_test.log_rows(tmp_path / "logs" / "progress.jsonl")[-1]
         assert resolve_progress_row(tmp_path, meta.pop("row_address")) == stored
-        assert meta == {"card_row": "timeline", "narration": False}
+        assert captured[-1][0] == (1, "**bold**") and stored["format"] == "markdown"
+        # The omitted narration defaults to false; it doesn't override the message's role.
+        assert stored["role"] == "assistant" and stored["narration"] is False
+        assert meta == {"card_row": "timeline", "narration": False, "reply_author_label": "Ouroboros"}
 
     def test_the_legacy_read_is_unchanged(self):
         # ABSENT still means narration for every row written before the fact —
@@ -93,6 +106,7 @@ class TestHostNoteVoice:
         response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
         replay = next(row for row in json.loads(response.body)["messages"] if row.get("text") == "Host note")
         assert replay["role"] == "system" and replay["narration"] is False
+        assert replay["reply_author_label"] == sent[-1]["progress_meta"]["reply_author_label"] == "System"
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +166,9 @@ class TestChildWarnings:
 
         failed_review = {"status": "completed", "outcome_axes": {"review": {"status": "fail"}}}
         assert outcome_phase(failed_review, {}) == "error"
-        assert _completed_lifecycle_display({"status": "completed"}, failed_review) == ("❌", "finished with a failed outcome")
+        assert _completed_lifecycle_display({"status": "completed"}, failed_review) == "finished with a failed outcome"
         warned = {"status": "completed", "outcome_axes": {"review": {"status": "degraded"}}}
-        assert _completed_lifecycle_display({"status": "completed"}, warned) == ("⚠️", "finished with warnings")
+        assert _completed_lifecycle_display({"status": "completed"}, warned) == "finished with warnings"
         clean = {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}}}
         assert _completed_lifecycle_display(clean, clean) is None
 

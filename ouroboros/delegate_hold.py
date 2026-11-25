@@ -87,7 +87,7 @@ def _configured_session(ctx: Any) -> bool:
 
 
 def _leaf_probe_live(ctx: Any, run_id: str) -> bool:
-    """READ-ONLY liveness probe: one short engine poll of the run's own engine, no lease/settle/cancel.
+    """Probe the owned run once, recording a recovered start's first execution state.
 
     Requires a POSITIVE non-terminal engine state. A gateway failure, refusal,
     or state-less payload is not evidence of a live leaf (fail-closed)."""
@@ -96,13 +96,24 @@ def _leaf_probe_live(ctx: Any, run_id: str) -> bool:
     try:
         from ouroboros import claudexor_daemon
         from ouroboros.delegate_progress import bounded_poll
+        from ouroboros.delegate_resume import ACTIVE, observe_bound_state, recovered_cancel_detail
         from ouroboros.execution_domain import run_gateway
 
-        entry = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)[1]
+        root = custody.custody_root(ctx)
+        ownership, entry = custody.lookup(root, str(getattr(ctx, "task_id", "") or ""), run_id)
+        if ownership != custody.OWNED:
+            return False
         with contextlib.closing(run_gateway(entry, lambda: claudexor_daemon.ensure_owned_gateway(
                 admission_wait_sec=0), timeout_sec=5.0)) as gateway:
             detail = bounded_poll(gateway, run_id, 5.0)
         state = str(custody.summary_of(detail).get("state") or "")
+        if entry.resume_start_state is not None:
+            # The recovered run's first state is kept only from its own proved answer
+            # (``recovered_cancel_detail``); an unrecognized answer keeps ``unknown`` and is
+            # no evidence of a live leaf.
+            if not recovered_cancel_detail(gateway, entry, detail) or observe_bound_state(root, entry, state) is False:
+                return False
+            return state in ACTIVE and entry.resume_start_state in ACTIVE and not entry.terminal_state
     except Exception:
         log.debug("Hold eligibility leaf probe failed", exc_info=True)
         return False
@@ -275,7 +286,10 @@ def _append_wake_receipt(
 def round_top(tools: Any, limit_ctx: Any, controls: Dict[str, Any], emit_progress: Any, *, new_input: bool) -> Any:
     """The loop's round-top hold (``hold_step`` over this round's ``limit_ctx``): ``""`` or ``"resume"`` dispatch
     the round; ``"park"`` once the hold's host-armed sleep was parked here without a model call (its wake is the
-    next round top's); else the unknown no-resend terminal's ``(text, usage, trace)``, with zero provider calls."""
+    next round top's); ``"redrain"`` once it resumed on a wake read after this round's drain: the round goes back to
+    its top without a model call, that drain brings the mail that arrived meanwhile (the wake carries none), and that
+    top sends it with the receipt, holding nothing, even a latch whose tombstone was not written; else the unknown
+    no-resend terminal's ``(text, usage, trace)``, with zero provider calls."""
     step = hold_step(tools, controls=controls, messages=limit_ctx.messages, drive_logs=limit_ctx.drive_logs,
                      task_id=limit_ctx.task_id, emit_progress=emit_progress, new_input=new_input)
     if step == "park":
@@ -283,6 +297,9 @@ def round_top(tools: Any, limit_ctx: Any, controls: Dict[str, Any], emit_progres
 
         wait_after_tools(tools._ctx, limit_ctx.messages, limit_ctx.llm_trace, limit_ctx.accumulated_usage,
                          limit_ctx.round_idx, limit_ctx.tool_schemas, limit_ctx.owner_msg_seen)
+    if step == "resume" and not new_input:  # its receipt waits for that drain and goes out at that top
+        tools._ctx._delegate_hold_receipt_pending = True
+        return "redrain"
     if step != "terminal":
         return step
     from ouroboros.loop_delivery import _merge_finalization_trace
@@ -302,7 +319,8 @@ def hold_step(
 ) -> str:
     """Round-top step for a latched hold.
 
-    Returns "" (no latch — dispatch normally), "resume" (material new input in
+    Returns "" (no latch, or a receipt taken at the previous top that goes out now even
+    past a latch still active — dispatch normally), "resume" (material new input in
     the transcript; dispatch this round), "park" (the host armed the hold's own
     warm sleep: the caller parks it now, without a model call, and its wake is
     the next round top's), or "terminal" (control wake, refused wait, or failed
@@ -311,6 +329,9 @@ def hold_step(
     """
     ctx = getattr(tools, "_ctx", None)
     if ctx is None or not _configured_session(ctx):
+        return ""
+    if getattr(ctx, "_delegate_hold_receipt_pending", False):  # a receipt already taken goes out with this top
+        ctx._delegate_hold_receipt_pending = False
         return ""
     try:
         hold = read_unknown_hold(ctx)
@@ -343,6 +364,7 @@ def hold_step(
     if controls.get("finalize_now"):
         ctx._transport_repeat_control_reason = str(controls["finalize_now"]).splitlines()[0].strip()
         return _exit_terminal("finalize_now")
+    woke, ctx._delegate_hold_parked = bool(getattr(ctx, "_delegate_hold_parked", False)), False  # read once, here
     if new_input:
         # The round-top drain already appended owner/task dialogue: that IS the
         # material new input, so resume without waiting — arrival timing must
@@ -356,7 +378,6 @@ def hold_step(
             hold_cycles=cycles, detail="owner_input", attempt_id=attempt_id,
         )
         return "resume"
-    woke, ctx._delegate_hold_parked = bool(getattr(ctx, "_delegate_hold_parked", False)), False
     if cycles > 1 and not woke:  # a park already spaced this cycle's dispatch
         time.sleep(min(
             NETWORK_WAIT_BACKOFF_START_SEC * (2.0 ** min(cycles - 1, 4)),

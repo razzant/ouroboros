@@ -17,7 +17,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, NamedTuple
 
 from ouroboros.owner_pause import OwnerPauseRefused
 from ouroboros.tools.tool_result import launch_refusal_result
@@ -50,7 +50,16 @@ from ouroboros.tool_access import (
     canonical_data_root,
     shell_cwd_block_message,
 )
-from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.launch_custody import (
+    _ordinary,
+    local_service_log_stamp as _log_stamp,
+    open_local_service_log,
+    service_log_directory as _directory,
+    service_log_origin,
+)
+from ouroboros.utils import append_jsonl, file_identity, json_dumps_utf8, utc_now_iso
+from ouroboros.process_census import launch_id
+from ouroboros.tools.service_stop import output_facts, publish_stop
 from ouroboros.tools.kept_service_outputs import (
     KEPT_DECLARATION, KEPT_DIRECTORY, consume_own_declaration, declare_kept, executor_launch, retire_kept_declaration,
     retire_kept_declarations,
@@ -285,18 +294,31 @@ def _finalize_service_log_for_drive(
     unconfirmed stop keeps the record for a later cleanup.
     """
     result: Dict[str, Any] = {"deleted_live_log": False, "full_log_ref": {}, "tail": "", "errors": []}
-    log_path = log_path if log_path is not None else record.log_path
+    target = log_path if log_path is not None else getattr(record, "log_path", None)
+    if target is None:
+        result["errors"].append("capture: ValueError")
+        return result
+    log_path = pathlib.Path(target)
+    missing = False
+    mtime: float | None = None
     try:
-        size = log_path.stat().st_size if log_path.exists() else 0
-        result["tail"] = _service_diagnostic(record, _tail(log_path, _MAX_SERVICE_LOG_TAIL_CHARS))
-        if size <= _MAX_SERVICE_LOG_BLOB_BYTES:
-            text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
-            result["full_log_ref"] = write_blob(pathlib.Path(drive_root), _service_diagnostic(record, text), kind="txt")
-        else:
-            result["full_log_omitted"] = f"log exceeds {_MAX_SERVICE_LOG_BLOB_BYTES} byte blob cap"
+        try:
+            st = log_path.stat()
+            size, mtime = st.st_size, st.st_mtime
+        except FileNotFoundError:
+            missing, size = True, 0
+        if not missing:
+            tail = _service_diagnostic(record, _tail(log_path, _MAX_SERVICE_LOG_TAIL_CHARS))
+            if size <= _MAX_SERVICE_LOG_BLOB_BYTES:
+                masked = _service_diagnostic(record, log_path.read_text(encoding="utf-8", errors="replace"))
+                result["tail"] = tail
+                result["full_log_ref"] = write_blob(pathlib.Path(drive_root), masked, kind="txt")
+            else:
+                result["tail"] = tail
+                result["full_log_omitted"] = f"log exceeds {_MAX_SERVICE_LOG_BLOB_BYTES} byte blob cap"
     except Exception as exc:
-        result["errors"].append(f"capture: {type(exc).__name__}: {exc}")
-    should_delete = bool((result.get("full_log_ref") or {}).get("sha256")) or not log_path.exists()
+        result["errors"].append(f"capture: {type(exc).__name__}")
+    should_delete = bool((result.get("full_log_ref") or {}).get("sha256")) or missing
     if should_delete:
         try:
             log_path.unlink(missing_ok=True)
@@ -305,11 +327,15 @@ def _finalize_service_log_for_drive(
             if parent.exists() and not any(parent.iterdir()):
                 parent.rmdir()
         except Exception as exc:
-            result["errors"].append(f"delete: {type(exc).__name__}: {exc}")
-    elif log_path.exists():
+            result["errors"].append(f"delete: {type(exc).__name__}")
+    if not result["deleted_live_log"] and not missing:
         result["retained_live_log_path"] = str(log_path)
-        from ouroboros.maintenance_retirement import artifact_changed
-        artifact_changed(drive_root, timestamp=log_path.stat().st_mtime)
+        try:
+            from ouroboros.maintenance_retirement import artifact_changed
+
+            artifact_changed(drive_root, timestamp=mtime)
+        except Exception:
+            pass
     return result
 
 
@@ -330,14 +356,19 @@ def retained_log_display(service: Dict[str, Any], *, drive_root: Any = None, tas
     then does the tail become ``tail_chars``. Without a readable source (no blob,
     ``full_log_omitted``, capture ``errors``, no task store) the tail stays; an
     unreadable blob keeps its digest marked ``unavailable``, with no path a review
-    closure would have to fetch. Errors, gaps and sizes are never dropped.
+    closure would have to fetch. A blob that cannot be located now keeps the row as
+    it is, address included. Errors, gaps and sizes are never dropped.
     """
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     finalization = service.get("log_finalization")
     ref = finalization.get("full_log_ref") if isinstance(finalization, dict) else None
     if not (drive_root and task_id and isinstance(ref, dict) and ref.get("sha256")):
         return service
     try:
-        text = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="txt")
+        text = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="txt", task_id=task_id)
+    except EvidenceUnavailable:
+        return service
     except Exception as exc:
         unavailable = {key: ref[key] for key in ("kind", "sha256", "size", "encoding") if key in ref}
         return {**service, "log_finalization": {**finalization, "full_log_ref": {
@@ -349,36 +380,106 @@ def retained_log_display(service: Dict[str, Any], *, drive_root: Any = None, tas
     return {**service, "log_finalization": {**_without_log_tail(finalization), "source_ref": source}}
 
 
-def _archive_stale_service_log(
-    drive_root: pathlib.Path,
-    log_path: pathlib.Path,
-    *,
-    event_type: str = "service_log_pruned",
-) -> Dict[str, Any]:
-    result: Dict[str, Any] = {"archived": False, "deleted_live_log": False, "full_log_ref": {}, "errors": []}
+def _log_paths(folder: pathlib.Path):
+    # Unlike glob, a failed listing is not evidence that there is nothing to keep.
+    return (path for path in folder.iterdir() if path.name.lower().endswith(".log"))
+
+
+def _preserve_service_log(owner, path, stamp, *, event_type) -> tuple[pathlib.Path, tuple]:
+    """Copy a closed log whole and verify its placement; never unlink a source here.
+
+    The raw bytes cannot be masked after recovery. This private placement is not a history blob or a result ref.
+    """
+    from ouroboros.artifacts import copy_artifact_file, stream_artifact_file
+    from ouroboros.observability import _observability_root
+    from ouroboros.task_custody import fence_publication
+
+    if _log_stamp(path) != stamp:
+        raise OSError("live service log changed before transfer")
+    measured = stream_artifact_file(path)
+    fence_publication()
+    _directory(owner / "observability")
+    copy = _observability_root(owner) / "service_logs" / f"{measured['sha256']}.log"
+    if not _directory(copy.parent):
+        copy.parent.mkdir(mode=0o700, exist_ok=True)
     try:
-        size = log_path.lstat().st_size
-        if size > _MAX_SERVICE_LOG_BLOB_BYTES:
-            result["retained_live_log_path"] = str(log_path)
-            result["full_log_omitted"] = f"log exceeds {_MAX_SERVICE_LOG_BLOB_BYTES} byte blob cap"
-            return result
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-        result["full_log_ref"] = write_blob(pathlib.Path(drive_root), text, kind="txt")
-        result["tail_chars"] = len(str(redact_projection(_tail(log_path, _MAX_SERVICE_LOG_TAIL_CHARS)).value))
-        append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
-            "ts": utc_now_iso(),
-            "type": event_type,
-            "task_id": log_path.parent.name,
-            "name": log_path.stem,
-            "full_log_ref": result["full_log_ref"],
-            "tail_chars": result["tail_chars"],
-        })
-        result["archived"] = True
-        log_path.unlink(missing_ok=True)
-        result["deleted_live_log"] = True
+        copied = _log_stamp(copy)
+    except FileNotFoundError:
+        copy_artifact_file(path, copy, expected=measured, mode=0o600)
+        copied = _log_stamp(copy)
+    stream_artifact_file(copy, expected=measured)
+    if _log_stamp(copy) != copied or _log_stamp(path) != stamp:
+        raise OSError("service log source or copy changed during transfer")
+    fence_publication()
+    name, launch_id = service_log_origin(path)
+    if not append_jsonl(owner / "logs" / "events.jsonl", {
+        "ts": utc_now_iso(), "type": event_type, "task_id": path.parent.name,
+        "name": name, "launch_id": launch_id, "private_log": measured,
+    }):
+        raise OSError("service log transfer receipt was not recorded")
+    return copy, copied
+
+
+def _archive_stale_service_log(owner, path, stamp, report, *, event_type="service_log_pruned") -> None:
+    """The explicit archive and age prune still remove their own verified sources."""
+    from ouroboros.task_custody import fence_publication
+
+    try:
+        _preserve_service_log(owner, path, stamp, event_type=event_type)
+        report["archived_files"] += 1
+        fence_publication()
+        if _log_stamp(path) != stamp:
+            raise OSError("live service log changed before unlink")
+        path.unlink()
+        report["deleted_files"] += 1
     except Exception as exc:
-        result["errors"].append(f"{log_path}: {type(exc).__name__}: {exc}")
-    return result
+        report["retained_files"] += 1
+        report["errors"].append(f"{path}: {type(exc).__name__}")
+
+
+def _drive_service_logs(drive, occupants) -> dict:
+    root = drive / "services"
+    logs = {}
+    if _directory(root):
+        for folder in root.iterdir():
+            if folder.name not in occupants or not _directory(folder):
+                raise OSError("service log's drive occupant is not established")
+            logs.update((path, _log_stamp(path)) for path in _log_paths(folder))
+    return logs
+
+
+def _service_writers(owner, drive, tasks) -> bool:
+    from ouroboros.body_candidate import live_lineage_processes
+    from ouroboros.launch_custody import unsettled_rows
+
+    return any(live_lineage_processes(owner, task_id) for task_id in tasks) or bool(
+        tasks and drive != owner and unsettled_rows(drive, tasks))
+
+
+def preserve_drive_service_logs(owner, drive, occupants) -> tuple[dict, dict] | None:
+    """Phase A: verify closed sources and their private copies without removing either.
+
+    Canonical process custody may lag a launch registered only in this drive's ledger.
+    An unreadable store, live writer or unknown log owner supplies no proof.
+    """
+    try:
+        logs = _drive_service_logs(drive, occupants)
+        if _service_writers(owner, drive, {path.parent.name for path in logs}):
+            return None
+        return logs, dict(_preserve_service_log(owner, path, stamp, event_type="service_log_preserved")
+                          for path, stamp in logs.items())
+    except (OSError, ValueError):
+        return None
+
+
+def drive_service_logs_current(drive, occupants, proof) -> bool:
+    """Phase B: protection against changed sources/copies; no hashing under the queue guard."""
+    logs, copies = proof
+    try:
+        return _drive_service_logs(drive, occupants) == logs and all(
+            _directory(path.parent) and _log_stamp(path) == stamp for path, stamp in copies.items())
+    except OSError:
+        return False
 
 
 def archive_task_service_logs(
@@ -386,35 +487,20 @@ def archive_task_service_logs(
     task_id: str,
     task: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Archive and remove leftover live service logs for a terminal task, once nothing of it may still write them."""
+    """Archive and remove a terminal task's closed logs; drive settlement uses the copy-only seam instead."""
 
     task_text = str(task_id or "").strip()
     if isinstance(task, dict):
-        seen: set[str] = set()
-        roots: List[pathlib.Path] = []
-        for candidate in (
-            drive_root,
-            task.get("drive_root"),
-            task.get("child_drive_root"),
-            task.get("headless_child_drive_root"),
-        ):
-            if not candidate:
-                continue
-            root = pathlib.Path(candidate).resolve(strict=False)
-            key = str(root)
-            if key in seen:
-                continue
-            seen.add(key)
-            roots.append(root)
+        roots = list(dict.fromkeys(pathlib.Path(candidate).resolve(strict=False) for candidate in (
+            drive_root, task.get("drive_root"), task.get("child_drive_root"), task.get("headless_child_drive_root"),
+        ) if candidate))
         reports = [archive_task_service_logs(root, task_text) for root in roots]
         return {
             "task_id": task_text,
             "roots": [str(root) for root in roots],
-            "archived_files": sum(int(report.get("archived_files") or 0) for report in reports),
-            "deleted_files": sum(int(report.get("deleted_files") or 0) for report in reports),
-            "deleted_dirs": sum(int(report.get("deleted_dirs") or 0) for report in reports),
-            "retained_files": sum(int(report.get("retained_files") or 0) for report in reports),
-            "errors": [err for report in reports for err in (report.get("errors") or [])],
+            **{key: sum(report[key] for report in reports)
+               for key in ("archived_files", "deleted_files", "deleted_dirs", "retained_files")},
+            "errors": [err for report in reports for err in report["errors"]],
         }
     report = {
         "task_id": task_text,
@@ -428,45 +514,26 @@ def archive_task_service_logs(
         report["errors"].append("invalid task_id")
         return report
     task_dir = pathlib.Path(drive_root) / "services" / task_text
-    try:
-        task_stat = task_dir.lstat()
-    except OSError:
-        return report
-    if not stat.S_ISDIR(task_stat.st_mode):
-        return report
-    from ouroboros import body_candidate
+    from ouroboros.task_custody import canonical_owner_root
 
     # A kept service outlives its task, and a killed worker's processes may not be settled yet: while anything of
     # this task may still write here, its live logs stay for retention (``prune_service_logs``), which has the proof.
-    live_writers = bool(body_candidate.live_lineage_processes(drive_root, task_text))
+    # That custody is the canonical root's, a child drive's too; it is read once a log is found.
     try:
-        for child in task_dir.glob("*.log"):
-            try:
-                child_stat = child.lstat()
-            except OSError:
-                continue
-            if not stat.S_ISREG(child_stat.st_mode):
-                continue
-            if live_writers:
-                report["retained_files"] += 1
-                continue
-            archive_result = _archive_stale_service_log(
-                pathlib.Path(drive_root),
-                child,
-                event_type="service_log_archived",
-            )
-            if archive_result.get("archived"):
-                report["archived_files"] += 1
-            if archive_result.get("deleted_live_log"):
-                report["deleted_files"] += 1
-            if archive_result.get("retained_live_log_path"):
-                report["retained_files"] += 1
-            report["errors"].extend(archive_result.get("errors") or [])
-        if task_dir.exists() and not any(task_dir.iterdir()):
+        if not _directory(task_dir.parent) or not _directory(task_dir):
+            return report
+        owner = canonical_owner_root(drive_root)
+        logs = {path: _log_stamp(path) for path in _log_paths(task_dir)}
+        if logs and _service_writers(owner, pathlib.Path(drive_root), {task_text}):
+            report["retained_files"] = len(logs)
+            return report
+        for child, stamp in logs.items():
+            _archive_stale_service_log(owner, child, stamp, report, event_type="service_log_archived")
+        if not any(task_dir.iterdir()):
             task_dir.rmdir()
             report["deleted_dirs"] += 1
     except Exception as exc:
-        report["errors"].append(f"{task_dir}: {type(exc).__name__}: {exc}")
+        report["errors"].append(f"{task_dir}: {type(exc).__name__}")
     return report
 
 
@@ -602,8 +669,10 @@ def _start_service(
         # Retire the exited host record before a new process can append to its log with a
         # different environment (or switch to an executor backend); never start beside its
         # processes while their end is unconfirmed, nor over a log another stop is finalizing.
-        retired = _stop_service(ctx, name=service_name)
-        owed = isinstance(retired, _UnconfirmedStopText)  # the stop's own answer about its processes, not its text
+        retired = _stop_service_launch(ctx, service_name)
+        if retired.payload is not None:
+            publish_stop(ctx, retired.payload, confirmed=retired.outcome == STOP_CONFIRMED)
+        owed = retired.outcome == STOP_UNCONFIRMED  # the stop's own answer about its processes, not its text
         with _LOCK:
             taken = _SERVICES.get(key) is not None
         if owed or taken:
@@ -612,9 +681,10 @@ def _start_service(
                      else "another call still holds this name (a stop finishing its log and outputs, or a newer start)")
             # Only that no new process started is claimed: the retire above may already have signalled processes,
             # so no operation_outcome says the call changed nothing.
+            detail = json.dumps(retired.payload, ensure_ascii=False, indent=2) if retired.payload is not None else ""
             return _publish_tool_result(ctx, ToolResult(
                 status="blocked", code="LEGACY_BLOCKED", meta={"process_not_started": True},
-                text=f"⚠️ SERVICE_ALREADY_RUNNING: {service_name}: {cause}.\n\n" + retired.partition("\n\n")[2]))
+                text=f"⚠️ SERVICE_ALREADY_RUNNING: {service_name}: {cause}.\n\n{detail}"))
     from ouroboros import body_candidate
 
     if output_context is not None or _executor_can_run_cwd(ctx, workdir):
@@ -652,9 +722,6 @@ def _start_service(
                                      **({"previous_service_retired": True} if existing is not None else {})}))
             return text
     task_id = str(getattr(ctx, "task_id", "") or "manual")
-    log_dir = pathlib.Path(ctx.drive_root) / "services" / task_id
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{service_name}.log"
 
     from ouroboros.owner_pause import _member_coordinates
     from ouroboros.process_scope import record_task_group, scoped_child_env, task_launch_target
@@ -706,7 +773,8 @@ def _start_service(
     candidate_env = body_candidate.process_environment(ctx, workdir)
     service_base_env = candidate_env if candidate_env is not None else _service_env()
 
-    log_fh = log_path.open("ab")
+    log_path, log_fh = open_local_service_log(pathlib.Path(ctx.drive_root), task_id, service_name, scope_marker,
+                                              keep_alive=keep_alive)
     from ouroboros.maintenance_retirement import artifact_changed
     artifact_changed(ctx.drive_root)
     try:
@@ -790,6 +858,7 @@ def _status_payload(record: ServiceRecord) -> Dict[str, Any]:
         "task_id": record.task_id,
         "pid": record.proc.pid,
         "pgid": record.pgid,
+        "launch_id": launch_id(getattr(record, "scope_marker", "")),
         "state": state,
         "ready": bool(record.ready),
         "ready_observed_at": record.ready_observed_at or None,
@@ -894,14 +963,62 @@ def _service_logs(ctx: ToolContext, name: str = "service", tail: int = 8000) -> 
         text=f"⚠️ SERVICE_NOT_FOUND: {name}"))
 
 
-class _UnconfirmedStopText(str):
-    """The text of a stop that could not confirm every process of the service ended.
+STOP_CONFIRMED = "confirmed"
+STOP_UNCONFIRMED = "unconfirmed"
+STOP_NOT_FOUND = "not_found"
 
-    Still the text ``stop_service`` has always returned, and still a ``str`` to the registry and every string caller,
-    so its string contract and its classification do not change. Its type is the stop's own answer for the one
-    internal caller that needs it: a start retiring an exited record must not launch beside processes still owed.
-    That caller reads the value it was handed, so the answer holds outside a registry invocation and no published
-    result and no part of the text is consulted."""
+
+class ServiceStop(NamedTuple):
+    """One stop's structured answer: the finalized payload, the typed outcome, and whether this
+    stop created or repaired a canonical artifact record. The ``stop_service`` tool boundary
+    renders and publishes it; task teardown and a same-name restart read the payload and the
+    outcome directly, never the rendered text."""
+
+    payload: Dict[str, Any] | None
+    outcome: str
+    registered: bool = False
+
+
+def _stop_service_launch(ctx: ToolContext, service_name: str) -> ServiceStop:
+    """Stop one named service launch, then finalize its log and declared outputs.
+
+    The structured core every internal caller shares. ``STOP_NOT_FOUND``: nothing held the
+    name at this stop's read — another stop retired the launch, or no such service exists;
+    whatever took its name since (an executor too) is not it. ``STOP_UNCONFIRMED``: not every
+    process of this service is confirmed ended; its record, log and output inputs stay kept
+    for the next attempt.
+    """
+    key = _service_key(ctx, service_name)
+    with _LOCK:
+        record = _SERVICES.get(key)
+    payload, confirmed = _stop_host_record(record) if record else (None, False)
+    if record is not None and payload is None:
+        return ServiceStop(None, STOP_NOT_FOUND)
+    if payload is not None and not confirmed:
+        return ServiceStop(payload, STOP_UNCONFIRMED)
+    if payload is not None:
+        try:
+            return ServiceStop(payload, STOP_CONFIRMED, _finalize_host_stop_payload(ctx, record, payload))
+        finally:
+            _release_name(record)
+    registered: List[bool] = []  # the winning stop registers its outputs while it still holds the name
+    try:  # a kept executor service's declaration, consumed below once its own capture is complete
+        from ouroboros.workspace_executor import _services_snapshot
+
+        kept = any(item.service_id == key and item.keep_alive for item in _services_snapshot())
+        kept_launch = executor_launch(key) if kept else None
+    except Exception:  # noqa: BLE001 — none known: nothing is consumed, an owed declaration stays owed
+        kept_launch = None
+    payload = executor_stop_service(
+        ctx, service_name, lambda done: registered.append(_finalize_executor_service_outputs(ctx, done)))
+    if payload is None:
+        return ServiceStop(None, STOP_NOT_FOUND)
+    if kept_launch is not None and not payload.get("stop_failed") and payload.get("cleanup_dispatched") is not False \
+            and not payload.get("artifact_output_failed"):
+        consume_own_declaration(kept_launch)
+    if payload.get("stop_failed") or payload.get("cleanup_dispatched") is False:
+        return ServiceStop(payload, STOP_UNCONFIRMED, any(registered))
+    return ServiceStop(payload, STOP_CONFIRMED, any(registered))
 
 
 def _stop_kept_service(ctx: ToolContext, service_id: str, reason: str) -> str:
@@ -936,7 +1053,7 @@ def _stop_kept_service(ctx: ToolContext, service_id: str, reason: str) -> str:
             meta={"operation_outcome": "completed_no_effect"},
             text=("⚠️ SERVICE_STOP_REFUSED" if refused else "⚠️ SERVICE_STOP_NOT_FOUND")
             + f": {receipt.get('detail', '')}\n\n{rendered}"))
-    return _UnconfirmedStopText(f"⚠️ SERVICE_STOP_ERROR (stop_service): {receipt.get('detail', '')}\n\n{rendered}")
+    return f"⚠️ SERVICE_STOP_ERROR (stop_service): {receipt.get('detail', '')}\n\n{rendered}"
 
 
 def _stop_service(ctx: ToolContext, name: str = "service", service_id: str = "", reason: str = "") -> str:
@@ -945,69 +1062,50 @@ def _stop_service(ctx: ToolContext, name: str = "service", service_id: str = "",
     service_name, name_error = _sanitize_service_name(name)
     if name_error:
         return name_error
-    key = _service_key(ctx, service_name)
-    with _LOCK:
-        record = _SERVICES.get(key)
-    payload, confirmed = _stop_host_record(record) if record else (None, False)
-    if record is not None and payload is None:  # another stop retired the launch this call selected: nothing is left
-        return f"⚠️ SERVICE_NOT_FOUND: {name}"  # for it, and whatever took its name since (an executor too) is not it
-    if payload is not None and not confirmed:
-        return _UnconfirmedStopText(
+    stop = _stop_service_launch(ctx, service_name)
+    if stop.outcome == STOP_NOT_FOUND:
+        return f"⚠️ SERVICE_NOT_FOUND: {name}"
+    publish_stop(ctx, stop.payload, confirmed=stop.outcome == STOP_CONFIRMED)
+    rendered = json_dumps_utf8(stop.payload, ensure_ascii=False, indent=2)
+    if stop.outcome == STOP_UNCONFIRMED:
+        return (
             "⚠️ SERVICE_STOP_ERROR (stop_service): not every process of this service is confirmed ended; "
             "its record, log and declared outputs are kept, and stop_service retries the identities still owed.\n\n"
-            + json.dumps(payload, ensure_ascii=False, indent=2))
-    if payload is not None:
-        try:
-            return _finalize_host_stop(ctx, record, payload)
-        finally:
-            _release_name(record)
-    registered: List[bool] = []  # the winning stop registers its outputs while it still holds the name
-    try:  # a kept executor service's declaration, consumed below once its own capture is complete
-        from ouroboros.workspace_executor import _services_snapshot
-
-        kept = any(item.service_id == key and item.keep_alive for item in _services_snapshot())
-        kept_launch = executor_launch(key) if kept else None
-    except Exception:  # noqa: BLE001 — none known: nothing is consumed, an owed declaration stays owed
-        kept_launch = None
-    payload = executor_stop_service(ctx, service_name, lambda done: registered.append(_finalize_executor_service_outputs(ctx, done)))
-    if payload is not None:
-        if kept_launch is not None and not payload.get("stop_failed") and payload.get("cleanup_dispatched") is not False \
-                and not payload.get("artifact_output_failed"):
-            consume_own_declaration(kept_launch)
-        if payload.get("stop_failed"):
-            return _UnconfirmedStopText(
-                "⚠️ SERVICE_STOP_ERROR (stop_service): executor backend did not confirm service termination.\n\n"
-                + json.dumps(payload, ensure_ascii=False, indent=2))
-        artifact_registered = any(registered)
-        rendered = json.dumps(payload, ensure_ascii=False, indent=2)
-        if payload["artifact_output_failed"]:
-            text = "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared executor service outputs were not finalized.\n\n" + rendered
-            return _publish_tool_result(
-                ctx,
-                ToolResult(
-                    status="error",
-                    code="ARTIFACT_OUTPUT_ERROR",
-                    text=text,
-                ),
-            )
+            + rendered)
+    registered_meta = {"artifact_registered": True} if stop.registered else {}
+    if stop.payload.get("artifact_output_failed"):
         return _publish_tool_result(
             ctx,
             ToolResult(
-                status="ok",
-                code="OK",
-                text=rendered,
-                meta={"artifact_registered": True} if artifact_registered else {},
+                status="error",
+                code="ARTIFACT_OUTPUT_ERROR",
+                text="⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared service outputs were not finalized.\n\n" + rendered,
+                # Another output this stop did register stays observed production beside the failure.
+                meta=registered_meta,
             ),
         )
-    return f"⚠️ SERVICE_NOT_FOUND: {name}"
+    return _publish_tool_result(
+        ctx,
+        ToolResult(
+            status="ok",
+            code="OK",
+            text=rendered,
+            meta=registered_meta,
+        ),
+    )
 
 
-def _finalize_host_stop(ctx: ToolContext, record: ServiceRecord, payload: Dict[str, Any]) -> str:
-    """The winning stop's log and declared outputs, with the name still held; returns its tool result."""
+def _finalize_host_stop_payload(ctx: ToolContext, record: ServiceRecord, payload: Dict[str, Any]) -> bool:
+    """The winning stop's log and declared outputs, with the name still held.
+
+    Returns whether this stop created or repaired a canonical artifact record;
+    the tool boundary renders the payload, this stays the shared fact core.
+    """
     payload["log_finalization"] = _finalize_service_log_for_drive(pathlib.Path(ctx.drive_root), record)
     artifact_note = ""
     artifact_failed = False
     artifact_registered = False
+    reports = []
     if record.outputs:
         try:
             from ouroboros.tools.shell import _register_process_outputs
@@ -1028,6 +1126,7 @@ def _finalize_host_stop(ctx: ToolContext, record: ServiceRecord, payload: Dict[s
                 changed_paths=_working_tree_changes(record.cwd),
                 before_outputs=record.before_outputs,
                 binding=output_binding,
+                reports=reports,
             )
             artifact_note += _baseline_gap_note(record.outputs, record.before_outputs)
         except Exception as exc:
@@ -1042,34 +1141,14 @@ def _finalize_host_stop(ctx: ToolContext, record: ServiceRecord, payload: Dict[s
         )
     if artifact_note:
         payload["artifact_outputs"] = artifact_note.strip()
+    payload["_output_facts"] = output_facts(ctx, record.outputs, reports, confirmed=True)
     payload["artifact_output_failed"] = bool(artifact_failed)
     if record.keep_alive and not artifact_failed:  # its own stop captured them: its kept declaration owes nothing
         from ouroboros.process_custody import custody_record_id
 
         consume_own_declaration((record.drive_root or ctx.drive_root, record.task_id, custody_record_id(
             {"pid": record.proc.pid, "scope_marker": record.scope_marker})))
-    rendered = json.dumps(payload, ensure_ascii=False, indent=2)
-    if artifact_failed:
-        text = "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared service outputs were not finalized.\n\n" + rendered
-        return _publish_tool_result(
-            ctx,
-            ToolResult(
-                status="error",
-                code="ARTIFACT_OUTPUT_ERROR",
-                text=text,
-                # Another output this stop did register stays observed production beside the failure.
-                meta={"artifact_registered": True} if artifact_registered else {},
-            ),
-        )
-    return _publish_tool_result(
-        ctx,
-        ToolResult(
-            status="ok",
-            code="OK",
-            text=rendered,
-            meta={"artifact_registered": True} if artifact_registered else {},
-        ),
-    )
+    return bool(artifact_registered)
 
 
 def _finalize_executor_service_outputs(ctx: ToolContext, payload: Dict[str, Any]) -> bool:
@@ -1085,7 +1164,9 @@ def _finalize_executor_service_outputs(ctx: ToolContext, payload: Dict[str, Any]
     artifact_registered = False
     before_outputs = payload.pop("_before_outputs", {})
     output_context = payload.pop("_output_context", None)
-    if payload.get("outputs"):
+    declarations = payload.get("outputs") or []
+    reports = []
+    if declarations:
         try:
             from ouroboros.tools.shell import _register_process_outputs
 
@@ -1099,13 +1180,14 @@ def _finalize_executor_service_outputs(ctx: ToolContext, payload: Dict[str, Any]
             )
             artifact_note, artifact_failed, artifact_registered = _register_process_outputs(
                 ctx,
-                [str(item) for item in (payload.get("outputs") or [])],
+                declarations,
                 pathlib.Path(str(payload.get("host_cwd") or ".")),
                 cwd_root=str(payload.get("cwd_root") or ""),
                 changed_paths=_working_tree_changes(str(payload.get("host_cwd") or ".")),
                 before_outputs=before_outputs if isinstance(before_outputs, dict) else None,
                 binding=output_binding,
                 output_context=output_context,
+                reports=reports,
             )
             artifact_note += _baseline_gap_note(payload.get("outputs"), before_outputs)
         except Exception as exc:
@@ -1113,6 +1195,7 @@ def _finalize_executor_service_outputs(ctx: ToolContext, payload: Dict[str, Any]
             artifact_failed = True
     if artifact_note:
         payload["artifact_outputs"] = artifact_note.strip()
+    payload["_output_facts"] = output_facts(ctx, declarations, reports, confirmed=True)
     payload["artifact_output_failed"] = bool(artifact_failed)
     return bool(artifact_registered)
 
@@ -1143,15 +1226,12 @@ def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
             results.append(payload)
             continue
         try:
-            raw = _stop_service(ctx, name=name)
-            if raw.startswith(("⚠️ ARTIFACT_OUTPUT_ERROR", "⚠️ SERVICE_STOP_ERROR")) and "\n\n{" in raw:
-                raw = raw.split("\n\n", 1)[1]
-            payload = json.loads(raw)
-            payload["lifecycle"] = (
-                "cleanup_pending"
-                if payload.get("stop_failed") or payload.get("cleanup_dispatched") is False
-                else "stopped"
-            )
+            stop = _stop_service_launch(ctx, name)
+            if stop.outcome == STOP_NOT_FOUND:
+                continue  # another stop retired this launch mid-teardown: that stop owns its result
+            payload = dict(stop.payload)
+            payload["lifecycle"] = "cleanup_pending" if stop.outcome == STOP_UNCONFIRMED else "stopped"
+            publish_stop(ctx, payload, confirmed=stop.outcome == STOP_CONFIRMED)
             results.append(payload)
         except Exception:
             pass
@@ -1179,6 +1259,8 @@ def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
                     payload["lifecycle"] = "cleanup_pending"
                 else:
                     payload.setdefault("lifecycle", "stopped")
+                if payload["lifecycle"] != "kept":
+                    publish_stop(ctx, payload, confirmed=payload["lifecycle"] == "stopped")
                 results.append(payload)
     except Exception:
         pass
@@ -1271,8 +1353,8 @@ def prune_service_logs(
 ) -> Dict[str, Any]:
     """Archive old logs, and retire a kept declaration naming no outputs (beside its log) with them, only after process
     custody releases their writers; an owed declaration waits for its capture (``retire_kept_declarations``)."""
-    from ouroboros import body_candidate
     from ouroboros.retention import age_cutoff, get_gc_retention_days, keep_until
+    from ouroboros.task_custody import canonical_owner_root
 
     # Explicit overrides are honored as-is (age_cutoff floors at 0 => explicit 0
     # prunes everything before `now`), uniform with the worktree/task prunes; only
@@ -1290,48 +1372,40 @@ def prune_service_logs(
         "retained_files": 0,
         "errors": [],
     }
-    if not services_root.exists():
+    if not _directory(services_root):
         return report
+    owner = canonical_owner_root(drive_root)
     retire_kept_declarations(pathlib.Path(drive_root), cutoff, report)
-    for task_dir in list(services_root.iterdir()):
+    for task_dir in services_root.iterdir():
         try:
-            task_stat = task_dir.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISDIR(task_stat.st_mode) or task_dir.name == KEPT_DIRECTORY:  # that directory: visited above
-            continue
-        try:
+            if task_dir.name == KEPT_DIRECTORY or not _ordinary(task_dir.lstat(), stat.S_ISDIR):
+                continue
             for declaration in task_dir.glob(f"*{KEPT_DECLARATION}"):
                 retire_kept_declaration(pathlib.Path(drive_root), task_dir.name, declaration, cutoff, report)
-            for child in task_dir.glob("*.log"):
-                try:
-                    child_stat = child.lstat()
-                except OSError:
+            live_writers = None
+            for child in _log_paths(task_dir):
+                info = child.lstat()
+                if not _ordinary(info, stat.S_ISREG):
                     continue
-                if stat.S_ISREG(child_stat.st_mode) and child_stat.st_mtime >= cutoff:
-                    keep_until(report, child_stat.st_mtime, retention_days)
-                if stat.S_ISREG(child_stat.st_mode) and child_stat.st_mtime < cutoff:
-                    facts = service_execution_facts(f"{task_dir.name}:{child.stem}")
-                    if facts is None and child.stem.endswith(".executor"):
-                        facts = service_execution_facts(f"{task_dir.name}:{child.stem.removesuffix('.executor')}")
-                    # A kept service can outlive its task or live in another worker's registry.
-                    if (facts is not None and facts.get("state") != "exited") or body_candidate.live_lineage_processes(
-                            drive_root, task_dir.name):
-                        report["retained_files"] += 1
-                        continue
-                    archive_result = _archive_stale_service_log(pathlib.Path(drive_root), child)
-                    if archive_result.get("archived"):
-                        report["archived_files"] += 1
-                    if archive_result.get("deleted_live_log"):
-                        report["deleted_files"] += 1
-                    if archive_result.get("retained_live_log_path"):
-                        report["retained_files"] += 1
-                    report["errors"].extend(archive_result.get("errors") or [])
+                if info.st_mtime >= cutoff:
+                    keep_until(report, info.st_mtime, retention_days)
+                    continue
+                # A live name may conservatively hold a legacy file, but never establishes its origin.
+                name, launch = service_log_origin(child)
+                facts = None if launch else service_execution_facts(f"{task_dir.name}:{name}")
+                if facts is None and not launch and name.endswith(".executor"):
+                    facts = service_execution_facts(f"{task_dir.name}:{name.removesuffix('.executor')}")
+                if live_writers is None:
+                    live_writers = _service_writers(owner, pathlib.Path(drive_root), {task_dir.name})
+                if live_writers or (facts is not None and facts.get("state") != "exited"):
+                    report["retained_files"] += 1
+                    continue
+                _archive_stale_service_log(owner, child, file_identity(info), report)
             if not any(task_dir.iterdir()):
                 task_dir.rmdir()
                 report["deleted_dirs"] += 1
         except Exception as exc:
-            report["errors"].append(f"{task_dir}: {type(exc).__name__}: {exc}")
+            report["errors"].append(f"{task_dir}: {type(exc).__name__}")
     return report
 
 

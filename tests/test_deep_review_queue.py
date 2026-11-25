@@ -31,11 +31,13 @@ def door(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 0.0)
     sent: list = []
     monkeypatch.setattr(queue, "send_with_budget",
-                        lambda chat_id, text, **kw: sent.append((chat_id, text, kw.get("system_type"))))
+                        lambda chat_id, text, **kw: sent.append((chat_id, text, kw.get("system_type"))) or notices.append(
+                            (kw.get("progress_meta") or {}).get("notice")))
+    notices: list = []
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
     monkeypatch.setattr("supervisor.workers._worker_pool_execution_state",
                         lambda: {"available": True, "disabled_reason": ""})
-    return types.SimpleNamespace(queue=queue, pending=pending, sent=sent)
+    return types.SimpleNamespace(queue=queue, pending=pending, sent=sent, notices=notices)
 
 
 def test_a_named_row_rides_the_task_and_the_ack_names_it(door, monkeypatch):
@@ -43,15 +45,18 @@ def test_a_named_row_rides_the_task_and_the_ack_names_it(door, monkeypatch):
     tid = door.queue.queue_deep_self_review_task("owner:/review", force=True, chat_id=7, reviewer=" api-scout ")
     [task] = door.pending
     assert (task["id"], task["type"], task["chat_id"], task["reviewer"]) == (tid, "deep_self_review", 7, "api-scout")
-    assert door.sent == [(7, f"🔎 Deep self-review queued: {tid} (owner:/review; reviewer: api-scout)",
-                          "deep_self_review_queued")]
+    assert door.sent == [(7, "Deep self-review is queued; reviewer: api-scout.", "deep_self_review_queued")]
+    # Its task id and its origin (``owner:/review``) are details, never words; the row's name is never translated.
+    assert door.notices == [{"code": "deep_self_review_queued", "details": f"task {tid}; requested as owner:/review",
+                             "template": "Deep self-review is queued; reviewer: {reviewer}.",
+                             "values": {"reviewer": "api-scout"}}]
 
 
 def test_no_name_runs_the_main_model(door):
     tid = door.queue.queue_deep_self_review_task("owner:/review", force=True, chat_id=7)
     assert door.pending[0]["reviewer"] == ""
-    assert door.sent == [(7, f"🔎 Deep self-review queued: {tid} (owner:/review; reviewer: Main)",
-                          "deep_self_review_queued")]
+    assert door.sent == [(7, "Deep self-review is queued; reviewer: Main.", "deep_self_review_queued")]
+    assert door.notices[0]["details"] == f"task {tid}; requested as owner:/review"
 
 
 @pytest.mark.parametrize("enabled, name", [(False, "api-scout"), (True, "nobody")])
@@ -61,7 +66,10 @@ def test_a_row_that_is_not_enabled_is_refused_in_the_asking_chat(door, monkeypat
     assert door.pending == []
     [(chat, text, kind)] = door.sent
     assert (chat, kind) == (7, "deep_self_review_unavailable")
-    assert text.startswith(f"Deep self-review could not be queued: reviewer {name!r} is not an enabled catalog row")
+    assert text == "Deep self-review could not be queued for this reviewer row."
+    [notice] = door.notices
+    assert notice["step"] == "choose_reviewer"
+    assert notice["details"].startswith(f"reviewer {name!r} is not an enabled catalog row"), "its cause: the details"
 
 
 @pytest.mark.parametrize("blocked", ["worker_pool_unavailable", "billing_authority_unavailable"])
@@ -71,17 +79,17 @@ def test_only_a_disabled_worker_pool_is_answered_with_restart(door, monkeypatch,
     if blocked == "worker_pool_unavailable":
         monkeypatch.setattr("supervisor.workers._worker_pool_execution_state",
                             lambda: {"available": False, "disabled_reason": "worker_readiness_exhausted"})
-        expected = ("Deep self-review could not be queued: worker_readiness_exhausted. "
-                    "Use /restart to restore the worker pool.")
+        expected = {"code": "deep_self_review_not_admitted", "step": "restart", "details": "worker_readiness_exhausted"}
     else:
         def unreadable(*_a, **_k):
             raise OSError("simulated unreadable money ledger")
 
         monkeypatch.setattr("ouroboros.usage_admission.ledger_billing_binding", unreadable)
-        expected = "Deep self-review could not be queued: billing_authority_unavailable."
+        expected = {"code": "deep_self_review_not_admitted", "details": "billing_authority_unavailable"}
     assert door.queue.queue_deep_self_review_task("owner:/review", force=True, chat_id=7) is None
     assert door.pending == []
-    assert door.sent == [(7, expected, "deep_self_review_unavailable")]
+    assert door.sent == [(7, "Deep self-review could not be queued.", "deep_self_review_unavailable")]
+    assert door.notices == [expected], "only the disabled pool's notice names Restart as its step"
 
 
 def test_the_tool_event_hands_the_reviewer_to_the_queue():
@@ -153,4 +161,4 @@ def test_the_worker_runs_the_named_row_and_links_its_record(tmp_path, monkeypatc
 
     monkeypatch.setattr(review_change, "run_system_review", refused)
     agent.handle_task({**task, "id": "dsr-q2"})
-    assert answers[-1].startswith("❌ Deep self-review unavailable: reviewer 'api-scout' is not an enabled catalog row")
+    assert answers[-1].startswith("Deep self-review is unavailable: reviewer 'api-scout' is not an enabled catalog row")

@@ -1,11 +1,13 @@
-// Skills → Sources rows and the dialogs' shared trust cards: the trust value is a
+// Extensions → Sources rows and the dialogs' shared trust cards: the trust value is a
 // setting, health is live evidence, and the first-start rows show their suggestion.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { renderSourceRow, sourceHealthHtml, unconfirmedHubRows } from '../modules/skill_sources_view.js';
+import { createSkillSources, renderSourceRow, sourceHealthHtml, unconfirmedHubRows } from '../modules/skill_sources_view.js';
 import { choiceCardsHtml, trustChoices } from '../modules/skill_dialogs.js';
+import { applyPayload } from '../modules/i18n.js';
+import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/skills_v4/${name}`, import.meta.url), 'utf8'));
 const SOURCES = fixture('skill_sources.json').sources;
@@ -18,10 +20,87 @@ const text = (html) => html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 // their age holds the clock at 15:10 that day, so it says the same whatever day it runs.
 const FIXTURE_NOW = Date.parse('2026-10-17T15:10:00Z');
 
+test('Sources keeps a door focused during a pending return read, without taking focus from elsewhere', async (t) => {
+    const { mount, document } = setup(t);
+    let read = async () => SOURCES;
+    const view = createSkillSources({ pane: mount, host: { sources: () => read(), sourceSnapshot: () => ({ rows: SOURCES }), catalog: async () => CATALOG,
+        installedSkills: () => [] } });
+    await view.show({});
+    let finish;
+    read = () => new Promise((resolve) => { finish = resolve; });
+    for (const action of ['made_here', 'auto_grant', 'skill_sources']) {
+        const pending = view.show({});
+        const door = mount.querySelector(`[data-source-action="${action}"]`);
+        door.focus();
+        finish(SOURCES);
+        await pending;
+        assert.equal(mount.querySelector(`[data-source-action="${action}"]`), door, 'the return holds the same door across redraw');
+        assert.equal(document.activeElement, door);
+    }
+    const pending = view.show({});
+    const elsewhere = new NodeStub('button');
+    document.body.append(elsewhere); elsewhere.focus();
+    finish(SOURCES);
+    await pending;
+    assert.equal(document.activeElement, elsewhere, 'a late read leaves another focused control alone');
+    view.destroy();
+});
+
+test('Sources translates its Made here sentence on language and dictionary changes without replacing its doors', async (t) => {
+    const { mount, document, window } = setup(t);
+    document.documentElement = new NodeStub('html');
+    // Exercise the actual i18n event; the DOM stub does not model the static chrome overlay.
+    document.createTreeWalker = () => ({ nextNode: () => null });
+    const english = { language: 'en', english: true, entries: {} };
+    const unknown = 'Skills made on this computer don’t come from a source.';
+    const counted = 'Skills made on this computer ({n}) don’t come from a source.';
+    const french = { language: 'fr', revision: 1, entries: {
+        [unknown]: { text: 'Les compétences locales ne viennent pas d’une source.' },
+        [counted]: { text: 'Les compétences locales ({n}) ne viennent pas d’une source.' },
+    } };
+    let installed = null;
+    const view = createSkillSources({ pane: mount, host: { sources: async () => [], sourceSnapshot: () => ({ rows: [] }), catalog: async () => null,
+        installedSkills: () => installed } });
+    try {
+        await view.show();
+        const copy = mount.querySelector('[data-source-made-copy]');
+        const actions = ['made_here', 'auto_grant', 'skill_sources'];
+        const door = (action) => mount.querySelector(`[data-source-action="${action}"]`);
+        const doors = actions.map(door);
+        doors[0].focus();
+        const check = (words) => {
+            assert.equal(mount.querySelector('[data-source-made-copy]'), copy);
+            assert.equal(copy.textContent, words);
+            actions.forEach((action, i) => assert.equal(door(action), doors[i]));
+            assert.equal(document.activeElement, doors[0]);
+        };
+        check(unknown);
+        applyPayload(french);
+        check(french.entries[unknown].text);
+
+        installed = [{ source: 'external' }];
+        await view.show();
+        check('Les compétences locales (1) ne viennent pas d’une source.');
+        const addSource = door('add');
+        applyPayload({ ...french, revision: 2, entries: { ...french.entries,
+            [counted]: { text: 'Compétences créées ici : {n}, sans source.' },
+        } });
+        check('Compétences créées ici : 1, sans source.');
+        assert.equal(door('add'), addSource, 'a dictionary update does not redraw the source rows');
+        applyPayload(english);
+        check(counted.replace('{n}', '1'));
+    } finally {
+        view.destroy();
+        applyPayload(english);
+    }
+    assert.equal(window.events.get('ouro:language-changed')?.length, 0, 'destroy removes the window listener');
+});
+
 test('the official hub row carries the Official glyph; the folder row says Folder; counts come from the catalog', (t) => {
     t.mock.timers.enable({ apis: ['Date'], now: FIXTURE_NOW });
     const official = renderSourceRow(source('ouroboros'), { items: items('ouroboros'), health: health('ouroboros') });
     assert.match(official, /<strong>Ouroboros<\/strong><button type="button" class="skills-mark ui-hit-area"/);
+    assert.match(official, /data-official-mark data-official-source="ouroboros"/, 'the row\'s mark is bound to the row itself');
     assert.match(text(official), /github\.com\/razzant\/OuroborosHub at main · 4 skills · read 12 min ago/);
     assert.match(text(official), /The Ouroboros project’s own skills, marked Official by its maintainer\./);
     const community = renderSourceRow(source('ouroboros-community'), { items: items('ouroboros-community'), health: health('ouroboros-community') });

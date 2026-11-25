@@ -16,7 +16,7 @@ import { cancelTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { haptic } from './haptics.js';
 import { showToast } from './toast.js';
-import { fmt, tr } from './i18n.js';
+import { fmt, tr, tx } from './i18n.js';
 
 export const ACTION_FINALIZE = 'finalize';
 export const ACTION_HURRY = 'hurry';
@@ -54,8 +54,21 @@ export function cancelRunEligibility({
         && !REUSABLE_TASK_IDS.has(String(groupId || ''));
 }
 
+// The reconciling reads of answered Resumes (`resumeTaskAction`'s `settle`): not requests out — a menu stays enabled
+// through one and its Stop stays available — but the task stays pending to every Resume door until its own read settles.
+const resumeReads = new Set();
+
+// Whether a Resume door may act now: its caller's current authority and no pending control of its task. A press, a
+// repaint of the button, a settled button and a focus landing read this, never the button's own enabled mark: a census
+// older than the press still says the task can be resumed, and no door may take that for leave to send it again.
+// `resumePending` is the task's one pending fact to a Resume door: a request of its own awaiting its answer
+// (`taskControlBusy`, which a menu reads) or the reconciling read its answered Resume still awaits.
+export const resumePending = (taskId) => taskControlBusy(taskId) || resumeReads.has(String(taskId || '').trim());
+export const resumeEligible = (taskId, canResume) => Boolean(canResume?.()) && !resumePending(taskId);
+
 // The direct button and the menu use the same request owner. Only a work's Resume control enables this door
 // (the server offers it where the Resume door accepts now); the caller re-checks that control on click.
+// `onSettled` is the read that reconciles the press: the task stays pending until it has settled.
 export function createTaskResumeButton(taskId, { canResume, onSettled = () => {} } = {}) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -65,10 +78,11 @@ export function createTaskResumeButton(taskId, { canResume, onSettled = () => {}
     button.textContent = tr('task.control.resume', 'Resume');
     button.addEventListener('click', async (event) => {
         event.stopPropagation();
-        if (!canResume?.() || taskControlBusy(taskId)) return;
+        if (!resumeEligible(taskId, canResume)) return;
         button.disabled = true;
-        try { await resumeTaskAction(taskId); await onSettled(); }
-        finally { button.disabled = false; }
+        // Settling gives back the authority held now: a connection that dropped meanwhile has withdrawn it.
+        try { await resumeTaskAction(taskId, { settle: onSettled }); }
+        finally { button.disabled = !resumeEligible(taskId, canResume); }
     });
     return button;
 }
@@ -92,6 +106,17 @@ const STOP_CONFIRMS = Object.freeze({
     [ACTION_STOP_EARLIER]: { title: 'Stop the earlier attempt?', confirmLabel: TASK_CONTROL_LABELS[ACTION_STOP_EARLIER],
         danger: true, body: 'What still runs of the earlier attempt stops at once; the Continue itself keeps going.' },
 });
+
+// A Stop over an accepted start whose outcome is unknown (#3428; the work projection's `unbound_start` on the
+// Activity trigger): the press records the request at once, but no engine run answers the start yet — the
+// confirmation says that truth instead of the bound run's immediate end.
+const UNBOUND_STOP_BODY = 'Stop is requested at once. A subagent whose start was never confirmed may keep '
+    + 'working until it is identified and its stop is confirmed.';
+
+function stopConfirm(action, anchor) {
+    return action === ACTION_STOP_NOW && anchor?.dataset?.unboundStart === '1'
+        ? { ...STOP_CONFIRMS[action], body: UNBOUND_STOP_BODY } : STOP_CONFIRMS[action];
+}
 
 /**
  * Whether a queue row's task is the ROOT of its tree — the server's own rule
@@ -161,8 +186,8 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
  */
 export async function pauseTaskAction(taskId, { pause = pauseTask, toast = showToast, wait = sleep } = {}) {
     const id = String(taskId || '').trim();
-    if (!id || inFlight.has(id)) return false;
-    inFlight.add(id);
+    if (!id || taskControlBusy(id)) return false;
+    const release = holdControl(id);
     try {
         const requestId = pauseRequestId(id);
         let ack = await pause(id, requestId);
@@ -197,7 +222,7 @@ export async function pauseTaskAction(taskId, { pause = pauseTask, toast = showT
         toast(`Pause refused: ${exc?.message || exc}`, 'error');
         return false;
     } finally {
-        inFlight.delete(id);
+        release();
     }
 }
 
@@ -236,6 +261,8 @@ const HELD_FACTS = {
     })[b.reason] || `a merge of task ${b.task_id} is not settled`,
     workspace_executor: (b) => `a workspace process of task ${b.task_id} is not settled`,
     delegated_run: (b) => (b.state === 'running' ? `delegated run ${b.run_id} is running`
+        : b.state === 'terminal' ? `delegated run ${b.run_id} ended and awaits collection`
+        : b.choice_id ? `start ${b.invocation_id} of task ${b.task_id} has an unknown outcome`
         : b.stop_outcome === 'pending_invocation_unbound'
             ? 'a delegated start has an unknown outcome (no run was recorded)'
             : b.state === 'stop_requested' ? `delegated run ${b.run_id}: its stop is requested, not confirmed`
@@ -289,23 +316,45 @@ const KEPT_PAUSED = Symbol('kept_paused');
 async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
     const named = refusal?.body?.acceptable_unknown;
     if (!Array.isArray(named) || !named.length) throw refusal;
-    const facts = heldWorkFacts(refusal.body.blockers, 5);
+    const blockers = refusal.body.blockers || [];
+    const starts = blockers.some((b) => b.kind === 'delegated_run' && b.choice_id);
+    const facts = heldWorkFacts(blockers, Infinity);
     const one = named.length === 1;
     const confirmed = await askOwner({
         title: 'Resume without these results?',
-        body: `${facts.charAt(0).toUpperCase()}${facts.slice(1)}. If you resume, ${one ? 'this call is' : 'these calls are'} `
+        body: starts ? `Resume the saved task ${id} without waiting for the listed results? The delegated work may `
+            + 'still be running, changing files or spending money. Resuming will not send these requests again. '
+            + 'Your decision is recorded in the task history.'
+            : `${facts.charAt(0).toUpperCase()}${facts.slice(1)}. If you resume, ${one ? 'this call is' : 'these calls are'} `
             + `never run again, whatever ${one ? 'it' : 'they'} changed outside stays as it is, `
             + 'and your decision is recorded on the task.',
+        details: { open: true, summary: `Inspect all ${named.length} ${one ? 'request' : 'requests'}`,
+            rows: blockers.map((b) => ({ label: `Task ${b.task_id}`,
+                value: b.kind === 'delegated_run' && b.choice_id ? `Start request ${b.invocation_id}`
+                    : `${heldWorkFacts([b])} (${b.operation_id || b.attempt_id || b.receipt_id})` })) },
         confirmLabel: 'Resume anyway',
     });
-    return confirmed ? resume(id, { accept_unknown: named, reason: 'The owner resumed without these results.' })
+    return confirmed ? resume(id, { accept_unknown: named, reason: starts
+        ? 'The owner accepted that the listed starts may still be working or spending money.'
+        : 'The owner resumed without these results.' })
         : KEPT_PAUSED;
 }
 
-export async function resumeTaskAction(taskId, { resume = resumeTask, toast = showToast, askOwner = openConfirmDialog } = {}) {
+/**
+ * The Resume press, the one owner of its request. The task is PENDING from the press until the answer is known and
+ * the read that reconciles it (`settle`, the door's own re-read of `/api/state`) has settled, applied or failed.
+ * `resumePending` says so to every Resume door, so a census read before the answer (still naming the task resumable)
+ * lends no second press, repaint or focus the leave to send again. The request lease covers only the answer
+ * (`taskControlBusy`, which a menu reads): through the reconciling read a menu stays enabled and its Stop stays
+ * available. Whatever the answer (a refusal, an unknown acknowledgement, a network failure, a declined "Resume
+ * anyway") the pending ends when that read does, never before it and never without it: its own lifetime bounds it
+ * (`readState`), and a closed socket retires it. A second press of the same task while pending sends nothing.
+ */
+export async function resumeTaskAction(taskId, { resume = resumeTask, toast = showToast, askOwner = openConfirmDialog,
+    settle = null } = {}) {
     const id = String(taskId || '').trim();
-    if (!id || inFlight.has(id)) return;
-    inFlight.add(id);
+    if (!id || resumePending(id)) return;
+    const release = holdControl(id);
     try {
         const ack = await resume(id).catch((refusal) => resumeWithoutUnknown(id, refusal, { resume, askOwner }));
         if (ack === KEPT_PAUSED) return;
@@ -325,10 +374,13 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         // and a held Continue's observed blockers as facts (#1721).
         // Handled here, never rethrown: the menu callback is fire-and-forget.
         const facts = heldWorkFacts(exc?.body?.blockers);
+        const message = exc?.body?.cause && exc.body.message ? tx(exc.body.message) : exc?.body?.message;
         toast(facts ? `Resume refused: ${facts}.${exc.body.action === 'wait_or_stop_the_previous_work'
-            ? ' Wait for that work or stop it.' : ''}` : exc?.body?.message || `Resume refused: ${exc?.message || exc}`, 'error');
+            ? ' Wait for that work or stop it.' : ''}` : message || `Resume refused: ${exc?.message || exc}`, 'error');
     } finally {
-        inFlight.delete(id);
+        release();
+        resumeReads.add(id);
+        try { await settle?.(); } finally { resumeReads.delete(id); }
     }
 }
 
@@ -359,12 +411,24 @@ export function hurryRequestId(taskId) {
     return hurryRequestIds.get(id);
 }
 
-// One action in flight per task: the menu disables items while a request is
-// awaiting, so a double click cannot race two controls.
-const inFlight = new Set();
+// One action in flight per task: the menu disables items while a request is awaiting its answer, so a double click
+// cannot race two controls. Each pending control is a lease its own operation gives back, and only that one — two
+// Stops of the same task end separately, and none frees a Resume's reconciling read (`resumeReads`). This map is
+// the ONE pending fact a menu reads: every door (a button's press and repaint, a focus landing, a menu opened later)
+// reads `taskControlBusy`, a Resume door `resumePending`; none keeps its own mark.
+const inFlight = new Map();
+
+function holdControl(taskId) {
+    const id = String(taskId || '').trim();
+    inFlight.set(id, (inFlight.get(id) || 0) + 1);
+    return () => {
+        const left = (inFlight.get(id) || 1) - 1;
+        if (left > 0) inFlight.set(id, left); else inFlight.delete(id);
+    };
+}
 
 export function taskControlBusy(taskId) {
-    return inFlight.has(String(taskId || '').trim());
+    return Boolean(inFlight.get(String(taskId || '').trim()));
 }
 
 /**
@@ -377,11 +441,11 @@ export function taskControlBusy(taskId) {
  */
 export async function requestHurry(taskId) {
     const id = String(taskId || '').trim();
-    inFlight.add(id);
+    const release = holdControl(id);
     try {
         return await hurryTask(id, hurryRequestId(id));
     } finally {
-        inFlight.delete(id);
+        release();
     }
 }
 
@@ -425,7 +489,7 @@ export async function requestStop(taskId, action) {
             || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
         pendingStopActions.set(key, `stop-${uuid}`);
     }
-    inFlight.add(id);
+    const release = holdControl(id);
     try {
         const result = await cancelTask(id, { cascade: true, stopPolicy: stopPolicyFor(action),
             stopActionId: pendingStopActions.get(key) });
@@ -433,7 +497,7 @@ export async function requestStop(taskId, action) {
         pendingStopActions.delete(key);
         return result;
     } finally {
-        inFlight.delete(id);
+        release();
     }
 }
 
@@ -642,7 +706,7 @@ export function openTaskControlMenu(anchor, {
     // choice. A trigger that always says `Stop…` keeps its menu: its label and its press change together.
     if (offered.length === 1 && anchor.dataset?.taskControlDirect === '1') {
         const [action] = offered;
-        if (!busy) Promise.resolve(STOPS.has(action) ? askConfirm(STOP_CONFIRMS[action]) : true).then((ok) => { if (ok) run(action); });
+        if (!busy) Promise.resolve(STOPS.has(action) ? askConfirm(stopConfirm(action, anchor)) : true).then((ok) => { if (ok) run(action); });
         return null;
     }
     // A11y: the trigger owns a popup menu; expanded tracks the open state.

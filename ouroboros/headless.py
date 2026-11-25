@@ -18,7 +18,9 @@ from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tupl
 from uuid import uuid4
 
 from ouroboros.contracts.task_constraint import normalize_task_constraint  # noqa: F401
-from ouroboros.post_task_checkpoint import CANONICAL_CUSTODY_FIELDS, project_replica_task_result_fields
+from ouroboros.post_task_checkpoint import (
+    canonical_keeps_replica_ending, project_replica_task_result_fields, replica_attempt_matches,
+)
 from ouroboros.delegate_named_evidence import published_workspace_evidence
 from ouroboros.workspace_file_outputs import _directory_direct_artifacts
 from ouroboros.task_results import (
@@ -511,7 +513,8 @@ def prune_task_trees(
 def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str, *, live: Any = None,
                                guard: Any = None, admission_rollback: bool = False) -> bool:
     """Remove TASK's own drives through ``task_custody.settle_child_drive`` (the one deletion owner):
-    ``live`` is the supervisor's probe, ``guard`` its interlock, ``admission_rollback`` frees a never-started drive."""
+    ``live`` is the supervisor's probe, ``guard`` its interlock, ``admission_rollback`` frees a never-started drive.
+    No report is passed, so the steps under the interlock are not measured here."""
     from ouroboros.task_custody import own_child_drives, settle_child_drive
 
     try:
@@ -559,13 +562,18 @@ def _copy_child_task_result_locked(parent_drive_root: pathlib.Path, task: Dict[s
     child_result = load_task_result(child_drive, task_id)
     if not isinstance(child_result, dict):
         return None
-    # Adopt the answer and deliverables now. Historical sources keep their exact
-    # references and their child drive until the existing off-loop custody pass
-    # verifies the archive. History size must not delay task_done or startup.
+    own = replica_attempt_matches(canonical_existing, child_result)
+    if not own and not (_ended(canonical_existing) and _ended(child_result)):
+        return canonical_existing  # a foreign open ending neither settles this live one nor adopts its drive
+    late_source = child_result  # the unmodified child record a rejected ending keeps whole (never the prepared replica)
+    # Adopt the answer and deliverables now; historical sources keep their exact references and
+    # child drive until the off-loop custody pass verifies the archive. Another attempt's files
+    # stay its own: settlement places them create-only.
     from ouroboros.history_retention import prepare_result_retention
 
     child_result, ref_promotion = prepare_result_retention(
-        pathlib.Path(parent_drive_root), child_drive, task_id, child_result)
+        pathlib.Path(parent_drive_root), child_drive, task_id,
+        child_result if own else {**child_result, "artifacts": []})
     _publish_child_verification_receipts(parent_drive_root, task_id, child_drive)
     child_status = str(child_result.pop("status", None) or "completed")
     child_result.pop("task_id", None)
@@ -576,7 +584,6 @@ def _copy_child_task_result_locked(parent_drive_root: pathlib.Path, task: Dict[s
             child_result["artifact_bundle"] = artifact_bundle_from_result(child_result)
         except Exception:
             child_result.pop("artifact_bundle", None)
-    child_result.setdefault("headless_child_drive_root", str(child_drive))
     if child_status in _FINAL_STATUSES and task_requires_workspace_capture(task):
         artifact_status = str(canonical_existing.get("artifact_status") or "").strip().lower()
         if artifact_status in ARTIFACT_TERMINAL_STATUSES | {ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING}:
@@ -593,11 +600,29 @@ def _copy_child_task_result_locked(parent_drive_root: pathlib.Path, task: Dict[s
         child_result["child_status"] = child_status
 
     return _retry_child_task_refs_locked(parent_drive_root, child_drive, task_id,
-                                         replica={**child_result, "task_id": task_id, "status": child_status})
+                                         replica={**child_result, "task_id": task_id, "status": child_status},
+                                         late_source=late_source)
+
+
+def _ended(row: Any) -> bool:
+    """A settled row: its status is text naming a final state (a malformed status settles nothing)."""
+    return isinstance(row, dict) and isinstance(row.get("status"), str) and row["status"] in _FINAL_STATUSES
+
+
+def _with_late(held: Any, entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The row's kept late results with ENTRY: one per retained digest, so a repeated copy-back adds nothing."""
+    rows = [row for row in held if isinstance(row, dict)] if isinstance(held, list) else []
+    digest = entry["source_ref"].get("sha256")
+    return rows if any(isinstance(row.get("source_ref"), dict) and row["source_ref"].get("sha256") == digest
+                       for row in rows) else [*rows, entry]
 
 
 class _GenerationClosed(Exception):
     """The maintenance generation closed before this publication's commit."""
+
+
+class LateResultRetentionFailed(Exception):
+    """The rejected ending could not be archived; the drive stays unadopted and the winner's bundle unchanged."""
 
 
 def retry_child_task_refs(parent: pathlib.Path, child: pathlib.Path, task_id: str,
@@ -614,9 +639,9 @@ def retry_child_task_refs(parent: pathlib.Path, child: pathlib.Path, task_id: st
 
 
 def _retry_child_task_refs_locked(parent: pathlib.Path, child: pathlib.Path, task_id: str,
-                                  *, replica: Optional[Dict[str, Any]] = None, stop: Any = None) -> Dict[str, Any]:
-    """Normal copyback supplies its prepared replica without history I/O; retry has
-    no replica and never reads an old child body; a changed CURRENT basis repeats preparation."""
+                                  *, replica: Optional[Dict[str, Any]] = None, stop: Any = None,
+                                  late_source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Publish from CURRENT; copyback supplies the original row for retention, ref-only retry supplies neither row."""
     from ouroboros.observability import (
         _has_pending_ref_promotion,
         child_ref_promotion_scope, promote_child_task_ref_patch,
@@ -628,16 +653,31 @@ def _retry_child_task_refs_locked(parent: pathlib.Path, child: pathlib.Path, tas
                 return source  # a closed generation starts no file promotion, not only no commit
             if replica is None and not source:
                 raise ValueError("pending child-ref authority is missing")
+            own = replica is None or replica_attempt_matches(source, replica)
+            keeps_ending = replica is not None and own and canonical_keeps_replica_ending(source, replica)
+            # Archive the exact original off-lock for this basis alone; the row transaction rechecks its rejection.
+            late = None
+            if _ended(late_source) and (keeps_ending or (not own and _ended(source))):
+                from ouroboros.history_retention import retain_late_result
+
+                try:
+                    late = retain_late_result(parent, task_id, late_source)
+                except Exception as exc:
+                    raise LateResultRetentionFailed(exc) from exc
             if replica is None:
                 if not _has_pending_ref_promotion(source.get("child_ref_promotion")):
                     return source
                 patch = promote_child_task_ref_patch(parent, child, task_id, source)
                 basis = {key: source.get(key) for key in patch}
+            elif not own and not _ended(source):
+                # another attempt's ending neither settles this live one nor adopts its drive
+                return source
             else:
                 source = {**source, **project_replica_task_result_fields(source, replica)}
                 review = source.get("review_projection")
                 promotion = copy.deepcopy(replica["child_ref_promotion"])
-                patch = {"child_ref_promotion": promotion}
+                # The same publication records the drive we read, not the replica's spelling of its placement.
+                patch = {"child_ref_promotion": promotion, "headless_child_drive_root": str(child)}
                 if isinstance(review, dict):
                     patch["review_projection"] = review
                 basis = {"review_projection": review}
@@ -647,24 +687,25 @@ def _retry_child_task_refs_locked(parent: pathlib.Path, child: pathlib.Path, tas
                     raise _GenerationClosed()  # re-asked at the commit, not only before the walk
                 if replica is not None and cancellation_blocks_child_result(current):
                     return None  # cancelled under the row lock: the child enriches nothing, not even by replica
+                if replica is not None and (replica_attempt_matches(current, replica) != own
+                                            or (not own and not _ended(current))):
+                    raise _RefPublicationChanged()  # the attempt or its end moved since this preparation
+                if (replica is not None and own and canonical_keeps_replica_ending(current, replica)) != keeps_ending:
+                    raise _RefPublicationChanged()  # the ending's clock and retention decision changed
                 selected = {**current, **project_replica_task_result_fields(current, replica)} if replica is not None else current
                 if {key: selected.get(key) for key in basis} != basis:
                     raise _RefPublicationChanged()
                 if replica is None and all(key in current and current[key] == value for key, value in patch.items()):
                     return None  # an unchanged retry rewrites nothing: no fresh updated_at/mtime (#1305)
-                if replica is not None and current.get("status") in _FINAL_STATUSES \
-                        and selected.get("status") != current["status"]:
-                    # A settled canonical row keeps its outcome; the child's is child_status.
-                    selected = {**selected, **{key: current[key] for key in ("status", "result", "error", "ts")
-                                               if key in current}, "child_status": replica.get("status")}
-                return {**(selected if replica is not None else {}), **patch, "status": selected["status"]}
+                kept = {"late_attempt_results": _with_late(current.get("late_attempt_results"), late)} if late else {}
+                return {**(selected if replica is not None else {}), **patch, **kept, "status": selected["status"]}
 
+            # Only the worker's own clock is stamped over the projector's field; a foreign attempt's and a kept ending's stay their own.
+            clock = {"ts": replica.get("ts", "")} if replica and own and not keeps_ending else {}
             try:
-                return write_task_result(parent, task_id, source["status"],
-                                         _field_projector=project, strict_existing_dict=True,
-                                         _terminal_time_source=replica,
-                                         **{key: value for key, value in (replica or {}).items()
-                                            if key not in {"status", "task_id", *CANONICAL_CUSTODY_FIELDS}})
+                return write_task_result(parent, task_id, source["status"], _field_projector=project,
+                                         strict_existing_dict=True, _terminal_time_source=replica,
+                                         **clock)
             except _RefPublicationChanged:
                 continue
             except _GenerationClosed:
@@ -672,14 +713,19 @@ def _retry_child_task_refs_locked(parent: pathlib.Path, child: pathlib.Path, tas
 
 
 def _child_result_adopted(child: pathlib.Path, result: Dict[str, Any]) -> bool:
-    promotion = result.get("child_ref_promotion")
-    source = str(result.get("headless_child_drive_root") or "")
-    return bool(
-        "result" in result and isinstance(promotion, dict)
-        and type(promotion.get("schema_version")) is int and promotion["schema_version"] == 1
-        and promotion.get("status") in {"complete", "incomplete"}
-        and source and pathlib.Path(source).resolve(strict=False) == child.resolve(strict=False)
-    )
+    """The drive was taken by copy-back and the row answers for itself: its own ``result``, or the exact late result it
+    kept of another attempt (``late_attempt_results``), never a fabricated empty answer."""
+    from ouroboros.task_custody import copied_child_drive
+
+    source = copied_child_drive(result)
+    return (("result" in result or bool(result.get("late_attempt_results")))
+            and source is not None and source.resolve(strict=False) == child.resolve(strict=False))
+
+
+def terminal_source_present(current: Dict[str, Any], source: Any) -> bool:
+    """A settled SOURCE that CURRENT can take: its own attempt's end, or any settled replica beside an ended row, whose
+    copy-back keeps that replica's exact bytes and the drive, never its ending (``replica_attempt_matches``)."""
+    return _ended(source) and (_ended(current) or replica_attempt_matches(current, source))
 
 
 def terminal_task_files_ready(canonical_root: pathlib.Path, task: Dict[str, Any], result: Any) -> bool:
@@ -709,10 +755,13 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
     """Finish one file-save attempt without turning an I/O failure into a worker crash.
 
     The dispatcher re-reads CURRENT; pending refs keep custody. terminal_source_present is True after a strict terminal read,
-    False for absence/nonterminal, None for unknown; later write failure preserves that observation, never inventing a source.
+    False for absence/nonterminal or another attempt's end beside a live row, None for unknown; later write failure
+    preserves that observation, never inventing a source, and stamps an artifact failure only on the attempt it read
+    (never over another attempt's row or a Stop).
     """
     task_id = str(task.get("id") or task.get("task_id") or "")
     report: Dict[str, Any] = {"task_id": task_id, "result": None, "error": "", "terminal_source_present": None}
+    own_source, observed = False, {}  # whether the settled source read is this row's own attempt's, and the row read beside it
     from ouroboros.task_custody import CustodyBusy
     from ouroboros.install_identity import StoreForeign, require_owned_root
 
@@ -727,7 +776,8 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
         source = current
         if child is not None and not adopted and not cancelled:
             source = load_task_result(child, task_id, strict=True)
-        report["terminal_source_present"] = bool(source and str(source.get("status") or "") in _FINAL_STATUSES)
+        report["terminal_source_present"] = terminal_source_present(current, source)
+        observed, own_source = current or source, replica_attempt_matches(current or source, source)
         if not report["terminal_source_present"]:
             raise ValueError("terminal task source is missing or not settled")
         if not adopted and child is not None and not cancelled:
@@ -757,19 +807,31 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
         log.warning("Terminal file preparation for %s waits: %s", task_id, exc)
     except Exception as exc:
         from ouroboros.observability import redact_projection
+
         report["error"] = str(redact_projection(f"{type(exc).__name__}: {exc}").value)
         log.warning("Terminal file preparation failed for %s: %s", task_id, report["error"])
-        # Only a real terminal source may stamp an artifact failure; absent/nonterminal source follows crash recovery.
-        if report["terminal_source_present"] is not True:
+        if isinstance(exc, LateResultRetentionFailed):
+            report["reason_code"] = "late_result_retention_failed"
+            return report
+        # Only the attempt whose own settled source was read may take a file failure.
+        if report["terminal_source_present"] is not True or not own_source:
             return report
         try:
             existing = load_task_result(canonical_root, task_id, strict=True)
             if existing:
                 fields = dict(artifact_status=ARTIFACT_STATUS_FAILED, artifact_error=report["error"],
                               artifact_finalized_at=utc_now_iso())
+                def stamp(live: Dict[str, Any], _incoming: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                    # Judged on the row under the lock, without I/O: still the attempt that was read and not stopped.
+                    # Open or ended alike — its own file-save is what failed; another attempt's row stamps nothing.
+                    if (cancellation_blocks_child_result(live)
+                            or not replica_attempt_matches(observed, live)):
+                        return None
+                    return {**_artifact_projection(live, fields), "status": live["status"]}
+
                 report["result"] = write_task_result(  # the live row's bundle and outcome axis take the failure
                     canonical_root, task_id, existing["status"], strict_existing_dict=True, **fields,
-                    _field_projector=lambda live, _: {**_artifact_projection(live, fields), "status": live["status"]})
+                    _field_projector=stamp)
         except Exception:
             log.warning("Terminal file failure could not be persisted for %s", task_id, exc_info=True)
     return report
@@ -802,9 +864,11 @@ def _copy_child_artifacts_to_parent(
         ArtifactIdentityError, _archive_previous_artifact_version, copy_artifact_file, stream_artifact_file,
     )
     from ouroboros.outcome_receipt_store import is_verification_receipts_path
+    from ouroboros.payload_release_state import read_release_state, released_publication_row
 
     parent_dir = task_artifacts_dir(parent_drive_root, task_id)
     parent_base = parent_dir.resolve(strict=False)
+    releases = read_release_state(parent_drive_root, task_id)
     child_base = task_artifacts_dir(child_drive, task_id, create=False).resolve(strict=False)
     rebased: List[Dict[str, Any]] = []
     for artifact in artifacts:
@@ -822,13 +886,18 @@ def _copy_child_artifacts_to_parent(
         dest = (src if src.is_relative_to(parent_base) else
                 parent_dir / (src.relative_to(child_base) if src.is_relative_to(child_base) else src.name))
         canonical_candidate = dest
-        if dest != src and expected is not None and dest.exists() and dest.resolve(strict=False) != src:
-            try:
-                stream_artifact_file(dest, expected=item)
-                src = dest  # Exact canonical bytes already survive this copy-back.
-            except OSError:
-                dest = dest.with_name(f"{src.stem}_{sha256(str(src).encode('utf-8')).hexdigest()[:8]}{src.suffix}")
         try:
+            if settled := released_publication_row(releases, src, dest, item):
+                rebased.append(settled)  # keep the canonical name/identity its accepted result already carries
+                continue
+            if dest != src and expected is not None and dest.exists() and dest.resolve(strict=False) != src:
+                try:
+                    stream_artifact_file(dest, expected=item)
+                    src = dest  # Exact canonical bytes already survive this copy-back.
+                except OSError:
+                    dest = dest.with_name(f"{src.stem}_{sha256(str(src).encode('utf-8')).hexdigest()[:8]}{src.suffix}")
+            if (final_rel := releases.address(dest.resolve(strict=False).relative_to(parent_base).as_posix())) in releases.pending or final_rel in releases.released:
+                raise OSError("payload_release_pending" if final_rel in releases.pending else "released_path_conflict")
             if expected is None and dest != src and dest.is_file() and not dest.is_symlink():
                 _archive_previous_artifact_version(pathlib.Path(parent_drive_root), task_id, dest, src)
             measured = copy_artifact_file(src, dest, expected=expected)

@@ -202,6 +202,31 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
     assert ws.roll_up_work("root", [selected], episode={"task_id": "root"})["tails"] == []
 
 
+@pytest.mark.parametrize(("held", "phrase"), [
+    ({"_budget_pause_hold": {"reason": "panic_hold", "release": "owner"}}, "awaited_helpers_owner"),
+    ({"_budget_pause": {"reason": "owner", "exact_continuation": True}}, "awaited_helpers_mind"),
+])
+def test_the_state_projection_places_a_held_dependency_only_on_the_nested_waiter(held, phrase):
+    from tests._work_projection_shared import work_fields
+
+    def sleep(chosen):
+        return {"running": True, "owner_wait": {"reason": "sleep", "state": "waiting", "task_attempt": 1,
+                "sleep": {"mode": "warm", "tasks": [chosen]}}}
+
+    lineage = {"root_task_id": "root"}
+    owners = [row("root"), row("A", parent_task_id="root", **lineage),
+              row("B", "budget_paused", pause_cause="unknown", parent_task_id="A", **lineage),
+              row("C", parent_task_id="root", **lineage), row("D", "budget_paused", parent_task_id="root", **lineage)]
+    (work,) = work_fields(owners, {"root": {"running": True}, "A": sleep("B"), "B": held,
+                                   "C": sleep("gone"), "D": held})["works"]
+    states = work["members"]["states"]
+    assert work["tails"] == [] and states["C"]["tails"] == []
+    assert (states["A"]["activity"], states["A"]["release"], states["A"]["turn"]) == ("waiting", "self", [])
+    (dependency,) = states["A"]["tails"]
+    assert (dependency["code"], dependency["ids"], dependency["state"]) == (phrase, ["B"], "held")
+    assert not any(control["target"] == "A" for control in work["controls"])
+
+
 _AT = "2026-11-03T18:05:00+00:00"
 _NAMED, _TIME = {"kind": "task", "name": "Draft the notes"}, {"kind": "time", "at": _AT}
 @pytest.mark.parametrize(("sleep", "text", "wake"), [
@@ -241,6 +266,68 @@ def test_the_projection_names_a_sleeps_helper_from_its_own_census_row():
     assert work["because"][0]["text"] == "Sleeping until the task it chose finishes or a message arrives"
 
 
+def test_a_queued_root_says_the_work_it_stands_behind_by_that_works_name_and_nothing_else():
+    """Owner 21.11.2026 («5A»): beside Queued a quiet line says behind which work the row stands, as the census read
+    it from the queue now (``lane_wait``), by the name that work's own row shows in the same list."""
+    from ouroboros.gateway.state import _raw_work_facts
+    from tests._work_projection_shared import work_fields
+
+    project = {"lane": "project", "task_id": "holder", "project_id": "p"}
+    folder = {"lane": "folder", "task_id": "holder", "project_id": "other", "folder": "/work/shared"}
+    assert _raw_work_facts({"id": "q", "lane_wait": folder})["lane_wait"] == folder  # the census carries the wait
+    assert "lane_wait" not in _raw_work_facts({"id": "q", "_lane_wait": folder, "_folder_wait": folder})
+    holder = row("holder", suggested_name="Add Ollama support")
+    live = {"holder": {"running": True, "suggested_name": "Add Ollama support"}}
+
+    def queued_of(owners, raw):
+        (queued,) = [work for work in work_fields(owners, raw)["works"] if work["activity"] == "queued"]
+        return queued["because"]
+
+    for wait, behind in ((project, {"task_id": "holder", "lane": "project", "name": "Add Ollama support"}),
+                         (folder, {"task_id": "holder", "lane": "folder", "name": "Add Ollama support",
+                                   "folder": "/work/shared"})):
+        assert queued_of([holder, row("q", "queued", chat_id=1)], {**live, "q": {"lane_wait": wait}}) == [
+            {"code": "queued", "text": "behind \u201cAdd Ollama support\u201d", "behind": behind}]
+    # A retried tree (its row is the retry, the wait names the tree) and a holder whose queue row holds no title or
+    # name of its own (the census row's derived name) are named as their work reads in the list.
+    retry = row("holder-r2", original_task_id="holder", root_task_id="holder")
+    retried = {"holder-r2": {"running": True, "original_task_id": "holder", "root_task_id": "holder",
+                             "suggested_name": "Add Ollama support"}, "q": {"lane_wait": project}}
+    assert queued_of([retry, row("q", "queued", chat_id=1)], retried)[0]["behind"]["name"] == "Add Ollama support"
+    # Review round 2 (Astra B3, Carbon A1): a helper queued before its root never lends the work its name, and a
+    # retry named only by its request (its census row's derived name) is named under either id the wait carries.
+    kid = row("kid", "queued", parent_task_id="holder", root_task_id="holder")
+    attempt = row("holder-r2", original_task_id="holder", root_task_id="holder")
+    helped = {"kid": {"parent_task_id": "holder", "root_task_id": "holder", "title": "Scan one file"},
+              "holder-r2": {"running": True, "original_task_id": "holder", "root_task_id": "holder",
+                            "title": "Build index"}, "q": {"lane_wait": project}}
+    assert queued_of([kid, attempt, row("q", "queued", chat_id=1)], helped)[0]["behind"]["name"] == "Build index"
+    by_request = row("holder-r2", original_task_id="holder", root_task_id="holder", suggested_name="Build from source")
+    for held_by in ("holder", "holder-r2"):
+        said = queued_of([by_request, row("q", "queued", chat_id=1)],
+                         {"holder-r2": {"running": True, "original_task_id": "holder", "root_task_id": "holder"},
+                          "q": {"lane_wait": {**project, "task_id": held_by}}})
+        assert said[0]["text"] == "behind \u201cBuild from source\u201d", held_by
+    bare = queued_of([row("holder", suggested_name="Derived from the request"), row("q", "queued", chat_id=1)],
+                     {"holder": {"running": True}, "q": {"lane_wait": project}})
+    assert bare[0]["text"] == "behind \u201cDerived from the request\u201d"
+    # A holder the list does not hold or cannot name, or no wait at all: no cause, as before.
+    for owners, raw in (([row("q", "queued")], {"q": {"lane_wait": project}}),
+                        ([row("holder"), row("q", "queued", chat_id=1)], {"holder": {"running": True},
+                                                                          "q": {"lane_wait": project}}),
+                        ([holder, row("q", "queued", chat_id=1)], live)):
+        assert queued_of(owners, raw) == [{"code": "queued", "text": ""}]
+    # Only Queued says it: a waiting, paused or working row never does; a sleep keeps naming by ``names``.
+    works = {"holder": "Add Ollama support"}
+    for member in (row("t", "queued", project_admission_hold={"label": "Waiting for Project verification"}),
+                   row("t", "budget_paused", pause_cause="owner", can_resume=False), row("t")):
+        said = ws.classify_member(member, {"lane_wait": project}, {}, works)["reasons"]
+        assert all("behind" not in entry and "Add Ollama" not in entry["text"] for entry in said), member["phase"]
+    assert ws.classify_member(row("t", "queued"), {"lane_wait": project}, {}, works)["reasons"][0]["behind"]["lane"] \
+        == "project"
+    assert ws.classify_member(row("t", "queued"), {"lane_wait": project}, works)["reasons"] == [
+        {"code": "queued", "text": ""}], "the sleep's names never name a lane holder"
+
 def test_under_a_settling_pause_only_running_helpers_are_said_still_working():
     owner = {"pause_by": {"actor": "owner"}}
     member = lambda task_id, **raw: ws.classify_member(  # noqa: E731
@@ -258,13 +345,33 @@ def test_under_a_settling_pause_only_running_helpers_are_said_still_working():
 
 def test_refused_source_keeps_resume_for_rechecking_and_unknown_without_a_stop_stays_held():
     state = ws.classify_member(row("t", "budget_paused", pause_cause="unknown"), {"hold": {"reason": "restore_refused:x"}})
-    assert state["reasons"][0]["code"] == "restore_failed" and state["release"] == "mind"
-    # A start whose outcome is unknown says that, never that saved state was lost; Resume stays the same door.
+    assert state["reasons"][0] == {"code": "held", "text": "Held"} and state["release"] == "mind"
+    # Older refusal records do not distinguish an ambiguous dispatch from unreadable saved work.
     unknown = ws.classify_member(row("t", "budget_paused", pause_cause="unknown"), {"hold": {"reason": "dispatch_outcome_unknown"}})
     assert unknown["reasons"][0]["code"] == "start_unconfirmed" and unknown["release"] == "mind"
     assert unknown["reasons"][0]["text"] == "Its last start is unconfirmed, or its saved work could not be read"
     raw = ws.classify_member(row("t", "budget_paused", pause_cause="mystery"), {"hold": {}})
     assert raw["reasons"][0]["code"] == "held" and raw["reasons"][0]["text"] == "Held"
+
+
+@pytest.mark.parametrize("record,words", [
+    ({"reason": "dispatch_outcome_unknown", "refusal_basis": "dispatch_unconfirmed"},
+     "An earlier assignment may already have reached a worker"),
+    ({"reason": "dispatch_outcome_unknown", "refusal_basis": "saved_work_unverified"},
+     "The saved work could not be verified for this attempt"),
+    ({"reason": "continuation_publication_unconfirmed"}, "Continue has not been confirmed in the queue"),
+    ({"reason": "stale_queue_row_grant_consumed"}, "The earlier Resume was already used"),
+    ({"reason": "stale_resume_grant_superseded"}, "The earlier Resume no longer matches the current pause"),
+    ({"reason": "_owner_hold"}, "An owner hold is in effect"),
+    ({"reason": "restore_refused:pause_source_unreadable"}, "The work saved at the pause could not be read"),
+])
+def test_the_work_row_and_resume_answer_name_the_recorded_refusal(record, words):
+    from ouroboros.work_stop import resume_outcome
+
+    state = ws.classify_member(row("t", "budget_paused", pause_cause="unknown"), {"hold": record})
+    assert state["reasons"][0]["text"] == words and state["release"] == "mind"
+    answer = resume_outcome({"ok": False, "error": record["reason"], **record})
+    assert answer["message"] == "Resume refused: " + words and answer["error"] == record["reason"]
 
 
 def test_the_word_beside_finalizing_follows_the_cards_status_fold():
@@ -516,6 +623,52 @@ def test_one_question_is_counted_once_while_both_of_its_rooms_show_it():
     assert ws.roll_up_summary(rooms, [acting])["turn"] == 1 + 3
 
 
+def test_an_owner_action_stands_where_the_measurement_proved_it_and_is_said_once():
+    """``settle_actions``: the census row's action is a candidate; the measurement (``main_decisions`` verdicts) is its
+    one address and availability. Offered at the work's room it stays; at another room it leaves for that room; one
+    the measurement could not prove is no turn anywhere and is named; another room's own work, and what the
+    measurement never considered, keep the census's word. Questions are never placed here."""
+    resume = {"kind": "action", "task_id": "helper", "code": "after_restart"}
+    wait = {"kind": "action", "task_id": "digest", "wait_id": "w1", "code": "model_access"}
+    ask = {"kind": "question", "task_id": "helper", "quiz_id": "q1"}
+    offered = {"state": "offered", "room": 42, "waits": frozenset({"w1"}), "resume": True}
+    verdicts = {"helper": offered, "digest": {**offered, "room": 7}, "far": {"state": "elsewhere"},
+                "lost": {"state": "unconfirmed"}, "stale": {**offered, "waits": frozenset(), "resume": False}}
+
+    def settle(*items, room="42"):
+        member, moved, unconfirmed = {"turn": [dict(item) for item in items]}, {}, []
+        ws.settle_actions(member, room, verdicts, moved, unconfirmed)
+        return member["turn"], moved, unconfirmed
+    assert settle(resume, ask) == ([resume, ask], {}, [])
+    assert settle(wait, resume) == ([resume], {"7": [wait]}, [])
+    assert settle(resume, room="7") == ([], {"42": [resume]}, [])
+    other = {"kind": "action", "task_id": "far"}
+    unknown = {"kind": "action", "task_id": "never-considered"}
+    assert settle(other, unknown) == ([other, unknown], {}, [])
+    lost, stale, stale_wait = ({"kind": "action", "task_id": task} for task in ("lost", "stale", "stale"))
+    assert settle(lost, stale, {**stale_wait, "wait_id": "w1"}) == ([], {}, ["lost", "stale", "stale"])
+    # Said once: the room's own turn gets one item per task and wait.
+    assert ws.place_actions({"7": [{"kind": "open_question", "task_id": "x"}]}, {"7": [wait, dict(wait), resume]}) == {
+        "7": [{"kind": "open_question", "task_id": "x"}, wait, resume]}
+
+
+def test_the_tray_counts_a_work_once_whichever_rooms_hold_its_actions():
+    """A helper's action placed in another room stands with no work of that room. Its work is already one wait when
+    it has a turn of its own; otherwise that action is the one wait. Nine helpers of one work are one work."""
+    def work(work_id, *tasks, turn=()):
+        return {**_work("working", work_id=work_id, turn=turn), "members": {"ids": list(tasks)}}
+    own = work("w-own", "a", "a-helper", turn=[{"kind": "question", "task_id": "a"}])
+    bare = work("w-bare", "b", *[f"b-helper-{index}" for index in range(9)])
+    acts = [{"kind": "action", "task_id": task} for task in ("a-helper", *[f"b-helper-{index}" for index in range(9)])]
+    elsewhere = ws.roll_up_room([], questions=acts)
+    here = ws.roll_up_room([own, bare])
+    assert elsewhere["amber"] is True and here["amber"] is True
+    assert ws.roll_up_summary({"7": elsewhere, "42": here}, [own, bare])["turn"] == 2, "w-own once, w-bare once"
+    # An action whose work is not listed at all is its own wait, once per task.
+    lone = [{"kind": "action", "task_id": "ghost"}, {"kind": "action", "task_id": "ghost", "wait_id": "w2"}]
+    assert ws.roll_up_summary({"7": ws.roll_up_room([], questions=lone)}, [])["turn"] == 1
+
+
 # ---- the server adapter ------------------------------------------------------------------------------
 
 _REAL_OPEN_RUNS = wp._open_runs  # the custody reader itself, before a fixture fakes it
@@ -524,7 +677,7 @@ _REAL_OPEN_RUNS = wp._open_runs  # the custody reader itself, before a fixture f
 def stored(monkeypatch):
     results = {}
     monkeypatch.setattr(wp._Observations, "result", lambda self, task_id: results.get(task_id))
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {})
     monkeypatch.setattr(wp, "_inflight_upkeep", lambda drive_root, known: [])
     return results
 
@@ -625,7 +778,7 @@ def _run(run_id, task_id, source="delegated_subagent", terminal_state=""):
 
 def test_working_helpers_and_runs_of_an_ended_root_are_its_tails(stored, monkeypatch, tmp_path):
     stored["p"] = {"task_id": "p", "status": "failed", "chat_id": 42}
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {"p": [_run("run-1", "p-a"), _run("run-2", "p-b")]})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {"p": [_run("run-1", "p-a"), _run("run-2", "p-b")]})
     snap = wp.works_snapshot(tmp_path, [row("h0", parent_task_id="p", root_task_id="p")], {})
     [work] = snap["works"]
     assert work["activity"] == "working" and work["because"] == []
@@ -674,6 +827,45 @@ def test_a_run_nobody_can_confirm_beside_a_live_episode_is_its_line_never_its_ma
     assert (ended["activity"], ended["mark"]) == ("unknown", "ring")
 
 
+def test_a_members_tails_require_its_exact_task_id():
+    handoffs = [{"kind": "model_handoff", "attempt_id": "m1", "task_id": "one"},
+                {"kind": "model_handoff", "attempt_id": "m2", "task_id": "two"},
+                {"kind": "model_handoff", "attempt_id": "unbound-model"}]
+    members = [ws.classify_member(row("root", "budget_paused", pause_cause="owner", finishing_reviews=True),
+                                  {"model_handoffs": handoffs}),
+               ws.classify_member(row("one", "queued")),
+               ws.classify_member(row("two", "budget_paused", pause_cause="owner"), {"model_handoffs": handoffs})]
+    runs = [{"run_id": "r1", "kind": "run", "state": "live", "task_id": "one"},
+            {"run_id": "r2", "kind": "run", "state": "unknown", "task_id": "two"},
+            {"run_id": "unbound-run", "kind": "run", "state": "unknown"}]
+    work = ws.roll_up_work("root", members, episode={"task_id": "root", "state": members[0]}, runs=runs)
+    assert [(tail["code"], tail.get("ids")) for tail in work["tails"]] == [
+        ("delegated_running", ["r1"]), ("review_work_finishing", None),
+        ("external_runs_unconfirmed", ["r2", "unbound-run"]), ("model_handoff", ["m1", "m2", "unbound-model"])]
+    states = work["members"]["states"]
+    assert states["root"]["tails"] == []
+    assert [(t["code"], t["ids"]) for t in states["one"]["tails"]] == [
+        ("delegated_running", ["r1"]), ("model_handoff", ["m1"])]
+    assert [(t["code"], t["ids"]) for t in states["two"]["tails"]] == [
+        ("external_runs_unconfirmed", ["r2"]), ("model_handoff", ["m2"])]
+
+
+def test_unreadable_custody_cannot_turn_a_wait_or_a_saved_run_record_into_a_live_leaf(stored, monkeypatch, tmp_path):
+    def unavailable(drive_root, state=None):
+        raise OSError("cannot read run custody")
+
+    monkeypatch.setattr(wp, "_open_runs", unavailable)
+    stored["child"] = {"status": "running", "delegated_runs_unreconciled": ["old-run"]}
+    owners = [row("root"), row("child", "budget_paused", pause_cause="sleep", parent_task_id="root", root_task_id="root")]
+    raw = {"child": {"_budget_pause": {"reason": "sleep", "sleep": {"mode": "cold", "runs": ["old-run"]}}}}
+    snapshot = wp.works_snapshot(tmp_path, owners, raw)
+    assert snapshot["works_complete"] is False and {"reason": "delegated_custody_unavailable"} in snapshot["works_gaps"]
+    [work] = snapshot["works"]
+    child = work["members"]["states"]["child"]
+    assert (child["activity"], child["live"], child["tails"]) == ("waiting", False, [])
+    assert work["tails"] == []
+
+
 def test_a_running_episodes_own_review_is_its_work_and_review_beside_a_pause_is_its_tail():
     running = ws.classify_member(row("t", "thinking"))
     review = {"run_id": "rv", "kind": "review", "state": "live"}
@@ -694,14 +886,29 @@ def test_one_rule_types_an_open_run_for_the_card_and_for_ouroboros(source, owner
     # A stop its own task's live Pause could not confirm leaves an ordinary run unconfirmed; review work stays review.
     assert ws.run_tail(source, owner, stop_unknown=True) == ((typed[0], "live") if typed[0] == "review"
                                                              else ("run", "unknown"))
-    entry = SimpleNamespace(run_id="r", task_id="h" if owner is not None else "", source=source)
+    entry = SimpleNamespace(run_id="r", task_id="h", source=source)
     stops = {}
     obs = SimpleNamespace(result=lambda task_id: owner if task_id == "h" else None,
                           stop_unknown=lambda task_id, drive_root=None, owner=None: frozenset(stops.get(task_id, ())))
-    assert wp._typed_run(entry, obs, {}) == {"run_id": "r", "kind": typed[0], "state": typed[1]}
+    expected = {"run_id": "r", "task_id": entry.task_id, "kind": typed[0], "state": typed[1]}
+    assert wp._typed_run(entry, obs, {}) == expected
     stops["h"] = ["r"]
-    stopped = "unknown" if typed[0] == "run" and entry.task_id else typed[1]
-    assert wp._typed_run(entry, obs, {}) == {"run_id": "r", "kind": typed[0], "state": stopped}
+    stopped = "unknown" if typed[0] == "run" else typed[1]
+    assert wp._typed_run(entry, obs, {}) == {**expected, "state": stopped}
+
+
+@pytest.mark.parametrize("owner", ["", "other"])
+def test_an_open_run_without_a_matching_member_keeps_its_trees_stop(stored, monkeypatch, tmp_path, owner):
+    stored["root"] = {"task_id": "root", "status": "done", "chat_id": 42}
+    monkeypatch.setattr(wp, "_open_runs", lambda root, state=None: {"root": [_run("orphan", owner)]})
+    monkeypatch.setattr("ouroboros.delegate_feed.current_activities", lambda root, keys: dict.fromkeys(keys, True))
+    snapshot = wp.works_snapshot(tmp_path, [row("other", "queued")], {})
+    works = {work["work_id"]: work for work in snapshot["works"]}
+    assert not works["other"]["members"]["states"]["other"]["tails"]
+    work = works["root"]
+    assert (work["live"], work["mark"], work["members"]["states"]) == (False, "ring", {})
+    assert [(tail["state"], tail["ids"]) for tail in work["tails"]] == [("unknown", ["orphan"])]
+    assert work["controls"] == [{"action": "stop", "target": "root", "scope": "cascade"}]
 
 
 def test_a_stop_is_unconfirmed_only_while_its_tasks_pause_lives(tmp_path):
@@ -729,7 +936,7 @@ def test_a_stop_is_unconfirmed_only_while_its_tasks_pause_lives(tmp_path):
 
 
 def test_a_review_the_pause_lets_finish_is_one_review_tail_from_either_source(stored, monkeypatch, tmp_path):
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {"t": [_run("run-rv", "t", source="review_substrate")]})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {"t": [_run("run-rv", "t", source="review_substrate")]})
     owners = [row("t", "budget_paused", pause_cause="owner", finishing_reviews=True)]
     snap = wp.works_snapshot(tmp_path, owners, {})
     [work] = snap["works"]
@@ -738,7 +945,7 @@ def test_a_review_the_pause_lets_finish_is_one_review_tail_from_either_source(st
         ("review", "Review work finishing", ["run-rv"])]
     assert "count" not in work["tails"][0]
     # A native review (no custody row) is the same tail; with no review at all there is none.
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {})
     [work] = wp.works_snapshot(tmp_path, owners, {})["works"]
     assert [(tail["kind"], tail.get("ids")) for tail in work["tails"]] == [("review", None)]
     [work] = wp.works_snapshot(tmp_path, [row("t", "budget_paused", pause_cause="owner")], {})["works"]
@@ -748,7 +955,7 @@ def test_a_review_the_pause_lets_finish_is_one_review_tail_from_either_source(st
 def test_a_run_whose_own_task_failed_is_unconfirmed_and_its_work_stays_stoppable(stored, monkeypatch, tmp_path):
     stored["p"] = {"task_id": "p", "status": "failed", "chat_id": 42}
     stored["h"] = {"task_id": "h", "status": "failed"}
-    monkeypatch.setattr(wp, "_open_runs", lambda drive_root: {"p": [_run("run-u", "h")]})
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {"p": [_run("run-u", "h")]})
     [work] = wp.works_snapshot(tmp_path, [], {})["works"]
     assert (work["activity"], work["live"], work["mark"]) == ("unknown", False, "ring")
     assert [(tail["state"], tail["text"]) for tail in work["tails"]] == [("unknown", "1 external run may still be running")]
@@ -969,3 +1176,50 @@ def test_a_finalizing_split_root_says_its_effective_outcome_not_its_hot_row(tmp_
     work = next(w for w in wp.works_snapshot(data, [row], {"fr": {"running": True}})["works"] if w["work_id"] == "fr")
     assert work["transition"] == "finalizing"
     assert work.get("outcome") == expected
+
+
+# ---- the text surfaces (Telegram) say the works as the window does -------------------------------------
+
+def test_text_surfaces_say_the_works_with_the_cards_words_and_an_unread_projection_is_unknown():
+    import pathlib
+    import re
+
+    assert ws.said_works({}) is None and ws.said_works(None) is None  # an unread body: unknown, never empty
+    assert ws.said_works({"works": [{"name": "a", "activity": "working"}], "works_complete": False}) is None
+    assert ws.said_works({"works": [], "works_complete": True}) == []  # a read, complete, empty projection
+    said = ws.said_works({"works_complete": True, "works": [
+        {"name": "a", "activity": "working", "transition": "pausing"},
+        {"name": "b", "activity": "waiting", "turn": [{"kind": "question"}], "because": [{"text": "Waiting for your answer"}]},
+        {"name": "c", "activity": "waiting", "turn": [{"kind": "open_question"}]},
+        {"name": "d", "activity": "paused", "because": [{"text": ""}, ws.reason("paused_by_owner")]},
+        {"name": "e", "activity": "unheard-of"}]})
+    assert [(w["state"], w["word"], w["reason"]) for w in said] == [
+        ("pausing", "Pausing…", ""), ("question", "Waiting for your answer", ""),
+        ("waiting", "Waiting", ""), ("paused", "Paused", "You paused it"), ("unknown", "Activity unconfirmed", "")]
+    # A correspondent's Presence turn is marked by its recorded fact, an owner's work is not.
+    marked = ws.said_works({"works_complete": True, "works": [{"name": "p", "activity": "working", "place_turn": True},
+                                                              {"name": "o", "activity": "working"}]})
+    assert [(w["name"], w["place_turn"]) for w in marked] == [("p", True), ("o", False)]
+    # The words are the cards' chip words (web/modules/task_phase_chip.js CHIP), not a second vocabulary.
+    chip = (pathlib.Path(__file__).resolve().parents[1] / "web/modules/task_phase_chip.js").read_text(encoding="utf-8")
+    chip_words = dict(re.findall(r"tr\('(task\.chip\.[a-z_]+)', '([^']+)'\)", chip))
+    assert {state: chip_words.get(key) for state, key in ws.ACTIVITY_CHIP_KEYS.items()} == ws.ACTIVITY_WORDS
+    assert all(w["chip_key"] == ws.ACTIVITY_CHIP_KEYS[w["state"]] for w in said)
+    # The reason's code rides only when its text is that code's own sentence (the window's ``work.because.<code>``).
+    assert [w["reason_code"] for w in said] == ["", "", "", "paused_by_owner", ""]  # b names no code
+    counted = ws.said_works({"works_complete": True, "works": [
+        {"name": "f", "activity": "waiting", "because": [ws.reason("helpers_running", count=2)]},
+        {"name": "h", "activity": "waiting", "because": [ws.reason("helpers_running", count=1)]},
+        {"name": "g", "activity": "paused", "because": [{"code": "paused_by_owner", "text": "Paused for the night"}]}]})
+    assert [(w["reason"], w["reason_code"]) for w in counted] == [
+        ("2 subagents still working", ""), ("1 subagent still working", "helpers_running"), ("Paused for the night", "")]
+
+
+@pytest.mark.parametrize("kind,raw,marked", [("presence", {}, True), ("managed_task", {"_presence_turn": True}, True),
+                                             ("managed_task", {}, False), ("direct_chat", {}, False)])
+def test_a_correspondents_presence_turn_is_marked_on_its_work(tmp_path, kind, raw, marked):
+    """``place_turn`` comes from the row's recorded facts (the census kind, the ``_presence_turn`` flag), as its
+    controls read them; an owner's work never carries it."""
+    work = next(w for w in wp.works_snapshot(tmp_path, [row("t", kind=kind)], {"t": {"running": True, **raw}})["works"]
+                if w["work_id"] == "t")
+    assert work.get("place_turn", False) is marked

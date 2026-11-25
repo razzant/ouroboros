@@ -1,6 +1,7 @@
 """Model-free attention decisions after the room has durably heard an event."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -12,6 +13,8 @@ from ouroboros.places import (FACT_FROM_BOT, PlaceError, get_place, observed_fac
 
 # What ``offer_arrival`` did: the reason its settlement records, or the mind's choice to make.
 HANDED_TO_AUTHOR, HANDED_TO_WORK, ROUTE_TO_MIND = "current_author", "conversation_work", "route"
+# A heard reason: an observed change whose initiator the connector could not name (``unattributed_change``).
+CHANGE_ACTOR_UNKNOWN = "change_actor_unknown"
 _REACTION_FIELDS = {"schema_version", "change", "old", "new", "counts", "target"}
 _REACTION_LIST_LIMIT = 256
 _REACTION_VALUE_LIMIT = 256
@@ -109,6 +112,28 @@ def reaction_refusal(event: dict, staged_files=None) -> str:
     return refusal
 
 
+def observed_change(message) -> bool:
+    """Whether the connector marks this event a change to something observed before rather than new words, by typed
+    facts alone: a ``message.non_text`` item of kind ``state_change`` (an edit, a merge, an assignment, a review
+    request, an object first seen after it changed), or, from a connector predating that marker, a
+    ``message.previous_source_event_id`` naming the earlier observation it revises. ``edited_at`` alone is no such
+    fact: a message first received after its author edited it is still new words."""
+    from ouroboros.presence_message_facts import STATE_CHANGE, non_text_items
+    facts = message if isinstance(message, Mapping) else {}
+    previous = facts.get("previous_source_event_id")
+    return (any(kind == STATE_CHANGE for kind, _description in non_text_items(facts))
+            or (isinstance(previous, str) and bool(previous.strip())))
+
+
+def unattributed_change(event) -> bool:
+    """An observed change whose actor the connector names no platform id for (``platform_actor_id``, else ``id``):
+    my own edit, assignment or merge then reads the same as a person's, so it is heard as background, never a wake,
+    whatever the wake list says (``any_message`` included). A change by a named actor keeps the ordinary path, and so
+    do new words by an unnamed one."""
+    actor = event.actor if isinstance(event.actor, Mapping) else {}
+    return observed_change(event.message) and not str(actor.get("platform_actor_id") or actor.get("id") or "").strip()
+
+
 def decide_attention(root: Path, admission, event) -> tuple[str, dict]:
     """Return silent / retry / focus, consulting current owner choices each time."""
     try:
@@ -134,6 +159,10 @@ def decide_attention(root: Path, admission, event) -> tuple[str, dict]:
         resolved = (reaction.get("target") or {}).get("resolution") == "resolved"
         heard = resolved and (not bot or bool(wake_matches(place, facts)))
         return "silent", {"reason": "reaction_context_only", "background": heard}
+    if unattributed_change(event):  # before the wake list and the Host's route: never new work
+        # A live author may hear it in the background, a bot's change only under the existing from_bot selection.
+        bot = FACT_FROM_BOT in facts
+        return "silent", {"reason": CHANGE_ACTOR_UNKNOWN, "background": not bot or bool(wake_matches(place, facts))}
     routed = isinstance(admission.allowance, dict) and admission.allowance.get(ROUTE_TO_MIND) is True
     if not wake_matches(place, facts) and not routed:  # the Host's route travels by value to the runner's recheck
         return "silent", {"reason": "no_wake_match"}
@@ -173,11 +202,12 @@ def _followup_in_scope(event) -> bool:
 def author_hears(decision: str, details: dict, event) -> bool | None:
     """How a live author of this conversation may hear an arrival: True as a wake, False as
     background context, None not at all. Neither needs the wake allowance; Paused, Off, a
-    disconnected place and a bot without its wake item stay heard-only. A reaction is never a wake;
-    an untagged follow-up in its own thread, topic or direct message is, and other room chatter stays background."""
+    disconnected place and a bot without its wake item stay heard-only. A reaction is never a wake, nor a change
+    whose initiator is unknown; an untagged follow-up in its own thread, topic or direct message is, and other room
+    chatter stays background."""
     if decision in {"focus", "retry"}:
         return True
-    if details.get("reason") == "reaction_context_only":
+    if details.get("reason") in {"reaction_context_only", CHANGE_ACTOR_UNKNOWN}:
         return False if details.get("background") else None
     bot = FACT_FROM_BOT in observed_facts(event)
     if decision != "silent" or details.get("reason") != "no_wake_match" or bot:
@@ -198,6 +228,15 @@ def arrival_conversation(conversation, source=None) -> dict:
     return facts
 
 
+def arrival_actor(root, event) -> dict:
+    """A later arrival's actor with the speaker facts its focus frame would state (``knowledge.speaker_pages``)."""
+    from ouroboros.knowledge import speaker_pages
+
+    return {**dict(event.actor), **speaker_pages(root, event.provider, event.account_id,
+                                                 str(event.actor.get("platform_actor_id") or event.actor.get("id") or ""),
+                                                 unverified=event.actor.get("authenticated") is False)}
+
+
 def _arrival_source(root, task: dict, event) -> dict:
     """The arrival's exact recorded facts, retained once with the existing focus source (its room row's
     dedup record holds the pointer, so ``chat_history`` and ``memory_read`` rows show it too), as a
@@ -210,6 +249,17 @@ def _arrival_source(root, task: dict, event) -> dict:
 
 def _arrival_msg_id(task: dict) -> str:
     return "place-event:" + task["metadata"]["presence_event_identity"]
+
+
+def _non_speech(event, reaction) -> dict:
+    """The host's label on an arrival a reader takes whole that is not new speech: a reaction, or an observed change
+    (its text may repeat words said before), with whether its initiator is named."""
+    if reaction:
+        return {"non_speech": f"Reaction, not speech: {reaction_words(reaction)}"}
+    if observed_change(event.message):
+        return {"non_speech": "A change, not new words; " + (
+            "who made it is unknown" if unattributed_change(event) else "made by the actor named here")}
+    return {}
 
 
 def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, pin: dict, claim=None):
@@ -234,8 +284,7 @@ def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, 
     # Provenance from the arrival's own author as the places confirm it now, never from the focus that hands it on
     # (a stranger's line handed on stays context) and never a verdict about whom it is for; the drain reads it again.
     confirmed_words = "" if reaction else place_confirmed_words(owner_event_now(root, place_id, event), event.text, event.message)
-    text = json.dumps({"actor": dict(event.actor), "event": event.text,
-                       **({"non_speech": f"Reaction, not speech: {reaction_words(reaction)}"} if reaction else {}),
+    text = json.dumps({"actor": arrival_actor(root, event), "event": event.text, **_non_speech(event, reaction),
                        "source_event_id": event.source_event_id, "conversation_key": event.conversation_key,
                        "message": dict(event.message), "conversation": arrival_conversation(event.conversation, source),
                        **({"context_source_ref": source} if source else {}),
@@ -390,8 +439,11 @@ def offer_arrival(root, task: dict, event, *, wake: bool) -> tuple[str, str]:
     The conversation's lease author first, whose focus can still tell its work; then its sole reader: a root, or an
     author parked for its review or private question, whose existing wait wakes and retakes the conversation before
     any model call. Several readers, or living work not reading this moment (preparing, past its final close), leave a
-    waking arrival to the mind: an ordinary focus under the allowance, never plain heard. ``{to: mind}`` wrote to no
-    work, so a later current author may still take it; a work or author holder never moves.
+    waking arrival to the mind: an ordinary focus under the allowance, never plain heard. Background reaches the lease
+    author alone, but a change whose initiator is unknown also reaches a sole reader, as context that ends no wait: it
+    may be this account's own echo, so never new work, yet still the running work's context; else it stays heard and
+    asks no mind.
+    ``{to: mind}`` wrote to no work, so a later current author may still take it; a work or author holder never moves.
     ``(outcome, holder)``; outcome "" leaves ordinary admission."""
     from ouroboros.place_arrivals import arrival_recipient, pin_recipient
     from ouroboros.room_reader import (
@@ -404,8 +456,10 @@ def offer_arrival(root, task: dict, event, *, wake: bool) -> tuple[str, str]:
     done, author = _offer_author(root, task, event, wake, pin)
     if done == "held":
         return HANDED_TO_AUTHOR, author
-    if done == "pinned" or not wake:
-        return (offer_arrival(root, task, event, wake=wake) if done == "pinned" else ("", ""))
+    if done == "pinned":
+        return offer_arrival(root, task, event, wake=wake)
+    if not wake and (pin.get("to") == "mind" or reaction_fact(event.message) or not unattributed_change(event)):
+        return "", ""  # a reaction, room chatter, a deletion or a named actor's state change: its lease author's alone
     if pin.get("to") == "mind":
         return ROUTE_TO_MIND, ""
     works = conversation_works(root, key, _bindings(task))
@@ -414,17 +468,20 @@ def offer_arrival(root, task: dict, event, *, wake: bool) -> tuple[str, str]:
     parked = [item for item in named if lent_author_reads(root, item, key, _bindings(task))]
     if len(readers) + len(parked) == 1:
         if parked:
-            done = _deliver(root, task, event, _author_pin(root, parked[0]), {}, _accept_lent(root, parked[0], task, event))
+            done = _deliver(root, task, event, _author_pin(root, parked[0]), {}, _accept_lent(root, parked[0], task, event),
+                            wake)
             handed = HANDED_TO_AUTHOR, parked[0]
         else:
             done = _deliver(root, task, event, _work_pin(readers[0]), {},
-                            lambda append: append(admit=lambda: work_reads_now(readers[0], key, _bindings(task))))
+                            lambda append: append(admit=lambda: work_reads_now(readers[0], key, _bindings(task))), wake)
             handed = HANDED_TO_WORK, readers[0]["task_id"]
         if done == "held":
             return handed
         if done == "pinned":
             return offer_arrival(root, task, event, wake=wake)
         readers, parked = [], []
+    if not wake:
+        return "", ""  # several readers or none reading now: background asks no mind and wakes no one
     if len(readers) + len(parked) > 1:
         why = "several_readers"
     elif (author or any(not lent_author_controlled(root, item) for item in named)

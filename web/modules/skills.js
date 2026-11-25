@@ -1,16 +1,17 @@
-// The Skills page: three views of one page — Installed (what Ouroboros can do
-// now), Browse (what else it could do, from every connected source) and Sources
-// (where skills come from and how much each place is trusted). Installed is the
-// default and never waits for a source or GitHub: it reads the local listing and
-// the serialized lifecycle queue, and every owner action keeps its own words,
-// confirmation and refusal. Browse and Sources live in their own modules.
-import { bindPageHeader, bindTabStrip, renderPageHeader, renderTabStrip } from './page_header.js';
+// The skill views of Extensions (extensions.js draws the place): Skills, the installed skills (what Ouroboros can do
+// now), and the skill catalog's Browse (what else it could do, from every connected source) and Sources (where skills
+// come from and how much each place is trusted) are three of its pages, never tabs; MCP servers is its fourth. The
+// views stay one mounted block; the section says which one is on screen (`showView`, `hideViews`). Skills never waits
+// for a source or GitHub: it reads the local listing and the serialized lifecycle queue, and every owner action keeps
+// its own words, confirmation and refusal. Browse and Sources live in their own modules. A skill's own form opens over
+// Skills as a level of the section; Accounts and Permissions open in Settings with Back to Extensions.
+import { createExtensions } from './extensions.js';
 import { bindMenu } from './ui_interactions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
-import { apiClient, apiFetch, skillSourcesApi } from './api_client.js';
+import { apiClient, apiFetch, readStateJson, skillSourcesApi, withinRequestLifetime } from './api_client.js';
 import {
-    continuableReview, fillFindingsOnOpen, installedSkillModel, installedSourceLabel, isMadeHere, patchInstalledSkillEnrichment,
+    continuableReview, fillFindingsOnOpen, installedSkillModel, installedSkillRowKey, installedSourceLabel, isMadeHere, patchInstalledSkillEnrichment,
     renderInstalledSkillCard,
     renderRequirementNotice,
 } from './skill_card_renderer.js';
@@ -23,21 +24,21 @@ import {
     connectSkillTools, openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog,
     updateWithoutReview,
 } from './skill_dialogs.js';
-import { plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
+import { manifestUnread, opensDetail, plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
+import { readConnectedServers } from './mcp_settings.js';
 import { bindScrollFade } from './scroll_fade.js';
 import {
     boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantReady, renderSkillRepairPrompt,
     reviewTone, reviewReady,
 } from './utils.js';
 
-const SKILLS_TABS = [
-    { value: 'installed', label: 'Installed', pillId: 'skills-tab-pill-installed', tabId: 'skills-tab-installed', panelId: 'skills-pane-installed' },
-    { value: 'browse', label: 'Browse', pillId: 'skills-tab-pill-browse', tabId: 'skills-tab-browse', panelId: 'skills-pane-browse' },
-    { value: 'sources', label: 'Sources', tabId: 'skills-tab-sources', panelId: 'skills-pane-sources' },
-];
 const LIFECYCLE_VISIBLE_STATUSES = new Set(['queued', 'running', 'failed']);
+// What a job's name-level row says of itself while more than one installed folder uses the name, and once the page that
+// read the job beside several folders lists fewer (the queue names no directory, so it cannot say which one it was for).
+const SHARED_NAME_ATTEMPT = 'Latest attempt on this name. More than one installed folder uses it; this is not one of them.';
+const SEEN_SHARED_ATTEMPT = 'Latest attempt on this name. It was seen while more than one installed folder shared the name, so it can’t say which folder it was for.';
 const INSTALLED_FILTERS = [
     ['all', 'All'], ['needs', 'Needs you'], ['updates', 'Updates'], ['off', 'Off'], ['made', 'Made here'],
 ];
@@ -47,24 +48,19 @@ const NOTHING_NEEDS_YOU = 'Nothing needs you now.';
 const WORK_POLL_MS = 3000;
 const REVIEW_POLL_MS = 15000;
 
-function skillsPageTemplate() {
+// The band's end over a skill view: its own actions, where they stood beside the tabs.
+export const SKILLS_ACTIONS = '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button><button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>';
+
+// The three skill views as one block of the section's page column: each view's search row, then their one scroller.
+export function skillsViewsTemplate() {
     return `
-        <section class="page app-page-glass" id="page-skills">
-            ${renderPageHeader({
-                page: 'skills',
-                actionsHtml: '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button><button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
-                tabsHtml: renderTabStrip({
-                    items: SKILLS_TABS, active: 'installed', dataAttr: 'data-tab', activeClass: 'is-active',
-                    ariaLabel: 'Skills views', stripClass: 'skills-tabs', tabClass: 'skills-tab',
-                }),
-            })}
             <div class="skills-search-chrome" data-chrome-pane="installed">
                 <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
                 <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
             </div>
             <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
             <div class="skills-scroll scroll-fade-y">
-                <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed" role="tabpanel" aria-labelledby="skills-tab-installed">
+                <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed">
                     <div id="skills-status" class="ui-status skills-list-status" role="status" aria-live="polite"></div>
                     <div id="skills-org-requirements" hidden></div>
                     <div id="skills-list" class="skills-list"></div>
@@ -74,10 +70,9 @@ function skillsPageTemplate() {
                         <button type="button" class="btn btn-primary btn-sm" data-skills-goto="browse">Browse skills</button>
                     </div>
                 </div>
-                <div class="skills-tab-panel" id="skills-pane-browse" data-pane="browse" role="tabpanel" aria-labelledby="skills-tab-browse" hidden></div>
-                <div class="skills-tab-panel" id="skills-pane-sources" data-pane="sources" role="tabpanel" aria-labelledby="skills-tab-sources" hidden></div>
+                <div class="skills-tab-panel" id="skills-pane-browse" data-pane="browse" hidden></div>
+                <div class="skills-tab-panel" id="skills-pane-sources" data-pane="sources" hidden></div>
             </div>
-        </section>
     `;
 }
 
@@ -92,49 +87,152 @@ export function lifecycleEventsFromQueue(queueResp) {
     return [...deduped, active];
 }
 
-export function mergeLifecycleEvents(skills, events) {
+/**
+ * The listed row is an installed extension that is On and affirmatively ready: the host lists it loaded with the
+ * reason `ready` (a recovered restart shows as `ready` too), and nothing waits on it or on a process to exit.
+ * A script or instruction, a missing or unfamiliar reason, an Off or still-unhealthy row proves no recovery.
+ */
+export function listedReadyOn(skill, pageModules = {}) {
+    if (!skill || skill.lifecycle_virtual || skill.identity_collision || skill.type !== 'extension') return false;
+    if (skill.enabled !== true || skill.load_error || skill.live_loaded !== true || skill.live_reason !== 'ready') return false;
+    if (Object.keys(skill.retained_companions || {}).length) return false;
+    if ((skill.mcp_servers || []).some((server) => server.configured && (server.error || !server.listed))) return false;
+    return !installedSkillModel(skill, { pageModules }).needs;
+}
+
+/**
+ * Observation marks of the failed jobs of one accepted queue read, by the queue's own job id: an earlier mark carries
+ * over, a job first seen failed takes `nextTick()` now. A job the queue no longer lists keeps nothing, and one with no
+ * id has no identity to mark, so no later listing can be said to answer it.
+ */
+export function tickFailures(events, earlier, nextTick) {
+    const ticks = new Map();
+    for (const event of events) {
+        const id = typeof event?.id === 'string' ? event.id : '';
+        if (id && event.status === 'failed') ticks.set(id, earlier?.get(id) ?? nextTick());
+    }
+    return ticks;
+}
+
+/**
+ * The job ids one accepted queue read lists in any visible status — queued, running or failed. The name-level
+ * ambiguity ids are pruned by this, not by the failed marks: a job remembered while its name was listed for more
+ * than one folder is still a visible record of the queue while it runs, and dropping it before it fails would
+ * hand it to whichever folder is listed next.
+ */
+export function visibleJobIds(events) {
+    const ids = new Set();
+    for (const event of events) {
+        const id = typeof event?.id === 'string' ? event.id : '';
+        if (id && LIFECYCLE_VISIBLE_STATUSES.has(event.status)) ids.add(id);
+    }
+    return ids;
+}
+
+// The failed Enable jobs a listing has answered are kept by the queue's job id and nothing else, in this tab's
+// sessionStorage: a reload still knows the answer while the queue lists the job. Every accepted queue read drops the ids it
+// no longer lists as failed, so the copy never outgrows the queue (80 jobs). A store that refuses leaves them to this page.
+// The jobs this page read while their name was listed for more than one folder — of any visible status, a job still
+// queued or running included — are kept the same way, under a key of their own (they are shown, where the answered
+// ones are hidden): the queue names no directory, so such a job is never given to a folder listed later, and a reload
+// of this tab still knows it. An accepted queue read drops one of these ids once the queue lists it in no visible
+// status at all; a job merely not failed yet is still listed, so it is not forgotten before it can fail. A page
+// without that memory (a new tab, or storage that refuses) has only the queue and the listing it reads now, which
+// cannot say which folder a job was for.
+const ANSWERED_FAILURES_KEY = 'ouroboros.skills.answeredFailures';
+const NAME_LEVEL_FAILURES_KEY = 'ouroboros.skills.nameLevelFailures';
+
+const tabStore = (storage) => {
+    try { return storage === undefined ? globalThis.sessionStorage || null : storage; } catch { return null; }
+};
+
+/** The job ids this tab kept under `key` (the answered ones); what is not a non-empty string is no id. */
+export function readAnsweredFailures(storage, key = ANSWERED_FAILURES_KEY) {
+    try {
+        const ids = JSON.parse(tabStore(storage)?.getItem(key) || '[]');
+        return new Set(Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id) : []);
+    } catch { return new Set(); }
+}
+
+export function writeAnsweredFailures(ids, storage, key = ANSWERED_FAILURES_KEY) {
+    try {
+        const store = tabStore(storage);
+        if (ids.size) store?.setItem(key, JSON.stringify([...ids]));
+        else store?.removeItem(key);
+    } catch { /* full or refused: the answers last for this page only */ }
+}
+
+export const readNameLevelFailures = (storage) => readAnsweredFailures(storage, NAME_LEVEL_FAILURES_KEY);
+export const writeNameLevelFailures = (ids, storage) => writeAnsweredFailures(ids, storage, NAME_LEVEL_FAILURES_KEY);
+
+/**
+ * The kept ids that stay: all of them while no queue read has been accepted (`marks` unknown), then only those the
+ * accepted queue still marks — its failed-job ticks for the answered ids, its visibly listed job ids (any visible
+ * status) for the name-level ones. A queue that could not be read takes none away.
+ */
+export function carryAnsweredFailures(ids, marks) {
+    return new Set(marks ? [...ids].filter((id) => marks.has(id)) : ids);
+}
+
+/**
+ * `answered(event)` says a failed job was settled earlier. It is asked of each failed job by its queue id alone, before
+ * the join by name, so two directories of one name, or their order, never decide which row carries it.
+ * `superseded(event, row)` is the caller's proof that a failed job has now been answered by a newer listing; it is asked
+ * only of an ordinary failed job of a name listed once, so neither an ambiguous identity nor a name-level attempt ever
+ * makes a new answer. The history entry stays in the queue, only the card stops carrying the failure. A job names no
+ * directory: while more than one directory carries its name, it stands as its own placeholder row, never on one of them,
+ * so the order of the listing decides nothing. `nameLevel(event, shared)` is the caller's memory of that (`shared`: the
+ * name is listed more than once now), asked of every visible job, one still in flight included: a job remembered so
+ * stays that placeholder when fewer directories are listed later — while it is still queued or running, and after it
+ * fails — with words that no longer say two folders exist, and is never given to one of them, so it never sets a
+ * listed row's toggle, busy state or error. No listed row can answer it, so it stays until a newer job of its name or
+ * the queue's own eviction. With no memory a job is a placeholder only while `shared`.
+ */
+export function mergeLifecycleEvents(skills, events, { answered = null, superseded = null, nameLevel = null } = {}) {
     const out = skills.map((skill) => ({ ...skill }));
-    const byName = new Map(out.map((skill) => [skill.name, skill]));
-    const names = new Set(byName.keys());
+    const byName = new Map();
+    // A null entry means there is no unique installed row for that name.
+    for (const row of out) byName.set(row.name, byName.has(row.name) ? null : row);
     const processedTargets = new Set();
     for (const event of [...events].reverse()) {
         const name = event.target;
         if (!name) continue;
+        const existing = byName.get(name);
+        const shared = existing === null;
+        const visible = LIFECYCLE_VISIBLE_STATUSES.has(event.status);
+        // Remember every visible job, even one shadowed by an active or newer job of the same name.
+        const attempt = visible && (Boolean(nameLevel?.(event, shared)) || shared);
         if (processedTargets.has(name)) continue;
         processedTargets.add(name);
-        if (!LIFECYCLE_VISIBLE_STATUSES.has(event.status)) continue;
-        if (names.has(name)) {
+        // A settled or answered newest job still takes the name; it does not expose older failures.
+        if (!visible || (event.status === 'failed' && answered?.(event))) continue;
+        if (existing && !attempt) {
             // The skill already has a real card: annotate it with the in-flight
             // transition so it shows "Turning off…" instead of a stale toggle
             // while the serialized lifecycle lane works through it.
-            const existing = byName.get(name);
-            if (existing) {
-                existing.lifecycle_status = event.status;
-                existing.lifecycle_kind = event.kind || existing.lifecycle_kind || '';
-                existing.lifecycle_message = event.message || '';
-                existing.lifecycle_pending = event.status !== 'failed';
-                if (event.status === 'failed' && event.error) existing.lifecycle_error = event.error;
-            }
+            // Neither a shared name nor an attempt gets here, so neither is answered by a listed row: no row can say which
+            // directory the job was for.
+            if (event.status === 'failed' && superseded?.(event, existing)) continue;
+            existing.lifecycle_status = event.status;
+            existing.lifecycle_kind = event.kind || existing.lifecycle_kind || '';
+            existing.lifecycle_message = event.message || '';
+            existing.lifecycle_job_id = typeof event.id === 'string' ? event.id : '';
+            existing.lifecycle_pending = event.status !== 'failed';
+            if (event.status === 'failed' && event.error) existing.lifecycle_error = event.error;
             continue;
         }
-        names.add(name);
+        // A queue-only record: its action, status and error. The queue's `source` is the caller, never the package's
+        // origin, and nothing here is an installed version, review or grant, so none is invented.
         out.unshift({
             name,
-            description: event.message || event.error || 'Skill lifecycle operation',
-            version: '',
-            type: 'skill',
-            enabled: false,
-            review_status: 'pending',
-            review_stale: true,
-            permissions: [],
+            description: shared ? SHARED_NAME_ATTEMPT : attempt ? SEEN_SHARED_ATTEMPT : event.message || event.error || 'Skill lifecycle operation',
             load_error: event.status === 'failed' ? event.error : '',
-            source: event.source || 'external',
             lifecycle_kind: event.kind || '',
             lifecycle_status: event.status,
             lifecycle_pending: event.status !== 'failed',
             lifecycle_error: event.error || '',
             lifecycle_virtual: true,
-            grants: { all_granted: true },
+            ...(attempt ? { lifecycle_name_level: true } : {}),
         });
     }
     return out;
@@ -277,20 +375,21 @@ async function postWithFeedback(url, body) {
     return payload;
 }
 
-async function fetchSkills() {
-    const extResp = await apiClient.extensions();
+async function fetchSkills(signal) {
+    const extResp = await apiClient.extensions({ signal });
     if (!Array.isArray(extResp?.skills)) throw new Error('Installed skills response is unavailable.');
     return { skills: extResp.skills, live: extResp.live || {}, deployment: extResp.deployment || null };
 }
 
 export function initSkills(ctx = {}) {
-    // A Settings page opened from here leads back to Skills, where it was opened.
-    const skillsBack = { label: 'Skills', go: () => ctx.showPage?.('skills') };
-    const page = document.createElement('div');
-    page.innerHTML = skillsPageTemplate();
-    document.getElementById('content').appendChild(page.firstElementChild);
+    // The section draws the place: its list of pages, the band and the page column these views stand in.
+    const section = createExtensions({ ctx, viewsHtml: skillsViewsTemplate(), toolbarHtml: SKILLS_ACTIONS,
+        views: { show: (view) => showView(view), hide: () => hideViews(), placeShown: () => placeShown(),
+            rowsShown: () => readInstalled({ quiet: true, join: true }) },
+        facts: () => sectionFacts() });
 
     const root = document.getElementById('page-skills');
+    const viewsRoot = root.querySelector('[data-extensions-views]');   // the views' own box: their presses stay theirs
     const container = document.getElementById('skills-list');
     const status = document.getElementById('skills-status');
     const requirementsEl = document.getElementById('skills-org-requirements');
@@ -306,35 +405,73 @@ export function initSkills(ctx = {}) {
     let activeTab = 'installed';
     let visible = false;
     let destroyed = false;
-    let renderGeneration = 0;
+    let listingReadController = null;
     let filter = 'all';
+    let requestedSkill = '';
+    let openRequest = 0;
     let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
+    let installedFailed = false;
     let activeMenu = null;
     let sheet = null;
+    let sheetPending = null;  // the pending install the open sheet describes: its row key and queue job
     let pollTimer = 0;
+    let hintTimer = 0;
     let lastListingRead = 0;
+    // The order of observations, not clocks. A snapshot carries the tick at which its queue first showed each failed
+    // job (`failureTicks`) and the tick at which its listing request began (`listingTick`): only a listing begun after
+    // the failure was seen can answer it. Both commit with the snapshot, so a queue read that is not accepted, or a
+    // listing that never lands, leaves the visible snapshot's marks as they were.
+    let readTick = 0;
+    let listingReadState = 'idle';
+    let pendingListingHint = null;
     let firstStartAsked = false;
     const contributions = getContributions();
     const hostModules = getHostModules();
-    const onPageModuleFacts = () => { if (!destroyed && visible && snapshot) paintInstalled(); };
+    const onPageModuleFacts = () => {
+        if (destroyed || document.hidden || !snapshot) return;
+        if (visible) paintInstalled();
+        else if (section.rowsOnScreen()) section.paintAnswers();
+    };
     const stopContributionFacts = contributions?.onChange?.(onPageModuleFacts);
     const stopHostFacts = hostModules?.onFactsChange?.(onPageModuleFacts);
 
     // ---- shared reads (Browse and Sources reuse them) -------------------------------------------
-    const cache = { sources: null, sourcesValue: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
+    const cache = { sources: null, sourcesValue: null, sourcesError: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
+    const sourceSnapshot = () => ({ rows: cache.sourcesValue, error: cache.sourcesError, problem: cache.sourcesProblem });
+    // Browse says how an entry installs from its catalog entry, conditionally, never from this list: a read that
+    // settles after its cards, a sheet or a dialog opened changes none of their words.
+    function paintSourceFacts() {
+        if (visible && activeTab === 'sources') sourcesView.repaint();
+        section.paintAnswers();
+    }
     const store = {
-        sources(force = false) {
-            if (force || !cache.sources) {
-                cache.sources = skillSourcesApi.list().then((data) => {
-                    const list = Array.isArray(data) ? data : (Array.isArray(data?.sources) ? data.sources : []);
+        // Arriving views join the place's read. An explicit refresh or write can supersede it.
+        sources({ fresh = false, replace = false } = {}) {
+            if (!replace && cache.sources) return cache.sources;
+            if (!fresh && !replace && cache.sourcesValue && !cache.sourcesError) return Promise.resolve(cache.sourcesValue);
+            const current = () => cache.sources === read && !destroyed;
+            const read = skillSourcesApi.list().then((data) => {
+                const list = Array.isArray(data) ? data : data?.sources;
+                if (!Array.isArray(list)) throw new Error('Skill sources response is unavailable.');
+                return { list, data };
+            }).then(({ list, data }) => {
+                if (current()) {
                     cache.sourcesValue = list;
+                    cache.sourcesError = null;
                     cache.sourcesProblem = String(data?.problem || '');
                     cache.sourceSuggestions = Array.isArray(data?.suggestions) ? data.suggestions : [];
-                    return list;
-                }).catch((error) => { cache.sources = null; throw error; });
-            }
-            return cache.sources;
+                    paintSourceFacts();
+                }
+                return list;
+            }, (error) => {
+                if (current()) {
+                    cache.sourcesError = error;
+                    paintSourceFacts();
+                }
+                throw error;
+            }).finally(() => { if (cache.sources === read) cache.sources = null; });
+            return (cache.sources = read);
         },
         catalog({ refresh = false } = {}) {
             if (refresh || !cache.catalog) {
@@ -344,10 +481,54 @@ export function initSkills(ctx = {}) {
             return cache.catalog;
         },
     };
-    const projected = () => (snapshot?.rawSkills
-        ? sortSkillsForDisplay(mergeLifecycleEvents(snapshot.rawSkills, lifecycleEventsFromQueue(snapshot.queue))) : []);
+    const failureTick = (id) => (typeof id === 'string' && id ? snapshot?.failureTicks?.get(id) : undefined);
+    const failureAnswered = (event) => event.kind === 'enable' && snapshot?.listingTick > (failureTick(event.id) ?? Infinity);
+    // A job a fresh listing has once answered stays answered, by its queue id alone, while the queue still lists it: a
+    // later, different fault of the same row (another companion stopping), a second directory taking the name, the order
+    // of the two, or a reload of this tab must not bring the resolved Enable's error back. The ids are the snapshot's own,
+    // so they live no longer than the failed jobs of the accepted queue read; this tab's sessionStorage keeps a copy.
+    const answeredFailure = (event) => typeof event.id === 'string' && Boolean(snapshot?.answeredFailures?.has(event.id));
+    // A new answer needs a listing begun after the failure was seen, and that listing's one row of the name ready and On.
+    const supersededFailure = (event, row) => {
+        if (!failureAnswered(event) || !listedReadyOn(row, pageModuleFacts())) return false;
+        snapshot.answeredFailures.add(event.id);
+        writeAnsweredFailures(snapshot.answeredFailures);
+        return true;
+    };
+    // A job of any visible status this page reads while its name is listed for more than one folder names none of them,
+    // now or later: its queue id is kept (as the answered ones are), so a folder listed afterwards is never given it —
+    // neither its toggle and busy state while it runs, nor its error after it fails — and it stays its own row in a
+    // later listing as in a reload of this tab. A job with no id has no identity to keep.
+    const nameLevelAttempt = (event, shared) => {
+        const ids = snapshot?.nameLevelFailures;
+        if (!ids || typeof event.id !== 'string' || !event.id) return shared;
+        if (shared) ids.add(event.id);
+        return ids.has(event.id);
+    };
+    // What a snapshot keeps of the answered and the name-level ids (a first one starts from this tab's copy); a change
+    // reaches the copy too.
+    const carryAnswers = (ids, marks, write = writeAnsweredFailures) => {
+        const kept = carryAnsweredFailures(ids, marks);
+        if (kept.size !== ids.size) write(kept);
+        return kept;
+    };
+    const projected = () => {
+        if (!snapshot?.rawSkills) return [];
+        const ids = snapshot.nameLevelFailures;
+        const size = ids.size;
+        const rows = mergeLifecycleEvents(snapshot.rawSkills, lifecycleEventsFromQueue(snapshot.queue), {
+            answered: answeredFailure, superseded: supersededFailure, nameLevel: nameLevelAttempt,
+        });
+        if (ids.size !== size) writeNameLevelFailures(ids);
+        return sortSkillsForDisplay(rows);
+    };
+    // A card carrying a failed Enable whose row, as listed, is ready, though no listing begun after the failure was
+    // seen has answered it yet: one more read settles it. (`listed` is the row as the listing gave it: the card's own
+    // failure would make its model ask for the owner.) A name-level attempt is no such card: no listed row answers it.
+    const awaitsNewerListing = (card, listed, facts) => card.lifecycle_status === 'failed' && card.lifecycle_kind === 'enable'
+        && !card.lifecycle_name_level && snapshot.listingTick <= (failureTick(card.lifecycle_job_id) ?? -Infinity) && listedReadyOn(listed, facts);
     const installedByName = () => (snapshot?.rawSkills ? new Map(projected().map((skill) => [skill.name, skill])) : null);
-    const officialSource = () => (cache.sourcesValue || []).find((source) => source.kind === 'hub' && source.part === 'official') || null;
+    const cardRowKey = (card) => card.dataset.skillRow || card.dataset.skill;
     // The catalog entry an installed skill came from (its author, full text), when the catalog was read.
     const catalogEntry = (skill) => (cache.catalogValue?.items || [])
         .find((item) => item.source_id === skill?.install?.source?.id && item.name === skill?.name) || null;
@@ -359,6 +540,18 @@ export function initSkills(ctx = {}) {
     };
     const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(),
         contributionVisibility: (name) => contributions?.visibilityForSkill?.(name) || [] });
+
+    // What the section's list says about these views, from reads already made (never a read of its own).
+    function sectionFacts() {
+        return {
+            installed: snapshot?.rawSkills ? snapshot.rawSkills.length : null,
+            installedFailed,
+            needs: snapshot?.rawSkills ? installedFilterCounts(projected(), pageModuleFacts()).needs : 0,
+            working: inFlightCount(lifecycleEventsFromQueue(snapshot?.queue)),
+            sources: Array.isArray(cache.sourcesValue) ? cache.sourcesValue.length : null,
+            sourcesFailed: Boolean(cache.sourcesError),
+        };
+    }
 
     // ---- Installed view -------------------------------------------------------------------------
     function paintFilters(skills) {
@@ -372,12 +565,12 @@ export function initSkills(ctx = {}) {
 
     function applyInstalledFilter() {
         const query = searchInput.value.trim().toLowerCase();
-        const byName = installedByName() || new Map();
+        const byRow = new Map(projected().map((skill) => [installedSkillRowKey(skill), skill]));
         const pageModules = pageModuleFacts();
         let shown = 0;
         let members = 0;
         for (const card of container.querySelectorAll(':scope > .skills-card')) {
-            const skill = byName.get(card.dataset.skill);
+            const skill = byRow.get(cardRowKey(card));
             const member = !skill || matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }));
             const ok = member && (!skill || !query
                 || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query)));
@@ -396,10 +589,10 @@ export function initSkills(ctx = {}) {
         paintFilters(skills);
         const candidates = skills ? updateAllCandidates(skills, cache.sourcesValue) : [];
         updateAllBtn.hidden = !(activeTab === 'installed' && candidates.length >= 2);
-        updateAllBtn.textContent = `Update ${candidates.length} trusted`;
-        const pill = document.getElementById('skills-tab-pill-installed');
-        const count = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue));
-        if (pill) { pill.hidden = !count; pill.textContent = count ? String(count) : ''; }
+        updateAllBtn.textContent = `Update ${candidates.length}`;
+        updateAllBtn.setAttribute('aria-label', `Update ${candidates.length} trusted skills`);
+        // Work in flight and what needs the owner are said by the Skills row of the section's list.
+        section.paintAnswers();
     }
 
     function paintInstalled({ replace = false } = {}) {
@@ -407,18 +600,20 @@ export function initSkills(ctx = {}) {
         const skills = projected();
         const pageFacts = pageModuleFacts();
         const options = cardOptions;
-        const cards = new Map(Array.from(container.querySelectorAll(':scope > .skills-card')).map((card) => [card.dataset.skill, card]));
+        const cards = new Map(Array.from(container.querySelectorAll(':scope > .skills-card')).map((card) => [cardRowKey(card), card]));
         let replacementFocus = null;
         if (replace) {
             closeMenus();
             container.innerHTML = skills.map((skill) => renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, options())).join('');
         } else {
             for (const skill of [...skills].reverse()) {
-                const card = cards.get(skill.name);
+                const key = installedSkillRowKey(skill);
+                const card = cards.get(key);
                 if (card) {
                     // A queue placeholder has no controls to enrich. Replace only this
                     // structural transition; real cards retain drafts and disclosures.
-                    if (card.hasAttribute('data-lifecycle-virtual') !== Boolean(skill.lifecycle_virtual)) {
+                    if (card.hasAttribute('data-lifecycle-virtual') !== Boolean(skill.lifecycle_virtual)
+                        || (card.querySelector('.skills-card-name')?.tagName === 'BUTTON') !== opensDetail(skill)) {
                         const ownsMenu = activeMenu?.card === card;
                         const focused = card.contains(document.activeElement)
                             || (ownsMenu && activeMenu.popover.contains(document.activeElement));
@@ -432,7 +627,7 @@ export function initSkills(ctx = {}) {
                         patchInstalledSkillEnrichment(card, skill, reviewingSkills, repairingSkills, snapshot.live, options(),
                             activeMenu?.card === card ? activeMenu.popover : card);
                     }
-                    cards.delete(skill.name);
+                    cards.delete(key);
                 } else {
                     const template = document.createElement('template');
                     template.innerHTML = renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, options());
@@ -453,24 +648,76 @@ export function initSkills(ctx = {}) {
         if (replacementFocus && !replacementFocus.hidden) {
             replacementFocus.querySelector('.skills-card-name')?.focus({ preventScroll: true });
         }
+        retirePendingSheet(skills);
         browse?.repaintStates();
         schedulePoll();
     }
 
-    async function readInstalled({ quiet = false } = {}) {
+    // The preview of a queue-only install describes one queue job. The repaint whose rows no longer show that same job
+    // as a pending install (failed, replaced, gone, or now a listed skill) closes it; focus then follows its binder to the
+    // title this row key has now (`titleOf` in openInstalledSheet), if one is shown.
+    function newestJobId(name) {
+        const id = lifecycleEventsFromQueue(snapshot?.queue).filter((event) => event.target === name).pop()?.id;
+        return typeof id === 'string' ? id : '';
+    }
+    function retirePendingSheet(rows) {
+        if (!sheet || sheet.closed || !sheetPending) return;
+        const row = rows.find((skill) => installedSkillRowKey(skill) === sheetPending.key);
+        if (row?.lifecycle_virtual && opensDetail(row) && newestJobId(row.name) === sheetPending.job) return;
+        sheet.close();
+    }
+
+    function clearListingTimers() {
+        clearTimeout(pollTimer);
+        clearTimeout(hintTimer);
+        hintTimer = 0;
+    }
+
+    // The rail and a view shown together share one read. Refresh supersedes an older read; a hint (a change, the tab
+    // shown again, the socket reopened) is read once, for the rail and the views alike, after the read on its way has
+    // answered (`scheduleHintRead`): the section asks for its rows only as its list comes on screen (`rowsShown`).
+    let listingOnWay = null;
+    // The listing is wanted while a skill view or the section's list of pages is on screen.
+    const needsListing = () => !destroyed && !document.hidden && (visible || section.rowsOnScreen());
+    const sayLoading = () => { status.dataset.tone = 'muted'; status.textContent = 'Loading installed skills…'; };
+    function readInstalled({ quiet = false, join = false } = {}) {
+        if (join && listingOnWay) {
+            if (!quiet && !snapshot) sayLoading();
+            return listingOnWay;
+        }
+        const read = readListing({ quiet });
+        const settled = listed => {
+            if (listingOnWay !== read) return;
+            listingOnWay = null;
+            if (listed) revealRequestedSkill();
+            requestedSkill = '';  // a failure or an absent skill ends the request too
+        };
+        listingOnWay = read;
+        read.then(settled, () => settled(false));
+        return read;
+    }
+
+    async function readListing({ quiet = false } = {}) {
         if (destroyed) return;
-        const generation = ++renderGeneration;
-        const current = () => generation === renderGeneration && !destroyed;
-        const next = { rawSkills: null, live: {}, queue: snapshot?.queue || null, githubTokenConfigured: snapshot?.githubTokenConfigured };
+        clearListingTimers();
+        const hint = pendingListingHint;
+        // A new listing reads its own optional facts; it does not leave the previous reads in flight.
+        listingReadController?.abort();
+        const controller = listingReadController = new AbortController();
+        listingReadState = 'pending';
+        const current = () => controller === listingReadController && !destroyed;
+        const earlierTicks = snapshot?.failureTicks;
+        const next = { rawSkills: null, live: {}, queue: snapshot?.queue || null, failureTicks: earlierTicks, visibleIds: snapshot?.visibleIds, githubTokenConfigured: snapshot?.githubTokenConfigured };
         const optional = { state: 'loading', queue: 'loading' };
         const showReads = () => {
-            if (!current() || !snapshot?.rawSkills) return;
+            // Optional facts describe the new list only after it has been published.
+            if (!current() || snapshot !== next) return;
             const notes = Object.entries(optional).filter(([, value]) => value === 'failed')
                 .map(([name]) => (name === 'state' ? 'Skill settings' : 'Lifecycle progress'));
             status.dataset.tone = notes.length ? 'warn' : 'muted';
             status.textContent = notes.length ? `${notes.join(' and ')} could not be refreshed. Refresh to retry; earlier facts are kept.` : '';
         };
-        apiClient.state().then((data) => {
+        readStateJson({ signal: controller.signal }).then((data) => {
             if (!current()) return;
             const ok = typeof data?.github_token_configured === 'boolean';
             optional.state = ok ? 'ready' : 'failed';
@@ -478,52 +725,99 @@ export function initSkills(ctx = {}) {
             if (snapshot === next) paintInstalled();
             showReads();
         }, () => { if (current()) { optional.state = 'failed'; showReads(); } });
-        apiClient.skillLifecycleQueue().then((data) => {
+        apiClient.skillLifecycleQueue({ signal: controller.signal }).then((data) => {
             if (!current()) return;
             const ok = Array.isArray(data?.events) || (data?.active && typeof data.active === 'object');
             optional.queue = ok ? 'ready' : 'failed';
-            if (ok) next.queue = data;
+            if (ok) {
+                const events = lifecycleEventsFromQueue(data);
+                const connected = (job) => job?.kind === 'connect_mcp' && job.status === 'succeeded';
+                const previous = lifecycleEventsFromQueue(next.queue).filter(connected);
+                const justConnected = events.some((job) => connected(job) && !previous.some((old) => old.id === job.id));
+                next.queue = data;
+                next.failureTicks = tickFailures(events, earlierTicks, () => ++readTick);
+                next.visibleIds = visibleJobIds(events);
+                if (next.answeredFailures) next.answeredFailures = carryAnswers(next.answeredFailures, next.failureTicks);
+                // The ambiguity ids follow the queue's visible records, not its failed ones: a job still in flight is still listed.
+                if (next.nameLevelFailures) next.nameLevelFailures = carryAnswers(next.nameLevelFailures, next.visibleIds, writeNameLevelFailures);
+                if (justConnected) readConnectedServers();
+            }
             if (snapshot === next) paintInstalled();
             showReads();
         }, () => { if (current()) { optional.queue = 'failed'; showReads(); } });
-        if (!quiet && !snapshot) { status.dataset.tone = 'muted'; status.textContent = 'Loading installed skills…'; }
+        if (!quiet && !snapshot) sayLoading();
         try {
-            const primary = await fetchSkills();
+            const listingTick = ++readTick;
+            const primary = await withinRequestLifetime(fetchSkills, { signal: controller.signal });
             if (!current()) return;
+            next.listingTick = listingTick;
             next.rawSkills = primary.skills;
             next.live = primary.live;
             next.deployment = primary.deployment;
             lastListingRead = Date.now();
+            listingReadState = 'idle';
+            if (pendingListingHint === hint) pendingListingHint = null;
         } catch (err) {
             if (!current()) return;
+            listingReadState = 'failed';
+            installedFailed = true;
+            section.paintAnswers();
             emptyEl.hidden = true;
+            const reason = err?.name === 'StateReadEnded' && err.reason === 'expired' ? 'the request took too long' : err.message || err;
             status.dataset.tone = 'danger';
-            status.textContent = `Couldn’t refresh installed skills: ${err.message || err}.${snapshot ? ' Showing the previous list. Refresh to try again.' : ' Refresh to try again.'}`;
+            status.textContent = `Couldn’t refresh installed skills: ${reason}.${snapshot ? ' Showing the previous list. Refresh to try again.' : ' Refresh to try again.'}`;
+            // New hints get their one trailing read even if the primary stalled. An old, unanswered hint
+            // still retries at the slower failure cadence, not in a tight loop.
+            if (pendingListingHint !== hint) scheduleHintRead();
+            schedulePoll();
             return;
         }
         const firstPaint = !snapshot;
+        // Decisions already made carry over while no accepted queue read has dropped their job — from the failed marks for
+        // the answers, from the visible ones for the ambiguity, so a job still in flight is not forgotten before it can
+        // fail. A first snapshot starts from this tab's copy: a reload does not bring back a failure a listing once
+        // answered, nor move an attempt seen beside two folders onto the one left.
+        next.answeredFailures = carryAnswers(snapshot?.answeredFailures ?? readAnsweredFailures(), next.failureTicks);
+        next.nameLevelFailures = carryAnswers(snapshot?.nameLevelFailures ?? readNameLevelFailures(), next.visibleIds, writeNameLevelFailures);
         snapshot = next;
-        if (!quiet && !firstPaint) status.textContent = '';
-        if (firstPaint) status.textContent = '';
+        installedFailed = false;
         paintInstalled({ replace: firstPaint });
         showReads();
+        scheduleHintRead();
+        return true;
     }
 
-    // Local progress only (never GitHub): lifecycle work and pending MCP listings,
-    // plus the listing now and then while a review runs outside the lane.
+    function scheduleHintRead() {
+        const canRead = () => needsListing() && listingReadState !== 'pending';
+        // The first hint owns the deadline; newer hints cannot supersede an active read.
+        if (!pendingListingHint || hintTimer || !canRead()) return;
+        hintTimer = setTimeout(() => {
+            hintTimer = 0;
+            if (canRead()) readInstalled({ quiet: true });
+        }, 300);
+    }
+
+    // Local progress only: pending work or a listing hint not yet covered by a successful read.
     function schedulePoll() {
         clearTimeout(pollTimer);
-        if (destroyed || !visible || document.hidden || !snapshot) return;
-        const working = inFlightCount(lifecycleEventsFromQueue(snapshot.queue)) > 0;
-        const listingTools = snapshot.rawSkills?.some((skill) => (skill.mcp_servers || [])
+        if (destroyed || !visible || document.hidden || listingReadState === 'pending' || (!snapshot && !pendingListingHint)) return;
+        const working = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue)) > 0;
+        const listingTools = snapshot?.rawSkills?.some((skill) => (skill.mcp_servers || [])
             .some((server) => server.configured && !server.listed && !server.error));
-        const reviewing = reviewingSkills.size > 0 || projected().some((skill) => /Reviewing/.test(installedSkillModel(skill).chip));
-        if (!working && !reviewing && !listingTools) return;
+        const rows = projected();
+        const reviewing = reviewingSkills.size > 0 || rows.some((skill) => installedSkillModel(skill).reviewing);
+        const exiting = snapshot?.rawSkills?.some((skill) => Object.keys(skill.retained_companions || {}).length);
+        const listed = new Map((snapshot?.rawSkills || []).map((skill) => [skill.name, skill]));
+        const facts = pageModuleFacts();
+        const confirming = rows.some((row) => awaitsNewerListing(row, listed.get(row.name), facts));
+        if (!pendingListingHint && !working && !reviewing && !listingTools && !exiting && !confirming) return;
+        const retrying = listingReadState === 'failed';
         pollTimer = setTimeout(async () => {
             if (destroyed || !visible || document.hidden) return;
-            if (Date.now() - lastListingRead >= REVIEW_POLL_MS || working || listingTools) await readInstalled({ quiet: true });
-            else schedulePoll();
-        }, WORK_POLL_MS);
+            if (retrying || pendingListingHint || working || listingTools || confirming || Date.now() - lastListingRead >= REVIEW_POLL_MS) {
+                await readInstalled({ quiet: true });
+            } else schedulePoll();
+        }, retrying ? REVIEW_POLL_MS : WORK_POLL_MS);
     }
 
     // ---- menus and the Official mark ------------------------------------------------------------
@@ -778,7 +1072,8 @@ export function initSkills(ctx = {}) {
     }
 
     function openFindings(name) {
-        const card = container.querySelector(`:scope > .skills-card[data-skill="${CSS.escape(name)}"]`);
+        // An attempt beside the folder of its name has no Details: the folder's card is the one that opens.
+        const card = container.querySelector(`:scope > .skills-card[data-skill="${CSS.escape(name)}"]:not([data-lifecycle-virtual])`);
         const details = card?.querySelector('.skills-details');
         if (!details) return;
         details.open = true;
@@ -792,23 +1087,35 @@ export function initSkills(ctx = {}) {
     }
 
     function openInstalledSheet(name, opener) {
-        const skill = installedByName()?.get(name);
-        if (!skill) return;
-        const source = (cache.sourcesValue || []).find((row) => row.id === skill.install?.source?.id) || null;
+        const card = opener && (opener.closest('.skills-card') || (activeMenu?.popover.contains(opener) && activeMenu.card));
+        const key = card ? cardRowKey(card) : name;
+        const skill = projected().find((row) => installedSkillRowKey(row) === key);
+        if (!skill || !opensDetail(skill)) return;
         const catalogItem = catalogEntry(skill);
         const item = catalogItem || {
             id: `installed/${name}`, source_id: skill.install?.source?.id || '', source_name: installedSourceLabel(skill),
-            name, title: skillTitle(skill), description: skill.description || '', version: skill.version, permissions: skill.permissions || [],
-            needs_keys: skill.grants?.requested_keys || [], official: Boolean(skill.install?.official), signals: null,
+            name, title: skillTitle(skill), description: skill.description || '', version: skill.version,
+            official: Boolean(skill.install?.official), signals: null,
             category: skill.category || [],
         };
         sheet?.close();
+        // What it can use is this loaded row's parsed manifest and grants, never the catalog's entry; a pending install, or
+        // a folder whose manifest was not read, declares nothing we may state.
+        const access = skill.lifecycle_virtual || manifestUnread(skill) ? null
+            : { permissions: skill.permissions || [], needs_keys: skill.grants?.requested_keys || [] };
         // The source's entry has the full text; a registry install has no entry to read back.
         const origin = skill.install?.source;
+        // A queue-only install's title may be replaced while its preview is open, so closing returns to the title this row
+        // key has then (shown, never a hidden card or another key's); the job's own id says when it stops being this one.
+        const pendingKey = skill.lifecycle_virtual ? installedSkillRowKey(skill) : '';
+        const job = pendingKey ? newestJobId(name) : '';
+        const titleOf = () => Array.from(container.querySelectorAll(':scope > .skills-card'))
+            .find((listed) => cardRowKey(listed) === pendingKey && !listed.hidden)?.querySelector('.skills-card-name') || null;
         sheet = openSkillDetailSheet({
-            item, installed: skill, source, returnFocus: opener,
+            item, installed: skill, returnFocus: pendingKey ? titleOf : opener, access,
             readDetail: origin?.id && origin.kind !== 'registry' ? ({ signal } = {}) => skillSourcesApi.item(origin.id, name, { signal }) : null,
         });
+        sheetPending = job ? { key: pendingKey, job } : null;
     }
 
     /** One installed-skill action by name (cards, the menu, Browse and the sheet share it). */
@@ -822,15 +1129,31 @@ export function initSkills(ctx = {}) {
             return false;
         }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
-        if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
-        if (action === 'open_secrets') {
-            // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
-            void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim(), back: skillsBack });
+        if (action === 'open_widgets') {
+            if (options.opener) void ctx.showPage?.('widgets', { opener: options.opener });
+            else void ctx.showPage?.('widgets');
             return false;
         }
-        if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`, { back: skillsBack }); return false; }
+        if (action === 'open_secrets') {
+            // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
+            void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim() });
+            return false;
+        }
+        // The skill's own form stays with the skill: a level over Skills; Back returns to its card, to the pressed control
+        // while it still stands, else (an item of the card's menu is gone by then) to the menu's button.
+        if (action === 'open_settings') {
+            const pressed = options.node;
+            section.go(`skill/${encodeURIComponent(name)}`, {
+                opener: () => (pressed?.isConnected && pressed.getClientRects().length ? pressed
+                    : viewsRoot.querySelector(`.skills-card[data-skill="${CSS.escape(name)}"] [data-skill-menu-trigger]`)),
+            });
+            return false;
+        }
         if (action === 'read_findings') { openFindings(name); return false; }
-        if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
+        if (action === 'find_in_browse') {
+            if (await section.open('browse', { opener: options.node }) && visible && activeTab === 'browse') void browse.searchFor(name);
+            return false;
+        }
         if (action === 'review' || action === 'rereview') {
             const ok = await openConfirmDialog({
                 title: `Review ${name}?`,
@@ -868,7 +1191,10 @@ export function initSkills(ctx = {}) {
         if (action === 'connect_tools') {
             const result = await connectSkillTools(await currentSkill(name));
             if (stillWorking(name, result)) return true;  // not confirmed yet: the card follows its job
-            if (result?.ok) showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            if (result?.ok) {
+                readConnectedServers();
+                showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            }
             return Boolean(result);
         }
         if (action === 'grant') {
@@ -912,14 +1238,19 @@ export function initSkills(ctx = {}) {
         if (event.target.closest('.skills-menu-item')) closeMenus({ restoreFocus: true });
         const mark = event.target.closest('[data-official-mark]');
         if (mark) {
-            await store.sources().catch(() => null);
-            openOfficialExplanation(mark, (cache.sourcesValue || []).find((source) => source.id === mark.dataset.officialSource) || officialSource());
+            // A Browse card's mark is explained from its own entry. Elsewhere only a mark bound to a source says how
+            // that source installs, from its row as read now; an unbound mark borrows no other source's setting.
+            const entry = mark.closest('.marketplace-card');  // only Browse draws these
+            const bound = entry ? '' : mark.dataset.officialSource;
+            if (bound) await store.sources().catch(() => null);
+            openOfficialExplanation(mark, entry ? browse.officialSource(entry.dataset.item)
+                : (bound && !cache.sourcesError && cache.sourcesValue?.find((row) => row.id === bound)) || null);
             return;
         }
         const goto = event.target.closest('[data-skills-goto]');
-        if (goto) { selectTab(goto.dataset.skillsGoto); return; }
+        if (goto) { void section.open(goto.dataset.skillsGoto, { opener: goto }); return; }
         const chip = event.target.closest('[data-installed-filter]');
-        if (chip) { filter = chip.dataset.installedFilter; paintFilters(snapshot?.rawSkills ? projected() : null); applyInstalledFilter(); return; }
+        if (chip) { requestedSkill = ''; filter = chip.dataset.installedFilter; paintFilters(snapshot?.rawSkills ? projected() : null); applyInstalledFilter(); return; }
         const menuTrigger = event.target.closest('[data-skill-menu-trigger]');
         if (menuTrigger) { openSkillMenu(menuTrigger); return; }
         const actionTarget = event.target.closest('[data-skill-action]');
@@ -981,45 +1312,92 @@ export function initSkills(ctx = {}) {
     // A findings block is rendered collapsed; its list is built on first open
     // from the row already in memory (`toggle` does not bubble: capture).
     const onToggle = (event) => fillFindingsOnOpen(event.target, snapshot?.rawSkills);
-    const onSearch = () => applyInstalledFilter();
+    const onSearch = () => { requestedSkill = ''; applyInstalledFilter(); };
+
+    function revealRequestedSkill() {
+        if (!requestedSkill || !visible || document.hidden || activeTab !== 'installed') return;
+        // The folder's own card is the skill asked for, and only it moves the owner's search and filter. An attempt of
+        // the name alone is a queue record with nothing installed yet: it is brought into view where it stands.
+        const entry = `.skills-card[data-skill="${CSS.escape(requestedSkill)}"]`;
+        const card = container.querySelector(`${entry}:not([data-lifecycle-virtual])`);
+        if (!card) {
+            const attempt = container.querySelector(entry);
+            if (attempt && !attempt.hidden) attempt.scrollIntoView({ block: 'nearest' });
+            return;
+        }
+        if (card.hidden) {
+            searchInput.value = requestedSkill;
+            applyInstalledFilter();
+            if (card.hidden) {
+                filter = 'all';
+                paintFilters(projected());
+                applyInstalledFilter();
+            }
+        }
+        card.scrollIntoView({ block: 'nearest' });
+    }
+
+    // Opening Skills may already have started a fresh read. A read started before this request
+    // cannot settle it: the requested card may just have been installed. (`beforeOpen` is the read that was the
+    // newest when the request began: each listing read has its own controller.)
+    function requestInstalledSkill(name, beforeOpen) {
+        requestedSkill = name;
+        void readInstalled({ quiet: true, join: listingReadController !== beforeOpen });
+    }
 
     // ---- Browse and Sources ---------------------------------------------------------------------
     const host = {
         installedByName,
         installedSkills: () => (snapshot?.rawSkills ? projected() : null),
+        live: () => snapshot?.live,
         refreshInstalled: () => readInstalled({ quiet: true }),
-        sources: (force) => store.sources(force),
-        sourcesProblem: () => cache.sourcesProblem,
+        sources: store.sources,
+        sourceSnapshot,
         sourceSuggestions: () => cache.sourceSuggestions,
         catalog: (options) => store.catalog(options),
-        // A source change moves the listing's source facts too (a re-added name's id, updates): read both again.
-        reloadAll: async () => { await Promise.all([store.sources(true).catch(() => null), readInstalled({ quiet: true })]); },
-        runInstalledAction: async (name, action) => {
+        // A source change moves the listing's source facts too (a re-added name's id, updates): read both again, and
+        // the catalog under Browse when it is the page on screen (the first-start choice is made over it).
+        reloadAll: async () => {
+            await Promise.all([store.sources({ replace: true }).catch(() => null), readInstalled({ quiet: true })]);
+            if (visible && activeTab === 'browse') await browse.show();
+        },
+        runInstalledAction: async (name, action, options) => {
             try {
-                const changed = await runInstalledAction(name, action);
+                const changed = await runInstalledAction(name, action, options);
                 if (changed !== false) await readInstalled({ quiet: true });
             } catch (err) {
                 if (!err.cancelled) showToast(`${name}: ${err.message || err}`, 'danger');
             }
         },
-        confirmFirstStart: async (sourceId) => {
-            const sources = await store.sources().catch(() => []);
-            if (firstStartAsked || !unconfirmedHubRows(sources).some((row) => !sourceId || row.id === sourceId)) return;
-            firstStartAsked = true;
-            await sourcesView.confirmFirstStart();
+        confirmFirstStart: async (sourceId, canOpen = () => true) => {
+            // Browse and Sources have already requested these facts. A check after a failed visit is not another read.
+            await cache.sources?.catch(() => null);
+            const sources = cache.sourcesError ? [] : cache.sourcesValue || [];
+            if (firstStartAsked || !canOpen() || !unconfirmedHubRows(sources).some((row) => !sourceId || row.id === sourceId)) return;
+            await sourcesView.confirmFirstStart(() => {
+                if (firstStartAsked || !canOpen()) return false;
+                firstStartAsked = true;
+                return true;
+            });
         },
         compare: (item, installed) => openCompareDialog({
             mine: { name: installed?.name, official: installed?.install?.official, source: installedSourceLabel(installed || {}),
                 version: installed?.version, state: installed?.enabled ? 'On' : 'Off', description: installed?.description },
             other: { name: item.name, official: item.official, source: item.source_name, owner: item.owner, version: item.version,
-                popularity: popularityText(item), description: item.description,
-                reviewed: (cache.sourcesValue || []).find((row) => row.id === item.source_id)?.trust !== 'trusted' },
+                popularity: popularityText(item), description: item.description },
         }),
         toast: (message, tone) => showToast(message, tone),
         pageModuleFacts,
-        showInstalled: (name) => { selectTab('installed'); searchInput.value = name; applyInstalledFilter(); },
-        showMadeHere: () => { filter = 'made'; selectTab('installed'); },
-        openSettings: (path, options = {}) => ctx.openSettings?.(path, { back: skillsBack, ...options }),
+        showInstalled: async (name, opener) => {
+            const beforeOpen = listingReadController;
+            if (!await section.open('installed', { opener }) || !visible || activeTab !== 'installed') return;
+            searchInput.value = name;
+            applyInstalledFilter();
+            requestInstalledSkill(name, beforeOpen);
+        },
+        showMadeHere: () => { filter = 'made'; return section.open('installed'); },
+        // Skill sources open here as a level over Sources; the rest of Settings with Back to Extensions.
+        openSettings: (path, options = {}) => section.fromPage(path, options),
     };
     const browse = createSkillBrowse({ pane: document.getElementById('skills-pane-browse'), chrome: document.getElementById('skills-browse-chrome'), host });
     const sourcesView = createSkillSources({ pane: document.getElementById('skills-pane-sources'), host });
@@ -1030,29 +1408,42 @@ export function initSkills(ctx = {}) {
     }
 
     async function showActive({ refresh = false } = {}) {
-        if (activeTab === 'installed') return readInstalled({ quiet: Boolean(snapshot) });
+        if (activeTab === 'installed') return readInstalled({ quiet: Boolean(snapshot), join: true });
+        const view = activeTab;
+        const stillHere = () => !destroyed && visible && !document.hidden && activeTab === view;
         // Browse and Sources need the installed listing for every card's state.
-        const listing = snapshot ? Promise.resolve() : readInstalled();
+        const listing = snapshot && !pendingListingHint ? Promise.resolve() : readInstalled({ quiet: Boolean(snapshot), join: true });
         if (activeTab === 'browse') await Promise.all([browse.show({ refresh }), listing]);
         else await Promise.all([sourcesView.show({ refresh }), listing]);
-        if (!firstStartAsked) host.confirmFirstStart();
+        if (!firstStartAsked && stillHere()) void host.confirmFirstStart(undefined, stillHere);
     }
 
-    function selectTab(tabName) {
+    // A view is the section's open page (extensions.js calls this when Skills, Browse or Sources comes on screen).
+    function showView(view) {
         closeMenus();
-        activeTab = tabName;
-        tabs.select(tabName);
-        activateTab(tabName);
+        requestedSkill = '';
+        activeTab = view;
+        visible = true;
+        activateTab(view);
         paintChrome();
+        // The retained cards must match the selected filter before the new read answers.
+        if (view === 'installed') applyInstalledFilter();
         showActive();
     }
 
-    const tabs = bindTabStrip(root.querySelector('.skills-tabs'), {
-        dataAttr: 'data-tab', activeClass: 'is-active',
-        onChange(tabName) { closeMenus(); activeTab = tabName; activateTab(tabName); paintChrome(); showActive(); },
-    });
-    // On a desk Installed, Browse and Sources start the bar that Update all and Refresh end (DESIGN "Page header").
-    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'));
+    // No view is on screen: another page of the section, a level over a view, or another place.
+    function hideViews() {
+        closeMenus();
+        requestedSkill = '';
+        visible = false;
+        clearTimeout(pollTimer);
+        sheet?.close();
+    }
+
+    // Sources also supplies the trust facts used by the skill views.
+    function placeShown() {
+        store.sources({ fresh: true }).catch(() => null);
+    }
 
     const onRefresh = async () => {
         refreshBtn.disabled = true;
@@ -1062,81 +1453,85 @@ export function initSkills(ctx = {}) {
             else if (activeTab === 'browse') await Promise.all([browse.refresh(), readInstalled({ quiet: true })]);
             else await sourcesView.refresh();
         } catch (err) {
-            showToast(`Skills view failed: ${err.message || err}`, 'danger');
+            if (!destroyed) showToast(`Skills view failed: ${err.message || err}`, 'danger');
         } finally {
-            refreshBtn.disabled = false;
-            refreshBtn.textContent = 'Refresh';
+            if (!destroyed) {
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = 'Refresh';
+            }
         }
     };
-    const onPageShown = (event) => {
-        closeMenus();
-        visible = event.detail?.page === 'skills';
-        if (!visible) { clearTimeout(pollTimer); sheet?.close(); return; }
-        tabs.select(activeTab);
-        store.sources(true).catch(() => null);
-        showActive();
+    const invalidateInstalled = () => {
+        if (destroyed) return;
+        // A successful read only consumes the hint it started with.
+        pendingListingHint = Symbol();
+        if (!needsListing()) listingOnWay = null;  // on return, read past the change instead of joining a read started before it
+        scheduleHintRead();
     };
-    let wsTimer = 0;
-    const onLifecycle = () => {
-        if (!visible) return;
-        clearTimeout(wsTimer);
-        wsTimer = setTimeout(() => readInstalled({ quiet: true }), 300);
+    // A lifecycle end reaches this page from the socket and from this window's own actions (contributions.js); health
+    // and a reopened socket come from the socket alone.
+    const offLifecycle = contributions.onLifecycle(invalidateInstalled);
+    const stopSync = typeof ctx.ws?.on === 'function' ? [
+        ctx.ws.on('extension_lifecycle', (event) => {
+            if (event?.action === 'connect_mcp') readConnectedServers();
+            invalidateInstalled();
+        }),
+        ctx.ws.on('extension_health_changed', invalidateInstalled),
+        ctx.ws.on('open', invalidateInstalled),  // a lost hint is recovered by re-reading, not replayed
+    ] : [];
+    const onVisibilityChange = () => {
+        if (document.hidden) { ++openRequest; requestedSkill = ''; clearListingTimers(); }
+        else schedulePoll();
+        invalidateInstalled();
     };
-    const unsubscribe = typeof ctx.ws?.on === 'function' ? ctx.ws.on('extension_lifecycle', onLifecycle) : null;
 
     refreshBtn.addEventListener('click', onRefresh);
     updateAllBtn.addEventListener('click', updateAll);
     searchInput.addEventListener('input', onSearch);
-    root.addEventListener('click', onClick);
+    viewsRoot.addEventListener('click', onClick);
     container.addEventListener('change', onChange);
     container.addEventListener('toggle', onToggle, true);
-    window.addEventListener('ouro:page-shown', onPageShown);
-    document.addEventListener('visibilitychange', schedulePoll);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     // Another surface asks for one installed skill's entry ({skill}), a Browse search ({query}) or a Browse category
-    // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js).
+    // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js). The
+    // explicit target opens regardless of the device's previously selected page.
     const onOpenSkills = async (event) => {
         const { skill = '', query = '', category = '' } = event?.detail || {};
+        const request = ++openRequest;
+        const beforeOpen = listingReadController;
+        requestedSkill = '';
         closeMenus();
-        if (!await ctx.showPage?.('skills')) return;
-        if (!skill && category) { selectTab('browse'); await browse?.showCategory(category); return; }
-        if (!skill) { selectTab('browse'); await browse?.searchFor(query); return; }
-        selectTab('installed');
-        const found = () => container.querySelector(`.skills-card[data-skill="${CSS.escape(skill)}"]`);
-        if (found()) return found().scrollIntoView({ block: 'nearest' });
-        const observer = new MutationObserver(() => {
-            if (!found()) return;
-            observer.disconnect();
-            found().scrollIntoView({ block: 'nearest' });
-        });
-        observer.observe(document.getElementById('page-skills'), { childList: true, subtree: true });
-        setTimeout(() => observer.disconnect(), 10000);  // an entry that never comes leaves the page as it is
+        if (!await section.open(skill ? 'installed' : 'browse') || request !== openRequest || destroyed) return;
+        if (!skill && category) { await browse?.showCategory(category); return; }
+        if (!skill) { await browse?.searchFor(query); return; }
+        if (!visible || activeTab !== 'installed') return;
+        requestInstalledSkill(skill, beforeOpen);
     };
     window.addEventListener('ouro:open-skills', onOpenSkills);
     paintFilters(null);
 
-    return { destroy() {
+    // `open` and `pressedAgain` are the app's doors to the section (app.js `openExtensions`, the sidebar's row).
+    return { open: section.open, capture: section.capture, pressedAgain: section.pressedAgain, destroy() {
         destroyed = true;
-        renderGeneration += 1;
-        clearTimeout(pollTimer);
-        clearTimeout(wsTimer);
+        clearListingTimers();
+        listingReadController?.abort();
         closeMenus();
         sheet?.close();
         browse.destroy();
         sourcesView.destroy();
-        tabs.destroy();
-        disposeBar();
-        unsubscribe?.();
+        section.destroy();
+        stopSync.forEach((off) => off?.());
+        offLifecycle();
         stopContributionFacts?.();
         stopHostFacts?.();
         refreshBtn.removeEventListener('click', onRefresh);
         updateAllBtn.removeEventListener('click', updateAll);
         searchInput.removeEventListener('input', onSearch);
-        root.removeEventListener('click', onClick);
+        viewsRoot.removeEventListener('click', onClick);
         container.removeEventListener('change', onChange);
         container.removeEventListener('toggle', onToggle, true);
-        window.removeEventListener('ouro:page-shown', onPageShown);
-        document.removeEventListener('visibilitychange', schedulePoll);
+        document.removeEventListener('visibilitychange', onVisibilityChange);
         window.removeEventListener('ouro:open-skills', onOpenSkills);
     } };
 }

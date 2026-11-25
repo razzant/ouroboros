@@ -54,11 +54,17 @@ class ClaudexorThreadGateway:
         return body
 
     def start_thread_turn(self, thread_id: str, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
-        """Append one turn through the public v3 thread pipeline; its receipt names the admitting store."""
+        """Append one turn through the public v3 thread pipeline; its receipt names the admitting store. A turn the
+        engine refuses on a limit asks the subscription census for a read (no run exists to settle)."""
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
-        body = self._request("POST", _thread_path(thread_id, "turns"), json_body=dict(request),
-                             headers={"Idempotency-Key": str(idempotency_key), **STORE_IDENTITY})
+        try:
+            body = self._request("POST", _thread_path(thread_id, "turns"), json_body=dict(request),
+                                 headers={"Idempotency-Key": str(idempotency_key), **STORE_IDENTITY})
+        except ClaudexorUnavailable as error:
+            from ouroboros.subscription_census import note_limit_failure
+            note_limit_failure(error.code, getattr(error, "problem", None))
+            raise
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "thread turn returned no handle")
         return body

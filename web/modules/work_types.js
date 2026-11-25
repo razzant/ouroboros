@@ -3,7 +3,7 @@
 // Words come from the server's codes through tr(); a client never derives a state, mark or control.
 
 /**
- * The owner's cited words, bounded for publication (CLIENT_CONTRACT §5); text stays authored.
+ * The owner's cited words or pressed label, bounded for publication (CLIENT_CONTRACT §5). Text stays authored.
  * @typedef {Object} CitedModelWords
  * @property {string} text
  * @property {boolean} clipped  // the durable citation is longer than this published span
@@ -14,7 +14,13 @@
  * @property {string} model
  * @property {boolean} use_local
  * @property {CitedModelWords=} cited
- * @property {string} basis  // main | a role it follows | room | owner | owner_words | mind | fallback | place | circle
+ * @property {string} basis  // main | a role it follows | room | owner | owner_words | owner_press | mind | fallback | place | circle
+ */
+/**
+ * @typedef {Object} WorkPendingRoute
+ * @property {string} model
+ * @property {boolean} use_local
+ * @property {string=} basis  // next chooser, when it is known
  */
 /**
  * The route a work acts on and its chooser (`lead` on a work and on its activity row). A departure names the
@@ -28,13 +34,13 @@
  * @property {WorkPrimaryRoute=} primary  // only when the acting route is not the primary
  * @property {string=} since  // an ISO instant in UTC
  * @property {string=} cause  // a short code or phrase: `switch_model`, a failure's code, `configured fallback`
- * @property {import('./client_contract_types.js').ChatModelRoute=} pending  // the route the next step uses, when it differs
+ * @property {WorkPendingRoute=} pending  // the next route and, when known, its separate chooser
  */
 /**
  * Main's own tier ('' = none: Main takes the default) and the default every lead pays (`/api/state`).
  * @typedef {Object} ProcessingTiers
- * @property {""|"standard"|"fast"|"economy"} main
- * @property {""|"standard"|"fast"|"economy"} default
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"} main
+ * @property {""|"standard"|"fast"|"economy"} default  // never ultrafast
  */
 /**
  * One call's processing as its receipt states it: what was asked, sent and seen.
@@ -42,7 +48,7 @@
  * @property {?string} requested
  * @property {?string} submitted
  * @property {?string=} submittedNative  // the provider's own word for what was sent
- * @property {string} observed  // standard | fast | economy | unknown
+ * @property {string} observed  // standard | fast | economy | ultrafast | mixed | unknown
  * @property {Array<string>=} observedNative  // the provider's own words (an older Codex: `ultrafast` folded into fast)
  * @property {?string} reason  // processing_not_submitted | submitted_mode_differs | provider_mode_changed
  */
@@ -82,6 +88,14 @@
  * @property {*=} since
  * @property {PauseAuthor=} by  // the declared author of a decided Pause
  * @property {Array<SleepWake>=} wake  // what a `sleeping` reason waits for: its clauses, joined by "or", time last
+ * @property {QueuedBehind=} behind  // the work a `queued` reason stands behind now
+ */
+/**
+ * @typedef {Object} QueuedBehind
+ * @property {string} task_id  // that work's tree id
+ * @property {string} lane  // project | folder
+ * @property {string} name  // that work's name as the list shows it
+ * @property {string=} folder  // the folder's path (folder lane)
  */
 /**
  * @typedef {Object} PauseAuthor
@@ -106,7 +120,7 @@
 /**
  * @typedef {Object} WorkTail
  * @property {string} kind  // helper | run | review | model
- * @property {string} state  // live | unknown | held (a helper a sleeping episode chose, paused until its Resume)
+ * @property {string} state  // live | unknown | open (an observed inactive run) | held (a paused helper)
  * @property {string} code
  * @property {string} text  // its English sentence, said beside the work's word, never as it
  * @property {number=} count
@@ -133,9 +147,24 @@
  * @property {boolean} live
  */
 /**
+ * @typedef {Object} WorkMemberState
+ * @property {"working"|"queued"|"waiting"|"paused"|"unknown"} activity
+ * @property {"none"|"finalizing"|"pausing"} transition
+ * @property {""|"preparing"|"sending"|"thinking"|"working"} call
+ * @property {boolean} live  // this task executes, independent of its external runs
+ * @property {"self"|"owner"|"mind"|"none"} release
+ * @property {boolean} confirmed
+ * @property {Array<WorkTurn>} turn
+ * @property {Array<WorkReason>} because
+ * @property {Array<WorkTail>} tails  // only this task's runs, reviews and model handoffs
+ * @property {string} mark  // the member's own mark, independent of its tails
+ * @property {number=} queue_attempt  // observed queue ordinal of this member's state, not an executor ordinal
+ * @property {LastResume=} last_resume
+ */
+/**
  * @typedef {Object} WorkMembers
  * @property {Array<string>} ids  // every member task id (episode roots and helpers): a card of another id re-reads the state
- * @property {Object<string, Object>=} states  // the same server classification for each Activity row
+ * @property {Object<string, WorkMemberState>=} states  // keyed by the exact member task id
  */
 /**
  * @typedef {Object} WorkFocus
@@ -170,6 +199,10 @@
  * @property {WorkFocus=} focus
  * @property {Array<Object>=} gaps
  * @property {string=} client_message_id
+ * @property {boolean=} place_turn  // a correspondent's Presence turn: Telegram's owner list leaves it out
+ * @property {boolean=} unbound_start  // an accepted delegate start no engine run answers yet: its Stop is a
+ *   request taken against the recorded request and the tree, never against a remote run handle; that start's
+ *   true fate stays unknown until a stop is confirmed (#3428; task_control_menu.js). Absent, never false, otherwise.
  * @property {WorkLead=} lead  // the model it runs on and whose choice that is
  * @property {WorkProcessing=} processing  // its own tier and the newest call's receipt
  */

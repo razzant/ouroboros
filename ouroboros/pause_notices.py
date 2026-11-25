@@ -26,7 +26,7 @@ _LOCK = threading.Lock()
 
 
 def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reason: str, *,
-                  fence: dict | None = None) -> dict:
+                  fence: dict | None = None, cause: str | None = None) -> dict:
     """Called inside the result writer, only for a newly confirmed pause episode.
 
     ``fence`` is the owner Pause this episode confirms: the author it declared
@@ -38,13 +38,19 @@ def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reaso
 
     if not episode_id or reason not in {"budget", "owner", "authority"}:
         return {}
-    identity = f"pause:{task_id}:{episode_id}"
+    technical = reason == "authority"
     pending = dict(current.get("pause_notices") or {})
+    if technical:
+        if current.get("authority_notice_registered"):
+            return {}
+        if any(isinstance(owed, dict) and owed.get("reason") == reason for owed in pending.values()):
+            return {"authority_notice_registered": True}
+    identity = f"pause:{task_id}:{'authority' if technical else episode_id}"
     by = {"by": pause_author(fence)} if fence is not None else {}
     gaps = (fence or {}).get("membership_gaps")
     gaps = {"membership_gaps": dict(gaps)} if isinstance(gaps, dict) and gaps.get("count") else {}
-    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso(), **by, **gaps})
-    return {"pause_notices": pending}
+    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso(), **by, **gaps, **({"cause": cause} if cause else {})})
+    return {"pause_notices": pending, **({"authority_notice_registered": True} if technical else {})}
 
 
 _RETAINED = "Its work is retained; Resume continues it."
@@ -76,9 +82,29 @@ def gap_words(gaps: Any, lead: str = "The Pause did not wait for") -> str:
             f"that nothing ties to this task ({named}); whether {'it belongs' if one else 'they belong'} here is unknown.")
 
 
+def authority_subject(cause: str) -> str:
+    """What the paused task could not read, in the reader's terms."""
+    return {
+        "dispatch_fence_unreadable": "which tasks are stopped for spending",
+        "dispatch_fence_invalid": "a valid list of tasks stopped for spending",
+        "read_failed": "its spending record", "malformed_binding": "which spending account to use",
+        "start_custody_unreadable": "whether its delegated work started",
+        "owner_pause_authority_unreadable": "whether you paused its work",
+        "owner_launch_authority_unavailable": "whether it may start the next step",
+    }.get(str(cause or "").partition(":")[0], "")
+
+
+def authority_wait_text(cause: str) -> str:
+    subject = authority_subject(cause)
+    return f"The task will continue automatically when it can read {subject}." if subject else ""
+
+
 def notice_text(notice: dict) -> str:
     """The sentence one owed notice says; an owner Pause names the author its own fence declared, and the words that
     press recorded follow its head verbatim, whoever declared it (a press without words says none)."""
+    if notice.get("reason") == "delegated_start_risk":
+        from ouroboros.delegate_resume import risk_words
+        return risk_words(notice["decision"])
     if notice.get("reason") == "owner":
         by = notice.get("by") if isinstance(notice.get("by"), dict) else {}  # a notice saved before ``by``: nobody
         said = " ".join(str(by.get("text") or "").split())
@@ -89,11 +115,11 @@ def notice_text(notice: dict) -> str:
             head = f"{actor} paused this task." if actor else "This task was paused."
         return f"{head} {_RETAINED}{gap_words(notice.get('membership_gaps'))}"
     authority = notice.get("reason") == "authority"
-    cause = ("a technical fault: its billing or control authority could not be read, which says nothing about "
-             "money left") if authority else "its budget limit"
-    resume = ("Use Resume on the task when available; it rechecks the conditions before continuing" if authority
-              else "Use Resume on the task when available")
-    return f"The task paused because of {cause}. Its work is retained. {resume}."
+    if authority and (words := authority_wait_text(notice.get("cause"))):
+        return f"{words} Its work is saved."
+    if authority:
+        return "The task could not read a saved decision about spending or permission to work. Its work is saved. Use Resume to check again."
+    return "The task paused because of its budget limit. Its work is retained. Use Resume on the task when available."
 
 
 def _acknowledge(root: pathlib.Path, task_id: str, identity: str, notice: dict) -> None:
@@ -160,7 +186,7 @@ def reconcile_pause_notices(drive_root: Any, *, stop_requested=None) -> None:
                             system_type="task_pause_notice", narration=False, require_write=True,
                             ensure_record_boundary=True,
                             progress_meta={**{k: event[k] for k in ("root_task_id", "parent_task_id") if k in event},
-                                           "card_row": "timeline", "card_row_id": identity},
+                                           "pause_reason": notice.get("reason"), "card_row": "timeline", "card_row_id": identity},
                         )
                     if stop_requested is not None and stop_requested():
                         return

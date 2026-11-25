@@ -63,8 +63,18 @@ class _Captured(Exception):
 
 
 def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subtests, monkeypatch, tmp_path):
+    import httpx
+
+    from ouroboros import net_transport
+    from ouroboros.opencode_go import GO_CHAT_BASE_URL
+    from tests._openai_sse import streamed_reply
+
+    go_route = ("openai-compatible::example-model", {
+        "OPENAI_COMPATIBLE_API_KEY": "unused", "OPENAI_COMPATIBLE_BASE_URL": GO_CHAT_BASE_URL,
+    })
+    real_execute = llm_module._execute_candidate
     case_paths = case_folders(tmp_path)
-    for model, env in _ROUTES:
+    for model, env in (*_ROUTES, go_route):
         tmp_path = next(case_paths)
         with subtests.test(model=model, env=env), monkeypatch.context() as monkeypatch:
             for key, value in env.items():
@@ -73,8 +83,18 @@ def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subte
 
             def execute(request, send, before_dispatch):
                 captured["request"] = request
+                if model == go_route[0]:
+                    return real_execute(request, send, before_dispatch)
                 raise _Captured()
 
+            if model == go_route[0]:
+                def peer(request):
+                    assert str(request.url) == GO_CHAT_BASE_URL + "/chat/completions"
+                    assert request.headers["x-opencode-session"]
+                    return streamed_reply()
+
+                monkeypatch.setattr(net_transport, "remote_httpx_transport", lambda *_a, **_k: httpx.MockTransport(peer))
+                monkeypatch.setattr(net_transport, "env_proxies_configured", lambda: False)
             _patch_execute_candidate(monkeypatch, llm_module, execute)
             client = LLMClient(api_key="unused")
             logs = tmp_path / "logs"
@@ -84,13 +104,15 @@ def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subte
             )):
                 prospective = task_pacing.prospective_wrapup_attempt_request(
                     llm=client, messages=_MESSAGES, model=model, reasoning_effort="high",
-                    tools=_TOOLS, cache_affinity=cache_key_for_model(model),
+                    tools=_TOOLS, cache_affinity=cache_key_for_model(model), task_id="parity",
                 )
                 try:
-                    call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
-                                        queue.Queue(), {}, initial_messages=_MESSAGES)
+                    reply, _ = call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
+                                                   queue.Queue(), {}, initial_messages=_MESSAGES)
+                    if model == go_route[0]:
+                        assert reply["content"] == "4" and usage_accounting.last_physical_attempt_capture().state == "settled"
                 except _Captured:
-                    pass
+                    assert model != go_route[0]
             assert "request" in captured, "the real send never reached the physical executor"
             assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
                 key: getattr(prospective, key) for key in _IDENTITY}
@@ -224,6 +246,76 @@ def test_every_wire_option_of_the_send_reaches_the_priced_copy():
     options = main_loop_wire_options("openai/gpt-test", allow_server_web_search=True)
     assert options["stream"] is True
     assert set(options) == {"stream", "cache_affinity", "allow_server_web_search", "bypass_response_cache"}
+
+
+@pytest.mark.parametrize("api_surface", ["responses", "chat_completions"])
+@pytest.mark.parametrize("learned", [False, True])
+def test_wrapup_parity_after_learned_responses_effort_repair(monkeypatch, tmp_path, api_surface, learned):
+    import ouroboros.llm_fallback as fallback
+    import ouroboros.request_wire_contract as wire
+    from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
+    from ouroboros.request_wire_recovery import (
+        finalize_wire_response, note_wire_send_succeeded, plan_wire_retry_from_exception,
+        prepare_wire_payload_for_send, request_wire_call_scope,
+    )
+    from tests.test_request_wire_recovery_phase2b import _Rejected, _capture
+
+    monkeypatch.setenv("OPENAI_API_KEY", "unused")
+    monkeypatch.setenv("OPENAI_API_SURFACE", "responses")
+    monkeypatch.setattr(wire, "canonical_wire_evidence_root", lambda: tmp_path)
+    client, model = LLMClient(api_key="unused"), "openai::gpt-test"
+    if learned:
+        target = client._resolve_remote_target(model)
+        source = client._build_remote_candidate(
+            target, _MESSAGES, "high", MAIN_LOOP_MAX_TOKENS, "auto", None, _TOOLS,
+            skip_capability_fetch=True, **main_loop_wire_options(model, allow_server_web_search=False))
+        # Teach the real durable store using a synthetic refusal and settled success.
+        with request_wire_call_scope():
+            prepare_wire_payload_for_send(target, source, api_surface="responses")
+            repaired = plan_wire_retry_from_exception(_Rejected(
+                "Unsupported value: 'reasoning.effort' does not support 'high' with this model. "
+                "Supported values are: 'low' and 'medium'."))
+            assert repaired["reasoning"] == {"effort": "medium"}
+            note_wire_send_succeeded(_capture(repaired, target))
+            finalize_wire_response({"role": "assistant", "content": "ok"}, {})
+        assert (tmp_path / "state" / wire.REQUEST_WIRE_STATE_FILE).is_file()
+
+    # A Responses repair must not leak onto the same model's Chat surface.
+    monkeypatch.setenv("OPENAI_API_SURFACE", api_surface)
+    finalized, captured = [], {}
+    real_finalize = llm_module._finalized_physical_candidate
+
+    def finalize(*args, **kwargs):
+        payload = real_finalize(*args, **kwargs)
+        finalized.append(copy.deepcopy(payload))
+        return payload
+
+    monkeypatch.setattr(llm_module, "_finalized_physical_candidate", finalize)
+    monkeypatch.setattr(fallback, "_finalized_physical_candidate", finalize)
+
+    def execute(request, send, before_dispatch):
+        captured["request"] = request
+        raise _Captured()
+
+    _patch_execute_candidate(monkeypatch, llm_module, execute)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    with usage_accounting.usage_scope(usage_accounting.UsageScope(
+        drive_root=tmp_path, task_id="parity", root_task_id="parity",
+    )):
+        prospective = task_pacing.prospective_wrapup_attempt_request(
+            llm=client, messages=_MESSAGES, model=model, reasoning_effort="high", tools=_TOOLS)
+        try:
+            call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
+                                queue.Queue(), {}, initial_messages=_MESSAGES)
+        except _Captured:
+            pass
+    assert "request" in captured, "the real send never reached the physical executor"
+    assert len(finalized) == 2, "one preview and one send, with no drift rebuild"
+    assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
+        key: getattr(prospective, key) for key in _IDENTITY}
+    assert finalized[0] == finalized[1], "full physical payload parity, not only its size"
+    assert wire.payload_effort(finalized[1]) == ("medium" if learned and api_surface == "responses" else "high")
 
 
 def _completion(text):
@@ -379,9 +471,13 @@ def test_the_forced_lookahead_and_send_share_one_measurement_allowance_and_ident
     from dataclasses import replace
 
     from ouroboros import loop_forced_finalization as forced
+    from ouroboros.context_fit import ContextCore
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
     plan = replace(_forced_plan(mode, 128_000), initial_mode=mode)
+    source = ('prompts/SYSTEM.md', '1' * 64, 128, '2' * 64)
+    plan = replace(plan, core=ContextCore('', '', '', '', '', '', plan.user_content_json, False,
+                                         base_prompt_source=source))
     owner_ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, task_metadata={}, model_turn_state=None)
     captured = []
 
@@ -406,6 +502,7 @@ def test_the_forced_lookahead_and_send_share_one_measurement_allowance_and_ident
         forced._call_forced_model_once(ctx)  # a direct / drift send: its own fresh measurement of the same bytes
     assert len(captured) == 2, "both forced sends reached the physical executor"
     admitted, direct = captured
+    assert admitted.physical_context.base_prompt_source == direct.physical_context.base_prompt_source == source
     assert admitted.max_completion_tokens == direct.max_completion_tokens == request.max_completion_tokens
     assert admitted.candidate_clock_free_sha256 == request.candidate_clock_free_sha256 is not None
     if mode == "nano":
@@ -555,7 +652,7 @@ def test_pricing_view_does_not_survive_exact_budget_resume(tmp_path, monkeypatch
     monkeypatch.setenv('OUROBOROS_TASK_REVIEW_MODE', 'off')
     monkeypatch.setenv('OUROBOROS_TASK_ABS_CEILING_SEC', '21600')
     monkeypatch.setenv('OPENAI_API_KEY', 'unused')
-    monkeypatch.setattr('ouroboros.config.get_runtime_mode', lambda: 'cyber_pro')
+    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'cyber_pro')
     monkeypatch.setattr(LLMClient, 'available_models', lambda _: [small, wide])
     monkeypatch.setattr(LLMClient, '_SUPPORTED_PARAMS_FETCHED', True, raising=False)
     monkeypatch.setattr('ouroboros.pricing._fetch_live_rows', lambda *a, **kw: {})

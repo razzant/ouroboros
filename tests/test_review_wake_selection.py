@@ -187,7 +187,6 @@ def test_wake_schema_is_unconditional_and_shared():
     (True, "pro", "blocking", "subscription"),
 ])
 def test_canonical_cas_wake_is_identical_across_installs_and_review_modes(tmp_path, monkeypatch, install, mode, enforcement, unavailable):
-    from ouroboros import config
     from ouroboros.review_records import ReviewActorRecord, ReviewRequest, ReviewSlot
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.reviewer_slot_config import ComposedPanel, PoolSeat
@@ -195,7 +194,7 @@ def test_canonical_cas_wake_is_identical_across_installs_and_review_modes(tmp_pa
     from ouroboros.tools.commit_gate import bind_commit_wake
 
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     ctx = _ctx(tmp_path)
     ctx._current_review_retry_key = "wave"
     routes = {"api": [ReviewRouteKind.API_CHAT] * 2, "subscription": [ReviewRouteKind.AGENT_SESSION] * 2,

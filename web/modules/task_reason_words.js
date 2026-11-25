@@ -77,10 +77,16 @@ export const TASK_CAUSE_PHRASES = {
     provider_unavailable: "The task could not get a usable model answer, so it could not finish",
     accounting_wait_expired: "Accounting access did not recover within this turn’s wait window",
     delivery_control_degraded: "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
-    authoring_handover_incomplete: "The replacement model stopped before resuming tool work.",
-    // A helper set to run as a coding session that finished without a succeeded run of it (subagent_bootstrap).
-    configured_actor_incomplete: "This subagent was set to run as a coding session, and no such run succeeded; its answer came without one.",
-    configured_actor_unknown: "This subagent was set to run as a coding session; whether that run succeeded is unknown.",
+    authoring_handover_incomplete: "The saved result records an incomplete model handover.",
+    // A helper set to run as a coding session: keys picked by configuredActorCauseKey, not reason codes.
+    configured_actor_first_undetermined: "First coding attempt: outcome unknown.",
+    configured_actor_first_failed: "First coding attempt failed.",
+    configured_actor_first_cancelled: "First coding attempt cancelled.",
+    configured_actor_first_interrupted: "First coding attempt interrupted.",
+    configured_actor_first_succeeded: "First coding session finished.",
+    configured_actor_first_succeeded_source_unverified: "First coding session ended; brief coverage unverified.",
+    configured_actor_first_refused: "First coding attempt: start refused.",
+    configured_actor_not_started: "First coding attempt did not start.",
     delegated_custody_unreconciled: "Some delegated work was never reconciled.",
     // The one non-reason-code key: the task-result FIELD terminal_plan_review_open, a standing limitation.
     terminal_plan_review_open: "The plan review was still open when this answer was delivered",
@@ -101,6 +107,7 @@ export const TASK_CAUSE_PHRASES = {
     reaper_wedged_worker_alive: "The task timed out and its worker could not be confirmed stopped",
     workers_unavailable: "The worker pool was unavailable, so the task was not scheduled",
     worker_pool_unavailable: "No worker was available to run the task",
+    evolution_disabled_in_light_mode: "Evolution is disabled in light runtime mode",
     worker_crash_signal: "The worker process running the task crashed",
     worker_crash_retry_exhausted: "The worker process running the task kept crashing until its retries ran out",
     worker_crash_owner_wait: "The worker process died while the task was waiting; completed actions were not retried",
@@ -129,6 +136,50 @@ export const UNSTARTED_REASONS = new Set(['subagent_executor_unavailable', 'dele
 export function deliveredAnswerCause(record, reason = 'finalization_incomplete') {
     return reason === 'finalization_incomplete' && record?.reason_code === reason && record.terminal_origin === 'model_final'
         && record.finalization_recovery?.answer === 'delivered' ? 'finalization_incomplete_delivered' : '';
+}
+
+// Twin of tool_error_words.first_attempt_cause_key: the sentence key the stored actor_first_terminal PROVES about the
+// FIRST coding attempt, else ''. The typed witness is the single source — no producer status×reason matrix is
+// re-derived here (a duplicated list reads every new producer fact as unknown). Closed vocabularies match with
+// includes(), never a property lookup, so an inherited key ('constructor') is no state; strict types, never coerced.
+// Witnesses: an initial_execution.state out of FIRST_ATTEMPT_STATES with its own run id (a refused start:
+// 'failed_definite' without one; a settled success whose work-order coverage was never confirmed carries
+// 'succeeded_source_unverified' and proves only the ending), or a typed zero-run receipt — the decision-as-status spelling,
+// or a validated historical 'complete' receipt that still proves no physical start while the fact stays unknown.
+const FIRST_ATTEMPT_STATES = ['failed', 'cancelled', 'interrupted', 'succeeded', 'succeeded_source_unverified'];
+export function firstAttemptCauseKey(execution) {
+    const fact = execution?.actor_first_terminal;
+    if (!fact || typeof fact !== 'object' || !['incomplete', 'unknown'].includes(fact.status) || typeof fact.reason !== 'string') return '';
+    if (fact.zero_run === true) {
+        if (fact.zero_run_decision === fact.status && fact.reason === `configured_actor_zero_run_${fact.status}`) return 'configured_actor_not_started';
+        return fact.status === 'unknown' && fact.zero_run_decision === 'complete' && fact.reason === 'historical_zero_run_complete'
+            ? 'configured_actor_not_started' : '';
+    }
+    const initial = fact.initial_execution;
+    if (!initial || typeof initial !== 'object') return '';
+    const { state, run_id: runId } = initial;
+    if (FIRST_ATTEMPT_STATES.includes(state)) {
+        return typeof runId === 'string' && runId.trim() !== '' ? `configured_actor_first_${state}` : '';
+    }
+    const noRun = runId === undefined || runId === null || (typeof runId === 'string' && runId.trim() === '');
+    return state === 'failed_definite' && noRun ? 'configured_actor_first_refused' : '';
+}
+
+// Twin of tool_error_words.configured_actor_cause_key: the reason codes stay as recorded; the words come from the
+// proven first-attempt fact only when the fact's own status matches the code, else the conservative sentence.
+export function configuredActorCauseKey(reason, execution) {
+    if (typeof reason !== 'string') return '';
+    if (reason !== 'configured_actor_incomplete' && reason !== 'configured_actor_unknown') return reason;
+    const fact = execution?.actor_first_terminal;
+    const undetermined = 'configured_actor_first_undetermined';
+    if (!fact || typeof fact !== 'object' || fact.status !== reason.slice('configured_actor_'.length)) return undetermined;
+    return firstAttemptCauseKey(execution) || undetermined;
+}
+
+// Twin of tool_error_words.first_attempt_clause_key: the proven key to state BESIDE a different primary reason.
+export function firstAttemptClauseKey(reason, execution) {
+    return typeof reason !== 'string' || reason === 'configured_actor_incomplete' || reason === 'configured_actor_unknown'
+        ? '' : firstAttemptCauseKey(execution);
 }
 
 export function taskReasonPhrase(code) {
@@ -195,14 +246,45 @@ const interruptedBy = (reason) => {
     return tr(`task.interrupted.${kind}`, INTERRUPTED_BY[kind]);
 };
 
-/** The headline of a finished step that did not succeed: held by Safety (never "failed"), ended by a control (never
- *  "failed"), a command's exit, or a failed step. */
+// A call the host refused a further step (``extension_dispatch``: ``tool_result_meta.refused_step``), by the reason the
+// host gave (``extension_plugin_api._STOP_WORDS``). The host attests its refusal, never that the extension started
+// nothing more; what ran before stays the extension's report.
+const REFUSED_STEP = {
+    cancelled: 'A further step was refused by Stop',
+    task_cancelled: 'A further step was refused: the task had already ended as cancelled',
+    operation_already_returned: 'A further step was refused: the call had already returned',
+    stop_unreadable: "A further step was refused: the task's Stop could not be read", other: 'A further step was refused',
+};
+
+/** The headline of a call the host refused a further step, or '' for any other call. */
+export function refusedStepPhrase(evt = {}) {
+    if (evt.tool_result_meta?.refused_step !== true) return '';
+    const reason = String(evt.tool_result_meta.control_reason || '');
+    const kind = Object.hasOwn(REFUSED_STEP, reason) ? reason : 'other';
+    return `${tr(`task.refused_step.${kind}`, REFUSED_STEP[kind])}${evt.tool ? ` · ${evt.tool}` : ''}`;
+}
+
+/** A non-error completion refused further work by Stop reads neutral (DESIGN §4 "Status marks").
+ *  A failed call keeps its error; an unread Stop or other refusal alone stays a warning. */
+export function refusedByStop(evt = {}) {
+    return evt.status === 'blocked' && evt.tool_result_meta?.refused_step === true
+        && ['cancelled', 'task_cancelled'].includes(evt.tool_result_meta.control_reason);
+}
+
+/** These two producer buckets are handled refusals; neither increments the call-error count. */
+export function handledRefusalHeadline(evt) {
+    if (evt.is_error) return '';
+    if (evt.status === 'git_error') return tr('task.tools.git_refused', 'Git refused the operation');
+    if (evt.status === 'review_blocked') return tr('task.tools.review_blocked', 'Review blocked the operation');
+    return '';
+}
+
+/** The headline of a finished step that did not succeed. */
 export function failedStepHeadline(evt = {}) {
-    const exitCode = Number(evt.exit_code);
     const tool = evt.tool ? ` · ${evt.tool}` : '';
     if (evt.status === 'interrupted') return `${interruptedBy(evt.control_reason)}${tool}`;
-    return heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
-        ? `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`
+    return (evt.status === 'blocked' && refusedStepPhrase(evt)) || handledRefusalHeadline(evt) || heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
+        ? `A command returned ${Number.isInteger(evt.exit_code) ? `exit code ${evt.exit_code}` : 'a non-zero exit code'}`
         : `One of the steps failed${tool}`);
 }
 

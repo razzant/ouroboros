@@ -42,7 +42,7 @@ def test_primary_endpoint_and_state_fallback_share_status(monkeypatch, tmp_path,
         return [{"task_id": "wake"}]
     monkeypatch.setattr(view, "wake_ids", lambda *args: ["wake"])
     monkeypatch.setattr(view, "recent_wakes", wakes)
-    response = asyncio.run(api_consciousness(Request({"type": "http", "app": server.app.app})))
+    response = asyncio.run(api_consciousness(Request({"type": "http", "query_string": b"", "app": server.app.app})))
     panel = json.loads(response.body)
     fallback = server.app.app.state.describe_bg_consciousness_state(True)
     assert panel["status"] == status and panel["detail"]
@@ -121,7 +121,7 @@ def test_stored_control_and_unconstructed_clock_are_visible(monkeypatch, tmp_pat
     monkeypatch.setattr(server, "_consciousness", clock if constructed else None)
     monkeypatch.setattr(server, "_supervisor_error", failed)
     monkeypatch.setattr(state, "load_state", lambda: {} if enabled is None else {"bg_consciousness_enabled": enabled})
-    response = asyncio.run(api_consciousness(Request({"type": "http", "app": server.app.app})))
+    response = asyncio.run(api_consciousness(Request({"type": "http", "query_string": b"", "app": server.app.app})))
     panel = json.loads(response.body)
     fallback = server.app.app.state.describe_bg_consciousness_state(enabled)
     assert panel["status"] == ("sleeping" if constructed and enabled else status)
@@ -182,11 +182,22 @@ def test_headlines_date_instants_outside_the_server_local_day(monkeypatch, offse
     assert view._clock_of(instant) == words
     facts = {"next_wake_at": instant, "appointment_at": instant}
     shown = view.describe_consciousness_state(facts, True)
-    assert shown["detail"] == (f"Sleeping until {words}." if day == 16
+    assert shown["detail"] == (f"Sleeping until {words} (UTC+00:00)." if day == 16
                                else f"Due since {words}; the wake-up has not started yet.")
     exhausted = view.describe_consciousness_state({**facts, "allowance_resets_at": instant,
                                                   "last_wake_outcome": "skipped:allowance_exhausted"}, True)
     assert f"next check {'at' if day == 16 else 'due since'} {words}." in exhausted["detail"]
+
+
+def test_the_sleeping_sentence_names_the_server_zone_it_prints_in(monkeypatch):
+    """A UTC server's 06:30 is not the owner's morning: the sentence names the zone of the time it prints."""
+    monkeypatch.setattr(view, "time", SimpleNamespace(time=lambda: NOW))
+    for hours, minutes, label in ((5, 30, "UTC+05:30"), (-4, 0, "UTC-04:00"), (0, 0, "UTC+00:00")):
+        zone = dt.timezone(dt.timedelta(hours=hours, minutes=minutes if hours >= 0 else -minutes))
+        monkeypatch.setattr(view, "_DISPLAY_ZONE", zone)
+        instant = (dt.datetime.fromtimestamp(NOW, zone) + dt.timedelta(hours=1)).isoformat()
+        shown = view.describe_consciousness_state({"next_wake_at": instant, "appointment_at": instant}, True)
+        assert shown["detail"] == f"Sleeping until {view._clock_of(instant)} ({label})."
 
 
 def test_host_date_follows_local_midnight_not_the_utc_day(monkeypatch):

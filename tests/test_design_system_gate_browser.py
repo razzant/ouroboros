@@ -106,8 +106,22 @@ MEASURE = """root => {
             (r.width < 43.9 || r.height < 43.9) && !hits(e, r))
             small.push({node:name(e),label:(e.getAttribute('aria-label') || e.textContent).trim().slice(0,65),
                 width:Math.round(r.width*10)/10,height:Math.round(r.height*10)/10});
-        if (e.matches('.app-page-header') && r.height > 56.1)
-            headers.push({node:name(e),height:Math.round(r.height*10)/10});
+        if (e.matches('.app-page-header')) {
+            // A narrow Skills column lends its tabs one line under the header, as the Logs rail can have.
+            const skillsBelow = e.closest('#page-skills') && s.gridTemplateAreas.includes('"tabs tabs"');
+            const rail = e.querySelector(skillsBelow ? '.app-tab-strip' : '.logs-kinds'), rb = rail?.getBoundingClientRect();
+            const secondLine = rb?.height && rb.top >= r.top + 28;
+            const gap = secondLine ? parseFloat(getComputedStyle(skillsBelow ? e : rail.closest('.section-lead-page')).rowGap) || 0 : 0;
+            const margin = secondLine ? parseFloat(getComputedStyle(rail).marginBottom) || 0 : 0;
+            const height = r.height - (secondLine ? rb.height + gap + margin : 0);
+            const docked = document.documentElement.dataset.layout === 'docked';
+            // A phone's page row stands 18px below a browser's top, a room's bar at its own (DESIGN "Page header").
+            const band = docked && !e.closest('#page-chat') ? (coarse ? 80 : 66) : e.closest('#page-chat') ? 56 : 67;
+            if (height > band + .1)
+                headers.push({node:name(e),height:Math.round(height*10)/10});
+            if (secondLine && new Set([...rail.children].filter(shown).map(n=>Math.round(n.getBoundingClientRect().top))).size > 1)
+                headers.push({node:name(rail),wrapped:true});
+        }
     }
     return {overflow, small, headers};
 }"""
@@ -196,6 +210,10 @@ def open_nav(page, name):
     # A one-column section page has Back in place of Places. Return through its real header controls.
     if page.locator('html').get_attribute('data-layout') == 'stack':
         while not toggle.count():
+            if page.locator('html').get_attribute('data-telegram-back') == 'back':
+                page.evaluate('Telegram.WebApp.BackButton.callback()')
+                rest(page)
+                continue
             back = page.locator('.page.active .app-page-header .shell-back:visible').first
             if not back.count():
                 break
@@ -258,15 +276,27 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
             open_nav(page, name)
             root = f'#page-{name}'
             if name == 'settings':
-                def measure_settings(view, root=root):
+                def measure_settings(view):
+                    # A page that moved to Extensions (MCP servers, a skill's form, the skill sources) is walked by its
+                    # old address and measured where it is shown, under the same rules.
+                    shown_root = '#page-skills' if page.locator('#page-skills').is_visible() else '#page-settings'
                     key = f'settings/{view}'
-                    facts[key] = page.evaluate(MEASURE, root)
+                    facts[key] = page.evaluate(MEASURE, shown_root)
                     if any(facts[key].values()):
                         failures[key] = facts[key]
-                    # A page alone has Back; beside its list the Places control stays with that list.
+                    if view != 'home':
+                        label = page.locator(shown_root + ' :is([data-settings-lead-name], [data-extensions-lead-name])').text_content().strip()
+                        if label and not page.locator(shown_root + ' > .app-page-header').get_by_role('heading', name=label, exact=True).count():
+                            failures[key + '/heading'] = 'the level heading left the accessibility tree'
+                    # One leading slot: a deeper level owns Back even when its list still fits beside it.
                     if width < 720:
-                        control = '[data-mobile-nav-toggle]' if page.locator(HOME).is_visible() else '[data-settings-back]'
-                        if not page.locator(root + ' .app-page-header ' + control).is_visible():
+                        host_back = page.locator('html').get_attribute('data-telegram-back') == 'back'
+                        page_back = page.evaluate('() => Boolean(window.__ouroLayers.page()?.back)')
+                        control = '[data-shell-back]' if page_back else '[data-mobile-nav-toggle]'
+                        if host_back:
+                            if page.locator(shown_root + ' .app-page-header [data-shell-back]:visible').count():
+                                failures[key + '/navigation'] = 'the page duplicates Telegram Back'
+                        elif not page.locator(shown_root + ' .app-page-header ' + control).is_visible():
                             failures[key + '/navigation'] = f'the expected {control} left the header'
                 # The home, every page a module registered (the list of skill forms and the fixture skill's form
                 # among them), and one editor of a page that lists entries.
@@ -275,7 +305,37 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                 facts['settings-views'] = views
                 continue
             if name == 'skills':
-                page.wait_for_selector('.skills-card')
+                # Extensions is a place with pages, as the Dashboard is: every row of its list opens its page (one
+                # column: from the list, which Back returns to), and each is measured.
+                rows = page.locator(root + ' [data-extensions-open]').all()
+                assert [row.get_attribute('data-extensions-open') for row in rows] == ['installed', 'tools', 'browse', 'sources']
+                rail = page.locator(root + ' [data-extensions-rail]')
+                back = page.locator(root + ' .app-page-header [data-shell-back]')
+                for row in rows:
+                    row.click()
+                    assert row.get_attribute('aria-current') == 'page'
+                    if row.get_attribute('data-extensions-open') == 'installed':
+                        page.wait_for_selector('.skills-card')
+                    # Section levels queue their arrival two frames ahead, before getAnimations() can see it.
+                    page.locator(root + ' [data-settings-arrive]:visible').wait_for(state='hidden')
+                    rest(page)
+                    key = f"{name}/{row.get_attribute('data-extensions-open')}"
+                    facts[key] = page.evaluate(MEASURE, root)
+                    if any(facts[key].values()):
+                        failures[key] = facts[key]
+                    # A page alone has Back; beside its list the Places control stays with that list.
+                    if not rail.is_visible():
+                        if telegram:
+                            assert page.evaluate('Telegram.WebApp.BackButton.isVisible'), key
+                            assert not back.is_visible(), f'{key} duplicates Telegram Back'
+                            page.evaluate('Telegram.WebApp.BackButton.callback()')
+                        else:
+                            back.click()
+                        rail.wait_for(state='visible')
+                        rest(page)
+                    elif width < 720 and not page.locator(root + ' .app-page-header [data-mobile-nav-toggle]').is_visible():
+                        failures[key + '/navigation'] = 'the Places control left the header'
+                continue
             if name == 'widgets':
                 page.wait_for_selector('.widgets-card')
             # Dashboard's vertical rail replaced its strip; every registered view still gets measured.
@@ -288,7 +348,7 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                 tab_name = 'page'
                 if tabs:
                     if name == 'dashboard' and not tabs[index].is_visible():
-                        page.locator(root + ' [data-dashboard-list-back]').click()
+                        page.evaluate("() => window.__ouroLayers.back('control')")
                         rest(page)
                     tabs[index].click()
                     tab_name = tabs[index].get_attribute('data-dashboard-tab') if name == 'dashboard' else tabs[index].inner_text().strip()
@@ -297,6 +357,10 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                 facts[key] = page.evaluate(MEASURE, root)
                 if any(facts[key].values()):
                     failures[key] = facts[key]
+                if name == 'dashboard':
+                    label = page.locator(root + ' [data-dashboard-lead-name]').text_content().strip()
+                    if label and not page.locator(root + ' > .app-page-header').get_by_role('heading', name=label, exact=True).count():
+                        failures[key + '/heading'] = 'the page heading left the accessibility tree'
         facts['sidebar'] = sidebar_metrics(page)
         if len(facts['sidebar']) != 1:
             failures['sidebar'] = facts['sidebar']
@@ -405,14 +469,17 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
     """Independent green proof for L3's bodies while L1's shell is integrating."""
     page = seed_page(gate_ui, 360, 844)
     results = {}
+    # Settings' walk reaches the pages that moved to Extensions by their old addresses: the shown place's shell.
     scopes = {'files': '.files-layout', 'skills': '.skills-scroll',
-              'widgets': '.widgets-scroll', 'dashboard': '.dashboard-shell', 'settings': '.settings-shell'}
+              'widgets': '.widgets-scroll', 'dashboard': '.dashboard-shell', 'settings': '.page.active .settings-shell'}
     try:
         page.goto(gate_ui['url'] + '/')
         page.wait_for_selector('#chat-input', state='attached')
         for name, scope in scopes.items():
             open_nav(page, name)
             if name == 'skills':
+                # A phone opens Extensions as its list; its Skills row opens the installed skills.
+                page.locator('#page-skills [data-extensions-open="installed"]').click()
                 page.wait_for_selector('.skills-card')
             if name == 'widgets':
                 page.wait_for_selector('.widgets-card')

@@ -119,6 +119,18 @@ test('a typed value commits on change, never on input, once; it says what it was
     assert.equal(view.line(TOTAL), 'Saved · was 250 · Undo');
 });
 
+test('a row put away while a read repaints and shown again (a level kept for a return) still says its result', async (t) => {
+    const { server, view } = await start(t, [TOTAL]);
+    const [node] = view.container.querySelectorAll('[data-setting-row]');
+    let away = true;
+    Object.defineProperty(node, 'isConnected', { get: () => !away });
+    await readSettings();  // a fresh read repaints the rows on screen while this one is away
+    away = false;
+    await view.type(TOTAL, '250');
+    assert.deepEqual(server.posts, [{ TOTAL_BUDGET: 250 }]);
+    assert.equal(view.line(TOTAL), 'Saved · was 200 · Undo', 'the row it is used through paints again');
+});
+
 test('Undo restores absence with unset, and restores a previously stored value with an assignment', async (t) => {
     for (const oldAbsent of [true, false]) await t.test(oldAbsent ? 'absent' : 'stored', async (t) => {
         const { server, view } = await start(t, [TOTAL]);
@@ -249,13 +261,13 @@ test('the model concurrency row refuses a fraction and accepts zero, negative an
         assert.deepEqual(server.posts.at(-1), { [row.id]: value });
         assert.match(view.line(row), /^Saved/);
     }
-    // Not set is a value of this row (no limit for API models, 3 for a local one): a blank is sent, never refused,
+    // Not set is a value of this row (no limit for API models, 1 for the built-in server): a blank is sent, never refused,
     // and the field says so where it is empty. Money beside it still refuses a blank.
     await view.type(row, '');
     assert.deepEqual(server.posts.at(-1), { [row.id]: '' });
     assert.match(view.line(row), /^Saved.*was 7/);
     assert.equal(view.field(row).getAttribute('placeholder'), 'Not set');
-    assert.match(view.meta(row), /Not set: no limit for API models, 3 for the built-in local model\. 0 or less: no limit for either\./);
+    assert.match(view.meta(row), /Not set: no limit for API models, 1 for the built-in local model\. 0 or less: no limit for either\./);
     // Room for its own word goes to this row alone: a row with a "No limit" button keeps its fixed width.
     assert.match(settingsRow(row, {}), / size="8"/);
     assert.doesNotMatch(settingsRow(rowById('OUROBOROS_MAX_WORKERS'), {}), / size="/);

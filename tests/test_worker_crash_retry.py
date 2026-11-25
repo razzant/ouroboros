@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests._worker_recovery_helpers import _make_worker
+
 
 @pytest.fixture(autouse=True)
 def _isolate_worker_crash_state(tmp_path, monkeypatch):
@@ -67,23 +69,6 @@ def _make_task(task_id="abc123", attempt=1, chat_id=1):
         "text": "test",
         "_attempt": attempt,
     }
-
-
-def _make_worker(wid=0, alive=False, busy_task_id="abc123", exitcode=-11):
-    proc = MagicMock()
-    proc.is_alive.return_value = alive
-    proc.exitcode = exitcode
-    proc.pid = 12345
-    w = MagicMock()
-    w.wid = wid
-    w.proc = proc
-    w.busy_task_id = busy_task_id
-    # Real Worker defaults reaping=False; without this the MagicMock auto-attr is truthy
-    # and the new crash-detector reaping guard would skip the worker.
-    w.reaping = False
-    w.readiness_exhausted = False
-    w.active_capacity = True
-    return w
 
 
 def _run_health_and_reap():
@@ -628,6 +613,8 @@ def test_crash_toast_for_a_bound_task_goes_to_its_project_chat(tmp_path):
 
     incident_notice.assert_called_once()
     assert incident_notice.call_args[0][0] == 5151
+    # A crash that exhausted its retries still offers its manual step (RV4 11: "Please try again." did not vanish).
+    assert incident_notice.call_args.kwargs["progress_meta"]["notice"]["step"] == "try_again"
 
 
 def test_deep_self_review_crash_emits_task_done_event(tmp_path):
@@ -780,6 +767,29 @@ def test_a_crashed_child_retries_on_its_own_id_under_its_parent_and_root(tmp_pat
     assert (retry['id'], retry['_attempt']) == (job['task_id'], 2)
     assert {key: retry.get(key) for key in lineage} == lineage
     assert not retry.get('timeout_retry_from') and retry.get('original_task_id', job['task_id']) == job['task_id']
+
+
+def test_an_older_attempts_saved_result_neither_ends_nor_blocks_a_dead_attempts_retry(tmp_path, monkeypatch):
+    # Attempt 2 died while its child drive still holds attempt 1's completed result. That result is no ending of
+    # attempt 2: recovery goes on to its own crash policy (here the one retry), neither publishing it nor waiting on it.
+    import supervisor.queue as q
+    import supervisor.workers as W
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.worker_health import recover_confirmed_dead_worker
+
+    job, _events = _reserved_job(tmp_path, monkeypatch, child=True, exitcode=1, attempt=2)
+    tid, child = job['task_id'], Path(job['task']['drive_root'])
+    monkeypatch.setattr(W, 'QUEUE_MAX_RETRIES', 2)  # attempt 2 still owns one retry
+    monkeypatch.setattr('supervisor.terminal_delivery.deliver_miss_lane_outcome', MagicMock())
+    write_task_result(tmp_path, tid, 'running', task_attempt=2, child_drive_root=str(child))
+    write_task_result(child, tid, 'completed', task_attempt=1, result='Attempt 1 answer.', terminal_origin='model_final',
+                      loop_outcome={'usage': {'total_rounds': 3}})
+    enqueued = []
+    monkeypatch.setattr(q, 'enqueue_task', lambda task, front=False: enqueued.append(dict(task)) or task)
+    recover_confirmed_dead_worker(job)
+    current = load_task_result(tmp_path, tid, strict=True)
+    assert [row['_attempt'] for row in enqueued] == [3], 'attempt 2 takes its own retry; attempt 1 answer is not its end'
+    assert current['status'] != 'completed' and current.get('result') != 'Attempt 1 answer.'
 
 
 def test_file_preparation_runs_without_queue_or_lifecycle_lock(tmp_path, monkeypatch):
@@ -977,7 +987,8 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     else:
         job['task']['type'] = job['meta']['task']['type'] = 'evolution'
     monkeypatch.setattr(W, 'load_state', lambda: {'evolution_mode_enabled': False})
-    monkeypatch.setattr(W, 'send_with_budget', lambda *_a, **_k: None)
+    sent = []
+    monkeypatch.setattr(W, 'send_with_budget', lambda *_a, **kw: sent.append(kw))
     monkeypatch.setattr(W, 'reconstruct_task_cost', lambda *_a, **_k: {
         'cost_accounting_status': 'available', 'cost_final': False,
         'accounted_upper_bound_usd': 12.5, 'rounds': 7,
@@ -988,6 +999,9 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     assert result['reason_code'] == ('evolution_stopped_no_retry' if cause == 'evolution_stopped'
                                      else 'worker_crash_owner_wait')
     assert result['status'] == ('cancelled' if cause == 'evolution_stopped' else 'failed')
+    if cause != 'evolution_stopped':  # RVD4 11: past an owner-wait checkpoint a repeat could redo completed actions
+        [notice] = [kw['progress_meta']['notice'] for kw in sent if 'notice' in (kw.get('progress_meta') or {})]
+        assert notice['code'] == 'worker_crash_owner_wait' and 'step' not in notice
     done = events.get_nowait()
     assert done['accounted_upper_bound_usd'] == 12.5 and done['rounds'] == 7
     q.enqueue_task.assert_not_called()
@@ -1137,7 +1151,8 @@ def test_a_handle_task_exception_is_the_tasks_own_terminal_without_a_crash_retry
 
     current = load_task_result(tmp_path, job["task_id"], strict=True)
     assert (current["status"], current["reason_code"]) == ("failed", "task_exception")
-    assert current["result"] == "⚠️ Error during processing: ValueError: predecessor plan source unavailable"
+    # The record keeps the raw error in a sentence (the parent's digest, the CLI); the row says the phrase.
+    assert current["result"] == "This task stopped on an unexpected error: ValueError: predecessor plan source unavailable"
     assert current["terminal_time"]["source"] == "executor_terminal" and current["terminal_time"]["occurred_at"]
     assert "platform-level" not in json.dumps(current, ensure_ascii=False)
     # A host-written text: delivered as a System row, never as the model's answer.

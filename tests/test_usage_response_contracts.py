@@ -26,9 +26,10 @@ BYOK_BIG = {"prompt_tokens": 911973, "completion_tokens": 4, "total_tokens": 911
 def _loop_usage(usage):
     """The loop-side projection of the same raw reply (``_normalize_remote_response``)."""
     from ouroboros.llm import LLMClient
+    from ouroboros.llm_routing import OPENROUTER_BASE_URL
 
     target = {"provider": "openrouter", "resolved_model": "anthropic/claude-opus-5.5",
-              "usage_model": "anthropic/claude-opus-5.5"}
+              "usage_model": "anthropic/claude-opus-5.5", "base_url": OPENROUTER_BASE_URL}
     body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": copy.deepcopy(usage)}
     return LLMClient()._normalize_remote_response(body, target, skip_cost_fetch=True)[1]
 
@@ -93,6 +94,96 @@ def test_api_token_normalization_preserves_missing_zero_and_body_error_contracts
         assert rejected_cache["completion_tokens"] is None
         assert rejected_cache[field]
         assert cost is None and final is False
+
+
+@pytest.mark.parametrize("details,expected_cost", [
+    ({"completion_tokens_details": {"audio_tokens": 3}}, None),
+    ({"output_tokens_details": {"reasoning_tokens": "unreadable"}}, None),
+    ({"server_tool_use": {"web_search_requests": False}}, None),
+    ({"completion_tokens_details": {"audio_tokens": None, "accepted_prediction_tokens": 0},
+      "_reported_token_usage": {"audio_tokens": 2}, "private_extension": {"counter": 7},
+      "cache_write_tokens_by_ttl": {"5m": 7}}, 0.0),
+])
+def test_free_body_error_requires_empty_raw_usage(details, expected_cost):
+    body = {"error": {"code": 429}, "usage": {"prompt_tokens": 0, "completion_tokens": 0, **details}}
+    normalized, cost, final = ua.usage_from_response(body)
+    assert (cost, final) == (expected_cost, expected_cost is not None)
+    if "output_tokens_details" in details:
+        assert normalized["_reported_token_usage"]["output_tokens_details"] == details["output_tokens_details"]
+
+
+def test_zero_counters_do_not_price_an_upstream_attempt():
+    body = {"error": {"code": 429}, "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (0.0, True)
+    body["openrouter_metadata"] = {"attempts": [{"status": 504}]}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+
+
+def test_numeric_error_code_supplies_missing_timeout_status():
+    body = {"error": {"message": "request rejected"},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (0.0, True)
+    body["error"]["code"] = 504
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+
+
+def test_byok_body_error_without_upstream_charge_does_not_infer_zero():
+    body = {"error": {"code": 429}, "usage": {
+        "is_byok": True, "cost": 0, "prompt_tokens": 0, "completion_tokens": 0}}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+    assert ua.usage_from_response({**body, "total_cost_usd": 0}, provider="openrouter")[1:] == (0.0, True)
+    body["usage"]["cost_details"] = {"upstream_inference_cost": 0}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (0.0, True)
+
+
+def test_usable_completion_keeps_explicit_zero_with_nonfatal_error_field():
+    from ouroboros.llm import LLMClient
+
+    body = {"error": {"code": 429}, "usage": {"prompt_tokens": 4, "completion_tokens": 2, "cost": 0},
+            "choices": [{"finish_reason": "stop", "message": {"content": "answer"}}]}
+    assert LLMClient._provider_body_error(body) is None
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (0.0, True)
+    body["choices"][0]["message"] = {}
+    assert LLMClient._provider_body_error(body) == body["error"]
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+
+
+def test_explicit_error_finish_does_not_make_partial_text_a_usable_zero_bill():
+    from ouroboros._usage_response import provider_body_error, refusal_body_conflicts
+
+    body = {"error": {"code": 502, "message": "provider failure"},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0},
+            "choices": [{"finish_reason": "error", "message": {"content": "partial"}}]}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+    assert provider_body_error(body) == body["error"]
+    assert refusal_body_conflicts(body)  # Partial output still prevents a replay.
+
+
+def test_r3_zero_full_bill_cannot_override_nested_byok_charge():
+    body = {"total_cost_usd": 0, "usage": {"prompt_tokens": 10}, "error": {
+        "code": 502, "usage": {"is_byok": True, "cost": 0.25},
+    }}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+
+
+@pytest.mark.parametrize("prior", [None, []], ids=["plain", "stream"])
+def test_r3_failure_price_reuses_retained_body_without_sdk_reread(prior):
+    from ouroboros._usage_response import priced_failure_usage
+
+    class SDKResponse:
+        reads = 0
+
+        def json(self):
+            self.reads += 1
+            return body
+
+    body = {"error": {"code": 502}, "usage": {"cost": 0, "completion_tokens": 1}}
+    error = RuntimeError("provider failure")
+    error.response = SDKResponse()
+    error.stream_prior_usage = prior
+    error.stream_usage = {"cost": 0}
+    assert priced_failure_usage(error, body, "openrouter") is None
+    assert error.response.reads == 0
 
 
 def test_api_cost_extraction_rejects_untrustworthy_provider_amounts():
@@ -195,3 +286,38 @@ def test_a_byok_fee_adds_and_a_missing_upstream_figure_is_unknown_never_free(mon
         assert (cost, final) == (None, False) and "cost_invalid" not in normalized, broken
         loop = _loop_usage(usage)
         assert (loop["cost"], loop["cost_estimated"], loop["cost_final"]) == (0.5, True, False), broken
+
+
+@pytest.mark.parametrize("reported,read", [
+    pytest.param({"cached_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}}, 0,
+                 id="details-zero-beside-a-top-level-count"),
+    pytest.param({"cached_tokens": 0, "prompt_cache_hit_tokens": 300}, 0, id="top-level-zero-beside-the-mirror"),
+    pytest.param({"prompt_tokens_details": {"cached_tokens": 0}, "prompt_cache_hit_tokens": 300}, 0,
+                 id="details-zero-beside-the-mirror"),
+    pytest.param({"cache_read_input_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}, "cost": 0.031}, 0,
+                 id="details-zero-beside-the-native-name-on-a-billed-reply"),
+    pytest.param({"cached_tokens": 300, "prompt_tokens_details": {"cached_tokens": 200}}, 200,
+                 id="details-count-beside-another-count"),
+    pytest.param({"cached_tokens": 0, "prompt_tokens_details": {"cached_tokens": 300}}, 300,
+                 id="details-count-beside-a-top-level-zero"),
+    pytest.param({"prompt_tokens_details": {"cached_tokens": 0}}, 0, id="details-zero-alone"),
+    pytest.param({"cached_tokens": 0}, 0, id="top-level-zero-alone"),
+    pytest.param({"prompt_cache_hit_tokens": 0}, 0, id="mirror-zero-alone"),
+    pytest.param({"prompt_cache_hit_tokens": 300}, 300, id="mirror-alone"),
+    pytest.param({}, None, id="unreported"),
+])
+def test_the_ledger_and_the_loop_read_one_cache_read_count_when_its_aliases_disagree(reported, read):
+    """A reply of 1,000 prompt tokens names its cache reads in up to four places: the details block, the native
+    ``cache_read_input_tokens``, the top-level count and DeepSeek's top-level mirror. Both lanes read them in one
+    order (the details block, then the first reported top-level name), and a reported zero is a measurement: the
+    300 of a name read after it never replaces it in the row, in the loop's counter or in the loop's event. A
+    reported $0.031 beside them stays the reply's one final amount in both lanes."""
+    from ouroboros.event_usage import event_token_counts
+
+    usage = {"prompt_tokens": 1000, "completion_tokens": 1, **reported}
+    ledger, cost, final = ua.usage_from_response({"usage": copy.deepcopy(usage)})
+    loop = _loop_usage(usage)
+    assert ledger["cached_tokens"] == event_token_counts(loop)["cached_tokens"] == read
+    assert (loop.get("cached_tokens") or 0) == (read or 0)  # the billing-shaped counter the loop folds and prices
+    if "cost" in reported:
+        assert (cost, final) == (loop["cost"], loop["cost_final"]) == (reported["cost"], True)

@@ -8,9 +8,9 @@ The commit gate stays reproducible and candidate-independent; ARCHITECTURE §8 o
 
 ### Pytest marker lanes
 
-Default local pytest excludes the seven costly or environment-dependent lanes named below (`pyproject.toml` `addopts`, mirrored by `LANE_EXCLUSION_EXPR`), and CI opts into each explicitly (job topology and provider matrix: ARCHITECTURE §8 "CI topology"):
+Default local pytest excludes the seven costly or environment-dependent lanes named below (`pyproject.toml` `addopts`, mirrored by `LANE_EXCLUSION_EXPR`), and CI opts into each explicitly (job topology, provider matrix and outcome classes: ARCHITECTURE §8 "CI topology"):
 
-- `integration` runs real provider checks. Split manual/tag jobs by `credential_required`, never waive a mixed pytest exit: optional failures stay red outside release dependencies; required missing credentials fail; quota/429/5xx/timeout stay inconclusive, contract/auth/model/reasoning/tool 4xx red. `provider_release_floor.py` blocks official tags unless every required canary passed. No provider secrets in PRs. Keyless `tests/system_e2e/` lanes and markers: ARCHITECTURE §8.
+- `integration` runs real provider checks. Split manual/tag jobs by `credential_required` and never waive a mixed pytest exit. `provider_release_floor.py` blocks official tags unless every required canary passed. Keyless `tests/system_e2e/` lanes and markers: ARCHITECTURE §8.
 - `browser` / `ui_browser` / `ui_browser_docker` launch real Playwright engines (agent browser tools / the host UI / the `ouroboros-web:test` container; the docker lane skips without Docker). The marker owns what a lane collects; UI page errors: `PageErrors` (`tests/ui_console_errors.py`), strict until declared. `portable_detail`: build and portable artifact invariants. Manual/tag `ui-smoke` runs the complete `ui_browser` lane (required invocation: "Safe local verification" below). None needs a paid provider.
 - `skill_smoke` (`tests/test_skill_smoke_official.py`): pinned live official catalog, three OSes, real network/pip; investigate RED, never skip. Ubuntu review legs alone hold keys; missing fails. One author calls `skill_review`; no payload edits; two paid cycles count infra, the second one grounded rebuttal or one retry of a verdictless review. Pending stays RED. Only persisted independent acceptance passes; reap the key-bearing tree before enable (ARCHITECTURE §8).
 - `size_ratchet` carries the live-repo size gates and is the only blocking surface for repository size (rules under "Module Size & Complexity"; base fallback and the fail-closed rule: ARCHITECTURE §8 "CI topology").
@@ -44,9 +44,11 @@ A test starts a real process only for a claim that lives at the process boundary
 
 ### The local battery entry point
 
+Context PR checks: `python scripts/context_gate.py`.
+
 `python scripts/run_tests.py` (`make test`) runs the full Node/default Python battery; pytest arguments focus it. `--selected [--base REF]` (default `HEAD`) prints the commit selector's tier/rule/module count and runs both passes. Scope travels in the run's inventory plugin (`preflight_inventory.launch_args`), not argv (Windows' 32,767-character limit). `--extra-test PATH`/`--full-tests` widen with `--test-reason`. Missing required Node is red `NOT_RUN`, no hermetic proof minted. Workers: the CPU count within measured memory, less other live runs' slots in the ledger `<temp parent>/ouroboros-test-slots-<uid>.noindex/<pid>.json` (`test_parallelism.SlotLease`) and one per unleased `pytest`/`node --test` root; floor one; a run waits only while the kernel confirms critical memory pressure, never for slots; the runner names both. A battery first warms its bytecode prefix (`ouroboros/test_bytecode.py`), read by every session, write ban kept.
 
-The battery runs the gate's two passes (above); its groups go longest-first by the durations table (`OUROBOROS_TEST_DURATIONS`, PERSISTENCE). `--evidence-dir DIR` sets each pass's `--ci-evidence-dir`; selected runs add `selection.json` and full inventory JSONL. Never export through `PYTEST_ADDOPTS`: nested pytest could overwrite parent results.
+`--evidence-dir DIR` sets each pass's `--ci-evidence-dir`; selected runs add `selection.json` and full inventory JSONL. Never export through `PYTEST_ADDOPTS`: nested pytest could overwrite parent results.
 
 ### Safe local verification and dirty browser candidates
 
@@ -85,9 +87,9 @@ Full is required for managed updates (their forced run), non-candidate evolution
 
 `preflight_runner.run_hermetic_pytest` runs Node, the bytecode warm, the xdist pass (`not exclusive`, resource groups), then `serial("exclusive")` alone in one disposable checkout at background priority, its workers leased in the ledger. Node and the passes share one budget (`OUROBOROS_PREFLIGHT_TIMEOUT_SEC`; none for the full suite), the warm takes none; a Node test has pytest's 300 s bound (`--test-timeout`); a full suite's collection and warm have none (a blocking import holds a full gate until Stop); `result.json` records `workers`, the budget and `elapsed_seconds`. `LANE_EXCLUSION_EXPR`/`*_PASS_FLAGS` own exclusions/flags. Missing Node/plugins blocks. `preflight_node.node_environment` fingerprints the lane's Node on gate/CLI child PATH; other environments keep their policy. Acorn (`web/tests/no_undef.test.js`) and lockfile-frozen CI ESLint stay independent. Gate temp defaults match `safe_test`, without `--temp-parent`; small/noexec `/tmp` can fail.
 
-Candidate capture uses one hardened worktree-vs-`HEAD` binary diff; assembly failure is `PREFLIGHT_CANDIDATE_ASSEMBLY`. It scrubs `PYTEST_*`, `NODE_OPTIONS`, settings and credentials; plugin probes run outside candidate control. Post-commit baselines include `HEAD~1` to catch suite deletion; exit status owns the verdict. `OUROBOROS_PREFLIGHT_SERIAL=1` is an explicit rollback lever, never silent fallback.
+Capture uses one hardened worktree-vs-`HEAD` binary diff or reports `PREFLIGHT_CANDIDATE_ASSEMBLY`. Scrub `PYTEST_*`, `NODE_OPTIONS`, settings and credentials; probe plugins outside candidate control. Post-commit adds `HEAD~1` to catch suite deletion. Serial rollback is explicit (`OUROBOROS_PREFLIGHT_SERIAL=1`), never silent fallback.
 
-Containment is checked even after green (§9 "Test runs"); unknown or surviving members block and retain the tree. Proof binding: ARCHITECTURE §6.
+Lane exits decide the verdict; surviving or unconfirmed processes block green and retain the tree (§9). `result.json` records worktree removal timeouts separately. Proof binding: ARCHITECTURE §6.
 
 ### GitHub Actions: secrets in step-level `if:` conditions
 
@@ -130,7 +132,7 @@ ARCHITECTURE §8 and `.github/workflows/ci.yml` own the artifact pipeline. Prese
 - Valid tags start builds and configured signing beside tests. Red tests still spend notarization and eSigner signings and record attestations, but publish no Release.
 - Proof/notes carry each job's actual conclusion and the run's FLAKY and ACCEPTED tests; no tag waives a lane.
 - Publication is draft-first with per-tag concurrency. Revalidate the remote annotated tag against the event SHA before drafting and publishing; reruns never overwrite published releases.
-- Astra/RED OS smokes are evidence, not release authority: third-party registry reachability is outside pipeline control.
+- Vendor smokes report separately. Only the RED OS CI image fetch uses its registry CA. Neither gates release.
 - Native Linux requires Jammy x86_64 and authenticated source indices; missing exact sources fail capture. Other builders keep the host backend. CI retains complete/partial sources for 30 days; recipient delivery remains a release obligation.
 - Release AppImage smoke stays headless. [Native GTK qualification](../../packaging/appimage/README.md) is separate.
 - Local-only `OUROBOROS_SKIP_PLAYWRIGHT_INSTALL_DEPS=1` skips host-library installation, not browser bundling; disclose unproven host compatibility.

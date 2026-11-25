@@ -350,11 +350,61 @@ def test_the_forced_final_contract_reads_the_same_reader_and_adds_no_round(fired
 
 
 def test_a_scheduled_root_keeps_its_published_contract_in_the_forced_final_too(fired_context, monkeypatch):
-    root, pending, _first_request = fired_context
+    import ouroboros.loop as loop
+    from ouroboros.loop_forced_finalization import _prepare_forced_prompt, _presence_forced_armed
+    from ouroboros.presence_runner import build_presence_result_event
+    from ouroboros.task_finalization import schedule_report_run
+    from tests.test_schedule_report_door import admit, ceiling, run_metadata
+
+    root, pending, first_request = fired_context
     registry, _turn = _source_turn(root, THREAD)
     fired = _fired(root, pending, registry)
     monkeypatch.setattr("ouroboros.presence_context.presence_send_facts", lambda *_a: "none")
-    assert "no connector reads its final there (it started from a schedule)" in _forced(root, fired)
+    assert "capability_ceiling" not in fired["task_contract"]
+    assert schedule_report_run(fired) is False
+    assert final_route(root, fired["metadata"], fired["id"]) == (ROUTELESS, "it started from a schedule")
+    told = _rendered(first_request, fired)
+    assert "This run started from a schedule, not from a new message" in told
+    assert "nothing it finishes with is sent to the conversation by itself" in told and HEADING not in told
+
+    tools = _registry_for(root, fired)
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    limit = loop._RoundLimitContext(
+        [{"role": "system", "content": told}, {"role": "user", "content": fired["text"]}],
+        types.SimpleNamespace(), "test-model", "medium", 1, root / "logs", fired["id"], 2,
+        None, {}, "", False, 10, drive_root=root, incoming_messages=None, owner_msg_seen=set(),
+    )
+    loop._finalize_limit_ctx(limit, tools, trace)
+    tail = _prepare_forced_prompt(limit, "[ROUND_LIMIT]", trace)
+    assert _presence_forced_armed(tools._ctx) is False
+    assert "This run started from a schedule, not from a new message" in limit.messages[0]["content"]
+    assert "[PRESENCE_DELIVERY]" not in tail and '"presence_finish"' not in tail
+    assert "a finish_task call or the same request as one JSON object" in tail
+    loop._replace_delivery_candidate(tools, limit, trace, FINAL, control="replace")
+    modern_text, modern_usage, _ = loop._handle_round_limit(limit)
+    assert modern_text == FINAL and not modern_usage.get("wake_silent")
+
+    # Contrast with a real old frozen-ceiling scheduled run: still disarmed at forced exit, and held quiet.
+    admit(root, "legacy-sched")
+    legacy = {"id": "legacy-sched", "chat_id": fired["chat_id"], "text": fired["text"],
+              "metadata": run_metadata("legacy-sched"), "task_contract": {"capability_ceiling": ceiling()}}
+    legacy_tools = _registry_for(root, legacy)
+    legacy_trace = {"tool_calls": [], "reasoning_notes": []}
+    legacy_limit = loop._RoundLimitContext(
+        [{"role": "user", "content": legacy["text"]}], types.SimpleNamespace(), "test-model", "medium",
+        1, root / "logs", legacy["id"], 2, None, {}, "", False, 10,
+        drive_root=root, incoming_messages=None, owner_msg_seen=set(),
+    )
+    loop._finalize_limit_ctx(legacy_limit, legacy_tools, legacy_trace)
+    legacy_tail = _prepare_forced_prompt(legacy_limit, "[ROUND_LIMIT]", legacy_trace)
+    assert schedule_report_run(legacy) is True and _presence_forced_armed(legacy_tools._ctx) is False
+    assert "[PRESENCE_DELIVERY]" not in legacy_tail and '"presence_finish"' not in legacy_tail
+    loop._replace_delivery_candidate(legacy_tools, legacy_limit, legacy_trace, FINAL, control="replace")
+    legacy_text, legacy_usage, _ = loop._handle_round_limit(legacy_limit)
+    assert legacy_text == FINAL and legacy_usage.get("wake_silent") is True
+    legacy_event = build_presence_result_event(legacy, FINAL, legacy_tools._ctx,
+                                               terminal_origin="model_final", silent=True)
+    assert (legacy_event["outcome"], legacy_event["text"], legacy_event["message"]) == ("silent", "", "")
 
 
 # --- receipts: one seam, the actual audience and the same reader ------------------------------------------------
@@ -452,13 +502,13 @@ def test_ordinary_project_and_main_receipts_name_only_acceptance(tmp_path):
 
     ctx = _ctx(tmp_path, _project(tmp_path), event_queue=queue_module.Queue())
     family = _family(ctx, tmp_path)
-    assert family["send_file"]() == "OK: file 'a.txt' accepted for delivery to Project room \"Launch\"."
+    assert family["send_file"]().split("\n")[0] == "OK: file 'a.txt' accepted for delivery to Project room \"Launch\"."
     assert family["send_user_message"]() == 'OK: message accepted for delivery to Project room "Launch".'
     assert json.loads(family["show_card"]())["delivery"] == 'OK: card accepted for delivery to Project room "Launch".'
     plain = _ctx(tmp_path / "other", 1, event_queue=queue_module.Queue())
     family = _family(plain, tmp_path)
     assert family["send_user_message"]() == "OK: message accepted for delivery to owner chat."
-    assert family["send_file"]() == "OK: file 'a.txt' accepted for delivery to owner chat."
+    assert family["send_file"]().split("\n")[0] == "OK: file 'a.txt' accepted for delivery to owner chat."
     assert json.loads(family["show_card"]())["delivery"] == "OK: card accepted for delivery to owner chat."
 
 

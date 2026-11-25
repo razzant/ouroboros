@@ -200,6 +200,7 @@ def _audit_task_custody(drive_root: Any, mine: str, result: Dict[str, Any], *,
                 {"run_id": str(row.run_id), "state": str(row.terminal_state),
                  "model": str(row.model), "profile_id": str(row.profile_id),
                  "selected_subagent_id": str(row.selected_subagent_id),
+                 **({"held_heads": row.request_event["held_heads"]} if row.request_event.get("held_heads") else {}),
                  **_answer_locators(drive_root, row)}
                 for row in state.values()
                 if row.task_id == mine and not row.review_owned
@@ -942,6 +943,7 @@ __all__ = [
 def _ack_current_receipts(root, tid, snapshot):
     from ouroboros import store
     from ouroboros.delegate_custody_current import _decode
+    from ouroboros.delegate_resume import retain_start_receipt
     from ouroboros.task_results import require_writable_task_result_schema
     # One transaction over the result row and its closing receipts: a new debt cannot be
     # removed while the result still shows the old row.
@@ -954,8 +956,12 @@ def _ack_current_receipts(root, tid, snapshot):
         facts = txn.get_row("delegated_runs", tid)
         if facts is None:
             return
-        held = {rid: raw for rid, raw in facts.get("closed_runs", {}).items()
+        closed = facts.get("closed_runs", {})
+        held = {rid: raw for rid, raw in closed.items()
                 if rid not in state or vars(_decode(raw)) != vars(state[rid])}
+        for rid in closed.keys() - held.keys():
+            if retain_start_receipt(txn, state[rid], tid, row):
+                held[rid] = closed[rid]
         if not held and not row.get("delegated_runs_unreconciled") and not facts.get("cost_revision"):
             txn.delete_row("delegated_runs", tid)
         elif {**facts, "closed_runs": held} != facts:  # an unchanged retained debt writes nothing

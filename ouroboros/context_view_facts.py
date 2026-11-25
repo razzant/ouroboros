@@ -13,7 +13,7 @@ from ouroboros.memory_waiting import text as waiting_text
 from ouroboros.utils import update_json_locked, utc_now_iso
 
 CONTEXT_FACTS_NAME = "ouroboros_context_facts"
-LOW_START_EPISODE = "low_start_episode.json"  # under state/: the open episode of memory-lowered starts, if any
+LOW_START_EPISODE = "low_start_episode.json"  # under state/: the open Main-line periods of Low starts, by cause
 SIZE_REFUSAL_KEY = "_context_size_refusal"  # in a task's usage: its round's latest size refusal, whole
 _REFUSAL_BASES = {"provider_stated": "provider stated",
                   "exact_local_count": "derived from an exact local count before sending",
@@ -59,11 +59,13 @@ def block_label(message, index, block, plan):
 
 def memory_facts(plan, mode, messages=()):
     """Captured memory facts of an integrating focus, absent from visible facts rows:
-    on the owner's Max with a known window, the build's Max room part by part (books, core,
-    knowledge and runtime facts, connections, assignment, reply reserve, work room, tool schemas) and how that build settled.
+    on the owner's Max with a known window, the build's Max room (``memory_floor.measure_text``: the gate's need, the
+    ordinary need, the measure by whose part it is) and how that build settled, a lowered one with its cause, in the
+    build's own mode (its start's Low or Nano: a later route may take it lower; else the current mode).
     A cold restore builds a new capture; the task's historical ``plan.start`` is separate and may be unknown.
     my memory: the story with its pages no part or account holds yet (how many, their tokens, the rooms holding
-    most of them) and the rooms' lines; what this view shows only by address; marks and waiting classes
+    most of them) and the rooms' lines; what this view shows only by address and, beside it, the held note heads
+    that stand whole where the window took that from memory (``held_heads_fact``); marks and waiting classes
     with their count, oldest date, list reader and closure act.
     Counted from the captured snapshot and its receipt; measures only, no advice and no
     threshold. Without a Max room fact (the owner's Low or Nano, an unknown window) it names the memory alone."""
@@ -76,53 +78,126 @@ def memory_facts(plan, mode, messages=()):
         line = (f"memory: story {blocks.get('story_tokens', 0):,} ({floor.pages_text(pages)}) + rooms "
                 f"{blocks.get('room_tokens', 0):,}")
     else:
-        line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages) + {
-            "held": "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room["cuts"] else ""),
-            "crowded": "; Low",
-            "route": "; Low, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here",
-        }[room["cause"]]
+        line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages)
+        if room.get("cause") == "held":
+            line += "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room.get("cuts") else "")
+        elif room.get("cause") in ("crowded", "route"):  # any other value is a measure without a settled cause
+            cause = floor.lowered_cause(room)  # Nano where protected words left the maps frame no room
+            start = str((getattr(plan, "start", None) or ("",))[0])
+            built = start if start in ("low", "nano") else mode  # the captured build's mode, not a later route's
+            ran = "Nano, temporarily, for the window" if built == "nano" else floor.TEMPORARY_LOW
+            line += f"; {ran}, cause {cause}" + (
+                ", a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here"
+                if cause == "route" else "")
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
-    line += (f"; shown only by address: {shown}" if shown else "") + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting)
+    line += ((f"; shown only by address: {shown}" if shown else "") + held_heads_fact(plan, receipt)
+             + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting))
     return "" if any(message.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME
                      and f" | {line} | " in f" | {message.get('content') or ''} | " for message in messages) else line
 
 
+def held_heads_fact(plan, receipt):
+    """``; held note heads: N tokens stand whole``, beside what memory yielded to the window: held heads yield to the
+    window last (``memory_floor._host_steps``), so at such a start their room came out of memory's farthest forms. ""
+    when no held head stands whole in this view or the window took nothing from memory: what only an owner's mode
+    target took (``by_budget``) is not the window's."""
+    from ouroboros.held_notes import HeldNoteSection
+
+    fact = receipt.get("floor") or {}
+    if sum((fact.get("steps") or {}).values()) <= int(fact.get("by_budget") or 0):
+        return ""
+    stepped = {row["section_id"] for row in receipt.get("host_sections_addressed", ()) if row.get("held_note_form")}
+    tokens = sum(floor.view_tokens(part.full_text) for part in plan.core.dynamic_sections
+                 if isinstance(part, HeldNoteSection) and part.section_id not in stepped)
+    return f"; held note heads: {tokens:,} tokens stand whole" if tokens else ""
+
+
+_SHORT_BASIS = {"request": " with no memory", "route": " with no memory and no tool schemas"}  # ``lowered_need``
+
+
+def mode_words(plan, mode):
+    """The facts row's mode: a Low the window took from my human's Max named so beside that choice, with its recorded
+    cause (``context_measurement.mode_cause``) and, where this capture's Max room lost its books to that same cause
+    (a cold restore's capture may have lowered for another), its shortfall on that cause's basis
+    (``memory_floor.lowered_need``); Max says Max is not measured where the row's own window text knows no window
+    (``row_window``), whatever its start, a rebind or restore onto an unknown window too, and a window learned later
+    (a rebind, a refusal) is a measured Max."""
+    preferred = str(getattr(plan, "preferred_mode", "") or "")
+    if mode == "low" and preferred == "max":
+        from ouroboros.context_measurement import mode_cause
+
+        cause = mode_cause(plan, mode)
+        room = (plan.projection(mode).memory_facts or {}).get("max_room") if cause in floor.LOWERED_CAUSES else None
+        same = isinstance(room, dict) and room.get("cause") in ("crowded", "route") and floor.lowered_cause(room) == cause
+        short = floor.lowered_need(room)[1] - room["window"] if same else 0
+        return (f"{floor.TEMPORARY_LOW.lower()} (my human's mode: max)" + (f"; cause {cause}" if cause else "")
+                + (f"; short {short:,}{_SHORT_BASIS.get(cause, '')}" if short > 0 else ""))
+    if mode == "max" and plan is not None and row_window(plan).usable is None:
+        return "max (window not known: Max not measured)"
+    return mode
+
+
+_LOW_START_WHY = {
+    "memory": "the whole books did not fit beside my memory even in its shortest tellings",
+    "request": "even with no memory, what the request itself carries tips this start over the window on {model}",
+    "route": ("on {model} the window cannot hold the whole books beside the rest of this start and the work's room "
+              "even with no memory; folding my memory cannot change that"),
+}
+
+
 def low_start_line(plan, mode, task_id):
-    """The owner's Main line for a fresh start of an integrating focus that memory lowered to Low: its Max room (which
-    exists only on the owner's Max with a known window) is ``crowded`` while the books, core, assignment, tool schemas,
-    reply reserve and work room alone fit (``memory_floor.crowded_by_memory``). No numbers: the task's own facts keep
-    them. "" for every other start: a route (the task's own facts disclose it), tool schemas that tip it alone, a held
-    start, a delegated child or nanny, the owner's Low or Nano, an unknown window."""
+    """The owner's Main line for a fresh start of an integrating focus that the window took from whole books in my
+    human's Max (to Low, temporarily, or to Nano where protected words leave the maps frame no room), named in the mode
+    it got, by its Max room's cause (``memory_floor.lowered_cause``: memory, what the request itself carries, or the
+    route). Its Max room exists only on the owner's Max with a known window. No numbers: the task's own facts keep
+    them. "" for every other start: a held start, a delegated child or nanny, the owner's Low or Nano, an unknown
+    window."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
     room = receipt.get("max_room")
-    if receipt.get("role") in DELEGATED_FOCUS_ROLES or not floor.crowded_by_memory(room):
+    if receipt.get("role") in DELEGATED_FOCUS_ROLES or not isinstance(room, dict) or room.get("cause") not in ("crowded", "route"):
         return ""
-    maps = "Low with chapter maps" + (floor.REQUIRED_BOOK_WHOLE if room.get("book_required") else "")
-    return f"Task {task_id} started in {maps}: memory did not fit beside the full books."
+    ran = "Nano" if mode == "nano" else "Low"  # protected words the maps frame could not hold beside its reply reserve
+    why = _LOW_START_WHY[floor.lowered_cause(room)].format(model=str(getattr(plan, "model", "") or "") or "this route")
+    return (f"Task {task_id} runs in {ran} for now{floor.REQUIRED_BOOK_WHOLE if room.get('book_required') else ''}, not "
+            f"in your Max: {why}{'; even the chapter maps did not fit' if ran == 'Nano' else ''}. Your setting stays Max.")
 
 
 def low_start_episode(root, plan, mode, task_id, send):
-    """One Main line per Low episode (owner A, 07.11.2026, replacing 1B of 29.10). A fresh start that memory lowered to
-    Low (``low_start_line``) opens an episode and ``send``s its line; while Low holds nothing more is sent; a start that
-    holds Max with at least the opening start's work room (a root keeps two eighths, a chat turn or wake one) closes
-    the episode silently, and a later Low opens a new one. Every other start (a delegated child or nanny, the owner's
-    Low or Nano, an unknown window, a route or tool schemas that tip a start alone) leaves it as it is. The episode is
-    one small object, ``state/low_start_episode.json``, rewritten under its lock in the terminal outbox's failure
-    domain; ``send`` runs inside that lock and opens the episode only when it queued the line."""
+    """One Main line per open period of each cause (owner A, 07.11.2026, replacing 1B of 29.10; a period per cause by
+    the coordinator's option C, 22.11.2026). ``state/low_start_episode.json`` maps each open period's key to
+    ``{since, task, levels, room}``: ``memory`` for the installation, ``request:<model>`` and ``route:<model>`` for the
+    plan's model. A fresh start that the window took from whole books (``low_start_line``) sends its line and opens its
+    key's period only when that key has none open; while it is open nothing more is sent for that key, and keys are
+    independent, so a route start never silences the memory line. A start that holds Max (it runs in Max, its room
+    held, no delegated role) silently closes every open period opened in its room (``room_id``) beside its work room
+    (a root keeps two eighths, a chat turn or wake one); the others stay open, so lines never alternate as the owner
+    moves between rooms. Every other start (a delegated child or nanny, the owner's Low or Nano, an unknown window, a
+    held room in a lower mode, as a voice envelope fitted below Max) leaves the file as it is. The single episode
+    written before periods (a top-level ``since``) holds no period: the first lowered start replaces it. Residual, by
+    design: a period stays open until a start of its opener's room and kind holds Max (a room that never starts again,
+    or keeps starting crowded, keeps it open), so later starts of its cause send no line; the work's own facts and task
+    card always say Low and the cause. The file is rewritten under its lock in the terminal
+    outbox's failure domain; ``send`` runs inside that lock and a period opens only when it queued the line."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
     room = receipt.get("max_room") or {}
-    held = room.get("cause") == "held" and receipt.get("role") not in DELEGATED_FOCUS_ROLES
+    held = room.get("cause") == "held" and mode == "max" and receipt.get("role") not in DELEGATED_FOCUS_ROLES
     levels = int(room.get("levels") or 1)  # the start's work room in eighths of its window
+    place = room.get("room_id")
     line = low_start_line(plan, mode, task_id)
+    cause = floor.lowered_cause(room) if line else ""
+    key = cause if cause == "memory" else f"{cause}:{str(getattr(plan, 'model', '') or '')}"
 
-    def episode(bit):  # None leaves the file as it is
-        if held:  # a turn that holds Max beside one eighth proves no room for a root that keeps two
-            return {} if bit.get("since") and levels >= int(bit.get("levels") or 1) else None
-        if bit.get("since") or not send(line):
+    def periods(bits):  # None leaves the file as it is
+        opened = {} if "since" in bits else bits  # the single episode written before periods: none open
+        if held:
+            kept = {name: bit for name, bit in opened.items()
+                    if not (bit.get("room") == place and int(bit.get("levels") or 1) == levels)}
+            return kept if len(kept) < len(opened) else None
+        if key in opened or not send(line):
             return None
-        return {"since": utc_now_iso(), "task": task_id, "levels": levels}
+        return {**opened, key: {"since": utc_now_iso(), "task": task_id, "levels": levels, "room": place}}
     if line or held:
-        update_json_locked(pathlib.Path(root) / "state" / LOW_START_EPISODE, episode)
+        update_json_locked(pathlib.Path(root) / "state" / LOW_START_EPISODE, periods)
 
 
 def size_refusal_cause(usage):
@@ -148,7 +223,7 @@ def remember_size_refusal(ctx, refused, *, measured):
     of the book's estimate."""
     import math
 
-    from ouroboros.capability_evidence import _parse_ctx_requested
+    from ouroboros.size_refusal import for_usage
     from ouroboros.context_anchor import _anchor_model_key
 
     usage, plan = ctx.accumulated_usage, getattr(ctx, "context_fit_plan", None)
@@ -156,7 +231,8 @@ def remember_size_refusal(ctx, refused, *, measured):
     own = physical is not None and physical.round_id == f"{usage.get('execution_id') or ''}:round:{ctx.round_idx}"
     measured = bool(measured) and (not own or usage.get("_context_route_fp", "") == physical.route_fp)
     route = physical.route_fp if own else str(usage.get("_context_route_fp") or "") if measured else ""
-    stated_input, _reply, stated_total = _parse_ctx_requested(str(usage.get("_last_llm_provider_message") or ""))
+    refusal = for_usage(usage)
+    stated_input, stated_total = (refusal.requested, refusal.requested_total) if refusal.units == "tokens" else (0, 0)
     sent = int(getattr(refused, "prompt_tokens_bounded_estimate", 0) or 0) if own else 0
     if getattr(refused, "predicted_free_tokens", None) is not None:  # a size it does not state stays unknown
         kind, tokens, basis = "input", int(getattr(refused, "estimated_input_tokens", 0) or 0), "known_window_prediction"
@@ -243,10 +319,11 @@ def request_window_fact(usage, *, overflow=False, round_idx=None, earlier_only=F
 def _failure_request_text(usage, walked):
     """The last failure's own stated request and the window its round assumed. After a configured route's failed walk
     the restored window and estimate are another attempt's: only the failure's own statement stays, if it made one."""
-    from ouroboros.capability_evidence import _parse_ctx_requested
+    from ouroboros.size_refusal import for_usage
     from ouroboros.context_window import WindowRecord
 
-    input_tokens, _reply, total = _parse_ctx_requested(usage.get("_last_llm_provider_message", ""))
+    refusal = for_usage(usage)
+    input_tokens, total = (refusal.requested, refusal.requested_total) if refusal.units == "tokens" else (0, 0)
     stated = f"request {'input' if input_tokens else 'total'} {input_tokens or total:,} tokens (provider stated)"
     if walked:
         model = (usage.get("_last_llm_failure") or {}).get("model")
@@ -292,7 +369,8 @@ def window_projection(record, *, under_way: bool = False):
     observed = limit.observed_at if limit else ""
     source = limit.source if limit else "unknown"
     labels = {"user_setting": "set in Settings", "owner_ack": "owner confirmation",
-              "provider_metadata": "server metadata", "local_health": "local serving window"}
+              "provider_metadata": "server metadata", "local_health": "local serving window",
+              "server_metadata": "the server's own window"}
     label = labels.get(source, source)
     dated = f"{label} {observed.replace('T', ' ')[:16]}".strip()
     if source == "refusal":
@@ -308,7 +386,11 @@ def window_projection(record, *, under_way: bool = False):
             text += f"; accepted input ≥ {record.accepted:,} ({record.accepted_at.replace('T', ' ')[:16]})"
     text += f"; reply reserve {record.reserve:,}"
     contradiction = asdict(record.contradicted_by) if record.contradicted_by else None
-    if contradiction:
+    if contradiction and record.limiting == record.contradicted_by:
+        for stated in record.declared:
+            if stated.source in {"user_setting", "owner_ack"} and stated.tokens > record.limiting.tokens:
+                text += f"; {labels[stated.source]} {stated.tokens:,} capped by the serving window"
+    elif contradiction:
         label = labels.get(contradiction["source"], contradiction["source"])
         text += (f"; {label} says {contradiction['tokens']:,} {contradiction['kind']}"
                  f" ({contradiction['observed_at'].replace('T', ' ')[:16]})")
@@ -321,10 +403,15 @@ def window_projection(record, *, under_way: bool = False):
                 basis=limit.basis if limit else "")
 
 
-def window_fact(plan, reserve):
+def row_window(plan, reserve=0):
+    """The plan's window as its facts row reads it, one reading for the window text and the mode's words: a rebind
+    onto an unknown window drops the plan's record, and a refusal another work recorded is read from the store."""
     from ouroboros.context_window import resolve_window
 
+    return resolve_window(plan, int(reserve or 0), bound=getattr(plan, "window_witness_bound", True))
+
+
+def window_fact(plan, reserve):
     if plan is None:
         return ""
-    record = resolve_window(plan, int(reserve or 0), bound=getattr(plan, "window_witness_bound", True))
-    return window_projection(record, under_way=True)["text"]
+    return window_projection(row_window(plan, reserve), under_way=True)["text"]

@@ -55,6 +55,19 @@ ALLOWED: Dict[Site, str] = {
     ("supervisor/task_admission.py in reserve_task_admission", "store.read"):
         "the reservation reads the task's stored record under its own hold (task_admission.py: not this item's file; "
         "the hunk that moves the read before the hold is in the journal)",
+    # Known debt: Phase B of a drive's settlement (task_custody.settle_child_drive) runs under Q, the ownership
+    # interlock that keeps any occupant from being admitted before the move; one hold reached 95 s (sprint S8), and
+    # its steps' seconds now ride the settlement pass's report (``under_q_sec``) until the work leaves Q.
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "open"):
+        "Phase B's census and hold rechecks and its custody and mail lock files",
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "os.mkdir"):
+        "Phase B's lock and trash folders",
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "os.remove"):
+        "Phase B releasing its custody and mail lock files",
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "os.rename"):
+        "Phase B's move itself: the drive into the trash the maintenance child removes",
+    ("supervisor/queue_transitions.py in task_settlement_interlock", "store.read"):
+        "Phase B's occupant recheck of the stored record",
 }
 
 _EVENTS = frozenset({"open", "os.rename", "os.remove", "os.mkdir", "sqlite3.connect"})
@@ -245,6 +258,18 @@ def _drive_tick() -> None:
     assert queue_publication.publish_queue_changes() in (True, None)
 
 
+def _drive_settlement(tmp_path) -> None:
+    """A settled task's drive moves under Q (``task_settlement_interlock``, Phase B of ``settle_child_drive``)."""
+    from ouroboros import task_custody
+    from supervisor.queue_transitions import task_settlement_interlock
+    from tests.test_child_drive_settlement import TASK, _cancelled_with_capture, not_live
+
+    tmp_path.mkdir(parents=True)
+    data, drive, _record = _cancelled_with_capture(tmp_path)
+    assert task_custody.settle_child_drive(data, TASK, drive, live=not_live,
+                                           guard=task_settlement_interlock)["status"] == "removed"
+
+
 # ---- the laws --------------------------------------------------------------------------------------------------------
 
 def _unnamed_or_gone(seen: Set[Site]) -> Dict[str, list]:
@@ -268,8 +293,11 @@ def test_no_io_under_q_beyond_the_named_inventory(lane, tmp_path, monkeypatch, a
         _drive_continue(tmp_path / "continue", scoped)
     with monkeypatch.context() as scoped:
         _drive_api_task(tmp_path / "api", scoped)
+    _drive_settlement(tmp_path / "settlement")
     with monkeypatch.context() as scoped:
         _drive_restart_pending_admission(tmp_path / "restart", scoped)
+    with monkeypatch.context() as scoped:
+        _drive_exact_pause_and_wake(tmp_path / "sleep", scoped)
     drift = _unnamed_or_gone(set(audited))
     for key in drift.get("unnamed", []):
         sample, stack = _STATE["samples"].get(key, ("", ""))
@@ -337,3 +365,17 @@ def test_every_row_names_a_reason():
     events = _EVENTS | {event for _module, _attr, event in _STORE_SEAMS}
     for site, why in ALLOWED.items():
         assert site[1] in events and " in " in site[0] and why, site
+
+
+def _drive_exact_pause_and_wake(tmp_path, monkeypatch):
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests.test_model_sleep import _cold_park, _mail, _result
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 5.0)
+    _tick_armed()
+    _result(tmp_path, "peer")
+    _cold_park(tmp_path, monkeypatch, workers, senders=["peer"], barrier=q.publish_queue_snapshot)
+    _mail(tmp_path, "sleeper", "ready", sender="peer")
+    assert wake_ready_sleepers(q)[0]["ok"]

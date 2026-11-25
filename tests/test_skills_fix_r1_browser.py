@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from tests._skills_page_harness import (
+    open_view,
     URL, capture, fixture, no_overflow, open_skills, skills_browser as skills_browser,
 )
 
@@ -45,7 +46,7 @@ def _only(page, name):
 
 def _contained(page):
     assert no_overflow(page)
-    assert page.locator(".marketplace-modal-body").evaluate_all(
+    assert page.locator(".ui-modal-body").evaluate_all(
         "nodes => nodes.every(el => el.scrollWidth <= el.clientWidth + 1)")
 
 
@@ -115,7 +116,7 @@ def test_acceptance_and_update_outcomes(skills_browser, browser_name, width, the
 
         withdrawn = _only(page, 'old_tool')
         assert 'Version 0.2.0 was withdrawn by Ouroboros Community' in withdrawn.inner_text()
-        page.locator('[data-tab="browse"]').click()
+        open_view(page, 'browse')
         builtin = page.locator('[data-browse-board] [data-item="builtin/telegram"]').first
         builtin.wait_for()
         assert builtin.locator('[data-official-mark]').count() == 1
@@ -141,7 +142,7 @@ def test_source_warning_and_my_skills_opt_in(skills_browser, browser_name, width
         page, skills, errors = _open(browser, width, theme, browser_name)
         skills.answers['/api/skill-sources/probe'] = {'kind': 'git', 'suggested_name': 'Team skills',
             'found': ['weather'], 'warning': 'not_encrypted'}
-        page.locator('[data-tab="sources"]').click()
+        open_view(page, 'sources')
         page.locator('[data-source-action="add"]').click()
         page.locator('[data-source-address]').fill('http://git.example/skills')
         page.locator('[data-add-check]').click()
@@ -155,7 +156,7 @@ def test_source_warning_and_my_skills_opt_in(skills_browser, browser_name, width
         skills.wait_for_count(('POST', '/api/skill-sources'), 1)
         assert skills.posted('/api/skill-sources') == [{'url': 'http://git.example/skills', 'name': 'Team skills', 'trust': 'review'}]
 
-        page.locator('[data-tab="installed"]').click()
+        open_view(page, 'installed')
         card = _only(page, 'update_rejected')
         card.locator('[data-skill-menu-trigger]').click()
         page.locator('body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub').click()

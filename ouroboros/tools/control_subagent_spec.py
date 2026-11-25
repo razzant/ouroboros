@@ -22,8 +22,8 @@ def schedule_subagent_properties() -> Dict[str, Any]:
 
     The PUBLIC schema is the model contract (`ToolEntry("schedule_subagent", …)` in `get_tools`,
     with `additionalProperties: False`). Ordinary arguments are derived from this one mapping;
-    the only non-public exception is the bounded D23 legacy selector set carried through the
-    registry for deterministic migration. This avoids the former pair of hand-maintained public
+    the only non-public exceptions are the bounded D23 legacy selector set carried through the
+    registry for deterministic migration and ``title``, refused there with the call that works. This avoids the former pair of hand-maintained public
     parameter lists drifting apart (BIBLE P7).
 
     Returns a FRESH mapping per call, exactly as the inline literal did, so a caller that mutates
@@ -62,13 +62,14 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "objective": {"type": "string", "description": "Focused OUTCOME and scope, not a step-by-step script. A harness-dispatched child forwards work to its delegated run; a scripted objective can read as orders to execute natively."},
         "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
         "role": {"type": "string", "description": "Optional freeform lineage/UI role, e.g. architecture-reviewer; omission assigns no role."},
-        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks and the knowledge outline but none of my other memory, so put recipes/details here, not in objective."},
+        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks, the knowledge outline and, unless declared, the heads of the notes that claim its room and of the notes their heads link, but none of my other memory, so put recipes/details here, not in objective."},
         "input_sources": {
             "type": "string", "enum": ["shared", "declared"],
             "description": (
                 "Every child starts with my human's words for the work verbatim and dated, the marks in force "
                 "and the knowledge outline; other knowledge stays one read away. Omit or shared: it also starts "
-                "with SYSTEM/BIBLE, book maps, my identity, life's top-level account (except Agent-session "
+                "with the heads of the notes that claim its room and of the notes their heads link, SYSTEM/BIBLE, "
+                "book maps, my identity, life's top-level account (except Agent-session "
                 "supervisors), the child's room page, full assignment and attachments. declared selects only "
                 "the authored objective/context/constraints and full governance/task authority for an independent "
                 "first position; it excludes the rest of shared memory (identity, life account, room page), "
@@ -132,11 +133,10 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "the child's work order attaches them; its later starts, continuations and replacements select their own. "
             "With input_sources=declared only these inputs are copied to the child."),
         **input_files_parameter(
-            "Read-only children only (write_surface omitted or read_only); [] reports an empty receipt. Checked with your "
-            "read authority and the child's limits and retained before the child is queued; the queued receipt lists each "
-            "copy. An API child's first input names each copy for read_file(path=<copy>); an agent_session child's first "
-            "start verifies them."),
-        "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
+            "Omit write_surface or use read_only. Checked for caller and child before queueing; [] reports an empty "
+            "receipt. API children read each copy with read_file. The first session start verifies retained bytes "
+            "unless it explicitly replaces the selection."),
+        "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree, directly or by applying its own children's patches. Pro runtime mode needs it, Cyber Pro does not, lower modes refuse either way; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
         "allowed_origins": {
             "type": "array", "items": {"type": "string"},
@@ -192,19 +192,29 @@ def schedule_subagent_param_names() -> frozenset:
 
 
 _INTERNAL_SCHEDULE_OPTIONS: frozenset = frozenset()
+SCHEDULE_REFUSAL = "⚠️ TOOL_ARG_ERROR (schedule_subagent): "
+_STRICT_SCHEMA = ("Use the strict schema: subagent_id, objective, expected_output, optional role/context/constraints/"
+                  "memory_mode/workspace_root/effort and (for mutative children) write_surface/write_root/"
+                  "protected_paths_grant/external_tool_grants.")
 
 
-def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tuple[Dict[str, Any], str]:
-    """Normalize and validate the public schedule_subagent fields.
+def one_refusal(problems: list) -> str:
+    """Every problem of one request in one refusal, each worded as its own check words it (the W2 shape of
+    ``arg_feedback.argument_refusal``; DEVELOPMENT 02: field, value and repair in one reply), so fixing one never
+    meets the next on the following call. One problem reads exactly as it always did."""
+    return SCHEDULE_REFUSAL + "; ".join(str(problem).rstrip(". ") for problem in problems) + "."
 
-    Returns ``(fields, "")`` or ``({optional reason}, refusal)``. Extracted from ``_schedule_task`` so
-    the handler stays inside the method-size gate — argument validation is a coherent
-    phase with one job, not a slice taken to shed lines.
+
+def _shape_problems(params: Dict[str, Any], unsupported: Any) -> tuple[list[str], dict]:
+    """Independent problems and normalized selections before any route is selected.
+
+    The shape pass checks each field on its own. Checks that depend on other fields, the parent's grants
+    or the route follow once these pass.
     """
+    problems = [f"unsupported argument(s): {', '.join(unsupported)}. {_STRICT_SCHEMA}"] if unsupported else []
     if params.get("mode") not in (None, "ask", "plan", "agent"):
-        return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): mode must be ask, plan or agent."
+        problems.append("mode must be ask, plan or agent.")
     deadline_at = str(params.get("deadline_at") or "").strip()
-    memory_mode = str(params.get("memory_mode") or "forked").strip().lower()
     if deadline_at:
         # `deadline_at` became MODEL-AUTHORED in v6.87.7; it used to be computed by
         # plan_review, where neither check could fail. Both failures below are SILENT
@@ -216,61 +226,97 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
 
         parsed = parse_deadline_ts(deadline_at)
         if parsed is None:
-            return {}, (
-                "⚠️ TOOL_ARG_ERROR (schedule_subagent): deadline_at must be an ISO-8601 UTC "
-                f"instant such as 2026-08-02T18:30:00Z (got: {deadline_at!r})."
-            )
-        if parsed <= utc_now():
-            return {}, (
-                "⚠️ TOOL_ARG_ERROR (schedule_subagent): deadline_at is already in the past "
-                f"({deadline_at}); a child bound to it would finalize before doing any work."
-            )
-    objective = str(params.get("objective") or "").strip()
-    if not objective:
-        return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required."
-    expected_output = str(params.get("expected_output") or "").strip()
-    if not expected_output:
-        return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): expected_output is required."
+            problems.append("deadline_at must be an ISO-8601 UTC instant such as 2026-08-02T18:30:00Z "
+                            f"(got: {deadline_at!r}).")
+        elif parsed <= utc_now():
+            problems.append(f"deadline_at is already in the past ({deadline_at}); a child bound to it would "
+                            "finalize before doing any work.")
+    if "title" in params:  # start_task's card name; this call names no card
+        problems.append(f"title={params['title']!r} is no schedule_subagent field: objective names the work"
+                        + ("" if str(params.get("objective") or "").strip() else " and is required")
+                        + ", and the optional role becomes part of the child's assignment; send the call without title.")
+    for field in ("objective", "expected_output"):
+        if not str(params.get(field) or "").strip() and (field, "title" in params) != ("objective", True):
+            problems.append(f"{field} is required.")
     raw_claims = params.get("acceptance_claims")
-    if raw_claims is not None and (
-        not isinstance(raw_claims, list)
-        or any(not isinstance(item, str) for item in raw_claims)
-    ):
-        return {}, (
-            "⚠️ TOOL_ARG_ERROR (schedule_subagent): acceptance_claims must be an array "
-            "of plain strings (one checkable claim per entry)."
-        )
+    if raw_claims is not None and (not isinstance(raw_claims, list) or any(not isinstance(item, str) for item in raw_claims)):
+        problems.append("acceptance_claims must be an array of plain strings (one checkable claim per entry).")
+    if str(params.get("memory_mode") or "forked").strip().lower() not in VALID_SUBTASK_MEMORY_MODES:
+        problems.append(f"memory_mode must be one of: {', '.join(sorted(VALID_SUBTASK_MEMORY_MODES))}. memory_mode=shared "
+                        "is disabled for live local subagents until a sanitized shared-context mode exists.")
+    effort_error = requested_child_effort(params.get("effort"), "schedule_subagent")[1]
+    if effort_error:
+        problems.append(effort_error.removeprefix(SCHEDULE_REFUSAL))
+    view = params.get("memory_view")
+    if isinstance(view, dict) and (view.get("owner_words") is False or view.get("marks") == "none"):
+        problems.append("memory_view only widens a child's view; it keeps my human's words and the marks in force.")
+    if isinstance(view, dict) and not set(view) <= set(MEMORY_VIEW_FIELDS):
+        problems.append(f"memory_view fields are {', '.join(MEMORY_VIEW_FIELDS)} "
+                        f"(got: {', '.join(sorted(map(str, set(view) - set(MEMORY_VIEW_FIELDS))))}).")
+    if "directory_strategy" in params and params["directory_strategy"] not in ("direct", "copy"):
+        problems.append("directory_strategy must be direct or copy.")
+    if "scope_paths" in params and not _relative_paths(params["scope_paths"]):
+        problems.append("scope_paths must be an array of nonempty relative paths.")
+    if params.get("workspace") not in (None, "copy", "in_place"):
+        problems.append("workspace must be copy or in_place.")
+
+    selections: dict = {}
+    if params.get("input_files") is not None:
+        from ouroboros.delegate_readonly_inputs import InputSelectionError, selection_entries
+
+        try:
+            selections["input_files"] = selection_entries(params["input_files"])
+        except InputSelectionError as exc:
+            problems.append(exc.detail)
+    if "allowed_origins" in params:
+        from ouroboros.contracts.task_contract import normalize_browser_origin
+
+        requested = params["allowed_origins"]
+        origins = [normalize_browser_origin(item, origin_only=True) for item in requested] if isinstance(requested, list) else None
+        if origins is None or not all(origins):
+            problems.append("allowed_origins must contain exact HTTP(S) origins without paths, credentials or wildcards.")
+        else:
+            selections["allowed_origins"] = list(dict.fromkeys(origins))
+    return problems, selections
+
+
+def _relative_paths(paths: Any) -> bool:
+    """``scope_paths`` as the folder geometry takes them: a list of nonempty relative paths inside the folder."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    return isinstance(paths, list) and not any(
+        not isinstance(path, str) or not path.strip() or "\x00" in path
+        or PurePosixPath(path).is_absolute() or PureWindowsPath(path).drive
+        or PureWindowsPath(path).root or ".." in PurePosixPath(path).parts for path in paths)
+
+
+def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
+                               unsupported: Any = ()) -> tuple[Dict[str, Any], str]:
+    """Normalize and validate the public schedule_subagent fields.
+
+    Returns ``(fields, "")`` or ``({optional reason}, refusal)``. Extracted from ``_schedule_task`` so
+    the handler stays inside the method-size gate — argument validation is a coherent
+    phase with one job, not a slice taken to shed lines. The independent shape problems,
+    with the ``unsupported`` names the handler found, are refused together (``_shape_problems``).
+    """
+    problems, selections = _shape_problems(params, unsupported)
+    if problems:
+        return {}, one_refusal(problems)
+    deadline_at = str(params.get("deadline_at") or "").strip()
+    memory_mode = str(params.get("memory_mode") or "forked").strip().lower()
+    objective = str(params.get("objective") or "").strip()
+    expected_output = str(params.get("expected_output") or "").strip()
     # Vacuous claims normalize to ABSENT, never an error (the v6.65.1/.2 lesson:
     # min-constraints shape placeholder junk instead of preventing it).
     acceptance_claims = [
-        item.strip() for item in (raw_claims or []) if isinstance(item, str) and item.strip()
+        item.strip() for item in (params.get("acceptance_claims") or []) if isinstance(item, str) and item.strip()
     ]
-    if memory_mode not in VALID_SUBTASK_MEMORY_MODES:
-        allowed = ", ".join(sorted(VALID_SUBTASK_MEMORY_MODES))
-        return {}, (
-            f"⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_mode must be one of: {allowed}. "
-            "memory_mode=shared is disabled for live local subagents until a sanitized shared-context mode exists."
-        )
-    requested_effort, effort_error = requested_child_effort(params.get("effort"), "schedule_subagent")
-    if effort_error:
-        return {}, effort_error
-    directory_options = {}
+    requested_effort = requested_child_effort(params.get("effort"), "schedule_subagent")[0]
+    directory_options = {}  # the folder fields' own values passed the shape pass
     if "directory_strategy" in params:
-        strategy = params["directory_strategy"]
-        if strategy not in ("direct", "copy"):
-            return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): directory_strategy must be direct or copy."
-        directory_options["directory_strategy"] = strategy
+        directory_options["directory_strategy"] = params["directory_strategy"]
     if "scope_paths" in params:
-        from pathlib import PurePosixPath, PureWindowsPath
-
-        paths = params["scope_paths"]
-        if not isinstance(paths, list) or any(
-            not isinstance(path, str) or not path.strip() or "\x00" in path
-            or PurePosixPath(path).is_absolute() or PureWindowsPath(path).drive
-            or PureWindowsPath(path).root or ".." in PurePosixPath(path).parts for path in paths
-        ):
-            return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): scope_paths must be an array of nonempty relative paths."
-        directory_options["scope_paths"] = list(paths)
+        directory_options["scope_paths"] = list(params["scope_paths"])
     if directory_options.get("directory_strategy") == "copy" and not directory_options.get("scope_paths"):
         return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): copy requires scope_paths; use ['.'] to select the whole folder."
     from ouroboros.delegate_directory import DIRECTORY_OPTIONS_NEED_WRITE, default_shaped_directory_options
@@ -289,24 +335,23 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
             import uuid
 
             directory_options["document_import_intent"] = uuid.uuid4().hex
-    if params.get("input_files") is not None:  # shape only: permission and copying happen with the queued child's identity
-        from ouroboros.delegate_readonly_inputs import InputSelectionError, selection_entries
-
-        try:
-            directory_options["input_files"] = selection_entries(params["input_files"])
-        except InputSelectionError as exc:
-            return {}, f"⚠️ TOOL_ARG_ERROR (schedule_subagent): {exc.detail}"
+    if "input_files" in selections:  # permission and copying happen with the queued child's identity
+        directory_options["input_files"] = selections["input_files"]
         if directory_options["input_files"] and str(params.get("write_surface") or "").strip().lower() not in {"", "read_only"}:
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): input_files_readonly_only: input_files prepares inputs "
                         "for a read-only child; omit it or write_surface.")
-    if params.get("workspace") not in (None, "copy", "in_place"):
-        return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace must be copy or in_place."
     if params.get("workspace") == "in_place":  # the documented default geometry is no folder request, as at delegate_start
-        if str(params.get("write_surface") or "").strip().lower() not in {"self_worktree", "external_workspace", "genesis"} \
-                or not default_shaped_directory_options(directory_options.get("directory_strategy"),
-                                                        directory_options.get("scope_paths")):
+        surface = str(params.get("write_surface") or "").strip().lower()
+        in_the_way = [] if surface in {"self_worktree", "external_workspace", "genesis"} else [
+            f"write_surface={params['write_surface']!r}" if params.get("write_surface") else "no write_surface"]
+        if not default_shaped_directory_options(directory_options.get("directory_strategy"),
+                                                directory_options.get("scope_paths")):
+            in_the_way += ["directory_strategy='copy'"] * (directory_options.get("directory_strategy") == "copy") + [
+                "scope_paths"] * bool(directory_options.get("scope_paths"))
+        if in_the_way:
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace='in_place' needs an acting Git write_surface "
-                        "and no directory options.")
+                        f"and no directory options; in the way: {', '.join(in_the_way)}. Omitting workspace removes "
+                        "this conflict.")
         directory_options["workspace"] = "in_place"
 
     # Folder geometry is a WRITE-side request: a read-only child reads the selected
@@ -320,7 +365,7 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
             directory_options.get("directory_strategy"), directory_options.get("scope_paths"))
     ):
         return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): " + DIRECTORY_OPTIONS_NEED_WRITE
-    from ouroboros.contracts.task_contract import normalize_allowed_origins, normalize_browser_origin, normalize_resource_policy
+    from ouroboros.contracts.task_contract import normalize_resource_policy
     from ouroboros.presence_authority import presence_ceiling_from_context
     from ouroboros.tools.core import is_restricted_subagent_profile
 
@@ -348,11 +393,8 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
     except ValueError as exc:
         return {"reason": "INPUT_SOURCE_SELECTION_INVALID"}, f"⚠️ TOOL_ARG_ERROR (schedule_subagent): {exc}."
     resource_policy = normalize_resource_policy(parent.get("resource_policy") or metadata.get("resource_policy"))
-    if "allowed_origins" in params:
-        requested = params["allowed_origins"]
-        if not isinstance(requested, list) or any(not normalize_browser_origin(item, origin_only=True) for item in requested):
-            return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): allowed_origins must contain exact HTTP(S) origins without paths, credentials or wildcards."
-        origins = normalize_allowed_origins(requested)
+    if "allowed_origins" in selections:
+        origins = selections["allowed_origins"]
         # The host caller class supplies authority; neither a URL in page prose
         # nor an external Presence event may manufacture a new owner grant.
         subset_only = (ctx is None or is_restricted_subagent_profile(ctx)
@@ -361,12 +403,6 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
             return {}, "⚠️ BROWSER_ORIGIN_NOT_GRANTED: this caller may only narrow its inherited allowed_origins."
         resource_policy["allowed_origins"] = origins
     view = params.get("memory_view")
-    if isinstance(view, dict) and (view.get("owner_words") is False or view.get("marks") == "none"):
-        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view only widens a child's view; "
-                    "it keeps my human's words and the marks in force.")
-    if isinstance(view, dict) and not set(view) <= set(MEMORY_VIEW_FIELDS):
-        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view fields are "
-                    f"{', '.join(MEMORY_VIEW_FIELDS)} (got: {', '.join(sorted(map(str, set(view) - set(MEMORY_VIEW_FIELDS))))}).")
     return {
         "deadline_at": deadline_at, "objective": objective, "expected_output": expected_output,
         "role": str(params.get("role") or "").strip(),

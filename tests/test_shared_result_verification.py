@@ -7,13 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.artifacts import task_artifact_dir_path, copy_directory_to_task_artifacts, copy_file_to_task_artifacts
-from ouroboros.headless import finalize_task_artifacts
 from ouroboros.task_results import write_task_result
 from ouroboros.task_status import load_effective_task_result
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
 from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from tests._store_shared import read_result, seed_result
+from tests._workspace_git import capture_manifest_fields, git_repository, publish_capture, world_git
+from tests._worlds import clone_repository, world
 
 # Actual Git subprocess fixtures follow the repository's real-process lane.
 
@@ -22,14 +22,15 @@ def git(root, *args):
     return subprocess.run(["git", *args], cwd=root, capture_output=True, check=True).stdout
 
 
-def init(root):
-    root.mkdir()
-    git(root, "init", "-q")
-    git(root, "config", "user.name", "Fixture")
-    git(root, "config", "user.email", "fixture@example.invalid")
+def _lay_base(folder):
+    root = git_repository(folder / "repo", unborn=True, identity=True)
     (root / "a.txt").write_bytes(b"one\ntwo\nthree\n")
-    git(root, "add", "a.txt")
-    git(root, "commit", "-qm", "base")
+    world_git(root, "add", "a.txt")
+    world_git(root, "commit", "-qm", "base")
+
+
+def init(root):
+    clone_repository(world("shared-result-verification-base", _lay_base) / "repo", root)
 
 
 @pytest.fixture
@@ -54,24 +55,21 @@ def capture(parent, b, drive, *, direct=False, edit=None, outputs=("rendered",))
         requested_constraint={"mode": "acting_subagent", "surface": "external_workspace", "write_root": str(b)},
         workspace_root=str(b), workspace_mode="external", base_sha="", parent_task_id="parent")
     assert not error
-    task = {"id": "child", "workspace_root": root, "workspace_mode": mode, "task_constraint": constraint}
+    task = {"id": "child", "workspace_root": root, "workspace_mode": mode, "task_constraint": constraint,
+            "result": "Files written in assigned B", "parent_task_id": "parent", "root_task_id": "parent",
+            "delegation_role": "subagent"}
     if edit:
         edit()
     else:
         (b / "a.txt").write_bytes(b"one\nchanged\nthree\n")
-    write_task_result(drive, "child", "completed", result="Files written in assigned B",
-                      parent_task_id="parent", root_task_id="parent", delegation_role="subagent",
-                      workspace_root=root, task_constraint=constraint)
-    art = task_artifact_dir_path(drive, "child", create=True)
     if direct:
         child = ToolContext(repo_dir=parent.repo_dir, drive_root=drive, task_id="child",
                             workspace_root=b, workspace_mode="external")
         for name in outputs:
             register = copy_directory_to_task_artifacts if (b / name).is_dir() else copy_file_to_task_artifacts
             register(child, b / name)
-        finalize_task_artifacts(drive, task)
-    else:
-        _, manifest = write_workspace_patch_artifacts(b, art, task=task)
+    art, manifest = publish_capture(drive, task)
+    if not direct:
         assert manifest["status"] == "ready_with_changes", manifest
     return art
 
@@ -153,19 +151,18 @@ def test_public_verifies_at_b_without_transfer(env, monkeypatch, kind):
     assert load_effective_task_result(drive, "child")["child_result_disposition"] == "integrated"
 
 
-@pytest.mark.parametrize("change", ["wrong_target", "base", "missing_assignment"])
+@pytest.mark.parametrize("change", ["wrong_target", "capture_root", "base", "result_root", "missing_assignment"])
 def test_identity_refusals_precede_b_verification(env, monkeypatch, change):
     parent, a, b, drive = env
+    if change == "capture_root":
+        capture_manifest_fields(monkeypatch, workspace_root=str(a))
+    elif change == "base":
+        capture_manifest_fields(monkeypatch, base_head="0" * 40)
     art = capture(parent, b, drive)
-    manifest = json.loads((art / "workspace_patch.json").read_text())
     args = {}
     if change == "wrong_target":
         args["target_root"] = str(a)
-    elif change == "capture_root":
-        manifest["workspace_root"] = str(a)
-    elif change == "base":
-        manifest["base_head"] = "0" * 40
-    else:
+    elif change in ("result_root", "missing_assignment"):
         row = read_result(drive, "child")
         if change == "result_root":
             row["workspace_root"] = str(a)
@@ -173,7 +170,6 @@ def test_identity_refusals_precede_b_verification(env, monkeypatch, change):
             row.pop("workspace_root")
             row["task_constraint"].pop("write_root")
         seed_result(drive, "child", row)
-    (art / "workspace_patch.json").write_text(json.dumps(manifest))
     monkeypatch.setattr("ouroboros.tools.subagent_integration._verify_shared_external_workspace",
                         lambda *a, **k: pytest.fail("B was verified before identity admission"))
     before = snapshot(a), snapshot(b), (art / "workspace.patch").read_bytes()
@@ -230,9 +226,11 @@ def test_cyber_no_external_parent_keeps_existing_off_home_read(env, monkeypatch)
     assert "Verified external_workspace child" in invoke(parent)
 
 
-@pytest.mark.parametrize("drift", ["patch_bytes", "content", "live_head"])
-def test_capture_integrity_legacy_and_shared_head_movement(env, drift):
+@pytest.mark.parametrize("drift", ["patch_bytes", "content", "live_head", "legacy"])
+def test_capture_integrity_legacy_and_shared_head_movement(env, monkeypatch, drift):
     parent, a, b, drive = env
+    if drift == "legacy":
+        capture_manifest_fields(monkeypatch, omit=("workspace_root", "base_head"))
     art = capture(parent, b, drive)
     if drift == "patch_bytes":
         with (art / "workspace.patch").open("ab") as stream:
@@ -242,11 +240,6 @@ def test_capture_integrity_legacy_and_shared_head_movement(env, drift):
     elif drift == "live_head":
         git(b, "add", "a.txt")
         git(b, "commit", "-qm", "shared parent commit")
-    else:
-        p = art / "workspace_patch.json"
-        m = json.loads(p.read_text())
-        m.pop("workspace_root"); m.pop("base_head")
-        p.write_text(json.dumps(m))
     before = snapshot(a), snapshot(b)
     out = invoke(parent)
     assert (snapshot(a), snapshot(b)) == before
@@ -436,8 +429,10 @@ def test_a_link_out_of_b_is_judged_by_its_own_path(env, authority, executor):
         assert "RESOURCE_POLICY_BLOCKED" in block_reason_for_path(parent, b / "link", "read_bytes")
 
 
-def test_capture_under_ancestor_repo_cannot_hide_patch_paths_from_policy(env):
+def test_capture_under_ancestor_repo_cannot_hide_patch_paths_from_policy(env, monkeypatch):
     parent, _, b, drive = env
+    # Path admission derives from captured patch bytes even when the writer omitted the hints.
+    capture_manifest_fields(monkeypatch, tracked_changed=[], untracked_included=[])
     art = capture(parent, b, drive)
     ancestor = drive.parent
     git(ancestor, "init", "-q")
@@ -446,12 +441,6 @@ def test_capture_under_ancestor_repo_cannot_hide_patch_paths_from_policy(env):
     (ancestor / "sentinel.txt").write_bytes(b"ancestor\n")
     git(ancestor, "add", "sentinel.txt")
     git(ancestor, "commit", "-qm", "ancestor")
-    manifest_path = art / "workspace_patch.json"
-    manifest = json.loads(manifest_path.read_text())
-    # Path admission derives from captured patch bytes, not these hints.
-    manifest["tracked_changed"] = []
-    manifest["untracked_included"] = []
-    manifest_path.write_text(json.dumps(manifest))
     parent.task_contract = {"resource_policy": {"protected_artifacts": [{
         "id": "reference", "paths": [str(b / "a.txt")], "deny": ["read_bytes"]}]}}
     before = snapshot(b), (art / "workspace.patch").read_bytes()
@@ -481,8 +470,14 @@ def dispositions(drive):
 
 
 @pytest.mark.parametrize("refusal", ["missing_assignment", "path_policy", "unparseable_patch"])
-def test_early_refusals_keep_verdict_and_custody_without_absorption(env, refusal):
+def test_early_refusals_keep_verdict_and_custody_without_absorption(env, monkeypatch, refusal):
     parent, a, b, drive = env
+    if refusal == "unparseable_patch":
+        # An unreadable Git diff can have a valid published byte count and digest.
+        def write_invalid_diff(cmd, cwd, stream, **options):
+            return stream.write(b"not a patch\n")
+
+        monkeypatch.setattr("ouroboros.workspace_patch_capture._append_git_output", write_invalid_diff)
     art = capture(parent, b, drive, edit=nested_edit(b) if refusal == "path_escape" else None)
     args = {}
     if refusal == "missing_assignment":
@@ -499,12 +494,6 @@ def test_early_refusals_keep_verdict_and_custody_without_absorption(env, refusal
             "id": "black-box", "paths": [str(b / "a.txt")], "deny": ["read_bytes"]}]}}
     elif refusal == "path_escape":  # the captured file's folder now leaves B
         link_out(b / "sub", b.parent / "outside")
-    else:
-        from hashlib import sha256
-        (art / "workspace.patch").write_bytes(b"not a patch\n")
-        manifest = json.loads((art / "workspace_patch.json").read_text())
-        manifest["sha256"] = sha256(b"not a patch\n").hexdigest()
-        (art / "workspace_patch.json").write_text(json.dumps(manifest))
     code, outcome = {
         "missing_assignment": ("TARGET_MISSING", "shared_workspace_missing_target"),
         "conflicting_assignment": ("TARGET_MISMATCH", "shared_workspace_target_mismatch"),
@@ -604,6 +593,27 @@ def test_registered_output_must_keep_its_recorded_type(env, change):
     assert "INTEGRATE_DIRECTORY_OUTPUT_MISMATCH" in out, out
     assert verdict(drive)["outcome"] == "direct_output_mismatch"
     assert_unabsorbed(drive)
+
+
+def test_split_directory_result_verifies_the_promoted_registered_file(env):
+    parent, a, b, drive = env
+    b = b.parent / "plain"
+    b.mkdir()
+    (b / "report.txt").write_bytes(b"fixture report\n")
+    producer = drive / "task_drives" / "child"
+    producer.mkdir(parents=True)
+    art = capture(parent, b, producer, direct=True, edit=lambda: None, outputs=("report.txt",))
+    row = read_result(producer, "child")
+    write_task_result(drive, "child", "running", parent_task_id="parent", workspace_root=str(b),
+                      task_constraint=row["task_constraint"], child_drive_root=str(producer), artifact_status="pending")
+    [held] = [Path(item["path"]) for item in row["artifacts"] if item["kind"] == "workspace_registered_output"]
+    destination = task_artifact_dir_path(drive, "child") / held.relative_to(art)
+    destination.parent.mkdir(parents=True)
+    held.replace(destination)
+    before = snapshot(a), snapshot(b)
+    out = invoke(parent)
+    assert "Verified 1 registered file postimage(s)" in out, out
+    assert (snapshot(a), snapshot(b)) == before
 
 
 def test_verdict_target_reaches_the_custody_disposition_rows_and_absence_stays_absent(env):

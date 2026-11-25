@@ -5,7 +5,7 @@ holds the failures (``outcome_axes.execution.unresolved_tool_errors`` first, els
 ``cosmetic_tool_errors``; ``outcomes`` keeps at most 20 of each), so the clause names the first LOUD one — not a
 failed read (``read_only``, owner 06.11 A) and not a details-only leftover (``details_only``, owner 09.11 A: a
 command that ran and failed, a call refused before running; both stay in the details) — in plain words: a noun for
-the step and what happened to it, never a tool name, its result text or a path (DESIGN "Owner-facing words"; owner decision 16.09 Q5=A). Browser twin:
+the step and what happened to it, never a tool name, its result text or a path (DESIGN principle 7 "Words serve the next step"; owner decision 16.09 Q5=A). Browser twin:
 ``web/modules/task_reason_words.js`` (``residualToolErrorsPhrase``); the cases of
 ``web/tests/fixtures/outcome_phase_parity.json`` pin both.
 
@@ -14,6 +14,15 @@ the step and what happened to it, never a tool name, its result text or a path (
 ``_outcome_receipts.red_check_fact``): why the check did not pass, in the words of the card's "Check did not pass"
 row where it has one, and whether any check passed after it; the command and paths stay in the receipt. Browser twin:
 ``web/modules/verification_presentation.js`` (``redCheckPhrase``), pinned by the same fixture.
+
+``configured_actor_incomplete`` / ``configured_actor_unknown`` read one sentence whatever the first coding attempt of a
+helper had done, and said no run succeeded. ``first_attempt_cause_key`` picks a sentence from the stored
+``outcome_axes.execution.actor_first_terminal`` instead, only where its typed witness PROVES the first attempt: an
+``initial_execution.state`` out of the closed ``_FIRST_ATTEMPT_STATES`` vocabulary (a settled success whose work-order
+coverage was never confirmed carries ``succeeded_source_unverified`` and proves only the ending), or a typed zero-run receipt —
+a validated historical ``complete`` included, since it still proves no physical start while the fact stays UNKNOWN.
+The reason codes stay as recorded; the producer's status×reason pairing is deliberately NOT re-derived here (a
+duplicated matrix is a second exception list that reads every new producer fact as unknown).
 """
 
 from __future__ import annotations
@@ -133,3 +142,67 @@ def red_check_phrase(objective: Any) -> str:
             else f"The last recorded check did not pass ({check_cause(fact)}); no check passed after it")
     tail = f"; {more} more failed check{' has' if more == 1 else 's have'} no recorded passing rerun" if more else ""
     return f"{head}{tail}."
+
+
+_ACTOR_REASONS = ("configured_actor_incomplete", "configured_actor_unknown")
+# The closed vocabulary of the typed first-attempt witness (``initial_execution.state``): the custody
+# terminal states that prove what the FIRST coding attempt did. A settled success whose work-order
+# coverage stayed unconfirmed carries ``succeeded_source_unverified`` (delegate_evidence): it gets
+# its own words, never the succeeded attempt's sentence.
+_FIRST_ATTEMPT_STATES = ("failed", "cancelled", "interrupted", "succeeded", "succeeded_source_unverified")
+
+
+def first_attempt_cause_key(execution: Dict[str, Any]) -> str:
+    """The sentence key the stored ``actor_first_terminal`` PROVES about the FIRST coding attempt, else ``""``.
+
+    The typed witness is the single source: an ``initial_execution.state`` out of ``_FIRST_ATTEMPT_STATES``
+    with its own run id (a refused start is ``failed_definite`` without one), or a typed zero-run receipt —
+    the decision-as-status spelling, or a validated historical ``complete`` receipt (``historical_zero_run_complete``),
+    whose ``physical_run_started=False`` validation still proves the leaf never started while the fact's own
+    status stays UNKNOWN. The producer's status×reason pairing is not re-checked here. ``physical_leaf_not_started``
+    is not proof: it is also what a lost receipt looks like. Malformed values (a non-string reason, a state
+    outside the vocabulary) prove nothing. Never a claim about later runs or the answer (a settled success is
+    that session's own end). Twin: ``firstAttemptCauseKey`` (``web/modules/task_reason_words.js``)."""
+    fact = execution.get("actor_first_terminal") if isinstance(execution, dict) else None
+    status, why = (fact.get("status"), fact.get("reason")) if isinstance(fact, dict) else (None, None)
+    if status not in ("incomplete", "unknown") or not isinstance(why, str):
+        return ""
+    if fact.get("zero_run") is True:
+        decision = fact.get("zero_run_decision")
+        if decision == status and why == f"configured_actor_zero_run_{decision}":
+            return "configured_actor_not_started"
+        # A validated historical receipt (the pre-charter "complete" decision): the store only
+        # accepts it with physical_run_started False, so the absent start is proven; the
+        # self-reported completion is not, and this function never touches the fact's status.
+        return ("configured_actor_not_started"
+                if (status, decision, why) == ("unknown", "complete", "historical_zero_run_complete") else "")
+    initial = fact.get("initial_execution")
+    if not isinstance(initial, dict):
+        return ""
+    state, run_id = initial.get("state"), initial.get("run_id")
+    if state in _FIRST_ATTEMPT_STATES:
+        return f"configured_actor_first_{state}" if isinstance(run_id, str) and run_id.strip() else ""
+    no_run = run_id is None or (isinstance(run_id, str) and not run_id.strip())
+    return "configured_actor_first_refused" if state == "failed_definite" and no_run else ""
+
+
+def configured_actor_cause_key(reason: str, execution: Dict[str, Any]) -> str:
+    """The sentence key for ``configured_actor_incomplete`` / ``_unknown``: the reason codes stay as recorded.
+
+    The words come from ``first_attempt_cause_key`` only when the stored fact's own status matches the code; anything
+    else (a reason-only or legacy record, a reason that is not a code, unknown or unreadable evidence) says the first
+    attempt's outcome could not be determined. Twin: ``configuredActorCauseKey`` (``web/modules/task_reason_words.js``)."""
+    if not isinstance(reason, str):
+        return ""  # a malformed code is never a sentence
+    if reason not in _ACTOR_REASONS:
+        return reason
+    fact = execution.get("actor_first_terminal") if isinstance(execution, dict) else None
+    if not isinstance(fact, dict) or fact.get("status") != reason.removeprefix("configured_actor_"):
+        return "configured_actor_first_undetermined"
+    return first_attempt_cause_key(execution) or "configured_actor_first_undetermined"
+
+
+def first_attempt_clause_key(reason: str, execution: Dict[str, Any]) -> str:
+    """The proven first-attempt key to state BESIDE a different primary reason (a round limit, a refusal ...), else
+    ``""``; under the actor's own codes the primary clause already says it. Twin: ``firstAttemptClauseKey``."""
+    return "" if not isinstance(reason, str) or reason in _ACTOR_REASONS else first_attempt_cause_key(execution)

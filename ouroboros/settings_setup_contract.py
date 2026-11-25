@@ -9,7 +9,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.config import SETTINGS_DEFAULTS, VALID_RUNTIME_MODES
 from ouroboros.review_run_isolation import run_cap_from_env
-from ouroboros.provider_models import DIRECT_PROVIDER_DEFAULTS, MINIMAX_REGION_ENDPOINTS
+from ouroboros.provider_models import (
+    DIRECT_PROVIDER_DEFAULTS, MINIMAX_REGION_ENDPOINTS, OPENAI_RESPONSES_DIRECT_DEFAULTS, choice_error,
+)
 from ouroboros.secret_masking import (
     CONFIGURED_SECRET_PLACEHOLDER,
     MASKED_SECRET_SETTING_KEYS as SECRET_SETTING_KEYS,
@@ -124,9 +126,10 @@ _MODEL_DEFAULTS = {
         "consciousness": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"]),
         "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"]),
     },
-    # Every direct provider's own defaults (provider_models.DIRECT_PROVIDER_DEFAULTS), never a second list.
+    # Every direct provider's own defaults (provider_models.DIRECT_PROVIDER_DEFAULTS), never a second list;
+    # an OpenAI connection on Responses has its own (``direct_provider_defaults``).
     **{kind: {key: value for key, value in defaults.items() if key != "heavy"}
-       for kind, defaults in DIRECT_PROVIDER_DEFAULTS.items()},
+       for kind, defaults in {**DIRECT_PROVIDER_DEFAULTS, "openai-responses": OPENAI_RESPONSES_DIRECT_DEFAULTS}.items()},
     # No defaults: model names are server-specific; user must fill all slots.
     "openai-compatible": {"main": "", "light": "", "vision": "", "fallback": ""},
     # Several direct providers and no router: the owner chooses Main; no provider is guessed.
@@ -140,12 +143,15 @@ for _profile_defaults in _MODEL_DEFAULTS.values():
     _profile_defaults.setdefault("vision", "")
     _profile_defaults.setdefault("safety", "")
 
-_STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
-    ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts and keys."),
-    ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
-    ("review_mode", "Choose access", "Reach", "Choose how much access Ouroboros gets.", ""),
-    ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
-    ("summary", "Review before launch", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
+# ``railTitle`` names a step in the rail (one short word, so seven fit one line); ``title`` heads the step itself.
+_STEPS = _rows(("id", "title", "railTitle", "railCopy", "copy", "footer"), (
+    ("accounts", "Connect your accounts", "Accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts and keys."),
+    ("models", "Choose models", "Models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
+    ("review_mode", "Choose access", "Access", "Reach", "Choose how much access Ouroboros gets.", ""),
+    ("consciousness", "Consciousness", "Consciousness", "When it acts", "", ""),
+    ("skills", "Skills", "Skills", "What it can do", "Ouroboros starts with the ticked skills; clear any you do not want.", "Add or remove skills any time in Extensions."),
+    ("budget", "Review limits", "Limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
+    ("summary", "Review before launch", "Review", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
 
@@ -155,6 +161,8 @@ _STEP_ORDER = [step["id"] for step in _STEPS]
 _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "label", "placeholder", "note", "inputType", "group"), (
     ("openrouter-key", "openrouterKey", "OPENROUTER_API_KEY", "s-openrouter", "OpenRouter API Key", "sk-or-v1-...", "Best when you want one router for OpenAI, Anthropic, Google, and more.", "password", "primary"),
     ("openai-key", "openaiKey", "OPENAI_API_KEY", "s-openai", "OpenAI API Key", "sk-...", "", "password", "primary"),
+    # Drawn as the key card's API strip under the key, never as a text field: only its label names it, in a refusal.
+    ("openai-api-surface", "openaiApiSurface", "OPENAI_API_SURFACE", "s-openai-api-surface", "OpenAI API", "", "", "text", "more"),
     ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "", "password", "more"),
     # GigaChat is ready with an authorization key, or a user and password (provider_models.PROVIDER_KINDS).
     ("gigachat-credentials", "gigachatCredentials", "GIGACHAT_CREDENTIALS", "s-gigachat-credentials", "GigaChat Authorization Key", "Base64 client_id:secret", "", "password", "more"),
@@ -179,7 +187,7 @@ _PROFILE_SPECS = {
     "gigachat": ("GigaChat", "GigaChat is present, so the next step prefills GigaChat's own model ids.", "GigaChat-only setup detected. These defaults use GigaChat's own model ids."),
     "cloudru": ("Cloud.ru Foundation Models", "Cloud.ru is present, so the next step prefills Cloud.ru's own model ids.", "Cloud.ru-only setup detected. These defaults use Cloud.ru's own model ids."),
     "minimax": ("MiniMax", "MiniMax is present, so the next step prefills MiniMax's own model ids.", "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M3.1-Flash."),
-    "deepseek": ("DeepSeek", "DeepSeek is present, so the next step prefills DeepSeek's own model ids.", "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-v4-flash for the light lane."),
+    "deepseek": ("DeepSeek", "DeepSeek is present, so the next step prefills DeepSeek's own model ids.", "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-flash for the light lane."),
     "zai": ("Z.ai (GLM)", "Z.ai is present, so the next step prefills Z.ai's own GLM model ids.", "Z.ai-only setup detected. These defaults use glm-5.3 for main work and glm-5.3-flash for the light lane. The plan setting selects the pay-as-you-go or Coding Plan endpoint."),
     "anthropic": ("Anthropic", "Anthropic is present, so the next step prefills Anthropic's own model ids.", "Anthropic-only setup detected. These defaults are explicit and official."),
     "openai-compatible": ("OpenAI-compatible endpoint", "An OpenAI-compatible base URL is configured. Enter the model names your server exposes in the next step.", "OpenAI-compatible endpoint detected. Choose the OpenAI-compatible endpoint as the source and enter the model names your server exposes. The model list is whatever your server supports."),
@@ -189,7 +197,7 @@ _PROFILE_SPECS = {
 
 _MODEL_SLOTS = _rows(("slot", "stateKey", "settingKey", "inputId", "label", "note", "settingsInputId", "settingsToggleId"), (
     ("main", "mainModel", "OUROBOROS_MODEL", "main-model", "Main Model", "Primary reasoning and long-form work.", "s-model", "s-local-main"),
-    ("light", "lightModel", "OUROBOROS_MODEL_LIGHT", "light-model", "Light Model", "Fast summaries, lightweight internal work and the default Fast scout. Empty uses Main.", "s-model-light", "s-local-light"),
+    ("light", "lightModel", "OUROBOROS_MODEL_LIGHT", "light-model", "Light Model", "Memory consolidation, Light subagents, review verdicts, duplicate checks, names and translation; Safety when it inherits. Empty uses Main.", "s-model-light", "s-local-light"),
     ("safety", "safetyModel", "OUROBOROS_MODEL_SAFETY", "safety-model", "Safety Supervisor", "Empty uses the Light model.", "s-model-safety", ""),
     ("vision", "visionModel", "OUROBOROS_MODEL_VISION", "vision-model", "Vision Model", "Caption and VLM lane. Empty uses Main.", "s-model-vision", ""),
     ("consciousness", "consciousnessModel", "OUROBOROS_MODEL_CONSCIOUSNESS", "consciousness-model", "Consciousness Model", "High-horizon background consciousness. Empty uses Main.", "s-model-consciousness", "s-local-consciousness"),
@@ -284,6 +292,11 @@ ONBOARDING_COMPLETED_KEY = "OUROBOROS_ONBOARDING_COMPLETED_AT"
 # still ask about its own save when the answer is lost. The same write carries it.
 ONBOARDING_ATTEMPT_KEY = "OUROBOROS_ONBOARDING_ATTEMPT_ID"
 ATTEMPT_ID_FIELD = "attempt_id"
+# The setup's Consciousness switch (owner decision 2026-11-20): the optional completion field, and the completion fact
+# that carries "on" into the first state a mint creates (``state_initialization.first_state``). It counts only while
+# that first state is still to come; afterwards the state's flag alone decides and the fact is history.
+CONSCIOUSNESS_CHOICE_FIELD = "consciousness"
+ONBOARDING_CONSCIOUSNESS_KEY = "OUROBOROS_ONBOARDING_CONSCIOUSNESS"
 _ATTEMPT_ID = re.compile(r"[A-Za-z0-9_-]{16,128}")
 
 _SUBSCRIPTION_FIELDS = _rows(("id", "payloadKey", "label", "note"), (
@@ -291,7 +304,7 @@ _SUBSCRIPTION_FIELDS = _rows(("id", "payloadKey", "label", "note"), (
     ("skip-subscription-presets", SKIP_SUBSCRIPTION_PRESETS_FIELD, "Finish without agent defaults", "Completes onboarding without moving reviewers and subagents onto the connected subscriptions. Everything stays editable in Settings afterwards."),
 ))
 
-_MODEL_SUGGESTIONS = list(dict.fromkeys(("google/gemini-3.8-flash", "x-ai/grok-4.6", "openai/gpt-6.1-sol", "openai/gpt-6-luna", "anthropic/claude-opus-5.5", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "openai::gpt-5.6-terra", "openai::gpt-5.6-sol", "openai::gpt-5.6-luna", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic::claude-sonnet-5", "anthropic::claude-opus-5-5", "anthropic::claude-opus-5", "anthropic::claude-opus-4-6", "deepseek/deepseek-v4-pro", "deepseek::deepseek-v4-pro", "deepseek::deepseek-v4-flash", "zai::glm-5.3", "zai::glm-5.3-flash", "openai-compatible::meta-llama/compatible", "cloudru::zai-org/GLM-4.7", "minimax::MiniMax-M3", "minimax::MiniMax-M3.1-Flash")))
+_MODEL_SUGGESTIONS = list(dict.fromkeys(("google/gemini-4-hydrogen", "google/gemini-3.8-flash", "x-ai/grok-4.6", "openai/gpt-6.1-sol", "openai/gpt-6-luna", "openai/gpt-6.1-terra", "anthropic/claude-opus-5.5", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "openai::gpt-6.1-terra", "openai::gpt-6.1-sol", "openai::gpt-6-luna", "openai::gpt-5.6-terra", "openai::gpt-5.6-sol", "openai::gpt-5.6-luna", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic::claude-sonnet-5-5", "anthropic::claude-sonnet-5", "anthropic::claude-opus-5-5", "anthropic::claude-opus-5", "anthropic::claude-opus-4-6", "deepseek/deepseek-v4-pro", "deepseek::deepseek-v4-pro", "deepseek::deepseek-flash", "deepseek::deepseek-v4-flash", "zai::glm-5.3", "zai::glm-5.3-flash", "openai-compatible::meta-llama/compatible", "cloudru::zai-org/GLM-4.7", "minimax::MiniMax-M3", "minimax::MiniMax-M3.1-Flash")))
 
 
 def _string(value: Any) -> str:
@@ -374,6 +387,10 @@ def derive_provider_profile(settings: dict) -> str:
     configured = [name for key, name in direct if flags[key]]
     if len(configured) > 1:
         return "direct-multi"
+    from ouroboros.provider_connections import direct_provider_defaults
+
+    if configured == ["openai"] and direct_provider_defaults("openai", settings) is OPENAI_RESPONSES_DIRECT_DEFAULTS:
+        return "openai-responses"
     return configured[0] if configured else ("local" if _string(settings.get("LOCAL_MODEL_SOURCE")) else "openrouter")
 
 
@@ -404,6 +421,7 @@ def build_setup_contract(host_mode: str = "desktop") -> dict:
 
     managed_checker = checker() is not None
     return {
+        "scopedModelCatalogs": True,
         "version": 1,
         "hostMode": "web" if host_mode == "web" else "desktop",
         "steps": [dict(item) for item in _STEPS],
@@ -441,6 +459,19 @@ def parse_completion_attempt(data: Any) -> Tuple[str, str]:
     if isinstance(raw, str) and _ATTEMPT_ID.fullmatch(raw):
         return raw, ""
     return "", "attempt_id must be 16-128 letters, digits, '-' or '_'."
+
+
+def completion_facts(data: dict, attempt_id: str, *, first_state_pending: bool) -> dict:
+    """The onboarding completion facts one completion writes in its single settings write: when, which client attempt,
+    and the setup's Consciousness switch. The switch counts only when ``first_state_pending`` (decided before this
+    write): then it is the first state's pending choice, ``true`` writing "on" and ``false`` clearing an earlier
+    attempt's "on". Where a state exists the field changes nothing, so setup never lifts an owner or Panic stop."""
+    from ouroboros.utils import utc_now_iso
+
+    choice = data.get(CONSCIOUSNESS_CHOICE_FIELD)
+    return {ONBOARDING_COMPLETED_KEY: utc_now_iso(), ONBOARDING_ATTEMPT_KEY: attempt_id,
+            **({ONBOARDING_CONSCIOUSNESS_KEY: "on" if choice else ""}
+               if first_state_pending and isinstance(choice, bool) else {})}
 
 
 def build_initial_setup_state(settings: dict, host_mode: str = "desktop", document: Optional[dict] = None) -> dict:
@@ -516,34 +547,43 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop", docume
     return state
 
 
-def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None) -> dict:
-    """The Summary's optional Consciousness row. It is offered while setup has never completed here
-    (an unticked choice the owner makes now; a completed setup neither shows nor repeats one), with
-    the limits consciousness runs under now, as the runtime's own readers report them. ``enabled``
-    is the control as the state shows it (``None``: unknown). Nothing here is saved or started:
-    a ticked row sends the ordinary Start after the save, from the wizard."""
+def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None, first_state: bool = True) -> dict:
+    """The setup's Consciousness step. It is offered only while the next boot mints a first state (``first_state``:
+    ``state_initialization.first_state_pending``) and setup has never completed here; where any state exists the step
+    is absent, whatever the state says, and Dashboard › Consciousness changes it. ``enabled`` is the control as the
+    state shows it, ``None`` on an offered step (no state yet: the switch starts on) and when unknown. The limits are
+    the ones consciousness runs under now, as the runtime's own readers report them; the words are the host's
+    (``first_run_words``)."""
     from ouroboros.runtime_limits import (
         get_consciousness_autonomy, get_consciousness_daily_usd, get_consciousness_max_tasks,
     )
 
-    return {"offered": not _string(settings.get(ONBOARDING_COMPLETED_KEY)),
-            "enabled": enabled if isinstance(enabled, bool) else None,
+    from ouroboros.consciousness_view import first_run_words
+
+    offered = first_state and not _string(settings.get(ONBOARDING_COMPLETED_KEY))
+    return {"offered": offered,
+            "enabled": enabled if isinstance(enabled, bool) and not offered else None,
             "autonomy": get_consciousness_autonomy(), "dailyUsd": get_consciousness_daily_usd(),
-            "maxTasks": get_consciousness_max_tasks()}
+            "maxTasks": get_consciousness_max_tasks(), "words": first_run_words(get_consciousness_autonomy())}
 
 
 def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
-                          consciousness_enabled: Optional[bool] = None, document: Optional[dict] = None) -> dict:
+                          consciousness_enabled: Optional[bool] = None, consciousness_first_state: bool = True,
+                          document: Optional[dict] = None, starter_choice: bool = True) -> dict:
+    """The wizard's bootstrap. ``starter_choice``: completion honors the starter ticks here
+    (``skill_starter.starter_choice_open``); without it the Skills step is absent, as Consciousness is without its offer."""
     from ouroboros.deployment_policy import policy_state
 
     normalized_host = "web" if host_mode == "web" else "desktop"
+    offer = consciousness_offer(settings, enabled=consciousness_enabled, first_state=consciousness_first_state)
+    optional = {"consciousness": offer["offered"], "skills": starter_choice}
     return {
         "hostMode": normalized_host,
         # Display provenance only; completion re-proves install eligibility.
         # Unknown/legacy callers preserve existing model choices conservatively.
         "freshInstall": fresh_install,
         "supportsLocalRuntimeControls": normalized_host == "web",
-        "stepOrder": list(_STEP_ORDER),
+        "stepOrder": [step for step in _STEP_ORDER if optional.get(step, True)],
         "modelDefaults": {key: dict(value) for key, value in _MODEL_DEFAULTS.items()},
         "localPresets": {key: dict(value) for key, value in _LOCAL_PRESETS.items()},
         "modelSuggestions": list(_MODEL_SUGGESTIONS),
@@ -552,7 +592,7 @@ def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_i
         "secretPlaceholder": CONFIGURED_SECRET_PLACEHOLDER,
         "contract": build_setup_contract(normalized_host),
         "initialState": build_initial_setup_state(settings, normalized_host, document),
-        "consciousnessOffer": consciousness_offer(settings, enabled=consciousness_enabled),
+        "consciousnessOffer": offer,
         "deployment": policy_state(),
     }
 
@@ -631,6 +671,8 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     so an unchanged short stored value cannot discard the whole form."""
     subscriptions_connected, skip_presets = parse_subscription_intent(data)
     pending_subscription = subscriptions_connected and not skip_presets
+    if not isinstance(data.get(CONSCIOUSNESS_CHOICE_FIELD, False), bool):
+        return {}, "consciousness must be true or false."
     selected_subscription = provider_for_model(_string(data.get("OUROBOROS_MODEL"))) == "claudexor"
     if selected_subscription:
         try:
@@ -669,7 +711,8 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     has_remote = any(
         value
         for setting_key, value in keys.items()
-        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN", "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
+        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN", "OPENAI_API_SURFACE",
+                               "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
     )
     has_remote = has_remote or bool(configured_connections({**keys, "OUROBOROS_CONNECTIONS": connections}))
     has_local = bool(local_source)
@@ -679,6 +722,11 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     if minimax_region and minimax_region not in MINIMAX_REGION_ENDPOINTS:
         return {}, "MiniMax Region must be global_en or cn_zh."
     keys["MINIMAX_REGION"] = minimax_region
+    if not keys.get("OPENAI_API_SURFACE"):  # no choice sent (or an older client) never clears a saved one
+        keys["OPENAI_API_SURFACE"] = _string(current_settings.get("OPENAI_API_SURFACE"))
+    if surface_error := choice_error("openai", "api_surface", keys.get("OPENAI_API_SURFACE")):
+        return {}, f"OpenAI API {surface_error}."
+    keys["OPENAI_API_SURFACE"] = keys.get("OPENAI_API_SURFACE", "").lower()
     if has_local and "/" in local_source and not local_source.startswith(("/", "~")) and not local_filename:
         return {}, "Local HuggingFace sources need a GGUF filename."
     if runtime_mode not in VALID_RUNTIME_MODES:
@@ -726,6 +774,9 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             return {}, str(exc)
     prepared.update(models)
     prepared.update(keys)
+    from ouroboros.provider_connections import seed_new_api_surfaces
+
+    seed_new_api_surfaces(prepared, current_settings)  # a key new to this install starts on Responses
     prepared.update(parsed_budget)
     prepared.update({
         "OUROBOROS_RUNTIME_MODE": runtime_mode,

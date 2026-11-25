@@ -190,11 +190,21 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
 }
 
 // The feed the reader can see: its viewport less the chrome drawn over it, the
-// header above and the composer below; chrome covering it all leaves an empty
-// band, where nothing is on screen. Eviction keeps the whole viewport.
+// header above (with its frosted edge, style.css "A room's edges") and the composer
+// below; chrome covering it all leaves an empty band, where nothing is on screen.
+// Eviction keeps the whole viewport.
 export function readBand(viewport, header, composer) {
     let { top, bottom } = viewport.getBoundingClientRect();
-    if (header?.getClientRects?.().length) top = Math.max(top, header.getBoundingClientRect().bottom);
+    if (header?.getClientRects?.().length) {
+        // The edge in the page's own scale: a phone's drawer scales the room, and the edge with it.
+        const box = header.getBoundingClientRect(), view = header.ownerDocument?.defaultView;
+        // The edge material's own box (style.css: `::before`, the bar's padding box plus the reach) resolves in every
+        // engine; the property itself resolves to px only with `@property` (WebKit 16.4+), else it is its tokens.
+        const drawn = parseFloat(view?.getComputedStyle?.(header, '::before')?.height) - header.clientHeight;
+        const edge = Number.isFinite(drawn) ? Math.max(0, drawn)
+            : parseFloat(view?.getComputedStyle?.(header)?.getPropertyValue?.('--edge-reach')) || 0;
+        top = Math.max(top, box.bottom + edge * (header.offsetHeight > 0 && box.height > 0 ? box.height / header.offsetHeight : 1));
+    }
     if (composer?.getClientRects?.().length) bottom = Math.min(bottom, composer.getBoundingClientRect().top);
     return { top, bottom };
 }
@@ -223,13 +233,19 @@ export function newestMessageOffset(latest, { delivered, nodes, viewport, header
     const band = readBand(viewport, header, composer);
     const node = nodes(latest.history_id).map(shownBy).find((shown) => shown.getClientRects?.().length);
     if (!node || band.bottom <= band.top || historyNodeOnScreen(node, viewport, band)) return 0;
-    // Measured on screen, moved in the feed's own pixels: a room scaled mid-motion (the phone drawer's handover) shows
-    // the distance smaller than the scroll it takes. The Interface size never scales the page (interface_size.js).
-    // The feed's own border-box height (style.css), fractional and untransformed, against the one on screen.
+    // Measured on screen, moved in the feed's own pixels (feedScale).
+    return (node.getBoundingClientRect().top - band.top) / feedScale(viewport);
+}
+
+/** How the feed is drawn against its own pixels: a room scaled mid-motion (the phone drawer's handover) shows a distance
+ * smaller than the scroll it takes, so a distance measured on screen is divided by this before it moves the feed. The
+ * Interface size never scales the page (interface_size.js). The feed's own border-box height (style.css), fractional and
+ * untransformed, against the one on screen; 1 when either is unknown. */
+export function feedScale(viewport) {
     const own = parseFloat(viewport.ownerDocument?.defaultView?.getComputedStyle?.(viewport)?.height);
     const height = own > 0 ? own : Number(viewport.offsetHeight) || 0;
     const scale = height > 0 ? viewport.getBoundingClientRect().height / height : 1;
-    return (node.getBoundingClientRect().top - band.top) / (scale > 0 ? scale : 1);
+    return scale > 0 ? scale : 1;
 }
 
 /**

@@ -19,7 +19,7 @@ receipt (a context build, a round's preparation); windows nest and never mix.
 
 ``host_step`` marks where one named step of a round's window ends; ``llm_observability.round_window`` opens
 that window and receipts the steps on the round's ``llm_round``. ``carry_spans`` names there the sections of a window
-measured before it (a resumed turn's prologue: restore, route rebind, tools).
+measured before it (its prologue: a turn's restore, route rebind and tools, a retained answer's evidence read).
 """
 
 from __future__ import annotations
@@ -196,6 +196,19 @@ def carry_spans(prefix: str, receipt: Optional[Dict[str, Dict[str, int]]]) -> No
         span = spans.setdefault(prefix if name == TOTAL else f"{prefix}.{name}", [0.0, 0.0])
         span[0] += wall / 1000
         span[1] += cpu.get(name, 0) / 1000
+
+
+def prologue_step(slot: Any, name: str, step: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """``step(*args, **kwargs)`` measured under ``name`` in a window of its own, raised or not, its spans added to
+    ``slot._round_prologue``: work done before a round's window opens, which that window names ``prologue.<name>``."""
+    with measured_sections():
+        try:
+            return timed(name, step, *args, **kwargs)
+        finally:
+            spent, start = section_spans(), getattr(slot, "_round_prologue", None) or {}
+            slot._round_prologue = {kind: {**start.get(kind, {}), **{
+                key: ms + start.get(kind, {}).get(key, 0) for key, ms in spent[kind].items()}}
+                for kind in ("sections_ms", "sections_cpu_ms")}
 
 
 def section_spans() -> Dict[str, Dict[str, int]]:

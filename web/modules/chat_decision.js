@@ -14,6 +14,9 @@ import { syncQuestionMaterials } from './result_files.js';
 import { memberPaused } from './work_status.js';
 import { createSecretRequestForms } from './secret_hitl.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
+import { feedScale, readBand } from './project_read_state.js';
+import { foreignReceiptBubble, receiptBubble, statesNoRow } from './chat_history_replay.js';
+import { reconcilePortalNotes } from './work_portal.js';
 
 // A question head's mark: its lifecycle's dot (question_presentation.questionMark), neutral while an answer is in
 // flight (Sending…, checking it, Not confirmed: the owner has moved). The one painter of it, whoever changed the card.
@@ -37,8 +40,9 @@ function paintStatusText(card, row, paused) {
 }
 
 // What one observation of a question carries: its identity (its own Project included: '' for Main's own and a
-// private Presence question, so the head follows the pill's rule), lifecycle, recorded answer and wait facts.
-const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'project_id', 'state', 'answered_index', 'comment', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
+// private Presence question, so the head follows the pill's rule), lifecycle, recorded answer (and the answer row's
+// address, which only history names: a narrower live frame keeps it) and wait facts.
+const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'project_id', 'state', 'answered_index', 'comment', 'answer_row_address', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
     'secret_outcome', 'secret_save', ...WAIT_FIELDS];
 const lifecycleOf = (row) => Object.fromEntries(LIFECYCLE_FIELDS.filter((field) => Object.hasOwn(row, field))
     .map((field) => [field, row[field]]));
@@ -208,6 +212,13 @@ export function createChatDecision({
         }
         if (!current() || !card) return false;
         card.scrollIntoView?.({ block: 'center', behavior: 'auto' });
+        // A card taller than what the reader sees keeps its message's head (the voice line above it) below the room's bar
+        // and its frosted edge (readBand).
+        const feed = card.closest?.('#chat-messages, .chat-messages');
+        const bar = feed?.closest('.project-panel')?.querySelector('.project-panel-bar') || feed?.closest('#page-chat')?.querySelector('.chat-page-header');
+        const head = card.closest('.chat-bubble') || card;
+        const under = bar && head.getClientRects?.().length ? readBand(feed, bar, null).top + 12 - head.getBoundingClientRect().top : 0;
+        if (under > 0) feed.scrollTop -= under / feedScale(feed);  // measured on screen, moved in the feed's pixels
         ((focus === 'question' ? null : card.querySelector('.chat-quiz-comment'))
             || card.querySelector('.chat-quiz-question'))?.focus?.({ preventScroll: true });
         didReveal();
@@ -630,6 +641,7 @@ export function createChatDecision({
         }
         const focused = card.contains?.(document.activeElement);
         const answerable = ANSWERABLE_QUIZ_STATES.includes(state);
+        const settling = card.dataset.state !== state && !answerable;
         const written = onDomWrite(() => {
             let changed = card.dataset.state !== state;
             if (changed) card.dataset.state = state;
@@ -686,9 +698,15 @@ export function createChatDecision({
             const buttons = card.querySelectorAll('.chat-quiz-option');
             buttons.forEach((btn, i) => {
                 const chosen = state === 'answered' && answeredIndex !== null && i === answeredIndex;
-                if (btn.disabled !== !answerable) {
-                    btn.disabled = !answerable;
+                // On its own card the recorded choice is inert yet focusable, out of the tab order, so a Reply can
+                // land on it; Main's copy, where none lands, keeps it disabled.
+                const recorded = chosen && !mirrored;
+                if (btn.disabled !== (!answerable && !recorded)) {
+                    btn.disabled = !answerable && !recorded;
                     changed = true;
+                }
+                if (recorded && (btn.getAttribute('aria-disabled') !== 'true' || btn.tabIndex !== -1)) {
+                    btn.setAttribute('aria-disabled', 'true'); btn.tabIndex = -1; changed = true;
                 }
                 if (btn.classList.contains('chosen') !== chosen) {
                     btn.classList.toggle('chosen', chosen);
@@ -696,13 +714,23 @@ export function createChatDecision({
                 }
                 if (paintChosenAnswer(btn, chosen)) changed = true;
             });
+            // The owner's answer has no row of its own in the feed (DESIGN "Replies"): its row's address marks the
+            // recorded choice, else the owner's words. A Main copy of a Project's question never carries it.
+            const address = !mirrored && state === 'answered' ? String(current.answer_row_address || '') : '';
+            const answer = card.querySelector('.chat-quiz-answer');
+            const holder = address ? [...buttons].find((btn) => btn.classList.contains('chosen')) || answer : null;
+            [...buttons, answer].forEach((node) => {
+                if (node && node !== holder && node.dataset.rowAddress) { delete node.dataset.rowAddress; changed = true; }
+            });
+            if (holder && holder.dataset.rowAddress !== address) { holder.dataset.rowAddress = address; holder.tabIndex = -1; changed = true; }
             return changed;
         });
         submissions.settled(card);
-        // Settling disables or removes the control the owner used (an option, the ×): focus stays in
-        // this card, on its question, rather than falling to the page.
+        // Settling disables, removes or makes inert the control the owner used (an option, the ×): focus stays in
+        // this card, on its question, rather than falling to the page or staying on a control that takes nothing.
         const active = document.activeElement;
-        if (focused && (!card.contains?.(active) || active?.disabled)) card.querySelector('.chat-quiz-question')?.focus?.({ preventScroll: true });
+        if (focused && (!card.contains?.(active) || active?.disabled || (settling && active?.getAttribute?.('aria-disabled') === 'true')))
+            card.querySelector('.chat-quiz-question')?.focus?.({ preventScroll: true });
         if (mirrored && (state === 'answered' || state === 'closed')) settleMirror(mirror);
         if (written && isMain && !answerable && state !== 'unknown') onQuestionsChanged();
         return written;
@@ -1034,6 +1062,27 @@ export function createChatDecision({
         });
     }
 
+    /**
+     * One live routing receipt (`message_annotation`, the twin of its saved row) on the owner bubble it names, as a
+     * reload paints it. `own`: the frame is this room's (`isMyThread`): the bubble is found by its room and id, and
+     * this room's local echo keeps the receipt in `journal`, so a re-render restores it. Otherwise only a Project
+     * applies it, and only to the bubble the host showed as exactly that message (`foreignReceiptBubble`): no bubble
+     * is made, and neither this room's journal nor its Sending is touched. Main keeps its own rule (`own` alone).
+     */
+    function applyRoutingAck(feed, frame, { own, journal }) {
+        const messageId = String(frame?.client_message_id || '');
+        // A receipt the host placed on no row wears no bubble and keeps no echo journal entry: its client id is no placement.
+        if (!messageId || statesNoRow(frame)) return false;
+        if (!own) return isMain ? false : renderRoutingDecision(foreignReceiptBubble(feed, frame, chatId), frame);
+        const room = Number(frame.chat_id ?? 1);
+        const journalEntry = room === chatId && journal.get(messageId);
+        const bubble = receiptBubble(feed, frame, chatId);
+        if (journalEntry && !frame.source_row_address) journalEntry.annotation = frame;
+        const changed = renderRoutingDecision(bubble, frame);
+        if (bubble && isMain) reconcilePortalNotes(feed, bubble);
+        return changed;
+    }
+
     function applyQuizStateFrame(rootNode, frame) {
         // Live lifecycle update for an already-rendered card (WS "quiz_state").
         // The card is found by identity, never appended: state changes must
@@ -1085,7 +1134,7 @@ export function createChatDecision({
     }
 
     return { buildQuizCard, buildQuestionPointer, appendQuestionPointer, appendActivityQuestion, syncCurrentQuestions, observedQuestion, readQuestion, revealQuestion, setCardState, applyQuizStateFrame, renderRoutingDecision,
-        releaseViews,
+        applyRoutingAck, releaseViews,
         // The instance's reconciled work state (work_status.reconcileWorkState): a question whose task is paused, or
         // resumed, says so at once; an answer still in flight keeps its own words until it settles.
         syncWorks(state) {

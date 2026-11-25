@@ -1,0 +1,1 @@
+{"models": [{"name": "qwen3.5:9b", "model": "qwen3.5:9b", "size": 9793572864, "digest": "x", "details": {"format": "gguf", "family": "qwen3"}, "expires_at": "2026-11-15T22:00:00Z", "size_vram": 9793572864, "context_length": 32768}]}

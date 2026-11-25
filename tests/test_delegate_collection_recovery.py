@@ -163,7 +163,7 @@ def test_public_wait_still_reads_engine_when_full_local_source_is_unavailable(tm
     assert result["output_delivery"]["complete"]
 
 
-@pytest.mark.parametrize("kind", ["review", "ordinary", "retained_review"])
+@pytest.mark.parametrize("kind", ["review", "ordinary", "retained_review", "collection_unavailable"])
 def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, money, kind):  # noqa: F811
     """The public string ABI must keep the native failure, not just wake the model."""
     from ouroboros.gateways import claudexor
@@ -172,7 +172,11 @@ def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, mon
         _install_tool_result_sidecar, _published_tool_result, _restore_tool_result_sidecar,
     )
 
-    entry = started(tmp_path, source="review_substrate_commit" if kind != "ordinary" else "")
+    review = kind in {"review", "retained_review"}
+    entry = started(tmp_path, source="review_substrate_commit" if review else "")
+    if kind == "collection_unavailable":
+        # A collector that loses its custody row under the collection lock reports this failure.
+        monkeypatch.setattr(body, "collect_terminal", lambda *a, **kw: {"status": "unavailable", "reason": "custody_missing"})
     if kind == "retained_review":
         assert body.collect_terminal(tmp_path, entry.run_id, detail=terminal(), allow_review=True)["status"] == "collected"
     else:  # the body saw the run end; its output is the engine's to give
@@ -204,16 +208,24 @@ def test_registered_wait_preserves_collection_outcome(tmp_path, monkeypatch, mon
     payload = json.loads(text)
     fresh = current.run(tmp_path, entry.run_id)
     assert not fresh.output_consumed and not fresh.patch_captured and not fresh.patch_disposed
-    assert fresh.review_owned == (kind != "ordinary")
-    assert calls == ([] if kind == "retained_review" else [entry.run_id])
-    assert bool(closed) == bool(calls)
-    if kind == "review":
+    assert fresh.review_owned == review
+    assert calls == ([] if review else [entry.run_id])
+    assert len(closed) == len(calls)
+    if review:
         assert native.code == "TOOL_REPORTED_FAILURE" and str(native.status) == "error"
         assert payload["status"] == "refused" and payload["ok"] is False
-        assert payload["reason"] == "collection_owner_mismatch"
+        assert payload["reason"] == "review_panel_owns_run" and payload["slept"] is False
+        [redirect] = payload["review_runs"]
+        assert redirect["run_id"] == entry.run_id and redirect["collection"]["status"] == "reference_unavailable"
+        assert "primary_output" not in payload
+        retained = kind == "retained_review"
+        assert bool(fresh.output_source) == fresh.ledger_recorded == retained
+        assert len(money) == int(retained)
+    elif kind == "collection_unavailable":
+        assert native.code == "TOOL_REPORTED_FAILURE" and str(native.status) == "error"
+        assert payload["ok"] is False and payload["reason"] == "custody_missing"
         assert payload["collection"]["status"] == "unavailable"
-        assert "review" in payload["detail"].lower()
-        assert not money and not fresh.ledger_recorded and not fresh.output_source
+        assert not money and not fresh.output_source
     else:
         assert native.code == "OK"
         assert payload["status"] == "terminal" and payload["primary_output"]["text"] == "complete answer"

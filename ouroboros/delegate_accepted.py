@@ -23,7 +23,8 @@ replay, other misses leave it to ``delegate_pending.replay_store_unproven``. A p
 the store that accepted the work, its own receipt (``storeId``); a handshake never does.
 
 ``bind_started`` is where the STARTED writers of one invocation converge (the start's own receipt, a
-review seat's, every read here: explicit retry, sweep, a seat's rejoin): under the actor decision lock a
+review seat's, every read here: explicit retry, sweep, a seat's rejoin, a start or replay whose POST the
+engine answered with an error, ``accepted_after_refusal``): under the actor decision lock a
 later writer adopts the run its invocation already holds, whichever engine name (job or run id) the
 first writer knew it by, so one accepted command keeps one custody and cost row. ``recover`` reads and
 binds; observation, settlement and any stop stay with their existing owners. Nothing here lifts a
@@ -149,7 +150,7 @@ def _validated(answer: Any, record: Dict[str, Any], thread_id: str, engine: Any)
 
 
 def bind_started(drive_root: Any, entry: Any, *, shape: Optional[Dict[str, Any]] = None,
-                 exclusive: bool = False) -> Bound:
+                 exclusive: bool = False, observed_state: str = "", accepted_only: bool = False) -> Bound:
     """Write ``entry``'s STARTED row unless its invocation already holds a run.
 
     Under the actor decision lock (no network inside it) the invocation's record decides: a run it
@@ -161,6 +162,7 @@ def bind_started(drive_root: Any, entry: Any, *, shape: Optional[Dict[str, Any]]
     own receipt keeps its live run in this process only, as a STARTED whose publication failed
     (``started_uncustodied`` with its retry token); the invocation stays pending for a read to bind once,
     and that run's money waits for the bound row (``deferred_money``).
+    ``accepted_only`` lets Stop republish its known physical handle only under the recorded decision.
     """
     from ouroboros import delegate_custody as custody
     from ouroboros.delegate_custody_current import run as current_run
@@ -175,8 +177,25 @@ def bind_started(drive_root: Any, entry: Any, *, shape: Optional[Dict[str, Any]]
             held = str(prior.get("run_id") or "") if prior.get("state") == "started" else ""
             existing = current_run(drive_root, held) if held else None
             decided = True
-            if held and existing is None and exclusive:
-                return Bound(None, False, False)  # a bound run whose row is unreadable: nothing is added
+            if accepted_only and (not prior.get("resume_decisions") or (not held and prior.get("state") != "pending")):
+                return Bound(None, False, False)
+            if prior and (prior.get("task_id") != task_id
+                          or (prior.get("root_task_id") or task_id) != (entry.root_task_id or task_id)
+                          or existing and (existing.task_id != task_id or existing.invocation_id != invocation_id)):
+                return Bound(None if exclusive else entry, False, False)
+            if held and existing is None:
+                entry = copy.copy(entry)
+                entry.run_id = held
+                return Bound(None if exclusive else entry, False, True)
+            if prior.get("resume_decisions"):
+                from ouroboros.delegate_resume import observe_bound_state
+
+                if existing is not None:
+                    if observe_bound_state(drive_root, existing, observed_state) is False:
+                        return Bound(existing, False, True)
+                else:
+                    shape = {**(shape or {}), "resume_start_state": observed_state if observed_state in RUN_STATES else "unknown",
+                             "root_task_id": prior.get("root_task_id") or task_id}
             if existing is not None and exclusive:
                 return Bound(existing, True, True)
             if existing is not None:  # the caller's object stays as it was: a copy takes the held run's name
@@ -211,7 +230,10 @@ def deferred_money(drive_root: Any, entry: Any) -> Dict[str, str]:
     if not invocation_id or not run_id:
         return {}
     try:
-        if current_run(drive_root, run_id) is not None:
+        held_entry = current_run(drive_root, run_id)
+        if held_entry is not None:
+            if held_entry.task_id != entry.task_id or held_entry.invocation_id != invocation_id:
+                return {"deferred": "custody_owner_mismatch"}
             return {}
         record = custody.invocation_record(drive_root, invocation_id) or {}
     except Exception:
@@ -219,19 +241,20 @@ def deferred_money(drive_root: Any, entry: Any) -> Dict[str, str]:
         record = {}
     held = str(record.get("run_id") or "") if record.get("state") == "started" else ""
     if held == run_id:
-        return {}
+        return {} if record.get("task_id") == entry.task_id else {"deferred": "custody_owner_mismatch"}
     return ({"deferred": "invocation_held_elsewhere", "held_by": held} if held
             else {"deferred": "custody_publication_unconfirmed"})
 
 
-def recover(drive_root: Any, gateway: Any, record: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
+def recover(drive_root: Any, gateway: Any, record: Dict[str, Any], *,
+            facts: Optional[Dict[str, Any]] = None) -> Tuple[Any, Dict[str, Any]]:
     """Read the accepted work behind one pending invocation and bind it once; nothing is POSTed.
 
     ``record`` carries the resolved ``request`` and the ``invocation_id``. Returns ``(custody, receipt)``:
     the custody now holding the invocation's run (bound here, or adopted from an earlier writer) or
     ``None`` with the typed reason the start stays pending and unknown. A runless retained turn is named
     with its thread, turn and recorded enqueue error and stays unknown: custody has no state that would
-    record it as a definite failure or as a run.
+    record it as a definite failure or as a run. ``facts`` ride a STARTED row this read writes.
     """
     from ouroboros.delegate_custody_reconcile import _mark_root_cost, recovered_custody
 
@@ -246,8 +269,11 @@ def recover(drive_root: Any, gateway: Any, record: Dict[str, Any]) -> Tuple[Any,
                  "enqueue_error": located.facts["enqueueError"]} if located.outcome == "turn_only" else {})
         return None, {**receipt, "action": "invocation_retained", "reason": reason, **turn}
     entry, shape = recovered_custody(drive_root, gateway, record, located.run_id, located.store_id)
-    shape["accepted_start_lookup"] = located.outcome
-    bound = bind_started(drive_root, entry, shape=shape, exclusive=True)
+    shape.update(facts or {}, accepted_start_lookup=located.outcome)
+    bound = bind_started(drive_root, entry, shape=shape, exclusive=True, observed_state=located.state)
+    if bound.custody is not None and bound.adopted and not bound.durable:
+        return bound.custody, {**receipt, "action": "accepted_start_adopted", "run_id": bound.custody.run_id,
+                               "reason": "start_state_not_recorded"}
     if bound.custody is None or not bound.durable:
         return None, {**receipt, "action": "invocation_retained", "reason": "accepted_start_unbound"}
     if not bound.adopted:
@@ -258,5 +284,38 @@ def recover(drive_root: Any, gateway: Any, record: Dict[str, Any]) -> Tuple[Any,
                            **({"problem": problem} if isinstance(problem, dict) else {})}
 
 
-__all__ = ["Bound", "Lookup", "NO_REPLAY", "RUN_LOOKUP", "RUN_STATES", "TURN_LOOKUP", "bind_started", "deferred_money",
-           "locate", "recover"]
+def accepted_after_refusal(drive_root: Any, gateway: Any, invocation_id: str,
+                           error: BaseException) -> Tuple[Any, Dict[str, Any]]:
+    """Read the work behind a start whose POST the engine answered with an error and no run; bind it once.
+
+    The fate rule every start site shares: only a fresh start that never entered its POST is a definite refusal.
+    An HTTP answer to an entered POST proves no non-admission (the gateway types a non-JSON body ``http_<status>``;
+    an accepted command can end before execution and answer its start 400), so that start keeps its pending
+    token, registration and copies exactly as a lost reply does, and its still-pending invocation is read here
+    (``recover``): a found command is bound for its existing observation, capture and settlement. Every other
+    answer (not found, unsupported, refused, another store, a record no longer pending) binds nothing, sends
+    nothing and removes nothing. A transport fault, no answer at all, is left to the start's existing readers.
+    Returns ``(custody or None, receipt)``; the receipt, and a STARTED row it writes, name the refusal it read
+    behind (``start_refusal``). The run's own terminal stays its outcome: its typed failure, never a success."""
+    refusal = {"code": str(getattr(error, "code", "") or type(error).__name__),
+               "status": int(getattr(error, "status_code", 0) or 0)}
+    receipt: Dict[str, Any] = {"invocation_id": str(invocation_id or ""), "lookup": "not_read",
+                               "start_refusal": refusal}
+    if not invocation_id or not refusal["status"]:
+        return None, receipt
+    from ouroboros import delegate_custody as custody
+
+    try:
+        record = custody.invocation_record(drive_root, invocation_id) or {}
+        if record.get("state") != "pending":  # a STARTED another reader bound, or no record: its own readers decide
+            return None, {**receipt, "reason": f"invocation_{record.get('state') or 'unrecorded'}"}
+        held, read = recover(drive_root, gateway, {**record, "invocation_id": invocation_id},
+                             facts={"start_refusal": refusal})
+    except Exception:  # a read that failed outright binds nothing; the start stays as unknown as before it
+        log.warning("Accepted-start read behind the refused start of %s failed", invocation_id, exc_info=True)
+        return None, {**receipt, "lookup": "failed"}
+    return held, {**read, "start_refusal": refusal}
+
+
+__all__ = ["Bound", "Lookup", "NO_REPLAY", "RUN_LOOKUP", "RUN_STATES", "TURN_LOOKUP", "accepted_after_refusal",
+           "bind_started", "deferred_money", "locate", "recover"]

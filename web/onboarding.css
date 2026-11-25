@@ -142,13 +142,13 @@ textarea::placeholder {
 .wizard-steps {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-columns: minmax(min-content, 1fr); /* a one-word title (Consciousness) never runs into its neighbour */
   gap: 10px;
 }
 
 /* The step rail: trays, the current step a chosen card in the soft crimson, a done step's chip in green. */
 .wizard-step {
-  min-width: 0;
+  min-width: min-content;
   padding: 10px 12px;
   border-radius: var(--radius-inner);
   border: 1px solid transparent;
@@ -182,6 +182,8 @@ textarea::placeholder {
   color: var(--tone-crimson-soft-ink);
 }
 .wizard-step.done .wizard-step-index { background: var(--tone-green); color: var(--status-ok-fg); }
+/* «of 7» joins the number only where the rail shows the current pill alone (a phone, below). */
+.wizard-step-of { display: none; }
 
 .wizard-step-title {
   margin: 0;
@@ -825,6 +827,14 @@ textarea::placeholder {
   top: -1px;
 }
 
+/* A family's program line (docs/DESIGN.md §7): the model chooser's compact line under the row's status, shown only
+   with something to act on. Its Update takes the in-row control size so the line stays compact. */
+.agent-family-identity .harness-model-program {
+  --control-h: var(--control-h-sm);
+  --control-pad-x: var(--space-3);
+  --button-font-size: var(--type-meta);
+}
+
 .agent-service-note,
 .agent-outcome {
   font-size: var(--type-meta);
@@ -1358,7 +1368,7 @@ textarea::placeholder {
   }
 }
 
-/* A short window: each pill as wide as its own title, so five titles stay on one line where they fit. */
+/* A short window: each pill as wide as its own short title (`railTitle`), so seven stay on one line where they fit. */
 @media (max-height: 820px) {
   .wizard-steps {
     display: flex;
@@ -1420,24 +1430,30 @@ textarea::placeholder {
   }
 }
 
-/* A rail too narrow for five titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
+/* A phone's rail says where you are and clips no neighbour: the current pill alone, «5 of 7» and its short title. */
 @media (max-width: 720px) {
   .wizard-steps {
     display: flex;
-    overflow-x: auto;
-    padding: 0 2px 4px;
-    scroll-snap-type: x proximity;
   }
 
   .wizard-step {
-    flex: 0 0 92px;
-    align-items: center;
-    text-align: center;
-    scroll-snap-align: start;
+    display: none;
   }
 
-  .wizard-step-title {
+  .wizard-step.active {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .wizard-step-word {
     display: none;
+  }
+
+  .wizard-step-of {
+    display: inline;
   }
 }
 
@@ -1467,17 +1483,22 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 }
 /* track-migration:end */
 
-/* ---- Starter skills (board B13): one Summary row that opens in place into ONE vertical scroll of categorized
-   cards — two columns, one on a phone; a ticked card takes the wizard's chosen tone. Under the list stay the two
-   public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
-   depend on style.css. */
+/* ---- The Skills step (owner 2026-11-21; «слишком крупные карточки»: rows, not boxes): one categorized list, one row
+   per skill with no surface of its own, two columns where a row keeps its words on about one line (one below, and on
+   a phone). The box says a skill is ticked. A group's head is its name only. The page scrolls under the pinned
+   footer like any tall step, the list's end clear of it. Under the list one small sentence says where the hub's
+   skills come from and how they install. Summary keeps one row back to the step. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
-/* The Consciousness row (#1603) beside it shares the value and note ink; its label holds the one checkbox. */
-.skills-starter-summary, .consciousness-offer { display: grid; gap: 2px; min-width: 0; }
-.skills-starter-value, .consciousness-offer-value, .consciousness-offer-choice { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.skills-starter-sub, .consciousness-offer-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.consciousness-offer-choice { display: inline-flex; align-items: center; gap: var(--space-2); justify-self: start; cursor: pointer; }
-[data-consciousness-offer]:empty { display: none; } /* no row offered: no extra gap in the card */
+[data-starter-skills]:empty { display: none; }
+[data-starter-skills="row"] { display: flex; flex-direction: column; gap: 10px; }  /* the Skills row and a card's, spaced as their neighbours */
+.skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
+/* Summary's row reads as its neighbours do: the value at their size. */
+.skills-starter-value { color: var(--text-primary); }
+.skills-starter-sub { display: block; margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* The Consciousness step: its meaning leads as the step's copy; the switch as the wizard's two choices, then what a
+   subscription pays with, its limits and its door. */
+.consciousness-step { display: grid; gap: var(--space-2); }
+.consciousness-step .wizard-choice-grid { margin-bottom: var(--space-1); }
 .skills-starter-change,
 .skills-starter-bulk button {
   padding: 0;
@@ -1490,68 +1511,76 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
   font-weight: 600;
 }
 .skills-starter-change:focus-visible,
-.skills-starter-bulk button:focus-visible,
-.skills-starter-scroll:focus-visible {
+.skills-starter-bulk button:focus-visible {
   outline: 2px solid var(--focus-accent-border);
   outline-offset: 2px;
 }
-.skills-starter-panel { display: grid; gap: var(--space-2); padding-bottom: var(--space-2); min-width: 0; container: starterpanel / inline-size; }
+/* The step holds the reading place itself (onboarding_starter_skills.js readingPlace): an engine's own scroll anchoring
+   would move the page a second time when the hub's skills arrive. */
+.skills-starter-step { overflow-anchor: none; container: skillsstep / inline-size; }
+.skills-starter-list { display: grid; gap: var(--space-2); min-width: 0; padding-bottom: var(--space-3); }
 .skills-starter-bar { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
-.skills-starter-bar p { margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.skills-starter-count { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-starter-bulk { display: inline-flex; align-items: baseline; gap: var(--space-2); color: var(--text-meta); font-size: var(--type-meta); white-space: nowrap; }
-.skills-starter-scroll {
-  max-height: 420px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  min-width: 0;
-  padding: var(--space-1) var(--space-2) var(--space-4);
-  --starter-fade-top: 0px;
-  --starter-fade-bottom: 0px;
-  -webkit-mask-image: linear-gradient(180deg, transparent 0, black var(--starter-fade-top), black calc(100% - var(--starter-fade-bottom)), transparent 100%);
-  mask-image: linear-gradient(180deg, transparent 0, black var(--starter-fade-top), black calc(100% - var(--starter-fade-bottom)), transparent 100%);
+/* The groups flow down two columns where each keeps 400px (a row's words on about one line), else one: a list read
+   down, each group whole in its column. */
+.skills-starter-groups { columns: 2 400px; column-gap: var(--space-5); }
+.skills-starter-group { min-width: 0; padding-bottom: var(--space-2); break-inside: avoid; }
+.skills-starter-group h3 { margin: 0 0 2px; color: var(--text-primary); font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 600; }
+.skills-starter-group h3 span { color: var(--text-meta); font-weight: 400; }
+.skills-starter-skill { display: flex; align-items: flex-start; gap: 6px; min-width: 0; padding: 4px 0; cursor: pointer; break-inside: avoid; }
+.skills-starter-skill .ui-checkbox { flex: none; margin: 2px 0 0; }
+/* The title, then muted what it gives and, quieter, what it needs first: one line where it fits, wrapping whole
+   under the title where it does not (an author's long text too), never cut. */
+.skills-starter-words { min-width: 0; font-size: var(--type-meta); line-height: 20px; overflow-wrap: anywhere; }
+.skills-starter-words strong { margin-right: 4px; color: var(--text-primary); font-size: var(--type-body); font-weight: 600; }
+.skills-starter-pitch { color: var(--text-meta); }
+.skills-starter-needs { color: var(--text-secondary); white-space: nowrap; }
+/* A row's whole prerequisite sentence, read out in place of its few-word mark. */
+.skills-starter-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.skills-starter-skill { position: relative; }
+.skills-starter-trust { display: grid; gap: var(--space-2); }
+/* A skill's declared connection card leads the step: closed, one row like the others with its action; open, the
+   skill's numbered steps, its token field and, once checked, the QR beside the account, its link and its options. A
+   hairline under it sets it apart from the list, no box. The QR keeps its own white square (qr_svg.js). */
+.skills-connection { display: grid; gap: var(--space-2); padding-bottom: var(--space-2); border-bottom: 1px solid var(--divider); }
+.skills-connection-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.skills-connection-head .skills-starter-skill { flex: 1 1 auto; }
+.skills-connection-head .btn { flex: none; }
+.skills-connection-body { display: grid; gap: var(--space-2); padding-left: 22px; min-width: 0; }
+.skills-connection-steps { display: grid; gap: var(--space-2); margin: 0; padding-left: 1.4em; color: var(--text-primary); font-size: var(--type-meta); line-height: var(--line-meta); }
+.skills-connection-steps .btn { display: inline-flex; margin-left: var(--space-2); vertical-align: middle; text-decoration: none; }
+.skills-connection-token > label:not(.skills-starter-sr) { display: block; margin-bottom: var(--space-1); }
+.skills-connection-field { display: flex; flex-wrap: wrap; gap: var(--space-2); max-width: 520px; margin-top: var(--space-1); }
+/* Under about 300px the button moves below the field; a token longer than the field ends in an ellipsis, not a cut. */
+.skills-connection-field .ui-control { flex: 1 1 220px; min-width: 0; text-overflow: ellipsis; }
+.skills-connection-pair { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-3); }
+.skills-connection-qr { flex: none; width: 148px; height: 148px; overflow: hidden; border-radius: 8px; }
+.skills-connection-qr svg { display: block; width: 100%; height: 100%; }
+.skills-connection-facts { display: grid; gap: var(--space-1); min-width: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
+.skills-connection-facts strong { color: var(--text-primary); font-size: var(--type-body); }
+.skills-connection-facts a { color: var(--text-primary); font-weight: 600; }
+.skills-connection-option { display: flex; align-items: flex-start; gap: 6px; margin-top: var(--space-1); color: var(--text-primary); cursor: pointer; }
+.skills-connection-option .ui-checkbox { flex: none; margin: 1px 0 0; }
+/* Where a row could not keep one line (a phone, a narrow window), every row takes two: the title, then what it gives and
+   its mark on one muted line under it, the same rhythm for all instead of a break mid-sentence. The card's action stays
+   beside its title. */
+@container skillsstep (max-width: 35rem) {
+  .skills-starter-words strong { display: block; margin-right: 0; }
+  .skills-connection-head { align-items: flex-start; }
 }
-.skills-starter-scroll[data-scroll-above] { --starter-fade-top: 32px; }
-.skills-starter-scroll[data-scroll-below] { --starter-fade-bottom: 32px; }
-.skills-starter-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
-.skills-starter-scroll::-webkit-scrollbar-track { background: transparent; }
-.skills-starter-scroll::-webkit-scrollbar-thumb { background: rgba(var(--neutral-rgb), 0.16); border-radius: var(--pill-radius); }
-.skills-starter-group + .skills-starter-group { margin-top: var(--space-4); }
-.skills-starter-group h4 { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
-.skills-starter-group h4 span { margin-left: var(--space-2); color: var(--text-meta); font-weight: 400; }
-.wizard-choice-grid.skills-starter-cards { grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: var(--space-2) var(--space-3); }
-.wizard-choice.skills-starter-card { display: grid; align-content: start; gap: var(--space-1); padding: var(--space-3); }
-.skills-starter-head { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--space-2); }
-.skills-starter-head strong { color: var(--text-primary); font-size: var(--type-body); font-weight: 600; overflow-wrap: anywhere; }
-.skills-starter-marks { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-left: auto; }
-.skills-starter-desc,
-.skills-starter-needs {
-  padding-left: calc(14px + var(--space-2));
-  color: var(--text-meta);
-  font-size: var(--type-meta);
-  line-height: var(--line-meta);
-  overflow-wrap: anywhere;
-}
-.skills-starter-needs { font-weight: 500; }
-.skills-starter-trust { display: grid; gap: var(--space-2); padding-top: var(--space-1); }
 .skills-starter-trust-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .skills-starter-trust-row strong { flex: 1 1 30%; min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
 .skills-starter-trust .selection-pill { padding: 6px 12px; font-size: var(--type-meta); }
-.skills-mark {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  color: var(--tone-crimson-word);
-  font-size: var(--type-meta);
-  line-height: var(--line-meta);
-  font-weight: 500;
-  white-space: nowrap;
+/* The entrance: each row comes, by position and opacity on the sheet curve, a 30 ms beat after the one above it in
+   its own column, so both columns build at one pace (a column's twelfth place and later together: 700 ms in all).
+   Only the paint that first shows the rows in an entry carries data-arrive, so a repaint or a refresh never plays it
+   again; the boxes answer from the first frame. Reduced motion shows the list as it ends. */
+@keyframes skills-starter-arrive { from { opacity: 0; transform: translateY(8px); } }
+.skills-starter-list[data-arrive] :is(.skills-starter-group h3, .skills-starter-group .skills-starter-skill, .skills-connection) {
+  animation: skills-starter-arrive var(--motion-open) var(--ease-sheet) both;
+  animation-delay: calc(var(--arrive, 0) * 30ms);
 }
-/* A mark inside a chosen card wears the card's ink (a chosen state's ink is its tone's, DESIGN.md principle 4). */
-.wizard-choice.active .skills-mark { color: inherit; }
-.skills-mark-glyph { display: inline-flex; }
-.skills-mark svg { width: 14px; height: 14px; flex: 0 0 auto; }
-.ui-chip.skills-chip { padding: 3px 10px; font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 500; }
-@container starterpanel (max-width: 44rem) {
-  .skills-starter-scroll { max-height: 60vh; }
+@media (prefers-reduced-motion: reduce) {
+  .skills-starter-list[data-arrive] :is(.skills-starter-group h3, .skills-starter-group .skills-starter-skill, .skills-connection) { animation: none; }
 }

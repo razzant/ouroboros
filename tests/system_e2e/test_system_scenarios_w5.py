@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import subprocess
 
 import pytest
@@ -53,6 +54,7 @@ from tests.system_e2e.harness import (
     ScriptedStubModel,
     body_text,
     keyless_settings,
+    message_text,
     require_lane,
     start_server,
     submit_running,
@@ -66,7 +68,7 @@ from tests.system_e2e.interfaces import (
 # The wave-3b delegated-transport glue, reused rather than re-derived: one author
 # for the run-id regex the scripts read and for the custody-row reader, so a change
 # to either cannot drift between the two delegation waves.
-from tests.system_e2e.test_system_scenarios_w3a import _completion_step
+from tests.system_e2e.test_system_scenarios_w3a import _Again, _HoldingStubModel, _completion_step
 from tests.system_e2e.test_system_scenarios_w3b import (
     _RUN_ID_RE,
     _custody_rows,
@@ -178,6 +180,50 @@ def _run_id_from(body: dict) -> str:
     return ids[-1] if ids else ""
 
 
+_INSPECT_REFUSAL = "INTEGRATE_DELEGATED_INSPECT_CAPTURE"
+_MANIFEST_READ_RE = re.compile(r'"manifest_read": \{\s*"root": "artifact_store",\s*"path": "([^"]+)"')
+
+
+def _newest_tool_result(body: dict) -> tuple[str, str]:
+    """(tool name, result text) of the newest tool result the model was shown."""
+    messages = body.get("messages") or []
+    names = {call.get("id"): (call.get("function") or {}).get("name", "")
+             for message in messages for call in message.get("tool_calls") or []}
+    for message in reversed(messages):
+        if message.get("role") == "tool":
+            return str(names.get(message.get("tool_call_id")) or ""), message_text(message)
+    return "", ""
+
+
+def _decide_after_inspection(apply, then: dict, seen: dict):
+    """A ``_HoldingStubModel`` step: the apply decision as a model that obeys the product plays it.
+
+    ``integrate_delegated_patch(decision="apply")`` applies only a capture that was ready
+    before the call. One the call had to prepare itself comes back unapplied for inspection
+    (``INTEGRATE_DELEGATED_INSPECT_CAPTURE``, #1969; architecture 06 "Snapshots, capture and
+    disposition": changes are shown before apply). That
+    happens whenever the terminal wake reaches the model before the maintenance child has
+    captured the patch, which on a fast runner is a plain race (#3854). After that refusal
+    this step reads the ``manifest_read`` it names and applies again, once: the same
+    retained capture, now inspected. ``apply(body)`` builds each apply call (and may act
+    on the live tree right before it); ``then`` is served once an apply was answered with
+    anything else. ``seen["inspections"]`` counts the refusals taken this way.
+    """
+    def step(body: dict):
+        name, text = _newest_tool_result(body)
+        if name == "integrate_delegated_patch" and _INSPECT_REFUSAL in text:
+            match = _MANIFEST_READ_RE.search(text)
+            if seen.get("inspections") or not match:
+                return {"final": f"E2E_SCRIPT_ERROR: unexpected inspection refusal: {text[:300]}"}
+            seen["inspections"] = 1
+            return _Again({"tool": "read_file", "arguments": {
+                "root": "artifact_store", "path": match.group(1)}})
+        if name == "integrate_delegated_patch":
+            return then
+        return _Again(apply(body))  # the first apply, or the one after reading the capture
+    return step
+
+
 def _capture_dir(data_root: pathlib.Path, task_id: str, snapshot_id: str) -> pathlib.Path:
     return (pathlib.Path(data_root) / "task_results" / "artifacts" / str(task_id)
             / "delegated_runs" / str(snapshot_id))
@@ -214,14 +260,16 @@ def test_s24_mutating_delegated_run_is_isolated_until_an_explicit_clean_apply(
     # AFTER the terminal wait: the isolation proof, taken causally (the script step
     # runs in this process, between the wait's result and the integrate call) rather
     # than by racing the server with a sleep.
-    observed: dict = {}
+    # One row per apply call (two when the call first returned the capture for inspection).
+    observed: dict = {"before_apply": [], "inspections": 0}
 
     def _integrate_step(body: dict) -> dict:
         run_id = _run_id_from(body)
         if not run_id:
             return {"final": "E2E_SCRIPT_ERROR: no delegated run id visible"}
-        observed["new_file_before_apply"] = (workspace / "delegated_new.txt").exists()
-        observed["tracked_before_apply"] = (workspace / "tracked.txt").read_text(encoding="utf-8")
+        observed["before_apply"].append((
+            (workspace / "delegated_new.txt").exists(),
+            (workspace / "tracked.txt").read_text(encoding="utf-8")))
         return {"tool": "integrate_delegated_patch",
                 "arguments": {"run_id": run_id, "decision": "apply",
                               "reason": "reviewed the captured diff"}}
@@ -230,13 +278,12 @@ def test_s24_mutating_delegated_run_is_isolated_until_an_explicit_clean_apply(
         {"tool": "delegate_start", "arguments": {
             "subagent_id": "cx-builder", "prompt": _MUTATE_PROMPT}},
         _wait_step,
-        _integrate_step,
-        # The verification reminder holds this answer for explicit selection.
-        {"final": f"{S24_MARKER}: patch integrated."},
+        # The verification reminder holds the answer it serves for explicit selection.
+        _decide_after_inspection(_integrate_step, {"final": f"{S24_MARKER}: patch integrated."}, observed),
         _completion_step(f"{S24_MARKER}: patch integrated.", answer_form="answer"),
     ]
     with FakeClaudexorDaemon() as daemon, \
-            ScriptedStubModel(script, final_answer=f"{S24_MARKER}: patch integrated.") as stub:
+            _HoldingStubModel(script, final_answer=f"{S24_MARKER}: patch integrated.") as stub:
         daemon.install(data_root / "claudexor")
         server = start_server(e2e_clone, root, _mutating_settings(stub, root))
         try:
@@ -277,8 +324,9 @@ def test_s24_mutating_delegated_run_is_isolated_until_an_explicit_clean_apply(
             assert (body.get("scope") or {}).get("root") == str(workspace), body
 
             # -- ISOLATION: nothing reached the live tree before the decision --
-            assert observed.get("new_file_before_apply") is False, observed
-            assert observed.get("tracked_before_apply") == "one\n", observed
+            # Every apply call met the untouched tree, the refused one included.
+            assert len(observed["before_apply"]) == 1 + observed["inspections"], observed
+            assert observed["before_apply"] == [(False, "one\n")] * len(observed["before_apply"]), observed
 
             # -- the capture is a durable artifact, sha-verified ---------------
             cap_dir = _capture_dir(server.data_root, task_id, snapshot_id)
@@ -341,10 +389,13 @@ def test_s25_mutating_delegated_patch_conflict_is_refused_and_keeps_its_material
     workspace = _seed_workspace(root)
     owner_text = "the owner's own edit\n"
 
+    seen: dict = {}
+
     def _drift_then_integrate(body: dict) -> dict:
         """The interleaving that makes a conflict REAL: the live tree moves on a
-        patched path AFTER the capture and BEFORE the decision. Written from the
-        script step itself, so the ordering is causal rather than timed."""
+        patched path AFTER the run's work and BEFORE the decision. Written from the
+        script step itself, right before each apply call (the same bytes again before
+        an apply that follows an inspection), so the ordering is causal rather than timed."""
         run_id = _run_id_from(body)
         if not run_id:
             return {"final": "E2E_SCRIPT_ERROR: no delegated run id visible"}
@@ -356,10 +407,11 @@ def test_s25_mutating_delegated_patch_conflict_is_refused_and_keeps_its_material
         {"tool": "delegate_start", "arguments": {
             "subagent_id": "cx-builder", "prompt": _MUTATE_PROMPT}},
         _wait_step,
-        _drift_then_integrate,
+        _decide_after_inspection(
+            _drift_then_integrate, {"final": f"{S25_MARKER}: conflict is mine to resolve."}, seen),
     ]
     with FakeClaudexorDaemon() as daemon, \
-            ScriptedStubModel(script, final_answer=f"{S25_MARKER}: conflict is mine to resolve.") as stub:
+            _HoldingStubModel(script, final_answer=f"{S25_MARKER}: conflict is mine to resolve.") as stub:
         daemon.install(data_root / "claudexor")
         server = start_server(e2e_clone, root, _mutating_settings(stub, root))
         try:

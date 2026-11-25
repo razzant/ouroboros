@@ -368,7 +368,7 @@ test('names from the server are escaped text; titles and accessible names are fi
 
 // Revision 4 of the backend contract (sections 2 and 3): every typed reason a page, a pool or a run's kept rows can carry.
 const CONTRACT_REASONS = ['results_pending', 'in_use', 'busy', 'unreadable_record', 'restart', 'other', 'capture_unproven', 'retained_evidence',
-    'undeclared_environment', 'owner_keep', 'changed', 'unproven_excluded_inputs', 'advanced_group'];
+    'undeclared_environment', 'owner_keep', 'changed', 'unproven_excluded_inputs', 'advanced_group', 'payload_offer'];
 
 test('every reason the server can send has its own words; none falls through to "another reason"', () => {
     for (const reason of CONTRACT_REASONS.filter((name) => name !== 'other')) {
@@ -386,7 +386,8 @@ const CONTRACT_CAUSES = ['child_result_unadopted', 'child_refs_pending', 'call_i
     'inputs_uncustodied', 'unread_mailbox_uncustodied', 'verification_receipts_uncustodied', 'raw_evidence_uncustodied',
     'artifact_source_missing', 'canonical_changed', 'drive_occupant_changed', 'canonical_not_settled', 'post_work_open',
     'artifacts_not_terminal', 'child_drive_mismatch', 'task_live', 'liveness_unknown', 'owner_processes_live', 'owner_not_terminal',
-    'task_not_terminal', 'parent_not_terminal', 'not_proven_over', 'custody_held', 'owner_paused', 'review_custody_active',
+    'task_not_terminal', 'parent_not_terminal', 'parent_decision_pending', 'parent_unreadable', 'not_proven_over',
+    'custody_held', 'owner_paused', 'review_custody_active',
     'seat_checking', 'operation_live', 'review_environment_held', 'custody_busy', 'mailbox_busy', 'store_busy', 'record_busy',
     'task_result_unreadable', 'unread_mailbox_unreadable', 'record_unreadable', 'review_state_unreadable', 'marker_unreadable',
     'capture_unproven', 'capture_incomplete', 'retained_process_environment', 'undeclared_environment', 'producer_retained',
@@ -408,6 +409,14 @@ test('every exact cause reads its own words from the one map, the same in the Fr
     const tray = resultSentences(free('done', { run: run({ kept: [{ reason: 'in_use', count: 1, causes: [{ cause: 'some_new_hold', count: 1 }] }] }) })).rest.join(' ');
     assert.match(tray, /1 was kept: 1 still in use \(some_new_hold\)\./);
     assert.equal(holdsPhrase({ holds: [{ class: 'some_new_hold', count: 1 }] }, NOW), 'holding 1: 1 some new hold');
+});
+
+test('a saved state the queue holds is said true whether a work may load it or the queue could not be read', () => {
+    // saved_state_retirement holds as lent_to_receiver both a state a queued or running work may load and every state
+    // of a work while the published queue is missing, stale or unreadable.
+    const said = holdsPhrase({ holds: [{ class: 'lent_to_receiver', count: 2 }] }, NOW);
+    assert.match(said, /^holding 2: 2 a queued or running work may still load it/);
+    assert.match(said, /or the queue could not be read$/);
 });
 
 test('saved-group items the pool leaves out are counted by the saved groups, not under what cannot go', () => {

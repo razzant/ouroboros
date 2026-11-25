@@ -15,11 +15,13 @@ refused as received (``mode_received``), never taken as a default; each field ke
 ``content``/``new_str`` deletes, a whitespace ``old_str`` is an exact anchor, an empty
 ``expected_revision`` is create-only and is the caller's). The note writer's summary, archive and
 lifecycle rules stay its own: a caller names its modes, the modes that take no content, the modes
-that require a reason and what an edit may revise beside the text (``alone``).
+that require a reason and what an edit may revise beside the text (``alone``, ``fields``).
 """
 from __future__ import annotations
 
 from typing import Any, Mapping
+
+import yaml
 
 
 def mode_received(mode: Any, null: str = "missing or null") -> str:
@@ -68,7 +70,7 @@ def normalize_arguments(mode: Any, version: Any, expected_revision: Any, edits: 
 def check_arguments(mode: Any, content: Any, old_str: Any, new_str: Any, edits: Any, version: Any, reason: Any,
                     notes: list[str], *, modes: tuple[str, ...], no_content: tuple[str, ...] = ("revert",),
                     reason_required: tuple[str, ...] = (), alone: str = "", alone_given: bool = False,
-                    version_reader: str = "") -> tuple[Any, Any, Any]:
+                    fields: bool | None = None, version_reader: str = "") -> tuple[Any, Any, Any]:
     """``(content, old_str, edits)`` after the shared rules, or ``ValueError`` naming the field and the repair.
 
     Run after ``normalize_arguments``. ``new_str`` is ``content``'s alias for one ``old_str``; an
@@ -76,7 +78,10 @@ def check_arguments(mode: Any, content: Any, old_str: Any, new_str: Any, edits: 
     ``mode=revert`` requires ``version`` and takes no content; a mode outside ``no_content`` requires
     ``content``. ``alone`` names what an edit may revise without ``old_str`` or ``edits`` (the
     note's summary) and ``alone_given`` says the call carries it; otherwise an edit requires one of
-    them. ``version_reader`` is the read a refusal of a stray ``version`` names."""
+    them. ``fields`` is for a writer whose edit also takes a content that is only a YAML block, which
+    sets its fields and keeps the body (the note writer): ``True`` says this content is one, ``False``
+    that it is not; ``None``, a writer without that edit. ``version_reader`` is the read a refusal of a
+    stray ``version`` names."""
     from ouroboros.tools.arg_feedback import ignored_argument_note
 
     if not isinstance(mode, str) or mode not in modes:  # each refusal names the one argument that is wrong
@@ -125,13 +130,16 @@ def check_arguments(mode: Any, content: Any, old_str: Any, new_str: Any, edits: 
         if old_str not in (None, "") or content:
             raise ValueError("edits carries its own replacements: pass edits without old_str and content")
         content, old_str = "", None
+    elif mode == "edit" and fields and old_str in (None, ""):  # a YAML block alone: its fields, never body text
+        old_str = None
     elif mode == "edit" and alone_given and old_str in (None, ""):  # "" asks for nothing
         if content:
             raise ValueError(f"content ({len(content)} chars) has no old_str to replace; pass old_str "
                              f"for a body edit, or omit content to revise only the {alone}")
         content, old_str = "", None
     elif mode == "edit" and (not isinstance(old_str, str) or not old_str):
-        raise ValueError("mode=edit requires edits, or a non-empty old_str" + (f", or a {alone}" if alone else ""))
+        raise ValueError("mode=edit requires edits, or a non-empty old_str" + (f", or a {alone}" if alone else "")
+                         + ("" if fields is None else ", or YAML-only content"))
     elif mode == "edit" and content is None:
         raise ValueError("mode=edit with old_str requires content, its replacement "
                          "(empty text deletes the old_str span)")
@@ -225,3 +233,8 @@ def compile_edit_items(raw: bytes, body_start: int, items: list[tuple[str, str]]
         out += [body[at:start], new]
         at = end
     return b"".join(out + [body[at:]])
+
+
+def yaml_form(metadata: Mapping[str, Any]) -> str:
+    """Compare loaded YAML by type and value, including recursive aliases."""
+    return yaml.safe_dump(metadata, allow_unicode=True, sort_keys=True)

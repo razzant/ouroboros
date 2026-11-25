@@ -302,20 +302,21 @@ def test_new_or_reentered_band_path_requires_nonblank_rationale(rationale: str |
     )
 
     assert validate_manifest_transition(current, previous) == [
-        "new or re-entered 1001-1500 path needs a nonblank rationale: legacy.py"
+        "new or re-entered 1001-1600 path needs a nonblank rationale: legacy.py"
     ]
 
 
-def test_surviving_band_rationale_is_preserved() -> None:
+def test_a_band_rationale_may_be_replaced_but_never_dropped() -> None:
+    """Owner 2A (2026-11-06): a recorded reason may give way to a better one, Git keeps the old text;
+    a reason once recorded never returns to none, and a baseline ``None`` may take a reason."""
     previous = _manifest(band_paths={"feature.py": "owner-approved extraction seam"})
-    current = _manifest(band_paths={"feature.py": "rewritten"})
-
-    assert validate_manifest_transition(current, previous) == ["surviving band rationale is immutable: feature.py"]
-    previous_none = _manifest(band_paths={"feature.py": None})
-    current_fabricated = _manifest(band_paths={"feature.py": "fabricated later"})
-    assert validate_manifest_transition(current_fabricated, previous_none) == [
-        "surviving band rationale is immutable: feature.py"
+    assert validate_manifest_transition(_manifest(band_paths={"feature.py": "rewritten"}), previous) == []
+    assert validate_manifest_transition(_manifest(band_paths={"feature.py": None}), previous) == [
+        "band rationale dropped: feature.py"
     ]
+    previous_none = _manifest(band_paths={"feature.py": None})
+    assert validate_manifest_transition(_manifest(band_paths={"feature.py": "written later"}), previous_none) == []
+    assert validate_manifest_transition(previous_none, previous_none) == []
 
 
 def test_byte_debt_cannot_grow_or_reenter() -> None:
@@ -389,8 +390,8 @@ def test_band_entry_stays_only_while_its_module_sits_above_the_band(tmp_path: Pa
 def test_band_entry_kept_above_the_band_returns_with_its_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """1504 -> 1450 lines needs no new reason: the entry never left. The adjacent rule that a
-    surviving reason is immutable is unchanged."""
+    """1504 -> 1450 lines needs no new reason: the entry never left. A new reason may replace it, and the
+    regenerator keeps the one written on disk."""
     repo = _band_repo(tmp_path, {"mod.py": 1504}, _manifest(band_paths={"mod.py": "extraction seam"}))
     assert collect_size_ratchet_inventory_at_ref(repo, "HEAD").above_band_paths == frozenset({"mod.py"})
     _write_lines(repo / "mod.py", 1450)
@@ -399,7 +400,250 @@ def test_band_entry_kept_above_the_band_returns_with_its_reason(
     assert validate_size_ratchet(repo) == []
     assert regenerate._next_manifest({}).band_paths == {"mod.py": "extraction seam"}
     _write_manifest(repo, _manifest(band_paths={"mod.py": "a new reason"}))
-    assert validate_size_ratchet(repo) == ["surviving band rationale is immutable: mod.py"]
+    assert validate_size_ratchet(repo) == []
+    assert regenerate.main([]) == 0
+    assert parse_size_ratchet_manifest((repo / "ouroboros/size_ratchet_manifest.py").read_text(
+        encoding="utf-8")).band_paths == {"mod.py": "a new reason"}
+
+
+def test_a_touched_module_of_1001_to_1600_lines_needs_a_band_rationale() -> None:
+    """Owner 2A (2026-11-06): above 1000 lines a record with its reason, owed by the change that touches
+    the module; an untouched 1501-1600 module needs no entry and a baseline ``None`` may stay."""
+    from ouroboros.review import touched_band_errors
+
+    manifest = _manifest(band_paths={"none.py": None, "kept.py": "a reason", "top.py": None, "blank.py": " "})
+    lines = {"gap.py": 1550, "none.py": 1200, "kept.py": 1550, "band.py": 1200, "low.py": 1000,
+             "giant.py": 1601, "top.py": 1600, "blank.py": 1300}
+    assert touched_band_errors(manifest, lines, lines) == [
+        "touched 1300-line module needs a nonblank band rationale: blank.py",  # an in-memory blank is no reason
+        "touched 1550-line module needs a nonblank band rationale: gap.py",
+        "touched 1200-line module needs a nonblank band rationale: none.py",
+        "touched 1600-line module needs a nonblank band rationale: top.py",
+    ]
+    assert touched_band_errors(manifest, lines, ["kept.py", "low.py", "giant.py", "gone.py"]) == []
+    assert touched_band_errors(manifest, lines, []) == []
+    # A touched band module without any entry is the exactness check's missing live entry, said once.
+    assert touched_band_errors(manifest, lines, ["band.py"]) == []
+
+
+def test_the_rule_reads_what_the_candidate_touched_and_an_unchanged_tree_stays_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = "ouroboros/size_ratchet_manifest.py"
+    repo = _band_repo(tmp_path, {"gap.py": 1550, "legacy.py": 1200},
+                      _manifest(band_baseline_paths=frozenset({"legacy.py"}), band_paths={"legacy.py": None}))
+    assert validate_size_ratchet(repo) == []  # untouched: no entry owed, the baseline None stays
+    monkeypatch.setattr(regenerate, "REPO_ROOT", repo)
+
+    _write_lines(repo / "gap.py", 1551)
+    _write_lines(repo / "legacy.py", 1201)
+    _git(repo, "add", "legacy.py")
+    gap = "touched 1551-line module needs a nonblank band rationale: gap.py"
+    legacy = "touched 1201-line module needs a nonblank band rationale: legacy.py"
+    assert validate_size_ratchet(repo) == [gap, legacy, f"staged: {legacy}"]
+    before = (repo / manifest_path).read_bytes()
+    assert regenerate.main([]) == 2 and (repo / manifest_path).read_bytes() == before
+    assert regenerate.main(["--band-rationale", "gap.py=one parser", "--band-rationale", "legacy.py=its reason"]) == 2
+    _git(repo, "add", manifest_path)  # written; only the staged copy lagged
+    assert validate_size_ratchet(repo) == []
+    assert regenerate.main([]) == 0  # a run without the flags keeps the reasons written on disk
+    assert parse_size_ratchet_manifest((repo / manifest_path).read_text(encoding="utf-8")).band_paths == {
+        "gap.py": "one parser", "legacy.py": "its reason"}
+    assert regenerate.main(["--band-rationale", "low.py=no such module"]) == 2
+
+
+def test_a_file_only_the_index_dropped_is_touched_when_git_would_add_it_otherwise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``git rm --cached`` with the same file kept on disk touches nothing, so the live check and the
+    regenerator stay green; kept with other content or another mode it is touched; a staged deletion passes."""
+    repo = _band_repo(tmp_path, {"gap.py": 1599}, _manifest())
+    monkeypatch.setattr(regenerate, "REPO_ROOT", repo)
+    _git(repo, "rm", "-q", "--cached", "gap.py")
+    assert validate_size_ratchet(repo) == []
+    assert regenerate.main([]) == 0
+    _write_lines(repo / "gap.py", 1598)
+    assert validate_size_ratchet(repo) == ["touched 1598-line module needs a nonblank band rationale: gap.py"]
+    if os.name != "nt":  # a Windows checkout keeps no executable bit
+        _write_lines(repo / "gap.py", 1599)
+        (repo / "gap.py").chmod(0o755)
+        assert validate_size_ratchet(repo) == ["touched 1599-line module needs a nonblank band rationale: gap.py"]
+    (repo / "gap.py").unlink()
+    assert validate_size_ratchet(repo) == []
+
+
+def test_the_pairwise_check_reads_touched_modules_when_the_manifest_did_not_change(tmp_path: Path) -> None:
+    repo = _band_repo(tmp_path, {"gap.py": 1550}, _manifest())
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "README.md").write_text("unrelated\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "unrelated")
+    assert validate_size_ratchet_transition_against_base(repo, base) == []
+    _write_lines(repo / "gap.py", 1551)
+    _git(repo, "commit", "-qam", "touch gap.py, manifest unchanged")
+
+    touched = ["touched 1551-line module needs a nonblank band rationale: gap.py"]
+    assert validate_size_ratchet_transition_against_base(repo, base) == touched
+    assert validate_size_ratchet_transition_against_base(repo, None) == touched  # the degraded parent base
+    assert validate_size_ratchet(repo) == []  # the committed tree is clean against its own HEAD
+    _write_manifest(repo, _manifest(band_paths={"gap.py": "one parser"}))
+    _git(repo, "commit", "-qam", "its reason")
+    assert validate_size_ratchet_transition_against_base(repo, base) == []
+    assert validate_size_ratchet(repo) == []
+
+
+def test_a_recorded_reason_leaves_only_with_its_module_or_the_band(tmp_path: Path) -> None:
+    """Owner 2A: a reason is replaceable, never dropped. Deleting the entry of a module that still holds
+    1001-1600 lines drops it (candidate, live, pairwise); a module deleted or out of the band retires it."""
+    dropped = "band rationale dropped: gap.py (entry removed at 1550 lines)"
+    previous = _manifest(band_paths={"gap.py": "one parser"})
+    assert validate_manifest_transition(_manifest(), previous, {"gap.py": 1550}) == [dropped]
+    for lines in ({"gap.py": 1601}, {"gap.py": 1000}, {}):  # a giant now, out of the band, deleted
+        assert validate_manifest_transition(_manifest(), previous, lines) == []
+    assert validate_manifest_transition(_manifest(), _manifest(band_paths={"gap.py": None}), {"gap.py": 1550}) == []
+
+    kept = {"band.py": "a seam", "gone.py": "a reason", "low.py": "a reason"}
+    repo = _band_repo(tmp_path, {"gap.py": 1550, "band.py": 1200, "gone.py": 1300, "low.py": 1400},
+                      _manifest(band_paths={"gap.py": "one parser", **kept}))
+    base = _git(repo, "rev-parse", "HEAD")
+    without_gap = regenerate._render(_manifest(band_paths=kept))
+    assert validate_size_ratchet_candidate(repo, without_gap) == [dropped]
+    (repo / "ouroboros/size_ratchet_manifest.py").write_text(without_gap, encoding="utf-8")
+    assert validate_size_ratchet(repo) == [dropped]  # gap.py itself is untouched
+    _git(repo, "commit", "-qam", "drop the reason of a 1550-line module")
+    assert validate_size_ratchet_transition_against_base(repo, base) == [dropped]
+    assert validate_size_ratchet_transition_against_base(repo, None) == [dropped]
+
+    _git(repo, "reset", "-q", "--hard", base)
+    (repo / "gone.py").unlink()
+    _write_lines(repo / "low.py", 900)
+    _write_manifest(repo, _manifest(band_paths={"gap.py": "one parser", "band.py": "a seam"}))
+    assert validate_size_ratchet(repo) == []
+    _git(repo, "commit", "-qam", "two entries leave with their modules")
+    assert validate_size_ratchet_transition_against_base(repo, base) == []
+
+
+def test_a_tip_blob_git_cannot_give_is_a_partial_finding_never_an_absent_module(tmp_path: Path) -> None:
+    repo = _band_repo(tmp_path, {"gap.py": 1550, "kept.py": 1550}, _manifest())
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_lines(repo / "gap.py", 1551)
+    (repo / "kept.py").unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "touch gap.py, delete kept.py")
+    touched = ["touched 1551-line module needs a nonblank band rationale: gap.py"]
+    assert validate_size_ratchet_transition_against_base(repo, base) == touched  # a deletion owes nothing
+    blob = _git(repo, "rev-parse", "HEAD:gap.py")
+    loose = repo / ".git" / "objects" / blob[:2] / blob[2:]
+    loose.chmod(0o600)  # Git writes loose objects read-only; Windows refuses to unlink those.
+    loose.unlink()
+    [finding] = validate_size_ratchet_transition_against_base(repo, base)
+    assert finding.startswith("partial: pairwise touched or recorded modules at HEAD unavailable "
+                              "(SizeRatchetRefUnavailable: ")
+    assert finding.endswith("not checked: band rationales of touched modules and removed entries")
+
+
+def test_the_pairwise_reads_of_head_fetch_nothing_and_a_read_past_its_time_bound_is_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial clone, as installs are, that lacks HEAD's blob of a touched module answers ``partial:``
+    and fetches nothing from its promisor; a read past its time bound is ``partial:``, never a pass."""
+    from ouroboros import review
+
+    for name in ("GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL"):  # the manifest reads may fetch, as on an install
+        monkeypatch.delenv(name, raising=False)
+    source = _band_repo(tmp_path, {"gap.py": 1550}, _manifest())
+    base = _git(source, "rev-parse", "HEAD")
+    _write_lines(source / "gap.py", 1551)
+    _git(source, "commit", "-qam", "touch gap.py")
+    _git(source, "config", "uploadpack.allowFilter", "true")
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", "--filter=blob:none", "--no-checkout", source.as_uri(), str(clone))
+    blob = _git(clone, "rev-parse", "HEAD:gap.py")
+
+    def fetched() -> bool:
+        probe = ["git", "cat-file", "-e", blob]
+        return subprocess.run(probe, cwd=clone, env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}).returncode == 0
+
+    unavailable = "partial: pairwise touched or recorded modules at HEAD unavailable ("
+    assert not fetched()
+    [finding] = validate_size_ratchet_transition_against_base(clone, base)
+    assert finding.startswith(unavailable + "SizeRatchetRefUnavailable: ") and not fetched()
+    assert validate_size_ratchet_transition_against_base(source, base) == [
+        "touched 1551-line module needs a nonblank band rationale: gap.py"]
+    monkeypatch.setattr(review, "_GIT_READ_SECONDS", 1e-9)
+    [finding] = validate_size_ratchet_transition_against_base(source, base)
+    assert finding.startswith(unavailable + "TimeoutExpired: ")
+
+
+def test_touched_runs_from_the_fork_point_of_a_base_that_moved_on(tmp_path: Path) -> None:
+    """A base ahead of HEAD (a target that moved on) lends HEAD neither the modules it touched nor the
+    reasons it recorded; HEAD's own touches still owe theirs, against either base."""
+    repo = _band_repo(tmp_path, {"gap.py": 1550}, _manifest())
+    fork = _git(repo, "rev-parse", "HEAD")
+    _write_lines(repo / "gap.py", 1551)
+    _write_manifest(repo, _manifest(band_paths={"gap.py": "a reason"}))
+    _git(repo, "commit", "-qam", "the target touches gap.py and records why")
+    target = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "feature", fork)
+    (repo / "README.md").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "an unrelated change")
+    assert validate_size_ratchet_transition_against_base(repo, target) == []
+    _write_lines(repo / "gap.py", 1549)
+    _git(repo, "commit", "-qam", "the feature touches gap.py")
+    touched = ["touched 1549-line module needs a nonblank band rationale: gap.py"]
+    assert validate_size_ratchet_transition_against_base(repo, target) == touched
+    assert validate_size_ratchet_transition_against_base(repo, fork) == touched
+
+
+def test_a_drop_is_judged_against_the_reasons_the_fork_point_recorded(tmp_path: Path) -> None:
+    """A target that moved on and gave an inherited ``None`` a reason lends a branch that never touched the
+    module no drop; a reason the fork recorded and the branch drops is caught against the target and the
+    fork. A push that rewinds a published branch is out of scope: force-pushing ``ouroboros`` is forbidden."""
+    baseline = frozenset({"gap.py"})
+    repo = _band_repo(tmp_path, {"gap.py": 1200, "kept.py": 1550},
+                      _manifest(band_baseline_paths=baseline, band_paths={"gap.py": None, "kept.py": "a seam"}))
+    fork = _git(repo, "rev-parse", "HEAD")
+    _write_manifest(repo, _manifest(band_baseline_paths=baseline, band_paths={"gap.py": "a reason", "kept.py": "a seam"}))
+    _git(repo, "commit", "-qam", "the target gives the inherited None a reason")
+    target = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "feature", fork)
+    (repo / "README.md").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "an unrelated change")
+    assert validate_size_ratchet_transition_against_base(repo, target) == []
+    assert validate_size_ratchet_transition_against_base(repo, fork) == []
+    for kept, dropped in (({}, "kept.py (entry removed at 1550 lines)"), ({"kept.py": None}, "kept.py")):
+        _write_manifest(repo, _manifest(band_baseline_paths=baseline, band_paths={"gap.py": None, **kept}))
+        _git(repo, "commit", "-qam", "the branch drops the reason the fork recorded")
+        for base in (target, fork):
+            assert validate_size_ratchet_transition_against_base(repo, base) == [f"band rationale dropped: {dropped}"]
+        _git(repo, "reset", "-q", "--hard", "HEAD~1")
+
+
+def test_without_an_event_base_a_merge_owes_only_what_it_changed_against_every_parent(tmp_path: Path) -> None:
+    """A dispatch or tag run has no event base and reads HEAD against its parent: a target merged into a
+    branch lends the branch none of the modules the target touched, while a module the merge itself
+    changes, and an ordinary commit's own touch, still owe their reason."""
+    repo = _band_repo(tmp_path, {"gap.py": 1550}, _manifest())
+    fork = _git(repo, "rev-parse", "HEAD")
+    _write_lines(repo / "gap.py", 1551)
+    _git(repo, "commit", "-qam", "the target touches gap.py")
+    target = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "feature", fork)
+    (repo / "README.md").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "an unrelated change")
+    _git(repo, "merge", "-q", "--no-ff", "--no-edit", target)
+    assert validate_size_ratchet_transition_against_base(repo, "") == []
+    _write_lines(repo / "gap.py", 1552)
+    _git(repo, "commit", "-q", "--amend", "--no-edit", "-a")  # the merge itself changes gap.py
+    touched = ["touched 1552-line module needs a nonblank band rationale: gap.py"]
+    assert validate_size_ratchet_transition_against_base(repo, "") == touched
+    _git(repo, "reset", "-q", "--hard", "HEAD^1")
+    _write_lines(repo / "gap.py", 1552)
+    _git(repo, "commit", "-qam", "the feature touches gap.py")
+    assert validate_size_ratchet_transition_against_base(repo, "") == touched
 
 
 def test_tree_validation_reads_staged_bytes_not_unstaged_worktree_bytes(tmp_path: Path) -> None:
@@ -836,10 +1080,9 @@ def test_pairwise_degraded_red_parent_lends_the_tip_no_debt(tmp_path: Path) -> N
 
 
 def test_interval_rationale_form_allows_legal_reentry_and_blocks_drops(tmp_path: Path) -> None:
-    """Across an interval a band path may legally retire and re-enter with a
-    fresh rationale (every adjacent step green): the pairwise interval form
-    accepts the changed rationale and rejects a dropped or blank one. The
-    adjacent form keeps byte-equality."""
+    """Across an interval a band path may retire and re-enter with a fresh rationale, and between
+    adjacent manifests a reason may be replaced: one rule accepts the changed rationale and rejects a
+    dropped or blank one."""
     from ouroboros.review import parse_size_ratchet_manifest, validate_manifest_transition
     import scripts.regenerate_size_ratchet as regen
 
@@ -850,22 +1093,15 @@ def test_interval_rationale_form_allows_legal_reentry_and_blocks_drops(tmp_path:
     def _parse(manifest):
         return parse_size_ratchet_manifest(regen._render(manifest))
 
-    assert validate_manifest_transition(_parse(tip_fresh), _parse(base), adjacent=False) == []
-    assert validate_manifest_transition(_parse(tip_fresh), _parse(base)) == [
-        "surviving band rationale is immutable: mod.py"
-    ]
-    assert validate_manifest_transition(_parse(tip_dropped), _parse(base), adjacent=False) == [
-        "band rationale dropped across the interval: mod.py"
-    ]
+    assert validate_manifest_transition(_parse(tip_fresh), _parse(base)) == []
+    assert validate_manifest_transition(_parse(tip_dropped), _parse(base)) == ["band rationale dropped: mod.py"]
     # Blank strings are refused at the parse boundary ("nonblank or None"), so
     # a rendered manifest can never carry one; the transition guard still
     # treats a directly constructed blank rationale as a drop (defense in
     # depth for in-memory candidates that bypass the parser).
     for blank in ("", "   "):
         tip_blank = _manifest(band_paths={"mod.py": blank}, sha="a" * 40)
-        assert validate_manifest_transition(tip_blank, _parse(base), adjacent=False) == [
-            "band rationale dropped across the interval: mod.py"
-        ]
+        assert validate_manifest_transition(tip_blank, _parse(base)) == ["band rationale dropped: mod.py"]
 
 
 def _merge_commit_without_manifest(repo: Path, manifest: SizeRatchetManifest) -> str:
@@ -1039,7 +1275,7 @@ def test_manifest_parser_rejects_blank_rationale() -> None:
 def test_manifest_parser_rejects_executable_code_and_duplicate_dict_keys() -> None:
     text = regenerate._render(_manifest())
     with pytest.raises(ValueError, match="data-only"):
-        parse_size_ratchet_manifest(text + "\nimport os\n")
+        parse_size_ratchet_manifest(text + "\n(17,)\n")
     duplicate = text.replace("BAND_PATHS = {", "BAND_PATHS = {'a.py': None, 'a.py': None,")
     with pytest.raises(ValueError, match="duplicate keys"):
         parse_size_ratchet_manifest(duplicate)
@@ -1056,44 +1292,78 @@ def test_manifest_parser_rejects_executable_code_and_duplicate_dict_keys() -> No
         parse_size_ratchet_manifest(extra)
 
 
-def test_review_import_rejects_executable_manifest_before_side_effect(tmp_path: Path) -> None:
-    source_root = Path(__file__).parents[1]
+def _import_review_with_data_manifest(tmp_path: Path, *, unsupported: bool) -> subprocess.CompletedProcess[str]:
+    source_root = Path(__file__).resolve().parents[1]
     package = tmp_path / "ouroboros"
-    tools = package / "tools"
-    tools.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    (tools / "__init__.py").write_text("", encoding="utf-8")
-    (package / "review.py").write_bytes((source_root / "ouroboros" / "review.py").read_bytes())
-    (tools / "review_helpers.py").write_text(
-        "_VENDORED_NAMES = frozenset()\n_VENDORED_SUFFIXES = ()\n"
-        "def iter_repo_pack_entries(*args, **kwargs):\n    raise NotImplementedError\n",
-        encoding="utf-8",
-    )
-    marker = tmp_path / "executed"
-    (package / "size_ratchet_manifest.py").write_text(
-        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
-        encoding="utf-8",
-    )
+    package.mkdir()
+    # The real package bootstrap and review module run in a root without Git state.
+    # Other modules resolve from the source package, not a copy of a helper stub.
+    for name in ("__init__.py", "version.py", "review.py"):
+        (package / name).write_bytes((source_root / "ouroboros" / name).read_bytes())
+    (tmp_path / "VERSION").write_bytes((source_root / "VERSION").read_bytes())
+    sha = "5eed" * 10
+    text = regenerate._render(_manifest(sha=sha, giant_paths=frozenset({"fixture_only.py"})))
+    if unsupported:
+        # Syntactically valid, but a bare tuple is outside the data format.
+        text += "\n(17,)\n"
+    (package / "size_ratchet_manifest.py").write_text(text, encoding="utf-8")
+    child = """
+import os
+from pathlib import Path
+import sys
 
-    result = subprocess.run(
-        [sys.executable, "-c", "import ouroboros.review"],
-        cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"},
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+root, source_package, sha = sys.argv[1:]
+package = Path(root) / "ouroboros"
+review_file = os.path.normcase(str(package / "review.py"))
+manifest_file = os.path.normcase(str(package / "size_ratchet_manifest.py"))
+seen = []
 
-    assert result.returncode != 0
-    assert "size manifest is data-only" in result.stderr
-    assert not marker.exists()
+def audit(event, args):
+    if event != "exec":
+        return
+    code = args[0]
+    filename = os.path.normcase(code.co_filename)
+    if filename == manifest_file or sha in code.co_consts:
+        seen.append("manifest")
+        raise AssertionError("The manifest reached Python execution")
+    if filename == review_file:
+        seen.append("review")
 
-
-def test_review_reexports_the_exact_repo_pack_iterator() -> None:
+sys.addaudithook(audit)
+sys.path.insert(0, root)
+try:
+    import ouroboros
+    ouroboros.__path__.append(source_package)
     from ouroboros import review
-    from ouroboros.tools import review_helpers
+finally:
+    # Also prove the spy saw the real module, and fail if a refusal swallowed it.
+    assert seen == ["review"], seen
+assert review.GIANT_PATHS == frozenset({"fixture_only.py"}), review.GIANT_PATHS
+print("REVIEW_MANIFEST_DATA_LOADED")
+"""
+    env = {key: value for key, value in os.environ.items()
+           if key.upper() == "SYSTEMROOT" or key.startswith("OURO_PROC_CONTAINER_")}
+    env.update(HOME=str(tmp_path), USERPROFILE=str(tmp_path), TMPDIR=str(tmp_path),
+               TEMP=str(tmp_path), TMP=str(tmp_path), OUROBOROS_DATA_DIR=str(tmp_path / "data"),
+               OUROBOROS_SETTINGS_PATH=str(tmp_path / "settings.json"))
+    return subprocess.run(
+        [sys.executable, "-I", "-B", "-X", "utf8", "-c", child, str(tmp_path.resolve()),
+         str(source_root / "ouroboros"), sha],
+        cwd=tmp_path, env=env, capture_output=True, encoding="utf-8", timeout=60,
+    )
 
-    assert review.iter_repo_pack_entries is review_helpers.iter_repo_pack_entries
+
+def test_review_import_accepts_literal_manifest_without_executing_it(tmp_path: Path) -> None:
+    result = _import_review_with_data_manifest(tmp_path, unsupported=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1:] == ["REVIEW_MANIFEST_DATA_LOADED"]
+
+
+def test_review_import_rejects_executable_manifest_before_side_effect(tmp_path: Path) -> None:
+    # Keep the historical node; exercise its import boundary with inert data.
+    result = _import_review_with_data_manifest(tmp_path, unsupported=True)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert result.stderr.rstrip().split("\n")[-1].startswith("ValueError: size manifest is data-only"), result.stderr
 
 
 def test_generator_rationale_parser_requires_explicit_nonblank_path_text() -> None:

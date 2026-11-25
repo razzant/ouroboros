@@ -10,6 +10,7 @@ import {
     GENERIC_HARNESS_MARK,
     HARNESS_MARKS,
     META_PART_SEPARATOR,
+    identityPartsHtml,
     executorIdentityMarkup,
     formatCoordinatorProvenance,
     executorModelText,
@@ -31,11 +32,14 @@ const OFFICIAL_PATH_SHA256 = Object.freeze({
     claude: '0442033dcc3824e52ffb0a07849c46becbeeacd75d1287f9081c00510e3bbf84',
     cursor: '85eaa79be69a55d712a4843bf8d65a217d0e5b648177c8e5f2ad67fe9a46d9ad',
     opencode: 'f4f11e1603a4a49ca387925840ed9ebb4505786d6db512225205e076e54b4676',
+    // Google's one-colour Antigravity mark (antigravity-icon__one-color.svg), path bytes as published.
+    agy: 'cbc9e89e57b6ec9d4a155a53e84b722edc8f4ffcf9e33f6765bbd04cbca77422',
 });
 
 test('official Claudexor vector geometry stays exact', () => {
-    assert.deepEqual(Object.keys(HARNESS_MARKS), ['codex', 'claude', 'cursor', 'opencode']);
+    assert.deepEqual(Object.keys(HARNESS_MARKS), ['codex', 'claude', 'cursor', 'opencode', 'agy']);
     assert.equal(HARNESS_MARKS.codex.viewBox, '0 0 256 260');
+    assert.equal(HARNESS_MARKS.agy.viewBox, '0 0 180 180');
     for (const id of ['claude', 'cursor', 'opencode']) {
         assert.equal(HARNESS_MARKS[id].viewBox, '0 0 24 24');
     }
@@ -76,12 +80,14 @@ test('app and standalone onboarding sheets share the mark and long-label contrac
     }
 });
 
-test('unknown and Agy identities use the generic vector with readable escaped text', () => {
+test('Antigravity has its own mark; an unknown identity the generic vector with readable escaped text', () => {
     const agy = harnessPresentation('agy');
     const future = harnessPresentation('future<&"');
-    assert.equal(agy.label, 'Antigravity');
-    assert.equal(agy.generic, true);
-    assert.equal(agy.path, GENERIC_HARNESS_MARK.path);
+    assert.deepEqual([agy.label, agy.generic, agy.known, agy.path], ['Antigravity', false, true, HARNESS_MARKS.agy.path]);
+    // The same model on two programs is two marks; an API key stays the neutral channel.
+    assert.notEqual(harnessPresentation('claude').path, agy.path);
+    assert.match(harnessIdentityMarkup('agy'), /data-harness-identity="agy"[^]*viewBox="0 0 180 180"[^]*>Antigravity<\/span>/);
+    assert.equal(harnessPresentation('api').path, GENERIC_HARNESS_MARK.path);
     assert.equal(future.label, 'future<&"');
     assert.equal(future.known, false);
     assert.equal(future.path, GENERIC_HARNESS_MARK.path);
@@ -303,6 +309,13 @@ test('Chat, Logs, onboarding, and the subagent catalog consume the same mark own
 });
 
 test('#516 the card meta line separates its parts with real text, not a CSS gap', (t) => {
+    // The source identity: a static word is chrome the overlay may translate, the owner's name is
+    // authored, and each separator is one skipped element — never a bare dot looked up as a key.
+    assert.equal(identityPartsHtml([{ kind: 'static', text: 'API' }, { kind: 'authored', text: 'OpenRouter' }]),
+        `<span>API</span><span class="harness-identity-sep" data-i18n-skip>${META_PART_SEPARATOR}</span><span data-i18n-authored>OpenRouter</span>`);
+    assert.equal(identityPartsHtml([{ kind: 'authored', text: 'Antigravity' }, { kind: 'static', text: 'model' }]),
+        `<span data-i18n-authored>Antigravity</span><span class="harness-identity-sep" data-i18n-skip>${META_PART_SEPARATOR}</span><span>model</span>`);
+    assert.equal(identityPartsHtml([]), '');
     // The browser's text serializer, as utils.escapeHtmlText reads it back.
     const priorDocument = globalThis.document;
     globalThis.document = { createElement: () => ({ set textContent(value) {

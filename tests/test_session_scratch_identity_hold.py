@@ -1,4 +1,4 @@
-"""A recorded scratch whose real ``obs-*`` directory has another device/inode is kept, never repaired.
+"""A legacy recorded scratch whose real ``obs-*`` directory has another device/inode is kept, never repaired.
 
 A reboot can renumber a device, so a valid ownership record may name a real scratch directory under an
 identity it no longer has; another run may still use that directory. Only that case becomes the visible
@@ -18,14 +18,33 @@ import tempfile
 
 import pytest
 
-from ouroboros import maintenance, maintenance_jobs, session_scratch, storage_removers, task_custody, test_environment
-from ouroboros import workspace_preflight
+from ouroboros import (
+    maintenance,
+    maintenance_jobs,
+    session_scratch,
+    storage_removers,
+    task_custody,
+    test_environment,
+    workspace_preflight,
+)
 from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME, release_finished_scratch
 from tests._shared import retire_synthetic_retention
-from tests.test_session_scratch_release import OVER, _record, _started
-from tests.test_session_service_directories import GRANTED, _Catalog, _prepare, _synthetic_temp_parent  # noqa: F401
+from tests.test_session_scratch_release import OVER, _record
+from tests.test_session_scratch_release import _started as _new_started
+from tests.test_session_service_directories import (  # noqa: F401
+    GRANTED,
+    _Catalog,
+    _legacy_scratch,
+    _prepare,
+    _synthetic_temp_parent,
+)
 
 TRASH = ("state", "custody_trash")
+
+
+def _started(tmp_path, **kwargs):
+    data, _workspace = _new_started(tmp_path, **kwargs)
+    return data, _legacy_scratch(_record(data))
 
 
 def _unverify(record: pathlib.Path) -> list:
@@ -79,7 +98,10 @@ def test_an_unverified_scratch_keeps_its_record_and_releases_its_proven_sibling(
     moved = entry / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json"
     assert moved.read_bytes() == record_bytes, "the ownership declaration moves byte for byte"
     layout = sorted(item.relative_to(entry).as_posix() for item in entry.rglob("*"))
-    assert layout == [SESSION_SCRATCH_DIRNAME, f"{SESSION_SCRATCH_DIRNAME}/snap-1", f"{SESSION_SCRATCH_DIRNAME}/snap-1/scratch.json"]
+    proof = moved.with_name(workspace_preflight.HANDOFF_RECORD)
+    assert layout == [SESSION_SCRATCH_DIRNAME, f"{SESSION_SCRATCH_DIRNAME}/snap-1",
+                      proof.relative_to(entry).as_posix(), moved.relative_to(entry).as_posix()]
+    assert json.loads(proof.read_text(encoding="utf-8")) == {"task_id": "task-1"}
     # The Storage remover fact carries the same typed hold.
     [fact] = [fact for fact in storage_removers.place_removers(data, engine=False)["session_scratch"]
               if fact["id"] == "custody_trash"]
@@ -215,9 +237,9 @@ def test_a_record_that_cannot_be_read_is_no_evidence_its_scratch_is_gone(tmp_pat
 
 
 def test_a_new_start_still_refuses_the_unverified_directory(tmp_path):
-    first = _prepare(tmp_path, _Catalog(GRANTED))
-    scratch = pathlib.Path(first.scratch)
+    _prepare(tmp_path, _Catalog(GRANTED))
     data = tmp_path / "data"
+    scratch = _legacy_scratch(_record(data))
     _unverify(_record(data))
     record_bytes, before = _record(data).read_bytes(), _tree(scratch)
     again = _prepare(tmp_path, _Catalog(GRANTED))
@@ -262,7 +284,7 @@ def test_a_nested_drives_unverified_record_is_held_and_its_sibling_released(tmp_
     assert (report["removed"], report["stuck"], [h["class"] for h in report["holds"]]) == (1, {}, ["identity_unverified"])
     assert not rows["plain"][0].exists() and _tree(held) == before and not entry.exists()
     [handoff] = data.joinpath(*TRASH).iterdir()
-    assert handoff.name.startswith("task-1+scratch-")
+    assert handoff.name.startswith("child-1+scratch-")  # its own task, the one its parent hold is asked about
     assert (handoff / SESSION_SCRATCH_DIRNAME / "held" / "scratch.json").read_bytes() == held_bytes
     assert task_custody.remove_custody_trash(data)["holds"] == report["holds"]
     assert list(data.joinpath(*TRASH).iterdir()) == [handoff]

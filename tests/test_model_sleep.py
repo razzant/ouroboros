@@ -277,7 +277,7 @@ def test_a_cold_sleep_is_refused_over_its_own_live_writers(tmp_path, monkeypatch
     assert armed["reason"] == "sleep_armed" and ctx._model_sleep["mode"] == "cold"
 
 
-def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", arm=None, **selected):
+def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", arm=None, barrier=None, **selected):
     """``arm(ctx)`` arms the sleep through the tool instead of these ``selected`` sources."""
     from ouroboros import budget_pause, model_sleep
     from supervisor.events_budget import install_exact_budget_pause
@@ -299,7 +299,7 @@ def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", arm=None, **se
                                 "worker_id": 0, "attempt": 1}
     sup = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
                           WORKERS=workers.WORKERS, sort_pending=lambda: None,
-                          persist_queue_snapshot=lambda reason="": True, bridge=None)
+                          persist_queue_snapshot=barrier or (lambda reason="": True), bridge=None)
     install_exact_budget_pause(sup, task_id, budget_pause.exact_pause_marker(row)["checkpoint"])
     return row
 
@@ -594,3 +594,355 @@ def test_busy_sleep_poll_logs_one_traceback_then_counts_and_resets(tmp_path, mon
     checkpoint = {**checkpoint, "wait_id": "two"}
     assert owner_wait._sleep_wake(ctx, checkpoint) == ""
     assert caplog.records[-1].exc_info and caplog.records[-1].args[-1] == 1
+
+
+def test_wake_grant_has_no_durable_permission_until_its_snapshot(tmp_path, monkeypatch):
+    from ouroboros.budget_pause import budget_pause_row
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 5.0)
+    _result(tmp_path, "peer")
+    original = _cold_park(tmp_path, monkeypatch, workers, senders=["peer"], barrier=q.publish_queue_snapshot)
+    _mail(tmp_path, "sleeper", "ready", sender="peer")
+    before = q.QUEUE_SNAPSHOT_PATH.read_bytes()
+
+    class Crash(BaseException):
+        pass
+
+    def crash(reason):
+        assert reason == "budget_exact_resume_granted"
+        assert not q._queue_lock._is_owned()
+        assert budget_pause_row(tmp_path, "sleeper")["state"] == "paused"
+        raise Crash()
+
+    with monkeypatch.context() as fault, pytest.raises(Crash):
+        fault.setattr(q, "publish_queue_snapshot", crash)
+        wake_ready_sleepers(q)
+    assert q.QUEUE_SNAPSHOT_PATH.read_bytes() == before
+    workers.PENDING.clear()
+    assert q.restore_pending_from_snapshot() == 1
+    assert workers.PENDING[0]["_budget_pause"]["checkpoint"]["source_ref"] == original["source_ref"]
+    assert wake_ready_sleepers(q)[0]["ok"]
+    assert wake_ready_sleepers(q) == []
+
+
+def test_one_publication_for_all_ready_pauses_and_none_for_unready(tmp_path, monkeypatch):
+    from ouroboros import budget_pause as bp
+    from ouroboros.utils import atomic_write_json
+    from supervisor.sleep_wake import wake_ready_sleepers
+    from tests._budget_pause_exact_helpers import _install_queue, _parked
+
+    q, state, _ = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    for i in range(3):
+        task, row = _parked(tmp_path, monkeypatch, task_id=f"tech-{i}")
+        bp.end_dispatch_fence(task["id"])
+        row.update(
+            reason="authority", rail=bp.RAIL_CONTROL_AUTHORITY, cause="dispatch_fence_unreadable", state="paused"
+        )
+        bp.set_budget_pause(tmp_path, task["id"], row)
+        task["_budget_pause"] = bp.exact_pause_marker(row)
+    atomic_write_json(
+        tmp_path / "state/queue_dispatch.json", {"generation": "g", "budget_root_fences": [], "members": {}}
+    )
+    barriers, writes = [], []
+    publish, write = q.publish_queue_snapshot, q.atomic_write_text
+
+    def counted(reason=""):
+        barriers.append(reason)
+        return publish(reason=reason)
+
+    def counted_write(path, data):
+        writes.append((path.name, len(data)))
+        return write(path, data)
+
+    monkeypatch.setattr(q, "publish_queue_snapshot", counted)
+    monkeypatch.setattr(q, "atomic_write_text", counted_write)
+    with monkeypatch.context() as blocked:
+        def refuse(reason):
+            barriers.append(reason)
+            return False
+        blocked.setattr(q, "publish_queue_snapshot", refuse)
+        refused = wake_ready_sleepers(q)
+    assert len(barriers) == 1 and len(refused) == 3
+    assert all(reply["error"] == "snapshot_not_persisted" for reply in refused)
+    assert all("_budget_pause_resume" not in t and bp.budget_pause_row(tmp_path, t["id"])["state"] == "paused"
+               for t in q.PENDING)
+    barriers.clear()
+    outcomes = wake_ready_sleepers(q)
+    woken = [o for o in outcomes if o.get("ok")]
+    snapshot_writes = [w for w in writes if w[0] == "queue_snapshot.json"]
+    assert len(woken) == 3 and len(snapshot_writes) == len(barriers) == 1
+    assert not wake_ready_sleepers(q) and len(barriers) == 1
+
+
+def _sleep_after_consumed_resume(tmp_path, monkeypatch, *, fold_first=True, **second_arm):
+    import copy
+    from ouroboros import budget_pause, model_sleep, owner_wait
+    from supervisor.events_budget import _handle_budget_pause
+    from tests.test_budget_pause_lineage_restore import _install, _sup, _workers
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
+    _fast_hold(monkeypatch, budget_pause)
+    _quiet_external(monkeypatch, budget_pause)
+    monkeypatch.setattr(model_sleep, "cold_blockers", lambda _ctx, **_kw: [])
+    monkeypatch.setattr(owner_wait, "rebind_restored_route", lambda *_a, **_k: (None, "max"))
+    for tid in ("sleeper", "peer-a"):
+        _result(tmp_path, tid)
+    sent, events, sup = _workers(workers), [], _sup(tmp_path, queue, workers)
+    workers.WORKERS[0].busy_task_id, workers.WORKERS[0].proc = "sleeper", SimpleNamespace(pid=77, is_alive=lambda: True)
+    workers.RUNNING["sleeper"] = {"task": {"id": "sleeper", "type": "task", "chat_id": 0, "root_task_id": "sleeper"},
+                                  "worker_id": 0, "attempt": 1, "started_at": time.time() - 60.0}
+    ctx, limit_ctx = _loop_ctx(tmp_path, "sleeper")
+    ctx.repo_dir, ctx._loop_mailbox_seen_ids, ctx._budget_paused_sec = tmp_path, set(), 0.0
+    ctx.event_queue = SimpleNamespace(put=events.append)
+
+    def park_cold(**arm):
+        ctx._model_sleep, ctx._owner_wait_requested, ctx._owner_wait_deadline_at = None, "", ""
+        assert '"reason": "sleep_armed"' in _await_tool(ctx, mode="cold", **arm)
+        with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
+            budget_pause.enter_cold_sleep(limit_ctx)
+        budget_pause.end_dispatch_fence("sleeper")
+        _install(sup, "sleeper", raised.value.pause)
+        return raised.value.pause
+
+    first_pause = park_cold(wake_after_sec=3600)
+    first_grant = queue.resume_budget_paused_task("sleeper")
+    assert first_grant["ok"] is True
+    workers.assign_tasks()
+    restored_messages: list[dict] = []
+    _, _, _, _, restored_round, _ = budget_pause.resume_paused_loop(
+        limit_ctx.tools, budget_pause.load_budget_pause(ctx, sent[0]["_budget_pause_resume"]),
+        restored_messages, {}, {}, set(), budget_remaining_usd=5.0,
+    )
+    consumed_evt = next(evt for evt in events if evt.get("phase") == "consumed")
+    if fold_first:
+        _handle_budget_pause(consumed_evt, sup)
+    carrier = copy.deepcopy(workers.RUNNING["sleeper"]["task"]["_budget_pause_resume"])
+    assert carrier["pause_id"] == first_pause["pause_id"] and carrier["authority"] == "explicit_resume"
+
+    restored_messages.extend([
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_step", "type": "function", "function": {"name": "step", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_step", "content": "completed_once"},
+    ])
+    limit_ctx.messages, limit_ctx.round_idx = restored_messages, restored_round + 1
+    sent.clear()
+    events.clear()
+    return queue, workers, sup, ctx, limit_ctx, sent, events, first_pause, first_grant, consumed_evt, carrier, park_cold(**second_arm)
+
+
+@pytest.mark.parametrize("source", ["time", "mail"])
+def test_a_second_cold_sleep_after_a_consumed_explicit_resume_wakes_once_and_resumes_without_replay(
+    tmp_path, monkeypatch, source
+):
+    from ouroboros import budget_pause, deadline_utils, owner_pause
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    arm = {"wake_at": "2099-06-01T00:00:00+00:00"} if source == "time" else {"senders": ["peer-a"]}
+    queue, workers, _sup, ctx, limit_ctx, sent, _events, first_pause, first_grant, _cevt, _carrier, second_pause = (
+        _sleep_after_consumed_resume(tmp_path, monkeypatch, **arm)
+    )
+    assert second_pause["pause_id"] != first_pause["pause_id"] and second_pause["pause_generation"] == 2
+    assert wake_ready_sleepers(queue) == []
+    if source == "time":
+        monkeypatch.setattr(deadline_utils, "utc_now",
+                            lambda: datetime.datetime(2099, 6, 1, 0, 0, 5, tzinfo=datetime.timezone.utc))
+        expected = "timeout"
+    else:
+        _mail(tmp_path, "sleeper", "peer reply ready", sender="peer-a")
+        expected = "mail:peer-a"
+
+    owner_pause.install_fence(tmp_path, "sleeper", request_id="hold-check")
+    assert wake_ready_sleepers(queue)[0]["veto"] == "owner_pause"
+    owner_pause.release_fence(tmp_path, "sleeper", reason="test")
+
+    outcomes = wake_ready_sleepers(queue)
+    assert len(outcomes) == 1 and outcomes[0].get("ok") is True and outcomes[0]["ready"]["reason"] == expected, outcomes
+    assert wake_ready_sleepers(queue) == []
+    workers.assign_tasks()
+    workers.assign_tasks()
+    assert [task["id"] for task in sent] == ["sleeper"]
+    handoff = sent[0]["_budget_pause_resume"]
+    assert (handoff["pause_id"], handoff["pause_generation"], handoff["authority"]) == (
+        second_pause["pause_id"], 2, "sleep_readiness"
+    ) and handoff["grant_id"] != first_grant["grant_id"]
+
+    woken_messages: list[dict] = []
+    _, _, _, _, round_after_wake, _ = budget_pause.resume_paused_loop(
+        limit_ctx.tools, budget_pause.load_budget_pause(ctx, handoff), woken_messages, {}, {}, set(),
+        budget_remaining_usd=5.0,
+    )
+    assert round_after_wake == limit_ctx.round_idx
+    assert [m["content"] for m in woken_messages if m.get("tool_call_id") == "call_step"] == ["completed_once"]
+    assert len([m for m in woken_messages if m.get("tool_call_id") == "call_b"]) == 1
+    assert ("the wake time you chose" if source == "time" else "mail from peer-a") in woken_messages[-1]["content"]
+    with pytest.raises(ValueError):
+        budget_pause.load_budget_pause(ctx, handoff)
+
+
+def test_late_first_consumption_and_prefix_snapshot_restore_keep_clocks_and_current_grant(tmp_path, monkeypatch):
+    from ouroboros import budget_pause
+    from supervisor.events_budget import _handle_budget_pause, budget_hold_fact
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    queue, workers, sup, ctx, limit_ctx, sent, events, _p1, _g1, late_consumed, prefix_p1_carrier, second_pause = (
+        _sleep_after_consumed_resume(tmp_path, monkeypatch, fold_first=False, senders=["peer-a"])
+    )
+    folded_first = second_pause["paused_duration_sec"]
+    assert folded_first > 0 and "_budget_pause_resume" not in workers.PENDING[0]
+    _handle_budget_pause(late_consumed, sup)
+    assert "_budget_pause_resume" not in workers.PENDING[0]
+    assert budget_pause.budget_pause_row(tmp_path, "sleeper")["paused_duration_sec"] == pytest.approx(folded_first)
+
+    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    snap["pending"][0]["task"]["_budget_pause_resume"] = prefix_p1_carrier
+    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap), encoding="utf-8")
+    workers.PENDING.clear()
+    assert queue.restore_pending_from_snapshot() == 1
+    restored = workers.PENDING[0]
+    assert budget_hold_fact(restored) is None and "_budget_pause_resume" not in restored
+    assert restored["_budget_pause"]["checkpoint"]["pause_id"] == second_pause["pause_id"]
+
+    _mail(tmp_path, "sleeper", "done", sender="peer-a")
+    woke = wake_ready_sleepers(queue)
+    assert len(woke) == 1 and woke[0].get("ok") is True and woke[0]["grant_id"] != _g1["grant_id"]
+    assert wake_ready_sleepers(queue) == []
+
+    workers.assign_tasks()
+    meta = workers.RUNNING["sleeper"]
+    before_late = (meta["sleep_parked_at"], meta["budget_paused_sec"], meta["task"]["_budget_pause_resume"]["grant_id"])
+    _handle_budget_pause(late_consumed, sup)
+    assert (meta["sleep_parked_at"], meta["budget_paused_sec"], meta["task"]["_budget_pause_resume"]["grant_id"]) == before_late
+
+    handoff = sent[0]["_budget_pause_resume"]
+    budget_pause.resume_paused_loop(
+        limit_ctx.tools, budget_pause.load_budget_pause(ctx, handoff), [], {}, {}, set(), budget_remaining_usd=5.0
+    )
+    _handle_budget_pause(next(evt for evt in events if evt.get("phase") == "consumed"), sup)
+    assert "sleep_parked_at" not in meta and meta["budget_paused_sec"] >= folded_first
+    assert meta["budget_paused_sec"] == pytest.approx(budget_pause.budget_pause_row(tmp_path, "sleeper")["paused_duration_sec"])
+    with pytest.raises(ValueError):
+        budget_pause.load_budget_pause(ctx, handoff)
+
+
+@pytest.mark.parametrize(
+    ("case_id", "kind", "row_state", "grant_fields", "task", "lends"),
+    [
+        ("auto_sleep_granted", "exact", "resume_granted",
+         {"authority": "sleep_readiness", "selected_by": "sleep_wake"},
+         {"id": "r", "_budget_pause_resume": {"grant_id": "g1"}}, False),
+        ("auto_sleep_resumed_handoff", "exact", "resumed",
+         {"authority": "sleep_readiness", "consumed_at": 1.0},
+         {"id": "r", "_budget_pause_resume": {"grant_id": "g1"}}, False),
+        ("auto_authority_granted", "exact", "resume_granted",
+         {"authority": "authority_readable", "selected_by": "authority_readable"},
+         {"id": "r", "_budget_pause_resume": {"grant_id": "g1"}}, False),
+        ("unknown_exact_not_repaired_by_handoff", "exact", "resume_granted",
+         {"authority": "unexpected", "selected_by": "owner"},
+         {"id": "r", "_budget_pause_resume": {"grant_id": "g1", "authority": "explicit_resume", "selected_by": "owner"}},
+         False),
+        ("null_exact_not_repaired_by_selection", "exact", "resumed",
+         {"authority": None, "selected_by": "owner", "consumed_at": 1.0},
+         {"id": "r", "_resume_selection": {"selected_by": "owner", "grant_id": "g1", "grant_generation": 1}},
+         False),
+        ("unknown_or_null_warm", "warm", "released", {"authority": None, "selected_by": "owner"}, {"id": "r"}, False),
+        ("absent_exact_without_proof", "exact", "resume_granted", {},
+         {"id": "r", "_budget_pause_resume": {"grant_id": "g1"}}, False),
+        ("absent_exact_non_owner_selected_by", "exact", "resume_granted", {"selected_by": "child-1"},
+         {"id": "r", "_budget_pause_resume": {"grant_id": "g1"}}, False),
+        ("absent_warm_without_proof", "warm", "released", {}, {"id": "r"}, False),
+        ("legacy_owner_exact_unconsumed", "exact", "resume_granted", {"selected_by": "owner"}, {"id": "r"}, True),
+        ("legacy_owner_exact_handoff", "exact", "resumed", {"selected_by": "owner", "consumed_at": 1.0},
+         {"id": "r", "_budget_pause_resume": {"grant_id": "g1"}}, True),
+        ("legacy_owner_exact_retired_durable_only", "exact", "resumed",
+         {"selected_by": "owner", "consumed_at": 1.0}, {}, False),
+        ("legacy_owner_warm_live", "warm", "released", {"selected_by": "owner"}, {"id": "r"}, True),
+        ("legacy_owner_warm_retired_durable_only", "warm", "released", {"selected_by": "owner"}, {}, False),
+        ("modern_explicit_exact_unconsumed", "exact", "resume_granted",
+         {"authority": "explicit_resume", "selected_by": "owner"}, {"id": "r"}, True),
+        ("modern_explicit_exact_retained_selection", "exact", "resumed",
+         {"authority": "explicit_resume", "consumed_at": 1.0},
+         {"id": "r", "_resume_selection": {"selected_by": "owner", "grant_id": "g1", "grant_generation": 1}}, True),
+        ("modern_explicit_warm_live", "warm", "released", {"authority": "explicit_resume"}, {"id": "r"}, True),
+        ("modern_explicit_warm_retired_durable_only", "warm", "released", {"authority": "explicit_resume"}, {}, False),
+    ],
+    ids=lambda val: val if isinstance(val, str) else None,
+)
+def test_root_resume_grants_synthetic_provenance_table(case_id, kind, row_state, grant_fields, task, lends):
+    from supervisor.events_budget import _root_resume_grants, resume_basis
+
+    grant = {"grant_id": "g1", "generation": 1, **grant_fields}
+    pause = ({"state": row_state, "pause_id": "p1", "resume_generation": 1, "grant": grant}
+             if kind == "exact" else {})
+    owner = ({"state": row_state, "fence_id": "f1", "generation": 1, "resume_grant": grant}
+             if kind == "warm" else {})
+    durable_id = {"grant_id": "g1", "generation": 1, "pause_id": "p1" if kind == "exact" else ""}
+    state = {"task": task, "pause": pause, "owner_fence": owner, "latch": None,
+             "basis": resume_basis("r", pause, owner)}
+    assert _root_resume_grants(state) == (durable_id if lends else {}, durable_id), case_id
+
+
+def test_automatic_sleep_wake_grants_no_new_child_selection_while_preserving_explicit_choice(tmp_path, monkeypatch):
+    from ouroboros import budget_pause
+    from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
+    from supervisor import events_budget as eb
+    from supervisor.sleep_wake import wake_ready_sleepers
+    from tests.test_restart_retention import _queued
+
+    queue, workers, sup, ctx, limit_ctx, sent, events, _p1, first_grant, _cevt, _carrier, _second_pause = (
+        _sleep_after_consumed_resume(tmp_path, monkeypatch, senders=["peer-a"])
+    )
+    for cid in ("prior-selected", "held-model", "held-owner"):
+        write_task_result(tmp_path, cid, STATUS_SCHEDULED, chat_id=0, root_task_id="sleeper", parent_task_id="sleeper")
+        row = _queued(cid, root_task_id="sleeper", parent_task_id="sleeper")
+        eb.hold_budget_row(row, reason=eb.HOLD_SAVED_WORK, result_root=tmp_path)
+        workers.PENDING.append(row)
+    prior_child, held_model, held_owner = (next(r for r in workers.PENDING if r["id"] == cid)
+                                           for cid in ("prior-selected", "held-model", "held-owner"))
+    prior_child.pop(eb.BUDGET_HOLD_KEY)
+    prior_child[eb.SELECTION_KEY] = {
+        "selected_by": "sleeper", "selected_at": "2026-11-21T00:00:00+00:00", "by": {"actor": "ouroboros"},
+        "root_grant_id": first_grant["grant_id"], "root_resume_generation": 1,
+    }
+
+    _mail(tmp_path, "sleeper", "ready", sender="peer-a")
+    assert wake_ready_sleepers(queue)[0].get("ok") is True
+    assert eb.live_root_resume_grant(queue, "sleeper", tmp_path) == {}
+    assert queue.resume_budget_paused_task("held-model", selected_by="sleeper")["error"] == "root_resume_grant_missing"
+    assert eb.budget_resume_dispatch_allowed(queue, prior_child) is True
+
+    workers.assign_tasks()
+    assert [t["id"] for t in sent] == ["sleeper"]
+    handoff = sent[0]["_budget_pause_resume"]
+    budget_pause.resume_paused_loop(
+        limit_ctx.tools, budget_pause.load_budget_pause(ctx, handoff), [], {}, {},
+        ctx._loop_mailbox_seen_ids, budget_remaining_usd=5.0,
+    )
+    assert eb.live_root_resume_grant(queue, "sleeper", tmp_path) == {}
+    assert queue.resume_budget_paused_task("held-model", selected_by="sleeper")["error"] == "root_resume_grant_missing"
+    _handle_consumed = next(evt for evt in events if evt.get("phase") == "consumed")
+    eb._handle_budget_pause(_handle_consumed, sup)
+    assert eb._root_resume_grants(eb._root_resume_state(queue, "sleeper", tmp_path)) == (
+        {}, {"grant_id": handoff["grant_id"], "generation": 1, "pause_id": _second_pause["pause_id"]}
+    )
+    assert queue.resume_budget_paused_task("held-model", selected_by="sleeper")["error"] == "root_resume_grant_missing"
+    assert eb.budget_hold_fact(held_model) is not None
+
+    owner_choice = queue.resume_budget_paused_task("held-owner")
+    assert owner_choice["ok"] is True and not held_owner[eb.SELECTION_KEY].get("root_grant_id")
+    assert eb.budget_resume_dispatch_allowed(queue, held_owner) is True
+
+    _result(tmp_path, "peer-b")
+    ctx._model_sleep, ctx._owner_wait_requested, ctx._owner_wait_deadline_at = None, "", ""
+    assert '"reason": "sleep_armed"' in _await_tool(ctx, mode="cold", senders=["peer-b"])
+    with pytest.raises(budget_pause.BudgetPauseRequested) as third_sleep:
+        budget_pause.enter_cold_sleep(limit_ctx)
+    budget_pause.end_dispatch_fence("sleeper")
+    eb.install_exact_budget_pause(sup, "sleeper", budget_pause.exact_pause_marker(third_sleep.value.pause)["checkpoint"])
+    explicit = queue.resume_budget_paused_task("sleeper")
+    assert explicit["ok"] is True
+    assert eb.live_root_resume_grant(queue, "sleeper", tmp_path)["grant_id"] == explicit["grant_id"]
+    assert queue.resume_budget_paused_task("held-model", selected_by="sleeper")["ok"] is True

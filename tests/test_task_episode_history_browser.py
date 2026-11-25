@@ -34,7 +34,7 @@ isCurrent:()=>true,apply(){},fail(){}}});
 @pytest.mark.ui_browser
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_physical_episode_content_survives_continue(tmp_path, engine):
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     review_bytes = b'Original physical review source\nREVIEW_SOURCE_TAIL\n'
     review_ref = {'kind': 'task_source', 'root': 'artifact_store',
@@ -43,6 +43,7 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
     details = {
         'e1': {'task_id': 'e1', 'status': 'failed', 'reason_code': 'provider_unavailable',
                'title': 'Original report', 'wake_summary': 'Checked the first half.', 'started_at': T, 'ts': T,
+               'continuation_offer': {'eligible': True, 'cause': 'provider_unavailable', 'refusal': ''},
                'review_projection': {'panels': [{'panel_id': 'old-review', 'surface': 'task_acceptance',
                    'aggregate_signal': 'FAIL', 'reason': 'Preserved independent review detail', 'actors': [],
                    'applied_source_status': 'available', 'applied_source_ref': review_ref}]},
@@ -129,6 +130,20 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                     if card.get_attribute('data-expanded') != '1':
                         card.locator(':scope > [data-live-summary-button] [data-live-toggle]').click()
 
+                def set_continuation(task_id, successor, state):
+                    link = {'state': state, 'successor_task_id': successor}
+                    details[task_id].update(continued_by=link, continuation_offer={
+                        **link, 'eligible': False,
+                        **({'refusal': 'continuation_unconfirmed', 'action_nonce': 'fixture-nonce'}
+                           if state == 'bound' else {'refusal': 'already_continued'}),
+                    })
+
+                def report_successor(task_id):
+                    page.evaluate('task => fixture.instance.hydrateStateSnapshot({supervisor_ready:true,'
+                                  'active_chat_activities_complete:true,active_chat_activities:[task]})',
+                                  {'task_id': task_id, 'activity_id': task_id, 'chat_id': 1,
+                                   'kind': 'managed_task', 'phase': 'working', 'started_at': 1792224000})
+
                 first_row = narrate('e1', 'Original report', 'Checking original report')
                 review_row = {'chat_id': 1, 'task_id': 'e1', 'role': 'system',
                               'system_type': 'acceptance_late_settlement', 'card_row': 'reviews',
@@ -139,14 +154,18 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 first.locator('[data-result-files]').wait_for()
                 page.evaluate('window.originalReviewDoor=document.querySelector(".chat-live-card[data-task-id=e1] [data-live-review-summary]")')
                 page.screenshot(path=str(evidence / 'before.png'))
-                # A bound claim never folds the predecessor, even with a successor present.
-                details['e1']['continued_by'] = {'state': 'bound', 'successor_task_id': 'e2'}
+                # A Continue made elsewhere is learned from the predecessor's refreshed detail,
+                # prompted by the new root in the census, not a new terminal frame for the old task.
+                expect(first.locator('[data-continue-task]')).to_have_text('Continue')
+                set_continuation('e1', 'e2', 'bound')
                 second_row = narrate('e2', 'Continue: check totals', 'Checking new totals')
-                assert first.is_visible()
-                details['e1']['continued_by']['state'] = 'admitted'
-                emit('chat', {'chat_id': 1, 'task_id': 'e1', 'role': 'system', 'system_type': 'task_summary',
-                              'status': 'failed', 'continued_by': details['e1']['continued_by'], 'ts': T})
                 second = page.locator('.chat-live-card[data-task-id="e2"]')
+                report_successor('e2')
+                expect(first.locator('[data-continue-task]')).to_have_text('Retry Continue')
+                assert first.is_visible() and second.locator('details[data-episode-task="e1"]').count() == 0
+                set_continuation('e1', 'e2', 'admitted')
+                report_successor('e2')
+                second.locator('details[data-episode-task="e1"]').wait_for(state='attached')
                 expand(second)
                 second.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / 'names.png'))
@@ -209,17 +228,22 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 assert second.locator(':scope > [data-live-summary-button] [data-live-title]').inner_text() == 'Original report'
                 assert second.locator(':scope > [data-live-summary-button] [data-live-phase]').inner_text() == 'Working'
                 assert not disclosure.locator('[data-continue-task], [data-cancel-run]').count()
-                page.evaluate('fixture.instance.hydrateStateSnapshot({supervisor_ready:true,active_chat_activities_complete:true,active_chat_activities:[{task_id:"e2",activity_id:"e2",chat_id:1,kind:"managed_task",phase:"working",started_at:1792224000}]})')
+                report_successor('e2')
                 assert second.get_by_role('button', name='Stop…', exact=True).count() == 1
                 page.screenshot(path=str(evidence / 'after.png'))
                 facts['live'] = {'one_visible_card': page.locator('.chat-live-card:visible').count(),
                                  'earlier_text': disclosure.inner_text(), 'current_text': second.inner_text()}
                 # A third Continue rehomes disclosures without nesting or copying their contents.
-                details['e2'].update(status='failed', continued_by={'state': 'admitted', 'successor_task_id': 'e3'})
-                third_row = narrate('e3', 'Continue: publish totals', 'Publishing totals')
+                details['e2'].update(status='failed', reason_code='provider_unavailable',
+                                     continuation_offer={'eligible': True, 'cause': 'provider_unavailable', 'refusal': ''})
                 emit('chat', {'chat_id': 1, 'task_id': 'e2', 'role': 'system', 'system_type': 'task_summary',
-                              'status': 'failed', 'continued_by': details['e2']['continued_by'], 'ts': T})
+                              'status': 'failed', 'reason_code': 'provider_unavailable', 'ts': T})
+                expect(second.locator('[data-continue-task]')).to_have_text('Continue')
+                set_continuation('e2', 'e3', 'admitted')
+                third_row = narrate('e3', 'Continue: publish totals', 'Publishing totals')
+                report_successor('e3')
                 third = page.locator('.chat-live-card[data-task-id="e3"]')
+                third.locator('details[data-episode-task="e1"]').wait_for(state='attached')
                 expand(third)
                 own_facts = third.locator(':scope > .chat-live-details [data-live-facts]')
                 own_facts.wait_for(state='visible')
@@ -236,9 +260,9 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                               dict(first_row, history_id='h1'), dict(review_row, history_id='hr'),
                               *({**first_row, 'text': f'Earlier step {n}', 'history_id': f'he{n}'} for n in range(40)),
                               {'chat_id': 1, 'task_id': 'e2', 'role': 'system', 'system_type': 'task_summary',
-                               'status': 'failed', 'continued_by': details['e2']['continued_by'], 'ts': T, 'history_id': 'hs2'},
+                               'status': 'failed', 'continuation_offer': details['e2']['continuation_offer'], 'ts': T, 'history_id': 'hs2'},
                               {'chat_id': 1, 'task_id': 'e1', 'role': 'system', 'system_type': 'task_summary',
-                               'status': 'failed', 'continued_by': details['e1']['continued_by'], 'ts': T, 'history_id': 'hs1'}]
+                               'status': 'failed', 'continuation_offer': details['e1']['continuation_offer'], 'ts': T, 'history_id': 'hs1'}]
                 page.reload()
                 page.wait_for_function('window.fixture?.instance.hasPaintedHistory()')
                 third = page.locator('.chat-live-card[data-task-id="e3"]')

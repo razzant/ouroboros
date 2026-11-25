@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
 from ouroboros.gateway.claudexor_contracts import ClaudexorStatusResponse
+from ouroboros.gateway.reference_contracts import ReplyExcerpt
 from ouroboros.gateway.widgets import ExtensionLiveSnapshot
 from ouroboros.gateway.contributions import UiContributionsResponse
 
@@ -18,6 +19,12 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
 
 
 # --- Skills and extensions ---------------------------------------------------------------------
+
+class ExtensionHealthChangedOutbound(TypedDict):
+    """Invalidates the Skills listing; the frame carries no health data."""
+
+    type: Literal["extension_health_changed"]
+
 
 class SkillMcpServerFact(TypedDict):
     """One declared server's passive state in an installed skill's ``mcp_servers`` list."""
@@ -49,6 +56,7 @@ class InstalledSkill(TypedDict, total=False):
     source: Required[str]  # native | clawhub | ouroboroshub | external | self_authored | user_repo
     content_hash: Required[str]  # the revision every expected_content_hash names
     payload_root: Required[str]  # skills/<bucket>/<dir>, or ""
+    manifest_file: str  # the manifest the loader parsed; "" when none was readable (permissions/grants are then a placeholder)
     installed_at: Required[str]
     removal: str  # uninstall | delete | "": the server's available removal action
     review_status: str  # clean | warnings | blockers | pending
@@ -64,6 +72,7 @@ class InstalledSkill(TypedDict, total=False):
     desired_live: bool
     live_loaded: bool
     live_reason: str
+    retained_companions: Dict[str, str]  # registered names awaiting confirmed exit, with supervisor reasons
     process: str  # "", server or worker
     server_reconcile: str
     health_regressed: bool
@@ -82,6 +91,7 @@ class InstalledSkill(TypedDict, total=False):
     presence_runtime: Dict[str, Any]  # a reviewed presence profile's runtime choice
     provenance: Dict[str, Any]  # a ClawHub install record
     identity_collision: bool
+    collision_row_id: str  # display identity for one colliding directory, never an operation target
     # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id (the connected source it
     # matches now, whatever id it was installed under; absent when none does), name, kind, part (as recorded)}, official (exact endorsed bytes),
     # release, basis, base_known, modified (null: base unknown), update_available {version, digest} | null, withdrawn ({reason, version} for a withdrawn release), left_source,
@@ -199,6 +209,8 @@ class SkillToggleResponse(TypedDict, total=False):
     grants: Dict[str, Any]
     extension_action: Optional[str]  # extension_loaded | extension_unloaded | ... ; null for non-extensions
     extension_reason: Optional[str]
+    load_error: Optional[str]  # as SkillReconcileResponse: an unfinished repair's words, the switch staying On
+    retained_companions: Dict[str, str]
     process: str
     server_reconcile: str
 
@@ -227,6 +239,7 @@ class SkillActionRefusal(TypedDict, total=False):
     enabled: bool
     extension_action: Optional[str]
     extension_reason: Optional[str]
+    retained_companions: Dict[str, str]  # a failed Enable's pending exits, as SkillToggleResponse
     process: str
     server_reconcile: str
     load_error: Optional[str]
@@ -355,6 +368,7 @@ class SkillReconcileResponse(TypedDict):
     extension_reason: Optional[str]
     live_loaded: bool
     load_error: Optional[str]
+    retained_companions: NotRequired[Dict[str, str]]  # may coexist with a separate load error
     process: str
     server_reconcile: str
 
@@ -877,7 +891,7 @@ class ReviewPoolResponse(TypedDict):
 # --- Local model, MCP and the model catalog ----------------------------------------------------
 
 class ModelPriceTier(TypedDict):
-    """From ``min_prompt_tokens`` input tokens on, a request is charged these USD per 1M tokens."""
+    """Effective USD per 1M tokens above ``min_prompt_tokens`` until the next threshold is exceeded."""
 
     min_prompt_tokens: int
     input: float
@@ -926,29 +940,69 @@ class ModelCatalogItem(TypedDict, total=False):
     observed_at: Optional[str]
     availability: Any
     problem: Any
-    processing: Any
+    processing: Any  # an agent row's engine-stated tiers, raw with their provenance: no proof of the account's or the rest
+    # API rows: the host tiers their connection's transport can carry (``llm_attempt.processing_transport_modes``);
+    # absent where unknown. A transport fact, never the model's or the key's support.
+    processing_transport: List[Literal["standard", "fast", "economy", "ultrafast"]]
     use_local: bool
     price: ModelPrice  # OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
     price_condition: str  # DeepSeek rows whose published entry prices them only off-peak in USD: ``off_peak_usd``
 
 
+class ModelCatalogApiSource(TypedDict):
+    """A configured API connection, including when it returned no models. Its transport is not model or key eligibility."""
+
+    id: str
+    label: str
+    processing_transport: NotRequired[List[Literal["standard", "fast", "economy", "ultrafast"]]]
+
+
 class ModelCatalogResponse(TypedDict, total=False):
-    """``GET /api/model-catalog``: with ``source_id`` (and optionally ``credential_profile_id``) one
-    agent account's models only; otherwise every configured provider's, each fetched with its own
-    20-second bound. A provider that failed is an ``errors`` row and the read is still 200: absent
-    models are unknown, not proof of none. ``model_sources`` and ``account_catalogs`` are the
-    engine's model-source and per-account catalog objects, passed through; ``partial`` marks an
-    incomplete account view."""
+    """Subscription declarations (``view=sources``), raw models (``source_id``), a native agent inventory
+    (``harness_id``) or one API/local connection (``provider_id``). A whole read keeps completed results and
+    named errors at its 20-second deadline. ``account_catalogs`` retain per-account evidence;
+    ``partial`` marks an incomplete view; ``store_id`` names the store from the engine handshake."""
 
     items: Required[List[ModelCatalogItem]]
     errors: Required[List[Dict[str, Any]]]  # {provider_id, error, stage?, duration_ms?, source_id?, code?, ...}
     model_sources: Required[List[Dict[str, Any]]]
+    api_sources: List[ModelCatalogApiSource]
     account_catalogs: List[Dict[str, Any]]
+    session_catalog: Dict[str, Any]  # Native harness row; distinct from subscription model transports.
     partial: bool
+    store_id: str
+
+
+class ModelProcessingEndpoint(TypedDict):
+    """One endpoint of an OpenRouter model: ``service_tier`` as its record states it (null = Standard; ``flex``,
+    ``priority``, ``ultrafast``; another string kept with no ``mode``; absent when the record has no such field or a
+    non-string), ``mode`` the host tier that reads as, ``price`` only where its figure is honest (USD per 1M,
+    input-length tiers, no cache tier, no fee or time condition)."""
+
+    tag: str
+    service_tier: NotRequired[Optional[str]]
+    mode: NotRequired[Literal["standard", "fast", "economy", "ultrafast"]]
+    price: NotRequired[ModelPrice]
+
+
+class ModelProcessing(TypedDict):
+    """The tiers one model's endpoints list. ``complete``: every endpoint's tier was read for this route (a catalogue
+    fact, never a price or the key's entitlement); nothing read is ``[]`` and false, never Standard-only."""
+
+    modes: List[Literal["standard", "fast", "economy", "ultrafast"]]
+    complete: bool
+    endpoints: List[ModelProcessingEndpoint]
+
+
+class ModelProcessingResponse(TypedDict):
+    """``GET /api/model-catalog?processing_model=<route>``: one OpenRouter route's tiers, ``value`` as asked."""
+
+    value: str
+    processing: ModelProcessing
 
 
 class OpenAICompatibleModelsRequest(TypedDict):
-    """``POST /api/openai-compatible/models``: list ``{baseUrl}/models`` once; nothing is saved."""
+    """``POST /api/openai-compatible/models``: read the connection's model catalog once; nothing is saved."""
 
     baseUrl: str
     apiKey: NotRequired[str]
@@ -1028,15 +1082,16 @@ class McpSignIn(TypedDict, total=False):
     issuer: str
     pending: bool  # a sign-in was begun and not completed
     required_scope: str  # with insufficient_scope: what a new sign-in asks for
+    required_scope_since: Optional[str]  # with insufficient_scope: when that gap opened (None when an old record kept none)
 
 
 class McpServerStatus(TypedDict, total=False):
-    """One configured MCP server. A configuration error row has only ``id``, ``enabled``,
-    ``tool_count``, ``last_error`` and ``code`` (MCP_CONFIG_ERROR or MCP_ID_AMBIGUOUS)."""
+    """One server identity. A rejected row reports its config error and zero tools."""
 
     id: Required[str]
     name: str
     enabled: Required[bool]
+    configured_count: int  # MCP_ID_AMBIGUOUS groups all configured entries claiming this identity
     transport: str
     url: str  # credentials redacted
     auth_header: Any
@@ -1197,7 +1252,7 @@ class UpdateProgress(TypedDict, total=False):
 class UpdateLetter(TypedDict):
     """The update description, written by Ouroboros as ordinary work and never by a check.
     ``relation``: pending, applied, superseded, other, or '' without text. ``state`` none: nothing
-    saved yet (the projection still carries the offered range and the owner's request)."""
+    saved yet (still projected for a checked range, retained material or the owner's request)."""
 
     state: str  # ready | failed (old records only) | none
     relation: str
@@ -1217,7 +1272,8 @@ class UpdateLetter(TypedDict):
     author: Dict[str, Any]  # {task_id, model, requested} — host-derived
     checked_key: Optional[Dict[str, Any]]
     material: Optional[Dict[str, Any]]  # {key, collected_at, text_bytes (query_data's count), commits, bodies_read, bodies_omitted}
-    request: Optional[Dict[str, Any]]  # {task_id, current_task_id, mode, key, requested_at, status (retry/Continue), saved}
+    request: Optional[Dict[str, Any]]  # {task_id, current_task_id, mode, key, requested_at, status (retry/Continue), saved,
+    #                                    cancel_state "pending" while a Stop is carried out (status stays as read)}
 
 
 class UpdateTransactionState(TypedDict, total=False):
@@ -1247,6 +1303,7 @@ class UpdateStatusResponse(TypedDict, total=False):
     update_tx: Required[UpdateTransactionState]
     update_progress: Required[UpdateProgress]
     letter: Optional[UpdateLetter]
+    letter_unavailable: bool  # projection failed; a null letter alone is an observed absence
     after_update: Optional[Dict[str, Any]]
     managed: bool
     remote: str
@@ -1286,6 +1343,8 @@ class CommandRequest(TypedDict):
     message is written for it, only ``owner_text`` (words typed into the control) is theirs; malformed: 400."""
 
     cmd: str
+    reply_to: NotRequired[str]
+    reply_excerpt: NotRequired[ReplyExcerpt]
     if_boot: NotRequired[str]  # optional boot.since precondition, before queueing; Panic ignores it
     client_surface: NotRequired[Dict[str, Any]]
     visible_text: NotRequired[str]
@@ -1372,6 +1431,7 @@ class CostBreakdownResponse(TypedDict, total=False):
 
 
 __all__ = [
+    "ExtensionHealthChangedOutbound",
     "SkillMcpServerFact", "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
     "SkillToggleRequest", "SkillRevisionRequest", "SkillReviewRequest", "SkillGrantRequest", "SkillDeleteRequest",
     "SkillToggleResponse", "SkillActionRefusal", "SkillDaemonsResponse", "SkillLifecycleJob",
@@ -1390,7 +1450,8 @@ __all__ = [
     "ClaudexorAccountResetReceipt", "ClaudexorLoginRequest", "ClaudexorLoginInputRequest",
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
     "ModelPriceTier", "ModelPrice",
-    "ModelCatalogItem", "ModelCatalogResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
+    "ModelCatalogItem", "ModelCatalogApiSource", "ModelCatalogResponse", "ModelProcessingEndpoint", "ModelProcessing",
+    "ModelProcessingResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
     "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",
     "McpRefreshRequest", "McpRefreshResponse", "McpSignInRequest", "McpSignInResponse", "McpTestRequest",

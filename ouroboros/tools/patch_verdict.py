@@ -62,6 +62,33 @@ def retained_verdicts(canonical_root: Any, task_id: str, child_task_id: str) -> 
                 yield verdict
 
 
+def git_apply_completion(drive: Any, entry) -> Dict[str, Any]:
+    """The recorded successful staging observation of the run's exact pending apply attempt, read only from
+    the marks of the task its durable apply intent names as author; ``{}`` when absent, unreadable or older.
+    The caller still proves its own admission, the target and the observed state."""
+    from ouroboros.delegate_custody_current import marks
+    from ouroboros.store import StoreError
+
+    author = str(getattr(entry, "patch_apply_by", "") or "")
+    if not entry.patch_apply_key or not author:
+        return {}
+    try:
+        rows = marks(drive, author).get("patch_verdicts", [])
+    except (OSError, StoreError):
+        return {}
+    for row in reversed(rows):
+        proof = row.get("git_apply_completion") or {}
+        if (row.get("task_id") == author and row.get("child_task_id") == f"run_{entry.run_id}"
+                and row.get("pipeline") == "delegated" and row.get("disposition") == "applied"
+                and row.get("applied") is True and isinstance(proof, dict)
+                and proof.get("apply_key") == entry.patch_apply_key
+                and proof.get("invocation_id") == entry.invocation_id and isinstance(proof.get("reason"), str)
+                and isinstance(proof.get("unindexed"), list)
+                and all(len(str(proof.get(key) or "")) == 64 for key in ("manifest_sha256", "postimage_sha256"))):
+            return row
+    return {}
+
+
 def decision_reason_refusal(reason: Any, needs: str) -> str:
     """``""`` when REASON may carry a decision that requires one, else its argument refusal after NEEDS.
 
@@ -126,12 +153,12 @@ def write_patch_verdict(
     result that was cancelled adds ``cancelled`` as ``child_cancelled`` (artifact only): the
     cancellation and the retained capture this decision judged, as that result recorded them.
     ``observation`` keeps what the check or apply saw beside the decision (``observed_outcome``,
-    ``path_findings``, ``path_findings_note``, ``unindexed``); only ``observed_outcome`` also rides the
+    ``path_findings``, ``path_findings_note``, ``unindexed``, ``git_apply_completion``); only ``observed_outcome``
+    and the staging proof ``git_apply_completion`` (read back by the function of that name) also ride the
     custody row. An earlier verdict on the same child stays readable beside this one.
     ``failures`` receives this write's own failure facts, the names its records use
     (``verdict_artifact_write_failed``, ``custody_row_write_failed``), for the caller to report."""
     parent_task_id = task_id_for_artifacts(ctx)
-    art_dir = task_artifact_dir_path(getattr(ctx, "drive_root", "."), parent_task_id, create=True)
     verdict = {
         "schema_version": 1,
         "created_at": utc_now_iso(),
@@ -153,9 +180,11 @@ def write_patch_verdict(
         **(lineage or {}),
     }
     observed = str(verdict.get("observed_outcome") or "")
-    path = art_dir / f"subagent_patch_verdict_{child_task_id}.json"
+    path = None
     artifact_write_failed = False
-    try:
+    try:  # preparing the folder is part of the optional file copy: its failure never skips the custody row
+        art_dir = task_artifact_dir_path(getattr(ctx, "drive_root", "."), parent_task_id, create=True)
+        path = art_dir / f"subagent_patch_verdict_{child_task_id}.json"
         _retain_replaced(path)
         atomic_write_json(path, verdict, trailing_newline=True)
     except Exception:
@@ -193,6 +222,7 @@ def write_patch_verdict(
             **({"target_root": verdict["target_root"]} if verdict["target_root"] else {}),
             # An acceptance names what the check saw; the decision stays the disposition.
             **({"observed_outcome": observed} if observed else {}),
+            **({"git_apply_completion": verdict["git_apply_completion"]} if verdict.get("git_apply_completion") else {}),
             **(lineage or {}),
         })
     except Exception:

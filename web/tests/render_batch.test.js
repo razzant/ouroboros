@@ -174,6 +174,34 @@ test('the empty-Main greeting and the reconnect notice are chrome: a read over t
     assert.equal(controls.beginRecent(), false, 'a painted transcript gets no loading chrome');
 });
 
+test('a migrating store is waiting for ↓, never a failed read, also while its automatic retry is out', () => {
+    const doc = { byId: new Map(), createElement: (tag) => new ElementStub(tag, doc) };
+    const messages = new ElementStub('div', doc);
+    messages.isConnected = true;
+    const controls = createHistoryControls(messages);
+    const migrating = Object.assign(new Error('importing'), { status: 503, body: { reason_code: 'migrating' } });
+    const snapshot = { initialized: true, canOlder: true };
+    const facts = (state = snapshot) => { const { waiting, failed } = controls.render(state); return { waiting, failed }; };
+    controls.endRecent(migrating);
+    assert.equal(controls.recentFailed(), false);
+    assert.deepEqual(facts(), { waiting: true, failed: false });
+    assert.equal(controls.beginRecent(), true);
+    assert.deepEqual(facts(), { waiting: true, failed: false }, 'the read that asks again still waits');
+    controls.endRecent(new Error('offline'));
+    assert.equal(controls.recentFailed(), true);
+    assert.deepEqual(facts(), { waiting: false, failed: true }, 'an ordinary failure is one');
+    controls.endRecent();
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: true, failed: false },
+        '↓\'s own read refused by the upgrade waits too');
+    assert.deepEqual(facts({ ...snapshot, error: new Error('offline'), retryDirection: 'latest' }), { waiting: false, failed: true });
+    controls.endRecent(new Error('cut short'), true);  // a partial read's note heads the edge
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: true, failed: false },
+        '↓\'s own read refused by the upgrade waits, whichever note heads the edge');
+    controls.endRecent(new Error('offline'));
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: false, failed: true },
+        'an earlier refusal never hides the room\'s later ordinary failure');
+});
+
 // ─────────────── sticky hydration / replay contracts ──────────────────────
 
 test('sticky single-flight never swallows the post-completion resync', () => {
@@ -189,8 +217,8 @@ test('sticky single-flight never swallows the post-completion resync', () => {
     assert.match(fn, /run: \(\) => historyPager\.read\(\)/);
     assert.doesNotMatch(fn, /awaitInitialHydration/);
     // The reconnect branch of the open handler reads the newest page whole (frames sent while away are lost),
-    // through the read that folds every reconnect arriving meanwhile into one more.
-    assert.match(chatSource, /\? syncHistory\(\{ fromReconnect: true \}\)/);
+    // through the pager. chat_history_integration.test.js exercises queued reconnects and the actual re-fetch.
+    assert.match(chatSource, /isReconnect \? historyPager\.read\(\{ fromReconnect: true, whole: true,/);
     // Every failed sync resets the sticky promise.
     assert.ok((chatSource.match(/initialHydrationPromise = null;/g) || []).length >= 3);
 });
@@ -619,8 +647,8 @@ test('scaled drawer restoration uses scroll pixels and ignores subpixel rounding
 
 // A small layout model: a child's top follows its parent's top, the parent's own
 // scrollTop when the parent scrolls, and its offset in the parent's content.
-function layoutNode({ classes = [], data = {}, y = 0, height = 0, scroll = null, parent = null } = {}) {
-    const node = { classNames: new Set(classes), attrs: { ...data }, y, height, children: [], parentElement: null, isConnected: true };
+function layoutNode({ classes = [], data = {}, y = 0, height = 0, scroll = null, parent = null, tag = '' } = {}) {
+    const node = { classNames: new Set(classes), attrs: { ...data }, y, height, children: [], parentElement: null, isConnected: true, tag };
     let top = 0;
     Object.defineProperty(node, 'scrollTop', { get: () => top,
         set: value => { top = scroll === null ? 0 : Math.max(0, Math.min(scroll, value)); } });
@@ -629,7 +657,7 @@ function layoutNode({ classes = [], data = {}, y = 0, height = 0, scroll = null,
     node.dataset = new Proxy({}, { get: (_, key) => node.attrs[`data-${String(key).replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`] });
     node.classList = { contains: value => node.classNames.has(value) };
     const one = selector => selector.startsWith('.') ? node.classNames.has(selector.slice(1))
-        : selector.startsWith('[') ? selector.slice(1, -1).split('=')[0] in node.attrs : false;
+        : selector.startsWith('[') ? selector.slice(1, -1).split('=')[0] in node.attrs : selector === node.tag;
     node.matches = selector => selector.split(',').some(part => one(part.trim()));
     node.getBoundingClientRect = () => {
         const parent = node.parentElement;
@@ -791,4 +819,237 @@ test('saved-place readiness waits for the Review detail and an expanded line ful
     assert.equal(anchorOwnersReady(line, reviewReady), true);
     assert.equal(anchorOwnersReady({ reviewKey: 'reviewAttemptDetail', cardChain: [{ taskId: 'owner' }] }, reviewReady), false);
     assert.equal(anchorOwnersReady({ reviewKey: 'reviewAttemptDetail', cardChain: [{ taskId: 'other' }] }, reviewReady), true);
+});
+
+test('a living card straddling the top edge anchors the visible row below it and never shrinks offscreen', () => {
+    const feed = layoutNode({ height: 750, scroll: 5000 });
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map() });
+    const card = layoutNode({ classes: ['chat-bubble', 'chat-card-bubble'], data: { 'data-history-id': 'card:1' }, y: 1620, height: 520, parent: feed });
+    const following = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:2' }, y: 2154, height: 120, parent: feed });
+    feed.scrollTop = 2000; // card is [-380..140], following is [154..274]
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    assert.equal(anchor.node, following, 'straddling card bubble anchors on the visible message below');
+    card.height = 120;
+    following.y = 1754;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+    assert.equal(feed.scrollTop, 1600);
+    assert.equal(following.getBoundingClientRect().top - feed.getBoundingClientRect().top, 154, 'following row stays stationary');
+    assert.equal(card.getBoundingClientRect().bottom - feed.getBoundingClientRect().top, 140, 'card bottom stays in view without oscillating');
+
+    feed.children.length = 0;
+    const loneCard = layoutNode({ classes: ['chat-bubble', 'chat-card-bubble'], data: { 'data-history-id': 'card:lone' }, y: 1620, height: 1200, parent: feed });
+    feed.scrollTop = 2000;
+    const loneAnchor = anchors.captureVisibleTimelineAnchor();
+    loneCard.height = 120;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(loneAnchor), true);
+    assert.equal(loneCard.getBoundingClientRect().top - feed.getBoundingClientRect().top, 0);
+});
+
+test('disappearing temporary cards at or straddling the top keep the reference row below stationary without ts collision', () => {
+    const feed = layoutNode({ height: 750, scroll: 5000 });
+    const records = new Map();
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records, band: () => ({ top: 88, bottom: 750 }) });
+    const distantSameTs = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:early', 'data-ts': '1700000000' }, y: 200, height: 100, parent: feed });
+    const tempCard = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'temp-1', 'data-ts': '1700000000' }, y: 2010, height: 98, parent: feed });
+    const summary = layoutNode({ data: { 'data-live-summary-button': '1' }, y: 8, height: 40, parent: tempCard });
+    const refRow = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:ref', 'data-ts': '1700000030' }, y: 2122, height: 140, parent: feed });
+    records.set('temp-1', { groupId: 'temp-1', root: tempCard, items: [] });
+    feed.scrollTop = 2000;
+    assert.equal(distantSameTs.getBoundingClientRect().top, -1800);
+    assert.equal(summary.getBoundingClientRect().top, 18);
+
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    tempCard.isConnected = false;
+    feed.children.splice(feed.children.indexOf(tempCard), 1);
+    records.delete('temp-1');
+    refRow.y = 2010;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+    assert.equal(refRow.getBoundingClientRect().top - feed.getBoundingClientRect().top, 122, 'reference row stays at +122 px');
+});
+
+test('collapsing an expanded card whose top is above the viewport preserves the visible row below it', () => {
+    const feed = layoutNode({ height: 750, scroll: 5000 });
+    const records = new Map();
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records, band: () => ({ top: 88, bottom: 750 }) });
+    const card = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'portal-1', 'data-expanded': '1' }, y: 1700, height: 466, parent: feed });
+    const timeline = layoutNode({ data: { 'data-live-timeline': '1' }, y: 80, height: 370, parent: card });
+    const line = layoutNode({ classes: ['chat-live-line'], data: { 'data-live-line-key': 'line-1' }, y: 230, height: 80, parent: timeline });
+    const refRow = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:after' }, y: 2180, height: 120, parent: feed });
+    records.set('portal-1', { groupId: 'portal-1', root: card, items: [{ lineKey: 'line-1' }] });
+    feed.scrollTop = 2000;
+
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    assert.equal(anchor.node, line);
+    card.attrs['data-expanded'] = '0';
+    card.height = 162;
+    line.height = 0;
+    refRow.y = 1876;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+    assert.equal(refRow.getBoundingClientRect().top - feed.getBoundingClientRect().top, 180, 'reference row moves 0 px');
+});
+
+test('an expanded live card collapsing under a floating bar keeps the row after it; with no bar its own top holds', () => {
+    // The card's top is under the bar (+20 of a band from +88): the line read inside it goes when it collapses, and
+    // the row below it holds the place. With no bar the same top is in the band, the card itself the place.
+    for (const bar of [88, 0]) {
+        const feed = layoutNode({ height: 750, scroll: 5000 });
+        const records = new Map();
+        const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records,
+            band: () => (bar ? { top: bar, bottom: 750 } : null) });
+        const card = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'open-1', 'data-expanded': '1' }, y: 2020, height: 470, parent: feed });
+        const line = layoutNode({ classes: ['chat-live-line'], data: { 'data-live-line-key': 'line-1' }, y: 90, height: 80, parent: card });
+        const after = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:after' }, y: 2500, height: 120, parent: feed });
+        records.set('open-1', { groupId: 'open-1', root: card, items: [{ lineKey: 'line-1' }] });
+        feed.scrollTop = 2000;
+        const anchor = anchors.captureVisibleTimelineAnchor();
+        assert.equal(anchor.node, bar ? line : card, bar ? 'under the bar the line inside is read' : 'the card heads the band');
+        card.attrs['data-expanded'] = '0';
+        card.height = 166;
+        line.height = 0;
+        after.y = 2196;
+        assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+        if (bar) assert.equal(after.getBoundingClientRect().top, 500, 'under the bar the row after the card stays');
+        else assert.equal(card.getBoundingClientRect().top, 20, 'with no bar the card keeps its own top');
+    }
+});
+
+test('the row read is the first in the read band, not a row under the bar', () => {
+    for (const bar of [88, 0]) {
+        const feed = layoutNode({ height: 750, scroll: 5000 });
+        const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map(),
+            band: () => (bar ? { top: bar, bottom: 750 } : null) });
+        const under = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:under' }, y: 2000, height: 60, parent: feed });
+        const read = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:read' }, y: 2070, height: 100, parent: feed });
+        feed.scrollTop = 2000;
+        const anchor = anchors.captureVisibleTimelineAnchor();
+        assert.equal(anchor.node, bar ? read : under, bar ? 'the bar covers the first row' : 'no bar: the first row is read');
+        assert.equal(anchor.offset, bar ? 70 : 0, 'offsets stay feed-relative');
+    }
+});
+
+test('a row whose picture still loads above the band is passed over; one whose picture starts in the band holds', () => {
+    // A late picture grows when it lands: above the band's top it grows up out of view, so the row after it is read;
+    // starting in the band it grows down, and its own row stays the place.
+    for (const top of [40, 100]) {
+        const feed = layoutNode({ height: 750, scroll: 5000 });
+        const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map(), band: () => ({ top: 88, bottom: 750 }) });
+        const photo = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:photo' }, y: 2000 + top, height: 260, parent: feed });
+        const picture = layoutNode({ tag: 'img', y: 0, height: 200, parent: photo });
+        picture.complete = false;
+        const next = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:next' }, y: 2310 + top, height: 100, parent: feed });
+        feed.scrollTop = 2000;
+        assert.equal(anchors.captureVisibleTimelineAnchor().node, top < 88 ? next : photo,
+            top < 88 ? 'a picture above the band grows out of it' : 'a picture in the band is the place read');
+        picture.complete = true;
+        assert.equal(anchors.captureVisibleTimelineAnchor().node, photo, 'a picture landed is no reason to pass its row');
+    }
+});
+
+test('captureVisibleTimelineAnchor ignores collapsed stack rows with zero rects before and after a straddling card', () => {
+    const feed = layoutNode({ y: 0, height: 844, scroll: 5000 });
+    feed.offsetHeight = 844;
+    const records = new Map();
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records });
+    const makeHiddenStackRow = (id) => {
+        const hidden = layoutNode({
+            classes: ['chat-bubble', 'chat-relay-note'],
+            data: { 'data-history-id': id, 'data-deck-tucked': '1' },
+            y: 0, height: 0, parent: feed,
+        });
+        hidden.getBoundingClientRect = () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 });
+        hidden.getClientRects = () => [];
+        return hidden;
+    };
+
+    const earlyStackRow = makeHiddenStackRow('stack:early');
+    layoutNode({
+        classes: ['chat-bubble', 'chat-card-bubble'],
+        data: { 'data-history-id': 'card:straddle' },
+        y: 1800, height: 300, parent: feed,
+    });
+    const middleStackRow = makeHiddenStackRow('stack:middle');
+    const visibleFollowing = layoutNode({
+        classes: ['chat-bubble'],
+        data: { 'data-history-id': 'row:visible' },
+        y: 2120, height: 120, parent: feed,
+    });
+    feed.scrollTop = 2000;
+
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    assert.notEqual(anchor.node, earlyStackRow);
+    assert.notEqual(anchor.node, middleStackRow);
+    assert.equal(anchor.node, visibleFollowing);
+});
+
+test('a shrink above that clamps scrollTop before reflow still restores the exact 1600 px place with or without CSS anchoring', async () => {
+    const priorCss = globalThis.CSS;
+    try {
+        for (const cssSupports of [undefined, { supports: () => true }]) {
+            globalThis.CSS = cssSupports;
+            let maxScroll = 2200, top = 1950;
+            const feed = layoutNode({ height: 400, scroll: 2200 });
+            feed.offsetHeight = 400;
+            feed.clientWidth = 600;
+            const messages = Object.create(feed);
+            Object.defineProperty(messages, 'scrollHeight', { get: () => 400 + maxScroll });
+            Object.defineProperty(messages, 'scrollTop', {
+                get: () => top,
+                set: (v) => { top = Math.max(0, Math.min(maxScroll, v)); feed.scrollTop = top; },
+            });
+            messages.scrollTop = 1950;
+            const row = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:clamped' }, y: 1990, height: 120, parent: feed });
+            const anchors = createTimelineAnchors({ messagesDiv: messages, liveCardRecords: new Map() });
+            const anchor = anchors.captureVisibleTimelineAnchor();
+            await Promise.resolve(); // settle microtasks as before a later ResizeObserver reflow
+            // An element above shrinks by 350 px; the browser clamps scrollTop from 1950 to the new max 1850 before reflow.
+            maxScroll = 1850;
+            row.y = 1640;
+            messages.scrollTop = 1850;
+            assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+            assert.equal(messages.scrollTop, 1600, `expected 1600 when CSS=${Boolean(cssSupports)}`);
+            assert.equal(row.getBoundingClientRect().top - messages.getBoundingClientRect().top, 40);
+        }
+    } finally {
+        globalThis.CSS = priorCss;
+    }
+});
+
+test('transient sending and routing notes step to the next message only when the note itself reaches the top edge', () => {
+    const feed = layoutNode({ height: 750, scroll: 5000 });
+    feed.offsetHeight = 750;
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map() });
+
+    // Case 5a: long message straddling top; a 60 px sending note below the read line (+40 px) disappears.
+    const longBubble = layoutNode({ classes: ['chat-bubble', 'user'], data: { 'data-history-id': 'row:long' }, y: 1800, height: 500, parent: feed });
+    const body = layoutNode({ classes: ['message'], y: 0, height: 440, parent: longBubble });
+    const readLine = layoutNode({ y: 240, height: 24, parent: body });
+    const sendingNote = layoutNode({ classes: ['msg-pending'], data: { 'data-ingress-unconfirmed': '1' }, y: 440, height: 60, parent: longBubble });
+    const afterLong = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:after-long' }, y: 2314, height: 120, parent: feed });
+    feed.scrollTop = 2000; // readLine is at +40 px; sendingNote is below it at [+240..+300]
+    assert.equal(readLine.getBoundingClientRect().top, 40);
+
+    const anchorBelow = anchors.captureVisibleTimelineAnchor();
+    assert.equal(anchorBelow.node, longBubble, 'a note below the read passage does not step to the next message');
+    longBubble.children.splice(longBubble.children.indexOf(sendingNote), 1);
+    longBubble.height = 440;
+    afterLong.y = 2254;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchorBelow), true);
+    assert.equal(readLine.getBoundingClientRect().top - feed.getBoundingClientRect().top, 40, 'read line stays at +40 px');
+
+    // Case 5b: reverse case where only .msg-routing-annotation (32 px) is visible at the top edge, next row at +34 px.
+    feed.children.length = 0;
+    const routedBubble = layoutNode({ classes: ['chat-bubble', 'user'], data: { 'data-history-id': 'row:routed' }, y: 1800, height: 220, parent: feed });
+    layoutNode({ classes: ['message'], y: 0, height: 188, parent: routedBubble });
+    const receipt = layoutNode({ classes: ['msg-routing-annotation'], y: 188, height: 32, parent: routedBubble });
+    const nextRow = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:next' }, y: 2034, height: 120, parent: feed });
+    feed.scrollTop = 2000; // receipt crosses top at [-12..+20]; nextRow is at +34 px
+    assert.equal(nextRow.getBoundingClientRect().top, 34);
+
+    const anchorAtTop = anchors.captureVisibleTimelineAnchor();
+    assert.equal(anchorAtTop.node, nextRow, '.msg-routing-annotation at the top edge steps to the following message');
+    routedBubble.children.splice(routedBubble.children.indexOf(receipt), 1);
+    routedBubble.height = 188;
+    nextRow.y = 2002;
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchorAtTop), true);
+    assert.equal(nextRow.getBoundingClientRect().top - feed.getBoundingClientRect().top, 34, 'following row stays at +34 px');
 });

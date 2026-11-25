@@ -100,13 +100,16 @@ test('the SDK present at boot: ready, expand, swipes off, chrome painted, insets
     assert.equal(w.rootStyle.get('--tg-safe-area-inset-bottom'), '0px');
     // Back is hidden with an empty stack, shown while a layer is open, and its click is the stack's Back.
     assert.equal(sdk.app.BackButton.isVisible, false);
+    assert.equal(w.doc.documentElement.dataset.telegramBack, 'close');
     w.stack.count = 2; w.stack.emit();
     assert.equal(sdk.app.BackButton.isVisible, true);
+    assert.equal(w.doc.documentElement.dataset.telegramBack, 'back', 'a return is a layer: Telegram owns its visible Back');
     sdk.app.BackButton.handler();
     assert.deepEqual(w.stack.popped, ['host-back']);
     assert.equal(sdk.app.BackButton.isVisible, true, 'one layer left');
     w.stack.pop('scrim');
     assert.equal(sdk.app.BackButton.isVisible, false);
+    assert.equal(w.doc.documentElement.dataset.telegramBack, 'close');
     // Telegram's scheme is the System source; its change re-settles the theme and repaints the chrome.
     assert.equal(w.theme.source(), 'light');
     sdk.app.colorScheme = 'dark';
@@ -119,6 +122,7 @@ test('the SDK present at boot: ready, expand, swipes off, chrome painted, insets
     w.listeners.get('ouro:theme-changed')();
     assert.ok(sdk.calls.length > before + 2);
     adapter.dispose();
+    assert.equal(w.doc.documentElement.dataset.telegramBack, undefined);
     assert.equal(w.theme.source, null, 'dispose releases the System source');
     assert.equal(sdk.app.BackButton.handler, null);
     assert.equal(sdk.app.BackButton.isVisible, false);
@@ -190,10 +194,25 @@ test('a collapsed visual viewport with a focused field blurs it and asks the hos
     w.win.visualViewport.height = KEYBOARD_COLLAPSE_PX + 200;
     w.win.visualViewport.listeners.get('resize')();
     assert.equal(blurred, 0, 'a normal viewport is left alone');
+    w.win.document = w.doc;
+    w.doc.documentElement.clientWidth = 390;
+    w.win.visualViewport.width = 195;
     w.win.visualViewport.height = 1;
+    w.win.visualViewport.listeners.get('resize')();
+    assert.equal(blurred, 0, 'a magnified viewport keeps the keyboard');
+    w.win.visualViewport.width = 390;
+    const heights = [];
+    w.win.Event = Event;
+    w.win.dispatchEvent = event => {
+        if (event.type === 'ouro:host-viewport') heights.push(w.win.visualViewport.height);
+    };
     sdk.fire('viewportChanged', { isStateStable: false });
     assert.equal(blurred, 1);
     assert.ok(sdk.calls.some((c) => c[0] === 'hideKeyboard'));
+    w.win.visualViewport.height = 844;
+    sdk.fire('viewportChanged', { isStateStable: true });
+    assert.deepEqual(heights, [1, 844], 'the room sees the restored height even without a DOM resize');
+    w.win.visualViewport.height = 1;
     // Nothing focused: no recovery, however small the viewport.
     w.win.visualViewport.listeners.get('resize')();
     assert.equal(blurred, 1);
@@ -309,5 +328,23 @@ test('a page without the stamp waits for a late SDK tag but binds only on Telegr
     const adapter = createTelegramHost({ win: w.win, doc: w.doc, layers: w.stack, theme: w.theme });
     assert.equal(adapter.bind(), false);
     assert.equal(w.timers.length, 0);
+    adapter.dispose();
+});
+
+test('a change of Telegram\'s fullscreen tells the page (ouro:host-chrome), so the room\'s bar can join or leave its row', () => {
+    const sdk = fakeSdk({ version: '8.0' });
+    const w = fakeWorld({ sdk });
+    const told = [];
+    w.win.Event = class { constructor(type) { this.type = type; } };
+    w.win.dispatchEvent = (event) => { told.push(event.type); return true; };
+    const adapter = createTelegramHost({ win: w.win, doc: w.doc, layers: w.stack, theme: w.theme });
+    adapter.bind();
+    const before = told.filter((type) => type === 'ouro:host-chrome').length;
+    sdk.app.isFullscreen = true;
+    sdk.fire('fullscreenChanged');
+    assert.equal(told.filter((type) => type === 'ouro:host-chrome').length, before + 1, 'fullscreen on is told');
+    sdk.app.isFullscreen = false;
+    sdk.fire('fullscreenChanged');
+    assert.equal(told.filter((type) => type === 'ouro:host-chrome').length, before + 2, 'and fullscreen off');
     adapter.dispose();
 });

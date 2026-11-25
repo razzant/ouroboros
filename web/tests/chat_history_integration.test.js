@@ -48,7 +48,9 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null } = {}) 
         bubbles: () => messages.children.filter((node) => node.classList.contains('chat-bubble')
             && !node.classList.contains('typing-bubble') && node.dataset.ephemeral !== '1'),
         emit: (message) => handlers.get('chat')({ chat_id: 2, ...message }),
+        emitLog: (data) => handlers.get('log')({ chat_id: 2, data }),
         reconnect: (flags = {}) => handlers.get('open')({ previouslyConnected: true, ...flags }),
+        disconnect: () => handlers.get('close')(),
         respond: next => { response = next; },
         async refresh(next = response) {
             response = next;
@@ -450,6 +452,64 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
 });
 
+test('an opening with its stored address keeps one bubble when the original arrives live', async t => {
+    const address = `row:2@${TS}#0123456789ab`;
+    const origin = row('chat:220', 'Original request', {
+        role: 'user', source: 'web', sender_session_id: 'another-tab', client_message_id: 'owner-opening',
+        history_id: undefined, history_position: undefined,
+        origin_projected: true, origin_id: 'binding-source-ref', row_address: address,
+    });
+    const f = fixture(t, page([origin]));
+    await f.refresh();
+    const original = f.bubbles()[0];
+    const note = original.querySelector('.saved-project-context');
+    assert.equal(original.dataset.rowAddress, address);
+    assert.ok(note);
+    f.emit({ role: 'user', content: origin.text, ts: origin.ts, source: origin.source,
+        sender_session_id: origin.sender_session_id, client_message_id: origin.client_message_id,
+        row_address: address });
+    assert.deepEqual(f.bubbles(), [original]);
+    assert.equal(original.dataset.originId, origin.origin_id);
+    assert.equal(original.querySelector('.saved-project-context'), note);
+});
+
+test('a retained card input keeps a description that does not claim lost submitted words', async t => {
+    const origin = row('chat:240', 'First note\n2', {
+        role: 'user', client_message_id: 'card-opening', source: 'web', sender_session_id: 'another-tab',
+        history_id: undefined, history_position: undefined,
+        origin_projected: true, origin_id: 'card-opening-ref', opening_input_kind: 'owner_card_input',
+    });
+    const f = fixture(t, page([origin]));
+    await f.refresh();
+    const description = f.bubbles()[0].getAttribute('aria-description');
+    assert.ok(description, 'the retained card input keeps its accessible description');
+    assert.doesNotMatch(description, /unavailable/i, 'the kind alone never says the submitted words were lost');
+    assert.match(description, /asking task’s text/, 'the description still names whose text a label is');
+});
+
+test('a history row that names its origin hands that identity to the live echo it adopts', async t => {
+    const address = `row:2@${TS}#0123456789ab`;
+    const f = fixture(t, page([]));
+    await f.refresh();
+    f.emit({ role: 'user', content: 'Original request', ts: TS, source: 'web',
+        sender_session_id: 'another-tab', client_message_id: 'owner-opening' });
+    assert.equal(f.bubbles().length, 1);
+    const physical = row('chat:230', 'Original request', {
+        role: 'user', client_message_id: 'owner-opening', origin_id: 'binding-source-ref', row_address: address,
+    });
+    await f.refresh(page([physical]));
+    assert.equal(f.bubbles().length, 1, 'the physical row adopts the mounted live echo');
+    const bubble = f.bubbles()[0];
+    assert.equal(bubble.dataset.historyId, 'chat:230');
+    assert.equal(bubble.dataset.originId, 'binding-source-ref', 'the adopted echo carries the origin identity forward');
+    const retained = row('chat:231', 'Original request', {
+        role: 'user', source: 'web', sender_session_id: 'another-tab', client_message_id: undefined,
+        history_id: undefined, history_position: undefined, origin_projected: true, origin_id: 'binding-source-ref',
+    });
+    await f.refresh(page([retained]));
+    assert.deepEqual(f.bubbles(), [bubble], 'the retained copy reuses the bubble its origin identity names');
+});
+
 test('a replayed refusal receipt shows the host cause and a later scheduled receipt patches the same note', async (t) => {
     const cause = 'Not started: the working folder can\'t be used';
     const message = row('chat:250', 'Audit the GitHub tool', {
@@ -591,7 +651,8 @@ for (const hydrated of [false, true]) test(`an unavailable archive keeps recent 
         window: { complete: false, truncated_by: ['history_source_unavailable'] } };
     const f = fixture(t, page([row('chat:10', 'Readable recent answer')], 'initial', 'older'));
     if (hydrated) await f.refresh();
-    await f.refresh(partial);
+    f.respond(partial);
+    assert.equal((await f.instance.refreshHistory({ revision: 2 })).painted, false, 'an unavailable source grants no read credit');
     const recent = f.bubbles().find(node => node.innerHTML.includes('Readable recent answer'));
     assert.ok(recent, 'available dialogue stays readable despite the source gap');
     assert.equal(f.bubbles().length, 1, 'a temporary missing boundary does not duplicate a retained row');
@@ -662,6 +723,182 @@ for (const phase of ['unknown', 'done', 'error', 'warn', 'cancelled']) {
     });
 }
 
+for (const [extraAxes, expected] of [[{}, 'Done'], [{ review: { status: 'degraded' } }, 'Done with warnings'],
+    [{ artifacts: { status: 'missing' } }, 'Failed']]) {
+    test(`history keeps the recorded ending through row and page ordering: ${expected}`, async t => {
+        recordRenderedMarkup(t);
+        const id = 'recovered-report';
+        const outcome = { status: 'failed', terminal_origin: 'model_final',
+            reason_code: 'finalization_incomplete', finalization_recovery: { answer: 'delivered' },
+            outcome_axes: { lifecycle: { status: 'failed' }, execution: { status: 'infra_failed' }, ...extraAxes } };
+        const source = expected === 'Done' ? 'current_outcome' : 'task_outcome';
+        // An outcome names the stored result's attempt, as the host projects it; one without an attempt is another result.
+        const rich = row('chat:6', 'Recorded ending', { task_id: id, role: 'system', system_type: 'task_summary',
+            task_attempt: 2, [source]: { ...outcome, task_attempt: 2, revision: TS } });
+        const bare = row('progress:7', 'Last progress', { task_id: id, is_progress: true, narration: true,
+            task_terminal_status: 'failed', ts: '2026-09-12T12:01:00Z' });
+        const stopped = { status: 'cancelled', outcome_axes: { lifecycle: { status: 'cancelled' } }, revision: '2026-09-12T12:03:00Z' };
+        const old = row('chat:3', 'Previous attempt', { task_id: id, role: 'system', system_type: 'task_summary',
+            task_attempt: 1, current_outcome: { ...stopped, task_attempt: 1 } });
+        const f = fixture(t, page([rich, bare], 'recent', 'older'), () => page([old], 'older'));
+        const phase = () => walkCard(f.messages, id).querySelector('[data-live-phase]').textContent;
+        await f.refresh();
+        assert.equal(phase(), expected);
+        await f.clickOlder();
+        assert.equal(phase(), expected, 'an older attempt cannot replace this attempt, even when it has a later row time');
+        await f.refresh(page([bare, { ...rich, current_outcome: undefined, task_outcome: outcome }]));
+        assert.equal(phase(), expected);
+        await f.refresh(page([{ ...old, history_id: 'chat:8', task_attempt: 3, current_outcome: { ...stopped, task_attempt: 3 } }]));
+        assert.equal(phase(), 'Stopped', 'the new attempt owns its own status and causes');
+    });
+}
+
+test('older history can supply the missing outcome behind a lifecycle stamp', async t => {
+    recordRenderedMarkup(t);
+    const id = 'older-diagnostic';
+    const progress = row('progress:8', 'Preparing the report', { task_id: id, is_progress: true, narration: true,
+        task_attempt: 1, task_terminal_status: 'completed' });
+    const summary = row('chat:2', 'Recorded summary', { task_id: id, role: 'system', system_type: 'task_summary',
+        ts: '2026-09-12T11:59:00Z', task_attempt: 1, status: 'completed', outcome_axes: { review: { status: 'degraded' } } });
+    const f = fixture(t, page([progress], 'recent', 'older'), () => page([summary], 'older'));
+    const phase = () => walkCard(f.messages, id).querySelector('[data-live-phase]').textContent;
+    await f.refresh();
+    assert.equal(phase(), 'Done');
+    await f.clickOlder();
+    assert.equal(phase(), 'Done with warnings');
+    await f.refresh(page([progress]));
+    assert.equal(phase(), 'Done with warnings');
+});
+
+for (const first of ['legacy', 'receipt']) {
+    test(`a retained delivery warning survives a legacy status on either history page (first ${first})`, async t => {
+        recordRenderedMarkup(t);
+        const id = 'export-with-delivery-warning';
+        const progress = row('progress:1', 'Preparing export', { task_id: id, is_progress: true, narration: true });
+        const legacy = row('chat:4', 'Completed', { role: 'system', system_type: 'task_summary', task_id: id,
+            task_attempt: 1, status: 'completed', ts: '2026-09-12T12:04:00Z' });
+        const frozen = { status: 'completed', phase: 'warn', task_attempt: 1, ts: TS,
+            provenance: 'canonical_task_result_after_finalization' };
+        const receipt = row('chat:2', '', { role: 'system', system_type: 'task_summary', task_id: id,
+            summary_kind: 'terminal_root_projection', historical_terminal: frozen });
+        const [recent, older] = first === 'legacy' ? [legacy, receipt] : [receipt, legacy];
+        const f = fixture(t, page([progress, recent], 'recent', 'older'), () => page([older], 'older'));
+        const phase = () => walkCard(f.messages, id).querySelector('[data-live-phase]').textContent;
+        await f.refresh();
+        assert.equal(phase(), first === 'legacy' ? 'Done' : 'Done with warnings');
+        await f.clickOlder();
+        assert.equal(phase(), 'Done with warnings');
+        await f.refresh(page([progress, older, recent]));
+        assert.equal(phase(), 'Done with warnings');
+        // An older gateway filled in these default axes for the same bare status.
+        const defaults = { execution: { status: 'ok' }, artifacts: { status: 'not_applicable' }, review: { status: 'skipped' } };
+        await f.refresh(page([progress, { ...legacy, outcome_axes: defaults }]));
+        assert.equal(phase(), 'Done with warnings');
+        const late = { ...receipt, current_outcome: { task_attempt: 1, status: 'completed', outcome_phase: 'done',
+            revision: '2026-09-12T12:05:00Z', outcome_axes: { review: { status: 'pass', source: 'result_review' } } } };
+        await f.refresh(page([progress, late, legacy]));
+        assert.equal(phase(), 'Done', 'the current revision outranks its frozen phase');
+        await f.refresh(page([progress, receipt, { ...legacy, task_attempt: 2, status: 'cancelled' }]));
+        assert.equal(phase(), 'Stopped', 'the newer attempt outranks the revision of the old one');
+    });
+}
+
+test('a pruned summary reads its attached receipt and a hidden notice cannot settle its task', async t => {
+    recordRenderedMarkup(t);
+    const id = 'delivery-held';
+    const progress = row('progress:1', 'Preparing export', { task_id: id, is_progress: true, narration: true });
+    const notice = row('chat:2', '', { task_id: id, role: 'system', system_type: 'quiz_closed',
+        quiz: { quiz_id: 'choose', state: 'closed' }, task_outcome: { status: 'completed' } });
+    const f = fixture(t, page([progress, notice]));
+    await f.refresh();
+    assert.notEqual(walkCard(f.messages, id).dataset.finished, '1');
+    const summary = row('chat:3', 'Completed', { task_id: id, role: 'system', system_type: 'task_summary', status: 'completed',
+        historical_terminal: { status: 'completed', phase: 'warn', ts: TS, provenance: 'canonical_task_result_after_finalization' } });
+    await f.refresh(page([progress, summary]));
+    assert.equal(walkCard(f.messages, id).querySelector('[data-live-phase]').textContent, 'Done with warnings');
+});
+
+test('a sparse history refresh preserves a delivered final already seen live', async t => {
+    recordRenderedMarkup(t);
+    const id = 'answer-seen-live';
+    const progress = row('progress:1', 'Writing the answer', { task_id: id, is_progress: true, narration: true });
+    const f = fixture(t, page([progress]));
+    await f.refresh();
+    f.emitLog({ type: 'task_done', task_id: id, ts: TS, status: 'failed', task_attempt: 1,
+        reason_code: 'finalization_incomplete', terminal_origin: 'model_final', finalization_recovery: { answer: 'delivered' },
+        outcome_axes: { execution: { status: 'infra_failed' } } });
+    const phase = () => walkCard(f.messages, id).querySelector('[data-live-phase]').textContent;
+    assert.equal(phase(), 'Done');
+    await f.refresh(page([{ ...progress, task_attempt: 1, task_terminal_status: 'failed' }]));
+    assert.equal(phase(), 'Done');
+});
+
+// A receipt backs the current outcome beside it only as that same attempt's publication. Zero is an attempt like any
+// other; where neither names one, the pair is the legacy whole and keeps its retained words.
+for (const [name, receiptAttempt, currentAttempt, shares] of [
+    ['an outcome of unknown attempt takes nothing from a numbered receipt', 1, undefined, false],
+    ['an outcome of unknown attempt takes nothing from a receipt numbered zero', 0, undefined, false],
+    ['an outcome of the receipt\'s own attempt keeps its retained words', 1, 1, true],
+    ['zero is the same attempt as zero', 0, 0, true],
+    ['a wholly unnumbered pair keeps its retained words', undefined, undefined, true],
+]) test(`history joins a current outcome to its own attempt's receipt: ${name}`, async t => {
+    recordRenderedMarkup(t);
+    const id = 'retried-export', words = 'The first attempt closed with these words.';
+    const numbered = attempt => (attempt === undefined ? {} : { task_attempt: attempt });
+    const progress = row('progress:1', 'Preparing the export', { task_id: id, is_progress: true, narration: true });
+    const frozen = { status: 'completed', phase: 'warn', ts: '2026-09-12T11:00:00Z', wake_summary: words,
+        provenance: 'canonical_task_result_after_finalization', ...numbered(receiptAttempt) };
+    const receipt = row('chat:2', '', { role: 'system', system_type: 'task_summary', task_id: id, ts: frozen.ts,
+        summary_kind: 'terminal_root_projection', historical_terminal: frozen, ...numbered(receiptAttempt),
+        current_outcome: { task_id: id, status: 'completed', reason_code: 'final_message', outcome_phase: 'done',
+            quiet_effective: false, _result_text_present: true, revision: '2026-09-12T12:05:00Z',
+            outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } }, ...numbered(currentAttempt) } });
+    const f = fixture(t, page([progress, receipt]));
+    await f.refresh();
+    const card = walkCard(f.messages, id);
+    const shown = (node) => [node.innerHTML || '', node.textContent || '', ...(node.children || []).map(shown)].join('\n');
+    assert.equal(card.querySelector('[data-live-phase]').textContent, 'Done', 'the stored result settles the card either way');
+    assert.equal(shown(card).includes(words), shares);
+});
+
+test('a finalizing retry shows its own early answer, and an earlier attempt\'s ending is no part of it', async t => {
+    const markup = recordRenderedMarkup(t);
+    const open = 'recount', settled = 'sorted-notes';
+    const stop = (rationale) => ({ lifecycle: { status: 'completed' },
+        execution: { status: 'ok', task_completion: { action: 'stop', rationale, source: 'finish_task' } },
+        objective: { status: 'fail', source: 'task_completion' } });
+    const earlier = 'The first count stopped before the east bed.', own = 'The notes could not be sorted by date.';
+    // The host stamps the stored result's early answer on the rows of its attempt; these two carry no attempt of their own.
+    const answered = { task_phase: 'finalizing', outcome_final: false, outcome_phase: 'done', reason_code: 'final_message',
+        rounds: 17, outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } } };
+    const f = fixture(t, page([
+        row('progress:1', 'Counting it again', { task_id: open, is_progress: true, narration: true, ...answered }),
+        row('chat:2', '', { task_id: open, role: 'system', system_type: 'task_summary', task_attempt: 1, status: 'completed',
+            outcome_axes: stop(earlier), outcome_phase: 'error', outcome_final: false, rounds: 4, tool_calls: 3,
+            task_phase: 'unfinished' }),
+        row('chat:3', 'The east bed holds sage.', { task_id: open, task_terminal_status: 'completed', ...answered }),
+        // A summary that is its own task's ending still states its cause.
+        row('progress:4', 'Sorting the notes', { task_id: settled, is_progress: true, narration: true }),
+        row('chat:5', '', { task_id: settled, role: 'system', system_type: 'task_summary', status: 'completed',
+            task_terminal_status: 'completed', outcome_axes: stop(own) }),
+    ]));
+    await f.refresh();
+    const retried = walkCard(f.messages, open);
+    const chip = retried.querySelector('[data-live-phase]');
+    const label = chip.getAttribute('aria-label') || chip.textContent;
+    assert.notEqual(retried.dataset.finished, '1');
+    assert.match(label, /Finalizing/);
+    assert.doesNotMatch(label, /Failed/);
+    assert.equal(walkCard(f.messages, settled).querySelector('[data-live-phase]').textContent, 'Failed');
+    assert.ok(markup.some(html => html.includes(own)), 'a card states the cause of its own ending');
+    assert.ok(!markup.some(html => html.includes(earlier)), 'another attempt\'s cause is not the open attempt\'s');
+    const retriedFacts = retried.querySelector('[data-live-facts]').innerHTML;
+    const retriedMeta = retried.querySelector('[data-live-meta]').innerHTML;
+    assert.doesNotMatch(retriedFacts, /4 · usable solve responses/, 'the earlier attempt\'s rounds do not own the open attempt\'s card');
+    assert.doesNotMatch(retriedMeta, /3 tool calls/, 'the earlier attempt\'s calls do not own the open attempt\'s card either');
+    assert.match(retriedFacts, /17 · usable solve responses/, 'the open attempt\'s own stamped facts carry its counters');
+});
+
 // One saved row, one bubble: a relay's live frame names the row as history does (row_client_message_id),
 // while a host reply's client_message_id names the owner's submission and keys nothing.
 const savedRelay = (seq, text = 'Same words') => row(`chat:${seq}`, text, {
@@ -713,13 +950,13 @@ test("an owner message links its http(s) address live and from history, and Copy
     const words = 'Read `https://e.com/a?b=1&c=2`, then <b>reply</b>.';
     const link = '<a class="md-link" href="https://e.com/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">'
         + 'https://e.com/a?b=1&amp;c=2</a>';
-    const message = (bubble) => bubble.innerHTML.match(/<div class="message">[\s\S]*?<\/div>/)?.[0];
+    const message = (bubble) => bubble.innerHTML.match(/<div class="message" data-reply-body>[\s\S]*?<\/div>/)?.[0];
     const saved = row('chat:211', words, { role: 'user', client_message_id: 'owner:211', source: 'web' });
     const f = fixture(t);
     await f.refresh();
     f.emit({ ...saved, content: words, history_id: undefined });
     const live = f.bubbles()[0];
-    assert.equal(message(live), `<div class="message">Read \`${link}\`, then &lt;b&gt;reply&lt;/b&gt;.</div>`);
+    assert.equal(message(live), `<div class="message" data-reply-body>Read \`${link}\`, then &lt;b&gt;reply&lt;/b&gt;.</div>`);
     const copied = [];
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => copied.push(text) } });
     t.after(() => delete navigator.clipboard);
@@ -732,6 +969,22 @@ test("an owner message links its http(s) address live and from history, and Copy
     await f.refresh(page([earlier, saved]));
     const replayed = f.bubbles().find((bubble) => bubble.dataset.clientMessageId === 'owner:210');
     assert.equal(message(replayed), message(live), 'history paints the same linked words');
+});
+
+test('Markdown the page could not parse offers no passage, whatever the message says; an owner message still does', async (t) => {
+    // Without the parser the marks show: `**dom** dom dom` puts its second "dom" at 8, a parsed page's third. Coordinates
+    // saved from one reading must not be found in the other (docs/DESIGN.md "Replies").
+    const f = fixture(t);
+    await f.refresh();
+    const mine = row('chat:231', '**dom** dom dom', { role: 'user', client_message_id: 'owner:231', source: 'web' });
+    const hers = row('chat:232', '**dom** dom dom');
+    for (const saved of [mine, hers]) f.emit({ ...saved, content: saved.text, history_id: undefined });
+    const [owner, assistant] = f.bubbles();
+    assert.match(owner.innerHTML, /<div class="message" data-reply-body>/, 'plain owner words have one reading');
+    assert.doesNotMatch(assistant.innerHTML, /data-reply-body/, 'no parser here: no passage of it can be quoted');
+    await f.refresh(page([mine, hers]));
+    assert.doesNotMatch(f.bubbles().find((bubble) => bubble.innerHTML.includes('dom')
+        && !bubble.dataset.clientMessageId).innerHTML, /data-reply-body/, 'history draws the same words the same way');
 });
 
 test("a host reply that names the owner's submission is drawn beside his bubble, not into it", async (t) => {
@@ -975,4 +1228,934 @@ test('an actual reconnect during a recent read still owes a fresh read after tha
     await painting;
     for (let n = 0; n < 4; n += 1) await new Promise(setImmediate);
     assert.deepEqual(f.calls.slice(before), [null, null], 'the true reconnect must not join a request from before it');
+});
+
+test('a live completion re-fetches saved history after initial hydration has settled', async t => {
+    const f = fixture(t, page([row('chat:1', 'Already loaded')]));
+    await f.refresh();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    f.emit({ task_id: 'completed', role: 'assistant', is_progress: true, content: 'Working', ts: TS });
+    const card = walkCard(f.messages, 'completed');
+    assert.ok(card);
+    assert.equal(card.dataset.finished, '0');
+    const before = f.calls.length;
+    f.respond(page([row('chat:2', 'Saved after completion')]));
+    f.emitLog({ type: 'task_done', task_id: 'completed', status: 'completed', ts: TS });
+    assert.equal(card.dataset.finished, '1');
+    t.mock.timers.tick(699);
+    await new Promise(setImmediate);
+    assert.equal(f.calls.length, before, 'completion keeps the existing 700ms debounce');
+    t.mock.timers.tick(1);
+    for (let n = 0; n < 5; n += 1) await new Promise(setImmediate);
+    assert.deepEqual(f.calls.slice(before), [null], 'the settled hydration promise cannot swallow a new fetch');
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:2'), 'the newly saved row reaches the room');
+});
+
+test('reconnects queued behind an older read share one covering read', async t => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    const old = held(), fresh = held();
+    f.respond(old.promise);
+    const before = f.calls.length;
+    const painting = f.instance.refreshHistory({ revision: 80 });
+    await drain();
+    f.disconnect(); f.reconnect();
+    await drain();
+    f.disconnect(); f.reconnect();
+    await drain();
+    f.respond(fresh.promise);
+    // Even with an arrivals cursor available, reconnect must re-read the whole newest page.
+    old.release({ ...page(presentRows(901), 'page:recent', 'before:1'), after_cursor: 'after:old' });
+    await drain();
+    fresh.release(page(presentRows(905), 'page:recent', 'before:1'));
+    await painting;
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null, null], 'queued reconnects share the one covering read');
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:905'), 'the covering read reaches the room');
+});
+
+// ↓ "when the present is already loaded moves there and follows without a read" (DESIGN "History edges"), and a ↓
+// whose present must be read is never dropped by another read still in flight: it waits for no unrelated read.
+const held = () => { let release; const promise = new Promise(resolve => { release = resolve; }); return { promise, release }; };
+const drain = async (n = 30) => { for (let i = 0; i < n; i += 1) await new Promise(resolve => setTimeout(resolve, 0)); };
+const presentRows = (top) => Array.from({ length: 30 }, (_, i) => row(`chat:${top - 29 + i}`, `Present ${top - 29 + i}`));
+const pressLatest = () => globalThis.document.byId.get('chat-scroll-bottom').click();
+const atBottom = f => f.messages.scrollTop === f.messages.scrollHeight;
+
+test('↓ at the loaded present follows at once while an older page is still being read', async (t) => {
+    const older = held();
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'), () => older.promise);
+    await f.refresh();
+    readUp(f);
+    void f.clickOlder();
+    await drain();
+    assert.deepEqual(f.calls, [null, 'before:1'], 'the older read is in flight');
+    pressLatest();
+    await drain();
+    try {
+        assert.equal(atBottom(f), true, 'the loaded present is reached before the unrelated older read answers');
+        assert.deepEqual(f.calls, [null, 'before:1'], 'and without a read');
+    } finally {
+        older.release(page([row('chat:500', 'Older one')], 'page:1'));
+        await drain();
+    }
+});
+
+test('↓ at the loaded present follows at once while a newest read is in flight', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    readUp(f);
+    const recent = held();
+    f.respond(recent.promise);
+    const refreshing = f.instance.refreshHistory({ revision: 50 });
+    await drain();
+    pressLatest();
+    await drain();
+    try {
+        assert.equal(atBottom(f), true, 'the loaded present is reached before the refresh answers');
+    } finally {
+        recent.release(page(presentRows(901), 'page:recent', 'before:1'));
+        await refreshing;
+        await drain();
+    }
+    assert.equal(atBottom(f), true, 'and it keeps following once the refresh lands');
+});
+
+test('↓ away from the present is not dropped while Load more history crosses empty pages', async (t) => {
+    offScreen(t);
+    const gates = new Map([['before:4', held()], ['before:5', held()]]);
+    const f = fixture(t, page([row('chat:900', 'Newest saved message')], 'page:recent', 'before:1'), (cursor) => {
+        const index = Number(cursor.split(':')[1]);
+        const answer = index === 4 || index === 5 ? page([], `page:${index}`, `before:${index + 1}`)
+            : page([row(`chat:${800 - index}`, `Older ${index}`)], `page:${index}`, index < 6 ? `before:${index + 1}` : null);
+        return gates.has(cursor) ? gates.get(cursor).promise.then(() => answer) : answer;
+    });
+    await f.refresh();
+    for (let n = 0; n < 3; n += 1) await f.clickOlder();
+    assert.deepEqual(f.calls, [null, 'before:1', 'before:2', 'before:3'], 'three older pages released the newest one');
+    void f.clickOlder();  // before:4 and before:5 are empty: one press keeps reading until rows land
+    await drain();
+    assert.deepEqual(f.calls.slice(4), ['before:4']);
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(4), ['before:4', null], '↓ stops that walk and reads the present at once');
+    assert.equal(atBottom(f), true, 'and lands there before the empty page answers');
+    gates.get('before:4').release();
+    gates.get('before:5').release();
+    await drain(60);
+    assert.deepEqual(f.calls.slice(4), ['before:4', null], 'the walk it stopped asks for nothing more');
+    assert.equal(atBottom(f), true);
+    assert.equal(f.bubbles().filter(node => node.dataset.historyId === 'chat:900').length, 1, 'the newest message is shown');
+});
+
+// A window away from the present: three older pages released the newest one, and the reader reads up there.
+async function awayRoom(t, newest = 'Newest saved message') {
+    offScreen(t);
+    const f = fixture(t, page([row('chat:900', newest)], 'page:recent', 'before:1'), (cursor) => {
+        const index = Number(cursor.split(':')[1]);
+        return page([row(`chat:${800 - index}`, `Older ${index}`)], `page:${index}`, index < 6 ? `before:${index + 1}` : null);
+    });
+    await f.refresh();
+    for (let n = 0; n < 3; n += 1) await f.clickOlder();
+    readUp(f);
+    return f;
+}
+const latestButton = () => globalThis.document.byId.get('chat-scroll-bottom');
+const busy = () => latestButton().getAttribute('aria-busy') === 'true';
+const present = (...rows) => page([row('chat:900', 'Newest saved message'), ...rows], 'page:recent-2', 'before:1');
+
+test('↓ reaches retained messages before its needed read answers and keeps loading visible', async (t) => {
+    const f = await awayRoom(t);
+    const input = globalThis.document.byId.get('chat-input');
+    input.value = 'a draft in progress';
+    const latest = held();
+    f.respond(latest.promise);
+    const before = f.calls.length;
+    pressLatest();
+    assert.equal(busy(), true, 'the press is acknowledged before any read answers');
+    assert.equal(latestButton().getAttribute('aria-label'), 'Loading latest messages…');
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null], 'one read of the present');
+    assert.equal(atBottom(f), true, 'retained messages are reached before the held read answers');
+    assert.equal(latestButton().classList.contains('visible'), true, 'the loading control stays visible at the retained bottom');
+    latest.release(present(row('chat:901', 'Arrived while away')));
+    await drain();
+    assert.equal(atBottom(f), true);
+    assert.equal(busy(), false);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:901'));
+    assert.equal(input.value, 'a draft in progress', 'the draft is untouched');
+});
+
+test('a second press joins ↓ still reading; reading on supersedes it and its late answer moves no one', async (t) => {
+    const f = await awayRoom(t);
+    const latest = held();
+    f.respond(latest.promise);
+    const before = f.calls.length;
+    pressLatest();
+    await drain();
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null], 'the second press shares the read already out');
+    readUp(f);
+    assert.equal(busy(), false, 'reading on ends the wait at once');
+    const place = f.messages.scrollTop;
+    latest.release(present(row('chat:901', 'Arrived while away')));
+    await drain();
+    assert.equal(f.messages.scrollTop, place, 'the late answer lands under no one');
+    assert.equal(f.bubbles().some(node => node.dataset.historyId === 'chat:901'), false, 'nor replaces the chain they read');
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message', 'and leaves no failure behind');
+});
+
+test('a failed read leaves ↓ at the retained end with visible Retry; Retry is a fresh cancellable ↓', async (t) => {
+    const f = await awayRoom(t);
+    f.respond({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    const place = f.messages.scrollTop;
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true, 'the failure does not undo the immediate return');
+    assert.equal(latestButton().classList.contains('visible'), true, 'Retry remains accessible at the new position');
+    assert.equal(busy(), false);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages', 'its Retry is where the reader is');
+    const retry = f.messages.querySelector('.chat-load-older').querySelector('.chat-load-older-btn');
+    assert.equal(retry.textContent, 'Retry loading messages', 'and the history edge offers the same Retry');
+    const latest = held();
+    f.respond(latest.promise);
+    const before = f.calls.length;
+    retry.click();
+    await drain();
+    assert.deepEqual([busy(), f.calls.slice(before)], [true, [null]], 'Retry starts a new ↓');
+    readUp(f);
+    latest.release(present(row('chat:901', 'Arrived while away')));
+    await drain();
+    assert.equal(f.messages.scrollTop, place, 'which a gesture still supersedes');
+    f.respond(present(row('chat:902', 'Arrived later')));
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+});
+
+test('↓ before the room\'s first read waits for that read, busy, and asks again only when it failed', async (t) => {
+    const first = held();
+    const f = fixture(t, first.promise);
+    await drain(5);
+    pressLatest();
+    assert.equal(busy(), true, 'acknowledged before the first read answers');
+    first.release(page(presentRows(900), 'page:recent', 'before:1'));
+    await drain();
+    assert.equal(atBottom(f), true);
+    assert.equal(busy(), false);
+    assert.deepEqual(f.calls, [null], 'it shared the room\'s own first read');
+});
+
+test('↓ after the room\'s first read failed asks for it again and lands on it', async (t) => {
+    const f = fixture(t, { httpStatus: 503, body: { error: 'History source unavailable' } });
+    await drain();
+    assert.deepEqual(f.calls, [null]);
+    f.respond(page(presentRows(900), 'page:recent', 'before:1'));
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls, [null, null]);
+    assert.equal(atBottom(f), true);
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:900'));
+});
+
+test('↓ in the first moments of reconnect reaches retained messages while sharing catch-up', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    readUp(f);
+    const catchUp = held();
+    f.respond(catchUp.promise);
+    const before = f.calls.length;
+    f.reconnect();
+    pressLatest();  // within the bound before the room says it is catching up
+    assert.equal(busy(), true, 'what the room shows is not known to be current yet');
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null], 'only the catch-up read');
+    assert.equal(atBottom(f), true, 'the retained end is reached before catch-up answers');
+    assert.equal(latestButton().classList.contains('visible'), true);
+    catchUp.release(page(presentRows(905), 'page:recent', 'before:1'));
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null]);
+    assert.equal(atBottom(f), true);
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:905'));
+});
+
+test('a failed catch-up stays owed: each ↓ retries until current data arrives', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    readUp(f);
+    f.respond({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    const before = f.calls.length;
+    f.reconnect();
+    pressLatest();
+    await drain();
+    assert.deepEqual([f.calls.slice(before), atBottom(f), busy()], [[null], true, false],
+        'the failed shared read leaves the immediate return in place');
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null, null], 'the retained end cannot answer a failed catch-up');
+    assert.equal(atBottom(f), true);
+    assert.equal(latestButton().classList.contains('visible'), true);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
+    f.respond(present(row('chat:905', 'Fresh after failure')));
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null, null, null]);
+    assert.equal(atBottom(f), true);
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null, null, null], 'success alone makes the present reusable');
+});
+
+// A store upgrade (503 `migrating`) is waiting, not a failed read (DESIGN "History edges"): the room reads on by itself.
+const upgrading = { httpStatus: 503, body: { error: 'Saved history is being upgraded', reason_code: 'migrating' } };
+
+test('↓ during a store upgrade still moves at once and names no Retry; the next newest read lands', async (t) => {
+    const f = await awayRoom(t);
+    f.respond(upgrading);
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true, 'the immediate return stands');
+    assert.equal(busy(), false);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message', 'waiting is no failed read');
+    assert.equal(latestButton().classList.contains('visible'), false);
+    f.respond(present(row('chat:901', 'Published after the upgrade')));
+    await f.instance.refreshHistory({ revision: 65 });
+    await drain();
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:901'), 'the present lands under the reader');
+    assert.equal(atBottom(f), true);
+});
+
+test('a reconnect into a store upgrade keeps ↓ waiting through its automatic reads; an ordinary failed catch-up names Retry', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    pressLatest();
+    await drain();
+    const drawn = () => [latestButton().classList.contains('visible'), latestButton().getAttribute('aria-label')];
+    const quiet = [false, 'Scroll to latest message'];
+    f.respond(upgrading);
+    f.disconnect();
+    f.reconnect();
+    await drain();
+    assert.deepEqual(drawn(), quiet, 'the catch-up the upgrade refused waits: no Retry at the retained end');
+    const again = held();
+    f.respond(again.promise);
+    const before = f.calls.length;
+    await new Promise(resolve => setTimeout(resolve, 750));
+    assert.deepEqual(f.calls.slice(before), [null], 'the room reads the store again by itself');
+    assert.deepEqual(drawn(), quiet, 'and ↓ stays waiting while that read is out');
+    again.release(present(row('chat:905', 'Published after the upgrade')));
+    await drain();
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:905'), 'publication lands under the follower');
+    assert.equal(atBottom(f), true);
+    assert.deepEqual(drawn(), quiet);
+    f.respond({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    f.disconnect();
+    f.reconnect();
+    await drain();
+    assert.deepEqual(drawn(), [true, 'Retry loading latest messages'], 'an ordinary failed catch-up still names Retry');
+});
+
+test('an upgrade refusing ↓ after a partial read still waits; the room\'s later ordinary failure still names Retry', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    pressLatest();
+    await drain();
+    const drawn = () => [latestButton().classList.contains('visible'), latestButton().getAttribute('aria-label')];
+    f.respond({ ...present(row('chat:903', 'Part of the answer')),
+        window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } });
+    await f.instance.refreshHistory({ revision: 66 });
+    await drain();
+    assert.deepEqual(drawn(), [true, 'Retry loading latest messages'], 'the partial read is unconfirmed');
+    f.respond(upgrading);
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true, 'the immediate return stands');
+    assert.deepEqual(drawn(), [false, 'Scroll to latest message'], 'its read refused by the upgrade waits, whatever note the partial left');
+    f.respond({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    await f.instance.refreshHistory({ revision: 67 });
+    await drain();
+    assert.deepEqual(drawn(), [true, 'Retry loading latest messages'], 'the earlier refusal does not hide this failure');
+});
+
+test('a reopened revision waits for catch-up instead of consuming its unread arrival with old hydration', async t => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    f.instance.leave();
+    f.instance.stay();
+    const current = held();
+    f.respond(current.promise);
+    const before = f.calls.length;
+    f.reconnect({ resumed: true });
+    void f.instance.resume(true);
+    let settled = false;
+    const receipt = f.instance.refreshHistory({ revision: 1 }).then(result => { settled = true; return result; });
+    await drain();
+    assert.equal(settled, false, 'the already-covered revision still owes the absence, so its arrival remains pending');
+    assert.deepEqual(f.calls.slice(before), [null], 'the return and receipt share catch-up');
+    current.release(present(row('chat:905', 'Present after the absence')));
+    assert.equal((await receipt).painted, true);
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null], 'old hydration is replaced without a duplicate read');
+});
+
+for (const absence of ['disconnect', 'leave']) test(`↓ after ${absence}, before open, reaches retained messages while reading`, async t => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    readUp(f);
+    if (absence === 'disconnect') f.disconnect();
+    else { f.instance.leave(); f.instance.stay(); }
+    const next = held();
+    f.respond(next.promise);
+    const before = f.calls.length;
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null]);
+    assert.equal(busy(), true);
+    assert.equal(atBottom(f), true);
+    assert.equal(latestButton().classList.contains('visible'), true);
+    next.release(present(row('chat:905', 'After the absence')));
+    await drain();
+    assert.equal(atBottom(f), true);
+    assert.equal(busy(), false);
+});
+
+test('a read begun before another disconnect cannot discharge the new catch-up', async t => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    readUp(f);
+    const stale = held();
+    f.respond(stale.promise);
+    f.reconnect();
+    await drain();
+    f.disconnect();
+    stale.release(page(presentRows(901), 'page:recent', 'before:1'));
+    await drain();
+    const fresh = held();
+    f.respond(fresh.promise);
+    const before = f.calls.length;
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null]);
+    assert.equal(busy(), true);
+    assert.equal(atBottom(f), true, 'retained movement cannot settle the new freshness debt');
+    fresh.release(present(row('chat:905', 'Current after the second disconnect')));
+    await drain();
+    assert.equal(atBottom(f), true);
+});
+
+test('↓ awaiting one reconnect also waits for a later reconnect, sharing both reads', async t => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    readUp(f);
+    const first = held(), second = held();
+    f.respond(first.promise);
+    f.reconnect();
+    pressLatest();
+    await drain();
+    f.disconnect();
+    f.respond(second.promise);
+    f.reconnect();
+    first.release(page(presentRows(901), 'page:recent', 'before:1'));
+    await drain();
+    assert.equal(atBottom(f), true, 'movement is immediate, while the second disconnect still owes loading');
+    assert.equal(busy(), true);
+    const before = f.calls.length;
+    second.release(page(presentRows(905), 'page:recent', 'before:1'));
+    await drain();
+    assert.equal(atBottom(f), true);
+    assert.equal(busy(), false);
+    assert.equal(f.calls.length, before, 'no duplicate latest read');
+});
+
+test('a retained follower restores its place while failed catch-up remains owed', async t => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    globalThis.requestAnimationFrame = fn => setTimeout(fn, 0); // the saved place settles after leave, as in a browser
+    await f.refresh();
+    pressLatest();
+    await drain();
+    f.instance.leave();
+    f.messages.scrollTop = 0; // a hidden feed may be clamped by the engine
+    f.instance.stay();
+    f.respond({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    f.reconnect({ resumed: true });
+    f.instance.resume();
+    await drain();
+    assert.equal(atBottom(f), true, 'the saved follow intent is independent of freshness');
+    const receipt = await f.instance.refreshHistory({ revision: 70 });
+    assert.equal(receipt.painted, false, 'retained rows cannot grant fresh read credit');
+    f.emit({ role: 'assistant', content: 'A live reply after reopen', ts: '2026-09-13T12:00:00Z' });
+    await drain();
+    assert.equal(atBottom(f), true, 'the reopened follower keeps following live content');
+});
+
+test('a room leaving after immediate ↓ takes no late rows or landing; destroyed, nothing lands', async (t) => {
+    const f = await awayRoom(t);
+    const latest = held();
+    f.respond(latest.promise);
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true);
+    const before = f.calls.length;
+    f.instance.leave();
+    assert.equal(busy(), false);
+    f.messages.scrollTop = 0; // the hidden feed was clamped; old ↓ must not restore it
+    latest.release(present(row('chat:901', 'Arrived while away')));
+    await drain();
+    f.instance.stay();
+    await drain();
+    assert.equal(atBottom(f), false, 'the ↓ from before it left does not land');
+    assert.equal(f.bubbles().some(node => node.dataset.historyId === 'chat:901'), false);
+    assert.equal(f.calls.length, before, 'nor reads again on the return');
+    const again = held();
+    f.respond(again.promise);
+    pressLatest();
+    await drain();
+    f.instance.destroy();
+    again.release(present(row('chat:902', 'Arrived later')));
+    await drain();
+    assert.equal(f.bubbles().some(node => node.dataset.historyId === 'chat:902'), false);
+});
+
+test('↓ shares a read of the present already out and holds the present after it, with no read of its own', async (t) => {
+    const f = await awayRoom(t);
+    const recent = held();
+    f.respond(recent.promise);
+    const refreshing = f.instance.refreshHistory({ revision: 50 });
+    await drain();
+    const before = f.calls.length;
+    assert.equal(f.calls.at(-1), null, 'a refresh is reading the present');
+    pressLatest();
+    await drain();
+    assert.equal(busy(), true);
+    assert.equal(atBottom(f), true, '↓ moves while the shared read is still held');
+    recent.release(present(row('chat:901', 'Arrived while away')));
+    await refreshing;
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [], 'no read of its own');
+    assert.equal(atBottom(f), true);
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:901'));
+    readUp(f);
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [], 'that read left the window at the present');
+});
+
+test('the room\'s next newest read answers ↓\'s failed read of the present: its note and Retry name leave with it', async (t) => {
+    const f = await awayRoom(t);
+    f.respond({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    pressLatest();
+    await drain();
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
+    f.respond(present(row('chat:901', 'Arrived while away')));
+    await f.instance.refreshHistory({ revision: 60 });  // the room reads its newest window again (a reconnect, a refresh)
+    await drain();
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message', 'that read answered the failure');
+    const edge = f.messages.querySelector('.chat-load-older').querySelector('.chat-load-older-btn');
+    assert.notEqual(edge.textContent, 'Retry loading messages');
+    const before = f.calls.length;
+    assert.equal(latestButton().classList.contains('visible'), false);
+    await f.clickOlder();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), ['before:1'], 'the following reader continues from the recovered present');
+});
+
+// Retry belongs to the read that failed (DESIGN "History edges"): only ↓'s own read of the present is retried as ↓.
+const edgeButton = f => f.messages.querySelector('.chat-load-older').querySelector('.chat-load-older-btn');
+const viewChanged = { httpStatus: 409, body: { error: 'history_view_changed', reason_code: 'history_view_changed' } };
+
+test('Refresh history after a changed view reads the present again without a cursor, at the present too', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'), () => viewChanged);
+    await f.refresh();
+    await f.clickOlder();
+    assert.equal(edgeButton(f).textContent, 'Refresh history');
+    f.respond(page(presentRows(905), 'page:recent-2', 'before:2'));
+    const before = f.calls.length;
+    await f.clickOlder();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null], 'the reader at the present still gets the changed view read again');
+    assert.equal(edgeButton(f).textContent, 'Load more history', 'and its cursor is the new view\'s');
+    assert.equal(busy(), false);
+});
+
+test('Refresh history away from the present keeps the passage being read', async (t) => {
+    offScreen(t);
+    let changed = false;
+    const f = fixture(t, page([row('chat:900', 'Newest saved message')], 'page:recent', 'before:1'), (cursor) => {
+        const index = Number(cursor.split(':')[1]);
+        return changed ? viewChanged
+            : page([row(`chat:${800 - index}`, `Older ${index}`)], `page:${index}`, `before:${index + 1}`);
+    });
+    await f.refresh();
+    for (let n = 0; n < 3; n += 1) await f.clickOlder();
+    readUp(f);
+    changed = true;
+    await f.clickOlder();
+    assert.equal(edgeButton(f).textContent, 'Refresh history');
+    f.respond(present(row('chat:901', 'Arrived meanwhile')));
+    const before = f.calls.length;
+    await f.clickOlder();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null]);
+    assert.equal(atBottom(f), false, 'a refresh is no ↓: the reader is not taken to the present');
+    assert.equal(busy(), false);
+});
+
+// Coverage in stored order on one chain (CLIENT_CONTRACT "Incomplete windows"): the bytes a read delivered.
+const spans = (from, to, upper) => ({ v: 1, view: 'room', upper: { chat: upper, progress: 0 },
+    spans: { chat: { from, to, chain: 'c', gaps: [] }, progress: { from: 0, to: 0, chain: 'empty', gaps: [] } } });
+
+test('a read of the present that ↓ did not ask for is retried where the reader is', async (t) => {
+    offScreen(t);
+    const f = fixture(t, { ...page([row('chat:99', 'Newest then')], 'page:recent', 'before:1'), coverage: spans(80, 100, 100) },
+        () => ({ ...page([row('chat:79', 'The room\'s first message')], 'page:1'), coverage: spans(0, 80, 100) }));
+    await f.refresh();
+    await f.clickOlder();
+    readUp(f);
+    // The room grew far past its window while the reader read up: Load more history first reads the present.
+    await f.refresh({ ...page([row('chat:199', 'Newest now')], 'page:recent-2', 'before:2'), coverage: spans(180, 200, 200) });
+    f.respond({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    const before = f.calls.length;
+    await f.clickOlder();
+    assert.deepEqual(f.calls.slice(before), [null]);
+    assert.equal(edgeButton(f).textContent, 'Retry loading messages');
+    f.respond({ ...page([row('chat:199', 'Newest now')], 'page:recent-3', 'before:3'), coverage: spans(180, 200, 200) });
+    await f.clickOlder();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null, null], 'Retry reads that present again');
+    assert.equal(atBottom(f), false, 'and leaves the reader where they read');
+    assert.equal(busy(), false);
+});
+
+test('a read of the present that failed part-way confirms nothing: ↓ reads, names Retry, and a bounded page answers', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    readUp(f);
+    const partial = { ...page(presentRows(903), 'page:recent-2', 'before:1'),
+        window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } };
+    f.respond(partial);
+    f.disconnect();
+    f.reconnect();
+    await drain();
+    const before = f.calls.length;
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null], 'the catch-up was cut short: ↓ reads the present itself');
+    assert.equal(atBottom(f), true, 'partial history does not block the physical return');
+    assert.equal(latestButton().classList.contains('visible'), true);
+    assert.equal(busy(), false);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
+    f.respond(present(row('chat:905', 'Read whole, bounded by the page')));
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+});
+
+test('a catch-up that ends partial names ↓ Retry at the retained end at once, with no read or credit of its own', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    pressLatest();
+    await drain();
+    assert.equal(latestButton().classList.contains('visible'), false, 'following at the retained end');
+    f.respond({ ...present(row('chat:903', 'Part of the answer')),
+        window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } });
+    const before = f.calls.length;
+    f.disconnect();
+    f.reconnect();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null], 'the catch-up read alone');
+    assert.equal(busy(), false);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages', 'with no press or scroll');
+    assert.equal(latestButton().classList.contains('visible'), true);
+    assert.equal(atBottom(f), true);
+    assert.equal((await f.instance.refreshHistory({ revision: 95 })).painted, false, 'a partial read earns no read credit');
+    f.respond(present(row('chat:905', 'Whole again')));
+    f.disconnect();
+    f.reconnect();
+    await drain();
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message', 'a whole catch-up answers it');
+    assert.equal(latestButton().classList.contains('visible'), false);
+});
+
+test('a disconnect while ↓ reads the present: ↓ waits for the reconnect\'s catch-up and lands on it', async (t) => {
+    const f = await awayRoom(t);
+    const own = held(), caught = held();
+    f.respond(own.promise);
+    pressLatest();
+    await drain();
+    f.disconnect();
+    f.respond(caught.promise);
+    f.reconnect();
+    await drain();
+    own.release(present(row('chat:901', 'Read before the outage')));
+    await drain();
+    assert.equal(busy(), true, 'a read from before the outage cannot say what it missed');
+    assert.equal(atBottom(f), true, 'the return already happened, loading is still owed');
+    caught.release(present(row('chat:901', 'Read before the outage'), row('chat:902', 'Arrived during it')));
+    await drain();
+    assert.equal(atBottom(f), true);
+    assert.equal(busy(), false);
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:902'));
+});
+
+test('a disconnect while ↓ reads, the socket still down: retained return stays, ↓ names Retry and reads anew', async (t) => {
+    const f = await awayRoom(t);
+    const own = held();
+    f.respond(own.promise);
+    pressLatest();
+    await drain();
+    f.disconnect();
+    own.release(present(row('chat:901', 'Read before the outage')));
+    await drain();
+    assert.deepEqual([busy(), atBottom(f)], [false, true]);
+    assert.equal(latestButton().classList.contains('visible'), true);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
+    f.respond(present(row('chat:902', 'Read after it')));
+    const before = f.calls.length;
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null]);
+    assert.equal(atBottom(f), true);
+});
+
+// ↓ gives up its own read when the room's read it shares fails, ordinarily or refused by an upgrade. Partial or
+// source-refused 200s in between leave the present unconfirmed; the read that confirms it restores a follower's present
+// chain, and a reader who moved on keeps place and chain.
+const failedRead = { httpStatus: 503, body: { error: 'History source unavailable' } };
+const cutShort = { ...present(row('chat:903', 'Part of the answer')),
+    window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } };
+const sourceRefused = { messages: [row('chat:900', 'Newest saved message')], has_more: true, page_cursor: null, next_cursor: null,
+    reason_code: 'history_source_unavailable', window: { complete: false, truncated_by: ['history_source_unavailable'] } };
+for (const [title, failure, between, readOn] of [
+    ['↓ sharing the room\'s own read of the present names its Retry when that read fails, with no absence owed', failedRead, [], false],
+    ['↓ sharing the room\'s own read of the present that an upgrade refuses waits; the next healthy read restores the chain',
+        upgrading, [], false],
+    ['after ↓ shared a failed read, a partial read leaves the chain to the next whole read', failedRead, [cutShort], false],
+    ['after ↓ shared a failed read, repeated partial reads leave the chain to the next whole read', failedRead, [cutShort, cutShort], false],
+    ['after ↓ shared a failed read, a source-refused read leaves the chain to the next whole read', failedRead, [sourceRefused], false],
+    ['a reader who moves on after ↓ shared a refused read keeps place and chain through partial and whole reads',
+        upgrading, [cutShort], true],
+]) test(title, async (t) => {
+    const f = await awayRoom(t);
+    const recent = held();
+    f.respond(recent.promise);
+    const refreshing = f.instance.refreshHistory({ revision: 50 });
+    await drain();
+    pressLatest();
+    await drain();
+    assert.equal(busy(), true);
+    const place = f.messages.scrollTop;
+    recent.release(failure);
+    await refreshing;
+    await drain();
+    assert.deepEqual([busy(), f.messages.scrollTop], [false, place]);
+    assert.equal(latestButton().getAttribute('aria-label'),
+        failure === upgrading ? 'Scroll to latest message' : 'Retry loading latest messages', 'an upgrade waits, a failure names Retry');
+    if (readOn) readUp(f);
+    const kept = f.messages.scrollTop;
+    let revision = 50;
+    for (const unconfirmed of between) {
+        f.respond(unconfirmed);
+        await f.instance.refreshHistory({ revision: ++revision });
+        await drain();
+    }
+    f.respond(present(row('chat:901', 'Arrived while away')));
+    // An ordinary read that confirms the present: no ↓, reconnect or failure of ↓'s own.
+    await f.instance.refreshHistory({ revision: ++revision });
+    await drain();
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:901'));
+    if (readOn) assert.equal(f.messages.scrollTop, kept, 'the reader\'s place stays');
+    else assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+    const before = f.calls.length;
+    await f.clickOlder();
+    assert.deepEqual(f.calls.slice(before), [readOn ? 'before:4' : 'before:1'], readOn
+        ? 'and so does their older chain' : 'Load more history goes on from the present, not the older chain');
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true, '↓ still reaches the present');
+});
+
+test('a recent read failing after immediate ↓ leaves visible Retry at the retained end', async t => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    readUp(f);
+    const recent = held();
+    f.respond(recent.promise);
+    const refreshing = f.instance.refreshHistory({ revision: 80 });
+    await drain();
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true);
+    recent.release({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    await refreshing;
+    await drain();
+    assert.equal(atBottom(f), true);
+    assert.equal(latestButton().classList.contains('visible'), true);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
+    const before = f.calls.length;
+    f.respond(present(row('chat:905', 'After the failure')));
+    pressLatest();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null], '↓ retries the failed present even with retained rows');
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:905'));
+});
+
+test('partial fresh data without a disconnect keeps retained rows, names failure and grants no read credit', async t => {
+    const f = await awayRoom(t);
+    const retained = f.bubbles().map(node => node.dataset.historyId);
+    const response = present(row('chat:905', 'Part of the answer'));
+    response.window = { latest_message: { history_id: 'chat:905' }, complete: false,
+        truncated_by: ['quota', 'chat_projection_failed'] };
+    response.coverage = spans(500, 905, 905);
+    response.coverage.spans.chat.gaps = ['projection_failed'];
+    f.respond(response);
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true);
+    assert.equal(busy(), false);
+    assert.equal(latestButton().classList.contains('visible'), true);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
+    assert.equal(f.messages.parentNode.querySelector('.chat-panel-statusbar').querySelector('.chat-history-status').hidden, false);
+    assert.ok(retained.every(id => f.bubbles().some(node => node.dataset.historyId === id)), 'partial rechain must not erase the retained messages');
+    const receipt = await f.instance.refreshHistory({ revision: 90 });
+    assert.equal(receipt.painted, false, 'neither the retained bottom nor a partial 200 proves the current read');
+});
+
+for (const insideBox of [false, true]) test(`a shared catch-up updates rows after a new gesture (${insideBox ? 'box' : 'feed'}) without landing its old ↓`, async t => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    readUp(f);
+    const recent = held();
+    f.respond(recent.promise);
+    f.reconnect();
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true);
+    if (insideBox) {
+        const box = document.createElement('div');
+        f.bubbles().at(-1).appendChild(box);
+        Object.assign(box, { scrollTop: 200, scrollHeight: 1000, clientHeight: 400 });
+        document.defaultView = { getComputedStyle: node => ({ overflowY: node === box ? 'auto' : 'visible' }) };
+        for (const handler of f.messages.listeners.get('wheel')) handler({ type: 'wheel', deltaY: 1, target: box, timeStamp: 1000 });
+    } else readUp(f);
+    const place = f.messages.scrollTop;
+    recent.release(page(presentRows(905), 'page:fresh', 'before:1'));
+    await drain();
+    assert.equal(f.messages.scrollTop, place, 'the later reading intent owns the place');
+    assert.equal(busy(), false);
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:905'), 'the shared read still updates history');
+});
+
+// Qualification extensions: the real instance's public consumer, with held transport.
+test('physical down supersedes an arrival waiting on the same recent read', async t => {
+    const f = await awayRoom(t);
+    const recent = held();
+    f.respond(recent.promise);
+    const refreshing = f.instance.refreshHistory({ revision: 200 });
+    await drain();
+    const arrival = f.instance.showLatest({ arrive: true });
+    await drain();
+    assert.equal(busy(), true);
+    assert.equal(atBottom(f), false, 'the arrival still waits for its covered target');
+    const calls = f.calls.length;
+    pressLatest();
+    await drain();
+    const moved = atBottom(f);
+    recent.release(present(row('chat:901', 'New arrival')));
+    await refreshing; await arrival; await drain();
+    assert.equal(moved, true, 'a new physical intent reaches the retained end before the shared read answers');
+    assert.equal(f.calls.length, calls, 'the new claim shares the existing read');
+    assert.equal(atBottom(f), true);
+});
+
+test('a healthy reconnect after failed down leaves an accessible way to the present chain', async t => {
+    const f = await awayRoom(t);
+    f.respond({ httpStatus: 503, body: { error: 'Unavailable' } });
+    pressLatest(); await drain();
+    f.respond(present(row('chat:901', 'Fresh after reconnect')));
+    f.disconnect(); f.reconnect(); await drain();
+    assert.equal(latestButton().classList.contains('visible'), false, 'the healthy follower has reached the present chain');
+    await f.clickOlder();
+    assert.equal(f.calls.at(-1), 'before:1', 'Load more continues from that present, not the old island');
+});
+
+test('persistent partial recent and older pages remain browseable without read credit', async t => {
+    const partial = { ...page(presentRows(900), 'partial:0', 'before:1'),
+        window: { complete: false, latest_message: null, truncated_by: ['quota', 'chat_projection_failed'] } };
+    const f = fixture(t, partial, () => ({ ...page([row('chat:700', 'Available older row')], 'partial:1', 'before:2'),
+        window: { complete: false, latest_message: null, truncated_by: ['quota', 'chat_projection_failed'] } }));
+    const receipt = await f.instance.refreshHistory({ revision: 300 }); await drain();
+    assert.equal(receipt.painted, false, 'incomplete projection cannot certify the requested revision');
+    assert.equal(edgeButton(f).textContent, 'Load more history');
+    await f.clickOlder(); await drain();
+    assert.equal(f.calls.at(-1), 'before:1');
+    assert.ok(f.bubbles().some(n => n.dataset.historyId === 'chat:700'));
+    assert.equal(edgeButton(f).textContent, 'Load more history');
+});
+
+test('partial latest exposes available rows without erasing retained pages or accumulating partial windows', async t => {
+    const f = await awayRoom(t);
+    const retained = f.bubbles().map(n => n.dataset.historyId);
+    for (let i = 0; i < 8; i++) {
+        const response = present(row(`chat:${1200 + i}`, `Available partial ${i}`));
+        response.window = { complete: false, latest_message: null, truncated_by: ['chat_projection_failed'] };
+        f.respond(response); pressLatest(); await drain();
+        assert.ok(f.bubbles().some(n => n.dataset.historyId === `chat:${1200 + i}`), 'partial latest rows are still useful');
+        assert.ok(retained.every(id => f.bubbles().some(n => n.dataset.historyId === id)));
+        assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
+        assert.equal(edgeButton(f).textContent, 'Load more history', 'partial latest must not turn the independent older edge into Retry');
+        assert.ok(f.bubbles().length <= retained.length + response.messages.length, 'only the current partial window supplements retained history');
+    }
+});
+
+test('bare close before any read fails keeps the follower quiet; its next failed read offers Retry', async t => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    pressLatest(); await drain();
+    const before = f.calls.length;
+    f.disconnect(); await drain();
+    assert.equal(f.calls.length, before);
+    assert.equal(atBottom(f), true);
+    assert.equal(busy(), false);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+    assert.equal(latestButton().classList.contains('visible'), false);
+    f.respond({ httpStatus: 503, body: { error: 'Unavailable' } });
+    f.reconnect(); await drain();
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
+    assert.equal(latestButton().classList.contains('visible'), true);
+});
+
+test('a healthy read after failed down keeps a newer reading action and its older cursor', async t => {
+    const f = await awayRoom(t);
+    f.respond({ httpStatus: 503, body: { error: 'Unavailable' } });
+    pressLatest(); await drain();
+    readUp(f);
+    const place = f.messages.scrollTop;
+    f.respond(present(row('chat:901', 'Fresh after the failed down')));
+    await f.instance.refreshHistory({ revision: 400 }); await drain();
+    assert.equal(f.messages.scrollTop, place);
+    assert.equal(latestButton().classList.contains('visible'), true);
+    const before = f.calls.length;
+    await f.clickOlder();
+    assert.deepEqual(f.calls.slice(before), ['before:4'], 'recovery leaves the reader\'s chain alone');
+});
+
+test('a repeated physical down returns again after passive focus scrolling without another fetch', async t => {
+    const f = await awayRoom(t);
+    const latest = held(); f.respond(latest.promise);
+    pressLatest(); await drain();
+    const before = f.calls.length;
+    assert.equal(atBottom(f), true);
+    f.messages.scrollTop = 0; // focus/selection autoscroll: no wheel, swipe or navigation key
+    for (const handler of f.messages.listeners.get('scroll')) handler({ target: f.messages });
+    assert.equal(atBottom(f), false);
+    pressLatest(); await drain();
+    const returned = atBottom(f);
+    latest.release(present(row('chat:901', 'Fresh after repeated press')));
+    await drain();
+    assert.equal(returned, true, 'every physical press moves immediately');
+    assert.equal(f.calls.length, before, 'both presses share the one pending fetch');
 });

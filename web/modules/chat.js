@@ -1,6 +1,8 @@
 import { escapeHtmlAttr, isoMicros } from './utils.js';
+import { tr } from './i18n.js';
 import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
+import { clearReloadParams } from './layers.js';
 import { fluentIcon, renderSkillIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
@@ -14,30 +16,32 @@ import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
 import { syncCostBreakdown } from './cost_breakdown_presentation.js';
 import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
 import { createTextBubbles } from './chat_text_bubble.js';
+import { noticeLine } from './host_notice_text.js';
 import { createCatchUp } from './room_retire.js';
 import { createChatPreview } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
 import { SERVER_ANSWERS_EVENT } from './ws.js';
-import { applyCardWorkViews, cardControls, cardMenuActions, changedOffers, emptyWorkState, openCardControls, ownStopPress, reconcileWorkState, roomStatusView } from './work_status.js';
+import { applyCardWorkViews, cardControls, cardMenuActions, changedOffers, emptyWorkState, memberActivityEvidenced, openCardControls, ownStopPress, promoteChildCard, reconcileWorkState, roomStatusView } from './work_status.js';
 import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
 import { createHostStart } from './host_starting_status.js';
 import { createModelWaitController, isModelWaitReference } from './model_wait.js';
-import { closingLine, syncClosingSentence, syncSettledItems } from './settled_card.js';
+import { acceptLiveFrame, applyCardEnding, cardDetailReader, cardMetricFacts, closingLine, foldCardMetrics, hydrateOpenSettledChild, hydrateRevealedCard, hydrateRevealedChildren, noteHandoverAttempt, readCardDetail, readMissingCardDetail, refreshSettledCardDetail, replayedTerminalRecords, syncClosingSentence, syncSettledItems, terminalChildFrame } from './settled_card.js';
+import { noteOrigin, paintOrigin } from './task_origin.js';
 import { createChatReadingPosition } from './chat_reading_position.js';
 import { createRowSleep } from './chat_row_sleep.js';
 import { onRefit } from './text_fit.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
 import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset, readBand } from './project_read_state.js';
 import { createSharedReadTracker } from './read_ahead.js';
-import { createReplayKeys, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
+import { adoptsRetainedCopy, createReplayKeys, livePriorBubble, matchesHistoryBubble, messagePlacementKey, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
 import { apiClient, apiFetch, fetchTaskDetail, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
 import { readStateSnapshot } from './state_snapshots.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
 import {
-    childReportLabel,
+    childCauseFacts,
     getLogTaskGroupId,
     isGroupedTaskEvent,
     isTerminalTaskDetail,
@@ -63,6 +67,7 @@ import {
     requestStop,
 } from './task_control_menu.js';
 import { composerMarkup, createComposer } from './composer.js';
+import { composerHeightAtRest, syncShortRoom } from './composer_fold.js';
 import { effortFact } from './effort_chip.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
 import { createChatReplies } from './chat_reply.js';
@@ -73,8 +78,10 @@ import {
     captureLiveCardPhaseState,
     censusTaskFacts,
     desiredLiveCardPhase,
+    frameObservesPhase,
     liveCardCountBits,
     markOwnerHurry,
+    observeChildPhase,
     replayTerminalPhase,
     restoreLiveCardPhaseState,
     setLiveCardPhase,
@@ -110,7 +117,7 @@ import {
     upsertToolFoldRow,
 } from './chat_render_batch.js';
 import { measure } from './layout_batch.js';
-import { placeCheckRow, placeReplayedEvidence } from './verification_presentation.js';
+import { placeToolDiagnostic, placeReplayedEvidence } from './verification_presentation.js';
 import {
     boundActivityPreview,
     authoredLine,
@@ -135,10 +142,10 @@ import {
     mergeStickyCostMeta,
     applyToolObservation,
     noteToolHostMetrics,
-    toolEvidenceIncomplete,
     partitionLocalEchoJournal,
     projectCollapsedActivity,
     positiveTaskTerminalFact,
+    TERMINAL_SUBAGENT_EVENTS,
     unkeyedFrameEndsTurn,
     stampNodeTimestamp,
     reconcileHydratedDirectActivities,
@@ -163,8 +170,7 @@ import {
 
 // Host placement: custody warns; settled reviews show results.
 const CARD_ROW_PHASES = new Map([['timeline', 'warn'], ['reviews', 'result']]);
-const SUBAGENT_LIFECYCLE_EVENTS = new Set(['scheduled', 'running', 'completed', 'completed_warn', 'failed',
-    'cancelled', 'rejected', 'interrupted']);  // a helper's narration is `progress`
+const SUBAGENT_LIFECYCLE_EVENTS = new Set(['scheduled', 'running', 'interrupted', ...TERMINAL_SUBAGENT_EVENTS]);
 // Details and Reviews use the shared control glyph; ::after remains the touch hit area.
 const CHEVRON = renderSkillIcon('chevron', { size: 14, className: 'chat-live-chevron' });
 
@@ -254,7 +260,7 @@ export function createChatInstance({
     const onWs = (event, fn) => wsDisposers.push(ws.on(event, fn));
     const replies = createChatReplies({ chatId, feed: messagesDiv, input, composerArea: inputArea, key: storeKey('ouro_chat_reply'),
         reading: () => reading, onDomWrite: withStableViewport, history: () => historyReveal,
-        navigate: revealQuotedSource, present: () => !destroyed && isInstanceVisible() });
+        navigate: revealQuotedSource, present: () => !destroyed && isInstanceVisible(), onDraftChange: () => composer?.invalidateDraft() });
     const chatMedia = createChatMedia({
         durableChatMediaUrl,
         formatMsgTime,
@@ -302,7 +308,7 @@ export function createChatInstance({
 
     // Sent attachment messages not yet confirmed saved: "Send again" with one id, kept by this tab across a reload.
     const unconfirmed = createUnconfirmedSends({ send: (frame, options) => ws.send(frame, options),
-        root: () => messagesDiv, onDomWrite: withStableViewport, showToast, compose: replies.compose,
+        root: () => messagesDiv, onDomWrite: withStableViewport, showToast, compose: (...args) => composer?.prepareNewMessage(...args),
         storage: sessionStorage, storageKey: storeKey('ouro_chat_unconfirmed') });
 
     let _syncPass1Active = false;
@@ -367,9 +373,9 @@ export function createChatInstance({
     const explicitCardExpansion = new Map();
     const reviewDisclosureByTask = new Map();
     const reviewHydrator = createReviewHydrator({
-        fetchDetail: fetchTaskDetailStrict,
+        fetchDetail: cardDetailReader(liveCardRecords, fetchTaskDetailStrict),
         onSettled: () => !destroyed && reading.position(),
-        applyDetail: (id, detail) => !destroyed && attachTaskDetailReviews(id, detail),
+        applyDetail: (id, detail) => !destroyed && attachTaskDetailReviews(id, detail, true),
         onState: (id, status) => !destroyed
             && (liveCardRecords.get(id)?.reviewController?.setHydrateStatus?.(status) ?? false),
     });
@@ -377,8 +383,7 @@ export function createChatInstance({
     const pendingSuggestedNames = new Map();
     // Server-confirmed direct/managed activities.
     const activeDirectActivities = new Map();
-    // Local user submissions awaiting server confirmation (clientMessageId
-    // -> { clientMessageId, timestamp }).
+    // Local user submissions awaiting server confirmation.
     const pendingSubmissions = new Map();
     const hostStart = createHostStart(); // В9 readiness and boot phases; a disconnect and a reconnect forget both
     // Bounded conclusions retain known outcomes for later cards; reusable slots clear on settlement.
@@ -419,18 +424,17 @@ export function createChatInstance({
         else recordConcludedActivity(id, phase);
         settleTerminalRootChildren(id);
     }
-    // A terminal root reconciles open descendants through single-flight detail
-    // reads; only proven child terminality changes their state (#300).
+    const settleChildFrom = (id, d) => withStableViewport(() => routeSubagentTerminalToCard(id, { ...d, task_id: id }, true));
+    // A terminal root reads each open descendant once; only proven child terminality changes its state (#300).
     function settleTerminalRootChildren(rootId) {
         for (const [childId, info] of subagentChildParents) {
             if (info.parentId !== rootId) continue;
             settleTerminalRootChildren(childId);
             const record = liveCardRecords.get(childId);
-            if (!record || record.finished || managedTaskDetailReads.has(childId)) continue;
+            if (!record || record.finished || record.managedDetail?.current() || managedTaskDetailReads.has(childId)) continue;
             managedTaskDetailReads.add(childId);
-            fetchTaskDetail(childId).then((detail) => {
-                if (destroyed || leaving || !isTerminalTaskDetail(detail)) return;
-                withStableViewport(() => routeSubagentTerminalToCard(childId, { ...detail, task_id: childId }));
+            readCardDetail(record).then((detail) => {
+                if (!destroyed && !leaving && isTerminalTaskDetail(detail)) settleChildFrom(childId, detail);
             }).catch(() => {}).finally(() => managedTaskDetailReads.delete(childId));
         }
     }
@@ -441,7 +445,8 @@ export function createChatInstance({
             if (!record.isSubagent || record.finished || !record.root?.isConnected) continue;
             if (workState.members.has(childId)) {
                 record.childDetailRead = undefined;
-                if (record.historicalUnavailable) withStableViewport(() => {
+                if (record.historicalUnavailable
+                        || (record.historicalUnconfirmed && memberActivityEvidenced(workState.memberStates?.get(childId)))) withStableViewport(() => {
                     setHistoricalUnavailable(record, false);
                     renderLiveCardMeta(record);
                     return true;
@@ -452,14 +457,14 @@ export function createChatInstance({
             const updates = record.updates;
             if (!workState.complete || observedAt >= snapshotRequestedAt
                     || (record.childDetailRead?.missing && record.childDetailRead.updates === updates)
-                    || managedTaskDetailReads.has(childId)
+                    || record.managedDetail?.current() || managedTaskDetailReads.has(childId)
                     || !subagentChildParents.has(childId)) continue;
             // Queue departure and membership share this read; keep the visible hold
             // until actual recovery or terminal evidence, not just absence.
             record.projectHoldQueued = false;
             const observation = record.childDetailRead = { updates };
             managedTaskDetailReads.add(childId);
-            fetchTaskDetailStrict(childId).then((detail) => {
+            readCardDetail(record).then((detail) => {
                 if (destroyed || ws.isConnected?.() === false || !workState.complete
                         || liveCardRecords.get(childId) !== record || record.finished
                         || workState.members.has(childId) || record.updates !== updates
@@ -467,29 +472,18 @@ export function createChatInstance({
                 if (detail === null) {
                     observation.missing = true;
                     withStableViewport(() => settleMissingTaskRecord(record));
-                } else if (isTerminalTaskDetail(detail)) {
-                    withStableViewport(() => routeSubagentTerminalToCard(childId, { ...detail, task_id: childId }));
-                }
+                } else if (isTerminalTaskDetail(detail)) settleChildFrom(childId, detail);
             }).catch(() => {}).finally(() => managedTaskDetailReads.delete(childId));
         }
     }
     let activeLiveGroupId = '';
-    let pendingReconnectSync = false;  // Set when a fromReconnect sync arrives while one is already in-flight.
-    const catchUp = createCatchUp(syncChatStatus);  // a return's or reconnect's read still out after its bound
+    // A return's or reconnect's read: status once out past its bound, ↓ Retry once it ends unconfirmed (shown only,
+    // as a hidden feed reads as at its end).
+    const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); });
     let pendingRestartNotice = '';
     try {
         pendingRestartNotice = restartNoticeText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
     } catch {}
-    function clearReloadParams() {
-        try {
-            const url = new URL(window.location.href);
-            if (!url.searchParams.has('_ouro_reason') && !url.searchParams.has('_ouro_refresh')) return;
-            url.searchParams.delete('_ouro_reason');
-            url.searchParams.delete('_ouro_refresh');
-            window.history.replaceState({}, '', url);
-        } catch {}
-    }
-
     function rememberMessageKey(key) {
         if (!key || seenMessageKeys.has(key)) return;
         seenMessageKeys.add(key);
@@ -526,7 +520,7 @@ export function createChatInstance({
                 && setLiveCardExpanded(record, false)) } });
     const episodes = createTaskEpisodes({ records: liveCardRecords, reanchor: reanchorTaskCard, renamed: (record) => (portals.relabel(record), syncCardHeadline(record)),
         activity: (record) => currentActivity(record), follow: portals.follow,
-        expand: (record) => { setLiveCardExpanded(record, true); hydrateCardReviews(record.groupId); } });
+        expand: (record) => { setLiveCardExpanded(record, true); hydrateShownDetails(record); revealChildDetails(record); }, meta: renderLiveCardMeta });
     const rowMenu = createChatRowMenu({ feed: messagesDiv, replies, cardOf: (id) => liveCardRecords.get(id),
         actionsOf: (record) => cardMenuActions(workState, record, currentActivity(record)), afterAction: reread });
 
@@ -541,8 +535,7 @@ export function createChatInstance({
             if (!response.ok) return;
             const { queue } = await response.json();
             if (destroyed || leaving || !Array.isArray(queue?.pending) || !Array.isArray(queue?.running)) return;
-            const tasks = new Map([[queue.pending, 'queued'], [queue.running, 'working']]
-                .flatMap(([rows, phase]) => rows.map(row => [row.id, { ...row.task, phase }])));
+            const tasks = new Map([...queue.pending, ...queue.running].map(row => [row.id, row.task]));
             withStableViewport(() => {
                 for (const record of children) {
                     if (record.finished || !record.root?.isConnected || record.lastLiveObservedAt > started) continue;
@@ -550,9 +543,14 @@ export function createChatInstance({
                     if (task && 'project_admission_hold' in task) {
                         missingManagedTaskIds.delete(record.groupId);
                         restoreCardActivity(record, task.project_admission_hold);
-                        syncParkedPhase(record, ws.isConnected?.() === false ? 'unknown' : task.phase, task);
+                        if (ws.isConnected?.() !== false) {
+                            // A fresh connected read releases the park this client set when it lost the connection.
+                            const offline = record.parkedOffline;
+                            record.parkedOffline = false;
+                            if (record.projectHold && record.censusPhase && (!workState.memberStates || offline)) syncParkedPhase(record, '');
+                        }
                         record.projectHoldQueued = Boolean(record.projectHold);
-                    } else if (!task && record.projectHoldQueued) {
+                    } else if (!tasks.has(record.groupId) && record.projectHoldQueued) {
                         record.projectHoldQueued = false;
                         missingManagedTaskIds.add(record.groupId);
                         void reconcileMissingManagedTask(record.groupId);
@@ -567,9 +565,9 @@ export function createChatInstance({
         if (destroyed || leaving) return;
         if (data) void refreshChildProjectHolds();
         const before = workState;
-        workState = reconcileWorkState(workState, data, chatId, ws.isConnected?.() !== false);
+        workState = reconcileWorkState(workState, data, chatId, ws.isConnected?.() !== false, snapshotRequestedAt);
         if (Array.isArray(data?.works)) settleAbsentChildren(snapshotRequestedAt);
-        applyCardWorkViews(liveCardRecords, workState);
+        withStableViewport(() => applyCardWorkViews(liveCardRecords, workState));
         chatDecision.syncWorks(workState);
         changedOffers(liveCardRecords, before, workState).forEach(syncCancelRunButton);
         syncHeaderControlState(data ?? { accounting: { available: false } });
@@ -588,6 +586,7 @@ export function createChatInstance({
             for (const activity of activities) {
                 if (activity.required_question) chatDecision.appendActivityQuestion(activity.required_question, snapshotRequestedAt);
                 if (Number(activity.chat_id ?? 1) === chatId) modelWaits.observe(activity.activity_id, activity);
+                noteHandoverAttempt(liveCardRecords.get(activity.activity_id), activity, withStableViewport);
             }
         }
         syncChatStatus();
@@ -602,10 +601,9 @@ export function createChatInstance({
 
     const ACTUAL_BOTTOM_TOLERANCE_PX = 6;
 
-    const isNearBottom = threshold => reading.nearBottom(threshold);
-
+    const band = () => readBand(messagesDiv, pageHeader, inputArea);
     const { captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor, serializeTimelineAnchor, anchorOwnersReady } =
-        createTimelineAnchors({ messagesDiv, liveCardRecords });
+        createTimelineAnchors({ messagesDiv, liveCardRecords, band });
     // Far rows skipped once laid out (style.css); a restyle may change every row's size at once, and the reading owner
     // places the passage again.
     let rowSleep = createRowSleep({ feed: messagesDiv, onRestyle: () => reading.reflow() });
@@ -712,8 +710,7 @@ export function createChatInstance({
         return true;
     }
 
-    // DESIGN's activity-block predicate rechecks facts on each mutation;
-    // completion notes and receipts are not content, and visibility is not sticky.
+    // DESIGN / 16.09: visibility and chrome follow work.
     function blockVisible(record) {
         if (!record || record.isSubagent) return true;
         // A moved work's portal never leaves Main (one work, one card).
@@ -723,19 +720,17 @@ export function createChatInstance({
             || (record.finished && record.phaseEl?.dataset?.phase !== 'done');
     }
 
-    // Work chooses card chrome (owner 16.09): title and Main conversion, whatever the lane; attention-only or non-Done
-    // endings have neither. Bare outcome/receipts are not work; _is_direct_chat keeps its host duties.
     function blockHasWork(record) {
         const id = record.groupId;
         // Visibility depends on work, never the lane.
         return record.reviewController?.groups.size > 0
             || [...subagentChildParents.values()].some((info) => info.parentId === id)
-            || record.items.some((item) => !item.receipt && !String(item.dedupeKey || '').startsWith('task_done|'))
+            || record.items.some((item) => !item.receipt && (item.fullField === 'schedule_report'
+                || !String(item.dedupeKey || '').startsWith('task_done|')))
             || record.toolErrors > 0;
     }
 
-    // Child, else project, identity names the card; authored activity stays in its timeline. An unnamed
-    // root with work takes its newest narration, `Task activity` once ended (#1369).
+    // Child or project names the card; an unnamed root uses narration, `Task activity` once ended.
     function cardTitle(record, work = blockHasWork(record)) {
         return record.isSubagent ? childTitle(record) : record.suggestedName
             || (work ? authoredTitle(record) || (record.finished ? 'Task activity' : '') : '');
@@ -747,46 +742,34 @@ export function createChatInstance({
         const title = cardTitle(record);
         const line = record.finished && !record.isSubagent && record.wakeSummary ? closingLine(record, title) : record.collapsedActivity;
         if (record.titleEl.textContent !== title) { record.titleEl.textContent = title; portals.relabel(record); }
+        paintOrigin(record);  // the name may already say the place
         return renderCollapsedActivity(record, projectCollapsedActivity({ record, suggestedName: title, headline: line, body: line }));
     }
 
     // Fold host facts; absent counters stay absent.
-    function noteToolMetrics(taskId, metrics, rawTs, { suppressDomInsert = false } = {}) {
-        const rounds = Number.isInteger(metrics?.rounds) && metrics.rounds >= 0 ? metrics.rounds : null;
-        const [calls, errors, routing, completion] = ['tool_calls', 'tool_errors', 'routing_tool_calls', 'completion_tool_calls']
-            .map(key => Number.isInteger(metrics?.[key]) && metrics[key] >= 0 ? metrics[key] : null);
-        const hasToolEvidence = calls > 0 || errors > 0 || metrics.tool_evidence?.observations?.length
-            || metrics.tool_evidence?.legacy?.calls || toolEvidenceIncomplete(metrics.tool_evidence?.coverage);
-        if (rounds === null && calls === null && !hasToolEvidence) return false;
+    function noteToolMetrics(taskId, metrics, rawTs, { suppressDomInsert = false, attempt, recorded = false } = {}) {
+        const facts = taskId && cardMetricFacts(metrics);
+        if (!facts) return false;
         return withStableViewport(() => {
             const record = getLiveCardRecord(taskId);
             const before = captureLiveCardProjection(record);
-            const duration = Number(metrics.duration_sec);
-            if (rounds !== null) record.rounds = Math.max(record.rounds ?? 0, rounds);
-            if (metrics.duration_sec != null && Number.isFinite(duration)) record.durationSec = duration;
-            if (calls !== null) record.toolCalls = Math.max(record.toolCalls ?? 0, calls);
-            let changed = false;
-            // Rounds and a known zero are facts, not a tool invocation or a row of work.
-            if (hasToolEvidence) {
-                const summary = noteToolHostMetrics(record, { calls, errors, routing, completion, counts: metrics.tool_call_counts, evidence: metrics.tool_evidence });
-                if (summary.calls > 0 || record.toolCalls != null) record.toolCalls = summary.calls;
-                record.toolErrors = summary.errors;
-                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs)
-                    && renderLiveCardTimeline(record);
-            }
+            const projection = foldCardMetrics(record, metrics, facts, attempt, recorded);
+            if (!projection) return false;
+            const { owned, summary } = projection;
+            // A dateless current-work carrier belongs last; other attempts can anchor a real call, not today's chip.
+            const anchor = owned && !Number.isFinite(Date.parse(rawTs)) ? rawTs : replayedEvidenceTs(facts.evidence, owned ? rawTs : '');
+            const changed = summary && placeReplayedEvidence(record, summary, facts.evidence, anchor, normalizeLogTs, summarizeChatLiveEvent)
+                && renderLiveCardTimeline(record);
             updateLiveCardCount(record);
             renderLiveCardMeta(record);
-            // A timestamp-free current-work carrier intentionally belongs at the page end.
-            // Dated carriers may carry earlier evidence past an intervening owner message.
-            const anchor = Number.isFinite(Date.parse(rawTs)) ? replayedEvidenceTs(metrics.tool_evidence, rawTs) : rawTs;
             reanchorTaskCard(record, anchor, { suppressDomInsert });
             ensureLiveCardVisible(record, { suppressDomInsert });
             return Boolean(changed || liveCardProjectionChanged(before, record));
         });
     }
 
-    // P5: task ids whose progress carried the supervisor's host-attested `cancelable` marker (queue tasks the cancel
-    // endpoint reaches), from live frames and replay alike, maybe before their card: kept beside the records.
+    // P5: task ids whose progress carried supervisor's host-attested `cancelable` marker (queue
+    // tasks cancel endpoint reaches), from live frames, replay, maybe before card: kept with records.
     const cancelableTaskIds = new Set();
 
     function queueTaskLiveUpdate(summary, taskId, rawTs) {
@@ -806,8 +789,8 @@ export function createChatInstance({
         });
     }
 
-    // Main blocks with work offer conversion unless their origin is bound (the same /api/state fact app.js
-    // reads); titles use the same work predicate. Every root work card offers Reply in its row menu.
+    // Main blocks with work offer conversion unless origin bound (same /api/state fact app.js reads);
+    // titles use that predicate. Every root work card offers Reply in its row menu.
     function syncBlockChrome(record) {
         replies.syncCard(record, !record.isSubagent && (isPortal(record) || blockHasWork(record)));
         // A child is never a convertible unit (it inherits its root's Project by
@@ -876,7 +859,7 @@ export function createChatInstance({
         btn.addEventListener('click', (event) => {
             event.stopPropagation();
             openCardControls(btn, record, cardControls(workState, record.groupId).work, { activity: currentActivity(record),
-                stop: (action) => cancelRunFromCard(record, action), afterAction: reread });
+                stop: (action) => cancelRunFromCard(record, action), afterAction: refreshHeaderControlState });
         });
         actions.appendChild(btn);
         record.cancelRunBtn = btn;
@@ -1034,11 +1017,11 @@ export function createChatInstance({
         return Boolean(merged || mounted);
     }
 
-    function attachTaskDetailReviews(taskId, detail) {
+    function attachTaskDetailReviews(taskId, detail, stored = false) {
         return withStableViewport(() => {
             const id = taskKey(taskId);
             modelWaits.observe(id, detail);
-            const filed = noteTaskDetails(liveCardRecords.get(id), detail);
+            const filed = noteTaskDetails(liveCardRecords.get(id), detail, stored);
             const groups = reviewGroupsFromTaskDetail(detail, id);
             if (!id || groups.length === 0) return filed;
             const fresh = !liveCardRecords.has(id);
@@ -1051,13 +1034,13 @@ export function createChatInstance({
         });
     }
 
-    // Refresh files/history and a Swarm root's receipt line; retain lifecycle.
-    function noteTaskDetails(record, detail) {
-        const files = syncSettledItems(record, detail, { write: withStableViewport });
+    // Detail facts, independent of the card's lifecycle.
+    function noteTaskDetails(record, detail, stored) {
+        const files = syncSettledItems(record, detail, { write: withStableViewport, stored });
+        if (!stored && !record?.isSubagent) refreshSettledCardDetail(record, detail, hydrateCardReviews);
         const words = syncClosingSentence(record, detail);
         if (words) syncCardHeadline(record);
-        const origin = record && detail?.schedule_name && record.scheduleName !== detail.schedule_name;
-        if (origin) record.scheduleName = detail.schedule_name;
+        const origin = noteOrigin(record, detail);
         const history = syncHistoryRetentionItem(record, detail);
         const candidate = syncCandidateRemainderItem(record, detail);
         const chain = episodes.note(record, detail);
@@ -1067,10 +1050,18 @@ export function createChatInstance({
             || chain || receipt;
     }
 
-    function hydrateCardReviews(taskId, revision = null) {
-        return destroyed ? Promise.resolve(false) : reviewHydrator.hydrate(taskId, revision, {
+    function hydrateCardReviews(taskId, revision = null, fresh = false) {
+        return destroyed ? Promise.resolve(false) : reviewHydrator.hydrate(taskId, revision, { fresh,
             onDomWrite: _remoteActivityDepth > 0 ? withRemoteActivity : withStableViewport,
         });
+    }
+
+    function revealChildDetails(record) {
+        hydrateRevealedChildren(record, liveCardRecords, hydrateCardReviews);
+    }
+
+    function hydrateShownDetails(record, wasOpen = false) {
+        hydrateRevealedCard(record, wasOpen, hydrateCardReviews, reviewHydrator.ready);
     }
 
     function attachReviewFromRow(row, rawTs = '', showPointerAck = false) {
@@ -1083,9 +1074,11 @@ export function createChatInstance({
                     changed = Boolean(record.reviewController.update(pointer.group));
                 } else if (showPointerAck) {
                     const ack = String(row?.text || row?.content || '').trim();
+                    // A notice is a System row (its line; the original job behind Details); an older row, a progress note.
+                    const said = Boolean(noticeLine(row));
                     if (ack) changed = Boolean(addMessage(
-                        ack, 'assistant', !!row?.markdown, rawTs || row?.ts || null,
-                        true, { systemType: 'lifecycle_pointer' },
+                        ack, said ? 'system' : 'assistant', !said && !!row?.markdown, rawTs || row?.ts || null,
+                        !said, { systemType: 'lifecycle_pointer', ...(said ? { reply: row } : {}) },
                     ));
                 }
                 return changed;
@@ -1146,9 +1139,8 @@ export function createChatInstance({
     }
 
     function admitCardMetadata(row) {
-        // Carrier facts precede presentation returns.
-        if ((row.tool_evidence || Number.isInteger(row.rounds)) && row.task_id) noteToolMetrics(row.task_id, row, row.ts || row.timestamp || '');
         if (row.system_type === 'task_evidence') {
+            if (!_historyReplayActive) noteToolMetrics(row.task_id, row, row.ts);
             // The task's own evidence: mints its card at the carrier's row (zero tools included).
             const record = getLiveCardRecord(row.task_id);
             const activity = activeDirectActivities.get(row.task_id);
@@ -1162,7 +1154,7 @@ export function createChatInstance({
         }
         if (isModelWaitReference(row)) {
             const changed = modelWaits.observe(row.task_id, row);
-            return row.outcome_axes ? appendTaskSummaryToLiveCard(row) || changed : changed;
+            return row.outcome_axes && (!_historyReplayActive || row.task_phase === 'finalizing') ? appendTaskSummaryToLiveCard(row) || changed : changed;
         }
         const reference = reviewReferenceFromRow(row);
         if (!reference) return undefined;
@@ -1226,12 +1218,12 @@ export function createChatInstance({
                 <div class="chat-live-foot-end" data-live-foot-end></div>
             </div>
             <div data-live-reviews-host></div>
-            <div class="chat-live-details">
+            <div class="chat-live-details scroll-fade-y">
                 <div data-live-phase-detail hidden></div>
                 <dl class="chat-live-facts" data-live-facts hidden></dl>
                 <div data-live-cost-detail hidden></div>
             </div>
-            <div class="chat-live-timeline" data-live-timeline id="${escapeHtmlAttr(timelineId)}"></div>
+            <div class="chat-live-timeline scroll-fade-y" data-live-timeline id="${escapeHtmlAttr(timelineId)}"></div>
             <div class="chat-live-episode-history" data-live-episode-history hidden></div>
         `;
         const part = (name) => root.querySelector(`[data-live-${name}]`);  // the card's own named parts
@@ -1256,6 +1248,7 @@ export function createChatInstance({
             turnProjectBtn: null,
             cancelRunBtn: null,
             timelineEl: part('timeline'),
+            detailsEl: root.querySelector('.chat-live-details'),
             reviewsHostEl: part('reviews-host'),
             expandedLineKeys: new Set(),
             isSubagent: Boolean(options.isSubagent),
@@ -1283,9 +1276,8 @@ export function createChatInstance({
         record.disclosureEl?.addEventListener('click', () => {
             if (isPortal(record)) return;
             const nowExpanded = record.root.dataset.expanded !== '1';
-            explicitCardExpansion.set(record.groupId, nowExpanded);
-            setLiveCardExpanded(record, nowExpanded);
-            if (nowExpanded) hydrateCardReviews(record.groupId);
+            discloseLiveCard(record, nowExpanded);
+            if (nowExpanded) hydrateShownDetails(record);
         });
         record.timelineDispose = bindLiveCardTimeline(record.timelineEl, (lineKey) => {
             const nowExpanded = !record.expandedLineKeys.has(lineKey);
@@ -1301,8 +1293,8 @@ export function createChatInstance({
             }
         });
         // While a part Details opens scrolls inside (style.css) it is a named region the keyboard reaches.
-        record.regions = [['.chat-live-details', 'Scrollable task details'], ['.chat-live-timeline', 'Scrollable task notes']]
-            .map(([part, region]) => bindScrollFade(root.querySelector(part), { region }));
+        record.regions = [[record.detailsEl, 'Scrollable task details'], [record.timelineEl, 'Scrollable task notes']]
+            .map(([node, region]) => bindScrollFade(node, { region }));
         liveCardRecords.set(normalizedGroupId, record);
         liveCardBound.observe(liveCardRecords.size);
         // apply a name that arrived (task_named) before this card existed.
@@ -1314,7 +1306,7 @@ export function createChatInstance({
         resetLiveCardRecord(record);
         // A card the last complete body does not name asks for a read.
         if (!_historyReplayActive && workState.complete && !workState.members.has(normalizedGroupId)) reread();
-        applyCardWorkViews(new Map([[normalizedGroupId, record]]), workState);
+        applyCardWorkViews([record], workState);
         const activity = activeDirectActivities.get(normalizedGroupId);
         if (activity) syncParkedPhase(record, activity.phase, activity);
         const ended = concludedDirectActivities.get(normalizedGroupId);
@@ -1419,8 +1411,9 @@ export function createChatInstance({
         if (promoted) {
             record.root.classList.add('subagent');
             record.root.dataset.subagent = '1';
-            // A frame that outran its lineage minted this shell root-shaped:
-            // the conversion a root earned is re-derived from the child's facts.
+            promoteChildCard(record, workState);
+            if (record.finished) setLiveCardPhase(record, replayTerminalPhase(record), record.phaseEl.textContent, record.phaseEl.className);
+            // This shell received frames before its lineage.
             syncBlockChrome(record);
             refitCollapsedActivity(record);  // a child shows one line
         }
@@ -1492,6 +1485,11 @@ export function createChatInstance({
         else if (record.root.parentNode === messagesDiv) record.root.remove();
     }
 
+    function discloseLiveCard(record, expanded = true) {
+        explicitCardExpansion.set(record.groupId, expanded);
+        setLiveCardExpanded(record, expanded);
+    }
+
     function setLiveCardExpanded(record, expanded) {
         const mutate = () => {
             if (!record?.root) return false;
@@ -1502,6 +1500,7 @@ export function createChatInstance({
             if (expanded && record._timelineDirty) renderLiveCardTimeline(record);
             syncLiveCardToggle(record);
             refitCollapsedActivity(record);
+            if (expanded && !record.episodeDisclosure) revealChildDetails(record);
             return Boolean(record.root.isConnected);
         };
         return record?.root?.isConnected ? withStableViewport(mutate) : mutate();
@@ -1534,34 +1533,40 @@ export function createChatInstance({
     };
     document.addEventListener('visibilitychange', handleVisibility);
 
-    // Beyond the 4000-char preview: fetch/cache on expansion, bounded scroll, render while expanded.
     async function fetchFullLineOutput(item, record) {
+        const basis = item.childCause;
         item._fetchingFull = true;
         item.fullReadError = '';
         let changed = false;
         try {
             const resp = await apiFetch(`/api/tasks/${encodeURIComponent(item.fullRef)}`, { cache: 'no-store' });
             const data = resp && typeof resp.json === 'function' ? await resp.json() : resp;
-            // Keep result and trace: the preview can truncate either independently.
-            const result = String((data && data.result) || '').trim();
-            const trace = String((data && data.trace_summary) || '').trim();
-            const report = result && ['done', 'warn'].includes(taskOutcomeSeverity(data))
-                ? childReportLabel(data.status) : '';  // the label the capped body led with
             let full = '';
-            if (result && trace) full = `${report ? `## ${report}` : '[RESULT]'}\n${result}\n\n[TRACE]\n${trace}`;
-            else full = report ? `## ${report}\n${result}` : result || trace;
             if (item.fullField === 'candidate_remainder') {
                 full = readCandidateRemainder(item, data, resp?.ok !== false);
                 changed = true;
+            } else if (item.fullField === 'schedule_report') {
+                full = resp?.ok !== false && typeof data?.result === 'string' ? data.result : '';
+                if (!full) throw new Error('saved report unavailable');
+            } else if (data?.result || data?.trace_summary) {
+                const view = summarizeSubagentCardFrame({ ...childCauseFacts(data), subagent_event: data.status,
+                    result: data.result, trace_summary: data.trace_summary, error: data.error }, item.fullRef);
+                full = view?.fullOutput || '';
+                if (full) {
+                    item.fetchedCause = { ...basis, ...view.childCause };
+                    item.fetchedCauseBasis = basis;
+                }
             }
             if (full && item.fetchedFull !== full) {
                 item.fetchedFull = full;
                 changed = true;
             }
         } catch {
-            // best-effort: leave the capped preview on failure
             if (item.fullField === 'candidate_remainder') {
                 readCandidateRemainder(item, null, false);
+                changed = true;
+            } else if (item.fullField === 'schedule_report') {
+                item.fullReadError = tr('schedule.report_unavailable', 'The saved report is unavailable.');
                 changed = true;
             }
         } finally {
@@ -1590,8 +1595,8 @@ export function createChatInstance({
         return withStableViewport(() => applyLiveCardStateMutation(summary, groupId, rawTs, options));
     }
 
-    // Authored naming has its own clock: newer execution or a terminal outcome may own the card before its saved
-    // narration arrives here. A root's collapsed line shows narration unless a cause holds.
+    // Authored naming has own clock: newer execution or terminal outcome may own card before saved
+    // narration arrives. Root's collapsed line shows narration unless cause holds.
     function reconcileAuthoredHeadline(record, summary, rawTs) {
         if (!summary.human || !summary.headline) return;
         const previous = record.lastHumanHeadlineSource, shown = previous?.preview || '';
@@ -1629,25 +1634,32 @@ export function createChatInstance({
         }
         // One tool evidence row per block.
         const foldView = summary.toolCall ? applyToolObservation(record, summary.toolCall) : null;
-        if (summary.toolCall?.fact === 'wait_ended' && record.toolFold.calls.get(summary.toolCall.key)?.settlement) {
-            summary = { ...summary, visible: false }; // wait history remains in the fold
+        const call = summary.toolCall;
+        const settlement = call && record.toolFold.calls.get(call.key)?.settlement;
+        if (settlement && (call.fact === 'wait_ended' || call.fact === 'settled'
+                && (call.status !== settlement.status || Boolean(call.hostError) !== settlement.hostError))) {
+            summary = { ...summary, visible: false }; // the accepted settlement owns the diagnostic
         }
         if (closedPhase && !initialContent) {
             if (foldView) {
                 upsertToolFoldRow(record, foldView, ts, rawTs);
-                if (summary.dedupeKey?.endsWith(':check')) placeCheckRow(record, summary, ts, rawTs);
+                // A plain error arriving after the ending stays in the fold, just as on replay.
+                const plainError = call.status === 'error' && summary.phase === 'error' && !call.hostError
+                    && !summary.hostRefusedStep && !['run_command', 'run_script'].includes(call.tool);
+                if (!plainError && call.fact === 'settled' && summary.visible && summary.headline) placeToolDiagnostic(record, summary, ts, rawTs);
                 renderLiveCardTimeline(record);
                 updateLiveCardCount(record);
+                if (!record.isSubagent) reanchorTaskCard(record, rawTs, { suppressDomInsert });
             }
             if (summary.modelExecution) record.modelExecution = summary.modelExecution;
             renderLiveCardMeta(record, summary.costProjection);
             return liveCardProjectionChanged(before, record);
         }
-        if (!closedPhase && (summary.terminal || (!_historyReplayActive && !_syncPass1Active
-                && ['working', 'thinking'].includes(summary.phase)))) {
+        if (!closedPhase && (summary.terminal
+                || frameObservesPhase(record, summary, !_historyReplayActive && !_syncPass1Active))) {
             restoreCardActivity(record);
-            if (!summary.terminal) {
-                if (record.isSubagent && record.parkedPhase === 'unknown' && ws.isConnected?.() !== false) syncParkedPhase(record, summary.phase);
+            if (!summary.terminal && (!record.isSubagent || ws.isConnected?.() !== false)) {
+                if (!record.isSubagent || observeChildPhase(record, summary.phase)) record.livePhaseAt = Date.now();
                 record.lastLiveObservedAt = Date.now();
                 missingManagedTaskIds.delete(nextGroupId);
             }
@@ -1676,6 +1688,7 @@ export function createChatInstance({
         if (summary.model) record.agentModel = summary.model;
         // Keep the observed initiator.
         if (summary.initiator) record.initiator = summary.initiator;
+        noteOrigin(record, null, summary.placeOrigin);
         if (summary.continueRequester) record.continueRequester = summary.continueRequester;
 
         // Only task facts own the outcome chip under a hold; failed tools are diagnostics.
@@ -1720,7 +1733,6 @@ export function createChatInstance({
         }
         if (summary.modelExecution) record.modelExecution = summary.modelExecution;
         if (summary.effort) record.effort = summary.effort;
-        if (Number.isInteger(summary.toolCalls)) record.toolCalls = Math.max(record.toolCalls ?? 0, summary.toolCalls);
         record._lastFrameMeta = Array.isArray(summary.meta) ? summary.meta : [];
         if (rawTs) record.latestSourceTs = rawTs;
         renderLiveCardMeta(record, summary.costProjection);
@@ -1762,6 +1774,7 @@ export function createChatInstance({
         // A lost task_done is healed only by refetching; a block nobody sees
         // owes no refetch.
         if (!wasFinished && blockVisible(record)) scheduleHistorySync();
+        if (!wasFinished && record.isSubagent) hydrateOpenSettledChild(record, hydrateCardReviews);
         syncLiveCardToggle(record);
     }
 
@@ -1786,27 +1799,29 @@ export function createChatInstance({
             || liveCardProjectionChanged(before, record));
     }
 
-    function appendTaskSummaryToLiveCard(msg, { suppressDomInsert = false } = {}) {
+    function appendTaskSummaryToLiveCard(msg, { suppressDomInsert = false, currentOutcome = false, drawn = true } = {}) {
         const taskId = msg?.task_id || '';
-        const rawTs = msg?.ts || new Date().toISOString();
+        const rawTs = msg?.ts || msg?.revision || '';
         if (!taskId) {
             // Unkeyed summaries keep durable/log evidence but close no card.
             return false;
         }
-        let changed = false;
+        const record = getLiveCardRecord(taskId);
+        let changed = Boolean(record.reviewController?.updateMany(reviewGroupsFromTaskDetail(msg, taskId)));
+        if (!acceptLiveFrame(msg, _historyReplayActive, () => record, (card, words) => { changed = noteTaskDetails(card, words) || changed; })) {
+            return renderLiveCardMeta(record, taskCostProjection(msg, rawTs)) || changed;
+        }
         // Restore historical task name.
         if (msg?.suggested_name) changed = applySuggestedName(taskId, msg.suggested_name) || changed;
         const finalizing = msg?.task_phase === 'finalizing' || msg?.outcome_final === false;
-        changed = noteToolMetrics(taskId, msg, rawTs, { suppressDomInsert }) || changed;
-        const record = getLiveCardRecord(taskId);
+        // `currentOutcome` marks the host's composed selected ending: the count it carries is a record.
+        changed = noteToolMetrics(taskId, msg, rawTs, { suppressDomInsert, recorded: currentOutcome }) || changed;
         msg = { quiet_effective: record.quietEffective ?? record.historicalTerminal?.quiet_effective, ...msg };
         const summary = taskTerminalSummary({ ...msg, task_id: taskId });
         changed = noteTaskDetails(record, msg) || changed;
-        syncSettledItems(record, msg, { write: withStableViewport });
-        changed = Boolean(record.reviewController?.updateMany(reviewGroupsFromTaskDetail(msg, taskId))) || changed;
         if (finalizing && !record.finished) record.finalizingHold = true;
         changed = applyLiveCardState(
-            { ...summary, costProjection: taskCostProjection(msg, rawTs) },
+            { ...summary, visible: drawn && summary.visible, currentOutcome, costProjection: taskCostProjection(msg, rawTs) },
             taskId, rawTs, { suppressDomInsert },
         ) || changed;
         if (finalizing) return changed;
@@ -1847,20 +1862,23 @@ export function createChatInstance({
         }
     }
 
-    function learnSubagentLineage(msg) {
-        if (String(msg?.delegation_role || '').toLowerCase() !== 'subagent') return '';
+    function registerChild(msg) {
+        if (String(msg?.delegation_role || '').toLowerCase() !== 'subagent') return null;
         const parentId = taskKey(msg.parent_task_id);
-        const childId = String(msg.subagent_task_id || msg.task_id || '').trim();
-        if (!parentId || !childId || parentId === childId) return '';
-        setSubagentParent(childId, {
-            parentId, role: taskKey(msg.subagent_role), model: msg.model,
-        });
+        const childId = taskKey(msg.subagent_task_id || msg.task_id);
+        if (!parentId || !childId || parentId === childId) return null;
+        const role = taskKey(msg.subagent_role);
+        setSubagentParent(childId, { parentId, role, model: msg.model });
+        return { childId, parentId, role };
+    }
+
+    function learnSubagentLineage(msg) {
+        const child = registerChild(msg);
+        if (!child) return '';
         const event = String(msg.subagent_event || '').toLowerCase();
         const replayTerminal = msg.task_terminal_status && taskDoneIsTerminal(msg);
-        if (replayTerminal || ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event)) {
-            subagentTerminalChildren.add(childId);
-        }
-        return childId;
+        if (replayTerminal || TERMINAL_SUBAGENT_EVENTS.has(event)) subagentTerminalChildren.add(child.childId);
+        return child.childId;
     }
 
     function summarizeSubagentCardFrame(evt, childId, overrides = {}, rawTs = '') {
@@ -1895,7 +1913,7 @@ export function createChatInstance({
         const rawTs = msg?.ts || new Date().toISOString();
         if (!taskId) return false;
         modelWaits.observe(taskId, msg);
-        let changed = msg.tool_evidence || Number.isInteger(msg.rounds) ? noteToolMetrics(taskId, msg, rawTs) : false;
+        let changed = !_historyReplayActive && noteToolMetrics(taskId, msg, rawTs);
         // Only host-attested progress grants Stop authority.
         if (grantCancelAuthority && msg.cancelable === true) {
             changed = markTaskCancelable(String(taskId)) || changed;
@@ -1927,7 +1945,7 @@ export function createChatInstance({
         if (msg.suggested_name) changed = applySuggestedName(taskId, msg.suggested_name) || changed;
         // Outcome survives a lost summary even while post-work keeps controls live.
         if (
-            (msg.task_phase === 'finalizing' || taskDoneIsTerminal(msg))
+            (msg.task_phase === 'finalizing' || (!_historyReplayActive && taskDoneIsTerminal(msg)))
             && (msg.outcome_axes || msg.review_projection || msg.reason_code)
         ) {
             changed = appendTaskSummaryToLiveCard(msg) || changed;
@@ -1936,14 +1954,10 @@ export function createChatInstance({
     }
 
     function updateSubagentCardFromEvent(evt, tsValue) {
-        // undefined = not a subagent frame: callers fall through.
-        if (!evt || String(evt.delegation_role || '').toLowerCase() !== 'subagent') return undefined;
-        const parentId = taskKey(evt.parent_task_id);
-        const childId = String(evt.subagent_task_id || evt.task_id || '').trim();
-        if (!parentId || !childId || parentId === childId) return undefined;
+        const child = registerChild(evt);
+        if (!child) return undefined;  // not a subagent frame: callers fall through
+        const { childId, parentId, role } = child;
         const event = String(evt.subagent_event || '').toLowerCase();
-        const role = taskKey(evt.subagent_role);
-        setSubagentParent(childId, { parentId, role, model: evt.model });
         // Worker narration also carries subagent_event="progress": activity, not a lifecycle row. Its key keeps a later
         // terminal frame from overwriting the only full narration disclosure.
         if (!SUBAGENT_LIFECYCLE_EVENTS.has(event)) {
@@ -1976,8 +1990,7 @@ export function createChatInstance({
             content,
             text: content,
             subagent_event: 'running',
-            // A replayed progress row may follow a terminal record (the history pre-pass knows the child's final state):
-            // no contradictory `status=running` metadata then.
+            // Replay can show progress after terminal; omit `status=running` when history knows the child's final state.
             status: preserveTerminal ? '' : (msg?.status || ''),
         }, rawTs);
         if (!summary) return false;
@@ -2020,33 +2033,15 @@ export function createChatInstance({
     }
 
     // A child's card from its task_done or a late review's current outcome (log frames without subagent metadata).
-    function routeSubagentTerminalToCard(childId, evt) {
+    function routeSubagentTerminalToCard(childId, evt, stored = false, phase = taskTerminalPhase(evt)) {
         const info = subagentChildParents.get(childId);
         if (!info) return false;
-        const status = String(evt.status || '').toLowerCase();
-        const severity = taskOutcomeSeverity(evt);
-        const interrupted = status === 'interrupted';
-        const failed = severity === 'error' || status === 'failed';
-        const cancelled = status === 'cancelled' || status === 'cancel_requested';
-        const rejected = status === 'rejected_duplicate';
-        const event = interrupted ? 'interrupted'
-            : failed ? 'failed'
-                : cancelled ? 'cancelled'
-                    : rejected ? 'rejected'
-                        : (severity === 'warn' ? 'completed_warn' : 'completed');
-        return Boolean(updateSubagentCardFromEvent({
-            delegation_role: 'subagent',
-            parent_task_id: info.parentId,
-            subagent_task_id: childId,
-            subagent_role: info.role,
-            subagent_event: event,
-            review_projection: evt.review_projection,
-            model_execution: evt.model_execution,
-            result: evt.result || '',
-            error: evt.error || '',
-            reason_code: evt.reason_code || '',
-            ...cardMetaKeys(evt),
-        }, evt.ts || evt.timestamp || new Date().toISOString()));
+        const record = liveCardRecords.get(childId);
+        if (stored) noteHandoverAttempt(record, evt, withStableViewport, true);
+        const alreadyFinished = record?.finished;
+        const updated = Boolean(updateSubagentCardFromEvent(terminalChildFrame(childId, info, evt, phase), evt.ts || evt.timestamp));
+        if (!stored && alreadyFinished && taskDoneIsTerminal(evt)) hydrateOpenSettledChild(record, hydrateCardReviews);
+        return updated;
     }
 
     function updateLiveCardFromLogEvent(evt) {
@@ -2058,35 +2053,38 @@ export function createChatInstance({
         const reference = admitCardMetadata(evt);
         if (reference !== undefined) return reference;
         // owner_hurry.py marks an existing card, never progress.
-        if (eventType === 'owner_hurry') {
-            return markOwnerHurry(ownerHurryProjection(evt).applied ? liveCardRecords.get(getLogTaskGroupId(evt)) : null);
-        }
+        if (eventType === 'owner_hurry') return markOwnerHurry(ownerHurryProjection(evt).applied ? liveCardRecords.get(getLogTaskGroupId(evt)) : null);
         if (!isGroupedTaskEvent(evt)) return false;
         const taskId = getLogTaskGroupId(evt) || '', late = evt.current_outcome;
-        if (!taskId || (late && !lateOutcomeIsCurrent(liveCardRecords.get(taskId), evt))) return false;
+        if (!taskId) return false;
         const rawTs = late?.revision || evt.ts || evt.timestamp || new Date().toISOString();
         // Skill lifecycle belongs to its explicit owner.
         const review = attachReviewFromRow(evt, rawTs);
         if (review !== undefined) return review;
+        let changed = false;
+        const wasFinished = liveCardRecords.get(taskId)?.finished;
+        if ((late && !lateOutcomeIsCurrent(liveCardRecords.get(taskId), evt)) || ((late || ['task_started', 'task_done'].includes(eventType))
+                && !acceptLiveFrame(evt, _historyReplayActive, () => getLiveCardRecord(taskId), (card, words) => { changed = noteTaskDetails(card, words); }))) {
+            const journal = evt.tool_evidence && noteToolMetrics(taskId, { tool_evidence: evt.tool_evidence }, '');
+            return renderLiveCardMeta(liveCardRecords.get(taskId), taskCostProjection(evt, rawTs)) || Boolean(journal) || changed;
+        }
+        if (wasFinished && !liveCardRecords.get(taskId)?.finished) concludedDirectActivities.delete(taskId);
+        const metrics = late || evt;
+        changed = ((metrics.tool_evidence || Number.isInteger(metrics.rounds)
+            || ['task_metrics_event', 'task_eval', 'task_done'].includes(eventType)) && noteToolMetrics(taskId, metrics, rawTs)) || changed;
         const childInfo = subagentChildParents.get(taskId);
-        if (childInfo && (late || eventType === 'task_done')) return routeSubagentTerminalToCard(taskId, { ...evt, ...late, ts: rawTs });
+        if (childInfo && (late || eventType === 'task_done')) return routeSubagentTerminalToCard(taskId, { ...evt, ...late, ts: rawTs }) || changed;
         const summary = summarizeChatLiveEvent(evt);
         // Finished children still receive settled costs.
         if (childInfo && subagentTerminalChildren.has(taskId) && !summary?.toolCall && eventType !== 'task_cost_finalized') return false;
-        // Root/child fold: metrics, terminal and replay.
-        let changed = evt.tool_evidence || Number.isInteger(evt.rounds) || ['task_metrics_event', 'task_eval', 'task_done'].includes(eventType)
-            ? noteToolMetrics(taskId, evt, rawTs) : false;
-        if (!childInfo) changed = attachTaskDetailReviews(taskId, evt) || changed;
+        if (!childInfo) changed = attachTaskDetailReviews(taskId, late ? { ...late, task_id: taskId } : evt) || changed;
         if (!summary) return changed;
         if (childInfo) {
             getSubagentCardRecord(taskId, childInfo.parentId, childInfo.role);
             changed = attachTaskDetailReviews(taskId, evt) || changed;
         }
-        const presented = withTaskCostMeta(summary, evt, {
-            replace: eventType === 'task_done' || eventType === 'task_cost_finalized',
-            rawTs,
-        });
-        const queued = queueTaskLiveUpdate(presented, taskId, rawTs);
+        const replace = eventType === 'task_done' || eventType === 'task_cost_finalized';
+        const queued = queueTaskLiveUpdate(withTaskCostMeta(summary, evt, { replace, rawTs }), taskId, rawTs);
         if (childInfo) return Boolean(changed || queued);
         const subagentChanged = updateSubagentCardFromEvent(evt, rawTs);
         // Host-attested Stop facts also travel on tool-only turns.
@@ -2099,7 +2097,7 @@ export function createChatInstance({
     }
 
     function addMessage(text, role, markdown = false, timestamp = null, isProgress = false, opts = {}) {
-        // Normalize the persisted identity once; the same fields label and deduplicate a row.
+        // The same stored fields label and identify a row.
         const meta = Object.fromEntries([
             'clientMessageId', 'senderLabel', 'senderSessionId', 'source', 'initiator',
             'systemType', 'taskId', 'projectId', 'projectName', 'taskName', 'handoffId',
@@ -2107,9 +2105,10 @@ export function createChatInstance({
         ].map(key => [key, opts[key] || '']));
         const { clientMessageId } = meta;
         const ts = timestamp || new Date().toISOString();
-        const legacyKey = buildMessageKey(role, text, ts, { ...meta, isProgress });
+        meta.ownerChatId = ownerRowRoom(opts.reply, chatId);
+        const legacyKey = buildMessageKey(role, text, ts, { ...meta, isProgress, chatId });
         const bubbles = () => [...messagesDiv.querySelectorAll('.chat-bubble')];
-        const messageKey = opts.historyId ? `history:${opts.historyId}` : legacyKey;
+        const messageKey = messagePlacementKey(opts, legacyKey);
         const deliveryKey = opts.deliveryId ? `delivery:${opts.deliveryId}` : '';
         // A delivery is one bubble while that bubble is mounted; a released page mounts it again.
         const delivered = deliveryKey && seenMessageKeys.has(deliveryKey)
@@ -2123,8 +2122,7 @@ export function createChatInstance({
         const prior = opts.historyId
             ? (replayKeys && !replayKeys.history.has(opts.historyId) ? null
                 : historyNodes(opts.historyId).find(node => node.classList.contains('chat-bubble')))
-            : (replayKeys && !replayKeys.legacy.has(legacyKey) ? null
-                : Array.from(messagesDiv.querySelectorAll('.chat-bubble')).find(node => node.dataset.messageKey === legacyKey));
+            : livePriorBubble(bubbles, opts, replayKeys, legacyKey, chatId);
         if (prior && (opts.historyId || _historyReplayActive)) {
             rememberMessageKey(messageKey);
             const originChanged = syncSavedProjectContext(prior, opts.originProjected, opts.originId);
@@ -2136,16 +2134,16 @@ export function createChatInstance({
         if (opts.historyId) {
             const mounted = !replayKeys || (clientMessageId && replayKeys.client.has(clientMessageId))
                 || (opts.originId && replayKeys.origin.has(opts.originId)) || replayKeys.legacy.has(legacyKey);
-            const prior = mounted && bubbles().find(node =>
-                (clientMessageId && node.dataset.clientMessageId === clientMessageId)
-                || (opts.originId && node.dataset.originId === opts.originId)
-                || (!node.dataset.historyId && node.dataset.messageKey === legacyKey));
+            const prior = mounted && bubbles().find(node => matchesHistoryBubble(node, opts, legacyKey, chatId));
             if (prior) {
                 stampHistoryNode(prior, opts.historyId, opts.historyPosition);
                 noteBubbleKeys(prior);
                 rememberMessageKey(messageKey);
                 chatDecision.renderRoutingDecision(prior, opts.chatAnnotation);
-                return syncSavedProjectContext(prior, opts.originProjected);
+                // Exact origin gives this room's retained copy its Reply.
+                const adopted = adoptsRetainedCopy(prior, opts) && replies.adopt(opts.reply, prior);
+                const restored = syncSavedProjectContext(prior, opts.originProjected, opts.originId);
+                return restored || adopted;
             }
         }
 
@@ -2160,16 +2158,12 @@ export function createChatInstance({
         return bubble;
     }
 
-    function updateMessageAnnotation(clientMessageId, annotation) {
-        const messageId = String(clientMessageId || '');
-        if (!messageId) return false;
-        // The journal copy carries the ack, so a re-render restores it too.
-        const journalEntry = localEchoJournal.get(messageId);
-        if (journalEntry) journalEntry.annotation = annotation || null;
-        const bubble = Array.from(messagesDiv.querySelectorAll('.chat-bubble.user[data-client-message-id]'))
-            .find((candidate) => candidate.dataset.clientMessageId === messageId);
-        const changed = chatDecision.renderRoutingDecision(bubble, annotation);
-        if (bubble && isMain) reconcilePortalNotes(messagesDiv, bubble);
+    const localOwnerRow = row => !row.origin_projected && ownerRowRoom(row, chatId) === chatId;
+
+    function confirmOwnerRow(row) {
+        const bubble = ownerMessageBubble(messagesDiv, row, chatId);
+        const changed = markIngressSaved(messagesDiv, row, bubble) | markSwarmLabel(messagesDiv, row, bubble) | replies.adopt(row);
+        if (localOwnerRow(row)) unconfirmed.settle(row);
         return changed;
     }
 
@@ -2201,28 +2195,14 @@ export function createChatInstance({
     const MAIN_HYDRATION_MAX_DEFER_MS = 3500;
     function waitForHydrationWindow() {
         if (!isMain) return Promise.resolve();
-        if (hydrationGatePromise) return hydrationGatePromise;
-        hydrationGatePromise = new Promise((resolve) => {
+        return hydrationGatePromise ||= new Promise((resolve) => {
             const deadline = Date.now() + MAIN_HYDRATION_MAX_DEFER_MS;
-            const scheduleIdle = (callback) => (typeof requestIdleCallback === 'function'
-                ? requestIdleCallback(callback, { timeout: 1000 })
-                : setTimeout(callback, 50));
-            const attempt = () => {
-                if (destroyed) {
-                    resolve();
-                    return;
-                }
-                if (Date.now() < deadline
-                    && typeof isProjectOpening === 'function'
-                    && isProjectOpening()) {
-                    setTimeout(attempt, 200);
-                    return;
-                }
-                resolve();
-            };
-            scheduleIdle(attempt);
+            // Each look waits while a Project is still opening, until the bound; a destroyed room waits for nothing.
+            const attempt = () => (!destroyed && Date.now() < deadline && isProjectOpening?.()
+                ? setTimeout(attempt, 200) : resolve());
+            if (typeof requestIdleCallback === 'function') requestIdleCallback(attempt, { timeout: 1000 });
+            else setTimeout(attempt, 50);
         });
-        return hydrationGatePromise;
     }
 
     const historicalTerminals = new Map();
@@ -2279,7 +2259,7 @@ export function createChatInstance({
                 });
                 // Retire only local echoes this source snapshot confirms.
                 const localEcho = partitionLocalEchoJournal(localEchoJournal, new Set(messages
-                    .filter((m) => m.role === 'user' && m.client_message_id)
+                    .filter((m) => m.role === 'user' && m.client_message_id && localOwnerRow(m))
                     .map((m) => String(m.client_message_id))));
                 for (const entry of localEcho.confirmed) {
                     localEchoJournal.delete(entry.clientMessageId);
@@ -2291,13 +2271,7 @@ export function createChatInstance({
                             && msg.system_type !== 'project_question_pointer') evidencedTaskIds.add(msg.task_id);
                 }
 
-                const historicalTerminalProjections = new Set();
-                for (const msg of messages) if (msg.historical_terminal && msg.task_id) {
-                    historicalTerminals.set(msg.task_id, { ...msg.historical_terminal, ...(msg.current_outcome && { phase: msg.current_outcome.outcome_phase }), wake_summary: msg.wake_summary, suggested_name: msg.suggested_name, schedule_name: msg.schedule_name });
-                    if (msg.summary_kind === 'terminal_root_projection' || msg.outcome_final === true) {
-                        historicalTerminalProjections.add(msg.task_id);
-                    }
-                }
+                const endings = replayedTerminalRecords(messages, liveCardRecords, historicalTerminals);
                 // Rows pass 1 attached to a card; pass 2 mounts the card with them.
                 const cardRowsAttached = new Set();
                 // First pass builds card state without DOM insertion.
@@ -2305,8 +2279,12 @@ export function createChatInstance({
                 try { for (const msg of messages) {
                     _historyRow = msg;
                     if (['quiz_answer', 'quiz_closed'].includes(msg.system_type)) chatDecision.applyQuizStateFrame(messagesDiv, { ...msg.quiz, task_id: msg.task_id });
-                    if (msg.system_type === 'task_evidence') { admitCardMetadata(msg); continue; }
-                    if (isReplayEvidenceRow(msg) || msg.system_type === 'project_question_pointer') continue;
+                    if (msg.system_type !== 'task_evidence' && (isReplayEvidenceRow(msg) || msg.system_type === 'project_question_pointer')) continue;
+                    if (msg.role !== 'user' && (msg.is_progress
+                            || ['task_summary', 'task_evidence'].includes(msg.system_type)
+                            || ['task_metrics_event', 'task_eval', 'task_done'].includes(msg.type || msg.event))) {
+                        noteToolMetrics(msg.task_id, msg, msg.ts, { attempt: endings.get(msg.task_id)?.stamp.attempt });
+                    }
                     if (admitCardMetadata(msg) !== undefined) continue;
                     if (attachReviewFromRow(msg, msg.ts || '') !== undefined) continue;
                     if (attachCardRow(msg, msg.ts || '', { suppressDomInsert: true }) !== undefined) {
@@ -2331,8 +2309,10 @@ export function createChatInstance({
                         if (historyCard && historicalTerminals.has(taskId)) historyCard.historicalTerminal = historicalTerminals.get(taskId);
                         continue;
                     }
-                    if (msg.historical_terminal) getLiveCardRecord(taskId).quietEffective = msg.historical_terminal.quiet_effective;
-                    if (msg.system_type === 'task_summary') appendTaskSummaryToLiveCard(msg, { suppressDomInsert: true });
+                    if (msg.system_type === 'task_summary') {
+                        if (endings.has(taskId) || msg.task_phase === 'unfinished') getLiveCardRecord(taskId);
+                        else appendTaskSummaryToLiveCard(msg, { suppressDomInsert: true });
+                    }
                 } } finally { _syncPass1Active = false; _historyRow = null; }
 
                 // Pass 2 inserts cards at the first visible task message, then finishes them.
@@ -2375,7 +2355,7 @@ export function createChatInstance({
                         continue;
                     }
                     // History clears Sending; census re-links live turns.
-                    if (fromReconnect && msg.role === 'user' && msg.client_message_id) {
+                    if (fromReconnect && msg.role === 'user' && localOwnerRow(msg) && msg.client_message_id) {
                         pendingSubmissions.delete(String(msg.client_message_id));
                     }
                     if (msg.is_progress) {
@@ -2395,18 +2375,19 @@ export function createChatInstance({
                         insertCardIfNeeded(taskId); routeSubagentProgressToCard(taskId, msg, true); continue;
                     }
                     if (taskId && replayConcludesTask(msg)) {
-                        insertCardIfNeeded(taskId);
                         const child = subagentChildParents.has(taskId);
+                        insertCardIfNeeded(taskId);
                         if (child) routeSubagentFinalMessageToCard(taskId, msg);
                         // A replayed early final must not finalize a root's card.
                         if (!child && msg.task_phase === 'finalizing') markLiveCardFinalizing(taskId, msg);
-                        else if (child || !msg.historical_terminal || positiveTaskTerminalFact(msg)) {
+                        else if (!endings.has(taskId) && (child || !msg.historical_terminal || positiveTaskTerminalFact(msg))) {
                             finishLiveCard(taskId, msg.task_terminal_status ? taskTerminalPhase(msg) : replayTerminalPhase(liveCardRecords.get(taskId)));
                         }
                         if (child) continue;
                     }
                     // A durable routing receipt retires Sending like its live frame.
-                    if (msg.chat_annotation && msg.client_message_id) {
+                    if (msg.chat_annotation && localOwnerRow(msg) && msg.client_message_id &&
+                            (!msg.chat_annotation.source_row_address || msg.sender_session_id === chatSessionId)) {
                         pendingSubmissions.delete(String(msg.client_message_id));
                     }
                     addStoredRow(msg, taskId, {
@@ -2420,35 +2401,27 @@ export function createChatInstance({
                             ? { skill: msg.skill, jobId: msg.job_id, ...(msg.record_id ? { recordId: msg.record_id } : {}) }
                             : null,
                     });
-                    if (msg.role === 'user') { markIngressSaved(messagesDiv, msg); markSwarmLabel(messagesDiv, msg); replies.adopt(msg); unconfirmed.settle(msg); }
+                    if (msg.role === 'user') confirmOwnerRow(msg);
                 }
                 _historyRow = null;
-                // Durable terminal facts settle the named card, including progress-only replays.
-                const settleReplayedTerminal = (tid, terminalRecord, phase, summary = false) => {
-                    if (!taskDoneIsTerminal(terminalRecord)) return;
-                    if (subagentChildParents.has(tid)) return routeSubagentTerminalToCard(tid, terminalRecord);
+                for (const [tid, ending] of endings) {
+                    if (!ending) continue;
                     const record = liveCardRecords.get(tid);
-                    if (!record) return;
-                    if (terminalRecord.suggested_name) applySuggestedName(tid, terminalRecord.suggested_name);  // evidence names a card whose own rows lie elsewhere
-                    record.quietEffective = terminalRecord.quiet_effective ?? record.quietEffective;
-                    noteTaskDetails(record, terminalRecord);
+                    if (!record) continue;
+                    const { detail, phase, rich, stamp, drawn } = ending;
+                    _historyRow = detail;
+                    applyCardEnding(record, stamp);
+                    if (subagentChildParents.has(tid)) {
+                        routeSubagentTerminalToCard(tid, detail, false, phase);
+                        continue;
+                    }
+                    record.quietEffective = detail.quiet_effective ?? record.quietEffective;
                     insertCardIfNeeded(tid);
-                    if (summary) appendTaskSummaryToLiveCard(terminalRecord); else finishLiveCard(tid, phase);
-                };
-                const terminalTaskRecords = new Map(messages.filter((msg) => msg.task_id && msg.task_terminal_status)
-                    .map((msg) => [msg.task_id, { ...msg, status: String(msg.task_terminal_status) }]));
-                for (const [tid, terminalRecord] of terminalTaskRecords) {
-                    _historyRow = terminalRecord;
-                    settleReplayedTerminal(tid, terminalRecord, taskTerminalPhase(terminalRecord),
-                        Boolean(terminalRecord.outcome_axes || terminalRecord.review_projection || terminalRecord.reason_code));
+                    if (rich) appendTaskSummaryToLiveCard(detail, { currentOutcome: true, drawn });
+                    else { if (detail.suggested_name) applySuggestedName(tid, detail.suggested_name);
+                        noteTaskDetails(record, detail); finishLiveCard(tid, phase); }
                 }
                 _historyRow = null;
-
-                // Durable phase outranks narrative rows that may still say finalizing.
-                for (const [tid, historicalTerminal] of historicalTerminals) {
-                    if (!historicalTerminalProjections.has(tid)) continue;
-                    settleReplayedTerminal(tid, { ...historicalTerminal, task_id: tid }, historicalTerminal.phase);
-                }
 
                 // Cards without terminal or census evidence remain unconfirmed.
                 for (const [id, record] of liveCardRecords) {
@@ -2493,21 +2466,7 @@ export function createChatInstance({
 
     async function syncHistory({ fromReconnect = false } = {}) {
         if (destroyed || leaving) return false;
-        if (historySyncPromise) {
-            // A reconnect joining an older read still owes a rebuild.
-            if (fromReconnect) {
-                pendingReconnectSync = true;
-                return historySyncPromise.then(() => {
-                    // One waiter consumes the queued rebuild; peers await it.
-                    if (pendingReconnectSync) {
-                        pendingReconnectSync = false;
-                        return syncHistory({ fromReconnect: true });
-                    }
-                    return historySyncPromise || lastHistorySyncSucceeded;
-                });
-            }
-            return historySyncPromise;
-        }
+        if (historySyncPromise) return historySyncPromise;
         historySyncPromise = (async () => {
             const startedVisit = visit;
             const abort = historyReadAbort = new AbortController();
@@ -2515,7 +2474,7 @@ export function createChatInstance({
             const cardsAtStart = new Set(liveCardRecords.keys());
             // Replay can refill the feed without moving the reader's intent.
             const followingAtStart = reading.stick, generationAtStart = reading.generation;
-            const landedAtStart = historyPager.arrivalsLanded();
+            const landedAtStart = historyPager.arrivalsLanded(), recovering = !lastHistorySyncSucceeded || catchUp.owed;
             try {
                 // No welcome until this read lands.
                 emptyWelcome?.historyPending();
@@ -2530,14 +2489,14 @@ export function createChatInstance({
                 }
                 if (data.recentVersion < recentApplied) return lastHistorySyncSucceeded;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
-                const oldRecentIds = recentHistoryIds;
+                const oldRecentIds = retainedRecentIds();
                 const admitted = acceptRecentWindow(data, messages);
                 const pagerBeforeRecent = historyPager.getState();
-                // A reader in older history keeps the chain `Load more history` goes on from, the rows the newest read
-                // let go staying below; a shifted window re-anchors only a reader following the newest message.
-                const reader = readingHistory();
-                const rechainRecent = admitted && !reader && !data.reason_code && pagerBeforeRecent.initialized
-                    && !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !recentHistoryIds.has(id));
+                // Older reading keeps its chain; a follower's healthy read restores the present, also after ↓ failed.
+                const reader = readingHistory(), returning = reading.returning;
+                const rechainRecent = admitted && !catchUp.owed && (!reader || returning) && pagerBeforeRecent.initialized
+                    && (returning || pagerBeforeRecent.away && (fromReconnect || recovering || pagerBeforeRecent.retryReturn)
+                        || !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !recentHistoryIds.has(id)));
                 const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect });
                 if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect });
                 withStableViewport(() => releaseHistoryIds(!admitted || rechainRecent || reader
@@ -2592,8 +2551,6 @@ export function createChatInstance({
             } finally {
                 if (historyReadAbort === abort) historyReadAbort = null;
                 historySyncPromise = null;
-                // A reconnect caller waiting on the active promise owns replay of pendingReconnectSync above; its promise
-                // resolves only after the authoritative rebuild.
             }
         })();
         return historySyncPromise;
@@ -2604,18 +2561,18 @@ export function createChatInstance({
     const newestFacts = { delivered: id => retainedHistoryIds().has(id), nodes: id => historyNodes(id),
         viewport: messagesDiv, header: pageHeader, composer: inputArea };
     // A message this room shares with another is read once wherever it was shown whole (read_ahead.js).
-    const sharedRead = createSharedReadTracker({ chatId, feed: messagesDiv, band: () => readBand(messagesDiv, pageHeader, inputArea),
+    const sharedRead = createSharedReadTracker({ chatId, feed: messagesDiv, band,
         shown: () => !destroyed && !leaving && !page.hidden && isInstanceVisible() });
     const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample,
         read: async (fresh, whole) => {
-            await (!fresh && initialHydrationPromise || historyPager.read({ whole }));
-            return lastHistorySyncSucceeded;
+            await (!fresh && (catchUp.reading || !catchUp.owed && initialHydrationPromise) || historyPager.read({ whole }));
+            return lastHistorySyncSucceeded && !catchUp.owed;
         },
         // A destroyed page reports hidden===false, hence the lifecycle flag.
         isShown: () => !destroyed && !leaving && !page.hidden,
         // A place still being restored is not where the reader is.
-        isReadingLatest: latest => !destroyed && !reading.pending && !replies.revealing && isInstanceVisible() && isAtNewestMessage(latest, {
-            ...newestFacts, atBottom: () => isNearBottom() && !historyPager.getState().canNewer,
+        isReadingLatest: latest => !destroyed && !catchUp.owed && !reading.pending && !replies.revealing && isInstanceVisible() && isAtNewestMessage(latest, {
+            ...newestFacts, atBottom: () => reading.nearBottom() && !historyPager.getState().canNewer,
         }),
         onReadingLatest, arriving: () => reading.arriving, delivered: newestFacts.delivered,
         older: async current => {
@@ -2630,18 +2587,18 @@ export function createChatInstance({
         land: (latest, token) => reading.land(() => newestMessageOffset(latest, newestFacts), token),
     });
 
-    (async () => {
-        // The owners below exist first: no read stands between an opening and the saved text.
+    const opening = (async () => {
+        // The owners below exist first: no read stands between opening and saved text.
         await null;
-        if (!destroyed && preview.show()) { updateMessagesPadding(); reading.followAfterLayout(); }
+        if (!destroyed && preview.show()) { updateMessagesPadding(); reading.followAfterLayout(true); }
         await loadUiPreferences();
         // Main waits for hydration; Projects pass through. History reads share one flight.
         await waitForHydrationWindow();
         if (destroyed) return;
         await awaitInitialHydration();
         // A message this tab kept across a reload that the first read did not show saved is in doubt.
-        if (!destroyed) unconfirmed.reconcile(({ frame, views, ts }) => addMessage(frame.content, 'user', false, ts || null,
-            false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views }));
+        if (!destroyed) unconfirmed.reconcile(({ frame, reply, views, ts }) => addMessage(frame.content, 'user', false, ts || null,
+            false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views, reply }));
     })();
 
     // The composer (composer.js): its field, the room's capsules, attachments and the send path.
@@ -2650,7 +2607,7 @@ export function createChatInstance({
         onSent: showSent, readingBack: () => !reading.stick && reading.ownMove });
 
     // A send the composer made, shown in the feed: the bubble, its doubt until the host's saved echo, `Sending...`.
-    function showSent({ text, frame, result, views }) {
+    function showSent({ text, frame, reply, result, views }) {
         const sentTs = new Date().toISOString();
         reading.cancel(); // an accepted Send supersedes any saved place
         const row = addMessage(text, 'user', false, sentTs, false, {
@@ -2658,14 +2615,13 @@ export function createChatInstance({
             source: 'web',
             senderSessionId: chatSessionId,
             clientMessageId: result?.clientMessageId || '',
-            forceStick: true, reply: replies.echoRow(),
+            forceStick: true, reply,
             attachments: views,
         });
-        replies.clear();
         // Only the host's saved echo proves acceptance: every message's frame stays (a bare slash command is a
         // command); a queued one is the socket queue's until it is written.
-        if (views.length || !text.startsWith('/')) unconfirmed.track({ ...frame, client_message_id: result.clientMessageId },
-            { views, ts: sentTs, queued: result?.status === 'queued' });
+        if (views.length || frame.reply_excerpt || !text.startsWith('/')) unconfirmed.track({ ...frame, client_message_id: result.clientMessageId },
+            { views, reply, ts: sentTs, queued: result?.status === 'queued' });
         // Chat sends carry their minted client_message_id.
         const pendingId = result?.clientMessageId || '';
         if (pendingId) {
@@ -2693,102 +2649,113 @@ export function createChatInstance({
         requestAnimationFrame(() => { loadReflowQueued = false; if (!destroyed) reading.reflow(); });
     }, true);
 
-    // Navigation plus one coalesced, non-live-region remote-activity bit.
+    // ↓: navigation, coalesced remote activity (not a live region), and busy/Retry for the present read (style.css).
     function updateScrollButton() {
         if (!scrollBottomBtn) return;
-        if (_hasNewActivity && isNearBottom(ACTUAL_BOTTOM_TOLERANCE_PX)) {
-            _hasNewActivity = false;
-        }
-        const label = _hasNewActivity
-            ? 'New activity — scroll to latest message'
+        _hasNewActivity &&= !reading.nearBottom(ACTUAL_BOTTOM_TOLERANCE_PX);
+        const busy = reading.returning;
+        const retry = historyWindow?.failed || catchUp.retry && !historyWindow?.waiting;
+        const label = busy ? 'Loading latest messages…' : retry ? 'Retry loading latest messages'
+            : _hasNewActivity ? 'New activity — scroll to latest message'
             : 'Scroll to latest message';
         scrollBottomBtn.setAttribute('aria-label', label);
         scrollBottomBtn.title = label;
+        scrollBottomBtn.setAttribute('aria-busy', String(busy));
         if (scrollActivityDot) scrollActivityDot.hidden = !_hasNewActivity;
-        scrollBottomBtn.classList.toggle('visible', isInstanceVisible() && (!isNearBottom() || (!reading.stick && historyWindow?.gaps)));
+        scrollBottomBtn.classList.toggle('visible', isInstanceVisible() && (busy || retry || !reading.nearBottom() || (!reading.stick && historyWindow?.gaps)));
     }
-    // The one way to the present: ↓, and a return to a room that followed it, unread at what arrived last.
+    // Freshness gates reads, not retained movement.
+    function presentHeld() {
+        return historyLoaded && !catchUp.owed && !historyWindow?.failed && !historyPager.getState().away && !historyWindow?.horizonGap;
+    }
+    // ↓ moves now. One claim owns the read and landing; new reading cancels it, repeated physical presses share it.
     async function showLatest({ arrive = false } = {}) {
-        const current = reading.claim(arrive === true);
-        if (historySyncPromise) await historySyncPromise;
-        await historyPager.whenIdle();
-        if (destroyed || !current()) return;
-        if (historyPager.getState().away || historyWindow?.horizonGap) {
-            if ((await historyPager.latest()).status !== 'applied') return;
-        }
-        if (destroyed || !current()) return;
-        reading.stick = true;
-        for (const record of liveCardRecords.values()) record.childDetailRead = undefined;
-        reading.followAfterLayout();
-        updateScrollButton();
-        historyControls.showNotice();
+        if (reading.returning && reading.arriving === null && !arrive) { reading.followAfterLayout(); return; }
+        const at = visit, claim = reading.claim(arrive === true);
+        const current = () => !destroyed && at === visit && claim();
+        historyPager.toPresent();
+        const needed = !presentHeld();
+        const follow = () => {
+            reading.stick = true;
+            for (const record of liveCardRecords.values()) record.childDetailRead = undefined;
+            reading.followAfterLayout();
+            historyControls.showNotice();
+        };
+        reading.wait(current, needed);
+        if (!arrive || !needed) follow();
+        if (!needed) return;
+        try {
+            const shared = catchUp.reading || historySyncPromise || !historyLoaded && opening.then(awaitInitialHydration);
+            await shared;
+            await catchUp.settled(current);
+            if (!current() || shared && !lastHistorySyncSucceeded) return;
+            if (!presentHeld() && (await historyPager.latest(current)).status !== 'applied') return;
+            await catchUp.settled(current);  // a reconnect during that read still owes feedback
+            if (current() && !catchUp.owed && arrive) follow();
+        } finally { reading.wait(current, false); }
     }
     scrollBottomBtn?.addEventListener('click', showLatest);
-    // A return: from the newest message to the present; from an older passage back there, ↓ marked, the rest unread
-    // (owner 2026-11-03). Leaving the screen keeps the place and stops a pending move.
-    const resume = (arrive = false) => ((reading.target || reading).stick === false
-        ? (_hasNewActivity ||= arrive, reading.position(), updateScrollButton()) : showLatest({ arrive }));
-    const keepPlace = () => { if (isInstanceVisible()) { reading.cancel(); reading.request(); } };
-
-    // The composer's height once its reply strip moved (chat_reply.js `data-motion`): opening, the full strip
-    // (`--reply-h`) plus the wrap's gap; leaving, none. One reserve move per motion, never per frame: each write
-    // restyles the whole room (~90 ms on a 34k-element WebKit Main; four in a row stuttered the close).
-    function composerHeightAtRest() {
-        const strips = inputArea.querySelectorAll('.chat-quote--composer[data-motion]');
-        if (!strips.length) return inputArea.offsetHeight || 0;
-        // Mid-motion heights are fractional: whole pixels would differ by one from frame to frame and write again.
-        let height = inputArea.getBoundingClientRect().height;
-        for (const strip of strips) {
-            // The room a strip takes is its box and its margins (style.css): opening it ends at --reply-room, shut at none.
-            const { marginTop, marginBottom } = getComputedStyle(strip);
-            const now = strip.getBoundingClientRect().height + (parseFloat(marginTop) || 0) + (parseFloat(marginBottom) || 0);
-            const end = strip.dataset.motion === 'open' ? (parseFloat(strip.style.getPropertyValue('--reply-room')) || 0) : 0;
-            height += end - now;
+    // Return keeps older reading, ↓ marked, newer messages unread (owner 2026-11-03). Follower
+    // restores place while catching up. Leaving keeps it and cancels the pending move.
+    function resume(arrive = false) {
+        if ((reading.target || reading).stick === false) {
+            _hasNewActivity ||= arrive; reading.position(); updateScrollButton(); return;
         }
-        return height;
+        const returning = showLatest({ arrive });
+        reading.request(); // Restore following even on failure, without fresh read credit.
+        return returning;
     }
+    const keepPlace = () => { if (isInstanceVisible()) { reading.cancel(); reading.request(); } };
 
     function updateMessagesPadding(preserveStickiness = true) {
         // A room not displayed (Main behind a page) measures its bars as 0: it keeps the reserves it was laid out
         // with, or it would come back with its newest message under the composer.
         if (leaving || !page.getClientRects().length) return false;
-        // The room's measured layout variables, each written only when it changes (true then).
-        const layout = { setProperty: (name, value) => page.style.getPropertyValue(name) !== value
-            && (page.style.setProperty(name, value), true) };
+        // Stage only changed CSS properties; then apply the measurements in one timeline transaction.
+        const changes = [];
+        const setProperty = (name, value) => page.style.getPropertyValue(name) !== value && (changes.push([name, value]), true);
+        const shortMoved = syncShortRoom(page);
         let chromeMoved = false;
-        const mutate = () => {
-            let changed = false;
-            if (pageHeader && messagesDiv) {
-                // The bar's own height places the note under it; the transcript clears both.
-                const bar = Math.ceil(pageHeader.offsetHeight || 0);
-                const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
-                changed = layout.setProperty('--chat-header-bar', `${bar}px`);
-                changed = layout.setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`) || changed;
+        if (pageHeader && messagesDiv) {
+            // The bar's own height places the note under it; the transcript clears both.
+            const bar = Math.ceil(pageHeader.offsetHeight || 0);
+            const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
+            setProperty('--chat-header-bar', `${bar}px`);
+            setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`);
+        }
+        if (inputArea && messagesDiv) {
+            setProperty('--chat-composer-height', `${composerHeightAtRest(inputArea)}px`);
+            // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
+            const box = el => el.getBoundingClientRect();
+            if (document.body.classList.contains('keyboard-open') && !inputArea.querySelector('[data-motion]')) {
+                const top = Math.max(readBand(messagesDiv, pageHeader, null).top,
+                    pageNote?.offsetHeight ? box(pageNote).bottom : 0);
+                chromeMoved = setProperty('--chat-keyboard-chrome', `${Math.round(top - box(pageHeader || page).top
+                    + box(inputArea).height - box(input).height)}px`);
             }
-            if (inputArea && messagesDiv) {
-                const reserve = Math.max(92, Math.ceil(composerHeightAtRest()) + 16);
-                changed = layout.setProperty('--chat-input-reserve', `${reserve}px`) || changed;
-                // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
-                const box = el => el.getBoundingClientRect();
-                if (pageHeader && document.body.classList.contains('keyboard-open')
-                        && !inputArea.querySelector('[data-motion]')) {
-                    chromeMoved = layout.setProperty('--chat-keyboard-chrome', `${Math.round(box(messagesDiv).top
-                        - box(pageHeader).top + box(inputArea).height - box(input).height)}px`);
-                }
-            }
-            return changed || chromeMoved;
-        };
-        const changed = preserveStickiness ? withStableViewport(mutate) : mutate();
-        if (chromeMoved) composer?.resize();  // a grown cap sends no resize
+        }
+        if (changes.length || shortMoved) {
+            const write = () => { for (const [name, value] of changes) page.style.setProperty(name, value); };
+            const apply = () => preserveStickiness ? withStableViewport(write) : write();
+            if ((chromeMoved || shortMoved) && composer) composer.remeasureInput(apply);
+            else if (changes.length) apply();
+        }
         // The scrollbar this feed draws (none where scrollbars overlay the page): a Project's focus corners keep off it.
-        if (asPanel) layout.setProperty('--chat-feed-lane', `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`);
+        if (asPanel) {
+            const lane = `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`;
+            if (lane !== page.style.getPropertyValue('--chat-feed-lane')) page.style.setProperty('--chat-feed-lane', lane);
+        }
         updateScrollButton();
-        return changed;
     }
 
     // Kept on the instance so destroy() can disconnect it (the observer was
     // previously an unreachable closure — the P3 lifecycle leak).
     let chatResizeObserver = null;
+
+    function reflowViewport() {
+        if (destroyed || leaving) return;
+        reading.reflow(updateMessagesPadding);
+    }
 
     function installChatResizeObservers() {
         if (typeof ResizeObserver !== 'function') return;
@@ -2798,9 +2765,7 @@ export function createChatInstance({
             queued = true;
             requestAnimationFrame(() => {
                 queued = false;
-                if (destroyed || leaving) return;
-                reading.reflow();
-                updateMessagesPadding();
+                reflowViewport();
             });
         };
         chatResizeObserver = new ResizeObserver(schedule);
@@ -2810,11 +2775,13 @@ export function createChatInstance({
         if (inputArea) chatResizeObserver.observe(inputArea);
     }
 
+    const syncComposerReserve = () => updateMessagesPadding();
+    inputArea?.addEventListener('ouro:composer-reserve', syncComposerReserve);
     installChatResizeObservers();
 
-    // An open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners (style.css): a
-    // pointer in the panel quiets them; any key in the room restores them (Back to reading from the composer too) but
-    // lone modifiers and non-scrolling shortcuts (Cmd+C, Cmd+Shift+4).
+    // Open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners
+    // (style.css): a pointer in panel quiets them; any key restores them (Back to reading from the
+    // composer too) but lone modifiers and non-scrolling shortcuts (Cmd+C, Cmd+Shift+4).
     const focusPanel = asPanel ? container.closest?.('.project-panel') : null;
     const quietFocus = () => messagesDiv.classList.add('is-quiet-focus');
     const showFocus = ({ key, metaKey, ctrlKey, altKey }) => {
@@ -2825,8 +2792,8 @@ export function createChatInstance({
     focusPanel?.addEventListener('keydown', showFocus);
 
     if (asPanel) {
-        // Late panels missed socket open; seed from the socket and latest snapshot, its works included: a working
-        // Project opened from its row said Online until its own first read (owner 20.10).
+        // Late panels missed socket open; seed from socket and latest snapshot, its works: a working
+        // Project opened from row said Online until first read (owner 20.10).
         const latest = stateSnapshots.latest?.();
         hostStart.read(latest);
         workState = reconcileWorkState(workState, latest, chatId, ws.isConnected?.() !== false);
@@ -2849,6 +2816,8 @@ export function createChatInstance({
     let pagerRecent = {};
     let recentHasOrigins = false;
     let recentHistoryIds = new Set();
+    let beforePartialIds = null;
+    const retainedRecentIds = () => new Set([...recentHistoryIds, ...(beforePartialIds || [])]);
     let recentRequest = 0, recentApplied = 0;
     // Every read of this room (newest, a page, ↓, arrivals): a current one refused for authentication takes the saved text.
     async function fetchHistory(cursor, options = {}) {
@@ -2860,25 +2829,27 @@ export function createChatInstance({
             throw error;
         }
     }
-    // Both newest reads (the room's own, ↓'s `latest` page) are admitted here once: the saved preview follows.
+    // Admit each newest response once, including ↓; the preview follows it.
     function acceptRecentWindow(data, messages) {
         if (data.recentVersion <= recentApplied) return false;
         recentApplied = data.recentVersion;
+        const whole = catchUp.confirmWindow(data);
         preview.save(messages, data);
         // The newest admitted window (↓ too) owns the failure note.
-        historyControls.endRecent(data.reason_code ? new Error('Some saved history could not be loaded.') : null);
+        historyControls.endRecent(whole ? null : new Error('Some saved history could not be loaded.'), Boolean(data.page_cursor));
         recentCoverage = data.coverage ?? null;
         recentHasOrigins = messages.some(row => row.origin_projected);
         readReceipt.recent(data);
-        const ids = new Set(messages.flatMap(historyRowIds));
-        for (const id of recentHistoryIds) if (data.window?.truncated_by?.includes(`${id.split(':')[0]}_source_unavailable`)) ids.add(id);
-        recentHistoryIds = ids;
+        // Keep the rows held before the fault across a rechain; repeated partial windows replace one another.
+        if (whole) beforePartialIds = null;
+        else beforePartialIds ??= retainedHistoryIds();
+        recentHistoryIds = new Set(messages.flatMap(historyRowIds));
         return true;
     }
     const pendingHistoryEvictions = new Set();
     const historyNodes = (id) => Array.from(messagesDiv.querySelectorAll('[data-history-id]'))
         .filter(node => node.dataset.historyId === id);
-    const retainedHistoryIds = () => new Set([...recentHistoryIds,
+    const retainedHistoryIds = () => new Set([...retainedRecentIds(),
         ...[...pageHistoryIds.values()].flatMap(ids => [...ids])]);
     function isHistoryPageProtected(descriptor) {
         const ids = pageHistoryIds.get(descriptor.id) || new Set();
@@ -2965,9 +2936,9 @@ export function createChatInstance({
         fetchPage: fetchHistory,
         isAlive: () => !destroyed && !leaving,
         applyPage: (messages, descriptor) => {
-            pageHistoryIds.set(descriptor.id, new Set(messages.flatMap(historyRowIds)));
-            const oldRecentIds = recentHistoryIds;
+            const oldRecentIds = retainedRecentIds();
             const admitted = descriptor.direction === 'latest' && (acceptRecentWindow(descriptor, messages) || descriptor.rechained);
+            pageHistoryIds.set(descriptor.id, new Set(messages.flatMap(historyRowIds)));
             const archived = descriptor.direction !== 'recent' && descriptor.direction !== 'latest';
             if (!archived) pagerRecent = descriptor;
             applyHistoryMessages(messages, { ...descriptor, archived });
@@ -2992,7 +2963,7 @@ export function createChatInstance({
             readReceipt.arrived(window);
         },
         readNewest: syncHistory, newestInFlight: () => historySyncPromise,
-        canArrive: () => historyLoaded && lastHistorySyncSucceeded && !liveCardBound.isArmed(),
+        canArrive: () => historyLoaded && lastHistorySyncSucceeded && !catchUp.owed && !liveCardBound.isArmed(),
         isPageProtected: isHistoryPageProtected,
         onState: snapshot => syncLoadOlderControl(snapshot),
     });
@@ -3010,7 +2981,10 @@ export function createChatInstance({
             return true;
         });
     }
-    const handleHistoryLanguage = () => syncLoadOlderControl();
+    const handleHistoryLanguage = () => withStableViewport(() => {
+        syncLoadOlderControl();
+        for (const record of liveCardRecords.values()) if (record.handoverRows?.length) renderLiveCardMeta(record);
+    });
     window.addEventListener('ouro:language-changed', handleHistoryLanguage);
     async function loadOlderHistory() {
         if (historyControls.recentFailed()) {
@@ -3018,16 +2992,17 @@ export function createChatInstance({
             return historySyncPromise ? owned : syncHistory();
         }
         const snapshot = historyPager.getState();
+        // ↓'s own failed read is a fresh ↓, later reading supersedes it; a changed view reads the present in place.
+        if (snapshot.retryReturn) return showLatest();
         if (snapshot.error?.body?.reason_code === 'history_view_changed') {
             reading.cancel();
             return historyPager.latest();
         }
-        if (snapshot.error) return historyPager.retry();
-        return loadHistoryAtEdge('older');
+        return snapshot.error ? historyPager.retry() : loadHistoryAtEdge('older');
     }
-    // `Load more history` reads older messages, ↓ the present (owner, 2026-09-14 and 2026-10-05). Empty pages cross the
-    // server read ceiling: reading goes on until rows land or the chat ends. A grown room re-anchors unless its reader
-    // still walks its older chain; `current` guards each request.
+    // `Load more history` reads older, ↓ the present (owner 2026-09-14, 10-05). Empty pages cross
+    // server read ceiling: continue to rows or chat start. Growth re-anchors unless reader walks
+    // older chain; `current` guards each request.
     async function loadHistoryAtEdge(direction, current = () => true) {
         const { canNewer, canOlder } = historyPager.getState();
         if (direction === 'older' && current() && historyWindow?.horizonGap && !canNewer && !(canOlder && readingHistory())) {
@@ -3116,51 +3091,44 @@ export function createChatInstance({
         syncCancelRunButton(liveCardRecords.get(taskId));
     }
 
-    async function reconcileMissingManagedTask(taskId, onDomWrite = withStableViewport) {
-        if (
-            destroyed
-            || managedTaskDetailReads.has(taskId)
-            || concludedDirectActivities.has(taskId)
-            || !missingManagedTaskIds.has(taskId)
-        ) return;
-        managedTaskDetailReads.add(taskId);
-        try {
-            const detail = await fetchTaskDetailStrict(taskId);
-            if (destroyed || leaving || concludedDirectActivities.has(taskId)) return;
-            const currentRecord = liveCardRecords.get(taskId);
-            if (!currentRecord || currentRecord.finished) return;
+    function reconcileMissingManagedTask(taskId, onDomWrite = withStableViewport) {
+        const record = liveCardRecords.get(taskId), started = visit, portal = isPortal(record);
+        if (!record || destroyed || leaving || managedTaskDetailReads.has(taskId)
+                || concludedDirectActivities.has(taskId) || !missingManagedTaskIds.has(taskId)) return;
+        const shown = () => !destroyed && !leaving && visit === started && liveCardRecords.get(taskId) === record
+            && isPortal(record) === portal;
+        readMissingCardDetail(record, shown, detail => {
             onDomWrite(() => {
-                let changed = Boolean(attachTaskDetailReviews(taskId, detail));
+                if (record.finished || concludedDirectActivities.has(taskId)) {
+                    return isTerminalTaskDetail(detail) && attachTaskDetailReviews(taskId, detail, true);
+                }
+                let changed = attachTaskDetailReviews(taskId, detail, true);
                 const cancelPending = taskCancelPending(detail);
                 if (cancelPending || taskKey(detail?.status)) {
-                    changed = setHistoricalUnavailable(currentRecord, false) || changed;
-                    changed = markReviewAnchor(currentRecord) || changed;
+                    changed = setHistoricalUnavailable(record, false) || changed;
+                    changed = markReviewAnchor(record) || changed;
                 }
                 const vouched = !missingManagedTaskIds.has(taskId) || activeDirectActivities.has(taskId);
                 if (!vouched && detail === null) {
                     revokeManagedTaskCancelAuthority(taskId);
-                    return settleMissingTaskRecord(currentRecord) || changed;
+                    return settleMissingTaskRecord(record) || changed;
                 }
                 if (cancelPending || (!vouched && !isTerminalTaskDetail(detail))) {
-                    if (currentRecord.isSubagent && detail?.status) missingManagedTaskIds.delete(taskId);
-                    return Boolean(reconcileCancelCardFromDetail(currentRecord, taskId, detail) || changed);
+                    if (record.isSubagent && detail?.status) missingManagedTaskIds.delete(taskId);
+                    return Boolean(reconcileCancelCardFromDetail(record, taskId, detail) || changed);
                 }
                 if (vouched) return changed;
                 recordTerminalActivity(taskId, taskTerminalPhase(detail));
                 return Boolean(appendTaskSummaryToLiveCard({ ...detail, task_id: taskId }) || changed);
             });
-        } catch {
-            // No terminal fact was proved. A later existing snapshot retries.
-        } finally {
-            managedTaskDetailReads.delete(taskId);
-        }
+        }, s => reviewHydrator.note(taskId, s, onDomWrite));
     }
 
     function observeMissingManagedTask(taskId, onDomWrite = withStableViewport) {
         const id = taskKey(taskId);
         if (!id || concludedDirectActivities.has(id) || subagentChildParents.has(id) || liveCardRecords.get(id)?.isSubagent) return;
         missingManagedTaskIds.add(id);
-        void reconcileMissingManagedTask(id, onDomWrite);
+        reconcileMissingManagedTask(id, onDomWrite);
     }
 
     function hydrateDirectActivities(turnsList, snapshotBarrierMs = Infinity, complete = false) {
@@ -3225,8 +3193,8 @@ export function createChatInstance({
 
     onWs('typing', (msg) => {
         if (!isMyThread(msg)) return;  // each column shows typing only for its own thread
-        // A typing frame is a submission receipt, never liveness: it re-reads the state at once and retires the linked
-        // `Sending...` only when that read answers: the room steps from Sending... to the server's word.
+        // Typing frame is submission receipt, never liveness: re-reads state at once, retires linked
+        // `Sending...` only when that read answers: room steps from Sending... to server's word.
         const cmid = String(msg.client_message_id || '');
         if (!cmid) return;
         void refreshHeaderControlState().then(() => {
@@ -3247,14 +3215,19 @@ export function createChatInstance({
         if (msg.role === 'user') {
             const clientMessageId = msg.client_message_id || '';
             const senderSessionId = msg.sender_session_id || '';
-            // 2A: the user echo is receipt of the user ROW, not turn start: it settles the bubble but must NOT retire the
-            // `Sending...` submission (a linked typing frame, snapshot turn, routing receipt or the turn's conclusion does).
-            const own = senderSessionId === chatSessionId && clientMessageId;
-            if (own) markPendingDelivered(clientMessageId);
+            // 2A: user echo is receipt of user ROW, not turn start: settles bubble but must NOT retire the
+            // `Sending...` submission (linked typing frame, snapshot turn, routing receipt or conclusion does).
+            const local = localOwnerRow(msg);
+            const own = local && senderSessionId === chatSessionId && clientMessageId;
+            if (own) {
+                markPendingDelivered(clientMessageId);
+                const pending = pendingSubmissions.get(clientMessageId);
+                if (pending && msg.row_address) pending.rowAddress = msg.row_address;
+            }
             // The custody listener can settle this room's send while away; another client's echo waits for history.
             if (leaving) {
-                if (own) markIngressSaved(messagesDiv, msg);
-                unconfirmed.settle(msg);
+                if (own) markIngressSaved(messagesDiv, msg, ownerMessageBubble(messagesDiv, msg, chatId));
+                if (local) unconfirmed.settle(msg);
                 return;
             }
             if (!own) withRemoteActivity(() => addMessage(
@@ -3268,8 +3241,7 @@ export function createChatInstance({
                 textPlaceholder: msg.text_placeholder === true, reply: msg,
                 },
             ));
-            withStableViewport(() => markIngressSaved(messagesDiv, msg) | replies.adopt(msg) | markSwarmLabel(messagesDiv, msg));
-            unconfirmed.settle(msg);
+            withStableViewport(() => confirmOwnerRow(msg));
             syncChatStatus();
             return;
         }
@@ -3353,13 +3325,17 @@ export function createChatInstance({
     });
 
     onWs('message_annotation', (msg) => {
-        if (!isMyThread(msg)) return;
         if (msg.annotation_type !== 'routing_ack') return;
-        const apply = () => updateMessageAnnotation(msg.client_message_id || '', msg);
-        (msg.status === 'needs_manual_target' ? withRemoteActivity : withStableViewport)(apply);
-        // A routing receipt ends this submission's `Sending...` phase.
+        // Only the host places relay reads, including resolved older quotes.
+        if (msg.action === 'steer_task' && msg.status === 'read' && !msg.source_row_address) return;
+        const own = isMyThread(msg);
+        const apply = () => chatDecision.applyRoutingAck(messagesDiv, msg, { own, journal: localEchoJournal });
+        (own && msg.status === 'needs_manual_target' ? withRemoteActivity : withStableViewport)(apply);
+
         const receiptCid = String(msg.client_message_id || '');
-        if (receiptCid && pendingSubmissions.delete(receiptCid)) {
+        if (own && receiptCid && Number(msg.chat_id ?? 1) === chatId &&
+                (msg.source_row_address ? msg.source_row_address === pendingSubmissions.get(receiptCid)?.rowAddress : msg.source_row_address !== '') &&
+                pendingSubmissions.delete(receiptCid)) {
             syncChatStatus();
         }
     });
@@ -3428,9 +3404,9 @@ export function createChatInstance({
         const isReconnect = typeof msg?.previouslyConnected === 'boolean'
             ? msg.previouslyConnected
             : wsHasConnectedOnce;
-        // A real reconnect forgets the start as the close did: a body polled while the socket was down may be the
-        // server's from before a restart. A room's return (`resumed`) is none: `leave` forgot an outage it left in,
-        // `stay` one it slept through.
+        // A real reconnect forgets the start as the close did: a body polled while the socket was down
+        // may predate the restart. Room's return (`resumed`) is none: `leave` forgot an outage it left
+        // in, `stay` one it slept through.
         if (isReconnect && !msg?.resumed) hostStart.forget();
         mainWaiting?.setConnected(true);
         refreshHeaderControlState();
@@ -3441,34 +3417,37 @@ export function createChatInstance({
         const restartNotice = pendingRestartNotice;
         wsHasConnectedOnce = true;
         updateMessagesPadding();
-        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit);
         const settled = () => {
             if (destroyed || openedVisit !== visit) return;  // left meanwhile: a return opens again
-            catchUp.end();
+            catchUp.end(read);
             if (restartNotice && pendingRestartNotice === restartNotice) {
                 pendingRestartNotice = '';
                 addMessage(restartNotice, 'system', false, null, false, { ephemeral: true, systemType: 'reconnect' });
             }
             clearReloadParams();
         };
-        loadUiPreferences()
-            // A return's paint receipt may have read the newest page while preferences loaded (even a refused read
-            // counts). Share that work; a real reconnect still owes a read newer than any request it interrupted.
+        const read = loadUiPreferences()
+            // A return shares its paint receipt's newest read during preferences, even a refusal; a real reconnect owes
+            // a read newer than any it interrupted.
             .then(() => (destroyed || openedVisit !== visit ? false
                 : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
-                : isReconnect ? syncHistory({ fromReconnect: true }) : waitForHydrationWindow().then(awaitInitialHydration)))
+                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, current: () => catchUp.reading === read })
+                    : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
+        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen);
     });
 
     // A disconnect: written sends not yet saved say so and the room shows the outage; away, which sends it doubts is
     // decided now (custody) and both are drawn on its return (`stay`).
     onWs('close', () => {
+        catchUp.cancel(recentRequest);
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
         showOutage();
     });
     onWs(SERVER_ANSWERS_EVENT, () => syncChatStatus());
     function showOutage(doubted) {
         unconfirmed.unsettle(doubted);
+        workState = reconcileWorkState(workState, null, chatId);
         mainWaiting?.setConnected(false);
         withStableViewport(() => {
             for (const [id, activity] of activeDirectActivities) {
@@ -3477,6 +3456,7 @@ export function createChatInstance({
             let changed = false;
             for (const [id, record] of liveCardRecords) {
                 record.childDetailRead = undefined;
+                if (record.isSubagent) record.parkedOffline = true;  // this client's own park, not the server's view
                 changed = syncParkedPhase(record, 'unknown', activeDirectActivities.get(id)) || changed;
             }
             return changed;
@@ -3492,8 +3472,8 @@ export function createChatInstance({
         taskId, quizId, projectId, chatId, appendQuizMessage, isInstanceVisible,
         () => { const current = reading.claim(); reading.stick = false; return current; }, reading.scroll, options);
     const historyReveal = createHistoryReveal({ pager: historyPager, reading, feed: messagesDiv, records: liveCardRecords,
-        present: isInstanceVisible, expand: record =>
-            (explicitCardExpansion.set(record.groupId, true), setLiveCardExpanded(record, true)) });
+        present: isInstanceVisible, expand: discloseLiveCard,
+        hydrate: hydrateShownDetails });
     roomWork = createRoomWork({ page, asPanel, ws, statusBadge, messagesDiv, reading, stateSnapshots, revealQuestion,
         works: () => workState, liveCardRecords, pendingSubmissions, pendingSuggestedNames,
         cancelRunFromCard, refreshHeaderControlState, captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor,
@@ -3511,7 +3491,8 @@ export function createChatInstance({
         showLatest,
         resume,
         ws,
-        // Shell exposure after its motion: present retained notice state, without fetching or scrolling.
+        reflowViewport,
+        captureReading: () => reading.capture(),
         showHistoryNotice: () => { if (!destroyed) historyControls.showNotice(); },
         refreshHistory: readReceipt.refresh,
         revealQuestion,
@@ -3530,11 +3511,11 @@ export function createChatInstance({
         // Another place covers the room: a reader or file dialog its card opened closes, its place is kept; `pause`
         // (another place replaces it) also pauses what plays. Staged files stay.
         closeTransient: (pause) => { roomWork?.leave(); keepPlace(); chatMedia.closeTransient(pause); },
-        // A room leaving the screen (room_retire.js), on exit and while away: its place kept, its paint receipt and reads
-        // stopped, neither shown nor read (its reader and playback are `closeTransient`'s); `stay` returns.
+        // Room leaving screen (room_retire.js), on exit, while away: place kept, paint receipt and
+        // reads stopped, neither shown nor read (reader and playback `closeTransient`'s); `stay` returns.
         leave: () => {
             if (leaving) return;
-            catchUp.cancel();  // its return reads, and says so, anew
+            catchUp.cancel(recentRequest);  // its return reads, and says so, anew
             // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
             // readiness polled meanwhile. Before the first open there is none: that open keeps the boot read.
             if (ws.isConnected?.() === false && ws.previouslyConnected?.()) hostStart.forget();
@@ -3552,8 +3533,8 @@ export function createChatInstance({
         },
         // How the room was opened (app.js): pressed open by a pointer, its focus corners wait for a key.
         quietFocus: (quiet) => messagesDiv.classList.toggle('is-quiet-focus', Boolean(quiet)),
-        // Full teardown (P3): every acquired resource (ws subscriptions, window/document listeners, ResizeObserver,
-        // timers), then buffered collections, the DOM last. Idempotent; late rAF/async continuations no-op on `destroyed`.
+        // Full teardown (P3): all acquired resources (ws subscriptions, window/document listeners,
+        // timers), then buffered collections, DOM last. Idempotent; late rAF/async continuations no-op on `destroyed`.
         destroy() {
             if (destroyed) return;
             destroyed = true;
@@ -3587,6 +3568,7 @@ export function createChatInstance({
             header?.destroy();
             focusPanel?.removeEventListener('pointerdown', quietFocus);
             focusPanel?.removeEventListener('keydown', showFocus);
+            inputArea?.removeEventListener('ouro:composer-reserve', syncComposerReserve);
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
             historyResyncScheduler.cancel();

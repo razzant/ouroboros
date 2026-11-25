@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.upgrade_notices import BORN_SETTLED_NOTICE_KEYS, JUDGED_BY_FACTS_NOTICE_KEYS
 from supervisor import state, state_initialization
 from tests._source_scan import parse
 from tests._store_shared import remove_store_tree
@@ -46,6 +47,11 @@ def _prior(**extra):
             "owner_chat_id": 7, "owner_external_id": 99, "owner_external_chat_id": 99,
             "evolution_mode_enabled": True, "evolution_owner_stopped": False, "evolution_cycle": 6,
             "bg_consciousness_enabled": True, "usage_ledger_high_water_seq": [1, 50], **extra}
+
+
+def _born_settled(values):
+    return all(values.get(key) for key in BORN_SETTLED_NOTICE_KEYS) and not any(
+        key in values for key in JUDGED_BY_FACTS_NOTICE_KEYS)
 
 
 def _files(root):
@@ -125,7 +131,7 @@ def test_evolution_after_a_recovery_waits_for_the_owner_then_resumes(root, monke
     monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "")
     queue.enqueue_evolution_task_if_needed()
     assert pending == []  # a recovered "enabled" is not the owner's current decision
-    assert owner_evolution_start("resume", source="owner_chat") == ""
+    assert owner_evolution_start("resume", source="owner_chat") == {}
     queue.enqueue_evolution_task_if_needed()
     # The witnessed write-once binding survives; Start confirms evolution only.
     assert [task["chat_id"] for task in pending] == [7]
@@ -166,6 +172,7 @@ def test_a_positive_fresh_bootstrap_creates_one_identity(root, scaffold):
     assert status == "ok" and witness["phase"] == "complete" and witness["origin"] == "first_boot"
     assert read.values["initialization_id"] == witness["initialization_id"]
     assert state.control_value(state.load_state(), "owner_id") == (True, None)
+    assert _born_settled(read.values)  # a fresh install owes no news of an earlier release
 
 
 def test_an_interrupted_initialization_finishes_the_same_identity(root):
@@ -215,6 +222,7 @@ def test_a_legacy_readable_state_is_adopted_with_its_values(root):
     read = state.init_state()
     assert read.quality == "current" and read.values["session_id"] == "old-session"
     assert read.values["created_at"] == "2026-07-30T00:00:00+00:00" and read.values["evolution_cycle"] == 6
+    assert not any(key in read.values for key in BORN_SETTLED_NOTICE_KEYS)  # an upgraded install keeps them owed
     status, witness = state_initialization.read_witness(root)
     assert (status, witness["phase"], witness["origin"]) == ("ok", "complete", "legacy_adopted")
 
@@ -223,7 +231,7 @@ def test_an_owner_reset_is_an_explicit_fresh_start(root):
     _write(root / "task_results" / "leftover.json", {"task_id": "leftover"})
     state_initialization.mark_pending(root, origin="owner_reset")
     read = state.init_state()
-    assert read.quality == "current"
+    assert read.quality == "current" and _born_settled(read.values)  # a Reset is a fresh start: nothing to hear
     assert state_initialization.read_witness(root)[1]["origin"] == "owner_reset"
 
 
@@ -246,7 +254,7 @@ def test_stop_during_an_outage_outlives_the_primary_coming_back(root, monkeypatc
     assert lifecycle.evolution_stop_reason() == "stop_intent"
     assert not lifecycle.start_evolution_campaign("agent", source="agent_tool")
     assert lifecycle._read_evolution_campaign()["status"] == "active"  # no invented terminal status
-    assert owner_evolution_start("resume", source="owner_chat") == ""
+    assert owner_evolution_start("resume", source="owner_chat") == {}
     assert lifecycle.evolution_stop_reason() == "" and "stop_intent" not in lifecycle._read_evolution_campaign()
     assert state.control_is(state.load_state(), "evolution_mode_enabled", True)
 

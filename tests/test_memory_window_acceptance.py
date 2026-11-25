@@ -45,6 +45,24 @@ def test_notes_fold_when_an_owner_nano_target_is_smaller(tmp_path, monkeypatch):
     assert all(note['id'] in shown.system_content_json for note in snap.room['notes'])
 
 
+def test_this_rooms_notes_stay_whole_for_an_owner_low_target(tmp_path, monkeypatch):
+    """This room does not yield to Low's target (owner 15.11.2026, 3A): the owner's Low target leaves this room's
+    notes whole, led or not, and records that it is missed; only the window may shorten them. Nano's number still
+    folds them (the test above)."""
+    from tests import _memory_scale_fixture as scale
+    for led in (False, True):
+        snap = scale.snapshot()
+        for note in snap.room['notes'] if led else ():
+            note['lead_rule'] = 1
+        plan = scale.build(tmp_path, monkeypatch, snap=snap, window=1000000, reserve=None, mode='low')
+        shown = plan.projection(plan.initial_mode)
+        floor = shown.memory_facts['floor']
+        assert floor['budget_allowance_tokens'] is not None and floor['target_missed']
+        assert 'F8' not in floor['steps'] and 'F8a' not in floor['steps']
+        text = "\n".join(block["text"] for block in json.loads(shown.system_content_json))
+        assert all(note['text'] in text for note in snap.room['notes'])
+
+
 def _core(mature):
     spoken = [syn.spoken(i, "ouroboros", 4_000) for i in range(24)]
     snap = syn.snapshot(role="consciousness", story=syn.pages(103 if mature else 2, 200),
@@ -221,7 +239,7 @@ def _tipping_window(held):
 
 @pytest.mark.parametrize("replies,window_of,start", [
     (24, "crowded", ("max", "")), (400, "crowded", ("max", "")),
-    (2_400, "crowded", ("low", "memory")), (24, "tipping", ("low", "window"))])
+    (2_400, "crowded", ("low", "memory")), (24, "tipping", ("low", "request"))])
 def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop, sent, tmp_path, monkeypatch,
                                                                        replies, window_of, start):
     """Audit item 23(a): a start succeeds when it holds the selected mode or records the reason the person then
@@ -263,12 +281,14 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
         assert fact["need"] - fact["reserve"] - fact["work"] <= tokens + -(-window // 100)
     events = [f.events.get_nowait() for _ in range(f.events.qsize())]
     sends = [event["context_attempt"] for event in events if "context_attempt" in event]  # the census the capsule reads
-    assert sends and {(send["preferred_at_send"], send["applied"], send["cause"]) for send in sends} == {
-        ("max", *start)}
+    # A Low the window took from Max is named Low beside the owner's Max (21.11.2026)
+    assert sends and {(send["preferred_at_send"], send["applied"], send["books"], send["cause"]) for send in sends} == {
+        ("max", start[0], "whole" if start[0] == "max" else "maps", start[1])}
     rows = [event["data"] for event in events if event["type"] == "log_event"
             and event["data"].get("checkpoint_kind") == "context_fit_physical_mode"]
     assert [row["cause"] for row in rows] == ([start[1]] if start[1] else [])  # the task card's start row
-    assert [event["system_type"] for _root, event in sent] == (["low_start_notice"] if start[1] == "memory" else [])
+    assert [(row["effective_mode"], row["books"]) for row in rows] == ([("low", "maps")] if start[1] else [])
+    assert [event["system_type"] for _root, event in sent] == (["low_start_notice"] if start[1] else [])  # every cause
 
 
 @pytest.mark.parametrize("window", [40_000, 200_000, 1_000_000])

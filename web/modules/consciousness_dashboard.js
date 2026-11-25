@@ -16,6 +16,7 @@ import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, modelRouteWor
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { confirmAndSendRestart, costPresentationDetail } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
+import { switchActionWords, switchReadingWords, turnConsciousness } from './consciousness_switch.js';
 import { openCircles, openPlaceSheet } from './place_sheet.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { CODECS, GUARDED_WRITERS, WRITERS } from './settings_controls.js';
@@ -75,6 +76,7 @@ export function liveWake(snapshot) {
  *  follows from its state (a held wake's allowance). */
 export function headlineView(snapshot) {
     return { text: snapshot.detail ? tr(snapshot.detail, snapshot.detail) : tr('task.phase.unknown', 'State unknown'),
+        position: snapshot.position ? tr(snapshot.position, snapshot.position) : '',
         ...(snapshot.detailNote ? { note: tr(snapshot.detailNote, snapshot.detailNote) } : {}), moving: snapshot.status === 'thinking' };
 }
 
@@ -111,13 +113,14 @@ export function countedRootsText(snapshot) {
  *  `toggling` is the command just sent (its button says so until the next read). */
 export function summaryHtml(snapshot, { hasSocket = true, toggling = '', detailsOpen = false } = {}) {
     const headline = headlineView(snapshot);
-    const kicker = snapshot.enabled === null ? 'Consciousness · state unknown' : `Consciousness · ${snapshot.enabled ? 'on' : 'off'}`;
+    // The switch's gloss over its position by meaning; the host's state line beneath (owner 15.11, 5A).
+    const kicker = snapshot.gloss ? `Consciousness · ${snapshot.gloss[0].toLowerCase()}${snapshot.gloss.slice(1)}` : 'Consciousness';
     const money = allowanceText(snapshot);
     const roots = countedRootsParts(snapshot);
     const mark = consciousnessMark(snapshot);
     const markHtml = mark.shape === 'none' ? '' : statusMarkHtml('consciousness-mark', mark);
-    const busy = toggling ? (toggling === 'stop' ? 'Stopping…' : 'Starting…') : '';
-    const toggle = snapshot.enabled === null ? '' : `<button type="button" class="btn btn-default btn-sm" data-cx-act="toggle" data-enabled="${snapshot.enabled ? '1' : '0'}"${hasSocket && !busy ? '' : ' disabled'}>${busy || (snapshot.enabled ? 'Stop' : 'Start')}</button>`;
+    const busy = { read: switchReadingWords(), stop: 'Turning off…', start: 'Turning on…' }[toggling] || '';
+    const toggle = snapshot.enabled === null ? '' : `<button type="button" class="btn btn-default btn-sm" data-cx-act="toggle" data-enabled="${snapshot.enabled ? '1' : '0'}"${hasSocket && !busy ? '' : ' disabled'}>${busy || escapeHtml(switchActionWords(snapshot.enabled))}</button>`;
     // It cannot wake until Ouroboros starts again: the next step is beside the words that say so.
     const restart = snapshot.enabled && snapshot.status === 'stopped'
         ? `<button type="button" class="btn btn-default btn-sm" data-cx-act="restart"${hasSocket ? '' : ' disabled'}>Restart</button>` : '';
@@ -129,11 +132,11 @@ export function summaryHtml(snapshot, { hasSocket = true, toggling = '', details
     ].join('');
     return `<div class="dashboard-hero">
             <p class="dashboard-hero-kicker">${escapeHtml(kicker)}</p>
-            <p class="dashboard-hero-figure consciousness-headline">${escapeHtml(headline.text)}${markHtml}</p>
+            <p class="dashboard-hero-figure consciousness-headline">${escapeHtml(headline.position || headline.text)}${markHtml}</p>
+            ${headline.position ? `<p class="dashboard-hero-meta consciousness-headline-state">${escapeHtml(headline.text)}</p>` : ''}
             ${headline.note ? `<p class="dashboard-hero-meta consciousness-headline-note">${escapeHtml(headline.note)}</p>` : ''}
             ${money ? `<p class="dashboard-hero-meta">${escapeHtml(money)}</p>` : ''}
             ${roots ? `<p class="dashboard-hero-meta">${escapeHtml(roots.head)}</p>` : ''}
-            ${snapshot.enabled ? '<p class="dashboard-hero-meta">Stop also ends a wake that is running now.</p>' : ''}
             ${toggle || restart ? `<div class="dashboard-hero-actions">${restart}${toggle}</div>` : ''}
         </div>
         ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}`;
@@ -247,11 +250,10 @@ export function paintWakeRows(region, wakes, coverage, opened, put, release = de
  *  Circles page. */
 function mountSettingsCards(host, { state, openSettings, openDashboardTab, route }) {
     if (!host) return { paint() {}, dispose() {} };
-    const back = { label: 'Consciousness', go: () => openDashboardTab?.('consciousness') };
     const doors = {
         'consciousness-allowance': () => openDashboardTab?.('costs', { row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' }),
-        'consciousness-model': () => openSettings?.('models/role/consciousness', { back }),
-        'consciousness-safety': () => openSettings?.('permissions', { row: 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', back }),
+        'consciousness-model': () => openSettings?.('models/role/consciousness'),
+        'consciousness-safety': () => openSettings?.('permissions', { row: 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE' }),
         'consciousness-places': () => openCircles(),
         'consciousness-evolution': () => openDashboardTab?.('evolution', { row: 'OUROBOROS_POST_TASK_EVOLUTION' }),
     };
@@ -410,12 +412,18 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
             return;
         }
         if (act === 'toggle') {
-            // The existing direct control command (the Activity row and the chat header send the same); the button says
-            // it is on its way until the read after the runtime's beat paints the state it reached.
-            toggling = button.dataset.enabled === '1' ? 'stop' : 'start';
+            // The one switch (consciousness_switch.js: it names what changes first, then sends the same /bg as the
+            // Activity row and the chip's Shade); the button says it is on its way until the read after the runtime's
+            // beat paints the state it reached.
+            const to = button.dataset.enabled === '1' ? 'off' : 'on';
+            toggling = 'read';  // «Reading…» while the preview is read; a poll meanwhile keeps it
+            toggledAt = Number.POSITIVE_INFINITY;
+            paint();
+            const sent = await turnConsciousness(to, { ws, onRead: () => { toggling = ''; paint(); } });
+            if (!sent) { toggling = ''; paint(); return; }
+            toggling = to === 'off' ? 'stop' : 'start';
             toggledAt = Date.now();
             paint();
-            ws?.send?.({ type: 'command', cmd: `/bg ${toggling}`, ui_control: { name: 'consciousness_toggle' } });
             await new Promise((resolve) => setTimeout(resolve, COMMAND_SETTLE_MS));
             await refresh();
         }

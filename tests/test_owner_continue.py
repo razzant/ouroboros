@@ -13,29 +13,8 @@ from __future__ import annotations
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._owner_continue_helpers import NONCE, _interrupted, _running_predecessor
 from tests._store_shared import delete_result, seed_result
-
-NONCE = "press-0001-abcdef"
-
-
-def _interrupted(tmp_path, task_id="pred-1", *, origin=None, reason_code="", **extra):
-    from ouroboros.task_results import STATUS_CANCELLED, STATUS_RUNNING, write_task_result
-
-    from ouroboros.usage_admission import original_group_limit
-    prior = original_group_limit(tmp_path, task_id)
-    initial = {} if prior["source"] == "ledger_first_row" else {"billing_group": {
-        "billing_group_id": task_id, "billing_group_limit_usd": 20.0,
-        "billing_group_limit_source": "initial_task_admission", "billing_group_limit_revision": "admission-1"}}
-    write_task_result(tmp_path, task_id, STATUS_RUNNING, chat_id=7, project_id="", **initial,
-                      origin_message_text="Write the Friday report",
-                      origin_message_ref={"chat_id": 7, "client_message_id": "m-1"},
-                      root_task_id=task_id, title="Friday report", deadline_at="2099-01-01T00:00:00+00:00")
-    fields = {"cancel_origin": origin if origin is not None else {"source": "snapshot_restore",
-                                                                   "reason": "server_shutdown"}}
-    if reason_code:
-        fields = {"reason_code": reason_code}
-    write_task_result(tmp_path, task_id, STATUS_CANCELLED if not reason_code else "failed",
-                      result="interrupted", **fields, **extra)
 
 
 def _owner_mail(tmp_path, task_id="pred-1"):
@@ -178,6 +157,129 @@ def test_an_accounting_expiry_never_outranks_a_stop_or_a_whole_work_bound(tmp_pa
 _STAMP = "delegated_custody_unreconciled"
 
 
+@pytest.mark.parametrize("carried,recorded,resumed,source,limits,earlier,refusal", [
+    ("budget_exhausted", "dated", False, "owner_restart", {}, "budget_exhausted", ""),
+    ("budget_exhausted", "", False, "owner_restart", {}, None, ""),
+    ("budget_exhausted", "dated", False, "http_single", {}, "budget_exhausted", "stopped_by_owner"),
+    ("", "", False, "owner_restart", {"deadline_at": "2000-01-01T00:00:00+00:00"}, None, "hard_limit_reached"),
+    ("budget_exhausted", "dated", True, "owner_restart", {}, "budget_exhausted", ""),
+    ("budget_exhausted", "undated", True, "owner_restart", {}, None, ""),
+], ids=["dated-pause-from-its-producer", "lonely-inherited-code", "owner-stop", "recorded-deadline",
+        "dated-pause-lifted-by-the-real-resume", "undated-pause-lifted-by-the-real-resume"])
+def test_pool_cancel_names_an_earlier_stop_only_where_the_row_recorded_one(
+        tmp_path, monkeypatch, carried, recorded, resumed, source, limits, earlier, refusal):
+    """#3210. The cancel states its own cause (``cancel_origin``; ``reason_code`` becomes ``cancelled``) and may name beside
+    it, as an observation only (``earlier_stop``, which Continue never reads), a budget pause THIS row recorded: the code with
+    its producer's dated pause record (``worker_assignment``: ``paused_before_dispatch``, ``paused_at``), or that dated record
+    as the real explicit Resume (``queue_transitions``) leaves it: status ``resumed``, code cleared. A code alone proves no
+    event (no writer of a running or interrupted row records a budget stop), nor does an undated record (an event-shaped
+    pause, or what a held selection writes): that is unknown, not an earlier stop. A Stop and a deadline the work recorded
+    decide Continue as ever, label or none."""
+    from types import SimpleNamespace
+
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.outcomes import normalize_outcome_axes
+    from ouroboros.owner_continue import continuation_eligibility
+    from ouroboros.project_dialogue import _completion_verdict
+    from ouroboros.server_routing_context import _ended_work_facts
+    from ouroboros.task_results import (
+        STATUS_INTERRUPTED, STATUS_RUNNING, STATUS_SCHEDULED, load_task_result, write_task_result,
+    )
+    from supervisor.queue_transitions import resume_budget_paused_task
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    events = []
+    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
+    tid = "pred-1"
+    pause = {"status": "paused_before_dispatch", "scope": "global", "physical_calls": 0, "replay_safe": True,
+             "auto_resume": False, "resume_policy": "manual_same_generation",
+             **({"paused_at": "2026-11-17T09:00:00+00:00"} if recorded == "dated" else {})}
+    if carried:  # ``worker_assignment``'s pause (one write: the code and its record, explicit zero calls) or the code alone
+        write_task_result(tmp_path, tid, STATUS_SCHEDULED, reason_code=carried, **({"resource_limit": pause} if recorded else {}))
+    if resumed:  # the REAL explicit Resume lifts it: its record kept whole under status ``resumed``, the code cleared
+        workers.PENDING.append({"id": tid, "type": "task", "chat_id": 7, "_attempt": 1,
+                                "admitted_dispatch": "none", "_budget_pause": pause})
+        assert (outcome := resume_budget_paused_task(tid))["ok"], outcome
+    _running_predecessor(tmp_path, tid)
+    write_task_result(tmp_path, tid, STATUS_RUNNING, task_attempt=1, result="Task is running.", **limits)
+    write_task_result(tmp_path, tid, STATUS_INTERRUPTED, result="Worker process died mid-task (attempt 1). Retrying.")
+    held = load_task_result(tmp_path, tid)
+    assert held.get("reason_code", "") == ("" if resumed else carried), "the premise: the code only rode along"
+    if resumed:  # what the real writer left: the pause record whole under a lifted status
+        assert held["resource_limit"]["status"] == "resumed" and held["resource_limit"].get("paused_at") == pause.get("paused_at")
+    if source:
+        intent = request_cancel(tmp_path, tid, source=source, requested_stop_policy="immediate",
+                                reason="Owner restart" if source == "owner_restart" else "Owner requested a stop")
+    assert workers._settle_terminalization_task(
+        {"id": tid, "_attempt": 1}, status="cancelled", reason="External cancellation", trigger="worker_pool_kill",
+        stop_source="owner_restart" if source else "", reconcile_delegate_custody=False)
+    assert [(e["task_id"], e["status"]) for e in events if e["type"] == "task_done"] == [(tid, "cancelled")]
+    row = load_task_result(tmp_path, tid, strict=True)
+    axes = normalize_outcome_axes(row)
+    execution = axes["execution"]
+    assert row["status"] == row["reason_code"] == execution["status"] == execution["reason_code"] == "cancelled"
+    assert execution.get("earlier_stop") == _ended_work_facts(row, tid).get("earlier_stop") == earlier
+    assert ("Earlier recorded stop:" in _completion_verdict(row, {})) is bool(earlier)
+    if source:
+        assert row["cancel_origin"]["request_id"] == intent["request_id"]
+    assert (row.get("cancel_origin") or {}).get("source") == (source or None)
+    verdict = continuation_eligibility(row, tid)
+    assert (verdict["eligible"], verdict["refusal"]) == (not refusal, refusal)
+    view_only = {**row, "outcome_axes": {**axes, "execution": {k: v for k, v in execution.items() if k != "earlier_stop"}}}
+    assert continuation_eligibility(view_only, tid) == verdict, "an observation: Continue never reads it"
+
+
+@pytest.mark.parametrize("settled,stop_source,refusal", [
+    ({"status": "failed", "reason_code": "budget_exhausted",
+      "result": "Budget exhausted after prior dispatch; cancel or start a new run."}, "", "hard_limit_reached"),
+    ({"status": "cancelled", "cancel_origin": {"source": "http_single", "reason": "Stop now"},
+      "result": "Task cancelled by user/agent request."}, "owner_restart", "stopped_by_owner"),
+], ids=["recorded-hard-limit", "owner-stop"])
+def test_a_writer_that_settles_the_row_after_the_pool_pre_read_keeps_its_whole_row(
+        tmp_path, monkeypatch, settled, stop_source, refusal):
+    """The pool writer reads the row before it writes, and the reducer lets a rewrite with the SAME terminal status
+    through, so a writer that settled the task in that gap lost its result, cause, author and stop origin to the
+    pool's own (an owner Stop turned into a Restart, a hard limit into a worker failure). The gap is generated
+    without a process: the real pre-read, then the neighbour's real publication, then the pool's write."""
+    from ouroboros import task_results
+    from ouroboros.owner_continue import continuation_eligibility
+    from tests._store_shared import read_result, result_signature
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    tid, status = "pred-1", settled["status"]
+    _running_predecessor(tmp_path, tid)
+    read, race = task_results.load_task_result, {"armed": True}
+
+    def read_then_lose_the_race(root, task_id, **kwargs):
+        seen = read(root, task_id, **kwargs)  # the row is still live: the pre-read passes
+        if race.pop("armed", False):
+            task_results.write_task_result(root, task_id, status, **{k: v for k, v in settled.items() if k != "status"})
+            race["after"] = (result_signature(root, task_id), read_result(root, task_id))
+        return seen
+
+    monkeypatch.setattr(task_results, "load_task_result", read_then_lose_the_race)
+    assert workers._write_failure_result(
+        tid, reason="External cancellation", status=status, stop_source=stop_source) == status
+    assert race["after"] == (result_signature(tmp_path, tid), read_result(tmp_path, tid)), "the pool's write left the row alone"
+    row = read_result(tmp_path, tid)
+    assert row["result"] == settled["result"] and row.get("cancel_origin") == settled.get("cancel_origin")
+    assert continuation_eligibility(row, tid)["refusal"] == refusal
+
+
+def test_legacy_cancel_with_its_own_technical_reason_still_admits_continue(tmp_path, monkeypatch):
+    from ouroboros.server_routing_context import _ended_work_facts
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, origin={})
+    row = seed_result(tmp_path, "pred-1", {**load_task_result(tmp_path, "pred-1"), "reason_code": "provider_failure"})
+    facts = _ended_work_facts(row, "pred-1")
+    assert facts["cause"] == "provider_failure" and "earlier_stop" not in facts
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    assert workers.PENDING[0]["metadata"]["continuation"]["cause"] == "provider_failure"
+
+
 @pytest.mark.parametrize("stored,admitted,cause_or_refusal", [
     ({"reason_code": "provider_failure", "delegated_runs_unreconciled": ["run-open"],
       "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "provider_failure"}}},
@@ -256,6 +358,104 @@ def test_a_finished_answer_and_a_live_task_refuse_while_a_technical_limit_admits
     assert admit_continuation("live-1", action_nonce=NONCE)["error"] == "predecessor_live"
     _interrupted(tmp_path, "limit-1", reason_code="round_limit")
     assert admit_continuation("limit-1", action_nonce=NONCE)["ok"] is True
+
+
+def test_a_deep_self_review_refuses_continue_by_type_and_writes_nothing_while_an_ordinary_root_admits(
+        tmp_path, monkeypatch):
+    """A deep self-review keeps no saved midpoint: its Continue would start an ordinary task under its name. The
+    refusal is typed and early: no claim, no successor row, no offer on the card; the same record of an ordinary
+    root admits."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway.task_continue import api_task_continue
+    from ouroboros.owner_continue import continuation_offer
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    for task_id, task_type in (("review-1", "deep_self_review"), ("ordinary-1", "task")):
+        _interrupted(tmp_path, task_id, task_contract={"task_type": task_type})
+    refused = {"eligible": False, "cause": "deep_self_review", "refusal": "deep_review_restart_required"}
+    assert continuation_offer(load_task_result(tmp_path, "review-1"), "review-1") == refused
+    assert admit_continuation("review-1", action_nonce=NONCE) == {
+        "ok": False, "error": "deep_review_restart_required", "cause": "deep_self_review"}
+    client = TestClient(Starlette(routes=[Route("/api/tasks/{task_id}/continue", api_task_continue,
+                                                methods=["POST"])]))
+    answer = client.post("/api/tasks/review-1/continue", json={"action_nonce": NONCE})
+    assert answer.status_code == 409 and answer.json()["reason_code"] == "deep_review_restart_required"
+    stored = load_task_result(tmp_path, "review-1")
+    assert not {"continued_by", "superseded_by", "retry_task_id"} & set(stored) and workers.PENDING == []
+    assert continuation_offer(load_task_result(tmp_path, "ordinary-1"), "ordinary-1")["eligible"] is True
+    assert admit_continuation("ordinary-1", action_nonce=NONCE)["ok"] is True
+    # A finished review and an owner-stopped one keep their own refusals (no "start it again" note on a success).
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(tmp_path, "review-done", "completed", chat_id=7, root_task_id="review-done",
+                      task_contract={"task_type": "deep_self_review"}, result="report")
+    assert continuation_offer(load_task_result(tmp_path, "review-done"), "review-done")["refusal"] == "author_finished"
+    _interrupted(tmp_path, "review-stopped", origin={"source": "http_single", "reason": "Stop now"},
+                 task_contract={"task_type": "deep_self_review"})
+    assert continuation_offer(load_task_result(tmp_path, "review-stopped"), "review-stopped")["refusal"] == (
+        "stopped_by_owner")
+
+
+def test_an_older_bound_claim_on_a_deep_self_review_creates_no_successor_while_an_admitted_one_answers(
+        tmp_path, monkeypatch):
+    """A claim bound before this refusal, with no successor row yet, must not create an ordinary task on replay; a
+    successor that was really admitted is still answered with its receipt; an ordinary root's bound claim completes."""
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    real_persist = queue.persist_queue_snapshot
+    for task_id in ("bound-review", "bound-task"):
+        _interrupted(tmp_path, task_id, task_contract={"task_type": "task"})
+        monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": False)
+        assert admit_continuation(task_id, action_nonce=NONCE)["error"] == "queue_snapshot_persist_failed"
+        monkeypatch.setattr(queue, "persist_queue_snapshot", real_persist)
+        assert load_task_result(tmp_path, task_id)["continued_by"]["state"] == "bound"
+    # The first record names a deep self-review (an older admission, before the kind refusal).
+    seed_result(tmp_path, "bound-review", {**load_task_result(tmp_path, "bound-review"),
+                                            "task_contract": {"task_type": "deep_self_review"}})
+    assert admit_continuation("bound-review", action_nonce=NONCE) == {
+        "ok": False, "error": "deep_review_restart_required", "cause": "deep_self_review"}
+    assert workers.PENDING == []
+    assert admit_continuation("bound-task", action_nonce=NONCE)["ok"] is True  # the ordinary kind completes
+    _interrupted(tmp_path, "admitted-review", task_contract={"task_type": "task"})
+    admitted = admit_continuation("admitted-review", action_nonce=NONCE)
+    assert admitted["ok"] is True
+    seed_result(tmp_path, "admitted-review", {**load_task_result(tmp_path, "admitted-review"),
+                                               "task_contract": {"task_type": "deep_self_review"}})
+    again = admit_continuation("admitted-review", action_nonce=NONCE)
+    assert again["ok"] is True and again["successor_task_id"] == admitted["successor_task_id"]
+
+
+def test_a_deep_self_review_queued_through_the_real_admission_is_recognised_before_it_starts(tmp_path, monkeypatch):
+    """The kind is recorded at admission: the scheduled receipt carries the contract (in its metadata), so a review
+    interrupted before its first run is refused too."""
+    from ouroboros.owner_continue import continuation_eligibility, recorded_task_type
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor import queue as q
+
+    from tests.test_owner_wait_pool import InputQueue, Process
+    from tests.worker_pool_support import affirm_ready
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    slot = workers.Worker(0, Process(42), InputQueue())  # a started pool: the review needs one
+    affirm_ready(slot)
+    workers.WORKERS[0] = slot
+    said = []
+    monkeypatch.setattr(q, "send_with_budget", lambda *a, **k: said.append(a), raising=False)
+    monkeypatch.setattr(q, "load_state", lambda: {"owner_chat_id": 7}, raising=False)
+    tid = q.queue_deep_self_review_task(reason="owner:/review", force=True, chat_id=7)
+    assert tid, said
+    stored = load_task_result(tmp_path, tid)
+    assert stored["status"] == "scheduled" and recorded_task_type(stored) == "deep_self_review"
+    write_task_result(tmp_path, tid, "cancelled", result="interrupted",
+                      cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
+    assert continuation_eligibility(load_task_result(tmp_path, tid), tid)["refusal"] == "deep_review_restart_required"
 
 
 def test_the_continues_barriers_run_outside_q_and_its_record_is_written_with_the_row_still_queued(tmp_path, monkeypatch):
@@ -432,6 +632,11 @@ def _settled_with_corpus(tmp_path, *rows, unavailable=(), late=False):
     _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
     _owner_mail(tmp_path)
     if late:
+        from ouroboros.owner_quiz import record_answered, record_asked
+
+        record_asked(tmp_path, "asker-1", quiz_id="q-1", question="Which sheet?", options=["Sheet B"])
+        record_answered(tmp_path, "asker-1", quiz_id="q-1", option_index=0, comment="Option B, please",
+                        request_id="sheet-answer")
         write_owner_message(tmp_path, "Option B, please", "pred-1", msg_id="late-1",
                             late_answer={"task_id": "asker-1", "quiz_id": "q-1"})
     assert settle_task_mailbox(tmp_path, "pred-1", tmp_path)
@@ -1176,3 +1381,326 @@ def test_a_carried_rendering_keeps_its_reference_and_its_words_through_each_cont
         write_task_result(tmp_path, successor["id"], "cancelled", result="interrupted", review_evidence={
             "task_inputs": inputs}, cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
         current, nonce = successor["id"], f"hop-{hop}-press-2941"
+
+
+from ouroboros.owner_continue import continuation_eligibility
+
+
+def test_both_size_refusal_endings_offer_continue():
+    for reason in ("llm_api_error", "context_overflow"):
+        verdict = continuation_eligibility({"status": "failed", "reason_code": reason}, "solo")
+        assert verdict == {"eligible": True, "cause": reason, "refusal": ""}, reason
+
+
+def test_an_owner_stop_after_a_size_refusal_still_refuses():
+    verdict = continuation_eligibility({"status": "cancelled", "reason_code": "context_overflow",
+                                        "cancel_origin": {"source": "owner_stop"}}, "solo")
+    assert verdict["eligible"] is False and verdict["refusal"] == "stopped_by_owner"
+    child = continuation_eligibility({"status": "failed", "reason_code": "context_overflow",
+                                      "parent_task_id": "root", "root_task_id": "root"}, "child")
+    assert child["refusal"] == "not_a_root_task"
+
+
+@pytest.mark.parametrize("comment", ["", "  only the blue tiles  "])
+def test_opening_answer_keeps_its_authorship_in_continue_and_start(tmp_path, monkeypatch, comment):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_words import carried_owner_corpus, owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    label, asker, qid = "Turn the tiles", "tile-setter", "tile-order"
+    shown = comment or "1. " + label
+    ref = build_owner_message_ref(chat_id=7, client_message_id="tile-answer", ts="2040-01-01T00:00:00Z", text=shown)
+    block = {"state": "answered", "quiz_id": qid, "question": "Which side?", "options": [label],
+             "answered_index": 0, "comment": comment, "answered_after_terminal": True}
+    metadata = {"origin_message_text": shown, "origin_message_ref": ref,
+                "late_answer": {"task_id": asker, "quiz_id": qid, "answer_snapshot": {"task_id": asker, "quiz": block}}}
+    def opened(task_metadata, text):
+        ctx = SimpleNamespace(task_metadata=task_metadata, drive_root=tmp_path)
+        _initialize_owner_directives(ctx, [{"role": "user", "content": text}])
+        return ctx
+    head = opened(metadata, shown)
+    _interrupted(tmp_path, origin_message_text=shown, origin_message_ref=ref, metadata=metadata,
+                 owner_mailbox={"read_complete": True, "rows": []}, review_evidence=_corpus(*head._owner_directives))
+    before_capture = load_task_result(tmp_path, "pred-1")
+    before_capture.pop("review_evidence")
+    opening = owner_sources(tmp_path, before_capture, "pred-1")["original"]
+    assert opening["reply_to"]["text"].startswith("Which side?")
+    assert (opening.get("input_source") == "owner_press") == (not comment)
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+    assert ack.get("ok"), ack
+    [successor] = workers.PENDING
+    drafted = {"objective_author": {"kind": "task"}, "owner_corpus": carried_owner_corpus(head, shown)}
+    for ctx in (head, opened(successor["metadata"], successor["text"]), opened(drafted, "Draft the work")):
+        [opening] = ctx._owner_directives
+        assert opening["reply_to"]["text"].startswith("Which side?")
+        assert owner_words_contain(ctx, label) is False
+        assert opening["content"] == shown
+        if comment:
+            assert owner_words_contain(ctx, comment)
+        else:
+            assert opening["source"] == "owner_press"
+    if not comment:
+        assert "Owner's original instruction (verbatim):" not in successor["text"]
+        assert label in successor["text"] and "pressed" in successor["text"]
+    chained = load_task_result(tmp_path, successor["id"])
+    chained["owner_mailbox"] = {"read_complete": True, "rows": []}
+    assert not owner_sources(tmp_path, chained, successor["id"])["gaps"]
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "message"])
+def test_cold_opening_keeps_its_identity_through_a_routed_start(tmp_path, monkeypatch, kind):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_words import owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.tools import control_routing
+    from ouroboros.tools.registry import ToolContext
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    label, stamp = "Choose the blue tiles", "2040-01-01T00:00:00Z"
+    words = "  send a sample  " if kind == "comment" else label if kind == "message" else "1. " + label
+    ref = build_owner_message_ref(chat_id=7, client_message_id="cold-tiles", ts=stamp, text=words)
+    meta = {"origin_message_ref": ref, "origin_message_text": words}
+    if kind != "message":
+        block = {"state": "answered", "quiz_id": "tiles", "question": "Which tiles?", "options": [label],
+                 "answered_index": 0, "comment": words if kind == "comment" else "", "answered_after_terminal": True}
+        meta["late_answer"] = {"task_id": "tile-desk", "quiz_id": "tiles",
+                               "answer_snapshot": {"task_id": "tile-desk", "quiz": block}}
+    _interrupted(tmp_path, metadata=meta, origin_message_ref=ref, origin_message_text=words, owner_mailbox={"read_complete": True, "rows": []})
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    ctx = ToolContext(repo_dir=Path.cwd(), drive_root=tmp_path, task_metadata=successor["metadata"])
+    ctx.current_chat_id, ctx.task_id = 7, successor["id"]
+    _initialize_owner_directives(ctx, [{"role": "user", "content": successor["text"]}])
+    events = []
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
+                        lambda _ctx, event: (events.append(event) or "live", {"status": "scheduled"}))
+    monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda _ctx: "")
+    control_routing._start_task(ctx, "Read the building notes", title="Read notes")
+    [event] = events
+    routed = SimpleNamespace(task_metadata={"objective_author": event["objective_author"], "owner_corpus": event["owner_corpus"]})
+    _initialize_owner_directives(routed, [{"role": "user", "content": "Read the building notes"}])
+    for focus in (ctx, routed):
+        [row] = focus._owner_directives
+        assert row["content"] == words
+        assert (row["chat_id"], row["client_message_id"], row["ts"]) == ("7", "cold-tiles", stamp)
+        assert owner_words_contain(focus, words) is (kind != "press")
+        assert owner_words_contain(focus, label) is (kind == "message")
+
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
+def test_a_reference_only_late_answer_keeps_its_type_on_every_opening(tmp_path, monkeypatch, kind):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision, owner_reply_owed
+    from ouroboros.owner_quiz import late_answer_model_text, record_answered, record_asked
+    from ouroboros.owner_words import carried_owner_corpus, cited_owner_basis, owner_words_contain
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    asker, quiz, label = "fern-desk", "fern-card", "Use the fern chart"
+    comment = "  after moonrise  " if kind == "comment" else ""
+    bubble = comment or "1. " + label
+    reference = {"task_id": asker, "quiz_id": quiz}
+    if kind != "unavailable":
+        record_asked(tmp_path, asker, quiz_id=quiz, question="Which chart?", options=[label])
+        record_answered(tmp_path, asker, quiz_id=quiz, option_index=0, comment=comment, request_id="fern-choice")
+    ref = build_owner_message_ref(chat_id=7, client_message_id="fern-late", ts="2040-01-01T00:00:00Z", text=bubble)
+    meta = {"origin_message_text": bubble, "origin_message_ref": ref, "late_answer": reference}
+
+    def opened(metadata, frame):
+        ctx = SimpleNamespace(task_metadata=metadata, drive_root=tmp_path)
+        _initialize_owner_directives(ctx, [{"role": "user", "content": frame}])
+        return ctx
+
+    head = opened(meta, late_answer_model_text(tmp_path, reference, bubble))
+    assert owner_input_revision(head) == 1 and owner_reply_owed(head)
+    start = opened({"objective_author": {"kind": "task"}, "owner_corpus": carried_owner_corpus(head, bubble)}, "Read notes")
+    _interrupted(tmp_path, metadata=meta, origin_message_ref=ref, origin_message_text=bubble,
+                 owner_mailbox={"read_complete": True, "rows": []})
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    for focus in (head, start, opened(successor["metadata"], successor["text"])):
+        [row] = focus._owner_directives
+        assert not owner_words_contain(focus, label)
+        if kind == "unavailable":
+            assert row["source"] == "owner_card_input" and not cited_owner_basis(focus, label)[0]
+        else:
+            assert row["content"] == bubble and "Which chart?" in row["reply_to"]["text"]
+            if comment:
+                assert owner_words_contain(focus, comment)
+            else:
+                assert cited_owner_basis(focus, label)[0]["source"] == "owner_press"
+
+
+def test_continue_labels_a_later_unavailable_answer_and_preserves_the_words_around_it(tmp_path, monkeypatch):
+    from ouroboros.owner_mailbox import write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path)
+    notice = "Quiz answer received. Its accepted answer is unavailable."
+    after = "  keep the elm dates  "
+    assert write_owner_message(tmp_path, notice, "pred-1", msg_id="elm-copy")
+    assert write_owner_message(tmp_path, "1. Elm chart", "pred-1", msg_id="elm-late",
+                               late_answer={"task_id": "elm-desk", "quiz_id": "elm-chart"})
+    assert write_owner_message(tmp_path, after, "pred-1", msg_id="elm-after")
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    [successor] = workers.PENDING
+    rows = successor["metadata"]["owner_corpus"]
+    assert [(row["msg_id"], row["source"], row["content"]) for row in rows if row.get("msg_id")] == [
+        ("elm-copy", "owner_mailbox", notice), ("elm-late", "owner_card_input", notice),
+        ("elm-after", "owner_mailbox", after)]
+    order = successor["text"]
+    assert "Other owner words in that task's record (verbatim, in order):" not in order
+    assert order.count(notice) == 2 and order.count(after) == 1
+    assert order.index("Owner words (verbatim): " + notice) < order.index("Host record: " + notice) < order.index(after)
+
+
+@pytest.mark.parametrize("has_snapshot", [True, False])
+def test_continue_reads_the_retained_form_opening(tmp_path, monkeypatch, has_snapshot):
+    from types import SimpleNamespace
+
+    from ouroboros.card_store import owner_press_text, record_submission, write_card
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_relay import origin_snapshot, owner_row_source
+    from ouroboros.owner_words import owner_words_contain
+    from ouroboros.projects_registry import bind_task_to_project, create_project, project_binding_for_task
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    asker, label = "map-desk", "Save map notes"
+    values = {"notes": "line one\nline two", "copies": 2}
+    source = tmp_path / "source"
+    card = write_card(source, chat_id=1, task_id=asker, title="Map notes", fallback_text="Map notes",
+                      kind="components", body={"components": []})
+    record_submission(source, card["card_id"], request_id="notes-1", action_id="save", label=label,
+                      values=values, once=False, revision=1)
+    original = {"direction": "in", "chat_id": 1, "client_message_id": "map-form", "ts": "2040-01-01T00:00:00Z",
+                "text": owner_press_text(label, values), "card_press": {"task_id": asker,
+                    "card_id": card["card_id"], "request_id": "notes-1"}}
+    ref, display = owner_row_source(original)
+    snapshot = origin_snapshot({**original, "_owner_source_root": str(source)}, tmp_path, include_reply=True)
+
+    project = create_project(tmp_path, "notes")
+    bound = bind_task_to_project(tmp_path, "pred-1", project["id"], origin={"ref": ref, "text": display, "snapshot": snapshot})
+    meta = {"origin_message_ref": ref, "origin_message_text": display}
+    if has_snapshot:
+        meta["origin_message_snapshot"] = snapshot
+    _interrupted(tmp_path, metadata=meta,
+                 origin_message_ref=ref, origin_message_text=display, owner_mailbox={"read_complete": True, "rows": []})
+    receipt = admit_continuation("pred-1", action_nonce=NONCE)
+    assert receipt["ok"]
+    [successor] = workers.PENDING
+    assert successor["chat_id"] == project["chat_id"]
+    retained = project_binding_for_task(tmp_path, successor["id"])
+    assert retained["source_ref"] == ref and retained["source_text"] == display
+    assert retained["source_input"] == bound["source_input"] == snapshot["input"]
+    assert "Owner's original instruction (verbatim):\nline one\nline two\n2" in successor["text"]
+    assert '"notes": "line one\\nline two", "copies": 2' in successor["text"]
+    ctx = SimpleNamespace(task_metadata=successor["metadata"], drive_root=tmp_path)
+    _initialize_owner_directives(ctx, [{"role": "user", "content": successor["text"]}])
+    [row] = ctx._owner_directives
+    assert row["source"] == "owner_mailbox" and row["row_sha256"] == ref["row_sha256"] and row["ts"] == ref["ts"]
+    assert row["reply_to"]["submitted_values"] == values and row["reply_to"]["pressed_label"] == label
+    assert owner_words_contain(ctx, values["notes"]) and not owner_words_contain(ctx, label)
+
+
+@pytest.mark.parametrize("conflict", [None, "selection", "quiz_id", "comment"],
+                         ids=["released", "changed-option", "other-card", "trimmed-comment"])
+def test_continue_retypes_the_previous_releases_later_quiz_answers(tmp_path, monkeypatch, conflict):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    asker, label, comment = "larch-desk", "Violet ledger", "  after the print proof  "
+    _interrupted(tmp_path, task_id=asker)
+    for quiz_id, question, options, typed in (
+        ("ledger", "Which ledger?", ["Amber ledger", label], ""),
+        ("print", "When?", ["Now", "Later"], comment),
+    ):
+        card = {"state": "answered", "quiz_id": quiz_id, "question": question, "options": options,
+                "answered_index": 1, **({"comment": typed} if typed else {})}
+        assert write_owner_message(tmp_path, typed or "2. " + label, asker, kind="quiz_answer",
+                                   msg_id=f"quiz_answer:{asker}:{quiz_id}", quiz_delivery={
+                                       "task_id": asker, "quiz_id": quiz_id, "answer_snapshot": card})
+
+    # The previous Continue wrote both accepted cards and their corpus copies under owner_quiz_answer.
+    with monkeypatch.context() as previous:
+        previous.setattr("ouroboros.owner_continue.row_source", lambda entry, words_source: words_source)
+        first = admit_continuation(asker, action_nonce=NONCE)
+    assert first["ok"], first
+    predecessor = first["successor_task_id"]
+    assert not workers.WORKERS
+    assert workers.kill_workers(terminal_status="cancelled", result_reason="server shutdown", stop_source="server_shutdown")
+    record = load_task_result(tmp_path, predecessor)
+    press, words = record["metadata"]["continuation"]["owner_sources"]["later"]
+    assert press["source"] == words["source"] == "owner_quiz_answer"
+    assert press["content"] == "2. " + label and words["content"] == words["card"]["comment"] == comment
+    if conflict:
+        if conflict == "selection":
+            press["card"]["answered_index"] = 0
+        elif conflict == "quiz_id":
+            press["card"]["quiz_id"] = words["quiz_id"]
+        else:
+            words["card"]["comment"] = comment.strip()
+        seed_result(tmp_path, predecessor, record)
+        refused = admit_continuation(predecessor, action_nonce=NONCE)
+        assert refused == {"ok": False, "error": "owner_source_missing", "gaps": ["chained_owner_source_malformed"]}
+        assert not workers.PENDING and "continued_by" not in load_task_result(tmp_path, predecessor)
+        return
+
+    second = admit_continuation(predecessor, action_nonce=NONCE)
+    assert second["ok"], second
+    [successor] = workers.PENDING
+    meta = successor["metadata"]
+    focus = SimpleNamespace(task_metadata=meta)
+    _initialize_owner_directives(focus, [{"role": "user", "content": successor["text"]}])
+    assert not owner_words_contain(focus, label) and not owner_words_contain(focus, "ledger")
+    assert cited_owner_basis(focus, "ledger")[0] is None
+    whole = cited_owner_basis(focus, label)[0]
+    assert (whole["source"], whole["msg_id"], whole["cited"]) == ("owner_press", press["msg_id"], label)
+    assert owner_words_contain(focus, comment)
+    worded = cited_owner_basis(focus, "print proof")[0]
+    assert (worded["source"], worded["msg_id"], worded["content"]) == ("owner_quiz_answer", words["msg_id"], comment)
+    assert [(row["msg_id"], row["source"]) for row in meta["owner_corpus"] if row.get("quiz_id")] == [
+        (press["msg_id"], "owner_press"), (words["msg_id"], "owner_quiz_answer")]
+    assert meta["continuation"]["owner_sources"]["later"] == [{**press, "source": "owner_press"}, words]
+
+
+def test_continue_and_snapshot_gc_still_see_the_original_pending_writer(tmp_path, monkeypatch):
+    from tests._owner_pause_ended_helpers import _decide, _pending, _resume
+    from ouroboros import delegate_custody as custody
+    from tests._delegated_transport_shared import _rows
+    from ouroboros.task_results import write_task_result
+    from supervisor.continuation_admission import admit_continuation, release_settled_continuations
+
+    _install_queue(tmp_path, monkeypatch)
+    write_task_result(tmp_path, "pred-1", "running", root_task_id="pred-1")
+    start = _pending(tmp_path, "pred-1", "lost", tree="pred-1", snapshot_id="retained-copy")
+    assert _decide(tmp_path, start)
+    _interrupted(tmp_path)
+    successor = admit_continuation("pred-1", action_nonce=NONCE)
+    assert successor["ok"] and successor["held"]
+    assert any(b.get("invocation_id") == "lost" for b in successor["blockers"])
+    refused = _resume("owner", [start["choice_id"]], selected=successor["successor_task_id"])
+    assert refused["error"] == "predecessor_writers_unsettled" and not refused.get("acceptable_unknown")
+    assert release_settled_continuations("pred-1") == []
+    assert len(_rows(tmp_path, custody.START_RISK_ACCEPTED)) == 1
+    assert "retained-copy" in custody.open_snapshot_ids(tmp_path)

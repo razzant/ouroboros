@@ -9,6 +9,7 @@ host-observed evidence rather than a model claim.
 import copy
 import dataclasses
 import json
+import re
 
 import pytest
 
@@ -1075,7 +1076,8 @@ _LAST_READ_VIEW_WRITERS = {  # exact (file, enclosing def, kind); the site COUNT
     (_CORE, "_read_file", "assign"),
     (_EPISODE, "_execute_inspection_call", "assign"),
 }
-_RESET = "    ctx.last_read_view = None\n"  # the reader's entry reset inside _read_file
+# the reader's entry reset inside _read_file, one line, with or without a trailing comment
+_RESET = re.compile(r"^    ctx\.last_read_view = None(?:  #[^\n]*)?\n", re.MULTILINE)
 
 
 def _assert_three_writers(sites):
@@ -1113,10 +1115,161 @@ def test_last_read_view_has_exactly_three_writers():
     base = _last_read_view_sites(live)
     _assert_three_writers(base)
     core = live[_CORE]
-    assert core.count(_RESET) == 1
-    injected_at = core[:core.index(_RESET)].count("\n") + 2  # 1-based line of the injected reset
-    live[_CORE] = core.replace(_RESET, _RESET + _RESET.rstrip("\n") + "  # injected\n")
+    resets = list(_RESET.finditer(core))
+    assert len(resets) == 1, resets
+    reset = resets[0]
+    injected_at = core[:reset.start()].count("\n") + 2  # 1-based line of the injected reset
+    live[_CORE] = core[:reset.end()] + "    ctx.last_read_view = None  # injected\n" + core[reset.end():]
     fourth = _last_read_view_sites(live)
     assert fourth == base | {(_CORE, "_read_file", injected_at, "assign")}
     with pytest.raises(AssertionError):
         _assert_three_writers(fourth)
+
+
+class _TerminalLLM(_ScriptedLLM):
+    """Replays ``(message, usage facts)`` pairs: the provider-stated terminal of each round."""
+
+    def chat(self, **kwargs):
+        self.calls.append({**kwargs, "messages": copy.deepcopy(kwargs.get("messages"))})
+        message, facts = self.script.pop(0)
+        return message, {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0, **facts}
+
+
+_COMMENTARY = {"response_finish_reason": "commentary", "response_status": "completed"}
+
+
+def test_commentary_continues_the_same_episode_to_its_verdict(subject_repo):
+    llm = _TerminalLLM([({"content": "Reading the subject first."}, _COMMENTARY),
+                        ({"content": "Still checking."}, _COMMENTARY),
+                        ({"content": _VERDICT}, {"response_finish_reason": "stop", "response_status": "completed"})])
+    result = NativeToolRoundReviewExecutor(_assignment(subject_repo, llm), llm=llm).execute()
+    assert result.raw_text == _VERDICT and len(llm.calls) == 3
+    sent = [row.get("content") for row in llm.calls[2]["messages"] if row.get("role") == "assistant"]
+    assert sent[-2:] == ["Reading the subject first.", "Still checking."]
+
+
+@pytest.mark.parametrize("reason", ["content_filter", "max_messages", "steered", None])
+def test_an_unsuitable_incomplete_terminal_is_never_a_verdict(subject_repo, reason):
+    llm = _TerminalLLM([({"content": _VERDICT, "tool_calls": [_tool_call("read_file", {"path": "greeting.txt"})]},
+                         {"response_finish_reason": reason, "response_status": "incomplete"})])
+    with pytest.raises(ReviewRouteUnavailable) as exc:
+        NativeToolRoundReviewExecutor(_assignment(subject_repo, llm), llm=llm).execute()
+    assert exc.value.code == "native_round_unusable" and len(llm.calls) == 1
+
+
+def test_a_completed_refusal_after_commentary_is_never_a_verdict(subject_repo):
+    llm = _TerminalLLM([({"content": "Reading the subject first."}, _COMMENTARY),
+                        ({"content": _VERDICT, "refusal": "I can't help with that request."},
+                         {"response_finish_reason": "refusal", "response_status": "completed"})])
+    with pytest.raises(ReviewRouteUnavailable) as exc:
+        NativeToolRoundReviewExecutor(_assignment(subject_repo, llm), llm=llm).execute()
+    assert exc.value.code == "native_round_unusable" and len(llm.calls) == 2
+
+
+_CUT = {"response_finish_reason": "max_output_tokens", "response_status": "incomplete"}
+
+
+def test_an_output_cut_the_provider_left_unfinished_is_never_a_verdict(subject_repo):
+    """Main recovers a Responses reply cut at its output limit; a review has no such recovery, so the cut fails
+    closed with no verdict even when its text already parses as one, and the episode sends nothing more."""
+    llm = _TerminalLLM([({"content": _VERDICT}, _CUT)])
+    with pytest.raises(ReviewRouteUnavailable) as exc:
+        NativeToolRoundReviewExecutor(_assignment(subject_repo, llm), llm=llm).execute()
+    assert exc.value.code == "native_round_unfinished" and len(llm.calls) == 1
+
+
+def test_a_chat_shaped_output_limit_reply_keeps_its_existing_reading(subject_repo):
+    """Negative control: a lane without a terminal status (every Chat-shaped one) is read by its finish alone, as
+    before; only the provider-stated ``incomplete`` terminal is held back from becoming a verdict."""
+    llm = _TerminalLLM([({"content": _VERDICT}, {"response_finish_reason": "length"})])
+    result = NativeToolRoundReviewExecutor(_assignment(subject_repo, llm), llm=llm).execute()
+    assert result.raw_text == _VERDICT and len(llm.calls) == 1
+
+
+_TOOLS_DONE = {"response_finish_reason": "tool_calls", "response_status": "completed"}
+_DRAFT = "# Draft\n\n- read greeting\n"
+
+
+class _BrokeAfterScript(_TerminalLLM):
+    """The paid ledger refuses the send after the scripted rounds (the episode's money bound)."""
+
+    def chat(self, **kwargs):
+        if not self.script:
+            from ouroboros.usage_accounting import BudgetExceeded
+
+            self.calls.append(kwargs)
+            raise BudgetExceeded("root budget exhausted")
+        return super().chat(**kwargs)
+
+
+def _report(subject_repo, tmp_path, llm, name):
+    assignment = dataclasses.replace(_assignment(subject_repo, llm), custody_root=tmp_path / name)
+    assignment.request.surface = "deep_self_review"  # a report: an exhausted episode may deliver its draft
+    return NativeToolRoundReviewExecutor(assignment, llm=llm)
+
+
+def test_a_report_without_a_usable_draft_ends_an_unusable_terminal_with_no_result(subject_repo, tmp_path):
+    """Commentary is progress, not a draft: a report whose only earlier prose was commentary has nothing to
+    deliver when the provider ends the next reply as a non-result, so it fails closed — the unusable reply's text
+    and call are neither its product nor executed."""
+    llm = _TerminalLLM([({"content": "Reading the subject first."}, _COMMENTARY),
+                        ({"content": "# Report\n- all good", "tool_calls": [_tool_call("read_file", {"path": "greeting.txt"})]},
+                         {"response_finish_reason": "content_filter", "response_status": "incomplete"})])
+    executor = _report(subject_repo, tmp_path, llm, "no-draft")
+    with pytest.raises(ReviewRouteUnavailable) as exc:
+        executor.execute()
+    assert exc.value.code == "native_round_unusable" and len(llm.calls) == 2
+    [row] = _episode_rows(tmp_path / "no-draft")
+    assert (row["native_end_reason"], row["native_tool_calls"]) == ("unusable_answer", 0) and "native_incomplete" not in row
+    assert json.loads(row["native_terminal_round"])["messages"][0]["content"] == "# Report\n- all good"  # kept as evidence
+
+
+def test_a_report_keeps_its_usable_draft_marked_incomplete_after_an_unusable_terminal(subject_repo, tmp_path):
+    """A usable earlier round's prose stays the report's draft through later commentary; the unusable terminal
+    ends the episode (its call never runs) and the draft is delivered marked incomplete for that reason — never
+    as a finished report, never as a verdict."""
+    llm = _TerminalLLM([({"content": _DRAFT, "tool_calls": [_tool_call("read_file", {"path": "greeting.txt"}, "c1")]},
+                         _TOOLS_DONE),
+                        ({"content": "Checking one more file."}, _COMMENTARY),
+                        ({"content": _VERDICT, "tool_calls": [_tool_call("read_file", {"path": "greeting.txt"}, "c2")]},
+                         {"response_finish_reason": "max_messages", "response_status": "incomplete"})])
+    result = _report(subject_repo, tmp_path, llm, "draft").execute()
+    assert result.raw_text == _DRAFT and len(llm.calls) == 3
+    assert (result.usage["native_incomplete"], result.usage["native_end_reason"]) == ("unusable_answer", "unusable_answer")
+    assert result.message["native_incomplete"] == "unusable_answer" and result.usage["verdict_method"] == "report"
+    assert result.usage["native_tool_calls"] == 1  # round one's read; the unusable round's call never ran
+    [row] = _episode_rows(tmp_path / "draft")
+    assert row["native_incomplete"] == "unusable_answer"
+
+
+def test_a_report_keeps_its_usable_draft_marked_incomplete_after_an_unfinished_cut(subject_repo, tmp_path):
+    """An output cut never replaces the draft: the earlier usable draft is delivered marked incomplete for it."""
+    llm = _TerminalLLM([({"content": _DRAFT, "tool_calls": [_tool_call("read_file", {"path": "greeting.txt"}, "c1")]},
+                         _TOOLS_DONE),
+                        ({"content": "# Report\n- all good, but the reply was cut"}, _CUT)])
+    result = _report(subject_repo, tmp_path, llm, "cut").execute()
+    assert result.raw_text == _DRAFT and len(llm.calls) == 2
+    assert result.usage["native_incomplete"] == result.usage["native_end_reason"] == "unfinished_answer"
+
+
+def test_a_commentary_only_report_reaching_its_bound_has_no_draft_but_a_usable_one_survives(subject_repo, tmp_path):
+    """Commentary rounds continue the same episode until its own bound (here the ledger refusing the next send).
+    Without a usable round there is no draft and the bound's own error stands; with one, that draft is delivered
+    marked incomplete for the bound — the commentary never becomes the product either way."""
+    from ouroboros.usage_accounting import BudgetExceeded
+
+    llm = _BrokeAfterScript([({"content": "Reading."}, _COMMENTARY), ({"content": "Still reading."}, _COMMENTARY)])
+    executor = _report(subject_repo, tmp_path, llm, "commentary-only")
+    with pytest.raises(BudgetExceeded):
+        executor.execute()
+    assert len(llm.calls) == 3
+    [row] = _episode_rows(tmp_path / "commentary-only")
+    assert (row["native_end_reason"], row["native_tool_calls"]) == ("budget_exhausted", 0) and "native_incomplete" not in row
+
+    llm = _BrokeAfterScript([({"content": _DRAFT, "tool_calls": [_tool_call("read_file", {"path": "greeting.txt"}, "c1")]},
+                              _TOOLS_DONE),
+                             ({"content": "Reading."}, _COMMENTARY), ({"content": "Still reading."}, _COMMENTARY)])
+    result = _report(subject_repo, tmp_path, llm, "draft-then-commentary").execute()
+    assert result.raw_text == _DRAFT and len(llm.calls) == 4
+    assert (result.usage["native_incomplete"], result.usage["native_end_reason"]) == ("budget_exhausted", "budget_exhausted")
+    assert result.usage["native_tool_calls"] == 1

@@ -4,11 +4,12 @@
 // composer's pills reaches whichever of them is off screen. It owns no polling or saved state:
 // `/api/state` names the canonical questions and actions, the feed holds their cards.
 import { createModelWaitController } from './model_wait.js';
+import { readBand } from './project_read_state.js';
 import { projectReference, nameProjectReference } from './project_reference.js';
-import { createTaskResumeButton, openTaskControlMenu, requestStop, hurryTaskAction,
+import { createTaskResumeButton, openTaskControlMenu, requestStop, hurryTaskAction, resumeEligible, resumePending,
     resumeTaskAction, ACTION_RESUME, ACTION_HURRY, TASK_CONTROL_TRIGGER_LABEL } from './task_control_menu.js';
 import { syncParkedPhase } from './task_phase_chip.js';
-import { memberState, resumeAttemptWords, workOfEpisode } from './work_status.js';
+import { memberState, reasonText, resumeAttemptWords, workOfEpisode } from './work_status.js';
 import { ANSWERABLE_QUIZ_STATES, questionWaits, unknownDeliveryRemovable, vouchedBy } from './question_presentation.js';
 import { createSystemMessageActions } from './ui_helpers.js';
 import { showToast } from './toast.js';
@@ -78,11 +79,8 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         heading.append(title, phaseEl);
         root.append(heading, reason, controls, timelineEl);
         bubble.append(sender, root);
-        const reference = row.project_id ? projectReference({ id: row.project_id, name: row.project_name },
-            { taskId: id, beside: title }) : null;
-        if (reference) controls.append(reference);
         // The message stands only while the census says the task needs the owner, so its chip is the owner's move.
-        record = { groupId: id, bubble, root, phaseEl, title, reason, controls, timelineEl, reference,
+        record = { groupId: id, bubble, root, phaseEl, title, reason, controls, timelineEl, reference: null,
             phaseSecondaryEl: null, row, available: true, finished: false, ownerMove: true };
         records.set(id, record);
         // The time it is first seen: a blocker is a current fact, so it stands at the live edge.
@@ -95,22 +93,41 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         && record.row.can_resume === true && record.row.pause_cause !== 'owner';
 
     function paint(record, row) {
+        if (record.reference && record.row.project_id !== row.project_id) {
+            record.reference.remove();
+            record.reference = null;
+        }
         record.row = row;
-        record.title.textContent = row.task_name || row.title || row.project_name || 'Task';
+        record.title.textContent = row.suggested_name || row.task_name || row.title || row.project_name || tx('Task');
         // What it needs, then its latest refused Resume as dated history in the door's words (never a second message).
         const attempt = resumeAttemptWords(row.last_resume);
-        // Beside its own Resume button a plain resume pause says nothing more: the button is the whole ask.
-        const needs = row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? ''
+        // A named stop explains the button. A plain Resume needs no second instruction.
+        const needs = row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? reasonText(row.resumeReason)
             : tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
         record.reason.textContent = [needs, attempt && (/[.!?…]$/.test(attempt) ? attempt : `${attempt}.`)].filter(Boolean).join(' ');
         record.reason.hidden = !record.reason.textContent;
-        if (record.reference) nameProjectReference(record.reference, { id: row.project_id, name: row.project_name });
+        if (row.project_id) {
+            const project = { id: row.project_id, name: row.project_name };
+            if (record.reference) nameProjectReference(record.reference, project);
+            else {
+                record.reference = projectReference(project, { taskId: record.groupId, beside: record.title });
+                record.controls.prepend(record.reference);
+            }
+        }
+        // A row no census vouches for now (kept from an earlier read, or the socket is down) has no confirmed
+        // place: its Project reference leads to no room until a census names it again.
+        if (record.reference) record.reference.disabled = !record.available;
         syncParkedPhase(record, connected ? row.phase : 'unknown', row);
         if (canResume(record) && !record.resume) {
             record.resume = createTaskResumeButton(record.groupId, { canResume: () => canResume(record), onSettled: refresh });
             record.controls.append(record.resume);
         }
-        if (record.resume) record.resume.disabled = !canResume(record);
+        if (record.resume) {
+            record.resume.hidden = row.can_resume !== true || row.pause_cause === 'owner';
+            // A repaint reads the task's one pending fact with the census's authority, never the census alone: a read
+            // taken before a press still names the task resumable until the read that follows the press says otherwise.
+            record.resume.disabled = !resumeEligible(record.groupId, () => canResume(record));
+        }
         if (row.cancelable === true && !record.stop) {
             const button = document.createElement('button');
             button.type = 'button';
@@ -120,12 +137,15 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
                 if (!connected || !record.available || record.row.cancelable !== true) return;
                 openTaskControlMenu(button, { budgetPaused: record.row.phase === 'budget_paused',
                     // Resume rides the menu where the server allows it and no Resume button of its own stands
-                    // beside it (an interrupted owner Resume of a member).
-                    resume: record.row.can_resume === true && !canResume(record), onAction: async action => {
+                    // beside it (an interrupted owner Resume of a member), and nothing of the task is pending —
+                    // a request of its own, or the read that reconciles a Resume it just answered.
+                    resume: record.row.can_resume === true && !canResume(record) && !resumePending(record.groupId),
+                    onAction: async action => {
                         if (!connected || !record.available || record.row.cancelable !== true) return;
                         try {
-                            if (action === ACTION_RESUME) await resumeTaskAction(record.groupId);
-                            else if (action === ACTION_HURRY) await hurryTaskAction(record.groupId);
+                            // A Resume keeps its task pending until this re-read has settled (the request owner holds it).
+                            if (action === ACTION_RESUME) { await resumeTaskAction(record.groupId, { settle: refresh }); return; }
+                            if (action === ACTION_HURRY) await hurryTaskAction(record.groupId);
                             else await requestStop(record.groupId, action);
                             await refresh();
                         } catch (error) { showToast(`Task control not confirmed: ${error.message || error}`, 'error'); }
@@ -167,13 +187,9 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         const card = messagesDiv.querySelector(`.chat-quiz-card[data-task-id="${CSS.escape(String(target.row.task_id))}"][data-quiz-id="${CSS.escape(String(target.row.quiz_id))}"]`);
         return card?.closest('.chat-bubble') || card || null;
     }
-    // The reading area between the floating header and the composer.
+    // The reading area between the floating header (with its frosted edge) and the composer.
     function view() {
-        const box = messagesDiv.getBoundingClientRect();
-        const header = page.querySelector('.chat-page-header')?.getBoundingClientRect();
-        const composer = toolbar?.getBoundingClientRect();
-        return { top: Math.max(box.top, header ? header.bottom : box.top),
-            bottom: Math.min(box.bottom, composer && composer.height ? composer.top : box.bottom) };
+        return readBand(messagesDiv, page.querySelector('.chat-page-header'), toolbar);
     }
     function onScreen(node) {
         if (!node?.isConnected) return false;
@@ -215,12 +231,22 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
     }
 
     // The card's head lands just under the chat header; the question text takes focus (never the
-    // answer field), so going to a question summons no phone keyboard.
-    function land(node) {
+    // answer field), so going to a question summons no phone keyboard. An action's landing focuses its
+    // explicit Resume where one stands (owner 18.11, A: the pill leads to the System row's own door);
+    // focusing never sends the operation.
+    function land(node, door = null) {
         const position = reading();
         if (position) { position.claim(); position.stick = false; }
         messagesDiv.scrollTop += node.getBoundingClientRect().top - view().top - 12;
-        (node.querySelector('.chat-quiz-question') || node).focus?.({ preventScroll: true });
+        (door || node.querySelector('.chat-quiz-question') || node).focus?.({ preventScroll: true });
+    }
+    // The action target's own Resume button while a press of it would act and can be made now: the owner's
+    // current authority (`resumeEligible`) AND a shown, enabled button (a press keeps its own disabled until its
+    // census read settles, and a browser focuses no disabled button); otherwise the message takes the landing.
+    function resumeDoor(target) {
+        const record = target.kind === 'action' ? records.get(target.id) : null;
+        const door = record?.resume;
+        return door && !door.hidden && !door.disabled && resumeEligible(record.groupId, () => canResume(record)) ? door : null;
     }
     pill.addEventListener('click', async () => {
         const target = nextTarget();
@@ -236,7 +262,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
             }
             else { await revealQuestion(target.row.task_id, target.row.quiz_id, { focus: 'question' }); node = nodeOf(target); }
         }
-        if (node) land(node);
+        if (node) land(node, resumeDoor(target));
         requestAnimationFrame(update);
     });
     let queued = false;
@@ -272,8 +298,9 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
                     if (!id) continue;
                     current.add(id);
                     // The same body's work projection says the task's latest refused Resume (`last_resume`).
-                    const attempt = memberState(data, id)?.last_resume || workOfEpisode(data, id)?.last_resume;
-                    const row = attempt ? { ...action, last_resume: attempt } : action;
+                    const member = memberState(data, id);
+                    const row = { ...action, last_resume: member?.last_resume || workOfEpisode(data, id)?.last_resume || action.last_resume,
+                        resumeReason: !action.project_id ? member?.because?.[0] : null };
                     const record = recordFor(row);
                     record.available = true;
                     paint(record, row);

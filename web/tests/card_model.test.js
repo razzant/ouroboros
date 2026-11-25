@@ -27,7 +27,7 @@ const CATALOG = {
 const flush = async () => { for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
 /* One card's meta line as chat_activity.js leaves it, with everything the fact's acts reach injected. */
-function card({ recents = [route(GLM)], pins = [], answer = null, catalog = CATALOG } = {}) {
+function card({ recents = [route(GLM)], pins = [], answer = null, catalog = CATALOG, settings = {}, processing = null } = {}) {
     const doc = stubDocument();
     doc.body = doc.createElement('body');
     const meta = doc.createElement('div');
@@ -44,8 +44,18 @@ function card({ recents = [route(GLM)], pins = [], answer = null, catalog = CATA
     const rerenders = [];
     const reply = { value: answer };
     const pinned = { routes: pins, writes: [] };
+    // `reads`: the settings documents read, and the key models whose own endpoints were asked for (`processing`
+    // answers them by routed value; without it that read fails, as offline).
+    const reads = { settings: 0, processing: [] };
     const store = createModelCatalogStore({ readCatalog: async () => catalog,
-        readPreferences: async () => ({ model_recents: recents, model_pins: pinned.routes }), readSettings: async () => ({ _meta: { connections: [] } }),
+        readPreferences: async () => ({ model_recents: recents, model_pins: pinned.routes }),
+        readSettings: async () => {
+            reads.settings += 1;
+            if (settings instanceof Error) throw settings;
+            return { OUROBOROS_MODEL: ASTRA, USE_LOCAL_MAIN: 'false',
+                _meta: { connections: [{ id: 'openrouter', enabled: true, configured: true }] }, ...settings };
+        },
+        readProcessing: async (value) => { reads.processing.push(value); if (!processing) throw new Error('not read'); return processing(value); },
         savePreferences: async (body) => {
             pinned.writes.push(body);
             const { pin = [], unpin = [] } = body.model_pins;
@@ -105,7 +115,7 @@ function card({ recents = [route(GLM)], pins = [], answer = null, catalog = CATA
         scope: strip().querySelector('.model-tier-scope').textContent,
         means: strip().querySelector('.model-tier-means').textContent,
     });
-    return { doc, meta, record, tools, calls, ids, toasts, rerenders, reply, store, pinned, paint, part, fact, said, popup, acts, pressAct, list,
+    return { doc, meta, record, tools, calls, ids, toasts, rerenders, reply, store, pinned, reads, paint, part, fact, said, popup, acts, pressAct, list,
         rows, outline: () => modelSheetOutline(list().innerHTML), take, pin, chooseTier, tierView, fire };
 }
 
@@ -115,6 +125,7 @@ test('the words of a fact follow its basis; a follower says nothing beside its m
     assert.equal(words('room'), 'this room\'s model');
     assert.equal(words('owner'), 'you chose it');
     assert.equal(words('owner_words'), 'you asked for it');
+    assert.equal(words('owner_press'), 'you pressed this option');
     assert.equal(words('mind'), 'Ouroboros switched to it');
     assert.equal(words('light'), 'follows Light', 'any other basis is the role the work follows');
     assert.equal(words('circle'), 'its circle\'s model');
@@ -264,6 +275,48 @@ test('the fact is the first node of the line and a repaint of the line never tou
     assert.equal(c.part().querySelector('.chat-live-meta-sep').hidden, true, 'none when the fact stands alone');
 });
 
+test('a source confirmed late wears its harness mark: the card repaints the mark when the catalog names it', () => {
+    const c = card();
+    const mark = () => c.part().querySelector('.card-model-mark').innerHTML;
+    c.paint({ lead: lead(ASTRA, 'main') });
+    // The catalog has not been read: the source is an unknown one, so only its initial stands.
+    assert.match(mark(), /model-source-initial" aria-hidden="true">C</, 'an unknown source wears its initial, never an invented mark');
+    c.store.adopt(CATALOG);  // the catalog read brings the source's descriptor (id codex, credentialHarness codex)
+    c.paint({ lead: lead(ASTRA, 'main') });
+    // The same words (Codex) now stand beside the harness's own mark: the mark is what changed.
+    assert.match(mark(), /^<svg class="model-source-mark"/, 'the harness mark stands where the descriptor names it');
+});
+
+test('a catalog repaint brings no tiers back: a Main tier press stands after the store announces it', async () => {
+    const c = card();
+    c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: '', default: 'standard' } });
+    await flush();
+    c.store.adoptTiers({ main: 'fast', default: 'standard' });  // the owner's Main tier press (composer_model.js)
+    await flush();
+    assert.deepEqual(c.store.tiers(), { main: 'fast', default: 'standard' }, 'the pressed tier stays after the store announces it');
+});
+
+test('two mounted cards that remember different tiers and one catalog change: the adoptions stop', async () => {
+    const d = card();
+    let adopts = 0;
+    const adopt = d.store.adoptTiers;
+    d.store.adoptTiers = (tiers) => { adopts += 1; if (adopts <= 50) adopt(tiers); };
+    d.paint({ lead: lead(ASTRA, 'main'), tiers: { main: '', default: 'standard' } });
+    await flush();
+    paintCardModel(card().record, { lead: lead(ASTRA, 'main'), target: 't2', main: route(ASTRA), tiers: { main: 'fast', default: 'standard' } },
+        { store: d.store, coarse: () => false, place: () => ({ reposition() {}, destroy() {} }), toast() {}, rerender() {}, act: async () => ({}) });
+    await flush();
+    assert.equal(adopts, 2, 'each body that arrives adopts its tiers once; repaints adopt none, so the chain ends');
+});
+
+test('a new view from the server adopts its tiers, also on a card that already holds one', () => {
+    const c = card();
+    c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: '', default: 'standard' } });
+    assert.deepEqual(c.store.tiers(), { main: '', default: 'standard' });
+    c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: 'fast', default: 'standard' } });
+    assert.deepEqual(c.store.tiers(), { main: 'fast', default: 'standard' }, 'a body naming new tiers is adopted');
+});
+
 test('the meta separator stays with the last visible model fact across repaints', () => {
     const c = card();
     const separator = () => c.part().querySelector('.chat-live-meta-sep');
@@ -340,7 +393,7 @@ test('the sheet is the composer\'s Model sheet; its Main row is the one way to f
     assert.deepEqual(c.outline(), ['main', '§ Recent', `route|${GLM} * -pin`, 'sources'], 'the work\'s own model is the chosen row');
     assert.deepEqual([c.rows()[0].name, c.rows()[0].facts, c.rows()[0].pin], ['Main', 'this work will follow Main', null]);
     assert.equal(c.rows()[1].facts, 'OpenRouter · paid by key', 'any other row keeps its route\'s facts');
-    assert.equal(c.tierView().scope, 'Default · Standard · for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs');
+    assert.equal(c.tierView().scope, 'Default · for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs');
     assert.ok(c.doc.activeElement === c.popup().querySelector('.chat-model-query'), 'a keyboard types at once');
     c.fact().click();
     assert.equal(c.popup(), null, 'a second press closes it');
@@ -352,7 +405,7 @@ test('the sheet is the composer\'s Model sheet; its Main row is the one way to f
     assert.deepEqual(c.acts(), []);
     assert.equal(c.popup().querySelector('.card-model-pop-words').textContent, 'Model for this work · follows Main');
     assert.deepEqual([c.rows()[0].selected, c.rows()[0].facts], [true, 'this work follows Main'], 'Main\'s row is its own');
-    assert.equal(c.tierView().scope, 'Default · Standard · for this work when it starts, and its new subagents without a tier of their own', 'a queued work says when a change lands');
+    assert.equal(c.tierView().scope, 'Default · for this work when it starts, and its new subagents without a tier of their own', 'a queued work says when a change lands');
     // A follower whose next step is another route has not arrived yet: the row still says what a press does.
     c.paint({ lead: lead(GLM, 'main', { pending: route(ASTRA) }) });
     assert.deepEqual([c.rows()[0].selected, c.rows()[0].facts], [false, 'this work will follow Main']);
@@ -602,7 +655,12 @@ test('beside its model the fact names the work\'s tier when it is not Standard, 
     assert.equal(tierFact({ lead: lead(GLM, 'owner'), processing: { choice: 'fast', last: { requested: 'fast', submitted: 'fast', observed: 'standard' } }, tiers: STANDARD }),
         '· Fast · Fast asked · served Standard', 'what was served, beside what was chosen');
     assert.equal(tierFact({ lead: lead(GLM, 'owner'), processing: { choice: '', last: { requested: 'fast', submitted: null, observed: 'unknown',
-        reason: 'processing_not_submitted' } }, tiers: STANDARD }), '· Fast asked · sent as Standard');
+        reason: 'processing_not_submitted' } }, tiers: STANDARD }), '· Fast asked · sent with no tier', 'not sent is never called Standard');
+    assert.equal(tierFact({ lead: lead(GLM, 'owner'), processing: { choice: 'ultrafast', source: 'owner', last: { requested: 'ultrafast', submitted: 'ultrafast',
+        submittedNative: 'ultrafast', observed: 'fast', observedNative: ['priority'], reason: 'provider_mode_changed', source: 'provider_response' } }, tiers: STANDARD }),
+    '· Ultrafast · Ultrafast asked · served Fast', 'the provider\'s own change');
+    assert.equal(tierFact({ lead: lead(GLM, 'owner'), processing: { choice: 'ultrafast', source: 'owner', last: { requested: 'ultrafast', submitted: 'ultrafast',
+        observed: 'unknown', observedNative: [], source: 'host_request' } }, tiers: STANDARD }), '· Ultrafast · Ultrafast asked · not confirmed', 'nothing echoed it');
     assert.equal(tierFact({ lead: lead(GLM, 'owner'), processing: { choice: 'fast', last: { requested: 'fast', submitted: 'fast', observed: 'fast' } }, tiers: STANDARD }),
         '· Fast', 'served as asked: nothing more');
     assert.equal(tierFact({ lead: lead(GLM, 'owner') }), '', 'no tier fact and no tiers: nothing');
@@ -622,7 +680,7 @@ test('a tier press is this work\'s own act from its next call: the sheet stays o
     await flush();
     assert.deepEqual(c.tierView(), { checked: [], ring: ['standard'], busy: false, reset: false,
         scope: 'Default · Standard · for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs',
-        means: 'The ordinary service at the catalog price.' });
+        means: 'Request Standard processing. Price unknown.' });
     let answer;
     c.reply.value = new Promise((resolve) => { answer = resolve; });
     await c.chooseTier('fast');
@@ -661,8 +719,8 @@ test('the strip says before a press what a tier means for this work\'s route; th
     assert.deepEqual([c.tierView().scope.endsWith('of their own'), served()], [true, ''], 'served as asked: the head says nothing');
     c.paint({ lead: lead(GLM, 'owner'), queued: true, tiers: STANDARD,
         processing: { choice: 'economy', source: 'room', last: { requested: 'economy', submitted: 'economy', observed: 'standard', observedNative: ['default'] } } });
-    assert.equal(c.tierView().means, 'Lower price, slower; a provider may be out of capacity for it. Not confirmed for glm-5.3 here: a provider may serve it as Standard.',
-        'the catalog does not say this route serves Flex');
+    assert.equal(c.tierView().means, 'Requests slower processing at a discount when capacity is available. Not confirmed for glm-5.3 here: a provider may serve it as Standard. Price unknown.',
+        'the catalog does not say this route serves Flex, nor what Flex is listed at on it');
     assert.deepEqual(c.popup().querySelector('.model-tier').querySelectorAll('.model-tier-seg').map((seg) => seg.dataset.support), ['unknown', 'listed', 'unknown', 'unknown']);
     assert.equal(c.said('tier'), '· Flex · Flex asked · served Standard');
     // The whole receipt (asked, sent, served) stands in the card's Details, not in the sheet or the meta line.
@@ -680,7 +738,7 @@ test('a work on a named tier holds its receipt line in an open sheet, so the rec
     assert.deepEqual([held.hidden, held.textContent], [false, ''], 'held empty: CSS keeps its one line');
     c.paint({ lead: lead(GLM, 'owner'), tiers: STANDARD,
         processing: { choice: 'fast', source: 'owner', last: { requested: 'fast', submitted: null, reason: 'processing_not_submitted' } } });
-    assert.deepEqual([node() === held, held.hidden, held.textContent], [true, false, 'Fast asked · sent as Standard']);
+    assert.deepEqual([node() === held, held.hidden, held.textContent], [true, false, 'Fast asked · sent with no tier']);
     closeCardModel();
     // A Standard work holds nothing: no receipt of another tier is coming.
     c.paint({ lead: lead(GLM, 'owner'), tiers: STANDARD, processing: { choice: '', source: '' } });
@@ -708,16 +766,176 @@ test('the strip offers Ultrafast where the work\'s source and model list it, or 
         ['economy', 'standard', 'fast', 'ultrafast'], 'the work\'s own Ultrafast can be seen and left');
 });
 
-test('a refused Fast or Flex the host continued on Standard reads as that deviation on the card and in Details', () => {
-    // The receipt of a call the host retried on Standard after the engine refused its tier before any generation
-    // (owner 13.11: continue on Standard and say so): it keeps what the work asked beside what was sent and served.
+test('a tier sent as Standard (a native setting, or the host\'s continuation of a refused Fast or Flex) reads as that on the card and in Details', () => {
+    // The receipt of a call sent as Standard: the host retried it after the engine refused its tier before any
+    // generation (owner 13.11: continue on Standard and say so), or the route's own native setting stood over it. It
+    // keeps what the work asked beside what was sent and served, and never reads as the provider's own change.
     for (const [tier, word] of [['fast', 'Fast'], ['economy', 'Flex']]) {
         const c = card();
         c.paint({ lead: lead(GLM, 'owner'), tiers: STANDARD, processing: { choice: tier, source: 'owner', last: { requested: tier,
             submitted: 'standard', submittedNative: 'default', observed: 'standard', observedNative: ['default'], reason: 'submitted_mode_differs' } } });
-        assert.equal(c.said('tier'), `· ${word} · ${word} asked · served Standard`);
+        assert.equal(c.said('tier'), `· ${word} · ${word} asked · sent as Standard`);
         assert.equal(c.record.processingDetail, `${word} · last call: asked ${word} · sent Standard · served Standard`);
     }
+});
+
+/* --- the strip follows the next route as it is bound --- */
+
+// Codex with two accounts as one read gives them: `home` lists Ultrafast for gpt-6-astra, `work` does not.
+const account = (id, modes) => ({ credentialProfileId: id, availability: 'available', problem: null,
+    catalog: { source: 'codex', credentialProfileId: id, provenance: 'live', models: [{ id: 'gpt-6-astra', processing: { modes } }] } });
+const TWO_ACCOUNTS = { ...CATALOG, model_sources: [{ ...CATALOG.model_sources[0], processingPreferences: ['standard', 'fast', 'ultrafast'] }],
+    account_catalogs: [{ source: 'codex', partial: false, accounts: [account('home', ['standard', 'fast', 'ultrafast']), account('work', ['standard', 'fast'])] }] };
+const stripOf = (c) => {
+    const el = c.popup().querySelector('.model-tier');
+    const segs = el.querySelectorAll('.model-tier-seg');
+    return { hidden: el.querySelector('.model-tier-row').hidden, offered: segs.filter((seg) => !seg.hidden).map((seg) => seg.dataset.tier),
+        support: Object.fromEntries(segs.map((seg) => [seg.dataset.tier, seg.dataset.support])) };
+};
+
+test('an accepted handover moves the chosen row, endpoint read and strip together, not the last call', async (t) => {
+    t.after(closeCardModel);
+    const c = card({ catalog: TWO_ACCOUNTS, recents: [route(GLM), route(ASTRA)],
+        settings: { OUROBOROS_MODEL_ACCOUNTS: { main: 'home' } },
+        processing: (value) => ({ value, processing: { complete: true, modes: ['standard', 'economy'], endpoints: [] } }) });
+    const last = { requested: 'fast', submitted: 'fast', observed: 'standard' };
+    const tiers = { main: 'ultrafast', default: 'standard' };
+    const paint = (acting, basis, pending) => c.paint({ lead: lead(acting, basis, { pending }), tiers, processing: { choice: '', last } });
+    paint(ASTRA, 'main', lead(GLM, 'owner'));
+    c.fact().click();
+    await flush();
+    assert.ok(c.rows().find((row) => row.key === `route|${GLM}`).selected);
+    assert.deepEqual([c.reads.processing, c.reads.settings, stripOf(c).offered], [[GLM], 0, ['economy', 'standard']]);
+    assert.match(c.tierView().scope, /^Default · Standard/);
+    assert.equal(c.said('name'), 'Codex · gpt-6-astra');
+    assert.match(c.record.processingDetail, /last call: asked Fast · sent Fast · served Standard/);
+
+    paint(GLM, 'owner', lead(ASTRA, 'main'));
+    await flush();
+    assert.ok(c.rows()[0].selected);
+    assert.equal(c.said('name'), 'OpenRouter · glm-5.3');
+    assert.deepEqual([c.reads.processing, c.reads.settings, stripOf(c).offered, stripOf(c).support.ultrafast],
+        [[GLM], 1, ['standard', 'fast', 'ultrafast'], 'listed']);
+    assert.match(c.tierView().scope, /^Default · Ultrafast/);
+    assert.match(c.tierView().means, /^Pinned account home · /);
+    assert.match(c.record.processingDetail, /last call: asked Fast · sent Fast · served Standard/);
+
+    paint(ASTRA, 'main', lead(ASTRA, 'owner'));
+    assert.deepEqual([c.rows()[0].selected, stripOf(c).support.ultrafast], [false, 'some'], 'the same model as its own choice uses Auto');
+    c.paint({ lead: lead(GLM, 'fallback', { primary: lead(ASTRA, 'main'), role: 'fallback:0', pending: route(ASTRA) }), tiers });
+    assert.deepEqual([c.rows()[0].selected, stripOf(c).support.ultrafast], [false, 'unknown'], 'retry or legacy pending does not prove a pin');
+    assert.equal(c.fact().classList.contains('model-fallback'), true, 'no accepted primary reply yet');
+});
+
+test('an earlier settings read cannot lend its pin to a different next Main route, and repaint is not a retry', async (t) => {
+    t.after(closeCardModel);
+    const c = card({ catalog: TWO_ACCOUNTS, settings: { OUROBOROS_MODEL: 'claudexor::codex=other',
+        OUROBOROS_MODEL_ACCOUNTS: { main: 'home' } } });
+    await c.store.readConnections();
+    const view = { lead: lead(GLM, 'owner', { pending: lead(ASTRA, 'main') }), tiers: STANDARD };
+    c.paint(view);
+    c.fact().click();
+    await flush();
+    assert.deepEqual([c.reads.settings, stripOf(c).support.ultrafast], [2, 'unknown']);
+    c.paint(view);
+    await flush();
+    assert.equal(c.reads.settings, 2);
+});
+
+test('a follower of Main reads Main\'s own account, its pin or Auto; a work on a model of its own reads Auto, never Main\'s pin', async () => {
+    const strip = async (view, settings) => {
+        const c = card({ catalog: TWO_ACCOUNTS, settings });
+        c.paint({ tiers: STANDARD, ...view });
+        c.fact().click();
+        await flush();
+        await flush();
+        const said = [stripOf(c).offered, stripOf(c).support.ultrafast, c.reads.settings];
+        closeCardModel();
+        return said;
+    };
+    assert.deepEqual(await strip({ lead: lead(ASTRA, 'main') }, { OUROBOROS_MODEL_ACCOUNTS: { main: 'work' } }), [['standard', 'fast', 'ultrafast'], 'unknown', 1],
+        'Main is pinned to the account that does not list Ultrafast: never confirmed on the other account\'s word (the transport carries it, so it can be tried); Flex is beyond the transport');
+    assert.deepEqual(await strip({ lead: lead(ASTRA, 'main') }, { OUROBOROS_MODEL_ACCOUNTS: { main: 'removed' } }), [['standard', 'fast', 'ultrafast'], 'unknown', 1],
+        'a pin to an account that is gone confirms nothing');
+    assert.deepEqual(await strip({ lead: lead(ASTRA, 'main') }, new Error('offline')), [['standard', 'fast', 'ultrafast'], 'unknown', 1],
+        'the pin could not be read: it is unknown, never Auto');
+    assert.deepEqual(await strip({ lead: lead(ASTRA, 'main') }, { OUROBOROS_MODEL_ACCOUNTS: { main: 'home' } }), [['standard', 'fast', 'ultrafast'], 'listed', 1]);
+    assert.deepEqual(await strip({ lead: lead(ASTRA, 'main') }, {}), [['standard', 'fast', 'ultrafast'], 'some', 1], 'Main on Auto: some of its accounts');
+    for (const source of ['owner', 'owner_words', 'owner_press']) {
+        assert.deepEqual(await strip({ lead: lead(ASTRA, source) }, { OUROBOROS_MODEL_ACCOUNTS: { main: 'work' } }),
+            [['standard', 'fast', 'ultrafast'], 'some', 0], `${source}: this work uses Auto, not Main’s pin`);
+    }
+    assert.deepEqual(await strip({ lead: lead(ASTRA, 'fallback', { role: 'fallback:0' }) }, {}),
+        [['standard', 'fast', 'ultrafast'], 'unknown', 0], 'the acting fallback did not publish its pin');
+    assert.deepEqual(await strip({ lead: lead(GLM, 'owner') }, {}), [['economy', 'standard', 'fast'], 'unknown', 0], 'another route, its own word');
+});
+
+test('a work whose route is proven to have only its ordinary service has no strip; its own tier stays in view and can be left', async () => {
+    const c = card({ catalog: { ...CATALOG, model_sources: [{ ...CATALOG.model_sources[0], processingPreferences: ['standard'] }] } });
+    c.paint({ lead: lead(ASTRA, 'owner'), tiers: STANDARD });
+    c.fact().click();
+    await flush();
+    assert.deepEqual([stripOf(c).hidden, stripOf(c).offered], [true, []]);
+    // The work is given Fast (a room's tier at admission, an older choice): said, with what this route makes of it.
+    c.paint({ lead: lead(ASTRA, 'owner'), tiers: STANDARD, processing: { choice: 'fast', source: 'room' } });
+    assert.deepEqual([stripOf(c).hidden, stripOf(c).offered, c.tierView().checked, c.tierView().reset, stripOf(c).support.fast],
+        [false, ['standard', 'fast'], ['fast'], true, 'unlisted']);
+    assert.equal(c.tierView().means, 'Account: Auto · Requests faster processing. It may cost more. Codex does not list Fast for gpt-6-astra: its calls may go as Standard.');
+    assert.equal(c.said('tier'), '· Fast', 'and the card still names the wish');
+    // Main's Fast inherited by a follower is the same: Default is not Standard.
+    c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: 'fast', default: 'standard' } });
+    assert.deepEqual([stripOf(c).offered, c.tierView().checked, c.tierView().ring], [['standard', 'fast'], [], ['fast']]);
+    closeCardModel();
+});
+
+test('a key model\'s own endpoints are read for the route the work acts on, when its sheet opens or that route changes', async () => {
+    const standard = { tag: 'a', service_tier: null, mode: 'standard', price: { input: 1, output: 4 } };
+    const listed = { [GLM]: [standard, { tag: 'a:fast', service_tier: 'priority', mode: 'fast', price: { input: 2, output: 8 } },
+        { tag: 'b:fast', service_tier: 'priority', mode: 'fast', price: { input: 3, output: 9 } }],
+    'moonshotai/kimi-k3': [standard, { tag: 'a:flex', service_tier: 'flex', mode: 'economy' }] };
+    const processing = (value) => ({ value, processing: { modes: [...new Set(listed[value].map((endpoint) => endpoint.mode))], complete: true, endpoints: listed[value] } });
+    const c = card({ processing, recents: [route(GLM), route('moonshotai/kimi-k3')] });
+    c.paint({ lead: lead(GLM, 'owner'), tiers: STANDARD, processing: { choice: 'fast', source: 'owner' } });
+    assert.deepEqual(c.reads.processing, [], 'a card that is only shown asks nothing');
+    c.fact().click();
+    await flush();
+    assert.deepEqual([c.reads.processing, stripOf(c).offered, stripOf(c).support], [[GLM], ['standard', 'fast'],
+        { economy: 'unlisted', standard: 'listed', fast: 'listed', ultrafast: 'unlisted' }], 'its route, once; no row of the list');
+    assert.equal(c.tierView().means, 'Requests faster processing. It may cost more. Listed at $2–3 in / $8–9 out per 1M tokens, depending on the provider.',
+        'two providers, two prices: their range, neither quoted as the price');
+    c.paint({ lead: lead(GLM, 'owner'), tiers: STANDARD, processing: { choice: 'fast', source: 'owner' } });
+    await flush();
+    assert.deepEqual(c.reads.processing, [GLM], 'a repaint asks nothing again');
+    // The work moves to another model under the open sheet: that route is asked, and the first answer is not its.
+    c.paint({ lead: lead('moonshotai/kimi-k3', 'owner'), tiers: STANDARD, processing: { choice: 'economy', source: 'owner' } });
+    await flush();
+    assert.deepEqual([c.reads.processing, stripOf(c).offered], [[GLM, 'moonshotai/kimi-k3'], ['economy', 'standard']]);
+    assert.equal(c.tierView().means, 'Requests slower processing at a discount when capacity is available. Price unknown.', 'a tier listed without a price');
+    closeCardModel();
+    const codex = card({ processing });
+    codex.paint({ lead: lead(ASTRA, 'main'), tiers: STANDARD });
+    codex.fact().click();
+    await flush();
+    assert.deepEqual(codex.reads.processing, [], 'a subscription route has no such read');
+    closeCardModel();
+});
+
+test('a card can request Standard over a workspace default without adding a tier label to the card', async (t) => {
+    t.after(closeCardModel);
+    const c = card({ catalog: { ...CATALOG, api_sources: [{ id: 'openrouter', processing_transport: ['standard', 'economy', 'fast', 'ultrafast'] }] },
+        processing: (value) => ({ value, processing: { complete: true, modes: ['standard'], endpoints: [] } }) });
+    c.paint({ lead: lead(GLM, 'owner'), tiers: { main: '', default: '' } });
+    c.fact().click();
+    await flush();
+    assert.deepEqual([stripOf(c).offered, c.tierView().reset, c.said('tier')], [['standard'], false, '']);
+    assert.match(c.tierView().means, /No tier requested.*OpenRouter may apply a workspace default/);
+    await c.chooseTier('standard');
+    await flush();
+    assert.deepEqual([c.tierView().checked, c.tierView().reset, c.said('tier')], [['standard'], true, '']);
+    await c.chooseTier('');
+    await flush();
+    assert.deepEqual([stripOf(c).offered, c.tierView().checked, c.tierView().reset], [['standard'], [], false]);
+    assert.deepEqual(c.calls, ['standard', ''].map((processing) => ['t1', { action: 'processing', processing }]));
 });
 
 test('a refused tier is said in the sheet; one the server saved offers Retry with the same request', async () => {
@@ -914,7 +1132,7 @@ test('the server-resolved fallback tier drives both the card and its open footer
     c.paint({ lead: fallback, tiers: { main: 'fast', default: 'standard' },
         processing: { choice: '', resolved: 'economy', last: { requested: 'fast', submitted: null,
             observed: 'unknown', reason: 'processing_not_submitted' } } });
-    assert.equal(c.said('tier'), '· Flex · Fast asked · sent as Standard');
+    assert.equal(c.said('tier'), '· Flex · Fast asked · sent with no tier');
     c.fact().click();
     await flush();
     assert.match(c.tierView().scope, /^Default · Flex/);

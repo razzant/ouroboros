@@ -10,7 +10,7 @@ import { sendModelWaitDecision } from '../modules/model_wait.js';
 import { forgetSettingRows } from '../modules/settings_controls.js';
 import { setup } from './dashboard_dom_fixture.js';
 
-test('the room and Main model and tier writes declare the owner app, without changing generic fetch', async () => {
+test('context, model and tier writes declare the owner app while effort, subagents and generic saves carry only JSON headers', async () => {
     const seen = [];
     const previous = globalThis.fetch;
     globalThis.fetch = async (url, init) => {
@@ -18,14 +18,22 @@ test('the room and Main model and tier writes declare the owner app, without cha
         return { ok: true, status: 200, json: async () => ({ ok: true }) };
     };
     try {
+        await apiClient.ownerContextMode('low');
         await apiClient.ownerChatModel({ kind: 'main', project_id: 'fixture' });
         await apiClient.ownerChatProcessing({ processing: 'fast' });
+        await apiClient.ownerEffortRange({ min: 'low', recommended: 'high', max: 'high' });
+        await apiClient.ownerSubagentsMode({ mode: 'auto' });
         await apiClient.saveSettings({ TOTAL_BUDGET: 25 });
     } finally { globalThis.fetch = previous; }
+    const jsonHeaders = { 'Content-Type': 'application/json' };
+    const appHeaders = { ...jsonHeaders, ...APP_SETTINGS_ORIGIN };
     assert.deepEqual(seen, [
-        ['/api/owner/chat-model', { 'Content-Type': 'application/json', ...APP_SETTINGS_ORIGIN }],
-        ['/api/owner/chat-processing', { 'Content-Type': 'application/json', ...APP_SETTINGS_ORIGIN }],
-        ['/api/settings', { 'Content-Type': 'application/json' }],
+        ['/api/owner/context-mode', appHeaders],
+        ['/api/owner/chat-model', appHeaders],
+        ['/api/owner/chat-processing', appHeaders],
+        ['/api/owner/effort-range', jsonHeaders],
+        ['/api/owner/subagents-mode', jsonHeaders],
+        ['/api/settings', jsonHeaders],
     ]);
 });
 

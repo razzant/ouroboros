@@ -12,27 +12,55 @@ PRESENCE_OUTCOMES = ("message", "silent", "tool_delivered", "deferred")
 
 def _configure_presence(ctx: ToolContext, action: str, place_id: str = "", **params: Any) -> str:
     from ouroboros.dialogue_provenance import run_origin
+    from ouroboros.knowledge import focus_signature
     from ouroboros.owner_words import owner_words_contain
     from ouroboros import places
     from ouroboros.place_projection import circle_summary, places_view, place_view, connect_declared_place
+    from ouroboros.place_words_history import earlier
+    from ouroboros.presence_context import focus_owner_now
     from ouroboros.tool_access import canonical_data_root
     root = canonical_data_root(ctx)
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    owner = (bool(getattr(ctx, "is_direct_chat", False)) and run_origin({"metadata": metadata})["owner_ingress"]
-             and metadata.get("wake_cause") != "focus" and metadata.get("initiator") != "consciousness")
+    owner_turn = (bool(getattr(ctx, "is_direct_chat", False)) and run_origin({"metadata": metadata})["owner_ingress"]
+                  and metadata.get("wake_cause") != "focus" and metadata.get("initiator") != "consciousness")
+    owner = owner_turn
     words = params.get("description") if action == "set_description" else params.get("text")
     if action in {"add_note", "set_description"} or (action in {"create_circle", "edit_circle"} and words is not None):
         owner = owner and owner_words_contain(ctx, words)  # an act is ordered by the turn; a text is signed by its composer
     author = places.AUTHOR_OWNER if owner else places.AUTHOR_OUROBOROS
+
+    def by() -> dict:  # my human's words leave by their turn's act, or where their own words woke this focus now
+        speaking = metadata.get("wake_cause") == "focus" and focus_owner_now(ctx)
+        return {"owner_turn": owner_turn, "writer": focus_signature(ctx),
+                "owner_speaks_in": str((metadata.get("focus") or {}).get("place_id") or "") if speaking else ""}
     try:
         if action == "list":
             result = places_view(root)
         elif action == "inspect":
             records = places.place_records(root)
-            if place_id not in records.places:
-                raise places.PlaceError("place_not_found", "place_id")
-            result = {"place": place_view(root, records.places[place_id], records=records),
-                      "circle": records.circle_context(place_id)}
+            circle_id = "" if place_id else params.get("circle_id", "")
+            try:
+                previous = earlier(root, place_id, circle_id=circle_id)
+            except places.PlaceError as exc:
+                if exc.code != "place_history_unreadable":
+                    raise
+                previous = {"error": exc.code, "message": f"Earlier words could not be read: {exc}"}
+            if circle_id:
+                circle = records.circle(circle_id)
+                if circle is None and not previous:
+                    raise places.PlaceError("circle_not_found", "circle_id")
+                result = {"circle_id": circle_id, "circle": circle_summary(circle) if circle else None,
+                          "earlier": previous}
+                if circle is None:
+                    result["status"] = "This circle no longer exists."
+            else:
+                place = records.places.get(place_id)
+                if place is None and not previous:
+                    raise places.PlaceError("place_not_found", "place_id")
+                result = {"place": place_view(root, place, records=records) if place else None,
+                          "circle": records.circle_context(place_id), "earlier": previous}
+                if place is None:
+                    result.update(place_id=place_id, status="This place is not connected.")
         elif action == "connect":
             result = {"place": place_view(root, connect_declared_place(root, **params))}
         elif action == "create_circle":
@@ -41,18 +69,24 @@ def _configure_presence(ctx: ToolContext, action: str, place_id: str = "", **par
         elif action == "edit_circle":
             result = {"circle": circle_summary(places.edit_circle(
                 root, params.get("circle_id"), author=author, expected_revision=params.get("expected_revision"),
-                name=params.get("name"), text=words, model=params.get("model")))}
+                name=params.get("name"), text=words, model=params.get("model"), by=by()))}
         elif action == "delete_circle":
-            result = places.delete_circle(root, params.get("circle_id"), expected_revision=params.get("expected_revision"))
+            result = places.delete_circle(root, params.get("circle_id"), author=author, by=by(),
+                                          expected_revision=params.get("expected_revision"))
         else:
-            saved = places.edit_place(root, place_id, action, author=author, **params)
+            saved = places.edit_place(root, place_id, action, author=author, by=by(), **params)
             result = {"place": place_view(root, saved)} if saved else {}
         return json.dumps({"ok": True, **result}, ensure_ascii=False)
     except (places.PlaceError, ValueError, TypeError) as exc:
         if getattr(exc, "code", "") == "place_activation_owner_only":
             return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
                 text="Only your human switches a place to Active, on its sheet or by a word in Main; propose it there."))
-        blocked = getattr(exc, "code", "") == "place_owner_confirmation_required"
+        if getattr(exc, "code", "") == "place_owner_words_owner_only":
+            return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=(
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: place_owner_words_owner_only: these are your human's words; only they "
+                "remove or replace them: in the app, by a word in Main, or speaking in that place themselves (a circle's "
+                "words: in a place of that circle). Propose it there; words you wrote stay yours to change.")))
+        blocked = getattr(exc, "code", "") in {"place_owner_confirmation_required", "place_history_unavailable"}
         return _publish_tool_result(ctx, ToolResult(status="blocked" if blocked else "error",
             code="RESOURCE_CONSTRAINT_BLOCKED" if blocked else "TOOL_ARG_ERROR",
             text=("⚠️ RESOURCE_CONSTRAINT_BLOCKED: " if blocked else "ERROR: ") + str(exc)))

@@ -63,6 +63,7 @@ log = logging.getLogger(__name__)
 
 try:  # pragma: no cover - import guard exercised by tests via monkeypatch
     from mcp import ClientSession  # type: ignore
+    ClientSession = mcp_catalog.answering_session(ClientSession)  # a call's session says when its server answered
     from mcp.client.sse import sse_client  # type: ignore
     from mcp.client.stdio import StdioServerParameters, stdio_client  # type: ignore
     from mcp.client.streamable_http import streamablehttp_client  # type: ignore
@@ -545,7 +546,7 @@ def parse_servers(
         log.warning("Invalid MCP server config: %s", message)
         if errors is not None:
             errors.append({"id": server_id, "enabled": any(e.get("enabled", False) for e in entries),
-                           "tool_count": 0, "last_error": message, "code": "MCP_ID_AMBIGUOUS"})
+                           "configured_count": len(entries), "tool_count": 0, "last_error": message, "code": "MCP_ID_AMBIGUOUS"})
     return out
 
 # Async transport.
@@ -640,7 +641,7 @@ async def _http_with_guards(cfg: MCPServerConfig):
     client_factory = bearer_client if bearer is not None else guard.client
     sse = cfg.transport == "sse"
     with _redacted_sdk_logs(cfg, "mcp.client.sse" if sse else "mcp.client.streamable_http"):
-        opened = (sse_client if sse else streamablehttp_client)(
+        opened = mcp_catalog.http_transport(sse_client if sse else streamablehttp_client)(  # notes its own 404 stand-ins
             cfg.url, headers=cfg.wire_headers(), httpx_client_factory=client_factory, auth=bearer)
         try:
             async with opened as streams:
@@ -764,13 +765,13 @@ async def _call_tool_async(
     from ouroboros.store import StoreError
     from ouroboros.mcp_result_images import with_returned
     from ouroboros.work_domain import WorkDomainUnsettled
-    unsent_joined = False
-    returned = None
+    unsent_joined, returned, used = False, None, None
 
     async def _do() -> ToolResult:
-        nonlocal unsent_joined, returned
+        nonlocal unsent_joined, returned, used
         refusal = None
         async with _session(cfg) as session:
+            used = session  # whether its call was answered outlives a timeout in the SDK's own checks
             try:
                 await session.initialize()
             except BaseException as exc:
@@ -805,8 +806,8 @@ async def _call_tool_async(
         try:
             return await asyncio.wait_for(pending, timeout=timeout_sec)
         except WorkDomainUnsettled as exc:
-            if returned is None:
-                raise  # no result was received; the operation may have happened
+            if returned is None:  # no result was kept; the operation may have happened, an answer stays one
+                raise mcp_catalog.with_answer(used, exc)
             return _replace_tool_result(returned, code="MCP_ERROR",
                 text=returned.text + "\n⚠️ The response above was received, but server cleanup is unconfirmed. "
                 "Do not repeat the completed call. " + str(exc), meta_updates={"backend_settled": False})
@@ -815,6 +816,8 @@ async def _call_tool_async(
                 # wait_for replaces CancelledError with TimeoutError; carry proof,
                 # not exception-class inference, over that conversion.
                 exc.mcp_unsent_joined = True
+            if returned is not None or getattr(used, "mcp_call_answered", False):  # answered; what came after ran out
+                exc.mcp_server_answered = True
             raise
 
 
@@ -1132,6 +1135,13 @@ class MCPManager:
                     if rt.config.enabled and rt.catalog and rt.catalog["complete"] and not rt.catalog["items"]
                     and rt.catalog["latest_attempt"].get("ok") is True
                     and not rt.catalog["latest_attempt"].get("partial")]
+
+    def server_records(self) -> Dict[str, Any]:
+        """Whether MCP is on, every configured server's ``(config, adopted envelope)`` and the Settings rows that do
+        not parse (their typed ``code`` and words), for readers of their dated records."""
+        with self._lock:
+            return {"enabled": self._enabled, "servers": [(rt.config, rt.catalog) for rt in self._servers.values()],
+                    "invalid": [dict(item) for item in self._configuration_errors]}
 
     def server_facts(self) -> Dict[str, Dict[str, Any]]:
         """Each enabled server's display name, pin, transport and ``task_session`` lifetime, and redacted
@@ -1480,9 +1490,11 @@ class MCPManager:
                    "and remote cancellation is not confirmed. Use the server-specific status/read "
                    "tool, if available, to reconcile the operation before retrying.")
             ) + server_stderr_note(exc)
+            mcp_catalog.note_failed_call(cfg, exc, method=tool.raw_name)  # no answer, sent or not
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text,
                               meta={"mcp_call_not_sent": not_sent or closing})
         except mcp_oauth.MCPAuthRequired as exc:  # the server ran nothing: no grant, refused refresh or token
+            mcp_catalog.note_failed_call(cfg, exc, method=tool.raw_name)
             return ToolResult(status="unavailable", code="MCP_AUTH_REQUIRED", text=f"⚠️ {exc}",
                               meta={"dynamic_provider": True, "mcp_call_not_sent": True, "sign_in_reason": exc.reason})
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
@@ -1493,10 +1505,12 @@ class MCPManager:
                 from ouroboros.tools.tool_result import launch_refusal_result
                 return _replace_tool_result(launch_refusal_result(exc),
                                             meta_updates={"mcp_call_not_sent": True})
+            mcp_catalog.note_failed_call(cfg, exc, method=tool.raw_name)  # a local refusal or interruption says nothing
             body = f"⚠️ MCP_TOOL_ERROR: {_exception_text(exc, cfg)}"
             return ToolResult(status="error", code="MCP_ERROR", text=_model_facing_result(cfg, tool.raw_name, body),
                               meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent})
         # The remote call is complete here; projecting it never turns it into a failure.
+        mcp_catalog.note_call(cfg, ok=True, method=tool.raw_name)  # the server answered (an isError answer is an answer)
         if result.status == "ok" and getattr(ctx, "drive_root", None):  # a post I made as an account: never my human's
             from ouroboros.own_sends import record_result
             from ouroboros.tool_access import canonical_data_root

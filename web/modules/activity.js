@@ -30,9 +30,12 @@ import {
     taskControlTriggerLabel,
 } from './task_control_menu.js';
 import { markView, statusMarkHtml } from './status_mark.js';
+import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { whenLabel } from './storage_format.js';
 import { showToast } from './toast.js';
 import { normalizeConsciousness } from './consciousness_api.js';
+import { switchActionWords, switchReadingWords, turnConsciousness } from './consciousness_switch.js';
+import { autonomyOf } from './consciousness_autonomy.js';
 import { allowanceText } from './consciousness_words.js';
 
 function esc(value) {
@@ -125,19 +128,22 @@ function presenceWorkName(census, taskId) {
  * false: no door takes it yet). `work` is the confirmed work whose live episode this row is: a parked census phase
  * only guesses, so that work's word and line say it, the row's own outcome still leading, as on a queue row. A work's
  * episode is offered that work's controls only (the click handler, never the generic menu), and a parked row whose
- * work lists none (an unbound start no door reaches) shows no trigger at all. */
+ * work lists none (an unbound start no door reaches) shows no trigger at all. With no census row (`a === null`),
+ * the server's tail-only work supplies the ended episode, name, outcome and controls without a synthetic phase. */
 export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume = false, work = null) {
+    const tailOnly = a === null;
+    a ??= {};
     const names = { direct_chat: 'Direct turn', managed_task: 'Managed task' };
     const started = Number(a.started_at) || 0;
     const spent = started > 0 ? elapsedWords(nowMs / 1000 - started) : '';
     const elapsed = spent ? ` · ${spent}` : '';
-    const truth = work && PARKED_PHASES.has(a.phase) ? workRowView(work) : null;
+    const truth = work && (tailOnly || PARKED_PHASES.has(a.phase)) ? workRowView(work) : null;
     const late = a.late_work && typeof a.late_work === 'object' ? lateWorkHtml(a, a.late_work, truth && work) : null;
-    const own = !late && slot ? ownOutcomePhase(a) : null;
+    const own = !late && slot ? ownOutcomePhase(tailOnly ? { status: work.outcome } : a) : null;
     const outcome = own && truth ? { ...own, secondary: truth.word } : own;
     const presence = a.kind === 'presence';
-    // A Presence turn says its work's name; any other run the name its card shows (the producer's suggested_name).
-    const named = !late && (presence ? work?.name : String(a.suggested_name || '').trim());
+    // A Presence turn or tail-only row says its work's name; another census row uses its producer's suggested_name.
+    const named = !late && (presence || tailOnly ? work?.name : String(a.suggested_name || '').trim());
     const line = presence && work ? workLine(work) : truth?.secondary || '';
     const said = (text) => `<span data-i18n-skip>${esc(text)}</span>`;
     // The trigger says what a press will offer: its work's controls, else the card-state set the click opens.
@@ -146,14 +152,24 @@ export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume =
     const offers = !truth || actions.length > 0;
     const look = truth || ownCensusView(a).view;
     const mark = late || outcome ? '' : stateMark(look);
+    const target = tailOnly ? work.episode.task_id : a.activity_id;
+    const tail = tailOnly ? ` data-tail-work="${esc(work.work_id)}"` : '';
+    // A work the server marks with an accepted unbound start (#3428): its Stop confirmation says the request.
+    const unbound = work?.unbound_start ? ' data-unbound-start="1"' : '';
     const trigger = (presence && a.cancelable === false) || !offers ? ''
-        : `<div class="ui-row-actions activity-row-actions"><button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button></div>`;
+        : `<div class="ui-row-actions activity-row-actions"><button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${esc(target || '')}" data-root="1"${tail}${unbound}${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button></div>`;
     return `<div class="ui-row activity-row">
-                <span class="ui-row-title activity-name"${named ? ' data-i18n-authored' : ''}>${late ? late.name : esc(named || names[a.kind] || 'Live turn')}</span>
+                <span class="ui-row-title activity-name"${named ? ' data-i18n-authored' : ''}>${late ? late.name : esc(named || names[tailOnly ? 'managed_task' : a.kind] || 'Live turn')}</span>
                 <span class="ui-row-meta activity-sub">${late ? late.sub : `${mark}${outcome ? `${slot(outcome)}${line ? ` · ${said(line)}` : ''}`
                     : said([truth ? truth.word : censusWords(a), line].filter(Boolean).join(' · '))}${elapsed}`}</span>
                 ${trigger}
             </div>`;
+}
+
+function delegatedTailWorks(census) {
+    const works = Array.isArray(census?.works) ? census.works : [];
+    return works.filter((work) => work?.confirmed !== false && work?.work_id && work.episode?.live === false
+        && work.episode.task_id && work.tails?.some((tail) => tail.kind === 'run'));
 }
 
 /** The shared status mark of a row's state, beside its word: the work's own shape, the owner's move in amber. */
@@ -234,7 +250,10 @@ function scheduleRunHtml(s, timeZone) {
         const state = quiet && outcome.state === 'completed' ? tr('schedule.outcome.quiet', 'ran · no message') : outcome.state;
         // The line is the host's notice, else the run's own words (its sentence, or the end of its answer).
         const line = outcome.line ? ` · ${outcome.notice ? `notice: ${esc(outcome.line)}` : `<span data-i18n-authored>${esc(outcome.line)}</span>`}` : '';
-        parts.push(`last run: ${esc(state)}${outcome.ended_at ? ` · ${scheduleInstantHtml(outcome.ended_at, { timeZone, includeYear: true })}` : ''}${line}`);
+        // The settled run's room, not the schedule's editable destination, owns its card.
+        const reference = outcome.chat_id == null ? '' : taskReferenceHtml(outcome.task_id, outcome.chat_id);
+        const door = reference ? ` ${reference}` : '';
+        parts.push(`last run: ${esc(state)}${outcome.ended_at ? ` · ${scheduleInstantHtml(outcome.ended_at, { timeZone, includeYear: true })}` : ''}${line}${door}`);
     }
     // Why the row did not do its job, as stored (a note whose chat write was not confirmed is consumed and never
     // retried, so this is the only place it says so) — once: a run whose own line already says it is not repeated.
@@ -432,6 +451,8 @@ export function keptStopToast(receipt, name) {
 export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     if (!mount) return { refresh: () => {} };
     let busy = false;
+    // The switch's preview is being read (seconds on a large install): a repaint meanwhile keeps saying so.
+    let switchReading = false;
     let refreshRevision = 0;
     let migrationTimer = null, destroyed = false;
     // Remembered across re-renders: whether each disclosure (a group, a row's Details) is open, by its key. A refresh
@@ -459,8 +480,12 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     // Known-outcome chips of the last queue render; paintTaskPhase writes them into
     // their slots once the markup is mounted. The words come from the translation seam.
     let phaseViews = [];
-    // The body the queue was last drawn from: a work's controls come from it, at their exact targets.
+    // The body the queue was last drawn from — set the moment the accepted state settles, so a work's controls
+    // (the door that reads it, at their exact targets) never wait for a repaint unrelated reads could hold.
     let lastCensus = null;
+    // The state read the last refresh performed: the ONE accepted state. A Resume settles against this very
+    // read — the same one its repaint draws from — never a second GET of its own.
+    let stateRead = Promise.resolve(null);
     const phaseSlot = (view) => `<span class="activity-phase" data-i18n-skip><span data-activity-phase="${
         phaseViews.push(view) - 1}"></span><span class="chat-live-phase-secondary" hidden></span></span>`;
     // A group of one list by its records' state (paused work, finished schedules): its label and count from the caller.
@@ -489,23 +514,36 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             // Any other run is named as its card is (the producer's suggested_name), never by its whole order.
             const named = t._presence_turn ? presenceWorkName(census, ownId) : String(t.suggested_name || t.title || '').trim();
             const label = esc(named || (t._presence_turn ? 'Live turn' : q.type || ownId || 'task'));
-            const spent = kind === 'running' ? elapsedWords(q.runtime_sec) : '';
+            // The queue and census are independent reads. Compare the same task's attempts; a helper's witness
+            // comes from its own member state, not its root. If they cannot be joined, keep the known phase by itself.
+            // Names, orders and control targets still address the task, not its attempt.
+            const censusRow = ownId ? activities.find((entry) => entry?.activity_id === ownId) : undefined;
+            const ownWork = workOfEpisode(census, ownId);
+            const member = ownWork ? null : memberState(census, ownId);
+            const projected = ownWork || member;
+            const censusAttempt = censusRow?.task_attempt ?? member?.queue_attempt;
+            const numbered = Number.isSafeInteger(q.attempt) && q.attempt >= 0
+                && Number.isSafeInteger(censusAttempt) && censusAttempt >= 0;
+            const queueBehind = numbered && q.attempt < censusAttempt;
+            const censusBehind = numbered && censusAttempt < q.attempt;
+            const hideQueueFacts = queueBehind || (!censusRow && member?.confirmed === true && !numbered);
+            const spent = kind === 'running' && !hideQueueFacts ? elapsedWords(q.runtime_sec) : '';
             const rt = spent ? ` · ${spent}` : '';
-            const projected = workOfEpisode(census, ownId) || memberState(census, ownId);
-            const view = workRowView(projected || { activity: 'unknown', confirmed: false });
+            const shown = censusBehind ? null : projected;  // the state the row may say; the controls keep `projected`
+            const view = workRowView(shown || { activity: 'unknown', confirmed: false });
             const parked = projected?.activity === 'paused';
             const kindLabel = view.word;
-            const outcome = ownId && ownOutcomePhase(activities.find((entry) => entry?.activity_id === ownId),
-                view.outcome || (projected?.activity === 'working' && projected.transition === 'none') ? '' : kindLabel);
+            const outcome = ownId && !censusBehind && ownOutcomePhase(censusRow,
+                view.outcome || (shown?.activity === 'working' && shown.transition === 'none') ? '' : kindLabel);
             // The chip already says Finalizing beside its outcome; retain only the work's other facts.
-            const secondary = outcome && view.outcome ? workLine(projected, kindLabel) : view.secondary;
+            const secondary = outcome && view.outcome ? workLine(shown, kindLabel) : view.secondary;
             // The projection owns the state; the current wait's recorded blockers
             // keep its specific cause readable after the Continue toast expires.
-            const waiting = t._budget_pause_hold;
-            const heldFacts = projected?.confirmed !== false && projected?.because?.[0]?.code === 'earlier_work_unconfirmed'
+            const waiting = hideQueueFacts ? null : t._budget_pause_hold;
+            const heldFacts = shown?.confirmed !== false && shown?.because?.[0]?.code === 'earlier_work_unconfirmed'
                 && waiting?.reason === 'continuation_writer_unsettled' && !waiting.selected ? heldWorkFacts(waiting.blockers) : '';
             const meta = `${outcome ? phaseSlot(outcome) : `${stateMark(view)}${esc(kindLabel)}`}${secondary ? ` · ${esc(secondary)}` : ''}${heldFacts ? ` · ${esc(heldFacts)}` : ''}${q.type ? ` · ${esc(q.type)}` : ''}${rt}`;
-            const hold = t.project_admission_hold;
+            const hold = hideQueueFacts ? null : t.project_admission_hold;
             const projectWait = hold?.label ? ` · ${esc(hold.label)}: ${esc(hold.detail || hold.reason)}` : '';
             // The trigger says what the press offers: a root's work controls, else the card-state set (click handler).
             const root = phases.has(ownId) || isRootTaskRow(t, ownId);
@@ -516,15 +554,15 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             // The whole order is the record: it waits behind the row's Details (owner seed S2).
             const order = t._presence_turn ? '' : String(t.description || t.objective || t.text || '');
             // The held cause is what the owner reads before Resume: it wraps, never ellipsized.
-            const html = `<div class="ui-row activity-row${projected?.activity === 'waiting' ? ' activity-held' : ''}">
+            const html = `<div class="ui-row activity-row${shown?.activity === 'waiting' ? ' activity-held' : ''}">
                 <span class="ui-row-title activity-name"${named ? ' data-i18n-authored' : ''}>${label}</span>
                 <span class="ui-row-meta activity-sub">${meta}${projectWait}</span>
                 <div class="ui-row-actions activity-row-actions">
-                    <button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${id}"${budgetPaused ? ' data-budget-paused="1"' : ''}${resumable.has(ownId) ? ' data-resume="1"' : ''}${root ? ' data-root="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button>
+                    <button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${id}"${budgetPaused ? ' data-budget-paused="1"' : ''}${resumable.has(ownId) ? ' data-resume="1"' : ''}${root ? ' data-root="1"' : ''}${work?.unbound_start ? ' data-unbound-start="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button>
                 </div>
                 ${rowDetailsHtml({ key: `order:${ownId}`, open: isOpen(`order:${ownId}`), text: order, title: named })}
             </div>`;
-            return { html, rank: RANKS[projected?.activity] ?? (kind === 'pending' ? RANKS.queued : RANKS.working) };
+            return { html, rank: RANKS[shown?.activity] ?? (kind === 'pending' ? RANKS.queued : RANKS.working) };
         };
         // Queue facts keep their runtime/budget controls. The census adds only
         // missing identities; queued direct turns can appear in both sources. A live Presence turn its
@@ -533,16 +571,23 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         const queued = running.filter((q) => !q?.task?._presence_run);
         const known = new Set([...queued, ...pending].map((q) => String(q.id || q.task?.id || '')));
         const live = activities.filter((a) => a && !known.has(String(a.activity_id || '')));
+        const represented = new Set([...known, ...live.map((a) => String(a.activity_id || ''))]);
+        const tails = delegatedTailWorks(census).filter((work) => !represented.has(String(work.episode.task_id)));
         const items = [...queued.map((q) => row(q, 'running')), ...pending.map((q) => row(q, 'pending')),
             ...live.map((a) => {
                 const work = workOfEpisode(census, a.activity_id);
                 return { html: liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(String(a.activity_id || '')), work),
                     rank: a.phase === 'budget_paused' || work?.activity === 'paused' ? RANKS.paused : RANKS.working };
-            })];
+            }), ...tails.map((work) => ({ html: liveActivityRowHtml(null, Date.now(), phaseSlot, false, work),
+                rank: RANKS[work.activity] ?? RANKS.unknown }))];
         if (!items.length) {
-            return census?.active_chat_activities_complete === true
+            // An empty list needs BOTH completeness proofs: a complete census beside an incomplete work
+            // projection (an unreadable delegated custody) can hide an ended task's unconfirmed helper
+            // (#3428), so the unknown side says what is unknown — never "nothing".
+            const turns = census?.active_chat_activities_complete === true;
+            return turns && census?.works_complete !== false
                 ? '<div class="activity-empty">Nothing running or queued.</div>'
-                : '<div class="activity-empty">Queue empty; live turns unknown.</div>';
+                : `<div class="activity-empty">Queue empty; ${turns ? 'work status' : 'live turns'} unknown.</div>`;
         }
         const ordered = items.map((item, index) => ({ ...item, index })).sort((a, b) => a.rank - b.rank || a.index - b.index);
         const paused = ordered.filter((item) => item.rank === RANKS.paused).map((item) => item.html);
@@ -554,19 +599,19 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         if (typeof stateData?.bg_consciousness_enabled !== 'boolean') throw new Error('Background state unavailable');
         const enabled = stateData.bg_consciousness_enabled;
         const bg = (stateData && stateData.bg_consciousness_state) || {};
-        const detail = esc(bg.detail || (enabled ? 'enabled' : 'disabled'));
+        const detail = esc(String(bg.detail || '').replace(/\.$/, ''));
         const facts = [
-            bg.level ? `autonomy ${esc(bg.level)}` : '',
+            enabled && bg.level ? esc(autonomyOf(bg.level)?.label || bg.level) : '',
             bg.last_wake_at ? `last wake ${esc(whenLabel(bg.last_wake_at))}${bg.last_wake_outcome ? ` (${esc(bg.last_wake_outcome)})` : ''}` : '',
-            // The money line in the Consciousness tab's own words ("≥ $1.50 of $20.00 in the last 24 hours").
+            // The money line in the Consciousness tab's own words ("≥ $1.50 of $15.00 in the last 24 hours").
             esc(allowanceText(normalizeConsciousness(bg, { enabled }))),
             Number.isFinite(Number(bg.max_tasks)) ? esc(fmt('own tasks {running}/{max}', { running: Number(bg.tasks_running || 0), max: Number(bg.max_tasks) })) : '',
         ].filter(Boolean).join(' · ');
         return `<div class="ui-row activity-row">
             <span class="ui-row-title activity-name">Consciousness</span>
-            <span class="ui-row-meta activity-sub">${enabled ? 'enabled' : 'disabled'}${detail ? ` · ${detail}` : ''}${facts ? ` · ${facts}` : ''}</span>
+            <span class="ui-row-meta activity-sub">${esc(bg.position || (enabled ? 'enabled' : 'disabled'))}${detail ? ` · ${detail}` : ''}${facts ? ` · ${facts}` : ''}</span>
             <div class="ui-row-actions activity-row-actions">
-                <button type="button" class="btn btn-sm btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws ? '' : ' disabled'}>${enabled ? 'Stop' : 'Start'}</button>
+                <button type="button" class="btn btn-sm btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws && !switchReading ? '' : ' disabled'}>${esc(switchReading ? switchReadingWords() : switchActionWords(enabled))}</button>
                 <button type="button" class="btn btn-sm btn-ghost" data-act="bg-open" aria-label="Open Dashboard › Consciousness"${openDashboardTab ? '' : ' hidden'}>Details</button>
             </div>
         </div>${keptServicesHtml(kept)}`;
@@ -613,51 +658,62 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         for (let details = target.closest?.('details'); details; details = details.parentElement?.closest?.('details')) {
             if (!details.open) details.open = true;
         }
-        target.focus?.();
+        target.focus?.({ preventScroll: true });
     }
+
+    // Each section's renderer, over what its own reads produced: the queue's rows with the accepted state,
+    // Background's state with the kept services, the schedules' list.
+    const renderers = [
+        ({ rows, census }) => renderQueue(rows?.queue, census),
+        ({ state, kept }) => renderBg(state, kept),
+        renderSchedules,
+    ];
 
     async function refresh() {
         if (destroyed) return;
         clearTimeout(migrationTimer); migrationTimer = null;
         const revision = ++refreshRevision;
         rememberDisclosure();
-        const focused = focusedControl();
-        const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '', holdId: focused.dataset.holdId || '' };
         // A refresh says nothing while it reads (aria-busy only): a line that came and went under each heading moved
         // every row below it (DESIGN principle 6). Only the first read and a failure speak.
         sections.forEach(({ root, status, loaded }) => {
             root.setAttribute('aria-busy', 'true');
             if (!loaded) setInlineStatus(status, 'Loading…');
         });
-        const results = await Promise.allSettled([
-            // This view renders only the queue; queue_only skips the whole
-            // task-results scan server-side (v6.9x P2).
-            getJson('/api/tasks?queue_only=1'),
-            readStateJson(),
+        // One read per endpoint. Each section paints from its own reads as they settle — the queue from its rows
+        // and the accepted state, Background from the state and the kept services, Scheduled from its list — so no
+        // section waits for a read it does not consume: a slow schedules or kept read never holds the queue's rows
+        // (and the control rights their buttons carry) for state a Resume has already accepted.
+        stateRead = readStateJson();
+        // This view renders only the queue; queue_only skips the whole task-results scan server-side (v6.9x P2).
+        const reads = [
+            Promise.allSettled([getJson('/api/tasks?queue_only=1'), stateRead]).then(([queue, state]) => {
+                if (queue.status === 'rejected') throw queue.reason;  // an unreadable queue is unknown, never empty
+                return { rows: queue.value, census: state.status === 'fulfilled' ? state.value : null };
+            }),
+            Promise.allSettled([stateRead, getJson('/api/services/kept')]).then(([state, kept]) => {
+                if (state.status === 'rejected') throw state.reason;  // Background reads the state; kept degrades to null
+                return { state: state.value, kept: kept.status === 'fulfilled' ? kept.value : null };
+            }),
             getJson('/api/schedules'),
-            getJson('/api/services/kept'),
-        ]);
-        if (destroyed || revision !== refreshRevision) return;
-        // A request can take long enough for the owner to move focus elsewhere.
-        // Only restore the original control when it is still the active owner;
-        // if this render detaches it, activeElement is still the original node
-        // immediately before replacement.  A different active element means
-        // the owner made a newer choice while the request was in flight.
-        const mayRestoreFocus = !focusedKey || document.activeElement === focused;
-        const census = results[1].status === 'fulfilled' ? results[1].value : null;
-        const kept = results[3].status === 'fulfilled' ? results[3].value : null;
-        const renderers = [(data) => renderQueue(data?.queue, census), (data) => renderBg(data, kept), renderSchedules];
-        sections.forEach((section, index) => {
+        ];
+        // The accepted state, applied the moment it settles: the work-controls door reads `lastCensus` before any
+        // repaint lands, so a control the fresh snapshot withdrew is withdrawn at once, not after unrelated reads.
+        stateRead.then((census) => { if (!destroyed && revision === refreshRevision) lastCensus = census; }, () => {});
+        const paintSection = (index, outcome) => {
+            const section = sections[index];
             const { root, status, content } = section;
+            // Keep the control focused now: a return may have restored it while this section's read was pending.
+            const focused = focusedControl();
+            const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '', holdId: focused.dataset.holdId || '' };
             root.removeAttribute('aria-busy');
             try {
-                const result = results[index];
-                if (result.status === 'rejected') throw result.reason;
+                if ('reason' in outcome) throw outcome.reason;
                 // Disclosure is an owner choice too.  Capture it at the render
                 // boundary, after the async reads, so opening/closing a group or
                 // a row's Details while a poll is pending is not undone by a stale snapshot.
                 rememberDisclosure();
-                content.innerHTML = renderers[index](result.value);
+                content.innerHTML = renderers[index](outcome.value);
                 content.querySelectorAll('[data-activity-phase]').forEach((el) => paintTaskPhase(
                     el, phaseViews[Number(el.dataset.activityPhase)], el.nextElementSibling));
                 section.loaded = true;
@@ -666,15 +722,35 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 if (isStoreMigrating(error)) {
                     setInlineStatus(status, 'Saved tasks are being upgraded…');
                     migrationTimer ??= setTimeout(refresh, 700);
-                    return;
+                } else {
+                    setInlineStatus(status, section.loaded
+                        ? 'Could not refresh. Previously loaded values shown; current state is unknown. Reopen Activity to try again.'
+                        : 'Could not load. Current state is unknown. Reopen Activity to try again.', 'error');
                 }
-                setInlineStatus(status, section.loaded
-                    ? 'Could not refresh. Previously loaded values shown; current state is unknown. Reopen Activity to try again.'
-                    : 'Could not load. Current state is unknown. Reopen Activity to try again.', 'error');
             }
-        });
-        if (mayRestoreFocus) restoreFocus(focusedKey);
+            restoreFocus(focusedKey);
+        };
+        await Promise.all(reads.map(async (read, index) => {
+            let outcome;
+            try { outcome = { value: await read }; } catch (reason) { outcome = { reason }; }
+            if (destroyed || revision !== refreshRevision) return;
+            paintSection(index, outcome);
+        }));
     }
+
+    // A Resume's confirmation is the state read its own refresh performs (`readStateJson`): the ONE accepted
+    // state — no second GET beside the repaint — and none of the unrelated sections' reads prolongs a pending
+    // Resume (that read's own lifetime bounds it). The queue repaints from that same accepted state as soon as
+    // its own rows arrive, so both doors — a work's controls from `lastCensus`, a row button's repainted
+    // dataset — read what the fresh snapshot said, never the state before the press.
+    const resumeSettled = () => {
+        refresh();
+        return stateRead;
+    };
+
+    // A task control's afterAction: a Resume settles against the bounded read; every other action repaints through
+    // the full refresh once its own effect has settled.
+    const afterTaskControl = (action) => (action === 'resume' ? resumeSettled() : refresh());
 
     // One seam for every lifecycle button: the owner NAMES the action and why.
     // The server applies and audits it; nothing here infers a command from text.
@@ -692,6 +768,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     }
 
     mount.addEventListener('click', async (event) => {
+        if (openTaskReference(event)) return;
         const btn = event.target.closest('[data-act]');
         if (!btn || busy || btn.dataset.act === 'schedule-text') return;
         const act = btn.dataset.act;
@@ -714,12 +791,15 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             // running, Stop earlier attempt the earlier ones, each at the server's exact target. It offers
             // only those: a work that lists none opens nothing, never the generic menu below, whose Stop or
             // Resume a door that work does not list would refuse.
-            const work = btn.dataset.root === '1' ? workOfEpisode(lastCensus, id) : null;
+            const tail = btn.dataset.tailWork;
+            const work = tail ? delegatedTailWorks(lastCensus).find((w) => w.work_id === tail && w.episode.task_id === id)
+                : btn.dataset.root === '1' ? workOfEpisode(lastCensus, id) : null;
             if (work) {
                 openWorkControls(btn, work, { cancelPending: taskCancelPending(stored), withResume: true,
-                    afterAction: refresh });
+                    afterAction: afterTaskControl });
                 return;
             }
+            if (tail) return; // A vanished tail never falls back to the generic live-task menu.
             openTaskControlMenu(btn, {
                 cancelPending: taskCancelPending(stored),
                 budgetPaused: btn.dataset.budgetPaused === '1',
@@ -729,6 +809,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 busy: taskControlBusy(id),
                 onAction: async (action) => {
                     busy = true;
+                    let reread = false;
                     try {
                         if (action === ACTION_HURRY) {
                             // Local toast acknowledgement only — never a chat message.
@@ -736,7 +817,10 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                             return;
                         }
                         if (action === ACTION_RESUME) {
-                            await resumeTaskAction(id);
+                            // The task stays pending until its own bounded read has settled (the request owner holds it);
+                            // the full repaint runs beside it, never inside the confirmation.
+                            await resumeTaskAction(id, { settle: resumeSettled });
+                            reread = true;
                             return;
                         }
                         // Same declared semantics as the chat card (v6.82): the
@@ -754,7 +838,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                         }
                     } finally {
                         busy = false;
-                        await refresh();
+                        if (!reread) await refresh();
                     }
                 },
             });
@@ -799,11 +883,17 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 });
                 showToast(...keptStopToast(receipt, name));
             } else if (act === 'bg-toggle') {
-                const on = btn.dataset.enabled === '1';
-                // Reuse the existing direct control command (same as the chat header
-                // toggle); /bg is a control slash-command, not a chat message to the agent.
-                ws?.send?.({ type: 'command', cmd: `/bg ${on ? 'stop' : 'start'}`, ui_control: { name: 'consciousness_toggle' } });
-                await new Promise((resolve) => setTimeout(resolve, 400));
+                // The one switch (consciousness_switch.js): it names what changes, then sends the Dashboard's /bg.
+                switchReading = true;  // the preview read can take seconds on a large install; a repaint keeps it
+                btn.textContent = switchReadingWords();
+                const done = () => {
+                    switchReading = false;
+                    const current = mount.querySelector('[data-act="bg-toggle"]');
+                    if (current) current.textContent = switchActionWords(current.dataset.enabled === '1');
+                };
+                if (await turnConsciousness(btn.dataset.enabled === '1' ? 'off' : 'on', { ws, onRead: done })) {
+                    await new Promise((resolve) => setTimeout(resolve, 400));
+                }
             }
         } catch (exc) {
             // A 404 is the documented completion race (the run finished on its own)
@@ -814,6 +904,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             }
         } finally {
             busy = false;
+            switchReading = false;
             btn.disabled = false;
             await refresh();
         }

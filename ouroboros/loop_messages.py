@@ -179,6 +179,7 @@ def _record_owner_directive(
     reply_to: Optional[Dict[str, str]] = None,
     carried: bool = False,
     words: Any = None,
+    attachments: Any = None,
 ) -> None:
     """Retain the task-local owner corpus across transcript compaction.
 
@@ -199,7 +200,7 @@ def _record_owner_directive(
     """
     if ctx is None:
         return
-    if isinstance(content, str) and not content.strip():
+    if isinstance(content, str) and not content.strip() and not attachments:
         return
     if content in (None, [], {}):
         return
@@ -209,7 +210,14 @@ def _record_owner_directive(
         setattr(ctx, "_owner_directives", directives)
     stable_id = str(msg_id or "").strip()
     client, room = (str((origin or {}).get(key) or "") for key in ("client_message_id", "chat_id"))  # unique per room
-    for known in directives:  # a client id is one message unless both rows name different rooms (``dialogue_store``)
+    digest = (origin or {}).get("row_sha256")
+    for known in directives:
+        if isinstance(known, dict) and (digest or known.get("row_sha256")):
+            if digest != known.get("row_sha256"):
+                continue
+            if not carried:
+                known.pop("carried", None)
+            return
         if isinstance(known, dict) and ((stable_id and str(known.get("msg_id") or "") == stable_id) or (
                 client and str(known.get("client_message_id") or "") == client
                 and room in ("", str(known.get("chat_id") or room)))):
@@ -227,6 +235,9 @@ def _record_owner_directive(
     row.update({key: str(value) for key, value in (origin or {}).items() if value})
     if reply_to:
         row["reply_to"] = dict(reply_to)
+    if attachments:
+        from ouroboros.chat_uploads import stored_refs
+        row["attachments"] = stored_refs(attachments)
     if carried:
         row["carried"] = True
     directives.append(row)
@@ -235,30 +246,29 @@ def _record_owner_directive(
 def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> None:
     """Capture the run's first user turn before system notices are added.
 
-    A task-authored objective copies its retained owner corpus, not the draft.
-    Other runs record the first user row, labelled only by what the host knows:
-    ``initial_user`` when the owner door stamped this run (``run_origin``'s
-    ``owner_ingress``), ``initial_text`` otherwise — a Presence event, a wake, a
-    schedule, a follow-up, a child's work order or an unmarked context; a first turn
-    the host composed for my human's press of a control (``objective_author`` kind
-    ``ui_control``) is ``initial_text`` although the press stamped the run. A
-    schedule's text (its own schedule's, and its tree's by value) follows on every
-    path as ``schedule_text``: provenance, outside the owner sources, owed nothing.
-    The bytes of an owner row do not change, so ``owner_source_sha256`` stays what it
-    was; the label is read by the models that judge the corpus (acceptance, safety,
-    the post-task synthesis), never branched on by the host.
+    Drafted and continued work seed the retained owner corpus. Ordinary stamped first
+    turns are ``initial_user`` (``run_origin``'s ``owner_ingress``). Unstamped turns
+    and host-composed ``ui_control`` turns use ``initial_text``. A late quiz or
+    living-card press without words is ``owner_press``. A living form with words is
+    ``owner_mailbox``. An unavailable living submission or an unresolved late quiz answer
+    is ``owner_card_input``. A private Presence quiz with words uses ``owner_quiz_answer``. Confirmed place
+    words and schedule text ride as ``place_confirmed`` and ``schedule_text`` outside
+    the owner sources. The host uses the source for owner-input counting and to keep
+    word verification to records of words. Models read the label beside the input when
+    judging acceptance, Safety or the work's result.
     """
     existing = getattr(ctx, "_owner_directives", None)
     if isinstance(existing, list) and existing:
         return
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
+    from ouroboros.answer_facts import answer_source, card_input
     from ouroboros.dialogue_provenance import run_origin
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
     from ouroboros.owner_continue import ROW_IDS
     from ouroboros.owner_words import (
-        OWNER_SOURCES, PLACE_CONFIRMED, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card_reply, place_confirmed_words,
-        place_row_facts, reply_target, scheduled_text_items, task_schedule_items,
+        OWNER_SOURCES, PLACE_CONFIRMED, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card_reply,
+        place_confirmed_words, place_row_facts, reply_target, scheduled_text_items, task_schedule_items,
     )
 
     def schedule_text() -> None:  # the schedule this run fired from, then what its tree carried (a helper's field)
@@ -270,7 +280,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     if answered.get("presence_contact"):
         # The named owner ingress carries the host-bound answer snapshot: its human words are authority, the card
         # rides beside them; the source-work link in the model's frame and the external request are context.
-        _loop()._record_owner_directive(ctx, source="owner_quiz_answer", content=late_answer_owner_text(answered),
+        _loop()._record_owner_directive(ctx, source=answer_source(answered), content=late_answer_owner_text(answered),
                                       origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"], "ts": answered.get("answered_at")},
                                       reply_to=answered_card_reply(answered, late["task_id"]))
         return
@@ -278,13 +288,19 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
-        for row in metadata.get("owner_corpus") or []:  # the owner's rows, and confirmed place words and a schedule's text as provenance (owed nothing)
+        for index, row in enumerate(metadata.get("owner_corpus") or []):
             if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") in {PLACE_CONFIRMED, SCHEDULE_TEXT}):
+                # Continue seeded its original in slot zero, with the address on the task.
+                if index == 0 and row.get("source") == "origin_message" and not row.get("carried"):
+                    from ouroboros.owner_words import _opening, _opening_identity
+                    if _opening(row, metadata.get("origin_message_ref") or {}, first=True):
+                        row = {**row, **_opening_identity(ctx, read=True)}
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"), words=row.get("words"),
                     msg_id=str(row.get("msg_id") or ""),
-                    origin={key: row[key] for key in (*ROW_IDS[1:], *SCHEDULE_ITEM_IDS, "ts", "received") if row.get(key)},
+                    origin={key: row[key] for key in (*ROW_IDS[1:], *SCHEDULE_ITEM_IDS, "ts", "received", "basis", "cited") if row.get(key)},
                     reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
+                    attachments=row.get("attachments"),
                 )
         schedule_text()
         return  # The task-drafted objective is never an owner directive.
@@ -303,12 +319,27 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
             # The door's stamp names who started the run; a control's prompt is the host's words even then.
             composed = isinstance(author, dict) and author.get("kind") == "ui_control"
             stamped = run_origin({"metadata": metadata})["owner_ingress"] and not composed
-            target = reply_target(getattr(ctx, "drive_root", None), metadata.get("reply_reference")) if stamped else {}
-            # A late answer's head: my human's words with the card they answered, never the host's frame.
-            late_words = late_answer_owner_text(answered) if answered and stamped else ""
-            card = answered_card_reply(answered, late["task_id"]) if late_words else {}
+            root = getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
+            target = reply_target(root, metadata.get("reply_reference")) if stamped else {}
+            # A late answer's head: my human's words with the card they answered, never the host's frame; a press
+            # without words is their act, kept under the door's own message id and time.
+            if stamped and (submitted := card_input(metadata, root, "initial_user")):
+                door = metadata.get("origin_message_ref") or {}
+                _loop()._record_owner_directive(ctx, source=submitted["source"], content=submitted["content"],
+                        reply_to=submitted.get("reply_to"), origin={**{key: door.get(key) for key in ("chat_id", "client_message_id", "ts", "row_sha256")},
+                                                                   **{key: submitted.get(key) for key in ("source_task_id", "quiz_id")}})
+                break
+            snapshot = (metadata.get("origin_message_snapshot") or {}) if stamped else {}
+            content = message.get("content")
+            if snapshot.get("placeholder_text"):
+                content = ""
+            elif snapshot.get("attachments") and isinstance(metadata.get("origin_message_text"), str):
+                content = metadata["origin_message_text"]
             _loop()._record_owner_directive(ctx, source="initial_user" if stamped else "initial_text",
-                                            content=late_words or message.get("content"), reply_to=card or target or None)
+                                            content=content,
+                                            origin=({"row_sha256": metadata["origin_message_ref"]["row_sha256"]}
+                                                    if stamped and (metadata.get("origin_message_ref") or {}).get("row_sha256") else None),
+                                            attachments=snapshot.get("attachments"), reply_to=target or None)
             break
     schedule_text()
 
@@ -566,9 +597,12 @@ def acceptance_observation_prompt(ctx: Any, observation: Dict[str, Any]) -> str:
 
 def prepare_acceptance_observation(ctx: Any, trace: dict, incoming: Any, messages: list) -> None:
     """Capture the owner-source facts every round; while delivery control asks Main to select a
-    completion, append them when they changed (earlier rows stay for prefix caching)."""
+    completion, or one-shot facts returned its answer (it may still select one), append them when they
+    changed (earlier rows stay for prefix caching)."""
+    from ouroboros.delivery_facts import noted
+
     observed = capture_acceptance_observation(ctx, trace, incoming)
-    if not getattr(ctx, "_delivery_control_required", False):
+    if not getattr(ctx, "_delivery_control_required", False) and not noted(getattr(ctx, "_delivery_candidate", None)):
         return
     note = acceptance_observation_prompt(ctx, observed)
     if not note:
@@ -579,14 +613,12 @@ def prepare_acceptance_observation(ctx: Any, trace: dict, incoming: Any, message
     messages.append({"role": "user", "content": note, "acceptance_observation": True})
 
 
-def _latch_final_answer_marker(llm_trace: Dict[str, Any], content: str | None,
-                               current_tool_calls: list | None = None) -> None:
+def _latch_final_answer_marker(llm_trace: Dict[str, Any], content: str | None) -> None:
     """Anytime capture of an explicit FINAL ANSWER marker; marker-only, never mined prose. The
     tool-call count stamp keeps the stale-answer invariant: later grounding invalidates this
     fallback unless the model emits a newer marker."""
     from ouroboros.outcomes import FINAL_ANSWER_MARKER, extract_final_answer
 
-    del current_tool_calls
     text = content or ""
     answer = extract_final_answer(text)
     if not answer:
@@ -628,6 +660,10 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
     also carries ``reasoning=True``: it is the model's thinking, shown whole in the
     card's details, while only visible text may name the card or its collapsed line.
     """
+    from ouroboros.llm_messages import DISPLAY_KEY
+
+    if isinstance(display := msg.get(DISPLAY_KEY), dict):  # the lane's projection: history bytes hold more
+        content, msg = display.get("text") or "", {**msg, "reasoning": display.get("reasoning") or ""}
     visible_text = _visible_round_text(content)
     if visible_text:
         safe_text = sanitize_tool_result_for_log(visible_text)
@@ -637,6 +673,24 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
         display_reasoning = LLMClient.extract_display_reasoning(msg)
         if display_reasoning:
             emit_progress(sanitize_tool_result_for_log(display_reasoning), narration=True, reasoning=True)
+
+
+def _handle_text_response(
+    content: Optional[str],
+    llm_trace: Dict[str, Any],
+    accumulated_usage: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """Handle LLM response without tool calls (final response).
+
+    The answer is delivered as written; only its trace note, which feeds the stored
+    trace summary, is redacted like the round narration (``_emit_round_progress``)."""
+    content = content or ""
+    if content.strip():
+        llm_trace["reasoning_notes"].append(sanitize_tool_result_for_log(content).strip())
+        from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL
+
+        accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
+    return content, accumulated_usage, llm_trace
 
 
 # ---------------------------------------------------------------------------
@@ -674,7 +728,8 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
                        focus_fact: str = "", subagents_fact: Optional[str] = None, now: Optional[float] = None) -> str:
     """Round facts, no advice (owner decisions 5A, 11 Oct 1A).
     ``_remember_main_fit`` supplies distinct window/target room, largest residents and own cost; tariffs stay cached.
-    ``money`` is the round's wallet/tree/ceiling/quota observation, each bound named.
+    ``money`` is the round's wallet/tree/ceiling observation, each bound named, and ``quota`` the subscription
+    census part when it changed (``subscription_census.quota_part``).
     Time and nanny burn keep their owners/anchors; tool counts are observed results.
     ``measured=False`` reports unmeasured input rather than stale numbers.
     ``now`` is the row's sample instant, shared with the focus line's age; None samples the clock.
@@ -696,11 +751,12 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     from ouroboros.context_anchor import refused_input
     refused = refused_input(usage, getattr(ctx, "context_fit_plan", None)) if measured else None
     from ouroboros.lead_fact import model_fact_words
-    parts = [_round_fact(ctx, tool_ctx), f"mode {ctx.active_context_mode}", model_fact_words(tool_ctx, ctx.active_model)]
+    from ouroboros.context_view_facts import memory_facts, mode_words, window_fact
+    mode = mode_words(getattr(ctx, "context_fit_plan", None), ctx.active_context_mode)  # Low for the window, by name
+    parts = [_round_fact(ctx, tool_ctx), f"mode {mode}", model_fact_words(tool_ctx, ctx.active_model)]
     notes = [note for note in (f"largest accepted input {int(accepted):,}" if accepted else "",
                                f"refused at ~{int(refused):,}" if refused else "") if note]
     largest = f" ({'; '.join(notes)})" if notes else ""
-    from ouroboros.context_view_facts import memory_facts, window_fact
     source = window_fact(getattr(ctx, "context_fit_plan", None), usage.get("_context_response_reserve_tokens")) if measured else ""
     parts.append((source or ("window unknown" if capacity is None else f"window {int(capacity):,}")) + largest)
     parts.extend(filter(None, [memory_facts(getattr(ctx, "context_fit_plan", None), ctx.active_context_mode, ctx.messages)]))
@@ -890,7 +946,7 @@ def _context_components(ctx: Any, *, measured: bool) -> list:
 def cached_tariff_text(model: str, provider: str, prompt: Optional[int], *, unknown: str = "tariff unknown") -> str:
     """Quote fresh exact-model endpoint rates when they agree; never invent one. ``unknown`` words their absence: [ROUTE FACTS] says it, the round facts pass ""."""
     try:
-        from ouroboros.pricing import get_pricing
+        from ouroboros.pricing import get_pricing, pricing_at_prompt
         from ouroboros.provider_models import normalize_model_identity
 
         model, provider = normalize_model_identity(str(model or "")), str(provider or "")
@@ -898,12 +954,9 @@ def cached_tariff_text(model: str, provider: str, prompt: Optional[int], *, unkn
         rows = list(catalog.values()) if provider == "openrouter" else [catalog[model]] if model in catalog else []
         quoted = []
         for row in rows:
-            rates = row
             if getattr(row, "tiers", ()) and prompt is None:
                 return unknown and "tariff unknown (input tier unmeasured)"
-            for threshold, tier in getattr(row, "tiers", ()):
-                if int(prompt or 0) >= threshold:
-                    rates = tier
+            rates = pricing_at_prompt(row, prompt or 0)
             if len(rates) != 4 or rates[0] is None or rates[3] is None:
                 return unknown
             quoted.append(tuple(rates))
@@ -981,6 +1034,7 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
     obsolete snapshots. The caller remeasures including this line before sending.
     """
     from ouroboros.context_compaction import context_reclaim_transcript_sha256
+    from ouroboros.subscription_census import quota_part
     from ouroboros.transcript_prefix import reasoning_retirement_fact
 
     usage = ctx.accumulated_usage
@@ -988,15 +1042,17 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
     now = time.time()  # the row's one sample instant: its clock segment and its focus line's age
     focus_identity, focus_fact = _own_focus_fact(ctx, now)
     subagents_fact = subagents_fact_line()
+    quota, quota_term = quota_part(ctx)  # the census file alone, change-only against the latest part in view
     source = [{k: v for k, v in m.items() if k != "cache_control"} for m in ctx.messages if m.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME]
     source.append({"role": "system", "content": json.dumps(ctx.tool_schemas, ensure_ascii=False, sort_keys=True)})
     key = (ctx.round_idx, ctx.active_model, ctx.active_context_mode, ctx.active_effort,
            str(getattr(plan, "route_fp", "")), str(getattr(plan, "status", "")),
            bool(getattr(plan, "stale", False)), int(getattr(plan, "window_tokens", 0) or 0),
-           context_reclaim_transcript_sha256(source), focus_identity, subagents_fact, reasoning_retirement_fact(usage, ctx.round_idx))
+           context_reclaim_transcript_sha256(source), focus_identity, subagents_fact, reasoning_retirement_fact(usage, ctx.round_idx),
+           quota_term)
     visible = any(m.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME and m.get("content") == usage.get("_context_facts_line")
                   for m in ctx.messages)
-    if tuple(usage.get("_context_facts_key") or ()) == key and visible:
+    if tuple(usage.get("_context_facts_key") or ()) == key and visible and quota is None:  # a due quota part is sent
         return False
     measured = False
     if plan is not None:
@@ -1017,6 +1073,8 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
                 refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC))
         money = {"wallet": observed["wallet"], "tree": observed["tree"],
                  "cost_ceiling": getattr(tool_ctx, "_cost_ceiling", None)}
+    if quota is not None:
+        money = {**money, "quota": quota}
     line = context_facts_line(ctx, money=money, measured=measured, focus_fact=focus_fact, subagents_fact=subagents_fact,
                               now=now)
     ctx.messages.append(bound_host_row(CONTEXT_FACTS_NAME, line))

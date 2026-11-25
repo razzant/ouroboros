@@ -1,14 +1,12 @@
 """Modern per-account discovery in real editors, using controlled HTTP responses."""
 from __future__ import annotations
 
-import copy
-import json
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from tests import test_subscription_role_routes_browser as roles
 from tests.settings_browser_helpers import press_editor_save, settings_page
+from tests.test_subscription_setup_browser import scoped_catalog_answer
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
@@ -71,15 +69,7 @@ def account_catalog_ui(role_ui):
 
     def catalog_response(route):
         ui["reads"].append(route.request.url)
-        body = copy.deepcopy(ui["fixture"]["catalog"])
-        pin = parse_qs(urlparse(route.request.url).query).get("credential_profile_id", [""])[0]
-        if pin:
-            body["items"] = [item for item in body["items"] if item["credential_profile_id"] == pin]
-            envelope = body["account_catalogs"][0]
-            envelope["accounts"] = [account for account in envelope["accounts"] if account["credentialProfileId"] == pin]
-            body["errors"] = [error for error in body["errors"] if error["credential_profile_id"] == pin]
-            envelope["partial"] = body["partial"] = any(account["catalog"] is None for account in envelope["accounts"])
-        route.fulfill(content_type="application/json", body=json.dumps(body))
+        route.fulfill(json=scoped_catalog_answer(route.request.url, ui["fixture"]["catalog"], ui["fixture"]["status"]["harnesses"]))
 
     ui["page"].route("**/api/model-catalog*", catalog_response)
     return ui
@@ -123,11 +113,16 @@ def suggestions(page, field, expected=None):
 
 
 def refresh(ui):
-    ui["page"].evaluate("""async () => {
+    """An account read recovers while the owner is typing. The open form renews its scoped inventory."""
+    status = ui["fixture"]["status"]
+    request = """async () => {
         const {claudexorStatus} = await import('/static/modules/claudexor_status_store.js');
         await claudexorStatus.refresh({includeModels:true});
-        await (await import('/static/modules/settings_catalog.js')).refreshModelCatalog();
-    }""")
+    }"""
+    status["reads"]["accounts"] = "failed"
+    ui["page"].evaluate(request)
+    status["reads"]["accounts"] = "ok"
+    ui["page"].evaluate(request)
 
 
 def assert_saved(ui, consumer, model, pin):
@@ -225,6 +220,8 @@ def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(acc
 
 
 def test_models_auto_does_not_borrow_largest_context_or_processing_modes(account_catalog_ui):
+    from playwright.sync_api import expect
+
     ui = account_catalog_ui
     ui["settings"]["OUROBOROS_MODEL"] = f"claudexor::{SOURCE}=catalog-shared"
     ui["settings"]["OUROBOROS_PROCESSING_PREFERENCE"] = "fast"
@@ -232,13 +229,16 @@ def test_models_auto_does_not_borrow_largest_context_or_processing_modes(account
     row.locator("summary").click()
     note = row.locator("[data-model-context-note]")
     assert "272k" not in note.inner_text()  # Window authority comes from the server preview, not this catalog.
-    assert "Fast is not advertised" in row.locator("[data-processing-capability]").inner_text()
+    # The pinned account's list names Standard only: an account's list is its positive word, never proof a tier is
+    # absent, so the route says Fast is not confirmed here (a provider may serve it as Standard), not that it is refused.
+    assert "Not confirmed for catalog-shared here" in row.locator("[data-processing-capability]").inner_text()
     account.select_option("")
     assert {"catalog-only-a", "catalog-only-b"} <= set(suggestions(page, field, {"catalog-shared", "catalog-only-a", "catalog-only-b"}))
     assert "unknown" in note.inner_text() or "not known" in note.inner_text()
     assert "1M" not in note.inner_text()
     account.select_option("work")
+    # The pin changes before its scoped catalog returns. Wait for this account's listed Fast, with no caveat.
+    expect(row.locator("[data-processing-capability]")).to_have_text("Requests faster processing. It may cost more.")
     assert "1M" not in note.inner_text()
-    assert row.locator("[data-processing-capability]").inner_text() == ""
     assert field.input_value() == "catalog-shared"
     roles.capture(page, "account-catalog-exact-context-processing")

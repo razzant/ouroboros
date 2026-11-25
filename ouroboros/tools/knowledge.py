@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import List
 
@@ -15,6 +16,7 @@ from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.knowledge import INDEX_FILE as INDEX_FILE, OVERVIEW_TOPIC as OVERVIEW_TOPIC
 from ouroboros.knowledge import sanitize_topic as _sanitize_topic
 from ouroboros.knowledge_edits import check_arguments, mode_received, normalize_arguments
+from ouroboros.memory_view_events import SituationReceipt, receipt_situation
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolEntry, ToolContext
 from ouroboros.tools.tool_result import ToolResult, _MAX_META_BYTES, _publish_tool_result, completed_local_read
@@ -73,16 +75,17 @@ def _argument_notes(notes) -> str:
 
 
 def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = None,
-                 end_char: int | None = None, earlier: dict | None = None, notes=()) -> tuple[str, dict]:
+                 end_char: int | None = None, earlier: dict | None = None, notes=(), shelves=(),
+                 situation: str = "", *, version: str | None = None) -> tuple[str, dict]:
     """One exact character range of the note (``_range``), or of an ``earlier`` version of it."""
     ref = note.source_ref()
     ref["state"] = note.state
     text = note.text
     total = len(text)
     start, end, range_notes = _range(total, start_char, end_char)
-    if earlier is not None:  # the bytes of a recorded version, read through its own call
-        ref["read"] = {"tool": "knowledge_read", "arguments": {
-            "topic": note.address.topic, "scope": note.address.scope, "version": note.revision}}
+    if version is not None:
+        ref["read"]["arguments"]["version"] = version
+    if earlier is not None:
         ref["earlier_version"] = earlier
     ref.update(start_char=start, end_char=end, complete_chars=total)
     body = text[start:end]
@@ -90,12 +93,37 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
     header += "".join(f"[Range note] {item}\n" for item in range_notes) + _argument_notes(notes)
     if earlier is not None:
         written = knowledge_versions.written_text(earlier)
-        header += f"[Earlier version, not the current note: {written}. The current revision is {earlier['current_revision']}.]\n"
+        current = earlier["current_revision"]
+        where = (f"The current revision is {current}." if current else
+                 f"The live note is {earlier['live_status']} at this address.")
+        header += f"[Earlier version, not the current note: {written}. {where}]\n"
     if note.parse_error:
         header += "[Metadata unavailable; the complete original Markdown follows.]\n"
     if note.archive_error:
         header += f"[Archive metadata invalid; kept active: {note.archive_error}.]\n"
-    header += "\n"
+    if shelves and not start_char:  # link facts once, on a read from the note's start, not on every range page
+        links = {}
+        try:
+            outgoing = knowledge_store.knowledge_links(note)
+        except (ValueError, OSError) as exc:
+            links["unavailable"] = type(exc).__name__
+            outgoing = ()
+        for link in outgoing:
+            status = link["status"]
+            if status == "external":
+                links[status] = links.get(status, 0) + 1
+            elif status == "unavailable":
+                links.setdefault(status, link["error"])
+            else:
+                target = link.get("address", note.address.as_dict() if status == "same_source" else {})
+                links.setdefault(status, []).append(
+                    {key: target[key] for key in ("scope", "topic")} if target else link["target"])
+        if links:
+            header += "[Knowledge links] " + json.dumps(links, ensure_ascii=False) + "\n"
+        backlinks = knowledge_store.knowledge_backlinks(note, shelves)
+        if backlinks:
+            header += "[Knowledge backlinks (readable shelves now)] " + json.dumps(backlinks, ensure_ascii=False) + "\n"
+    header += (situation + "\n" if situation else "") + "\n"
     return header + body, {
         "knowledge_source": ref, "knowledge_body_start": len(header),
         "knowledge_body_chars": len(body), "knowledge_source_complete": start == 0 and end == total,
@@ -103,12 +131,13 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
 
 
 def _rendered_view(view: str, text: str, facts: dict, start_char: int | None, end_char: int | None,
-                   notes=()) -> tuple[str, dict]:
+                   notes=(), situation: str = "") -> tuple[str, dict]:
     """An outline or history listing, paged by the same character ranges as a note."""
     start, end, range_notes = _range(len(text), start_char, end_char, "view")
     head = {**facts, "view": view, "start_char": start, "end_char": end, "complete_chars": len(text)}
     header = (f"[Knowledge {view}] " + json.dumps(head, ensure_ascii=False, sort_keys=True) + "\n"
-              + "".join(f"[Range note] {item}\n" for item in range_notes) + _argument_notes(notes) + "\n")
+              + "".join(f"[Range note] {item}\n" for item in range_notes) + _argument_notes(notes)
+              + (situation + "\n" if situation else "") + "\n")
     return header + text[start:end], {"knowledge_view": head, "knowledge_body_start": len(header),
                                       "knowledge_body_chars": end - start}
 
@@ -117,37 +146,77 @@ class ListChanged(Exception):
     """A history page's continuation named another list than the one rendered now (a write landed since)."""
 
 
-def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | None,
-               start_char: int | None, end_char: int | None, notes=(), fingerprint: str = "") -> tuple[str, dict]:
+def _note_view(address: knowledge_store.KnowledgeAddress, view: str, version: str | None,
+               start_char: int | None, end_char: int | None, notes=(), fingerprint: str = "", shelves=(),
+               situation: str = "") -> tuple[str, dict]:
     if view not in ("note", "outline", "history"):
         raise ValueError(f"view={view!r}: use note (default), outline or history")
     if fingerprint and view != "history":
         raise ValueError("fingerprint continues a list of versions (view='history'), as its first page names it")
     if version is not None and view == "history":
         raise ValueError("version selects one version for view=note or view=outline; view=history lists them all")
+    requested = address
+    if version is not None or view == "history":
+        address = knowledge_store.shelf_spelling(address)
+    live_status = "readable"
+    try:
+        note = knowledge_store.read_knowledge_note(address)
+    except (OSError, UnicodeDecodeError) as exc:
+        if version is None:
+            raise
+        note = None
+        live_status = "absent" if isinstance(exc, FileNotFoundError) else "unreadable"
+    current_revision = note.revision if note is not None else None
     shown, earlier = note, None
-    if version is not None and version != note.revision:
-        text, row = knowledge_versions.find_version(note.address, version)
-        shown = knowledge_store._note(note.address, text.encode("utf-8"))
-        earlier = {**knowledge_versions.row_facts(row), "revision": version, "current_revision": note.revision}
+    if version is not None:
+        if version == current_revision:
+            if requested != address:
+                try:
+                    pin, _, _ = knowledge_versions.find_note_version(address, requested, version, live=None)
+                except knowledge_versions.VersionUnavailable:
+                    pass  # The live text can still supply a head with no recoverable journal entry.
+                else:
+                    shown = replace(note, address=pin)
+        else:
+            live = note.text if note is not None else None
+            pin, text, row = knowledge_versions.find_note_version(address, requested, version, live=live)
+            shown = knowledge_store._note(pin, text.encode("utf-8"))
+            earlier = {**knowledge_versions.row_facts(row), "revision": version, "current_revision": current_revision,
+                       **({"live_status": live_status} if note is None else {})}
     if view == "note":
-        return _source_view(shown, start_char, end_char, earlier, notes)
-    facts = {"topic": note.address.topic, "scope": note.address.scope, "revision": shown.revision,
-             **({"current_revision": note.revision, "earlier_version": earlier} if earlier else {})}
+        return _source_view(shown, start_char, end_char, earlier, notes, shelves, situation, version=version)
+    topic = requested.topic if view == "history" else shown.address.topic
+    facts = {"topic": topic, "scope": shown.address.scope, "revision": shown.revision,
+             **({"current_revision": current_revision, "earlier_version": earlier} if earlier else {})}
     if view == "history":  # newest first: a later page continues the list its first page read, by its fingerprint
         for name, bound in (("start_char", start_char), ("end_char", end_char)):  # an argument error, not a list's
             if bound is not None and (type(bound) is not int or bound < 0):
                 raise ValueError(f"{name}={bound!r} is not a position in the list: a non-negative integer")
-        listing = knowledge_versions.render_history(note)
+        listing = knowledge_versions.render_history(note, requested)
         digest = hashlib.sha256(listing.encode("utf-8")).hexdigest()[:16]
         if (start_char or fingerprint) and fingerprint != digest:
             raise ListChanged("that page belongs to another list of versions (a write landed since, or no fingerprint "
                               "named the list it continues): read it again from start_char=0" if start_char else
                               "the fingerprint names another list of versions (a write landed since): a first page "
                               "takes none, so read it without the fingerprint")
-        return _rendered_view(view, listing, {**facts, "fingerprint": digest}, start_char, end_char, notes)
-    label = f" — an earlier version, not the current note (current revision {note.revision})" if earlier else ""
-    return _rendered_view(view, knowledge_versions.render_outline(shown, label), facts, start_char, end_char, notes)
+        return _rendered_view(view, listing, {**facts, "fingerprint": digest}, start_char, end_char, notes, situation)
+    label = ""
+    if earlier is not None:
+        current = f"current revision {current_revision}" if current_revision else f"live note {live_status} at this address"
+        label = f" — an earlier version, not the current note ({current})"
+    if version is not None:
+        facts["read"] = {"tool": "knowledge_read", "arguments": {
+            "topic": shown.address.topic, "scope": shown.address.scope, "version": version}}
+    return _rendered_view(view, knowledge_versions.render_outline(shown, label, version=version), facts,
+                          start_char, end_char, notes, situation)
+
+
+def _line(situation: SituationReceipt | None) -> str:
+    return situation.line if situation is not None else ""
+
+
+def _with_lines(text: str, *lines: str) -> str:
+    return "\n".join((text, *(line for line in lines if line)))
 
 
 def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
@@ -160,37 +229,42 @@ def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
     if isinstance(version, str) and not version.strip():  # empty or whitespace: a blank value names no revision
         notes.append(ignored_argument_note("version", version, "no revision named; this is the current note"))
         version = None
+    situation = _line(receipt_situation(ctx, canonical_data_root(ctx)))
     try:
         sanitized = _sanitize_topic(topic)
         address = _address(ctx, sanitized, scope)
-        note = knowledge_store.read_knowledge_note(address)
         if fingerprint is not None and not isinstance(fingerprint, str):
             raise ValueError("fingerprint is the text a history page's header names")
-        text, meta = (_source_view(note, start_char, end_char, notes=notes)
-                      if view == "note" and version is None and not fingerprint
-                      else _note_view(note, view, version, start_char, end_char, notes, fingerprint or ""))
+        shelves = (address,
+                   knowledge_store.resolve_knowledge_address(address.canonical_root, sanitized, "global"),
+                   knowledge_store.resolve_knowledge_address(address.canonical_root, sanitized,
+                                                             project_id=str(placed_project_id(ctx) or ""))) if view == "note" else ()
+        text, meta = _note_view(address, view, version, start_char, end_char, notes, fingerprint or "", shelves, situation)
     except ListChanged as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: position_mismatch: {exc}",
+            status="error", code="TOOL_REPORTED_FAILURE", text=_with_lines(f"⚠️ TOOL_ERROR: position_mismatch: {exc}", situation),
             meta={"operation_outcome": "completed_no_effect"}))
     except knowledge_versions.VersionUnavailable as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: version_unavailable: {exc}",
+            status="error", code="TOOL_REPORTED_FAILURE", text=_with_lines(f"⚠️ TOOL_ERROR: version_unavailable: {exc}", situation),
             meta={"operation_outcome": "completed_no_effect"}))
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR: {exc}",
+            status="error", code="TOOL_ARG_ERROR", text=_with_lines(f"⚠️ TOOL_ARG_ERROR: {exc}", situation),
             meta={"operation_outcome": "completed_no_effect"}))
     except FileNotFoundError:
         elsewhere = ("" if address.scope == "global"
                      else f" A global note may exist: knowledge_read(topic={sanitized!r}, scope='global').")
         return _publish_tool_result(ctx, ToolResult(
-            status="ok", code="LEGACY_WARNING", text=f"Topic {topic!r} not found in {address.scope}. Use knowledge_list to see available topics." + elsewhere,
+            status="ok", code="LEGACY_WARNING", text=_with_lines(
+                f"Topic {topic!r} not found in {address.scope}. Use knowledge_list to see available topics." + elsewhere,
+                situation),
             meta={"knowledge_address": address.as_dict(), "knowledge_missing": True,
                   "operation_outcome": "completed_no_effect"}))
     except (OSError, UnicodeDecodeError) as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: Knowledge source unavailable: {type(exc).__name__}",
+            status="error", code="TOOL_REPORTED_FAILURE", text=_with_lines(
+                f"⚠️ TOOL_ERROR: Knowledge source unavailable: {type(exc).__name__}", situation),
             meta={"operation_outcome": "completed_no_effect"}))
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text, meta={**meta, "operation_outcome": "completed_no_effect"}))
 
@@ -271,9 +345,11 @@ def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -
         return f"Residency: it has no summary, so {where} shows its address and title, and its whole view marks it (no summary); {tail}"
     loaders = ("Main, tasks, wakes and Presence, and the outline a tight window, a helper and a session start with"
                if knowledge_store.outline_keeps_summary(note.metadata.get("type"))
-               else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its address and title")
+               else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its address and title "
+                    "(a note typed person or person-… keeps its summary there)")
     where = f"the global knowledge index ({loaders})" if note.address.scope == "global" else project
-    return f"Residency: its summary ({len(note.summary)} chars) is shown in {where}; {tail}"
+    return (f"Residency: its summary ({len(note.summary)} chars) is shown in {where} from each context's next build; "
+            f"works already running keep the view they started with; {tail}")
 
 
 def _capture_previous(ctx: ToolContext, note: knowledge_store.KnowledgeNote) -> dict:
@@ -298,20 +374,155 @@ def _capture_previous(ctx: ToolContext, note: knowledge_store.KnowledgeNote) -> 
 
 
 def _mode_refusal(ctx: ToolContext, mode: object) -> str:
-    """A write names its operation; without an exact mode nothing is written, and nothing else is read first.
+    """A write names its operation; without an exact mode no note is addressed or written.
 
     An omitted mode once meant overwrite, so a call meant to add one section replaced the whole note.
     Null and blank text say what omission says (``tools/arg_feedback``), now refused like it; any other
     value is refused as received, never trimmed, case-folded or matched to the nearest operation.
     """
-    return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+    text = (
         f"⚠️ TOOL_ARG_ERROR: {mode_received(mode)}. knowledge_write has no default operation: pass mode as exactly "
         "one of "
         "overwrite (content replaces the whole body), append (content goes at the end), edit (old_str with "
         "content, or edits, replaces exact text; summary may go alone), revert (puts back the earlier version "
         "named by version), archive or restore (the archive state only; archive requires reason). version names "
         "an earlier version to put back; expected_revision is the current revision a replacing write checks. "
-        "Nothing was written.")))
+        "Nothing was written.")
+    situation = _line(receipt_situation(ctx, canonical_data_root(ctx)))
+    return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=_with_lines(text, situation)))
+
+
+def _holds_names(result: knowledge_store.KnowledgeWriteResult) -> bool:
+    """The written note holds names: an active global note whose recorded names are not empty after the write. The
+    overview is not one here: it stands in its own place, named in the held section, not copied."""
+    note, claims = result.current, result.claims
+    return bool(note is not None and claims is not None and claims.active and note.state == "active"
+                and note.source is not None and note.address.topic != OVERVIEW_TOPIC)
+
+
+# Where a head yields to the physical window (``memory_floor._held_note_steps``), keyed by how the present situations
+# holding the note hold it: by its own names (True) it yields last; only by a link (False), before every claimed head.
+_YIELDS = {
+    frozenset({True}): "A held head takes its space ahead of the memory of other rooms and yields to the window last.",
+    frozenset({True, False}): ("A held head takes its space ahead of the memory of other rooms and yields to the window "
+                               "last; where only a link holds it, before every claimed head."),
+    frozenset({False}): ("A head a held head links takes its space ahead of the memory of other rooms and yields to the "
+                         "window before every claimed head."),
+}
+
+
+def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: SituationReceipt, root: Path,
+                 holding: dict[str, dict[str, list[str]]]) -> tuple[list[str], frozenset[bool]]:
+    """What a write says of where this note stands: on a write that sets or changes names, what became of them
+    (ignored entries, names no present situation matches or whose evidence was unreadable, a removed name); on every
+    write of a note that holds names (``_holds_names``) or that a held head links (``holding``,
+    ``held_notes.standing``), one line naming each present situation where it stands, by its own names or carried,
+    with the heads standing there and their tokens (``held_notes.standing_heads``), situations alike in both and in
+    why named together. Beside the lines, how each present situation holding the head holds it (``_YIELDS``): empty
+    where none does, so the head's size and where it yields are said only where one does."""
+    from ouroboros.held_notes import standing_heads
+
+    claims, note, lines, heads, own = result.claims, result.current, [], {}, []
+    matching, unverified = situation.matching(claims.written) if claims is not None else (set(), set())
+    if claims is not None and claims.report:
+        if claims.ignored:
+            lines.append("Ignored claims entries (expected a list of strings): " + ", ".join(claims.ignored))
+        names = dict.fromkeys(claims.written)
+        if unmatched := [repr(name) for name in names if name not in matching and name not in unverified]:
+            lines.append("Claims with no matching situation found: " + ", ".join(unmatched))
+        if unverified:
+            lines.append("Claims with unverified situations: " + ", ".join(repr(name) for name in names if name in unverified))
+    if note.address.scope != "global":
+        lines.append("Claims on a project-shelf note hold nowhere.")
+    else:
+        active = claims.active if claims is not None and note.state == "active" else []
+        carriers = [(by, names) for by, names in sorted(holding.get(note.address.topic, {}).items()) if by]
+        reached, doubtful = situation.matching([name for _, names in carriers for name in names]) if carriers else ((), ())
+        own = [name for name in active if name in matching]  # own names first, then each carrier's, in that order
+        where = list(dict.fromkeys([*own, *(name for _, names in carriers for name in names if name in reached)]))
+        if where and note.state == "active" and note.source is not None and note.address.topic != OVERVIEW_TOPIC:
+            heads = standing_heads(root, where, written=note, holding=holding)  # the overview stands only by name
+        alike: dict[tuple, list[str]] = {}  # situations holding the same heads for the same reasons are named together
+        for name in where:
+            reasons = (name in own, tuple(by for by, names in carriers if name in names))
+            alike.setdefault((heads.get(name), *reasons), []).append(name)
+        parts = []
+        for (total, mine, by), names in alike.items():
+            size = (f" {'each hold' if len(names) > 1 else 'holds'} {total[0]} head{'s' * (total[0] != 1)}, "
+                    f"{total[1]:,} tokens" if total else "")
+            why = f" ({'also ' if mine else ''}carried by {', '.join(by)})" if by else ""
+            parts.append(", ".join(names) + size + why)
+        carried = f" (carried by {', '.join(by for by, _ in carriers)})" if carriers else ""
+        nowhere = ("unverified" if unverified.intersection(active) or doubtful else "none") + carried
+        lines.append("Present situations holding this note: " + ("; ".join(parts) or nowhere))
+    if claims is not None and claims.report and claims.removed:
+        lines.append("A removed name stops holding this head in works that start from now on; a work already running "
+                     "keeps the heads it started with.")
+    return lines, frozenset(name in own for name in heads)  # only where a present situation holds the head
+
+
+def _head_line(note: knowledge_store.KnowledgeNote) -> str:
+    """How large a head this write leaves where a present situation holds the note, by its own names or carried by a
+    held head: there it stands whole, and a note with no `## ` line is all head; in characters and in host tokens
+    (``memory_floor.view_tokens``)."""
+    from ouroboros.held_notes import note_head
+    from ouroboros.memory_floor import view_tokens
+
+    head, body = note_head(note.source), note.source.body_span
+    size = f"{len(head):,} characters, {view_tokens(head):,} tokens"
+    if len(head.encode("utf-8")) < body.end_byte - body.start_byte:
+        return f"Held head: {size}, the body above the first `## ` line."
+    return f"Held head: {size}: this note has no `## ` line outside a fence, so its whole body is the head."
+
+
+def _link_lines(result: knowledge_store.KnowledgeWriteResult, holding: dict[str, dict[str, list[str]]],
+                evidence: SituationReceipt) -> list[str]:
+    """Where this note's own head carried or carries notes, beside who holds each after the write (``holding``,
+    ``held_notes.standing``): each one newly carried or released with its head size, and its head links held
+    nowhere. Facts only: no limit and no choice."""
+    from ouroboros.held_notes import linked_heads, note_head
+
+    note, claims, lines = result.current, result.claims, []
+    topic = note.address.topic
+
+    def present(names) -> str:
+        matching, unverified = evidence.matching(list(names))
+        return ", ".join(name for name in dict.fromkeys(names) if name in matching) or ("unverified" if unverified else "none")
+
+    def carries(version, names) -> tuple[dict, list]:
+        held = version.source is not None and version.state == "active" and names and topic != OVERVIEW_TOPIC
+        return linked_heads(version) if held else ({}, [])
+
+    def listed(targets, names, where=lambda _name: "") -> str:
+        parts, total = [], 0
+        for name in names:
+            head, body = note_head(targets[name].source), targets[name].source.body_span
+            whole = ("; no `## ` line outside a fence: the whole body"
+                     if len(head.encode("utf-8")) >= body.end_byte - body.start_byte else "")
+            parts.append(f"{name} ({len(head):,} characters{whole}{where(name)})")
+            total += len(head)
+        return f"{', '.join(parts)}; {total:,} characters in all"
+
+    own = claims.active if claims is not None else []
+    after, unheld = carries(note, own)
+    before = {}
+    if claims is not None and claims.recorded and result.previous_revision:
+        try:
+            old = note if result.previous_revision == note.revision else knowledge_store._note(note.address, (
+                knowledge_versions.find_version(note.address, result.previous_revision, note.text)[0].encode("utf-8")))
+            before = carries(old, set(claims.recorded) & set(knowledge_versions.claim_names(old.metadata.get("claims"))))[0]
+        except (knowledge_versions.VersionUnavailable, OSError) as exc:
+            before = None
+            lines.append(f"What this head carried before the write is unknown: {exc}.")
+    if before is not None and (newly := [name for name in after if name not in before]):
+        lines.append(f"Newly carried by this head: {listed(after, newly)}, standing where this note's own names hold it: "
+                     f"{present(own)}.")  # one hop: where a link holds this note, its links hold nothing
+    if before is not None and (released := [name for name in before if name not in after]):
+        lines.append("Released by this head: " + listed(before, released, lambda name: "; now held: " + present(
+            [held for names in holding.get(name, {}).values() for held in names])) + ".")
+    if unheld:
+        lines.append(f"Linked from this head, not held: {', '.join(unheld)}.")
+    return lines
 
 
 def _knowledge_write(
@@ -322,6 +533,9 @@ def _knowledge_write(
 ) -> str:
     if not isinstance(mode, str) or mode not in _MODES:  # no default operation: the call must choose one
         return _mode_refusal(ctx, mode)
+    root = canonical_data_root(ctx)
+    situation = receipt_situation(ctx, root)
+    situation_line = _line(situation)
     notes = []  # a value that means what omission means takes the omitted path, said in the result (tools/arg_feedback)
     # The argument rules every exact editor shares (knowledge_edits); archive still requires its reason.
     version, edits, old_str, reason = normalize_arguments(mode, version, expected_revision, edits, old_str, reason,
@@ -337,10 +551,12 @@ def _knowledge_write(
                              "or omit summary to keep the current one")
         if mode not in ("overwrite", "append", "edit") and summary is not None and mode in _MODES:
             raise ValueError(f"summary is used only with mode=overwrite, append or edit, not mode={mode}")
+        fields = (mode == "edit" and old_str in (None, "") and edits is None and isinstance(content, str) and bool(content)
+                  and knowledge_store.yaml_fields(content) is not None)  # a YAML block alone sets fields, keeps the body
         content, old_str, edits = check_arguments(
             mode, content, old_str, new_str, edits, version, reason, notes, modes=_MODES,
             no_content=("revert", "archive", "restore"), reason_required=("archive",), alone="summary",
-            alone_given=summary is not None, version_reader="knowledge_read(version=...)")
+            alone_given=summary is not None, fields=fields, version_reader="knowledge_read(version=...)")
         address = _address(ctx, sanitized, scope)
         # The turn is the writer; the route stamp is the route that ANSWERED the
         # loop's last round (provider + resolved model, account when Claudexor
@@ -357,10 +573,11 @@ def _knowledge_write(
     except ValueError as exc:
         said = f" ({'; '.join(notes)})" if notes else ""
         return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR: {exc}{said}"))
+            status="error", code="TOOL_ARG_ERROR", text=_with_lines(f"⚠️ TOOL_ARG_ERROR: {exc}{said}", situation_line)))
     except (OSError, UnicodeDecodeError) as exc:
         return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: Knowledge write failed: {type(exc).__name__}"))
+            status="error", code="TOOL_REPORTED_FAILURE", text=_with_lines(
+                f"⚠️ TOOL_ERROR: Knowledge write failed: {type(exc).__name__}", situation_line)))
     meta = {"knowledge_write_reason": result.reason, **({"ignored_arguments": notes} if notes else {})}
     if result.history_ref is not None:
         meta["knowledge_previous_source"] = result.history_ref
@@ -373,7 +590,7 @@ def _knowledge_write(
         if result.current is not None:  # before the bound, which then makes room for it
             meta["knowledge_residency"] = _residency(result.current, result.delta)
         if result.reason == "saved" and result.previous is not None:  # who wrote what this replaced, and its calls
-            where = {"topic": address.topic, "scope": address.scope}
+            where = {"topic": result.current.address.topic, "scope": result.current.address.scope}
             meta["knowledge_previous"] = result.previous
             meta["knowledge_read_previous"] = {"tool": "knowledge_read",
                                                "arguments": {**where, "version": result.previous_revision}}
@@ -387,6 +604,24 @@ def _knowledge_write(
         outline = meta.get("knowledge_outline")
         published = _bound_delta_meta(meta)
         text = f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True)
+        from ouroboros.held_notes import standing
+
+        claim_lines, link_lines, held, head = [], [], frozenset(), []
+        note = result.current  # links hold only once some claim was recorded on this shelf
+        linked = (note is not None and note.address.scope == "global"
+                  and knowledge_versions.claim_record_path(note.address.shelf, note.address.topic).parent.is_dir())
+        holding = standing(root) if linked else {}  # who holds each note, read once for every line below
+        carried = linked and any(carrier for carrier in holding.get(note.address.topic, {}))
+        named = carried or result.claims is not None and (result.claims.report or _holds_names(result))
+        if named or linked:
+            evidence = situation or receipt_situation(ctx, root, claims_written=True)
+            if named:
+                claim_lines, held = _claim_lines(result, evidence, root, holding)
+            if linked:
+                link_lines = _link_lines(result, holding, evidence)
+        if held:  # a size and where it yields are said only where a present situation holds the head
+            head = [_head_line(note), _YIELDS[held]]
+        text = _with_lines(text, situation_line, *claim_lines, *link_lines, *head)
         if isinstance(outline, str) and not isinstance(meta["knowledge_outline"], str):
             # The bare appender's only look at the note: an outline the meta cannot hold follows
             # the JSON line whole; the meta keeps its pointer (size, sha256, the read).
@@ -396,19 +631,20 @@ def _knowledge_write(
     changes = None
     if result.reason == "revision_conflict" and result.held is not None and result.current is not None:
         # The held version plus what came since is the whole current note: the note is not resent.
-        changes = (text + f" Nothing was written. Reconcile your change with what came since, then pass "
-                   f"expected_revision={result.current.revision!r}.\n\n"
-                   + knowledge_versions.render_changes(result.current, result.held))
-        if len(changes) > tool_result_limit("knowledge_write"):
-            changes = None  # all or whole: never a clipped diff; the complete current source follows instead
+        reply = (text + f" Nothing was written. Reconcile your change with what came since, then pass "
+                 f"expected_revision={result.current.revision!r}.")
+        diff = knowledge_versions.render_changes(result.current, result.held)
+        if len(reply) + 2 + len(diff) <= tool_result_limit("knowledge_write"):
+            changes = _with_lines(reply, situation_line) + "\n\n" + diff
     if changes is not None:
         text = changes
         meta["knowledge_changes_since"] = result.held["facts"]["revision"]
     elif not result.show_source:  # a refused edit item or revert says why; the note the caller holds is not resent
-        text += " Nothing was written."
+        text = _with_lines(text + " Nothing was written.", situation_line)
     else:
         if result.reason in ("revision_required", "revision_conflict"):
             text += " Read the current source and pass its revision as expected_revision when replacing it."
+        text = _with_lines(text, situation_line)
         if result.current is not None:
             view, current_meta = _source_view(result.current)
             meta.update(current_meta)
@@ -463,15 +699,25 @@ def get_tools() -> List[ToolEntry]:
             "name": "knowledge_write",
             "description": (
                 "Create, revise, append, revert or reversibly archive durable Markdown understanding. YAML carries type, "
-                "optional title and an authored summary; unknown metadata survives. Each active summary stays resident in "
+                "an authored summary and optional title, keys and claims; unknown metadata survives. keys are exact outside "
+                "names of the note's subject (an account, an email), each {provider, namespace, id}: a place turn states its "
+                "speaker's key and the global notes holding it; equality alone joins them and grants no authority. claims "
+                "lists exact situation names as knowledge_read and knowledge_write state them (room:<id>, place:<id>, "
+                "conversation:…, thread:…; not the label in parentheses): where one is present, every integrating focus "
+                "holds this active global note's head, the body above its first `## ` line. No selected mode shortens a "
+                "held head; only the window can, to my summary and an exact reader I can open, or in an emergency to "
+                "the reader alone. A name holds once a create, an overwrite or a YAML-only edit sets it. Each active "
+                "summary stays resident in "
                 "the index's whole view (a global note's in every room and place I work in, a project note's in that "
-                "project), never in a Safety check; body text never replaces it. Under physical window pressure, the outline names every active "
-                "topic and keeps type person summaries; others remain readable with knowledge_list. A summary names the "
+                "project), never in a Safety check; body text never replaces it. A write does not refresh a built context: a "
+                "running work keeps the index it started with. Under physical window pressure, the outline names every active "
+                "topic and keeps type person summaries; others stay readable with knowledge_list. A summary names the "
                 "note's enduring scope and when to open it, and is not a dated log of the latest edit. "
                 "mode is required and has no default; a call without it writes nothing. "
                 "overwrite replaces the note with content; its frontmatter fields merge with the retained ones. "
                 "append adds content at the end. edit replaces exact body text of the revision you read: one old_str by "
-                "content (or new_str), or edits, a list of {old_str, new_str} items. Each old_str must occur exactly "
+                "content (or new_str), or edits, a list of {old_str, new_str} items; YAML-only content sets only its "
+                "fields. Each old_str must occur exactly "
                 "once in that revision's body (never in an earlier item's result); items may touch but not overlap; all "
                 "apply or none; an empty new_str deletes; a refused item is named by its number. "
                 "revert puts back an earlier version byte for byte: version is its revision. Text a write removes stays "
@@ -479,7 +725,7 @@ def get_tools() -> List[ToolEntry]:
                 "back (mode='revert'). archive and restore own only the archive field and keep the body bytes; archive "
                 "requires reason. Archive hides default navigation rows; direct reads and explicit Presence topics stay "
                 "available. Restore removes even malformed archive metadata from readable YAML in CURRENT text, "
-                "including later edits. Ordinary writes preserve the lifecycle-owned archive field, and a revert across "
+                "including later edits. Other writes keep the archive field; a revert across "
                 "archive states refuses. summary may ride with overwrite, append or edit (alone with edit). reason, "
                 "optional on every mode, is kept in the note's history, never in its body. expected_revision (from "
                 "knowledge_read, a receipt or a refusal) is required to replace an existing note: overwrite, edit, "
@@ -498,7 +744,7 @@ def get_tools() -> List[ToolEntry]:
                 "edits": {"type": "array", "minItems": 1, "description": "mode=edit: several exact replacements in one revision-checked write, all or nothing. Each item is {old_str, new_str}: old_str is exact body text found once in the revision you read; new_str replaces it, empty deletes. Spans may touch, not overlap.",
                           "items": {"type": "object", "additionalProperties": False, "required": ["old_str", "new_str"],
                                     "properties": {"old_str": {"type": "string"}, "new_str": {"type": "string"}}}},
-                "summary": {"type": "string", "description": "A summary names the note's enduring scope and says when to open this note, not a dated log of its latest edit: it is shown in the resident knowledge index, while the body is read on demand. Passed with overwrite, append or edit, it replaces the current summary in the same revision-checked write (mode=edit may pass it alone); omit it to keep the current one."},
+                "summary": {"type": "string", "description": "A summary names the note's enduring scope and says when to open this note, not a dated log of its latest edit: it is shown in the resident knowledge index and can stand for a held head that the window reduces; the whole note remains readable on demand. Passed with overwrite, append or edit, it replaces the current summary in the same revision-checked write (mode=edit may pass it alone); omit it to keep the current one."},
                 "expected_revision": {"type": "string", "description": "The note's current revision, as knowledge_read, a receipt or a refusal returns it. Required to replace an existing note: overwrite, edit, revert, archive, restore and an append with summary. Omit it for a bare append or to create a note; pass empty only to create a missing note (on an existing note an empty value is a stale revision). A stale revision writes nothing."},
                 "version": {"type": "string", "description": "mode=revert: the revision of an earlier version of this note (knowledge_read(view='history') lists them); its exact stored bytes become the current note."},
             }, "required": ["topic", "mode"]},

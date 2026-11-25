@@ -29,10 +29,10 @@ from ouroboros.tools import review_result as rr
 from skills.unix_computer_use import macos_native as native
 from tests._review_session_route_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 from tests._tool_result_delivery_shared import measured_fit
+from tests._unix_computer_use import KEYNOTE, app_dict
 from tests.test_result_review import CRITICAL, _floor_ctx, _seam
 from tests.test_unix_computer_use_effects import API, TIMEOUT, Guest, Transport, fail_at, load_plugin
 from tests.test_unix_computer_use_element_act import LONG_BEFORE, LONG_LABEL, LONG_TEXT, NORMALIZED, FakeAX, long_field
-from tests.test_unix_computer_use_targeting import KEYNOTE, app_dict
 
 WARNING = ("⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\nReason: fixture\n"
            "The command was allowed, but consider whether this is the right approach.")
@@ -101,7 +101,7 @@ class Desktop:
                       allowed=allowed, fit=fit, boundary=boundary)
 
 
-MAC_TOOLS = ("cliclick", "osascript", "screencapture")
+MAC_TOOLS = ("osascript", "screencapture")
 
 
 def mac(ctx, tmp_path, monkeypatch, answer=None):
@@ -201,15 +201,18 @@ def test_reads_refusals_failures_and_timeouts_produce_nothing_and_force_no_revie
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
 
     def answer(argv, _index):
+        if argv[0] == "osascript" and str(argv[3]).endswith("input_events.js"):  # the macOS input program
+            spec = argv[-1]
+            if '"op":"position"' in spec:
+                return 0, '{"x":12,"y":34}'
+            return 1 if '"text":"boom"' in spec else (TIMEOUT if '"code":36' in spec else 0)
         if argv[0] == "osascript":
             return 0, ("0, 0, 1440, 900" if "bounds" in argv[-1] else "Finder, Safari")
-        if argv[:2] == ["cliclick", "p"]:
-            return 0, "12,34"
-        return {"t:boom": 1, "kp:return": TIMEOUT}.get(argv[-1], 0)
+        return 0
     desktop = mac(ctx, tmp_path, monkeypatch, answer=answer)
     rows = [desktop.call("screenshot"), desktop.call("cursor_position"), desktop.call("window_list"),
             desktop.call("ax_tree"), desktop.call("capabilities"), desktop.call("wait", ms=5),
-            desktop.call("scroll", clicks=3), desktop.call("click", x=1, y=1, button="middle"),
+            desktop.call("scroll", clicks=3, direction="sideways"), desktop.call("click", x=1, y=1, button="sideways"),
             desktop.call("type_text", text="boom"), desktop.call("key", keys="return"),
             desktop.call("key", keys="return return")]
     remote = ssh(ctx, tmp_path, monkeypatch)
@@ -287,8 +290,8 @@ def test_a_partial_view_still_reads_the_complete_receipt(tmp_path, monkeypatch):
     assert noted["producer_source_ref"]["path"] != noted["result_source_ref"]["path"]
 
     effects = rr.produced_material(ctx)["effects"]
-    assert [json.loads(effect["receipt"])["cmd"] for effect in effects] == [
-        ["cliclick", f"t:{text}"], ["cliclick", f"t:{text}!"]]
+    assert [json.loads(json.loads(effect["receipt"])["cmd"][-1])["ops"] for effect in effects] == [
+        [{"op": "type", "text": text, "interval_ms": 0}], [{"op": "type", "text": text + "!", "interval_ms": 0}]]
     assert "host_notes" not in effects[0] and effects[1]["host_notes"] == [WARNING]
 
 

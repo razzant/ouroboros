@@ -57,8 +57,9 @@ def fixed_density(monkeypatch):
 
 
 def _route(window, known=True, source="metadata"):
+    from ouroboros.capability_evidence import utc_now_iso  # a serving statement is dated, as its read is
     evidence = SimpleNamespace(route_fp="route", status="confirmed" if known else "unprobeable",
-                               stale=False, window_tokens=window, source=source)
+                               stale=False, window_tokens=window, source=source, ts=utc_now_iso())
     return lambda *_a, **_kw: ({"provider": "fixture", "model": "fixture"}, evidence)
 
 
@@ -438,7 +439,7 @@ def test_a_low_start_line_does_not_call_the_required_book_a_map(tmp_path, fixed_
     assert "(this task's directly required handbook stays whole)" in low_start_line(plan, "low", "t")
     plain = _plan(tmp_path, _core(tmp_path, **shape), "max", 330_000)
     assert _choices(plan) == _choices(plain)  # its words follow the choices, never enter them
-    assert "stays whole" not in low_start_line(plain, "low", "t") and "started in Low with chapter maps:" in low_start_line(plain, "low", "t")
+    assert "stays whole" not in low_start_line(plain, "low", "t") and "runs in Low for now, not in your Max:" in low_start_line(plain, "low", "t")
 
 
 def test_reprojection_keeps_the_book_and_asks_nothing_of_memory_for_it(tmp_path, fixed_density):
@@ -750,9 +751,9 @@ def test_the_overflow_terminal_names_the_book_and_what_fits_without_it():
     assert "directly requires the whole development handbook (~51,000 tokens)" in text
     assert "without it the input is ~139,000 against 174,464 usable" in text
     assert "larger window" in text and "Context mode" in text and "without this requirement" in text
-    # The Continue it names is the terminal cause's: a host forecast gets none, the book's known unfit gets it.
+    # Both provider refusals and host context_overflow forecasts now offer Continue; it keeps the required book.
     forecast = {**usage, "reason_code": "context_overflow"}
-    assert "a Continue keeps it" in text and "a Continue keeps it" not in provider_terminal_fallback_text(forecast, **flags)
+    assert "a Continue keeps it" in text and "a Continue keeps it" in provider_terminal_fallback_text(forecast, **flags)
     assert "a Continue keeps it" in provider_terminal_fallback_text({**forecast, REQUIRED_BOOK_UNFIT_KEY: True}, **flags)
     # A restored Max primary holds the book with no addition (0): the refusing candidate's own facts still stand.
     assert provider_terminal_fallback_text({**usage, "_context_required_book_tokens": 0}, **flags) == text
@@ -979,6 +980,8 @@ def test_the_terminal_preserves_saved_work_started_custody_and_unknown_money(tmp
     agent = _real_agent(repo, drive)
     events = agent._handle_task_scoped(_queued(task_id, _attempt=2, task_contract={KEY: True}))
     done = next(row for row in events if row["type"] == "task_done")
+    [start] = [frame["data"] for frame in agent._event_queue.queue if frame.get("data", {}).get("type") == "task_started"]
+    assert (start["task_id"], start["task_attempt"]) == (task_id, 2)
     assert ran == [] and done["reason_code"] == "context_capacity"
     assert done["delegated_runs_unreconciled"] == ["run-a1"]  # the started run stays open, disclosed beside the cause
     assert done["unknown_unmetered"] is True and done["unresolved_upper_bound_usd"] == 1.5  # the ledger's answer, unchanged
@@ -997,6 +1000,50 @@ def test_a_direct_turn_keeps_its_own_typed_owner(tmp_path, monkeypatch, fields):
         fit.MinimumViewUnfit("cannot", fixed_tokens=1, memory_tokens=1, reserve_tokens=1, window_tokens=1, ratio=1.0)))
     with pytest.raises(fit.MinimumViewUnfit):
         _real_agent(repo, drive)._handle_task_scoped(_queued("direct", **fields))
+
+
+def test_first_conversation_turn_names_the_same_attempt_at_start_and_finish(tmp_path, monkeypatch):
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.task_status import execution_owner_record
+    from supervisor.worker_chat_lane import _seed_task
+
+    repo, drive, ran = _agent_world(tmp_path, monkeypatch, 150_000)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **kw: None)
+    task = _seed_task(7, "Check the inventory.", None, None, None)
+    task["_execution_owner"] = execution_owner_record(drive, task, "direct")
+    agent = _real_agent(repo, drive)
+    events = agent._handle_task_scoped(task)
+    start, = [frame["data"] for frame in agent._event_queue.queue if frame.get("data", {}).get("type") == "task_started"]
+    metrics, = [row for row in events if row["type"] == "task_metrics"]
+    done, = [row for row in events if row["type"] == "task_done"]
+    assert ran == [task["id"]] and done["status"] == "completed"
+    assert start["task_attempt"] == metrics["task_attempt"] == done["execution_owner"]["task_attempt"] == 0
+
+
+def test_a_crash_retried_conversation_turn_names_its_own_attempt_at_start_and_finish(tmp_path, monkeypatch):
+    """The lane's crash readmission (``conversation_lane.readmit_after_crash``) is the retry's assignment: its first
+    ``task_started`` names the retry's attempt, as its metrics and terminal do, never the first admission's 0."""
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.task_status import execution_owner_record
+    from supervisor import conversation_lane, workers
+    from supervisor.worker_chat_lane import _seed_task
+
+    repo, drive, ran = _agent_world(tmp_path, monkeypatch, 150_000)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **kw: None)
+    monkeypatch.setattr(workers, "RUNNING", {})
+    monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
+    seed = _seed_task(7, "Check the inventory.", None, None, None)
+    seed["_execution_owner"] = execution_owner_record(drive, seed, "direct")  # its first admission: physical 0
+    with conversation_lane._queue_lock:
+        meta = conversation_lane.readmit_after_crash({**seed, "_attempt": 2}, {})
+    workers.RUNNING.clear()  # the carrier is another process: the server's row is not the agent's input
+    agent = _real_agent(repo, drive)
+    events = agent._handle_task_scoped(dict(meta["task"]))
+    start, = [frame["data"] for frame in agent._event_queue.queue if frame.get("data", {}).get("type") == "task_started"]
+    metrics, = [row for row in events if row["type"] == "task_metrics"]
+    done, = [row for row in events if row["type"] == "task_done"]
+    assert meta["attempt"] == 2 and ran == [seed["id"]] and done["status"] == "completed"
+    assert start["task_attempt"] == metrics["task_attempt"] == done["execution_owner"]["task_attempt"] == 2
 
 
 def test_only_a_known_incompatibility_takes_this_terminal(tmp_path, monkeypatch):

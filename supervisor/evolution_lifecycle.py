@@ -16,6 +16,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from ouroboros.consciousness_authority import consciousness_origin_metadata
+from ouroboros.host_notice import fields
 from ouroboros.cost_projection import honest_cost_pair_amount
 from ouroboros.evolution_fingerprint import canonical_objective_fingerprint
 from ouroboros.outcomes import normalize_outcome_axes
@@ -242,10 +243,10 @@ def enqueue_evolution_task_if_needed() -> None:
             return
         q.pause_evolution_campaign(f"admission_refused:{reason}")
         q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"🧬 Evolution paused: its next cycle was not admitted ({reason}{': ' + detail if detail else ''}). "
-            "/evolve start resumes it.",
+        q.send_with_budget(  # the admission's code and detail are the notice's details (DESIGN principle 7)
+            int(owner_chat_id), "Evolution is paused: its next cycle was not admitted.",
+            progress_meta=fields("evolution_admission_refused", step="evolution_start",
+                                 details=f"{reason}{': ' + detail if detail else ''}"),
             role="system", system_type="evolution_notice")
         return
 
@@ -1303,32 +1304,28 @@ def notify_owner_cycle_outcome(campaign: Dict[str, Any], tx: Dict[str, Any]) -> 
     owner_chat_id = int(load_state().get("owner_chat_id") or 0)
     if not owner_chat_id:
         return
-    objective = str(campaign.get("objective") or "").strip()
-    obj_short = (objective[:160] + "…") if len(objective) > 160 else objective
+    # The campaign's objective is its own detail, never the phrase's words (it is authored, never translated).
+    objective = f"objective: {str(campaign.get('objective') or '').strip() or 'autonomous self-improvement'}"
     if outcome == "absorbed":
         from ouroboros.review_overrides import landed_outcome
         from supervisor import queue
 
         commit_sha = str(tx.get("commit_sha") or "").strip()
-        # Only a landed row says how this commit's review ended (a FAIL or no verdict); nothing here may say PASS.
+        # The bounded landing list cannot establish a PASS, even when readable and empty.
         review = landed_outcome(queue.DRIVE_ROOT, commit_sha)
         msg = (
-            f"🧬 Evolution cycle absorbed (commit {commit_sha[:12]}).\n"
-            f"Objective: {obj_short or 'autonomous self-improvement'}\n"
-            "The self-modification is now live (restart verified); "
-            + (f"it landed over a FAIL or no verdict ({review})." if review else
-               "whether it landed over a FAIL or no verdict could not be read." if review is None
-               else "no landing over a FAIL or missing verdict is recorded for it.")
-            + " Reply if you want it reverted."
+            "After restart, the running version's history included the evolution commit; "
+            + ("it landed despite a failed review or check, or without a review verdict." if review else
+               "the recent landing records could not be read to check its review outcome." if review is None
+               else "it is not on the recent list of commits that landed despite a failed review or check, "
+                    "or without a review verdict.")
         )
+        notice = fields("evolution_cycle_absorbed", step="reply_to_revert", details=f"commit {commit_sha[:12]}"
+                        + (f"; review: {review}" if review else "") + f"; {objective}")
     else:
-        reason = str(tx.get("abandoned_reason") or "unspecified")
-        msg = (
-            f"⚠️ Evolution cycle abandoned (reason: {reason}).\n"
-            f"Objective: {obj_short or 'autonomous self-improvement'}\n"
-            "No change was absorbed; the transaction was rolled back/closed to unblock the next cycle."
-        )
-    send_with_budget(owner_chat_id, msg, role="system", system_type="evolution_cycle_outcome")
+        msg = "An evolution cycle was abandoned: no change was absorbed, and the next cycle can start."
+        notice = fields("evolution_cycle_abandoned", details=f"{tx.get('abandoned_reason') or 'unspecified'}; {objective}")
+    send_with_budget(owner_chat_id, msg, progress_meta=notice, role="system", system_type="evolution_cycle_outcome")
 
 
 def clear_pending_owner_report(expected: Dict[str, Any]) -> bool:

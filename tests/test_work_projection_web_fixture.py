@@ -105,9 +105,10 @@ CASES = {
     "working_with_review": (
         [_row("wr")], {"wr": _RUNNING}, {}, {"wr": [{"run_id": "run-own-review", "source": "review_substrate"}]},
     ),
-    # The owner's Pause could not confirm the stop of the task's own run: Paused, with that run said unconfirmed.
+    # The owner's Pause could not confirm one run's stop. Another is observed queued on its executor.
     "paused_stop_unknown": (
-        [_row("so", "budget_paused", pause_cause="owner", can_resume=False)], {}, {}, {"so": ["run-s"]},
+        [_row("so", "budget_paused", pause_cause="owner", can_resume=False)], {}, {},
+        {"so": ["run-s", {"run_id": "run-q", "invocation_id": "inv-q"}]},
     ),
     "finalizing_failed": (
         [_row("f", "finalizing", status="failed", outcome_axes={"lifecycle": {"status": "failed"}})],
@@ -141,6 +142,51 @@ CASES = {
         [_row("st", "budget_paused", pause_cause="sleep")],
         {"st": {"_budget_pause": {"reason": "sleep", "sleep": {"mode": "cold", "wake_at": "2026-10-17T18:05:00+00:00",
                                                                "any_mail": True}}}}, {}, {},
+    ),
+    # Owner 21.11.2026 («5A»): a queued root says behind which listed work it stands, by that work's name, as the
+    # census reads the queue now (``dispatch_choice.lane_waits``): its Project's lane, or a folder another Project keeps.
+    "queued_behind_project": (
+        [_row("qh", suggested_name="Add Ollama support"), _row("qp", "queued", started_at=90.0)],
+        {"qh": {**_RUNNING, "suggested_name": "Add Ollama support"},
+         "qp": {"suggested_name": "Check CI after the merge",
+                "lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
+    "queued_behind_folder": (
+        [_row("qh", suggested_name="Add Ollama support"), _row("qf", "queued", started_at=90.0)],
+        {"qh": {**_RUNNING, "suggested_name": "Add Ollama support"},
+         "qf": {"lane_wait": {"lane": "folder", "task_id": "qh", "project_id": "nano", "folder": "/work/shared"}}},
+        {}, {},
+    ),
+    # A retried holder (its row is the retry, the wait names its tree) and one whose queue row holds no name of its own
+    # (the census row's derived name) are named as their work reads.
+    "queued_behind_retry": (
+        [_row("qh-r2", original_task_id="qh", root_task_id="qh"), _row("qr", "queued", started_at=90.0)],
+        {"qh-r2": {**_RUNNING, "original_task_id": "qh", "root_task_id": "qh", "suggested_name": "Add Ollama support"},
+         "qr": {"lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
+    "queued_behind_derived_name": (
+        [_row("qh", suggested_name="Add Ollama support"), _row("qd", "queued", started_at=90.0)],
+        {"qh": _RUNNING, "qd": {"lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
+    # Review round 2: a helper queued before its root never names the work; a retry named only by its request is
+    # named by its episode's census row.
+    "queued_behind_helper_first": (
+        [_row("qk", "queued", parent_task_id="qh", root_task_id="qh"),
+         _row("qh-r2", original_task_id="qh", root_task_id="qh"), _row("qs", "queued", started_at=90.0)],
+        {"qk": {"parent_task_id": "qh", "root_task_id": "qh", "title": "Scan one file"},
+         "qh-r2": {**_RUNNING, "original_task_id": "qh", "root_task_id": "qh", "title": "Build index"},
+         "qs": {"lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
+    "queued_behind_request_retry": (
+        [_row("qh-r2", original_task_id="qh", root_task_id="qh", suggested_name="Build index from source"),
+         _row("qt", "queued", started_at=90.0)],
+        {"qh-r2": {**_RUNNING, "original_task_id": "qh", "root_task_id": "qh"},
+         "qt": {"lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
+    # The holder the wait names is not a work the list holds: nothing is claimed.
+    "queued_behind_unlisted": (
+        [_row("qu", "queued", started_at=90.0)],
+        {"qu": {"lane_wait": {"lane": "project", "task_id": "gone", "project_id": "nano"}}}, {}, {},
     ),
     "unknown": ([_row("u", "unknown")], {}, {}, {}),
     "ended_with_runs": ([], {}, {"r": {"task_id": "r", "status": "done", "chat_id": 42}}, {"r": ["run-1", "run-2"]}),
@@ -241,7 +287,8 @@ def project(name):
     """The ``/api/state`` work fields the server builds for one case."""
     owners, raw, stored, held = CASES[name]
     return work_fields(owners, raw, results=stored, fences={k: {"state": "paused", **v} for k, v in FENCES.items()},
-                       held=held, stops=STOPS, models={"mh": [{"kind": "model_handoff", "attempt_id": "attempt-mh"}]},
+                       held=held, stops=STOPS, activities={("so", "run-q", "inv-q"): False},
+                       models={"mh": [{"kind": "model_handoff", "attempt_id": "attempt-mh", "task_id": "mh"}]},
                        attempts=ATTEMPTS)
 
 

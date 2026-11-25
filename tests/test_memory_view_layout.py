@@ -8,14 +8,20 @@ a new page changes B and never A' or D. Anthropic keeps the message seal and giv
 slot to C before schemas. Codex and direct OpenAI keep all stable items and C as one notice (their cache is
 read only inside the leading system group, by prefix: measured 2026-10-03); the view fact of
 the first send reaches the cap info, the task context, one event and the trace.
+Between two works on one memory, mode, authority, catalogue and route, a clock, a restart, the queue, money, review
+records, route health, registration order, the actor's drive, the assignment's size, the calendar between framed starts
+or a failed MCP listing moves no schema, A', D, B section or their order; an open leak is a strict xfail on its tracker
+item, holding while every moved label is one it excuses. A new page keeps B's declared head and moves only the story.
 Fixture: ``tests._memory_inventory_shared`` (three rooms besides Main, legacy memory).
 """
 from __future__ import annotations
 
 import copy
 import json
+import pathlib
 import re
 import queue
+import sys
 
 import pytest
 
@@ -117,20 +123,544 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
     assert section(main_c, "## This room (Main [chat_id=1])") in main_c.split("## Other conversations", 1)[0]  # the room first
 
 
-def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch):
-    """A' and B are bytes of their sources alone (DEVELOPMENT "Cache-friendliness invariant"): another task, another
-    owner message and ``time.time`` three days on, at one state of memory, change only C. A paid route writes its
-    whole start again whenever these bytes move, so a capture fact in them is paid by every task that follows.
-    A stamp taken through ``datetime.now`` is not moved here (WORLD's dated measured block is such a line)."""
+_REAL_CLOCKS = {}  # the process's own clocks, taken on first use while none is moved
+_REAL_ROOT = {}  # config.DATA_DIR as conftest bound it, kept before the warm-up patches it
+_PRODUCT = ("ouroboros", "supervisor")
+
+
+class KnownLeak(AssertionError):
+    """Every moved label is one the case's strict xfail names and passes its ``_SAME`` check; else the case fails."""
+
+
+def _release_root(drive):
+    """Product module paths or ``str``s at or under ``drive`` (``config`` apart) moved under the real root: their names."""
+    drive, real, changed = pathlib.Path(drive), pathlib.Path(_REAL_ROOT["root"]), []
+    for name, module in [(n, m) for n, m in list(sys.modules.items()) if n.split(".")[0] in _PRODUCT and n != "ouroboros.config"]:
+        for attr, value in _namespace(module).items():
+            if isinstance(value, (str, pathlib.PurePath)) and pathlib.Path(value).is_relative_to(drive):
+                setattr(module, attr, type(value)(real / pathlib.Path(value).relative_to(drive)))
+                changed.append(f"{name}.{attr}")
+    return changed
+
+
+class _CalendarMeta(type):
+    def __instancecheck__(cls, value):
+        return isinstance(value, _REAL_CLOCKS["datetime"])
+
+    def __subclasscheck__(cls, other):
+        return issubclass(other, _REAL_CLOCKS["datetime"])
+
+
+def _namespace(module):
+    try:
+        return dict(vars(module))
+    except Exception:  # a module or a proxy without a readable namespace holds no clock of ours
+        return {}
+
+
+@pytest.fixture(scope="module")
+def _warm(tmp_path_factory):
+    """One family build under the real clocks per module and worker, before any case moves one: it first imports every
+    module a build or a fact imports (one loaded under a moved clock can keep it), then rebinds their copies of its root."""
+    from ouroboros import claudexor_exit_facts, config, mcp_client, review_ledger, review_price  # noqa: F401
+    from ouroboros import reviewer_slot_config, subscription_census  # noqa: F401
+    from tests._scale_root import money
+    from tests.test_tool_connections import _servers
+
+    _REAL_ROOT.setdefault("root", config.DATA_DIR)
+    with pytest.MonkeyPatch.context() as patch:
+        root = tmp_path_factory.mktemp("warm")
+        _one_root(patch, root / "drive")
+        _fixed_host(patch)
+        env, memory, _rooms = world(root)
+        _queue(env)
+        money(env.drive_root, "warm-task", cost=0.01, limit=100.0)  # the settlement path the budget case takes
+        mcp_client.reset_manager_for_tests()
+        try:
+            _servers()
+            _start(env, memory, dict(MAIN), ctx=_ctx(env, "tmain"), restart=True, reversed_registration=True)
+        finally:
+            mcp_client.reset_manager_for_tests()
+    _release_root(root / "drive")  # where first imports are meant to happen
+    assert not (kept := _release_root(root)), f"a product module still points into the warm-up's root: {kept}"
+
+
+@pytest.fixture
+def case_root(_warm, tmp_path, monkeypatch):
+    _one_root(monkeypatch, tmp_path / "drive")  # at teardown no product module may keep this drive
+    _fixed_host(monkeypatch)
+    yield  # what a test's first imports kept of its drive is rebound in any case, so later tests are not harmed
+    assert not (late := _release_root(tmp_path / "drive")), f"first imported under a case's data root: {late}; add it to the warm-up"
+
+
+@pytest.fixture
+def clocks(_warm):
+    """``move(wall=, calendar=)``: ``time.time``, ``time_ns``, bare ``gmtime``/``localtime``/``strftime`` and ``date.today()``
+    run ``wall`` seconds on, ``datetime.datetime.now``/``utcnow`` ``calendar`` seconds on, ``today`` their sum (also in each
+    product module's own name); teardown restores all by identity and the stray-probe cache by value, reports refusals
+    and fails on any module first imported meanwhile."""
+    import datetime as dt
     import time
 
+    if not _REAL_CLOCKS:
+        _REAL_CLOCKS.update(time=time.time, time_ns=time.time_ns, gmtime=time.gmtime, localtime=time.localtime,
+                            strftime=time.strftime, datetime=dt.datetime)
+    real, stray = _REAL_CLOCKS, sys.modules["ouroboros.context_health"]._STRAY_PROBE_CACHE  # loaded by ``_warm``
+    moved = {}  # id -> (the moved object, the name of the real clock it stands in for)
+    replaced = []  # (module, name, what stood there)
+    loaded = []  # sys.modules and the stray-probe cache (a moved wall stamps it) at the first move
+
+    def put(module, name, value):
+        moved[id(value)] = (value, name)
+        replaced.append((module, name, vars(module).get(name)))
+        setattr(module, name, value)
+
+    def move(*, wall: float, calendar: float) -> None:
+        if not loaded:
+            loaded.extend((set(sys.modules), dict(stray)))
+        put(time, "time", lambda: real["time"]() + wall)
+        put(time, "time_ns", lambda: real["time_ns"]() + int(wall * 1e9))
+        put(time, "gmtime", lambda secs=None: real["gmtime"](time.time() if secs is None else secs))
+        put(time, "localtime", lambda secs=None: real["localtime"](time.time() if secs is None else secs))
+        put(time, "strftime", lambda fmt, at=None: real["strftime"](fmt, time.localtime() if at is None else at))
+        delta = dt.timedelta(seconds=calendar)
+
+        class Later(real["datetime"], metaclass=_CalendarMeta):
+            @classmethod
+            def now(cls, tz=None):
+                return real["datetime"].now(tz) + delta
+
+            @classmethod
+            def utcnow(cls):
+                return real["datetime"].utcnow() + delta
+
+            @classmethod
+            def today(cls):
+                return real["datetime"].today() + delta
+
+        put(dt, "datetime", Later)
+        for name, module in list(sys.modules.items()):
+            held = _namespace(module).get("datetime") if name.split(".")[0] in _PRODUCT else None
+            if held is real["datetime"] or id(held) in moved:
+                put(module, "datetime", Later)
+
+    def holding():
+        return [(name, module, attr, moved[id(value)][1]) for name, module in list(sys.modules.items())
+                for attr, value in _namespace(module).items() if id(value) in moved and moved[id(value)][0] is value]
+
+    yield move
+    for module, name, before in reversed(replaced):
+        if id(before) not in moved:  # what stood there before this case: a real clock or an enclosing patch
+            setattr(module, name, before)
+    refused = []
+    for name, module, attr, clock in holding():  # also every name bound to a moved object while it was moved
+        try:
+            setattr(module, attr, real[clock])
+        except Exception as exc:  # report, and go on restoring the others
+            refused.append(f"{name}.{attr}: {exc!r}")
+    left = sorted(f"{name}.{attr}" for name, _module, attr, _clock in holding())
+    stray.update(loaded[1] if loaded else {})
+    late = sorted(set(sys.modules) - (loaded[0] if loaded else set(sys.modules)))
+    assert not refused and not left, f"a moved clock is left in {left}; refused: {refused}"
+    assert not late, f"first imported under a moved clock: {late}; import it in the warm-up"
+
+
+def _calendar_offsets():
+    """``(base, later)`` seconds past the real clock: noon UTC tomorrow, so no case depends on the hour it runs, and
+    17:43 UTC on the 4th of the month after it (at least four days on, across a month boundary, another hour)."""
+    import datetime as dt
+
+    now = dt.datetime.now(dt.timezone.utc)
+    base = (now + dt.timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+    later = (base.replace(day=1) + dt.timedelta(days=32)).replace(day=4, hour=17, minute=43)
+    return (base - now).total_seconds(), (later - now).total_seconds()
+
+
+def _one_root(monkeypatch, drive):
+    """The drive as data root: ``config.DATA_DIR``/``SETTINGS_PATH``, ``OUROBOROS_DATA_DIR`` (``resolve_data_dir``,
+    ``usage_ledger``, the evidence store) and a set ``OUROBOROS_SETTINGS_PATH``; ``supervisor.state`` stays the worker's."""
+    import os
+
+    from ouroboros import config
+
+    monkeypatch.setattr(config, "DATA_DIR", drive)
+    monkeypatch.setattr(config, "SETTINGS_PATH", drive / "settings.json")
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(drive))
+    if "OUROBOROS_SETTINGS_PATH" in os.environ:
+        monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(drive / "settings.json"))
+
+
+def _fixed_host(monkeypatch):
+    """The host probes of the startup's WORLD refresh as ``tests/test_world_map.py`` holds them: no subprocess, the
+    same text on every host; the dated refresh and its splice stay real."""
+    from ouroboros import world_profiler
+
+    monkeypatch.setattr(world_profiler, "_tools_found", lambda: ["git", "python3"])
+    monkeypatch.setattr(world_profiler, "get_cpu_info", lambda: "test-cpu")
+    monkeypatch.setattr(world_profiler, "get_system_memory", lambda: "1.0 GB")
+
+
+def _ctx(env, task_id, drive_root=None):
+    from ouroboros.tools.registry import ToolContext
+
+    return ToolContext(repo_dir=env.repo_dir, drive_root=drive_root or env.drive_root, task_id=task_id,
+                       current_chat_id=1)
+
+
+def _start(env, memory, task, *, ctx, restart=False, reversed_registration=False, window=400_000):
+    """What one work sends before its transcript on one model route: the schemas as the Claudexor transport puts them
+    on the wire (``llm_claudexor._request``: the registry's order) and as the OpenAI-shaped transports do
+    (``sanitize_function_tools``: sorted), every system block the request declares stable (A' first, B last, D the
+    blocks between) and C after them, the delivered user row, and the frame's own facts: the estimate, the start
+    room (the allowance beside it) and the host sections it addressed. ``restart`` first runs the startup's WORLD
+    refresh (``agent_startup_checks``), as a work after a host restart follows one, and records the calendar date the
+    refresh's own clock read when it ran (``refreshed``)."""
+    from types import SimpleNamespace
+
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_claudexor import _request
+    from ouroboros.llm_messages import SHARED_HEAD_KEY, STABLE_PREFIX_BLOCKS_KEY
+    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.world_profiler import refresh_world_profile
+
+    from ouroboros import world_profiler
+
+    refreshed = world_profiler.datetime.now(world_profiler.timezone.utc).strftime("%Y-%m-%d") if restart else None
+    if restart:
+        refresh_world_profile(str(memory.world_path()), str(env.repo_dir), str(env.drive_root))
+    registry = ToolRegistry(env.repo_dir, env.drive_root)
+    if reversed_registration:  # the same entries, registered in the opposite order
+        registry._entries = dict(reversed(list(registry._entries.items())))
+    registry.set_context(ctx)
+    schemas = initial_tool_schemas(registry, context_mode="max")
+    route = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=window)
+    messages, cap = _messages(env, memory, task, ctx=ctx, tool_schemas=schemas, tool_registry=registry,
+                              route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, route))
+    system, user = messages[0], messages[1]
+    content, stable = system["content"], system[STABLE_PREFIX_BLOCKS_KEY]
+    assert user["role"] == "user" and stable >= 2 and len(content) == stable + 1, (stable, len(content))
+    b = content[stable - 1]
+    view = cap.get("memory_view") or {}
+    return {"wire": _request({"source": "codex", "resolved_model": "exact-model"}, messages, schemas, {})["tools"],
+            "schemas (sorted)": json.dumps(LLMClient._sanitize_chat_completion_tools(schemas), ensure_ascii=False),
+            "A'": content[0]["text"], "D": [block["text"] for block in content[1:stable - 1]], "B": b["text"],
+            "head chars": b.get(SHARED_HEAD_KEY, {}).get("chars"), "C": content[stable]["text"],
+            "head": b["text"][:b[SHARED_HEAD_KEY]["chars"]] if SHARED_HEAD_KEY in b else "",
+            "user": user["content"] if isinstance(user["content"], str)
+            else "".join(part.get("text", "") for part in user["content"]),
+            "entries": list(registry._entries), "mode": cap["context_fit"]["initial_mode"],
+            "estimate": cap["context_fit"]["max_estimated_tokens"],
+            "room": cap["context_fit"]["max_estimated_tokens"] + view.get("floor", {}).get("allowance_tokens", 0),
+            "addressed": {row["section_id"] for row in view.get("host_sections_addressed", ())},
+            "refreshed": refreshed}
+
+
+def _named(text):
+    """A block's ``## `` sections in order, keyed by name: the heading line cut before its first `` (`` and at 80
+    characters, with its occurrence apart; the label is the name, then `` (n)`` from the second occurrence on, which no
+    cut name can hold."""
+    named, seen = {}, {}
+    for part in re.split(r"(?m)^(?=## )", text):
+        name = part.split("\n", 1)[0].split(" (", 1)[0][:80]
+        seen[name] = seen.get(name, 0) + 1
+        named[(name, seen[name])] = part
+    return named
+
+
+def _label(key):
+    name, occurrence = key
+    return name if occurrence == 1 else f"{name} ({occurrence})"
+
+
+def _moved(first, second):
+    """The labels of the shared start's parts that differ: the mode, the Claudexor wire list (``… order`` when it holds
+    the same entries, every field equal, in another order), the sorted schemas, A', D as a whole, and B's sections
+    paired by name: ``B <name>`` (another body), ``B gone <name>``, ``B new <name>``, and ``B order`` when the names
+    both works hold stand in another relative order. The wire lists compare as serialized JSON, entry by entry."""
+    moved = []
+    wire = [[json.dumps(tool, ensure_ascii=False) for tool in start["wire"]] for start in (first, second)]
+    if wire[0] != wire[1]:
+        moved.append("schemas (Claudexor wire)" + (" order" if sorted(wire[0]) == sorted(wire[1]) else ""))
+    moved += [part for part in ("mode", "schemas (sorted)", "A'", "D") if first[part] != second[part]]
+    old, new = _named(first["B"]), _named(second["B"])
+    common = [[key for key in this if key in that] for this, that in ((old, new), (new, old))]
+    return (moved + (["B order"] if common[0] != common[1] else [])
+            + [f"B {_label(key)}" for key in old if key in new and old[key] != new[key]]
+            + [f"B gone {_label(key)}" for key in old if key not in new]
+            + [f"B new {_label(key)}" for key in new if key not in old])
+
+
+def _queue(env, tasks=()):
+    """The supervisor's two published documents: the queue (``tasks`` pending and running) and its dispatch facts."""
+    from ouroboros.utils import atomic_write_json, utc_now_iso
+    from tests._shared import write_queue_document
+
+    state = env.drive_root / "state"
+    write_queue_document(state / "queue_snapshot.json", {
+        "ts": utc_now_iso(), "pending": [{"id": f"{task}-pending", "task": {"id": f"{task}-pending", "type": "task"}}
+                                         for task in tasks],
+        "running": [{"id": f"{task}-running", "task": {"id": f"{task}-running", "type": "task"}} for task in tasks]})
+    atomic_write_json(state / "queue_dispatch.json", {"generation": "fixture-generation", "budget_root_fences": [],
+                                                      "members": {}})
+
+
+_LONG = "A long assignment, pasted whole. " * 9_100  # about 300k characters, 75k estimator tokens
+
+
+def _press(memory):
+    """A larger map, the same bytes in both works: 120 places of my own text in the generated WORLD."""
+    memory.ensure_files()
+    world_path = memory.world_path()
+    world_path.write_text(world_path.read_text(encoding="utf-8") + "\n" + "".join(
+        f"\n## Place {index}\n\n" + "A host I reach, how, and what worked there. " * 60 for index in range(120)),
+        encoding="utf-8", newline="\n")
+
+
+def _framing_window(env, memory, ctx):
+    """The window at which this pressed fixture's first work sits midway between whole and framed: its start room is
+    its whole estimate plus half of ``_LONG``. Measured by two whole probes of that work (room against window)."""
+    from ouroboros.utils import estimate_tokens
+
+    probes = [_start(env, memory, dict(MAIN), ctx=ctx, restart=True, window=window) for window in (400_000, 500_000)]
+    assert not any(probe["addressed"] for probe in probes), "the pressed fixture is framed at 400k: the fixture moved"
+    slope = (probes[1]["room"] - probes[0]["room"]) / 100_000
+    target = probes[0]["estimate"] + estimate_tokens(_LONG) / 2
+    return round(400_000 - (probes[0]["room"] - target) / slope)
+
+
+def _regime(first, second, framed):
+    """The pressed fixture's own regime, so that a red here says the fixture walked off its edge, not the product."""
+    facts = [(start["estimate"], start["room"], sorted(start["addressed"])) for start in (first, second)]
+    assert "world" in second["addressed"] and ("world" in first["addressed"] if framed else not first["addressed"]), (
+        f"the pressed fixture left its regime (estimate, start room, addressed per build: {facts}): the fixture moved, "
+        "not the product")
+    return True
+
+
+def _age(text):
+    found = re.search(r'"age_sec":([0-9.]+)', text)
+    return float(found.group(1)) if found else None
+
+
+def _date_reached(first, second):
+    import datetime as dt
+
+    today = '"context_captured_at":"' + dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    return today in second["C"] and today not in first["C"]
+
+
+def _vary_work(env, monkeypatch, *, task, **_kw):
+    return lambda first, second: ('"another-task"' in second["C"] and '"another-task"' not in first["C"]
+                                  and task["text"] in second["user"] and task["text"] not in first["user"])
+
+
+def _vary_time(env, monkeypatch, *, clocks, base, later, **_kw):
+    clocks(wall=later, calendar=base)
+    return lambda first, second: _age(second["C"]) > 3 * 86_400 > _age(first["C"])
+
+
+def _vary_datetime(env, monkeypatch, *, clocks, base, later, **_kw):
+    clocks(wall=base, calendar=later)
+    return _date_reached
+
+
+def _vary_restart(env, monkeypatch, *, clocks, later, start, **_kw):
+    clocks(wall=later, calendar=later)
+    start["restart"] = True
+    return lambda first, second: (_date_reached(first, second) and first["refreshed"] != second["refreshed"]
+                                  and f'"context_captured_at":"{second["refreshed"]}' in second["C"])
+
+
+def _vary_queue(env, monkeypatch, **_kw):
+    _queue(env, ("other-a", "other-b", "other-c"))
+    return lambda first, second: '"pending_count":3' in second["C"] and '"pending_count":3' not in first["C"]
+
+
+def _vary_budget(env, monkeypatch, **_kw):
+    from tests._scale_root import money
+    monkeypatch.setenv("TOTAL_BUDGET", "250")
+    money(env.drive_root, "other-task", cost=3.21, limit=250.0)
+    return lambda first, second: '"spent_usd":3.21' in second["C"] and '"spent_usd":3.21' not in first["C"]
+
+
+def _vary_reviews(env, monkeypatch, **_kw):
+    """Two settled ledger records, a settled last review of the fixture pool's first seat (``review-1``: its activity
+    row in C carries it, ``subagent_runtime.py:380-387``), and a review price."""
+    from ouroboros import review_ledger, review_price, reviewer_slot_config
+    settled = {"review-1": {"status": "ok", "ts": "2026-10-29T08:00:00+00:00", "cost_usd": 0.4321}}
+    price = review_price.ReviewPrice(usd=0.4321, reviews=2, low=0.21, high=0.65)
+    monkeypatch.setattr(reviewer_slot_config, "reviewer_slot_last_executions", lambda: settled)
+    monkeypatch.setattr(review_price, "review_price", lambda *_a, **_kw: price)
+    for task in ("another-task", "other-task"):
+        review_ledger.write_record(env.drive_root, {"record_id": f"rv-{task}", "state": "settled", "task_id": task,
+                                                    "root_task_id": task, "surface": "commit_gate",
+                                                    "verdict": {"aggregate": "PASS"}})
+    words = ("rv-another-task", "0.4321", '"ts":"2026-10-29T08:00:00+00:00"')
+    return lambda first, second: all(word in second["C"] and word not in first["C"] for word in words)
+
+
+def _vary_accounts(env, monkeypatch, **_kw):
+    from ouroboros import claudexor_exit_facts, subscription_census as census
+    assert claudexor_exit_facts.record_route_health(env.drive_root, {"window_days": 7, "complete": True,
+        "generated_at": "2026-11-20T10:00:00+00:00", "routes": [{"harness": "codex", "access": "full", "runs": 40,
+        "failed": 9, "top_failures": [{"category": "quota", "code": "quota_exhausted", "count": 9}]},
+        {"harness": "claude", "access": "readonly", "runs": 12, "failed": 0, "top_failures": []}]})
+    census._write({"type": census.CENSUS_TYPE, "read": "ok", "since": "2026-11-20T10:00:00+00:00",  # in no system block
+                   "read_at": "2026-11-20T10:00:00+00:00", "families": {"codex": {"at_limit": 3}}}, env.drive_root)
+    return lambda first, second: ("codex full 9/40" in second["C"] and "codex full 9/40" not in first["C"]
+                                  and "codex 3 at limit" not in second["C"])  # C too, beside A', D and B
+
+
+def _vary_registration(env, monkeypatch, *, start, **_kw):
+    start["reversed_registration"] = True
+    return lambda first, second: len(first["entries"]) > 1 and second["entries"] == first["entries"][::-1]
+
+
+def _vary_fork(env, monkeypatch, *, start, **_kw):
+    """The second work's actor runs on a fork of the drive; C carries the actor's filesystem facts
+    (``context.py`` ``filesystem_affordance_map``), so the fork's root reaches C of that work alone."""
+    fork = env.drive_root.parent / "fork"
+    fork.mkdir()
+    start["ctx"] = _ctx(env, "another-task", fork)
+    spelled = json.dumps(str(fork.resolve()), ensure_ascii=False)[1:-1]  # as the runtime block writes it
+    return lambda first, second: spelled in second["C"] and spelled not in first["C"]
+
+
+def _vary_assignment_size(env, monkeypatch, *, task, **_kw):
+    from ouroboros.utils import estimate_tokens
+
+    task["text"] = "A long assignment, pasted whole. " * 4_500  # about 150k characters: the same mode on this route
+    grown = estimate_tokens(task["text"]) - estimate_tokens("hi")
+    return lambda first, second: (task["text"] in second["user"]
+                                  and abs(second["estimate"] - first["estimate"] - grown) <= grown // 20)
+
+
+def _vary_frame(env, monkeypatch, *, task, **_kw):
+    task["text"] = _LONG
+    return lambda first, second: _LONG in second["user"] and _regime(first, second, framed=False)
+
+
+def _vary_framed_day(env, monkeypatch, *, clocks, base, later, task, **_kw):
+    clocks(wall=base, calendar=later)
+    task["text"] = _LONG
+    return lambda first, second: (_LONG in first["user"] and _LONG in second["user"] and _date_reached(first, second)
+                                  and _regime(first, second, framed=True))
+
+
+def _vary_mcp(env, monkeypatch, **_kw):
+    """In the second work a listing of one of the two configured servers fails; the last good catalogue stands. The
+    request shows no trace of the failure (the map is a function of the catalogue alone:
+    ``tests/test_tool_connections.py::test_the_map_is_a_pure_function_of_catalog_facts``), so the witness is the
+    manager's own status of that server, and the start must also still hold both servers' rows."""
+    from ouroboros import mcp_client
+    from tests.test_tool_connections import SLACK, _servers
+
+    def failure():
+        return [row.get("last_error") for row in mcp_client.get_manager().status_payload()["servers"]
+                if row.get("id") == "gitlab"]
+
+    before = failure()
+    _servers(listing={"gitlab": ConnectionError("upstream refused"), "slack": SLACK})
+    return lambda first, second: (before == [""] and "upstream refused" in failure()[0]
+                                  and all("### mcp_gitlab (GitLab)" in start["B"] and "mcp_slack__history" in str(start["wire"])
+                                          for start in (first, second)))
+
+
+def _same_identity(env, first, second):
+    """Identity alike once the fork's reader address reads as the canonical one, spelled as the producer spells it."""
+    fork = repr(str((env.drive_root / "memory/identity.md").resolve(strict=False)))
+    sections = [_named(start["B"]).get(("## Identity", 1), "") for start in (first, second)]
+    return bool(sections[0]) and sections[0] == sections[1].replace(f"path={fork}", "path='memory/identity.md'")
+
+
+_VARY = {"another_work": _vary_work, "time_time": _vary_time, "datetime": _vary_datetime, "restart": _vary_restart,
+         "queue": _vary_queue, "budget": _vary_budget, "review_records": _vary_reviews, "accounts": _vary_accounts,
+         "tool_order": _vary_registration, "actor_fork": _vary_fork, "assignment_size": _vary_assignment_size,
+         "frame_budget": _vary_frame, "framed_another_day": _vary_framed_day, "mcp_liveness": _vary_mcp}
+_SAME = {"actor_fork": (_same_identity, "the reader address")}  # a case's closer check of its named leak
+
+
+def _frame_known(memory):
+    """What the one framing step of ``frame_budget`` re-forms, from the facts: WORLD's whole form (each ``## `` heading
+    of the file this case wrote) becomes its headings, and ``## Review`` its one-line view."""
+    return {"B ## My World", "B ## Review", *(f"B gone {_label(key)}" for key in _named(memory.load_world_profile())
+                                               if key[0].startswith("## "))}
+
+
+def _leak(item, what, *known):
+    return {"marks": pytest.mark.xfail(strict=True, raises=KnownLeak, reason=f"razzant/ouroboros#3231 item {item}: {what}"),
+            "known": known}
+
+
+_CLAUDEXOR_ORDER = pytest.mark.xfail(strict=True, raises=KnownLeak, reason=(
+    "razzant/ouroboros#3898: llm_claudexor.py:393 sends the schemas in the registry's order (registry_core.py:759, "
+    "built-ins then extensions then MCP rows as registered); the OpenAI-shaped transports sort them "
+    "(openai_chat_dispatch.py:106), the local and GigaChat transports keep the given order (llm_local.py:204-209, "
+    "llm.py:707-720)"))
+
+
+def _case(fact, item=None, what="", *known, marks=()):
+    leak = _leak(item, what, *known) if item else {"marks": marks, "known": known}
+    return pytest.param(fact, leak["known"], id=fact, marks=leak["marks"])
+
+
+@pytest.mark.parametrize("fact,known", [
+    _case("another_work"),
+    _case("time_time"),
+    _case("datetime"),
+    _case("restart", 6, "WORLD's measured block is restamped with the startup date (world_profiler.py:141-146, "
+          ":310-321), and the map's revision line under it follows", "B ## System", "B ## What lives here"),
+    _case("queue"),
+    _case("budget"),
+    _case("review_records"),
+    _case("accounts"),
+    _case("tool_order", None, "", "schemas (Claudexor wire) order", marks=_CLAUDEXOR_ORDER),
+    _case("actor_fork", 4, "identity's reader address is relative on the canonical drive, absolute on a fork "
+          "(tool_access_reads.py:32, context.py:699)", "B ## Identity"),
+    _case("assignment_size"),
+    _case("frame_budget", 3, "at one mode and window a larger assignment frames the start: WORLD whole becomes its "
+          "headings and ## Review its one-line view in the same step (memory_floor.py:847-852, :995-996; "
+          "context.py:721-735; subagent_runtime.py:431-441)", _frame_known),
+    _case("framed_another_day"),
+    _case("mcp_liveness"),
+])
+def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch, request, case_root, clocks, fact, known):
+    """Two works one ``_VARY`` fact apart keep the schemas, A', D, B's sections and order, each fact reaching its witness
+    (``mcp_liveness``: the MCP manager); an open leak raises ``KnownLeak`` only when every moved label is named, ``_SAME`` passing."""
+    from ouroboros import mcp_client
+
+    base, later = _calendar_offsets()
+    clocks(wall=base, calendar=base)
     env, memory, _rooms = world(tmp_path)
-    first = blocks(env, memory, MAIN)
-    later = time.time() + 3 * 86_400
-    monkeypatch.setattr(time, "time", lambda: later)
-    second = blocks(env, memory, {"id": "another-task", "chat_id": 1, "text": "a different owner message, much later"})
-    assert second[0] == first[0] and second[1] == first[1]
-    assert second[2] != first[2]  # the changing context is the capture's own
+    _queue(env)
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    canonical, window, first_task = _ctx(env, "tmain"), 400_000, dict(MAIN)
+    if fact in ("frame_budget", "framed_another_day"):
+        _press(memory)
+        window = _framing_window(env, memory, canonical)
+        if fact == "framed_another_day":  # the SAME large assignment in both works
+            first_task["text"] = _LONG
+    if fact == "mcp_liveness":  # two servers configured in both works
+        from tests.test_tool_connections import _servers
+
+        mcp_client.reset_manager_for_tests()
+        request.addfinalizer(mcp_client.reset_manager_for_tests)
+        _servers()
+    first = _start(env, memory, first_task, ctx=canonical, restart=True, window=window)
+    assert first["D"] and first["wire"] and first["mode"] == "max", "the fixture no longer builds D, schemas and Max"
+    task = {"id": "another-task", "chat_id": 1, "text": "a different owner message, later"}
+    start = {"ctx": _ctx(env, "another-task"), "window": window}
+    reached = _VARY[fact](env, monkeypatch, clocks=clocks, base=base, later=later, start=start, task=task)
+    second = _start(env, memory, task, **start)
+    assert reached(first, second), f"the {fact} fact never reached its witness (the request; for mcp_liveness the manager)"
+    moved = _moved(first, second)
+    known = set(known[0](memory) if known and callable(known[0]) else known)
+    unexplained = [label for label in moved if label not in known]
+    assert not unexplained, f"{fact}: the shared start moved in {unexplained}"
+    assert fact not in _SAME or _SAME[fact][0](env, first, second), f"{fact}: {moved} moved beyond {_SAME[fact][1]}"
+    if moved:
+        raise KnownLeak(f"{fact}: only the named leak moved: {moved}")
 
 
 def test_full_roles_share_the_first_block_and_only_eligible_tasks_get_the_handbook(tmp_path):
@@ -235,7 +765,7 @@ def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_flo
     assert not {row["section_id"] for row in receipts} & {"architecture", "development"}
 
 
-def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tmp_path):
+def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tmp_path, case_root):
     from tests.test_memory_view_story import _page
 
     env, memory, _rooms = world(tmp_path)
@@ -245,16 +775,26 @@ def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tm
     a1, b1, c1, _cap = blocks(env, memory, MAIN)
     assert (a1, b1) == (a0, b0) and c1 != c0 and "the view is wired" in c1
 
+    # A new page of my story, each work with its own tool context: B's declared head ends where the story starts and
+    # keeps its bytes with the schemas, A' and D; only the story moves, and its earlier bytes stay its prefix.
+    _queue(env)
+    before = _start(env, memory, dict(MAIN), ctx=_ctx(env, "tmain"), restart=True)
     page = _page(memory.drive_root, "1", 11, 12, text="My page about the next request.")
-    a2, b2, c2, _cap = blocks(env, memory, MAIN)
-    assert a2 == a0 and b2 != b1 and "My page about the next request." in b2
-    assert b2.startswith(b1.split("\n## My story", 1)[0])  # identity and catalog keep their bytes
-    assert f"page {page}" in b2 and "My page about the next request." not in c2
+    after = _start(env, memory, {"id": "another-task", "chat_id": 1, "text": "later"}, ctx=_ctx(env, "another-task"))
+    assert f"page {page}" in after["B"] and "My page about the next request." in after["B"]
+    assert "My page about the next request." not in after["C"]
+    for start in (before, after):
+        chars = start["head chars"]  # the declared count itself, never a slice that a negative count could rebuild
+        assert isinstance(chars, int) and 0 < chars < len(start["B"]) and start["B"].index("## My story\n") == chars, chars
+    assert all(after[part] == before[part] for part in ("head", "wire", "schemas (sorted)", "A'", "D"))
+    assert _moved(before, after) == ["B ## My story"]
+    told, tail = before["B"][len(before["head"]):].rsplit("\n\nPages sealed by me: ", 1)  # the story's closing counts
+    assert tail and after["B"][len(after["head"]):].startswith(told + "\n\n")
 
     identity = memory.drive_root / "memory" / "identity.md"
     identity.write_text("identity, revised", encoding="utf-8")
     a3, b3, _c3, _cap = blocks(env, memory, MAIN)
-    assert a3 == a0 and b3 != b2 and "identity, revised" in b3
+    assert a3 == a0 and b3 != b1 and "identity, revised" in b3
 
 
 @pytest.mark.parametrize("book", [False, True])
@@ -506,6 +1046,12 @@ def test_the_tool_schemas_count_in_the_floor_of_every_mode(tmp_path):
     # Unsent book forms share the selected start view, including its resident schema allowance.
 
 
+def _without_reader(schemas):
+    """The request leaves memory_read out: Nano's standing set carries it wherever the request has room and a contract
+    permits it, so these cue tests take the case a route's schema ceiling makes, the one their note describes."""
+    return [schema for schema in schemas if schema["function"]["name"] != "memory_read"]
+
+
 @pytest.mark.parametrize("actor,owner", [("child", "max"), ("child", "nano"), ("root", "max"),
                                          ("child_without_selector", "max")])
 def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkeypatch, actor, owner):
@@ -536,7 +1082,7 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
         registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
     if actor == "child_without_selector":
         registry._ctx.task_contract = {"disabled_tools": ["enable_tools"]}
-    schemas = initial_tool_schemas(registry, context_mode=owner)
+    schemas = _without_reader(initial_tool_schemas(registry, context_mode=owner))
     core = context._capture_context_core(env, memory, task, None, None)
 
     def plan(window):
@@ -569,7 +1115,7 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     # This receipt explains the reader path; it does not invite a sealing act.
     assert "chronicle_write kind=page" not in floor
     if actor == "child_without_selector":
-        assert sent == ("compact_context", "list_available_tools")
+        assert "enable_tools" not in sent and {"compact_context", "list_available_tools", "finish_task"} <= set(sent)
         assert floor.rstrip().endswith("(memory_read was not among my tools when this view was rendered; "
                                        "list_available_tools shows what this task can call)")
     else:
@@ -615,7 +1161,7 @@ def test_an_owners_nano_that_cuts_nothing_names_its_reader_path_and_a_selection_
     if actor == "child_without_selector" or not permitted:
         registry._ctx.task_contract = {"disabled_tools": ["enable_tools" if permitted else "memory_read"]}
     assert registry._is_local_readonly_subagent() is not root  # each actor is the role its name says
-    schemas = initial_tool_schemas(registry, context_mode="nano")
+    schemas = _without_reader(initial_tool_schemas(registry, context_mode="nano"))
     sent = list(select_tool_schemas(schemas, context_mode="nano").schemas)
     names = [schema["function"]["name"] for schema in sent]
     catalog = [schema["function"]["name"] for schema in registry.schemas()]
@@ -701,10 +1247,12 @@ def test_a_schema_only_change_leaves_the_nano_cue_true_of_the_view_it_was_render
     registry = ToolRegistry(repo_dir=tmp_path / "registry", drive_root=tmp_path / "registry")
     registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
     registry._ctx.task_contract = {"disabled_tools": ["enable_tools"]}
-    schemas = initial_tool_schemas(registry, context_mode="nano")
+    assert "memory_read" in [s["function"]["name"] for s in initial_tool_schemas(registry, context_mode="nano")]
+    schemas = _without_reader(initial_tool_schemas(registry, context_mode="nano"))
     sent = list(select_tool_schemas(schemas, context_mode="nano").schemas)
     names = [schema["function"]["name"] for schema in sent]
-    assert names == ["compact_context", "list_available_tools"]
+    assert "enable_tools" not in names and "memory_read" not in names  # finish_task is resident from the start
+    assert {"compact_context", "list_available_tools", "finish_task"} <= set(names)
     evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=10_000_000)
     plan = context._build_context_fit_plan(env, context._capture_context_core(env, memory, task, None, None), task,
         preferred_mode="nano", tool_schemas=schemas,
@@ -956,16 +1504,24 @@ def test_aggregate_range_keeps_interleaved_verbatim_rows_in_place():
 
 def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatch):
     """The receipt of a build inside ``measured_sections`` carries each section's wall and CPU time;
-    a build outside one carries neither, and the request itself is the same."""
+    a build outside one carries neither, and the request itself is the same. The batch read, the row
+    rendering and the running-focus lookup of the other conversations each hold only their own time."""
     from ouroboros.context_timing import measured_sections
     from ouroboros.agent_task_pipeline import build_review_context
-    from ouroboros import context_timing, skill_catalogue
+    from ouroboros import context_timing, memory_view, memory_view_conversations, skill_catalogue, task_store
+    from ouroboros.focus import normalize_focus
+    from tests._store_shared import seed_result
     from types import SimpleNamespace
 
     monkeypatch.setattr("shutil.disk_usage", lambda _path: SimpleNamespace(free=1, total=2))  # free space is dated too
 
     env, memory, _rooms = world(tmp_path)
     events = memory.drive_root / "logs" / "events.jsonl"
+    # A work of the alpha Project is running and has authored its focus: the other conversations name it, and their
+    # running-focus lookup has a task to read.
+    focus = normalize_focus("Finish the inventory check", {"reader": "get_task_result", "task_id": "alpha-live"},
+                            task_id="alpha-live", authored_at="2026-09-03T00:10:00+00:00")
+    seed_result(memory.drive_root, "alpha-live", {"status": "running", "project_id": "alpha", "focus": focus})
     # Skill discovery moved ahead of catalog rendering; its cost must still be
     # in installed_skills, and the always-on block and catalog share one read.
     clock = [0.0]
@@ -980,6 +1536,25 @@ def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatc
     monkeypatch.setattr(skill_catalogue, "discover_context_skills", discover_skills)
     monkeypatch.setattr(context_timing, "time", SimpleNamespace(
         perf_counter=lambda: clock[0], thread_time=lambda: clock[0] / 2))
+
+    # The three timed operations of the other conversations run for real, each moving the clock by a step of its own,
+    # so every span holds exactly its operation: 3 s for the one batch read of their open rows, 5 s for each row
+    # rendered, 7 s for the one read of the running work's focus. Nothing else of theirs moves the clock.
+    def stepping(seconds, real):
+        def step(*args, **kwargs):
+            clock[0] += seconds
+            return real(*args, **kwargs)
+        return step
+
+    rows, lookups = [], []  # the rows each render pass was given, and the tasks each focus lookup was asked for
+    write_lines, running_focus = memory_view_conversations._write_lines, memory_view_conversations._running_focus
+    monkeypatch.setattr(memory_view, "_row_texts", stepping(3.0, memory_view._row_texts))
+    monkeypatch.setattr(memory_view, "_spoken", stepping(5.0, memory_view._spoken))
+    monkeypatch.setattr(task_store, "display_documents", stepping(7.0, task_store.display_documents))
+    monkeypatch.setattr(memory_view_conversations, "_write_lines",
+                        lambda shown, *rest: rows.append(len(shown)) or write_lines(shown, *rest))
+    monkeypatch.setattr(memory_view_conversations, "_running_focus",
+                        lambda root, tasks: lookups.append(sorted(tasks)) or running_focus(root, tasks))
 
     def receipt():
         return [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()
@@ -996,15 +1571,26 @@ def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatc
     assert discoveries == [memory.drive_root]
     assert timed["sections_ms"]["installed_skills"] == 2000
     assert timed["sections_cpu_ms"]["installed_skills"] == 1000
+    # One capture rendered real rows of other conversations and read the running work's focus; each named span holds
+    # its own step, wall and CPU (half of it), and no other operation's.
+    assert len(rows) == 1 and rows[0] >= 2 and lookups == [["alpha-live"]]
+    read, render, looking = (f"memory_view.conversations.{name}" for name in ("read_rows", "render_rows", "running_focus"))
+    assert [timed["sections_ms"][name] for name in (read, render, looking)] == [3000, 5000 * rows[0], 7000]
+    assert [timed["sections_cpu_ms"][name] for name in (read, render, looking)] == [1500, 2500 * rows[0], 3500]
+    request = json.dumps(timed_messages, ensure_ascii=False)
+    assert "alpha again" in request and "beta again" in request  # the rows that were read and rendered
+    assert "get_task_result(task_id='alpha-live'): Finish the inventory check" in request  # the focus that was looked up
     events.write_bytes(history)  # the second build reads the same recent events as the first
     plain_messages, _cap = _messages(env, memory, task, review_context_builder=lambda: build_review_context(env))
     assert discoveries == [memory.drive_root, memory.drive_root]
     plain = receipt()
     assert {"memory_view", "knowledge", "health", "runtime", "registry", "installed_skills",
-            "drive_state", "review_records", "review_context", "fit", "total"} == {
+            "drive_state", "review_records", "review_facts", "review_context", "fit", "total"} == {
         name for name in timed["sections_ms"] if "." not in name}  # dotted names are spans inside these
     assert {"memory_view.chronicle", "memory_view.tail", "memory_view.conversations", "memory_view.story", "fit.frame_max",
-            "fit.projections"} <= set(timed["sections_ms"])
+            "fit.projections", "knowledge.navigation",
+            "memory_view.conversations.read_rows", "memory_view.conversations.render_rows",
+            "memory_view.conversations.running_focus"} <= set(timed["sections_ms"])
     assert set(timed["sections_cpu_ms"]) == set(timed["sections_ms"])
     assert timed["sections_ms"]["total"] >= max(timed["sections_ms"].values())  # the build's own time
     assert all(isinstance(ms, int) and ms >= 0 for ms in [*timed["sections_ms"].values(), *timed["sections_cpu_ms"].values()])

@@ -10,10 +10,10 @@
  * owner here (`needRows`), in its voice; search matches the words on screen and the words they replaced
  * (`searchSettings`), and its last line hands the words to Ouroboros as an unsent draft in Main. */
 
-import { apiClient, fetchJson } from './api_client.js';
+import { apiClient, fetchJson, withinRequestLifetime } from './api_client.js';
 import { confirmAndSendRestart, headerBudgetPresentation } from './chat_activity.js';
 import { routeSource, shortName } from './chat_model_routes.js';
-import { accountName, accountRows, claudexorStatus, facetReadState, familyLabel, READ_OK } from './claudexor_status_store.js';
+import { accountName, accountRows, claudexorStatus, facetReadState, familyLabel, READ_OK, STATUS_READ_LIFETIME_MS } from './claudexor_status_store.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { PLACES_CHANGED_EVENT, normalizeConsciousness, parseRoster } from './consciousness_api.js';
 import { headlineView } from './consciousness_dashboard.js';
@@ -23,10 +23,12 @@ import { refreshActionKind, verificationBadge } from './harness_accounts.js';
 import { harnessPresentation } from './harness_presentation.js';
 import { START_FAILED_LEAD, bootPhase, createHostStart, startingStatus, supervisorReady } from './host_starting_status.js';
 import { fmt, tr, translateString } from './i18n.js';
+import { configuredServerCount, mcpNeedsSignIn, mcpServerOn, mcpStatusSeen, refreshStatus } from './mcp_settings.js';
+import { modelCatalog, watchModelCatalog } from './model_catalog_store.js';
 import { readNotifyPrefs } from './notifications.js';
 import { PAGE_ICONS, SHELL_ICONS, controlIcon, fluentIcon } from './page_icons.js';
 import { readSkills, skillForms } from './settings_extension_forms.js';
-import { isDoorId, settingsPageFor } from './settings_pages.js';
+import { extensionsPageOf, isDoorId, settingsDoorName, settingsPageFor } from './settings_pages.js';
 import { policyValueLabel } from './settings_policy.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from './settings_rows.js';
 import { getSpeech } from './speech_providers.js';
@@ -55,8 +57,6 @@ const count = (n, one, many) => fmt(n === 1 ? one : many, { n });
 /** An account that needs sign-in again: enabled, and its login was checked and did not pass (harness_accounts.js). */
 const needsSignIn = (row) => row.enabled !== false && verificationBadge(row).tone === 'error';
 const serverName = (server) => String(server?.name || server?.label || server?.id || server?.slug || '');
-const toolNeedsSignIn = (server) => server?.enabled !== false && Boolean(server?.sign_in)
-    && (server.sign_in.state !== 'signed_in' || server.sign_in.reason === 'insufficient_scope');
 
 /**
  * What waits for the owner here, one row each: `{ kind, id, text, note, owner, action, open | run }`. `facts` holds what
@@ -86,7 +86,7 @@ export function needRows(facts = {}) {
                     : fmt('{n} {label} accounts need sign-in again', { n: list.length, label }) });
         }
     }
-    for (const server of (tools?.servers || []).filter(toolNeedsSignIn)) {
+    for (const server of (tools?.enabled === false ? [] : tools?.servers || []).filter(mcpNeedsSignIn)) {
         rows.push({ kind: 'tool-sign-in', id: String(server.id ?? serverName(server)), owner: true, action: 'Open',
             open: `tools/${encodeURIComponent(String(server.id ?? serverName(server)))}`,
             text: fmt('MCP server {name} needs sign-in', { name: serverName(server) }) });
@@ -152,10 +152,20 @@ function toolsWords(tools) {
     if (tools.enabled === false) return fmt('MCP servers off');
     const servers = Array.isArray(tools.servers) ? tools.servers : [];
     if (!servers.length) return fmt('No MCP servers');
-    // A server whose configuration could not be loaded is listed without its runtime facts: it is not on.
-    const on = servers.filter((server) => server?.enabled === true && Object.hasOwn(server, 'tool_count')).length;
-    return { text: fmt(servers.length === 1 ? '{on} of {n} server on' : '{on} of {n} servers on', { on, n: servers.length }),
-        owner: servers.some(toolNeedsSignIn) };
+    const on = servers.filter(mcpServerOn).length;
+    const n = configuredServerCount(servers);
+    return { text: fmt(n === 1 ? '{on} of {n} MCP server on' : '{on} of {n} MCP servers on', { on, n }),
+        owner: servers.some(mcpNeedsSignIn) };
+}
+
+/** Extensions' one door: its skills and its MCP servers, with independent read outcomes; sign-in is the owner's move. */
+function extensionsWords(skills, tools) {
+    const parts = [];
+    if (skills !== undefined) parts.push(Array.isArray(skills?.skills) ? count(skills.skills.length, '{n} skill', '{n} skills') : fmt(NOT_CHECKED));
+    const servers = tools ? toolsWords(tools) : tools === null ? fmt('MCP status unavailable') : undefined;
+    if (servers !== undefined) parts.push(typeof servers === 'string' ? servers : servers.text);
+    if (!parts.length) return undefined;
+    return { text: parts.join(' · '), owner: Boolean(servers?.owner) };
 }
 
 function updateWords(update) {
@@ -207,7 +217,10 @@ export function homeAnswers(facts = {}) {
     say('agents', settings, agentsWords);
     say('dashboard:consciousness', state, (s) => {
         const snapshot = normalizeConsciousness(s.bg_consciousness_state || {}, { enabled: s.bg_consciousness_enabled });
-        return { text: headlineView(snapshot).text, owner: consciousnessMark(snapshot).hue === 'owner' };
+        // Its position by meaning (owner 15.11, 5A); the host's line while the next move is the owner's.
+        const headline = headlineView(snapshot);
+        const owner = consciousnessMark(snapshot).hue === 'owner';
+        return { text: owner || !headline.position ? headline.text : headline.position, owner };
     });
     say('dashboard:evolution', state, (s) => fmt(s.evolution_enabled === true ? 'On' : s.evolution_enabled === false ? 'Off' : 'State unknown'));
     say('page:circles', places, (p) => (Array.isArray(p.places) ? count(p.places.length, '{n} place', '{n} places') : fmt(NOT_CHECKED)));
@@ -219,8 +232,8 @@ export function homeAnswers(facts = {}) {
     });
     const accountsAnswer = accountsWords(accounts, settings);
     if (accountsAnswer !== undefined) out.accounts = accountsAnswer;
-    say('tools', tools, toolsWords);
-    say('page:skills', skills, (s) => (Array.isArray(s.skills) ? fmt('{n} installed', { n: s.skills.length }) : fmt(NOT_CHECKED)));
+    const extensions = extensionsWords(skills, tools);
+    if (extensions !== undefined) out['page:skills'] = extensions;
     say('appearance', device.theme, (theme) => (['system', 'light', 'dark'].includes(theme) ? fmt({ system: 'System', light: 'Light', dark: 'Dark' }[theme]) : undefined));
     say('notifications', device.notify, (prefs) => fmt(!prefs.enabled ? 'Off on this device' : prefs.sound ? 'On, with sound' : 'On, silent'));
     say('voice', device.dictation, (engine) => (engine ? fmt('Dictation: {engine}', { engine }) : fmt('Dictation not chosen')));
@@ -240,16 +253,19 @@ const fold = (text) => String(text ?? '').normalize('NFKC').toLocaleLowerCase().
 export function searchEntries({ rows = ROWS, handWritten = HAND_WRITTEN, home = HOME_ROWS, doors = SEARCH_DOORS, forms = skillForms(), title = settingsTitle } = {}) {
     const entries = [...home, ...doors].map((row) => ({ id: row.id, name: row.name, where: '', to: row.to, row: '', glyph: row.glyph,
         words: [row.name, ...(row.aliases || [])] }));
+    // A row of a page of Extensions (MCP servers, Skill sources) says where it lives now and is a door there.
+    const extensions = { installed: 'Skills', tools: 'MCP servers', sources: 'Sources' };
     for (const row of [...rows, ...handWritten]) {
-        const where = title(row.page);
-        entries.push({ id: row.id, name: row.name || row.id, where, to: row.page, row: row.id,
-            glyph: home.find((door) => door.to === String(row.page).split('/')[0])?.glyph || 'settings',
+        const first = extensionsPageOf(row.page);
+        const where = first ? `Extensions › ${row.page === first ? extensions[first] : `${extensions[first]} › ${title(row.page)}`}` : title(row.page);
+        entries.push({ id: row.id, name: row.name || row.id, where, to: first ? `skills:${row.page}` : row.page, row: row.id,
+            glyph: first ? (first === 'tools' ? 'plug' : 'skills') : home.find((door) => door.to === String(row.page).split('/')[0])?.glyph || 'settings',
             words: [row.name, row.meta, ...(row.aliases || []), ...(row.keys || []), row.id, where] });
     }
     for (const form of forms) {
         for (const section of form.sections) {
             entries.push({ id: `skill:${form.skill}:${section.section_id || section.key || ''}`, name: String(section.title || form.name),
-                where: form.name, to: `skill/${encodeURIComponent(form.skill)}`, row: '', glyph: 'skills',
+                where: `Extensions › ${form.name}`, to: `skills:skill/${encodeURIComponent(form.skill)}`, row: '', glyph: 'skills',
                 words: [section.title, form.name, form.skill] });
         }
     }
@@ -312,24 +328,39 @@ function dictationWord() {
 
 const markHtml = (presentation) => `<svg width="18" height="18" viewBox="${presentation.viewBox}" fill="currentColor" aria-hidden="true"><path d="${presentation.path}"/></svg>`;
 
-/** The glyphs that say a fact: Main's source (its harness mark, else the cube) and the theme. */
-function liveGlyphs({ settings, device = {} } = {}) {
+/** The descriptor-confirmed mark of Main's subscription route, from the catalogue already held; '' when that list
+ *  names no credential harness for it. The opaque source id is never itself evidence of a harness, and nothing is
+ *  read here: without a descriptor the caller's neutral cube stands. */
+function mainSourceMark({ value, local, modelSources }) {
+    if (local) return '';
+    const source = routeSource({ model: value, use_local: false });
+    if (!source.startsWith('subscription:')) return '';
+    const descriptor = (modelSources || []).find((entry) => entry?.id === source.slice('subscription:'.length));
+    const brand = harnessPresentation(String(descriptor?.credentialHarness || ''));
+    return brand.generic ? '' : markHtml(brand);
+}
+
+/** The glyphs that say a fact: Main's source (its descriptor-confirmed harness mark, else the cube) and the theme. */
+function liveGlyphs({ settings, device = {}, modelSources = [] } = {}) {
     const out = {};
     if (settings) {
-        const source = routeSource({ model: String(settings.OUROBOROS_MODEL || ''), use_local: truthy(settings.USE_LOCAL_MAIN) });
-        const brand = source.startsWith('subscription:') ? harnessPresentation(source.slice('subscription:'.length)) : null;
-        out.models = brand && !brand.generic ? markHtml(brand) : glyphHtml('cube');
+        out.models = mainSourceMark({ value: String(settings.OUROBOROS_MODEL || ''), local: truthy(settings.USE_LOCAL_MAIN),
+            modelSources }) || glyphHtml('cube');
     }
     if (device.theme) out.appearance = glyphHtml(device.theme === 'light' ? 'sun' : 'moon');
     return out;
 }
 
 function doorHtml({ to, name, glyph, answer = '', result = '' }) {
-    return `<button type="button" class="settings-door section-row" data-settings-open="${escapeHtml(to)}"${isDoorId(to) ? ' data-section-out' : ''}${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
+    const outside = isDoorId(to);
+    let label = outside ? settingsDoorName(name, to) : '';
+    // An Extensions result's second line is its destination. Let both visible lines name the button.
+    if (result && to.startsWith('skills:')) label = answer ? '' : `${name}, Extensions`;
+    return `<button type="button" class="settings-door section-row" data-settings-open="${escapeHtml(to)}"${outside ? ' data-section-out' : ''}${label ? ` aria-label="${escapeHtml(label)}"` : ''}${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
         + `<span class="settings-door-glyph section-row-glyph" aria-hidden="true" data-settings-glyph>${glyphHtml(glyph)}</span>`
-        + `<span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title">${escapeHtml(name)}</span>`
+        + `<span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title">${escapeHtml(name)}</span> `
         + `<span class="settings-door-answer section-row-answer" data-settings-answer${result ? '' : ' data-i18n-fmt="settings.answer"'}>${escapeHtml(answer)}</span></span>`
-        + `<span class="settings-door-end section-row-end" aria-hidden="true">${result ? '' : statusMarkHtml('settings-door-mark')}${isDoorId(to) ? OUT_ICON : IN_ICON}</span></button>`;
+        + `<span class="settings-door-end section-row-end" aria-hidden="true">${result ? '' : statusMarkHtml('settings-door-mark')}${outside ? OUT_ICON : IN_ICON}</span></button>`;
 }
 
 const groupHtml = (title, body) => `<section class="settings-group section-group">${title ? `<h3 class="settings-group-title section-group-title">${escapeHtml(title)}</h3>` : ''}`
@@ -397,7 +428,14 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     const cardEl = find('[data-settings-card]');
     const [needsEl, listEl, searchEl, countEl] = [find('[data-being-needs]'), find('[data-settings-list]'), find('#settings-search'), find('[data-being-count]')];
     const [stateEl, sepEl, overviewAnswer] = [find('[data-being-state]'), find('.settings-being-sep'), find('[data-overview-answer]')];
+    // The catalogue a model sheet already holds (no read of the home's own): its descriptors brand the source they
+    // name, and a descriptor that arrives later refreshes that one glyph.
+    const heldModelSources = () => {
+        const sources = modelCatalog.catalog()?.model_sources;
+        return Array.isArray(sources) ? sources : [];
+    };
     const facts = { device: {} };
+    facts.modelSources = heldModelSources();
     seenFacts = facts;
     let current = '';
     let needs = [];
@@ -449,6 +487,19 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         });
     }
 
+    const paintRowMark = (row, glyphs) => {
+        const mark = glyphs[row.dataset.settingsOpen];
+        const glyph = mark && row.querySelector('[data-settings-glyph]');
+        if (!glyph || glyph.dataset.glyph === mark) return;
+        glyph.dataset.glyph = mark;
+        glyph.innerHTML = mark;
+    };
+    // Only the rows' glyph slots, for a fact that changed without any row's answer: a descriptor adopted late.
+    function paintMarks() {
+        if (shownQuery) return;
+        const glyphs = liveGlyphs(facts);
+        listEl.querySelectorAll('[data-settings-open]').forEach((row) => paintRowMark(row, glyphs));
+    }
     function paintRows() {
         if (shownQuery) return;
         const answers = homeAnswers(facts);
@@ -461,11 +512,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
                 if (words.textContent !== answer.text) words.textContent = answer.text;
                 paintStatusMark(row.querySelector('.settings-door-mark'), answer.owner ? { shape: 'dot', hue: 'owner' } : {});
             }
-            const glyph = row.querySelector('[data-settings-glyph]');
-            if (glyphs[to] && glyph.dataset.glyph !== glyphs[to]) {
-                glyph.dataset.glyph = glyphs[to];
-                glyph.innerHTML = glyphs[to];
-            }
+            paintRowMark(row, glyphs);
             if (to === current) row.setAttribute('aria-current', 'page'); else row.removeAttribute('aria-current');
         });
     }
@@ -493,14 +540,16 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     };
     const READS = {
         settings: () => ctx.readSettings(),
-        tools: (signal) => fetchJson('/api/mcp/status', { cache: 'no-store', signal }),
+        tools: () => refreshStatus({ join: true }),
         skills: (signal) => readSkills({ signal }),
         places: (signal) => fetchJson('/api/places', { cache: 'no-store', signal }),
         update: (signal) => apiClient.updateStatus({ signal }),
         storage: (signal) => fetchJson('/api/storage', { cache: 'no-store', signal }),
         autostart: (signal) => apiClient.desktopAutostart({ signal }),
         // The roster and the windows the engine last observed, as Costs reads them: it starts and refreshes nothing.
-        roster: async (signal) => (storeRead() ? facts.roster : fetchJson('/api/claudexor/status?view=quota', { cache: 'no-store', signal })),
+        // It ends within the status reads' lifetime, so a request that never answers frees the next roster read.
+        roster: async (signal) => (storeRead() ? facts.roster : withinRequestLifetime((transport) => fetchJson(
+            '/api/claudexor/status?view=quota', { cache: 'no-store', signal: transport }), { signal, lifetimeMs: STATUS_READ_LIFETIME_MS })),
         // The app's state snapshot, through the page's one sequencer: a read in flight is waited for, not doubled, and
         // its order keeps an older body from replacing a newer one.
         state: async () => {
@@ -513,6 +562,8 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     // One read of a source at a time: asked again while it runs, it runs once more after it. Its answer is painted
     // unless its own request was dropped (the list left the screen, or is gone).
     function read(name) {
+        // The shared MCP reader publishes the current answer, including failure, in request order to both sections.
+        if (name === 'tools') return READS.tools();
         const flight = flights.get(name);
         if (flight) { flight.again = true; return flight.done; }
         const mine = { controller: new AbortController(), again: false };
@@ -537,11 +588,13 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         hidden = false;
         readDevice();
         facts.state = ctx.stateSnapshots?.latest?.() || facts.state;
+        facts.tools = mcpStatusSeen();  // the shared read may have settled while this list was put away
+        facts.modelSources = heldModelSources();
         readAccounts();
         paint();
         return Promise.all(names.map(read));
     }
-    // Off screen: the reads in flight are dropped and free their connections; none starts until it is shown again.
+    // Off screen: home-owned reads release their connections; the shared MCP read can still serve the other section.
     function hide() {
         hidden = true;
         flights.forEach((flight) => flight.controller.abort());
@@ -607,6 +660,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     // read from here; the destination owns its own read.
     let at = '';
     const onWhere = (event) => {
+        if (event.detail?.place && event.detail.place !== 'settings') return;  // a page of Extensions, not of Settings
         const where = String(event.detail?.path || '').split('/')[0];
         const left = where === at ? null : rowAt(at);
         at = where;
@@ -628,6 +682,10 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         paintRows();
     };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
+    const offCatalog = watchModelCatalog((catalog) => {
+        facts.modelSources = Array.isArray(catalog?.model_sources) ? catalog.model_sources : [];
+        if (!hidden) paintMarks();
+    });
     // A skill's lifecycle and an update's status, as the shell hears them. The socket's state is the card's first word:
     // its open and close repaint the card, reading nothing (a reconnect's read is settings.js's); the close and a
     // reconnect (on the page's own socket, which never hears a room's `resumed` return) forget the readiness the bodies
@@ -672,6 +730,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         dispose() {
             hide();
             offStore();
+            offCatalog();
             offs.forEach((off) => off?.());
             root.removeEventListener('click', onClick);
             cardEl?.removeEventListener('click', onClick);

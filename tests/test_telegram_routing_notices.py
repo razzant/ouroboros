@@ -497,7 +497,168 @@ def test_a_picker_gets_no_invented_reason_and_one_message_with_its_files(phone):
               "Reply with a number, or tap an option in the web chat.")
     [sent] = phone.sent()
     assert sent["text"] == f"{picker}\nNot attached to the task: оглавление.docx" and sent["reply_to_message_id"] == 50
+    # A native Reply "2" to that very message quotes the list it shows (its stored row), so the router reads it.
+    from ouroboros.chat_references import resolve_reply
+    from supervisor import message_bus
+
+    state = sys.modules[phone.plugin.__package__ + ".lib.telegram_state"]
+    picker_id = 100 + len(phone.calls)
+    listed = state._message_ref(phone.api, "", 42, picker_id)["row_address"]
+    assert resolve_reply(phone.data, listed)["snippet"].startswith("I couldn't pick a destination for the last message.")
+    answer = {"message_id": 51, "chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "2",
+              "reply_to_message": {"message_id": picker_id, "from": {"id": 7, "is_bot": True}}}
+    fields = state._owner_ingress_fields(phone.api, "", 42, answer, 51, state._reply_target(phone.api, "", 42, answer))
+    row, _ = message_bus.accept_local_message(
+        SimpleNamespace(enqueue_local_message=lambda *_a, **_k: None), phone.data, "2", chat_id=42, user_id=42,
+        source="skill:telegram", client_message_id=fields["client_message_id"],
+        task_metadata={"reply_to": fields["reply_to"]})
+    assert row["reply_to"]["address"] == listed and "telegram_room_chat_id" not in row["reply_to"]
     asyncio.run(phone.plugin._make_outbound(phone.api)({**ack, "cause": "Not started: the attachments could not be staged",
                                                        "target_label": "Export"}))
     assert phone.sent()[-1]["text"] == (f"Export · Not started: the attachments could not be staged\n{picker}"
                                         "\nNot attached to the task: оглавление.docx")
+
+
+@pytest.mark.parametrize("mirror_progress", ["off", "on"])
+def test_phone_notice_uses_available_translation(phone, monkeypatch, mirror_progress):
+    from ouroboros import i18n_memory
+    from ouroboros.pause_notices import notice_text
+    from tests.test_telegram_i18n import _seed
+
+    text = notice_text({"reason": "authority", "cause": "dispatch_fence_invalid"})
+    translated = "Задача ждёт исправную запись допуска."
+    plugin = phone.plugin
+    plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+    try:
+        _seed(phone.data, "ru", {text: {"text": translated}})
+        assert i18n_memory.tr(text, "ru", drive_root=phone.data) == translated
+        settings = {
+            "TELEGRAM_CHAT_ID": "42",
+            "TELEGRAM_MIRROR_MODE": "all",
+            "TELEGRAM_MIRROR_PROGRESS": mirror_progress,
+        }
+        monkeypatch.setattr(plugin, "_load_settings", lambda _: settings)
+        event = {
+            "text": text,
+            "task_id": "root",
+            "role": "system",
+            "system_type": "task_pause_notice",
+            "narration": False,
+            "card_row": "timeline",
+            "card_row_id": "pause:root:authority",
+            "pause_reason": "authority",
+        }
+        asyncio.run(plugin._make_outbound(phone.api)(event))
+        delivered = [sent["text"] for sent in phone.sent()]
+        assert delivered == ([translated] if mirror_progress == "on" else [])
+    finally:
+        plugin.telegram_i18n.configure(None)
+
+
+def test_a_host_notice_reaches_the_phone_as_its_one_line_each_part_translated_first(phone, monkeypatch):
+    """Telegram says a notice row as the host's one line (``host_notice.notice_line``): the phrase by its exact text
+    and the step by its code, translated before they are joined; its raw details stay in the web's Details."""
+    from ouroboros.host_notice import STEPS, fields
+    from tests.test_telegram_i18n import _seed
+
+    plugin = phone.plugin
+    plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setattr(plugin, "_load_settings", lambda _: {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "all"})
+    phrase = "The total budget is spent, so this turn did not start."
+    event = {"text": phrase, "role": "system", "system_type": "task_not_started",
+             **fields("budget_exhausted", step="raise_total_budget", details="budget_exhausted at 12:00")}
+    try:
+        asyncio.run(plugin._make_outbound(phone.api)(event))
+        assert phone.sent()[-1]["text"] == f"{phrase} {STEPS['raise_total_budget']}", "English: the phrase, then its step"
+        monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+        _seed(phone.data, "ru", {phrase: {"text": "Общий бюджет исчерпан, ход не начался."},
+                                 "code:notice.step.raise_total_budget": {"text": "Поднимите Total budget в Dashboard → Costs."}})
+        asyncio.run(plugin._make_outbound(phone.api)(event))
+        assert phone.sent()[-1]["text"] == "Общий бюджет исчерпан, ход не начался. Поднимите Total budget в Dashboard → Costs."
+        assert "12:00" not in phone.sent()[-1]["text"], "the details never ride the line"
+    finally:
+        plugin.telegram_i18n.configure(None)
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_queued_technical_notice_uses_the_translation_under_its_original_receipt(phone, monkeypatch, legacy):
+    from ouroboros import obligations, pause_notices
+    from ouroboros.startup_migrations import prepare_startup_state
+    from ouroboros.task_results import write_task_result
+    from tests.test_telegram_i18n import _seed
+
+    row = {"reason": "authority"}
+    identity = "pause:task:episode-1"
+    if not legacy:
+        row["cause"] = "dispatch_fence_invalid"
+        identity = "pause:task:authority"
+    phrase = pause_notices.notice_text(row)
+    translated = "Задача ждёт восстановления записи."
+    prepare_startup_state(phone.data)
+    write_task_result(phone.data, "task", "running", chat_id=42, pause_notices={identity: row})
+    obligations.add(phone.data, "pause_notices", "task")
+    phone.plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+    try:
+        _seed(phone.data, "ru", {phrase: {"text": translated}})
+        settings = {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "all", "TELEGRAM_MIRROR_PROGRESS": "on"}
+        monkeypatch.setattr(phone.plugin, "_load_settings", lambda _: settings)
+        pause_notices.reconcile_pause_notices(phone.data)
+        pause_notices.reconcile_pause_notices(phone.data)
+        [saved] = [rec for rec in phone.rows() if rec.get("system_type") == "task_pause_notice"]
+        assert saved["card_row_id"] == identity and saved["content"] == phrase
+        assert [sent["text"] for sent in phone.sent()] == [translated]
+    finally:
+        phone.plugin.telegram_i18n.configure(None)
+
+
+def test_the_phone_says_the_line_its_frame_carries_rather_than_assembling_another(phone, monkeypatch):
+    """RV4 14: a translation that arrived between publication and delivery never splits the phone from the window and
+    Copy: the frame's own line wins; an event the host did not assemble still gets the assembler's line."""
+    from ouroboros.host_notice import fields
+
+    plugin = phone.plugin
+    plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setattr(plugin, "_load_settings", lambda _: {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "all"})
+    event = {"text": "This turn did not start.", "role": "system", "system_type": "task_not_started",
+             **fields("budget_exhausted", step="raise_total_budget")}
+    try:
+        asyncio.run(plugin._make_outbound(phone.api)({**event, "notice": {**event["notice"], "line": "Ход не начался. Поднимите бюджет."}}))
+        assert phone.sent()[-1]["text"] == "Ход не начался. Поднимите бюджет."
+        asyncio.run(plugin._make_outbound(phone.api)(event))
+        assert phone.sent()[-1]["text"].startswith("This turn did not start.")
+    finally:
+        plugin.telegram_i18n.configure(None)
+
+
+def test_the_phone_says_a_kept_stash_command_under_its_line_and_every_other_notice_as_its_line(phone, monkeypatch):
+    """RV4 15 and RVD4 15 (Q1=C): the phone has no Details, so the update row whose stash Git kept aside says its
+    exact command, the notice's typed one-line instruction, under its line after one blank line, as plain text; Git's
+    multiline note stays the window's Details. A notice without an instruction says its line alone, the same command
+    in its details included."""
+    from ouroboros.host_notice import STEPS, fields
+    from supervisor import message_bus
+    from supervisor.update_merge import boot_outcome_notice
+    from tests.test_host_notice import KEPT_NOTE, KEPT_SHA
+
+    plugin = phone.plugin
+    plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setattr(plugin, "_load_settings", lambda _: {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "all"})
+    command = f"git stash apply {KEPT_SHA}"
+    kept = boot_outcome_notice({"finalized": True, "stash_restore_status": "preserved", "stash_note": KEPT_NOTE,
+                                "stash_command": command})
+    restored = boot_outcome_notice({"finalized": True, "stash_restore_status": "restored", "stash_note": "restored"})
+    other = {"text": "This turn did not start.",
+             "progress_meta": fields("not_started", step="try_again", details=KEPT_NOTE)}
+    try:
+        message_bus.send_with_budget(42, **kept, role="system", system_type="managed_update_notice")
+        line = f"{kept['text']} {STEPS['restore_kept_changes']}"
+        assert phone.sent()[-1] == {"chat_id": "42", "text": f"{line}\n\n{command}"}, "line, blank line, command; plain"
+        assert "Git diagnostics" not in phone.sent()[-1]["text"]
+        message_bus.send_with_budget(42, **restored, role="system", system_type="managed_update_notice")
+        assert phone.sent()[-1]["text"] == restored["text"]
+        message_bus.send_with_budget(42, **other, role="system", system_type="task_not_started")
+        assert phone.sent()[-1]["text"] == f"This turn did not start. {STEPS['try_again']}"
+    finally:
+        plugin.telegram_i18n.configure(None)

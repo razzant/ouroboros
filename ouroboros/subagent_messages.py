@@ -122,7 +122,8 @@ def delegated_activity_meta(value: Any, *, task_id: str) -> Dict[str, Any]:
 
 
 def initiator_meta(record: Mapping[str, Any] | None) -> Dict[str, Any]:
-    """The turn's origin label — ``initiator`` from a task record or its ``metadata``.
+    """The turn's origin label — ``initiator`` from a task record or its ``metadata``, with ``place_origin`` for work a
+    place started.
 
     A consciousness wake-up (and, later, the roots it starts) carries
     ``metadata.initiator = "consciousness"``; an owner's turn carries nothing.
@@ -137,7 +138,38 @@ def initiator_meta(record: Mapping[str, Any] | None) -> Dict[str, Any]:
     admission = continuation.get("admission") if isinstance(continuation, Mapping) else None
     # Who asked for a Continue, apart from the origin it inherits: read here, kept only on the admission that recorded it.
     requester = {} if not isinstance(admission, Mapping) else {"continue_requester": _requester_of(admission)}
-    return {**({"initiator": value} if value else {}), **requester}
+    origin = place_origin(metadata if isinstance(nested, Mapping) else source)
+    return {**({"initiator": value} if value else {}), **requester, **({"place_origin": origin} if origin else {})}
+
+
+def place_origin(metadata: Mapping[str, Any]) -> Dict[str, Any]:
+    """Where a place's work came from and why, for its card's one line: the place (``place_id``, its label as admitted),
+    the provider, the author the admission saw (``focus.actor``: ``owner``/``bot`` only when true) and the wake items
+    its event matched (``focus.matched_wakes``) with the words its connector declared for them (``labels``, from
+    ``focus.matched_labels``), or ``routed`` when it came because several works read its conversation
+    (``focus.routed``; a focus minted before that key keeps it in its own allowance). A root or child that inherits
+    the focus carries it too; {} for work no place started. Copied from host-minted metadata by value; an author the
+    connector named no id or name for has no ``actor``, never "a person"."""
+    focus = metadata.get("focus")
+    if not isinstance(focus, Mapping) or not focus.get("place_id"):
+        return {}
+    presence = metadata.get("presence") if isinstance(metadata.get("presence"), Mapping) else {}
+    place, event = ((presence.get(key) if isinstance(presence.get(key), Mapping) else {}) for key in ("place", "event"))
+    actor = focus.get("actor") if isinstance(focus.get("actor"), Mapping) else {}
+    who = {**({"id": str(actor["platform_actor_id"])} if actor.get("platform_actor_id") else {}),
+           **({"label": str(actor["display_name"])} if actor.get("display_name") else {}),
+           **({"owner": True} if actor.get("owner_confirmed") is True else {}),
+           **({"bot": True} if actor.get("is_bot") is True else {})}
+    wakes, allowance = focus.get("matched_wakes"), metadata.get("focus_allowance")
+    wakes = [fact for fact in wakes if isinstance(fact, str)] if isinstance(wakes, list) else []
+    words = focus.get("matched_labels") if isinstance(focus.get("matched_labels"), Mapping) else {}
+    labels = {fact: words[fact] for fact in wakes if isinstance(words.get(fact), str) and words[fact].strip()}
+    routed = focus.get("routed") is True or (isinstance(allowance, Mapping) and allowance.get("route") is True)
+    return {"place_id": str(focus["place_id"]),
+            **({"place_label": str(place["label"])} if place.get("label") else {}),
+            **({"provider": str(event["provider"])} if event.get("provider") else {}),
+            **({"actor": who} if who else {}), "wakes": wakes, **({"labels": labels} if labels else {}),
+            **({"routed": True} if routed else {})}
 
 
 def _requester_of(admission: Mapping[str, Any]) -> str:

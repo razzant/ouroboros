@@ -3,9 +3,8 @@
 A parent takes a child's work back through two surfaces — the full single-child
 read and the compact batch projection — and they must agree about what matters:
 the outcome axes, the pinned result hash, the receipts, and any capability the
-child did not actually have. The waits add the facts a blocking parent cannot
-see for itself: an attention beacon raised mid-flight, siblings still running,
-an id this tree never minted, and a prompt cache that expired while it waited.
+child did not actually have. The waits add elapsed time, attention beacons,
+live siblings and ids this tree never minted. Round facts own cache observations.
 """
 
 from __future__ import annotations
@@ -30,10 +29,10 @@ from ouroboros.task_status import (
     wait_for_effective_tasks,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import truncate_review_artifact
+from ouroboros.utils import json_dumps_utf8, truncate_review_artifact
 from ouroboros.work_stop import stop_for_reader, task_current_stop
 from ouroboros.cost_projection import current_cost, current_costs
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read, publish_no_effect
 
 
 def disclosable_capability_delta(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -67,6 +66,17 @@ def disclosable_effort_fact(data: Dict[str, Any]) -> Dict[str, str]:
         return {}
     return {"level": str(fact["applied"] or ""), "requested": str(fact["requested"] or ""),
             "source": str(fact["source"] or "")}
+
+
+def _handoff_disclosures(data: Dict[str, Any]) -> Dict[str, Any]:
+    """The SEMANTIC handoff facts that decide how far to trust a child's answer, for both parent surfaces
+    (``[SUBTASK_OUTCOME]`` and the compact batch row a fan-out parent absorbs its children through), so the
+    batch and the singleton cannot disagree: a capability reduction, a moved effort request and the receipt's
+    repeat of what differed from the request (``helper_receipt.task_result_line``)."""
+    from ouroboros.helper_receipt import task_result_line
+
+    facts = {"capability_delta": disclosable_capability_delta(data), "effort": disclosable_effort_fact(data)}
+    return {key: value for key, value in {**facts, "receipt": task_result_line(data)}.items() if value}
 
 
 def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None, reader: str = "",
@@ -152,11 +162,7 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None,
         summary["delegated_custody"] = custody
     if isinstance(data.get("task_contract"), dict):
         summary["task_contract"] = data.get("task_contract")
-    _delta = disclosable_capability_delta(data)
-    if _delta:
-        summary["capability_delta"] = _delta
-    if _effort := disclosable_effort_fact(data):
-        summary["effort"] = _effort
+    summary.update(_handoff_disclosures(data))
     if isinstance(data.get("artifact_bundle"), dict):
         summary["artifact_bundle"] = data.get("artifact_bundle")
     if ledger := verification_ledger_view(data.get("verification_ledger")):
@@ -209,7 +215,7 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None,
         summary.update(disclosed_list_projection(
             ordered, key="verification_receipts", limit=10, item=_receipt_row,
         ))
-    return json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    return json_dumps_utf8(summary, ensure_ascii=False, indent=2, default=str)
 
 
 def _unchanged_result_reference(task_id: str, current_hash: str, known_hash: Any) -> Dict[str, Any]:
@@ -345,6 +351,7 @@ def _get_task_result(
 
         return authority_selection_response(ctx, data, status_drive_root, locals())
     if call_id:
+        from ouroboros.evidence_packs import EvidenceUnavailable
         from ouroboros.tools.task_result_views import retained_call_source
 
         try:
@@ -355,10 +362,14 @@ def _get_task_result(
         except FileNotFoundError:
             return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE",
                 text="Retained call has no available redacted projection."))
+        except EvidenceUnavailable as exc:  # neither absent nor damaged: whether to ask again is the mind's call
+            return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(
+                f"evidence_unavailable ({exc.reason}): where the retained call source lies cannot be learned now; "
+                "its address stays good, and the same call may be made again.")))
         except (OSError, ValueError, TypeError):
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR",
                 text="Retained call source is unreadable or failed verification."))
-        text = json.dumps({"call_source": source}, ensure_ascii=False, sort_keys=True)
+        text = json_dumps_utf8({"call_source": source}, ensure_ascii=False, sort_keys=True)
         if source.get("reason") == "source_range_invalid":
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
         return text
@@ -367,7 +378,7 @@ def _get_task_result(
 
         source = reentry_source_projection(status_drive_root, str(task_id), presence_reentry_sha256,
                                             source_start_char, source_end_char, presence_reentry_offset)
-        text = json.dumps({"presence_reentry_source": source}, ensure_ascii=False, sort_keys=True)
+        text = json_dumps_utf8({"presence_reentry_source": source}, ensure_ascii=False, sort_keys=True)
         if source.get("reason") == "source_range_invalid":
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
         return text
@@ -449,7 +460,7 @@ def _get_task_result(
             )
         if source_only and isinstance(payload["source"].get("arguments"), dict):
             payload["source"]["arguments"]["source_only"] = True
-        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        text = json_dumps_utf8(payload, ensure_ascii=False, sort_keys=True)
         if any(isinstance(view, dict) and view.get("reason") == "source_range_invalid"
                for view in (payload.get("work_order_source"), payload.get("completion_source"), payload.get("focus_source"))):
             # The requested text was NOT returned: same JSON (it names complete_chars and
@@ -507,7 +518,7 @@ def _get_task_result(
             f"Task {task_id} [{status}]: cost={cost_display(data)}\n"
             f"child_result_sha256={child_result_sha256}\n\n"
             f"[SUBTASK_OUTCOME]\n{outcome_summary}\n[/SUBTASK_OUTCOME]\n\n"
-            f"{json.dumps(unchanged, ensure_ascii=False)}\n"
+            f"{json_dumps_utf8(unchanged, ensure_ascii=False)}\n"
             "Result and trace are unchanged; omit known_result_sha256 to read them in full."
         )
     elif status == STATUS_COMPLETED:
@@ -536,10 +547,10 @@ def _get_task_result(
         origin = data["cancel_origin"]
         command = {"immediate": "stop_now", "finalize_then_cancel": "wrap_up"}.get(origin.get("stop_policy"), "unknown")
         marker = "[CANCELLED_BY]" if status == STATUS_CANCELLED else f"[OWNER_CONTROL] command={command}"
-        output += f"\n\n{marker} {json.dumps(origin, ensure_ascii=False)}"
+        output += f"\n\n{marker} {json_dumps_utf8(origin, ensure_ascii=False)}"
     if data.get("retired_tool_invocations"):
         output += ("\n\n[INTERRUPTED_TOOL_CALLS] Local execution ended; external effects remain unknown.\n"
-                   + json.dumps(data["retired_tool_invocations"], ensure_ascii=False))
+                   + json_dumps_utf8(data["retired_tool_invocations"], ensure_ascii=False))
     from ouroboros.task_custody import unread_mail_notice
 
     if unread := unread_mail_notice(data.get("unread_mailbox")):
@@ -642,53 +653,6 @@ def _wait_attention_poll(
     return _hook
 
 
-def cache_horizon_note(ctx: Any, elapsed_sec: Any) -> str:
-    """One factual line when a blocking wait outlived the APPLIED prompt-cache TTL.
-
-    Reads the RECORDED fact of this task's latest send — ``_last_prompt_cache_ttl``
-    in the loop's accumulated usage (published on the tool ctx), converted by
-    ``llm.cache_ttl_seconds`` — never a route-level prediction (a second predictor
-    can disagree with the payload after route-filter/promotion/cap). Empty string
-    when the horizon is unknown or not yet elapsed. UNKNOWN covers three cases,
-    all silent: no cached send recorded, a route that carries no markers at all,
-    and a send whose markers were BARE (reported ``"default"``) — a bare marker
-    names no tier, so its horizon is the provider's business and inventing one
-    would mislead the agent into re-planning its waits around a number nobody
-    established. Only the explicitly stamped ``5m``/``1h`` tiers speak here.
-    Deliberately NO token-count predictions: the submarine forensics showed the
-    fact ("the wait outlived the cache") is what changes the agent's next decision
-    (batch waits, longer single windows), while "~X tokens will re-write" is a
-    counterfactual — the next send may reroute, compact, or still hit a live cache.
-
-    REACHABILITY, honestly: the root waits (``wait_task``, ``wait_tasks``) feed
-    their own elapsed window, a LOWER bound on cache age, so at the shipped ``1h``
-    tier only ``wait_tasks`` (7200s ceiling) can cross inside the window and
-    ``wait_task`` sits on the 3600s horizon; at ``5m`` both cross. ``delegate_wait``
-    feeds the time since the task's last recorded model response, once per wake, so
-    its line is reachable at ANY tier and no longer depends on the 3 s tick. Pinned by
-    tests/test_cache_optimization.py::test_cache_horizon_reachability_matches_the_wait_clamps
-    and the supervising-wake tests; the tier is an owner setting, not a constant, and
-    a wait tool that silently could not disclose would be worse.
-    """
-    try:
-        elapsed = float(elapsed_sec)
-    except (TypeError, ValueError):
-        return ""
-    usage = getattr(ctx, "_accumulated_usage", None)
-    if not isinstance(usage, dict):
-        return ""
-    applied_ttl = str(usage.get("_last_prompt_cache_ttl") or "").strip()
-    from ouroboros.llm import cache_ttl_seconds
-
-    horizon = cache_ttl_seconds(applied_ttl)
-    if horizon is None or elapsed <= horizon:
-        return ""
-    return (
-        f"⚠️ configured prompt-cache horizon ({applied_ttl}, {horizon}s) elapsed since the "
-        f"last model response ({elapsed:.0f}s ago); the next model send may be cold."
-    )
-
-
 def _wait_early_return_note(early) -> str:
     if not early:
         return ""
@@ -764,11 +728,11 @@ def _single_wait_text(ctx: Any, tid: str, waited: Dict[str, Any], *, view: str, 
         extra = "\n\n" + _wait_early_return_note(early)
     elif early and early.get("reason") == "dependency_held":
         header = "Task wait returned to show a held dependency"
-        extra = (f"\n\n[HELD_DEPENDENCY]\n{json.dumps(early['held'], ensure_ascii=False, indent=2)}\n"
+        extra = (f"\n\n[HELD_DEPENDENCY]\n{json_dumps_utf8(early['held'], ensure_ascii=False, indent=2)}\n"
                  f"[/HELD_DEPENDENCY]\n{_wait_early_return_note(early)}{withdrawn}")
     elif early:
         header = "Task wait interrupted by a child attention beacon"
-        extra = f"\n\n[CHILD_BEACONS]\n{json.dumps(early, ensure_ascii=False, indent=2)}\n[/CHILD_BEACONS]"
+        extra = f"\n\n[CHILD_BEACONS]\n{json_dumps_utf8(early, ensure_ascii=False, indent=2)}\n[/CHILD_BEACONS]"
     else:
         header = "Task wait completed" if waited.get("all_terminal") else f"Task wait {unfinished}"
         extra = ""
@@ -785,9 +749,6 @@ def _single_wait_text(ctx: Any, tid: str, waited: Dict[str, Any], *, view: str, 
     if held:
         extra += (f"\n\n[ADVISORY] {len(held)} other child(ren) held by a current stop ({', '.join(held)}): "
                   "none reaches a terminal state until its stop is released; get_task_result shows its current_stop.")
-    horizon_note = cache_horizon_note(ctx, waited.get("elapsed_sec"))
-    if horizon_note:
-        extra += f"\n\n{horizon_note}"
     if window:
         extra += f"\n\n[WAIT_WINDOW] {json.dumps(window)}"
     tasks = waited.get("tasks") if isinstance(waited.get("tasks"), dict) else {}
@@ -826,7 +787,7 @@ def _unsettled_wait_body(drive_root: Path, tid: str, data: Any, known_result_sha
     projection["delegated_runs"] = _delegated_run_facts(drive_root, projection["task_id"])
     return (
         f"Task {tid} [{status}]\nchild_result_sha256={sha}\n\n[CHILD_PROJECTION]\n"
-        f"{json.dumps(projection, ensure_ascii=False, indent=2, default=str)}\n[/CHILD_PROJECTION]\n"
+        f"{json_dumps_utf8(projection, ensure_ascii=False, indent=2, default=str)}\n[/CHILD_PROJECTION]\n"
         f"Compact projection of an unsettled child; get_task_result({tid}) returns the full envelope."
     )
 
@@ -1012,9 +973,6 @@ def _await_messages(ctx: ToolContext, timeout_sec: Optional[int] = None, mode: A
         "note": _AWAIT_MESSAGES_NOTE,
         **({"owner_stop_state": "unknown"} if stop_unread and not stopped else {}),
     }
-    horizon_note = cache_horizon_note(ctx, elapsed)
-    if horizon_note:
-        out["cache_horizon"] = horizon_note
     return json.dumps(out, ensure_ascii=False)
 
 
@@ -1023,23 +981,27 @@ def _await_as_sleep(ctx: ToolContext, mode: str, **chosen: Any) -> str:
     ``request_default_sleep``): validate the selected sources, answer at once when one is
     already ready, else arm the park that follows this tool batch."""
     from ouroboros import model_sleep
+    from ouroboros.native_task_wait import armed_conflict
+    from ouroboros.tools.arg_feedback import repair_call_available
 
     try:
-        if mode not in (model_sleep.MODE_WARM, model_sleep.MODE_COLD, "default"):
-            raise ValueError("senders/tasks/runs/services/wake_at/wake_after_sec select a sleep: in_slot takes only timeout_sec, and a task with no continuation owner cannot sleep")
-        if not callable(getattr(ctx, "owner_wait_callback", None)):
-            raise ValueError("this task has no continuation owner to sleep under")
-        from ouroboros.native_task_wait import armed_conflict
-
+        owned = callable(getattr(ctx, "owner_wait_callback", None))  # with no owner nothing sleeps, in any mode
+        if not owned or mode not in (model_sleep.MODE_WARM, model_sleep.MODE_COLD, "default"):
+            raise ValueError("senders/tasks/runs/services/wake_at/wake_after_sec select a sleep: in_slot takes only timeout_sec, and a task with no continuation owner cannot sleep" if owned else
+                             "this task has no continuation owner to sleep under" + ('; await_messages(mode="in_slot", timeout_sec=…) waits here for any mail, without selectors' if repair_call_available(ctx, "await_messages") else ""))
         if conflict := armed_conflict(ctx):  # an owed native task wait is never overwritten
             raise ValueError(conflict)
-        selected = model_sleep.selectors(ctx, **chosen)
+        selected_runs = []
+        selected = model_sleep.selectors(ctx, selected_runs=selected_runs, **chosen)
+        if review_runs := [run for run in selected_runs if run.review_owned]:
+            from ouroboros.review_waiting import review_wait_refusal
+
+            return _publish_tool_result(ctx, review_wait_refusal(ctx, "await_messages", review_runs))
         outcome = (model_sleep.request_default_sleep(ctx, selected) if mode == "default"
                    else model_sleep.request_sleep(ctx, selected, mode))
     except (TypeError, ValueError) as exc:
-        return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR (await_messages): {exc}",
-            meta={"operation_outcome": "completed_no_effect"}))
+        return publish_no_effect(ctx, ToolResult(
+            status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR (await_messages): {exc}"))
     held, withdrawn = hold_notice(ctx, outcome["held"]) if outcome.get("held") else ({}, "")
     if withdrawn:
         outcome["note"] += withdrawn
@@ -1064,7 +1026,8 @@ def await_messages_entry() -> ToolEntry:
             "unknown, never as success). A place event the host marks as a wake wakes any wait past its selectors; one "
             "marked as context ends none and stays unread for your next round. The owner's messages, controls and "
             "typed descendant escalations always wake you; other unselected mail waits unread. A new question from any "
-            "ordinary run you own also wakes you, even if not selected; reviewer runs stay with their panel. Question "
+            "ordinary run you own also wakes you, even if not selected. Selecting a reviewer run refuses the whole wait "
+            "and points to its review surface. Question "
             "sources are delivered, not answered. mode=warm keeps your process and browser; mode=cold saves your "
             "continuation and releases the process only after the body accepts custody of your bound external runs "
             "(its wake re-reads everything past the leading system items; local services need warm). Retained "
@@ -1077,8 +1040,8 @@ def await_messages_entry() -> ToolEntry:
             "nothing itself: the message reaches you at the next round top, exactly as after a wait_task early return. "
             "The ordinary in-flight tool lease keeps the supervisor's silence attention (a notice, never a stop) off "
             f"you until that bound, or for at most {IDLE_LEASE_MAX_SEC // 3600} hours without one (a longer wait keeps "
-            "running and may draw that notice). The result says when the applied prompt-cache horizon elapsed since "
-            "the last model response."
+            "running and may draw that notice). The result reports time in the wait; round facts report the previous "
+            "response's age and recorded request cache TTL separately."
         ),
         "parameters": {"type": "object", "properties": {
             "timeout_sec": {"type": "integer", "description": "Seconds: a sleep's wake time, or the in_slot window."},
@@ -1090,7 +1053,7 @@ def await_messages_entry() -> ToolEntry:
                       "description": "Sleep: task ids whose terminal (any settled status), "
                                      "or a host silence notice about them or a descendant, wakes you."},
             "runs": {"type": "array", "items": {"type": "string"},
-                     "description": "Sleep: your delegated run ids whose terminal wakes you."},
+                     "description": "Sleep: ordinary delegated run ids you own; reviewer runs do not belong here."},
             "services": {"type": "array", "items": {"type": "string"},
                          "description": "Warm sleep: names of your own running services whose exit wakes you."},
             "wake_at": {"type": "string", "description": "Sleep: an absolute ISO-8601 wake time (with timezone). A time your human names for this work's return belongs here."},
@@ -1273,15 +1236,7 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
         projected["test_evidence_gap"] = gap
     if data.get("duplicate_of"):
         projected["duplicate_of"] = str(data.get("duplicate_of"))
-    # A capability reduction is a SEMANTIC handoff fact, not forensics: it is
-    # what decides how far to trust this answer, and this is the surface a
-    # fan-out parent absorbs its children through. Same predicate as the
-    # single-child read, so the batch and the singleton cannot disagree.
-    _delta = disclosable_capability_delta(data)
-    if _delta:
-        projected["capability_delta"] = _delta
-    if _effort := disclosable_effort_fact(data):
-        projected["effort"] = _effort
+    projected.update(_handoff_disclosures(data))
     # Delegation honesty (Q1A, 2026-08-10 amendments): whether a
     # harness-dispatched child ACTUALLY delegated is a handoff fact the
     # fan-out parent absorbs here — the e9108a09 incident hid nine
@@ -1475,7 +1430,7 @@ def _wait_for_tasks(
     hold_meta, withdrawn = _held_return(ctx, waited.get("early_return"))
     _batch_wait_payload(ctx, waited, normalized_ids, known_result_sha256_by_task, entry_unknown_ids, view=selected_view,
                         withdrawn=withdrawn, expiry=(requested_timeout, float(timeout), bound))
-    return _with_held(ctx, json.dumps(waited, ensure_ascii=False, indent=2), hold_meta)
+    return _with_held(ctx, json_dumps_utf8(waited, ensure_ascii=False, indent=2), hold_meta)
 
 
 def _batch_wait_payload(ctx: Any, waited: Dict[str, Any], normalized_ids: List[str], known_result_sha256_by_task: Any,
@@ -1571,9 +1526,6 @@ def _batch_wait_payload(ctx: Any, waited: Dict[str, Any], normalized_ids: List[s
         waited["window_sec"], waited["window_bound"] = expiry[1], expiry[2]
     if note := _wait_early_return_note(waited.get("early_return")):
         waited["early_return_note"] = note + withdrawn
-    horizon_note = cache_horizon_note(ctx, waited.get("elapsed_sec"))
-    if horizon_note:
-        waited["cache_horizon_note"] = horizon_note
     return waited
 
 

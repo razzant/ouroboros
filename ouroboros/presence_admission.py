@@ -36,6 +36,9 @@ class PresenceAdmission:
     place: Place | None = None
     allowance: Mapping[str, Any] | None = None
     circle: Mapping[str, Any] | None = None  # circle words with both origins, and model, at admission
+    # The words the connector's live declaration gives its facts (``places.declared_fact_labels``), as a door read
+    # them; a carrier takes the whole map from its seed, by value: display only, never a fact's meaning.
+    fact_labels: Mapping[str, str] | None = None
 
 
 def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str, binding_id: str = "",
@@ -75,17 +78,28 @@ def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str,
                              circle=records.circle_context(place.place_id))
 
 
-def focus_state(drive_root: Path) -> str:
-    """``on``; ``off`` (the owner's switch known Off, or a pending Panic); ``unknown`` (a switch this read cannot
-    know). Intake admits only ``on``; a view claims Off only for ``off``."""
-    from ouroboros.consciousness import panic_blocks_wake
+def switch_cause(drive_root: Path) -> str:
+    """The switch by its one cause, the one reading behind intake (``focus_state``) and the places' quiet words
+    (``place_projection.switch_state``): ``on``; ``panic`` (a Panic waits, or Panic turned it off); ``off`` (the
+    owner's switch known Off, or the mind's own stop); ``unknown`` (a switch this read cannot know)."""
+    from ouroboros.consciousness import PANIC_STOP, STOP_SOURCE_KEY, panic_blocks_wake
     from supervisor.state import control_is, control_value, read_state
     if panic_blocks_wake(drive_root):
-        return "off"
+        return "panic"
     projection = read_state(drive_root).projection()
     if control_is(projection, "bg_consciousness_enabled", True):
         return "on"
-    return "off" if control_value(projection, "bg_consciousness_enabled")[0] else "unknown"
+    if not control_value(projection, "bg_consciousness_enabled")[0]:
+        return "unknown"
+    known, source = control_value(projection, STOP_SOURCE_KEY)  # an unconfirmed source names no Panic
+    return "panic" if known and source == PANIC_STOP else "off"
+
+
+def focus_state(drive_root: Path) -> str:
+    """``on``; ``off`` (the owner's switch known Off, or a Panic); ``unknown`` (a switch this read cannot know).
+    Intake admits only ``on``; a view claims Off only for ``off``. ``switch_cause`` folded: a Panic is Off here."""
+    cause = switch_cause(drive_root)
+    return "off" if cause == "panic" else cause
 
 
 def focus_enabled(drive_root: Path) -> bool:

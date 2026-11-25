@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { initActivity } from '../modules/activity.js';
 import { initLogs } from '../modules/logs.js';
@@ -100,14 +101,14 @@ test('Activity failed reads stay unknown; independent successful empty state sta
     assert.match(message(section(mount, 'queue')), /Could not load.*unknown/);
     assert.doesNotMatch(section(mount, 'queue').textContent, /Nothing running/);
     assert.match(message(section(mount, 'background')), /Could not load/);
-    assert.equal(section(mount, 'background').querySelectorAll('button').length, 0, 'unknown must not invent Start');
+    assert.equal(section(mount, 'background').querySelectorAll('button').length, 0, 'unknown must not invent Turn on');
     assert.match(section(mount, 'schedules').textContent, /No scheduled tasks/);
     assert.equal(message(section(mount, 'schedules')), '');
     emptyActivity(routes);
     await activity.refresh();
     assert.match(section(mount, 'queue').textContent, /Nothing running or queued/);
     assert.equal(message(section(mount, 'queue')), '');
-    assert.equal(section(mount, 'background').querySelector('button').textContent, 'Start');
+    assert.equal(section(mount, 'background').querySelector('button').textContent, 'Turn on');
 });
 
 test('Activity keeps last-known data and actions on refresh failure, then reconciles recovery', async (t) => {
@@ -373,6 +374,12 @@ test('Activity preserves disclosure and current focus as of render, not request 
     assert.equal(section(mount, 'schedules').querySelector('[data-schedule-text]').hasAttribute('open'), true);
     assert.equal(globalThis.document.activeElement, moved,
         'a render must not steal focus the owner moved while its request was pending');
+    const returning = activity.refresh();
+    mount.querySelector('[data-act="bg-open"]').focus();
+    finishSchedules(response({ tasks: lifecycleSchedules }));
+    await returning;
+    assert.equal(globalThis.document.activeElement, mount.querySelector('[data-act="bg-open"]'),
+        'a return that focuses its door during the read keeps that focus through the repaint');
 });
 
 test('Activity invalid success payload is unavailable and stale requests cannot replace newer state', async (t) => {
@@ -434,7 +441,8 @@ test('Activity unites live direct turns with queue identities and preserves queu
     assert.deepEqual(rows.map((row) => row.querySelector('button').className), Array(3).fill('btn btn-sm btn-default'));
     assert.doesNotMatch(queue.textContent, /Nothing running/);
     // Kept services are their own read (custody, one census): the state read is still not repeated.
-    assert.deepEqual(calls, [queueUrl, backgroundUrl, schedulesUrl, keptUrl], 'reuse the existing state read');
+    assert.deepEqual([...calls].sort(), [queueUrl, backgroundUrl, schedulesUrl, keptUrl].sort(),
+        'one GET per endpoint (the state read reused, kept its own read), in any order');
     // A group the owner folded stays folded through the next refresh.
     paused.open = false;
     await activity.refresh();
@@ -531,7 +539,7 @@ test('Logs reports partial history without losing live rows or deduplication, th
     assert.equal(calls.length, 8, 'only existing init/reconnect backfill runs');
 });
 
-test('Logs reads oldest to newest, says why it is empty, and keeps one quiet tone until a filter narrows it', async (t) => {
+test('Logs reads oldest to newest, gives every event one anatomy, and shows the kinds chosen or, at rest, All', async (t) => {
     const { mount, routes, ws } = setup(t);
     const live = { type: 'test_live_event', ts: '2026-09-09T12:00:00Z', message: 'live' };
     const earlier = { type: 'test_earlier_event', ts: '2026-09-09T11:59:00Z', message: 'earlier' };
@@ -548,43 +556,125 @@ test('Logs reads oldest to newest, says why it is empty, and keeps one quiet ton
     const entries = mount.querySelector('#log-entries');
     // History that arrives after a live event takes its place by its own time (U035).
     assert.deepEqual(entries.children.map((entry) => entry.dataset.logTime), [String(Date.parse(earlier.ts)), String(Date.parse(live.ts))]);
-    // The event's one line: Raw at its end as the quiet small capsule, never a row of its own (U027, U032).
-    const main = entries.children[0].querySelector('.log-main');
-    const raw = main.querySelector('.log-raw-toggle');
-    assert.equal(raw.className, 'btn btn-ghost btn-sm log-raw-toggle');
-    assert.equal(entries.children[0].querySelector('.log-actions'), null);
-    // Raw wraps with its headline as one lead, so a narrow pane never leaves it alone on a line under the headline;
-    // the time stays outside the lead, so the lead takes the next line whole when it does not fit beside the time.
-    const lead = raw.parentElement;
-    assert.equal(lead.className, 'log-lead');
-    assert.equal(lead.parentElement, main);
-    assert.equal(lead.querySelector('.log-headline').parentElement, lead);
-    assert.equal(main.querySelector('.log-ts').parentElement, main);
-    // Raw is one delegated component (logs_raw.js): the browser's click reaches the list, which opens the record.
-    entries.dispatchEvent({ type: 'click', target: raw });
-    assert.equal(entries.children[0].querySelector('.log-raw').hidden, false);
-    assert.equal(raw.getAttribute('aria-expanded'), 'true');
-    // Every filter on narrows nothing: no chip takes the chosen tone; one off, the ones still on do (U031).
+    // One anatomy (U027, U028): the event is the shared fold, and its summary is its head: its name in words right after
+    // the caret (an unknown event's type) and, at the line's end, its time in Main's clock, as a sidebar row ends in its
+    // time, the exact moment to the second its tooltip; then its words in body text; opened, its facts and record.
+    const [first] = entries.children;
+    const head = first.children[0];
+    assert.equal(first.tagName, 'details');
+    assert.equal(first.className, 'ui-disclosure log-fold log-entry');
+    assert.equal(head.tagName, 'summary');
+    assert.deepEqual(head.children.map((part) => part.className), ['log-title', 'log-ts', 'log-line'], 'the head ends in its time');
+    const time = head.querySelector('.log-ts');
+    assert.match(time.textContent, /^(Yesterday, |[A-Z][a-z]{2} \d+, )?\d\d:\d\d$/, 'Main\'s clock');
+    assert.equal(time.getAttribute('datetime'), earlier.ts, 'the exact moment stays with it');
+    assert.match(time.getAttribute('title'), /^Sep 9, 2026 at \d\d:59:00$/, 'and is its tooltip, to the second, as a Main message\'s');
+    assert.equal(head.querySelector('.log-name').textContent, 'Test earlier event');
+    assert.equal(head.querySelector('.log-words').textContent, 'earlier');
+    assert.equal(first.querySelectorAll('details').length, 0, 'one fold: no Record or Timeline fold inside it');
+    assert.equal(first.querySelectorAll('summary').length, 1);
+    // The record is one delegated component (logs_raw.js): the fold's toggle reaches the list, which reads the record.
+    first.open = true;
+    entries.dispatchEvent({ type: 'toggle', target: first });
+    assert.equal(first.querySelector('.log-raw').hidden, false);
+    assert.ok(first.querySelector('.log-facts').textContent.startsWith(time.getAttribute('title')), 'the same moment leads its facts');
+    // The filter is the shared chips with one state model (U031), Skills' strip: All leads and is lit at rest, when every
+    // kind shows; a kind pressed is lit beside the others chosen and All goes out; All pressed clears the choice. The
+    // strip has no Clear of its own: its last item is the list's own action, Clear list.
     const chips = mount.querySelectorAll('.filter-chip');
-    assert.ok(chips.length > 1);
-    assert.ok(chips.every((chip) => !chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'true'));
-    await chips[0].fire('click');
-    assert.equal(chips[0].classList.contains('active'), false);
-    assert.equal(chips[0].getAttribute('aria-pressed'), 'false');
-    assert.ok(chips.slice(1).every((chip) => chip.classList.contains('active')));
-    for (const chip of chips.slice(1)) await chip.fire('click');
+    const label = (chip) => chip.textContent.slice(0, chip.textContent.length - chip.lastChild.textContent.length);
+    assert.deepEqual(chips.map(label), ['All', 'Tools', 'LLM', 'Errors', 'Tasks', 'System', 'Consciousness']);
+    // Skills' strip whole (owner 14.11: every rule reused, not duplicated): its chip and its count, and no chip size,
+    // padding or touch rule of Logs' own. Each kind says how many entries the list holds of it, as "All 82" does on
+    // Skills, and one it holds none of is hidden until chosen: at rest the strip says what the list holds, a failure too.
+    assert.ok(chips.every((chip) => chip.classList.contains('skills-category') && chip.lastChild.className === 'skills-category-count'));
+    const logsOwn = readFileSync(new URL('../style.css', import.meta.url), 'utf8').match(/[^{}]*\.logs-(?:filters|kinds)\b[^{]*\{[^}]*\}/g)
+        .filter((rule) => !rule.includes('.skills-'));
+    assert.ok(logsOwn.length && logsOwn.every((rule) => !/--control-|pointer: coarse/.test(rule)), logsOwn.join('\n'));
+    const said = () => chips.filter((chip) => !chip.hidden).map((chip) => `${label(chip)} ${chip.lastChild.textContent}`);
+    assert.deepEqual(said(), ['All 2', 'System 2']);
+    const strip = mount.querySelector('.logs-filters');
+    assert.equal(strip.children.at(-1), mount.querySelector('#btn-clear-logs'), 'Clear list ends the strip');
+    assert.equal(mount.querySelector('#btn-clear-logs').textContent, 'Clear');
+    assert.equal(mount.querySelector('#log-filters').querySelectorAll('button').filter((button) => button.textContent === 'Clear').length, 0, 'no separate Clear for the filter');
+    const lit = () => chips.filter((chip) => chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'true')
+        .map(label);
+    assert.deepEqual(lit(), ['All'], 'at rest All is lit');
+    assert.ok(entries.children.every((entry) => !entry.hidden), 'at rest every kind shows');
+    const [all, tools, , , , system] = chips;  // both events here are System's
+    await tools.fire('click');
+    assert.deepEqual(lit(), ['Tools'], 'a kind pressed is lit and All goes out');
+    assert.deepEqual(said(), ['All 2', 'Tools 0', 'System 2'], 'a kind chosen stays in the strip with nothing in it');
+    assert.equal(all.getAttribute('aria-pressed'), 'false');
+    assert.ok(entries.children.every((entry) => entry.hidden), 'a chosen kind shows alone');
     assert.equal(empty.hidden, false);
     assert.match(empty.textContent, /The filters hide every event\./);
+    await system.fire('click');
+    assert.deepEqual(lit(), ['Tools', 'System'], 'several kinds may be chosen together');
+    assert.ok(entries.children.every((entry) => !entry.hidden), 'a second chosen kind shows beside the first');
+    assert.equal(empty.hidden, true);
+    await all.fire('click');
+    assert.deepEqual(lit(), ['All'], 'All clears the choice');
+    assert.ok(entries.children.every((entry) => !entry.hidden));
+    await tools.fire('click');
     await empty.fire('click', { target: empty.querySelector('[data-log-show-all]') });
     assert.ok(entries.children.every((entry) => !entry.hidden), 'Show all brings every event back');
     assert.equal(empty.hidden, true);
-    assert.ok(chips.every((chip) => !chip.classList.contains('active')));
-    // Clear says when, and that new events appear (U033).
+    assert.deepEqual(lit(), ['All']);
+    // Clear list says when, and that new events appear (U033).
     await mount.querySelector('#btn-clear-logs').fire('click');
     assert.match(empty.textContent, /^Cleared at \d\d:\d\d\. New events appear here\.$/);
+    assert.deepEqual(said(), ['All 0']);
     ws.emit('log', { data: { ...live, ts: '2026-09-09T12:01:00Z' } });
     assert.equal(empty.hidden, true);
 });
+
+test('Logs leads a failure\'s line of words with its chip, so name, chip and words share one left edge', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    for (const name of ['events', 'tools', 'progress', 'supervisor']) routes.set(logUrl(name), response({ entries: [] }));
+    initLogs({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'logs' } });
+    await settle();
+    ws.emit('log', { data: { type: 'test_broken_event', ok: false, message: 'it broke', ts: '2026-09-16T12:00:00Z' } });
+    ws.emit('log', { data: { type: 'test_plain_event', message: 'all well', ts: '2026-09-16T12:00:01Z' } });
+    ws.emit('log', { data: { type: 'worker_ready', ts: '2026-09-16T12:00:02Z' } });
+    const [broken, plain, bare] = mount.querySelector('#log-entries').children.map((node) => node.children[0]);
+    const line = (head) => head.querySelector('.log-line');
+    const parts = (head) => line(head).children.map((part) => (part.hidden ? '' : part.textContent));
+    // The chip is the line's first part, its words flow on after it: under the name, not beside it on the first line.
+    assert.equal(broken.querySelector('.log-title').querySelector('.log-failure'), null, 'no chip beside the name');
+    assert.deepEqual(parts(broken), ['Failed', 'it broke']);
+    assert.equal(line(broken).hidden, false);
+    // An event that did not fail has no chip: its line is its words alone, and with no words there is no line.
+    assert.deepEqual(parts(plain), ['', 'all well']);
+    assert.equal(line(plain).hidden, false);
+    assert.equal(line(bare).hidden, true);
+});
+
+// The filter's choice lived in `state.activeFilters` as the kinds SHOWN (all six at rest, one turned off to narrow);
+// the candidate reads it once as the kinds CHOSEN, so a narrowed view stays the view the owner had.
+for (const [name, stored, lit, shown] of [
+    ['a kind turned off keeps the other five chosen', { tools: false, llm: true, errors: true, tasks: true, system: true, consciousness: true },
+        ['LLM', 'Errors', 'Tasks', 'System', 'Consciousness'], ['llm']],
+    ['all six on is the rest', { tools: true, llm: true, errors: true, tasks: true, system: true, consciousness: true }, ['All'], ['tools', 'llm']],
+    ['one kind on is that kind chosen', { tools: true }, ['Tools'], ['tools']],
+    ['no stored choice is the rest', undefined, ['All'], ['tools', 'llm']],
+]) {
+    test(`Logs carries a stored filter over: ${name}`, async (t) => {
+        const { mount, routes, ws } = setup(t);
+        for (const log of ['events', 'tools', 'progress', 'supervisor']) routes.set(logUrl(log), response({ entries: [] }));
+        const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs', ...(stored ? { activeFilters: { ...stored } } : {}) };
+        initLogs({ mount, ws, state });
+        await settle();
+        ws.emit('log', { data: { type: 'tool_call_finished', tool: 'read_file', is_error: false, ts: '2026-09-16T12:00:00Z' } });
+        ws.emit('log', { data: { type: 'llm_usage', model: 'm', ts: '2026-09-16T12:00:01Z' } });
+        const chips = mount.querySelectorAll('.filter-chip');
+        const label = (chip) => chip.textContent.replace(/\d+$/, '');
+        assert.deepEqual(chips.filter((chip) => chip.classList.contains('active')).map(label), lit);
+        assert.deepEqual(chips.filter((chip) => chip.getAttribute('aria-pressed') === 'true').map(label), lit);
+        const entries = mount.querySelector('#log-entries').children;
+        assert.deepEqual(entries.filter((entry) => !entry.hidden).map((entry) => entry.dataset.category), shown);
+    });
+}
 
 test('Logs prints an event\'s name once and names a task card by its short id without repeating its lineage', async (t) => {
     const { mount, routes, ws } = setup(t);
@@ -594,25 +684,38 @@ test('Logs prints an event\'s name once and names a task card by its short id wi
     ws.emit('log', { data: { type: 'worker_ready', ts: '2026-09-16T12:00:00Z' } });
     const entries = mount.querySelector('#log-entries');
     const plain = entries.children.find((node) => !node.dataset.taskGroup);
-    const headline = plain.querySelector('.log-headline').textContent;
-    const type = plain.querySelector('.log-type');
-    assert.ok(!type || type.textContent !== headline, 'the type is not printed again beside the same headline (U028)');
+    assert.equal(plain.querySelector('.log-name').textContent, 'Worker ready', 'its name is what the event is, in words');
+    assert.equal(plain.querySelector('.log-words').textContent, '', 'and is not printed again as its words (U028)');
+    // An event of a task with no card of its own says its task after its name, as a card does; never alone at the
+    // line's end, where it read as the event's own number.
+    ws.emit('log', { data: { type: 'storage_pack', task_id: '26e6d6ba00112233', ts: '2026-09-16T12:00:01Z' } });
+    const own = entries.children.find((node) => node.dataset.category === 'system' && node !== plain);
+    assert.deepEqual(['.log-name', '.log-task', '.log-count'].map((part) => own.querySelector(part).textContent), ['Storage pack', '26e6d6ba', '']);
+    assert.equal(own.querySelector('.log-title').children.map((part) => part.className).join(' '), 'log-name log-task log-count');
     ws.emit('log', { data: { type: 'task_heartbeat', task_id: '55d180783850458f', phase: 'running', ts: '2026-09-16T12:00:02Z',
         runtime_sec: 61 } });
     const card = entries.children.find((node) => node.dataset.taskGroup === '55d180783850458f');
-    assert.equal(card.querySelector('[data-task-kind]').textContent, 'task 55d18078', 'eight characters, as every row');
-    const pills = card.querySelector('[data-task-summary]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
-    assert.ok(!pills.some((pill) => pill.startsWith('task=') || pill === 'task'), `no repeated id: ${pills}`);
+    assert.equal(card.querySelector('.log-name').textContent, 'Task');
+    assert.equal(card.querySelector('.log-task').textContent, '55d18078', 'eight characters, as every row');
+    assert.equal(card.querySelector('.log-count').textContent, '1 event', 'a task\'s count is its events');
+    assert.equal(card.querySelector('.log-facts').hidden, true, 'its facts say no id and no repeated type');
     // A Timeline's rows exist while it is open (logs.js): opened the way the browser does, its `toggle` reaching the list.
-    const details = card.querySelector('details');
-    details.open = true;
-    entries.dispatchEvent({ type: 'toggle', target: details });
-    const timeline = card.querySelector('[data-task-timeline]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
-    assert.ok(timeline.includes('task=55d180783850458f'), 'the timeline keeps the full id');
+    card.open = true;
+    entries.dispatchEvent({ type: 'toggle', target: card });
+    const [row] = card.querySelector('.log-task-timeline').querySelectorAll('.log-task-event');
+    assert.doesNotMatch(row.querySelector('.log-facts').textContent, /task=|55d18078/, 'an id is no fact of the list');
+    assert.equal(row.querySelector('.log-count').textContent, '', 'a row in its task\'s timeline does not name the task again');
+    // A machine reference stands in the record: the row is its own fold, which holds the full id.
+    assert.equal(row.tagName, 'details');
+    row.open = true;
+    entries.dispatchEvent({ type: 'toggle', target: row });
+    await settle();
+    await settle();
+    assert.match(row.querySelector('.log-raw').textContent, /"task_id": "55d180783850458f"/, 'the record keeps the full id');
     // An older frame delivered later (history after the live stream) neither dates the card back nor moves it.
-    const shownAt = card.querySelector('[data-task-ts]').textContent;
+    const shownAt = card.querySelector('.log-ts').textContent;
     ws.emit('log', { data: { type: 'task_heartbeat', task_id: '55d180783850458f', phase: 'running', ts: '2026-09-16T11:59:00Z' } });
-    assert.equal(card.querySelector('[data-task-ts]').textContent, shownAt);
+    assert.equal(card.querySelector('.log-ts').textContent, shownAt);
     assert.equal(card.dataset.logTime, String(Date.parse('2026-09-16T12:00:02Z')));
 });
 
@@ -772,9 +875,10 @@ test('Logs files a wake-up group under Consciousness with its label, from the or
     const entries = mount.querySelector('#log-entries');
     const card = (id) => entries.children.find((node) => node.dataset.taskGroup === id);
     assert.equal(card('wake-1').dataset.category, 'consciousness');
-    assert.equal(card('wake-1').querySelector('[data-task-kind]').textContent, 'Consciousness');
+    assert.equal(card('wake-1').querySelector('.log-name').textContent, 'Consciousness');
     assert.equal(card('turn-2').dataset.category, 'tasks');
-    assert.equal(card('turn-2').querySelector('[data-task-kind]').textContent, 'task turn-2');
+    assert.equal(card('turn-2').querySelector('.log-name').textContent, 'Task');
+    assert.equal(card('turn-2').querySelector('.log-task').textContent, 'turn-2');
 });
 
 test('Logs keeps the executor chip quiet and prints its detail sentence as text (#360 A)', async (t) => {
@@ -790,12 +894,13 @@ test('Logs keeps the executor chip quiet and prints its detail sentence as text 
     await settle();
     const entries = mount.querySelector('#log-entries');
     const card = entries.children.find((node) => node.dataset.taskGroup === 'child-x');
-    const chip = card.querySelector('[data-task-executor]');
-    assert.equal(chip.hidden, false);
+    const chip = card.querySelector('.log-executor-chip');
+    assert.equal(chip.parentElement, card.querySelector('.log-facts'), 'the quiet chip stands among the card\'s facts');
     assert.match(chip.textContent, /Codex · 1 of 2 runs failed$/);
-    const detail = card.querySelector('[data-task-executor-detail]');
+    const detail = card.querySelector('.log-executor-detail');
+    assert.equal(detail.parentElement, card, 'its sentence opens with the card\'s fold');
     assert.equal(detail.hidden, false, 'the detail is visible text, not a hover-only title');
-    assert.equal(detail.textContent, chip.title);
+    assert.equal(detail.textContent, chip.getAttribute('title'), 'the sentence is the chip\'s own title, said as text');
     assert.match(detail.textContent, /2 runs settled \(1 ok, 1 failed\)/);
     const standalone = entries.children.find((node) => !node.dataset.taskGroup);
     assert.match(standalone.querySelector('.log-executor-chip').textContent, /Claude Code$/);
@@ -1111,6 +1216,55 @@ test('Activity keeps a queue row\'s own wait beside its known outcome and shows 
         'restart-root': '1', 'pending-root': undefined });
 });
 
+test('A retried row says only what the read of its current attempt says, and keeps its control', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    emptyActivity(routes);
+    const run = (id, attempt, extra = {}) => ({ id, type: 'task', attempt, runtime_sec: 9,
+        task: { id, root_task_id: id, title: `Work ${id}`, ...extra } });
+    const stop = (id) => ({ controls: [{ action: 'stop', target: id }] });
+    const thinking = (id, extra = {}) => projectedWork(id, 'working', { call: 'thinking', ...stop(id), ...extra });
+    const counted = (id, attempt, phase = 'working') => ({ activity_id: id, kind: 'managed_task', phase, task_attempt: attempt });
+    routes.set(queueUrl, response({ queue: { pending: [], running: [
+        run('old-thinking', 2), run('old-ending', 2), run('old-paused', 2), run('agreed', 1), run('kept-ending', 1),
+        run('ahead', 1), run('helper', 2, { root_task_id: 'agreed', parent_task_id: 'agreed', title: 'Helper of agreed' }),
+    ] } }));
+    routes.set(backgroundUrl, response({ bg_consciousness_enabled: false, active_chat_activities_complete: true,
+        works: [thinking('old-thinking'), projectedWork('old-ending', 'working', stop('old-ending')),
+            projectedWork('old-paused', 'paused'), projectedWork('kept-ending', 'working', stop('kept-ending')),
+            thinking('ahead'), thinking('agreed', { members: { states: {
+                helper: { activity: 'working', call: 'thinking', confirmed: true, mark: 'moving' } } } })],
+        active_chat_activities: [counted('old-thinking', 1), counted('old-paused', 1, 'budget_paused'),
+            counted('agreed', 1), counted('ahead', 2), ...['old-ending', 'kept-ending'].map((id) =>
+                outcomeRow(id, 'completed', 'ok', 'finalizing', 'running', { task_attempt: 1 }))] }));
+    await initActivity({ mount, ws }).refresh();
+    const sub = (id) => rowOf(mount, id).querySelector('.activity-sub').textContent;
+    const control = (id) => {
+        const button = section(mount, 'queue').querySelector(`[data-id="${id}"]`);
+        return [button.dataset.root, button.dataset.budgetPaused, button.dataset.resume, button.textContent];
+    };
+    // The census still describes attempt 1 of rows the queue already runs as attempt 2: neither that Thinking, that
+    // Done · Finalizing… nor that Paused is the running attempt's state. Each row says it is unconfirmed beside the
+    // running attempt's own time and ranks by the queue, so no Paused group forms.
+    for (const id of ['old-thinking', 'old-ending', 'old-paused']) {
+        assert.equal(sub(id), 'Activity unconfirmed · task · 9s', id);
+        assert.equal(chip(rowOf(mount, id)), null, id);
+    }
+    assert.equal(section(mount, 'queue').querySelector('details[data-open-key="paused"]'), null);
+    // Both reads name one attempt: the census's word or outcome and the queue's time stand together.
+    assert.equal(sub('agreed'), 'Thinking · task · 9s');
+    const kept = chip(rowOf(mount, 'kept-ending'));
+    assert.deepEqual([kept.text, kept.secondary], ['Done', 'Finalizing…']);
+    assert.match(sub('kept-ending'), / · task · 9s/);
+    // The census already speaks for attempt 2 while the queue still times attempt 1: the word stays, the time goes.
+    assert.equal(sub('ahead'), 'Thinking · task');
+    // A legacy member has no attempt witness: keep its own phase without joining a clock or borrowing the root's attempt.
+    assert.equal(sub('helper'), 'Thinking · task');
+    assert.deepEqual(control('helper'), [undefined, undefined, undefined, 'Stop…']);
+    // Every control keeps its target and rights: each running root's Stop, the paused row's Resume.
+    for (const id of ['old-thinking', 'old-ending', 'kept-ending', 'ahead']) assert.deepEqual(control(id), control('agreed'), id);
+    assert.deepEqual(control('old-paused').slice(0, 3), ['1', '1', '1']);
+});
+
 // ---------------------------------------------------------------------------
 // Dashboard -> Storage: the real controller over the fixture's fetch, window and document.
 // ---------------------------------------------------------------------------
@@ -1399,4 +1553,30 @@ test('Activity keeps a held Continue blocker readable without offering Pause or 
     await activity.refresh();
     assert.equal(section(mount, 'queue').querySelector('.activity-sub').textContent, 'Queued');
     activity.destroy();
+});
+
+test('Activity keeps saying Reading… while the switch reads what it would change, through a repaint', async (t) => {
+    // The preview read can take seconds on a large install; a repaint meanwhile (the tab shown again) is no reason to
+    // look idle, and the turn still asks and sends once (review r2).
+    const { mount, routes, ws } = setup(t);
+    emptyActivity(routes);
+    const frames = [];
+    ws.send = (frame) => frames.push(frame);
+    let release = () => {};
+    routes.set('/api/consciousness?switch=on', () => new Promise((resolve) => {
+        release = () => resolve(response({ lines: ['Ouroboros will also wake between your messages.'], places: [] }));
+    }));
+    const activity = initActivity({ mount, ws });
+    await activity.refresh();
+    const toggle = () => section(mount, 'background').querySelector('[data-act="bg-toggle"]');
+    assert.equal(toggle().textContent, 'Turn on');
+    const clicking = mount.fire('click', { target: toggle() });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual([toggle().textContent, toggle().disabled], ['Reading…', true]);
+    await activity.refresh();
+    assert.deepEqual([toggle().textContent, toggle().disabled], ['Reading…', true], 'a repaint keeps the read said');
+    release();
+    await clicking;
+    assert.deepEqual(frames, [{ type: 'command', cmd: '/bg start', ui_control: { name: 'consciousness_toggle' } }]);
+    assert.notEqual(toggle().textContent, 'Reading…');
 });

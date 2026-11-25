@@ -102,17 +102,18 @@ def _exact_payload_start(ctx, prompt: str, **params):
 class _StartStub:
     """The minimal gateway a payload delegate_start touches."""
 
-    def __init__(self, seen):
+    def __init__(self, seen, run_id="run-p1"):
         from ouroboros.config import CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION
 
         self.engine_version = CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION
         self._seen = seen
+        self._run_id = run_id
 
     def handshake(self, **_kw):
         return {}
 
     def agent_capabilities(self):
-        return {"harnesses": [{
+        return {"runControlKeys": ["continueFrom"], "harnesses": [{
             "id": "some-route", "enabled": True, "status": "ok",
             "accessProfilesSupported": ["readonly", "workspace_write", "full"],
         }]}
@@ -132,7 +133,7 @@ class _StartStub:
     def start_run(self, request, *, idempotency_key=""):
         self._seen["request"] = request
         self._seen["idempotency_key"] = idempotency_key
-        return {"runId": "run-p1", "runDir": "/tmp/run-p1"}
+        return {"runId": self._run_id, "runDir": f"/tmp/{self._run_id}"}
 
     def close(self):
         pass
@@ -153,7 +154,7 @@ def _start_payload_run(ctx, monkeypatch, *, skill_name="alpha", bucket="external
 
 
 def _terminal_wait(ctx, monkeypatch, *, run_id="run-p1",
-                   effective_access="workspace_write"):
+                   effective_access="workspace_write", state="succeeded"):
     import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gw
 
@@ -163,7 +164,7 @@ def _terminal_wait(ctx, monkeypatch, *, run_id="run-p1",
 
         def get_run(self, rid, **_kw):
             return {"lastSeq": 9, "summary": {
-                "state": "succeeded", "spendUsd": 0.0,
+                "state": state, "spendUsd": 0.0,
                 "effectiveAccess": effective_access,
             }}
 
@@ -231,6 +232,143 @@ def test_selector_argument_shapes_refuse_typed(tmp_path, monkeypatch):
     ):
         out = json.loads(delegate._delegate_start(ctx, "x", **kwargs).text)
         assert out["status"] == "refused" and out["reason"] == reason, out
+
+
+_ALPHA_SELECTOR = {"root": "skill_payload", "bucket": "external", "skill_name": "alpha"}
+
+
+@pytest.fixture
+def interrupted_payload(tmp_path, monkeypatch):
+    from ouroboros import safety
+    from ouroboros.gateways import claudexor as gw
+    from ouroboros.tools.registry import ToolRegistry
+
+    ctx = _payload_ctx(tmp_path, monkeypatch)
+    skill = _seed_skill(ctx.drive_root)
+    _seed_skill(ctx.drive_root, name="beta")
+    monkeypatch.setattr(safety, "check_safety", lambda *a, **k: (True, ""))
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+
+    def start(**params):
+        return json.loads(registry.execute("delegate_start", {
+            "subagent_id": "payload-session", "prompt": "Edit the skill", **params}))
+
+    custody._CUSTODY.clear()
+    monkeypatch.setattr(gw, "ClaudexorGateway", lambda: _StartStub({}))
+    first = start(**_ALPHA_SELECTOR)
+    assert first["status"] == "started", first
+    root = pathlib.Path(first["execution_root"])
+    (root / "notes.txt").write_text("FROM FIRST\n", encoding="utf-8")
+    terminal = _terminal_wait(ctx, monkeypatch, state="failed")
+    assert terminal["status"] == "terminal", terminal
+    assert terminal["workspace_capture"]["status"] == "ready_with_changes", terminal
+    prior = custody.replay(ctx.drive_root)[first["run_id"]]
+    assert not prior.patch_disposed and root.is_dir()
+
+    seen = {}
+    monkeypatch.setattr(gw, "ClaudexorGateway", lambda: _StartStub(seen, "run-p2"))
+    yield ctx, skill, root, prior, registry, start, seen
+    custody._CUSTODY.clear()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_ordinary_payload_continuation_applies_one_cumulative_patch(interrupted_payload, monkeypatch, explicit):
+    ctx, skill, root, prior, registry, start, seen = interrupted_payload
+    resumed = start(continue_from=prior.run_id, **(_ALPHA_SELECTOR if explicit else {}))
+    assert resumed["status"] == "started", resumed
+    request = seen["request"]
+    assert request["continueFrom"] == prior.run_id and request["access"] == "workspace_write"
+    assert (request["execution"].get("workspaceRoot") or request["scope"]["root"]) == str(root)
+    state = custody.replay(ctx.drive_root)
+    successor = state["run-p2"]
+    assert successor.resource_ref == prior.resource_ref
+    assert successor.target_root == prior.target_root and successor.baseline_sha == prior.baseline_sha
+    assert successor.snapshot_id == prior.snapshot_id and successor.capture_id == successor.invocation_id
+    assert state[prior.run_id].superseded_by == successor.run_id
+    assert (root / "notes.txt").read_text(encoding="utf-8") == "FROM FIRST\n"
+    (root / "plugin.py").write_text("VALUE = 2\n", encoding="utf-8")
+    assert (skill / "notes.txt").read_text(encoding="utf-8") == "PENDING\n"
+    terminal = _terminal_wait(ctx, monkeypatch, run_id=successor.run_id)
+    capture = terminal["workspace_capture"]
+    assert capture["status"] == "ready_with_changes", capture
+    manifest = json.loads(pathlib.Path(capture["manifest_artifact"]).read_text(encoding="utf-8"))
+    assert manifest["baseline_payload_hash"] == prior.resource_ref["payload_hash"]
+    assert set(manifest["tracked_changed"]) == {"notes.txt", "plugin.py"}
+    out = registry.execute("integrate_delegated_patch", {"run_id": successor.run_id, "decision": "apply"})
+    assert "✅ Integrated" in out, out
+    assert (skill / "notes.txt").read_text(encoding="utf-8") == "FROM FIRST\n"
+    assert (skill / "plugin.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+@pytest.mark.parametrize("problem,reason", [
+    ("selector", "continuation_resource_conflict"), ("drift", "payload_baseline_drift"),
+    ("disposed", "continuation_snapshot_released"),
+])
+def test_payload_continuation_refuses_without_replacing_baseline(interrupted_payload, problem, reason):
+    ctx, skill, root, prior, registry, start, seen = interrupted_payload
+    selector = {}
+    if problem == "selector":
+        selector = {**_ALPHA_SELECTOR, "skill_name": "beta"}
+    elif problem == "drift":
+        (skill / "plugin.py").write_text("VALUE = 99\n", encoding="utf-8")
+    else:
+        out = registry.execute("integrate_delegated_patch", {"run_id": prior.run_id, "decision": "reject"})
+        assert "rejected" in out.lower(), out
+    refused = start(continue_from=prior.run_id, **selector)
+    assert refused["reason"] == reason and refused["definitely_unrun"] is True, refused
+    assert not seen
+    entry = custody.replay(ctx.drive_root)[prior.run_id]
+    assert entry.resource_ref == prior.resource_ref and not entry.superseded_by
+    if problem != "disposed":
+        assert not entry.patch_disposed and (root / "notes.txt").read_text(encoding="utf-8") == "FROM FIRST\n"
+
+
+@pytest.mark.parametrize("at_claim", [False, True], ids=["missing", "disposed-at-handover"])
+def test_unavailable_payload_snapshot_points_to_a_new_run_for_the_same_skill(interrupted_payload, monkeypatch, at_claim):
+    from ouroboros import delegate_continuation, subagent_worktrees
+    _, skill, _, prior, registry, start, seen = interrupted_payload
+    with monkeypatch.context() as change:
+        if at_claim:
+            handover = delegate_continuation.snapshot_handover
+
+            def after_disposition(drive, row):
+                out = registry.execute("integrate_delegated_patch", {"run_id": prior.run_id, "decision": "reject"})
+                assert "rejected" in out.lower(), out
+                return handover(drive, row)
+
+            change.setattr(delegate_continuation, "snapshot_handover", after_disposition)
+        else:
+            change.setattr(subagent_worktrees, "find_execution_snapshot", lambda _sid: None)
+        refused = start(continue_from=prior.run_id)
+    reason = "continuation_snapshot_released" if at_claim else "continuation_snapshot_missing"
+    assert refused["reason"] == reason and "request" not in seen
+    assert "same bucket and skill_name without continue_from" in refused["detail"]
+    if not at_claim:
+        out = registry.execute("integrate_delegated_patch", {"run_id": prior.run_id, "decision": "apply"})
+        assert "✅ Integrated" in out, out
+    fresh = start(**_ALPHA_SELECTOR)
+    assert fresh["status"] == "started" and "continueFrom" not in seen["request"]
+    assert pathlib.Path(fresh["authority_target_root"]).resolve() == skill.resolve()
+    assert (pathlib.Path(fresh["execution_root"]) / "notes.txt").read_bytes() == skill.joinpath("notes.txt").read_bytes()
+
+
+def test_readonly_payload_continuation_keeps_the_writers_pending_patch(interrupted_payload):
+    ctx, skill, root, prior, registry, start, seen = interrupted_payload
+    resumed = start(continue_from=prior.run_id, access="readonly")
+    assert resumed["status"] == "started", resumed
+    request = seen["request"]
+    assert request["continueFrom"] == prior.run_id and request["access"] == "readonly"
+    assert request["mode"] == "ask" and request["scope"]["root"] == str(skill.resolve())
+    assert request["execution"] == {"isolation": "envelope", "delegated": False}
+    assert "PAYLOAD ASSIGNMENT" not in request["instructions"]
+    state = custody.replay(ctx.drive_root)
+    reader, writer = state["run-p2"], state[prior.run_id]
+    assert reader.resource_ref == writer.resource_ref and reader.authority_source == "readonly"
+    assert not reader.snapshot_id and not reader.capture_id and not writer.superseded_by
+    assert not writer.patch_disposed and (root / "notes.txt").read_text(encoding="utf-8") == "FROM FIRST\n"
+    out = registry.execute("integrate_delegated_patch", {"run_id": prior.run_id, "decision": "apply"})
+    assert "✅ Integrated" in out, out
 
 
 def test_native_missing_and_child_targets_refuse_before_any_gateway(tmp_path, monkeypatch):
@@ -1010,13 +1148,14 @@ def test_recovered_pending_invocation_object_carries_the_shape(tmp_path, monkeyp
         max_seconds=60, request=body, project_id="p", project_owned=False,
         route="r", root_task_id="t-a", parent_task_id="", snapshot_id="snap1",
         execution_root="/x/exec", baseline_sha="b1", target_root="/x/target",
-        authority_source="skill_payload", resource_ref=ref)
+        authority_source="skill_payload", resource_ref=ref, daemon_store_id="fixture-store")
     record = custody.pending_invocations(drive)[0]
     monkeypatch.setattr(custody, "_reconcile_one", lambda *_a, **_k: {"ok": True})
 
     class _Gw:
+        store_identity = "fixture-store"  # the recorded receipt's store, while this test varies granted shape
         def start_run(self, request, *, idempotency_key=""):
-            return {"runId": "run-rec"}
+            return {"runId": "run-rec", "storeId": self.store_identity}
 
     custody._recover_pending_invocation(drive, _Gw(), record)
     obj = custody._CUSTODY["run-rec"]

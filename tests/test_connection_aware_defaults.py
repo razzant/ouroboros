@@ -112,6 +112,98 @@ def test_a_named_only_openrouter_key_proposes_and_reviews_on_that_connection():
     assert len(rows) == 3 and all(target.startswith("openrouter@byok::") for target in _targets(rows))
 
 
+def test_the_openrouter_helpers_join_any_main_on_the_connection_the_router_resolves():
+    """Owner 16.11: GLM, DeepSeek and Kimi join the factory actors beside any reachable OpenRouter as plain Auto rows,
+    never marked. A named OpenRouter Main pays for them with its own key even beside the built-in one, another Main
+    takes the router's proposal connection, and two named router keys with no Main on either add none."""
+    from ouroboros.settings_defaults import OPENROUTER_HELPER_DEFAULTS
+
+    ids = [row_id for row_id, _model, _use in OPENROUTER_HELPER_DEFAULTS]
+    models = [model for _row_id, model, _use in OPENROUTER_HELPER_DEFAULTS]
+
+    def helpers(doc):
+        return [row for row in factory_actor_rows(doc) if row["subagent_id"] in ids]
+
+    built_in = helpers({"OPENROUTER_API_KEY": "k"})
+    assert _targets(built_in) == models
+    assert all(not row.get("review_eligible") and not row.get("effort") for row in built_in)
+    named_main = _doc(BYOK, OPENROUTER_API_KEY="k", OUROBOROS_MODEL="openrouter@byok::google/gemini-4-hydrogen")
+    assert _targets(helpers(named_main)) == [f"openrouter@byok::{model}" for model in models]
+    direct_main = _doc(BYOK, OPENAI_API_KEY="k", OUROBOROS_MODEL="openai::gpt-5.6-terra")
+    assert _targets(helpers(direct_main)) == [f"openrouter@byok::{model}" for model in models]
+    home = {**BYOK, "name": "home", "api_key": "row-home"}
+    ambiguous = _doc(BYOK, home, OPENAI_API_KEY="k", OUROBOROS_MODEL="openai::gpt-5.6-terra")
+    assert helpers(ambiguous) == [] and factory_actor_rows(ambiguous), "the direct Main keeps its own helper"
+    chosen = _doc(BYOK, home, OUROBOROS_MODEL="openrouter@home::google/gemini-4-hydrogen")
+    assert _targets(helpers(chosen)) == [f"openrouter@home::{model}" for model in models]
+
+
+def _actor_targets(doc):
+    return {row["subagent_id"]: row["route"]["target_id"] for row in factory_actor_rows(doc)}
+
+
+def test_a_local_main_lends_the_helpers_no_router_key_its_id_still_names():
+    """A local Main keeps the router id it was chosen under but runs on the local lane (``role_route_binding``), so it
+    chose no OpenRouter key: the helpers take the router's proposal connection, the built-in key first, and two named
+    router keys with no built-in one add none rather than the stale name's. Unticked, the same Main pays for them."""
+    from ouroboros.settings_defaults import OPENROUTER_HELPER_DEFAULTS
+
+    ids = [row_id for row_id, _model, _use in OPENROUTER_HELPER_DEFAULTS]
+    models = [model for _row_id, model, _use in OPENROUTER_HELPER_DEFAULTS]
+    main = "openrouter@byok::google/gemini-4-hydrogen"
+    local = {"OUROBOROS_MODEL": main, "USE_LOCAL_MAIN": True, "LOCAL_MODEL_SOURCE": "/models/m.gguf"}
+
+    beside_built_in = _actor_targets(_doc(BYOK, OPENROUTER_API_KEY="k", **local))
+    assert beside_built_in["primary-builder"] == f"{main} (local)"
+    assert [beside_built_in[row_id] for row_id in ids] == models
+    home = {**BYOK, "name": "home", "api_key": "row-home"}
+    ambiguous = _actor_targets(_doc(BYOK, home, **local))
+    assert ambiguous["primary-builder"] == f"{main} (local)"
+    assert not set(ids) & set(ambiguous), "several named router keys and Main on none: nothing is guessed"
+    remote = _actor_targets(_doc(BYOK, OPENROUTER_API_KEY="k", **{**local, "USE_LOCAL_MAIN": False}))
+    assert [remote[row_id] for row_id in ids] == [f"openrouter@byok::{model}" for model in models]
+
+
+def test_a_helper_on_mains_route_is_one_row_however_the_route_is_spelled():
+    """Bare, ``openrouter::`` and ``openrouter@default::`` spell one route on the built-in key: Main keeps its saved
+    spelling and the GLM helper adds no twin. A local lane, a processing preference or a named connection is another
+    route, so the helper stays beside it."""
+    glm = "z-ai/glm-5.3"
+    for spelling in (glm, f"openrouter::{glm}", f"openrouter@default::{glm}"):
+        same = _actor_targets({"OPENROUTER_API_KEY": "k", "OUROBOROS_MODEL": spelling})
+        assert same["primary-builder"] == spelling and "analysis-critic" not in same, spelling
+    local = _actor_targets({"OPENROUTER_API_KEY": "k", "OUROBOROS_MODEL": glm,
+                            "USE_LOCAL_MAIN": True, "LOCAL_MODEL_SOURCE": "/models/m.gguf"})
+    assert (local["primary-builder"], local["analysis-critic"]) == (f"{glm} (local)", glm)
+    processed = {"OPENROUTER_API_KEY": "k", "OUROBOROS_MODEL": glm,
+                 "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {"main": "fast"}}
+    rows = {row["subagent_id"]: row for row in factory_actor_rows(processed)}
+    assert rows["primary-builder"]["processing_preference"] == "fast"
+    critic = rows["analysis-critic"]
+    assert critic["route"]["target_id"] == glm and not critic.get("processing_preference")
+    named = _actor_targets(_doc(BYOK, OPENROUTER_API_KEY="k", OUROBOROS_MODEL="google/gemini-4-hydrogen",
+                                OUROBOROS_MODEL_LIGHT=f"openrouter@byok::{glm}"))
+    assert (named["fast-scout"], named["analysis-critic"]) == (f"openrouter@byok::{glm}", glm)
+
+
+def test_a_rows_identity_reads_the_route_grammar_and_keeps_every_other_axis():
+    """The dedup identity (``_row_identity``): one route in three spellings is one; connection, local lane, model,
+    account pin, processing and route kind each still separate rows."""
+    from ouroboros.route_spec import ROUTE_KIND_AGENT_SESSION, ROUTE_KIND_API_MODEL, RouteSpec
+    from ouroboros.subscription_install_presets import _row_identity
+
+    def api(target, pin="", processing=""):
+        return _row_identity(RouteSpec(ROUTE_KIND_API_MODEL, target, pin), processing)
+
+    assert api("z-ai/glm-5.3") == api("openrouter::z-ai/glm-5.3") == api("openrouter@default::z-ai/glm-5.3")
+    assert api("openai::gpt-6-luna") == api("openai@default::gpt-6-luna") != api("openai/gpt-6-luna")
+    distinct = [api("z-ai/glm-5.3"), api("openrouter@byok::z-ai/glm-5.3"), api("z-ai/glm-5.3 (local)"),
+                api("z-ai/glm-5.3-flash"), api("z-ai/glm-5.3", processing="fast"),
+                api("claudexor::codex=gpt-6-astra"), api("claudexor::codex=gpt-6-astra", pin="koshak"),
+                _row_identity(RouteSpec(ROUTE_KIND_AGENT_SESSION, "z-ai/glm-5.3"))]
+    assert len(set(distinct)) == len(distinct)
+
+
 # --- F3: MiniMax's mixed panel on a named connection --------------------------
 
 def test_a_named_minimax_main_keeps_its_mixed_panel_on_its_connection():
@@ -380,3 +472,51 @@ def test_the_wizard_reads_every_way_a_built_in_key_is_ready():
         needed = {spec.flat_key(field) for group in spec.ready for field in group}
         assert needed <= fields, (kind, needed - fields)
     assert set(DIRECT_PROVIDER_DEFAULTS) <= set(contract["providerProfiles"])
+
+
+# --- the key's own API decides which defaults it proposes (OpenAI Responses) ----
+
+RESPONSES_LAB = {"kind": "openai", "name": "lab", "api_key": "row-lab", "api_surface": "responses"}
+
+
+def test_a_proposal_takes_the_defaults_of_the_api_its_own_key_chose():
+    """One table per key, never one for the kind: the only named key on Responses proposes its profile, a key that
+    never chose keeps the earlier one, and among several named keys the one Main runs on decides. A saved Main stays."""
+    assert provider_slot_proposals(_doc(RESPONSES_LAB))["OUROBOROS_MODEL"] == "openai@lab::gpt-6.1-terra"
+    assert provider_slot_proposals(_doc(WORK))["OUROBOROS_MODEL"] == "openai@work::gpt-5.6-terra"
+    mixed = _doc(RESPONSES_LAB, WORK)
+    assert "@" not in provider_slot_proposals(mixed)["OUROBOROS_MODEL"]  # no key, no API is guessed
+    assert provider_slot_proposals({**mixed, "OUROBOROS_MODEL": "openai@lab::gpt-6.1-sol"})["OUROBOROS_MODEL_LIGHT"] == \
+        "openai@lab::gpt-6-luna"
+    assert provider_slot_proposals({**mixed, "OUROBOROS_MODEL": "openai@work::gpt-5.6-sol"})["OUROBOROS_MODEL_LIGHT"] == \
+        "openai@work::gpt-5.6-luna"
+
+
+@pytest.mark.parametrize(("rows", "main"), [((RESPONSES_LAB,), "openai@lab::gpt-6.1-terra"), ((WORK,), "openai@work::gpt-5.6-terra")])
+def test_the_wizard_bootstrap_proposes_on_the_api_of_the_only_named_key(tmp_path, monkeypatch, rows, main):
+    """The real ``GET /api/onboarding/bootstrap`` of a document holding one named OpenAI key: the wizard starts from
+    the proposal of that key's own API, and its masked row keeps the stored word the browser resolves it by."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import config as cfg
+    from ouroboros.gateway import onboarding_host
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", data_dir, raising=True)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", data_dir / "settings.json", raising=True)
+    for key in (*cfg.SETTINGS_DEFAULTS, CONNECTIONS_KEY, "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    (data_dir / "settings.json").write_text(json.dumps(_doc(*rows)), encoding="utf-8")
+    app = Starlette(routes=[Route("/api/onboarding/bootstrap", onboarding_host.api_onboarding_bootstrap)])
+    app.state.drive_root = data_dir
+    cfg.reset_runtime_mode_baseline_for_tests()
+    try:
+        with TestClient(app) as client:
+            state = client.get("/api/onboarding/bootstrap").json()["bootstrap"]["initialState"]
+    finally:
+        cfg.reset_runtime_mode_baseline_for_tests()
+    assert state["mainModel"] == main
+    assert [row.get("api_surface") for row in state["connections"]] == [row.get("api_surface") for row in rows]

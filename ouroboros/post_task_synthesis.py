@@ -24,6 +24,7 @@ from ouroboros.observability import without_finalization_timing
 from ouroboros.outcomes import SAFETY_HELD_STATUSES, normalize_outcome_axes
 from ouroboros.subagent_messages import initiator_meta
 from ouroboros.synthesis_cost_text import _summary_row_cost_fields
+from ouroboros.tool_call_log import has_refused_step, is_plain_step_refusal
 from ouroboros.tool_capabilities import routing_action_for_tool
 from ouroboros.utils import append_jsonl, truncate_review_artifact as _truncate_with_notice, utc_now_iso
 
@@ -50,9 +51,9 @@ def task_tool_metrics(llm_trace: dict) -> dict:
     calls = llm_trace.get("tool_calls") or []
     metrics = {
         "tool_calls": None if unavailable else len(calls),
-        "tool_errors": None if unavailable else sum(  # a call Safety held took no effect, and is no tool error
+        "tool_errors": None if unavailable else sum(  # a host refusal alone is not a failed tool
             1 for call in calls if isinstance(call, dict) and call.get("is_error")
-            and call.get("status") not in SAFETY_HELD_STATUSES),
+            and call.get("status") not in SAFETY_HELD_STATUSES and not is_plain_step_refusal(call)),
         # The addressing calls among them (tool_capabilities owns the family), so
         # a replayed block can tell a receipt-only turn from real work without
         # a client list of tool names.
@@ -190,7 +191,13 @@ def build_trace_summary(llm_trace: dict) -> str:
                 facts.append(f"signal={tc.get('signal')}")
             fact_suffix = f" [{', '.join(facts)}]" if facts else ""
             held = status in SAFETY_HELD_STATUSES  # it carries is_error, yet it is no error
-            suffix = " → HELD BY SAFETY" if held else " → ERROR" if tc.get("is_error") else ""
+            suffix = ""
+            if held:
+                suffix = " → HELD BY SAFETY"
+            elif tc.get("is_error") and not is_plain_step_refusal(tc):
+                suffix = " → ERROR"
+            if has_refused_step(tc):
+                suffix += " → FURTHER STEP REFUSED"
             return f"{index + 1}. {name}({args_str}){fact_suffix}{suffix}"
 
         if n > 30:
@@ -306,12 +313,19 @@ def _record_task_facts(env: Any, task: Dict[str, Any], usage: Dict[str, Any],
     """
     task_id = str(task.get("id") or "unknown")
     try:
+        from ouroboros.project_completion_facts import recorded_attempt
         from ouroboros.project_dialogue import append_canonical_task_summary, completion_status_label, outcome_phase
         from ouroboros.task_finalization import artifact_store_roots, rescued_files_fact
+        from ouroboros.terminal_time import source_task_attempt
 
         canonical_root = pathlib.Path(task.get("budget_drive_root") or drive_logs.parent)
         result_root = pathlib.Path(getattr(env, "drive_root", canonical_root))
+        # These counters belong to the supplied loop snapshot, not to the result
+        # that happens to be current when the post-task worker reaches this write.
+        attempt = source_task_attempt(task, recovered=bool(llm_trace.get("recovered_post_task_synthesis")))
         stored_result = _atp().load_task_result(result_root, task_id) or {}
+        if recorded_attempt(stored_result) != attempt:
+            stored_result = {"status": normalize_outcome_axes(usage)["lifecycle"].get("status") or "completed"}
         review_projection = _compact_review_projection(llm_trace, task, canonical_root)
         # TZ-2 C2: how many files the task rescued into its store(s) — positive, zero or
         # unknown — by stat alone; the fact discloses that no hash was computed. A split
@@ -323,6 +337,7 @@ def _record_task_facts(env: Any, task: Dict[str, Any], usage: Dict[str, Any],
         append_canonical_task_summary(canonical_root, retained=True, row={
             "ts": utc_now_iso(), "direction": "system", "type": "task_summary",
             "summary_kind": "host_task_facts", "summary_id": f"task-facts:{task_id}",
+            **({"task_attempt": attempt} if attempt is not None else {}),
             "task_id": task_id, "parent_task_id": str(task.get("parent_task_id") or ""), "root_task_id": str(task.get("root_task_id") or task_id),
             "project_id": str(task.get("project_id") or ""), "chat_id": int(task.get("chat_id") or 0), "delegation_role": str(task.get("delegation_role") or ""), "role": str(task.get("role") or ""),
             "status": str(stored_result.get("status") or "completed"), "outcome": completion_status_label(stored_result, usage), "outcome_phase": outcome_phase(stored_result, usage),
