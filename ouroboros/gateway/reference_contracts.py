@@ -43,9 +43,7 @@ class ConnectionProfileOutbound(TypedDict):
     """Issued once per socket at accept, before registration, when the serving connection proves a
     data profile (server_web.data_profile_scope; gateway/ws.py sends it directly — never per frame,
     poll or command). The browser adopts it before the generic emit and compares it with the profile
-    its document proves (#3294). A direct accept-time issuance, not a broadcast envelope, so it is
-    deliberately not in WS_MESSAGE_TYPES: publishing it in the frozen WS index belongs to the
-    endpoint-index owner."""
+    its document proves (#3294). A direct accept-time issuance, not a broadcast envelope."""
 
     type: Literal["connection_profile"]
     profile_scope: str
@@ -71,6 +69,9 @@ class ChatReplyReference(TypedDict, total=False):
     work_task_id: str  # addressed work, not the quoted author; empty means the work could not be resolved
     ordinary: Literal[True]  # the host proved the quoted row addresses no work; with neither key it could not tell
     target_home: Literal["work", "room", "none"]  # what decides the quoted row's room; an older reference lacks it
+    derived_question: Literal[True]  # host-derived question quote on an owner answer bubble without its own Reply, built per room on read or single-room live frame; never stored, no owner Reply
+    room_label: str  # only with derived_question: Main, the Project's display name, or Project when unnamed, when the question's home is another room
+    room_label_kind: Literal["main", "project"]  # only with derived_question + room_label: built-in chrome (Main or unnamed Project); absent for a user-named Project
     telegram_room_chat_id: int | None  # the owner bot's Reply only: its Project's turn, 0 its chat's own, null refused
     unresolved: bool
 

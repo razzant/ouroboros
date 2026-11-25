@@ -1,10 +1,13 @@
 """Names and sizes of the selected context, read from its captured sources.
 
 A window's source and date, reserve, disagreement and retired history are shared by facts rows, Settings and size
-failures (``window_projection``); a size failure names its round's own refused request (``remember_size_refusal``)."""
+failures (``window_projection``); a size failure names its round's own refused request (``remember_size_refusal``).
+An integrating start's facts row also names the gate's shortest telling by kind (``start_facts``), its draw kept on
+the captured core."""
 from __future__ import annotations
 
 import pathlib
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ouroboros import memory_floor as floor, memory_view as mv
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
@@ -71,7 +74,8 @@ def memory_facts(plan, mode, messages=()):
     my memory: the story with its pages no part or account holds yet (how many, their tokens, the rooms holding
     most of them) and the rooms' lines; what this view shows only by address and, beside it, the held note heads
     that stand whole where the window took that from memory (``held_heads_fact``); marks and waiting classes
-    with their count, oldest date, list reader and closure act.
+    with their count, oldest date, list reader and closure act. Where the gate priced a shortest telling, what it is
+    made of by kind (``start_facts``) rides the measure.
     Counted from the captured snapshot and its receipt; measures only, no advice and no
     threshold. Without a Max room fact (the owner's Low or Nano, an unknown window) it names the memory alone."""
     snapshot = memory_snapshot(plan)
@@ -79,11 +83,12 @@ def memory_facts(plan, mode, messages=()):
         return ""
     receipt = plan.projection(mode).memory_facts or {}
     room, blocks, pages = receipt.get("max_room"), receipt.get("blocks") or {}, floor.unfolded_pages(snapshot)
+    composition = start_facts(plan, snapshot, receipt)
     if not room:
         line = (f"memory: story {blocks.get('story_tokens', 0):,} ({floor.pages_text(pages)}) + rooms "
                 f"{blocks.get('room_tokens', 0):,}")
     else:
-        line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages)
+        line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages, composition=composition)
         if room.get("cause") == "held":
             line += "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room.get("cuts") else "")
         elif room.get("cause") in ("crowded", "route"):  # any other value is a measure without a settled cause
@@ -470,3 +475,123 @@ def window_fact(plan, reserve):
     if plan is None:
         return ""
     return window_projection(row_window(plan, reserve), under_way=True)["text"]
+
+
+# --- the gate's shortest telling by kind ---------------------------------------------------------
+
+_STORY = {"account": "accounts", "teller": "accounts", "told_records": "accounts", "story_status": "story headings",
+          "account_status": "story headings", "framing": "story headings", "unavailable": "story headings"}
+_ROOM = {"work": "finished works standing as lines", "task_gist": "task gist lines", "task_facts": "task fact lines",
+         "project_words": "my human's words in this room", "origin": "my human's words that started this work",
+         "note": "my notes", "notes": "my notes", "room_record": "this room's records", "told_records": "this room's records",
+         "room_rows": "this room's rows by count", "conversation_gist": "far works' gists"}
+_PIECES = {"owner_words": "my human's words for this work", "late_reviews": "late reviews", "marks": "marks"}
+
+
+def telling_parts(snapshot: mv.MemoryViewSnapshot, telling: int,
+                  chars: Optional[Tuple[Dict[str, int], Dict[str, int]]] = None) -> List[List[Any]]:
+    """The gate's shortest telling (``memory_floor.telling_level``) by kind, its ``telling`` tokens split per block by
+    cumulative characters (``kind_chars``, or ``chars`` already read from it): the story block's ``tokens_of`` over its
+    kinds, the room block's over its kinds, and what the gate's figure adds beyond them (its floor note) named as such.
+    The kinds sum to ``telling``. [] where the parts do not cover the drawn text or the memory is not active."""
+    if chars is None and snapshot.active and telling:
+        chars = kind_chars(snapshot)
+    if chars is None or not snapshot.active or not telling:
+        return []
+    story, room = chars
+    story_tokens, room_tokens = floor.tokens_of(sum(story.values())), floor.tokens_of(sum(room.values()))
+    total: Dict[str, int] = {}
+    for kinds, tokens in ((story, story_tokens), (room, room_tokens),
+                          ({"the floor note": 1}, telling - story_tokens - room_tokens)):
+        for kind, share in _split(kinds, tokens):
+            total[kind] = total.get(kind, 0) + share
+    return [[kind, tokens] for kind, tokens in sorted(total.items(), key=lambda item: (-item[1], item[0])) if tokens]
+
+
+def kind_chars(snapshot: mv.MemoryViewSnapshot, key: Any = None) -> Optional[Tuple[Dict[str, int], Dict[str, int]]]:
+    """``(story, room)``: each block's JSON characters at the telling level by kind, read from the renderer's own exact
+    parts (one draw of that level); each part is named once, a joining blank line goes with the part it follows, and
+    each block's kinds sum to that block's characters. None where the parts do not cover the drawn text."""
+    from ouroboros.context_timing import counted
+    from ouroboros.memory_form_facts import memory_composition
+
+    level = floor.telling_level(snapshot)
+    counted("view_compositions", key=(key, level.addressed))  # the start's one draw, beside view_renders
+    try:
+        blocks = memory_composition(snapshot, level)["blocks"]
+    except ValueError:  # the parts do not cover the renderer's text: no itemized measure, never a guessed one
+        return None
+    story: Dict[str, int] = {}
+    for row in blocks["story"]["parts"]:
+        kind = _story_kind(row)
+        story[kind] = story.get(kind, 0) + row["json_chars"]
+    room: Dict[str, int] = {}
+    pieces, last = blocks["room"]["pieces"], "this room's headings and facts"
+    for row in blocks["room"]["parts"]:
+        if row["kind"] != "separator":
+            last = _room_kind(row, pieces[row["piece"]])
+        room[last] = room.get(last, 0) + row["json_chars"]
+    return story, room
+
+
+def _story_kind(row: Mapping[str, Any]) -> str:
+    if row["kind"] in _STORY:
+        return _STORY[row["kind"]]
+    if row["kind"] in ("story_record", "story_records", "story_quotes"):
+        if any(source.get("kind") == "part" for source in row["sources"]):
+            return "parts"
+        return {"lead": "pages standing as leads", "whole": "pages whole"}.get(row["form"], "pages by opening, address or count")
+    return "old story"  # the helper's retelling and transfers, whole or as a room's line
+
+
+def _room_kind(row: Mapping[str, Any], key: Any) -> str:
+    head = key[0] if isinstance(key, list) and key else key
+    if head in _PIECES:
+        return _PIECES[head]
+    sources = [source for source in row["sources"] if isinstance(source, dict)]
+    if head == "room":
+        if row["kind"] == "room_row":  # a reaction is the renderer's place fact: no words of its own
+            return ("my replies" if any(s.get("kind") == "ouroboros" for s in sources) else
+                    "my human's words in this room" if any(s.get("owner_side") for s in sources) else
+                    "reactions in this room" if sources and all(s.get("kind") == "place_fact" for s in sources)
+                    else "words here not recorded as mine or my human's")
+        if row["kind"] == "task_fact":  # a work's line whole: its telling stands here, no reply of it in this room
+            return "works with a gist but no reply here" if row["form"] == "whole" and any(
+                s.get("gist_source") for s in sources) else "task fact lines"
+        return _ROOM.get(row["kind"], "this room's headings and facts")
+    if row["kind"] in _ROOM:
+        return _ROOM[row["kind"]]
+    return "my human's words elsewhere" if any(s.get("owner_side") for s in sources) else "far conversations as lines"
+
+
+def _split(chars: Mapping[str, int], tokens: int) -> List[Tuple[str, int]]:
+    """``tokens`` over ``chars``'s kinds by cumulative share: the parts sum to ``tokens`` exactly."""
+    total, through, used, out = sum(chars.values()), 0, 0, []
+    for kind, size in chars.items():
+        through += size
+        share = tokens * through // total if total else 0
+        out.append((kind, share - used))
+        used = share
+    return out
+
+
+# --- once per start ------------------------------------------------------------------------------
+
+def start_facts(plan: Any, snapshot: mv.MemoryViewSnapshot, receipt: Mapping[str, Any]) -> str:
+    """The composition of the gate's shortest telling by kind where this projection's Max room fact priced a telling,
+    else "". The telling level's characters by kind (one draw) depend on the captured view alone and are kept on the
+    plan's captured core, so a plan rebound over that core reuses them and another core never sees them; the telling's
+    tokens are read from this projection's fact every time. A failure drops the composition, never the facts row."""
+    core = plan.core
+    held = vars(core).setdefault("_start_facts", {}) if hasattr(core, "__dict__") else {}  # beside the core's fields
+    fact = receipt.get("max_room") if isinstance(receipt.get("max_room"), Mapping) else {}
+    try:
+        if not fact.get("telling") or not snapshot.active:
+            return ""
+        if "chars" not in held:
+            held["chars"] = None  # a draw that fails is remembered for this core, not retried at every facts row
+            held["chars"] = kind_chars(snapshot, hash(core.memory_view_json))
+        return ", ".join(f"{kind} {int(tokens):,}" for kind, tokens in
+                         telling_parts(snapshot, int(fact["telling"]), held["chars"])) if held["chars"] else ""
+    except Exception:  # the composition is a segment of the facts row: its failure drops it alone
+        return ""

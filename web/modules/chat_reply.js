@@ -8,7 +8,8 @@ import { tr } from './i18n.js';
 import { showToast } from './toast.js';
 import { isStoreMigrating } from './api_client.js';
 import { ownerRowRoom } from './chat_history_replay.js';
-import { authorOf, createRelayQuote, createReplyQuote, normalizeReplyRef, releaseQuoteFades, replySnippet } from './chat_reply_quote.js';
+import { authorOf, createRelayQuote, createReplyQuote, derivedQuoteRaw, normalizeReplyRef, quoteSignatureOf, releaseQuoteFades, replyQuoteSignature,
+    replySnippet } from './chat_reply_quote.js';
 import { createRelayDecks } from './chat_relay_deck.js';
 import { fullText } from './text_fit.js';
 import { bindBubbleActions } from './message_actions.js';
@@ -159,8 +160,10 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
      * newer reveal or leaving the room decided instead. A landing or a page drawn around it (`left`) keeps its view.
      * A landing answers `{state: 'found', target}`; `focus: false` (a search stepping through matches) leaves the
      * keyboard where it is, and a search's `locate(target)` names its first matching words (a Range, or null), placed
-     * in view with the row. */
-    async function reveal(address, isCurrent = () => true, prepared = null, { focus = true, locate = null } = {}) {
+     * in view with the row. `elsewhere`: the host named another room as this address's home (a derived question quote's
+     * `room_label`), so a row drawn here under it is only its copy (Main's pointer to a Project's question) and the
+     * read of the address decides. */
+    async function reveal(address, isCurrent = () => true, prepared = null, { focus = true, locate = null, elsewhere = false } = {}) {
         clearExcerptHighlight(feed.ownerDocument);
         clearTimeout(targetTimer);
         feed.querySelectorAll('.is-quote-target').forEach((old) => old.classList.remove('is-quote-target'));
@@ -171,7 +174,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         const generation = revealing = ++revealGeneration;
         const own = held = { following, claimed };
         position.stick = false;
-        const result = await seek(address, position, wanted, prepared, focus, locate)
+        const result = await seek(address, position, wanted, prepared, focus, locate, elsewhere)
             .catch(error => (wanted() ? { state: 'unknown', error } : null));
         if (generation === revealing) revealing = 0;
         if (held === own) held = null;
@@ -213,8 +216,8 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         feed.scrollTop += shift(top, bottom, word.top, word.bottom);
     }
 
-    async function seek(address, position, wanted, prepared, focus = true, locate = null) {
-        let target = !prepared && drawn(address);
+    async function seek(address, position, wanted, prepared, focus = true, locate = null, elsewhere = false) {
+        let target = !prepared && !elsewhere && drawn(address);
         const mounted = Boolean(target);
         if (!target) {
             const result = await history()?.reference(address, wanted, prepared);
@@ -254,7 +257,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             highlightExcerpt(range, TARGET_MS);
             return range;
         } : null;
-        const result = await reveal(ref.address, () => true, null, { locate });
+        const result = await reveal(ref.address, () => true, null, { locate, elsewhere: ref.derived_question === true && Boolean(ref.room) });
         if (!result || result.state === 'found') return;
         const [code, words] = failureText(result);
         showToast(tr(`chat.reply.${code}`, words), 'info');
@@ -465,6 +468,76 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         return Boolean(syncDerivedQuote(around) | syncDerivedQuote(below));
     }
 
+    const directQuote = (bubble) => [...(bubble?.children || [])].find((child) => child.classList?.contains('chat-quote')) || null;
+
+    /**
+     * Reconcile the host-derived question quote (`reply_to.derived_question === true`) on an already-mounted owner
+     * bubble. Only that derived quote is added, replaced or removed; an explicit owner Reply (a quote without
+     * `data-derived-question="1"`) is never touched, and an incomplete live frame (`!authoritative` or `also_rooms`)
+     * never removes a derived quote already shown. Focus inside a replaced or removed quote is preserved, and a quote
+     * that leaves releases its fades as every other leaving quote does.
+     */
+    function syncDerivedQuestion(bubble, row, { authoritative = false } = {}) {
+        if (!bubble?.classList?.contains('user')) return false;
+        const existing = directQuote(bubble);
+        const derived = row?.reply_to?.derived_question === true;
+        // An explicit Reply, or a bubble with no quote and none derived, is left as it is at once.
+        if (existing ? existing.dataset.derivedQuestion !== '1' : !derived) return false;
+        const sharedLive = Array.isArray(row?.also_rooms) && row.also_rooms.length > 0;
+        const incoming = derived ? normalizeReplyRef(row.reply_to) : null;
+        const doc = bubble.ownerDocument || feed.ownerDocument || globalThis.document;
+        const hadFocus = Boolean(existing && doc?.activeElement && existing.contains?.(doc.activeElement));
+        if (incoming) {
+            const nextSig = replyQuoteSignature(incoming);
+            if (existing && quoteSignatureOf(existing) === nextSig) return false;
+            const next = createReplyQuote(row.reply_to, { onJump: jump, onDomWrite });
+            if (!next) return false;
+            if (existing) {
+                releaseQuoteFades(existing);
+                existing.replaceWith(next);
+            } else {
+                const sender = bubble.querySelector('.sender');
+                if (sender) sender.after(next);
+                else bubble.prepend(next);
+            }
+            if (hadFocus) next.querySelector('.chat-quote-main')?.focus?.({ preventScroll: true });
+            return true;
+        }
+        if (!authoritative || sharedLive || !existing) return false;
+        releaseQuoteFades(existing);
+        existing.remove();
+        if (hadFocus) {
+            if (typeof bubble.tabIndex !== 'number' || bubble.tabIndex < 0) bubble.tabIndex = -1;
+            bubble.focus?.({ preventScroll: true });
+        }
+        return true;
+    }
+
+    /**
+     * The dictionary changed (ouro:language-changed, chat.js handleHistoryLanguage): a derived question quote already on
+     * screen re-renders in place, so its lead words, room-kind label and accessible name follow the new language at once.
+     * The quote's data — the author's label, the room's own name, the snippet — never translate (the overlay skips
+     * authored text, so this re-render is the only carrier), Main stays Main by tx, and a revision that changes
+     * nothing writes nothing. Focus inside a replaced quote stays on the quote's jump control; the caller's
+     * withStableViewport holds the reading position.
+     */
+    function retranslateDerivedQuotes() {
+        let changed = false;
+        for (const quote of feed.querySelectorAll('.chat-quote[data-derived-question="1"]')) {
+            const raw = derivedQuoteRaw(quote);
+            if (!raw || quoteSignatureOf(quote) === replyQuoteSignature(raw)) continue;
+            const next = createReplyQuote(raw, { onJump: jump, onDomWrite });
+            if (!next) continue;
+            const doc = quote.ownerDocument || feed.ownerDocument || globalThis.document;
+            const hadFocus = Boolean(doc?.activeElement && quote.contains?.(doc.activeElement));
+            releaseQuoteFades(quote);
+            quote.replaceWith(next);
+            if (hadFocus) next.querySelector('.chat-quote-main')?.focus?.({ preventScroll: true });
+            changed = true;
+        }
+        return changed;
+    }
+
     return {
         /**
          * One call per text bubble, after Copy is mounted. `row` is the history row or live frame the bubble was built
@@ -515,14 +588,20 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             bubble.dataset.rowAddress = address;
             if (row.reply_to?.excerpt || row.reply_to?.role === 'system') {
                 const saved = createReplyQuote(row.reply_to, { onJump: jump, onDomWrite });
-                const local = bubble.querySelector(':scope > .chat-quote');
-                if (local) { releaseQuoteFades(local); local.replaceWith(saved); }
-                else bubble.querySelector('.sender')?.after(saved);
+                if (saved) {
+                    const local = directQuote(bubble);
+                    if (local) { releaseQuoteFades(local); local.replaceWith(saved); }
+                    else bubble.querySelector('.sender')?.after(saved);
+                }
+            } else if (row.reply_to?.derived_question === true) {
+                syncDerivedQuestion(bubble, row, { authoritative: false });
             }
             if (!bubble.querySelector(':scope > .chat-message-actions > .chat-message-reply')) mountControl(bubble);
             syncDerivedQuotes(bubble);
             return true;
         },
+        syncDerivedQuestion,
+        retranslateDerivedQuotes,
         /** What the row menu's Reply on this bubble quotes, or null. */
         bubbleRef,
         /** What the row menu's Reply on this work card quotes, or null. */

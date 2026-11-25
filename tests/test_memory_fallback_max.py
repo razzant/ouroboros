@@ -7,6 +7,7 @@ import pytest
 
 from ouroboros import memory_inventory as mi
 from ouroboros.chronicle_store import ChronicleStore
+from ouroboros.memory_fold_receipt import CLOSE
 from tests import _memory_inventory_shared as shared
 from tests.test_memory_fallback import _consciousness, _drafts, _Light, _mind_page, _run, light_route
 
@@ -38,7 +39,8 @@ def test_a_start_memory_crowded_folds_one_rooms_oldest_pages_mine_included(tmp_p
     [part] = _drafts(tmp_path)
     assert part["kind"] == "part" and part["covers"]["member_ids"] == pages and part["room_id"] == "1"
     assert part["author"]["writer"] == "fallback_part" and part["author"]["attribution"] == "helper draft, not lived"
-    assert run.effect.startswith("a helper draft folded 2 records: ") and "next start re-measures its Max room" in run.effect
+    assert run.effect.startswith("a helper draft folded 2 records by room: 1 (2)\nthe part's own words: ")
+    assert "; its 2 members' own words: " in run.effect and run.effect.endswith(" tokens\n" + CLOSE)
     assert not [r for r in ChronicleStore(tmp_path).records(kinds=("account",))]  # never an account across rooms
 
 

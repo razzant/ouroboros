@@ -24,13 +24,15 @@ For a classic entry, fetch the script with the owner's session, from the page. T
 
 ## 2. Building the frame
 
-Create one `<iframe>` per running card with exactly these attributes:
+Create one `<iframe>` per running card. The three permission attributes are exactly these:
 
 | Attribute | Value |
 |---|---|
 | `sandbox` | `allow-scripts allow-pointer-lock allow-downloads` |
 | `allow` | `autoplay; fullscreen; clipboard-write` |
 | `allowfullscreen` | present |
+
+Give the frame its accessible name as well: `title` is the card's `title` (the words the card's head shows), falling back to `tab_id`, then the skill name.
 
 Never add `allow-same-origin`: the frame stays an opaque origin with no direct access to the page's cookies, storage or DOM. Cookie attachment to asset requests is browser-dependent; use the host fetch bridge, not a promise that passive requests are always anonymous. Never add top navigation, popups, forms or modals.
 

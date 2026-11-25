@@ -19,6 +19,7 @@ import pytest
 
 from ouroboros import chat_chain, memory_floor as mf, memory_view as mv
 from ouroboros.chronicle_store import ChronicleStore, body_sha256
+from ouroboros.memory_fold_receipt import CLOSE
 from ouroboros.memory_reader import read_memory
 from ouroboros.tools import chronicle as tools
 from ouroboros.tools.chronicle import _memory_read
@@ -312,7 +313,9 @@ def test_the_selection_answers_with_a_counted_receipt_of_what_it_tells_never_the
 
     readers = ", ".join(f"memory_read(room_id='{room}')" for room in sorted({"1", alpha}))
     chosen = _write(tmp_path, kind="selection", target_id=g, replaces=[a1, part], reason="told through it")
-    assert chosen["effect"].startswith("the account now tells 2 records: ")  # the measured effect, as before
+    assert chosen["effect"].startswith(  # one readback renders both fields: everything it tells, and what it names
+        f"account {g}: no selection before this one; this one has it shown; it tells 4 records by room: "
+        f"{rooms_of(**{'1': 3, alpha: 1})}; this selection names 2 of them directly\n")
     assert chosen["receipt"] == (
         "counted from the chronicle as read after this write: teller relations only, never display or what this write "
         "displaced (a later choice by any account changes them; what my story and a room's page show is read there, "
@@ -346,8 +349,22 @@ def test_post_write_receipt_failure_keeps_the_successful_selection(tmp_path, mon
     result = _write(tmp_path, kind="selection", target_id=account, replaces=[a1], reason="chosen")
     assert result["ok"] is True and "Selection saved" in result["receipt"]
     assert "Do not repeat the write" in result["receipt"]
+    assert result["effect"] == "\n".join([f"saved: selection {result['node_id']}; what the account tells now could not "
+                                          "be read back (OSError)", CLOSE])
     store = ChronicleStore(tmp_path)
     assert store.interpret([store.get(account)])[0]["selection"]["id"] == result["node_id"]
+
+
+def test_a_saved_selection_whose_readback_fails_untyped_answers_saved_not_an_error(tmp_path, monkeypatch):
+    import sqlite3
+
+    _rooms_map, _alpha, _beta, a1, _b1, _h1 = _rooms(tmp_path)
+    account = _write(tmp_path, kind="account", text=G_TEXT, sources=[a1])["node_id"]
+    monkeypatch.setattr(tools, "selection_facts", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("interrupted")))
+    result = _write(tmp_path, kind="selection", target_id=account, replaces=[a1], reason="chosen")
+    assert result["ok"] is True and result["receipt"] == f"Selection saved as {result['node_id']}; its readback could not be read."
+    assert result["effect"] == "\n".join([f"saved: selection {result['node_id']}; the rest of this receipt could not be "
+                                          "read back (OperationalError)", CLOSE])
 
 
 def test_receipt_does_not_attribute_a_later_selection_to_this_write(tmp_path, monkeypatch):
@@ -365,6 +382,7 @@ def test_receipt_does_not_attribute_a_later_selection_to_this_write(tmp_path, mo
     assert result["ok"] is True and later[0] != result["node_id"]
     assert "another selection is now acting" in result["receipt"]
     assert "leave my story" not in result["receipt"]
+    assert result["effect"] == "\n".join([f"superseded: selection {later[0]} acts now, not this one", CLOSE])
 
 
 def test_receipt_reads_teller_relations_and_claims_no_displacement_another_accounts_choice_made(tmp_path, monkeypatch):
@@ -411,10 +429,9 @@ def test_withdrawing_one_teller_does_not_claim_a_page_hidden_by_another_returns(
     result = _write(tmp_path, kind="selection", target_id=later, replaces=[a1], shown=False, reason="withdraw later")
     assert result["shown"] is False
     assert "Alpha asked again and I counted." not in _story(tmp_path)
-    assert result["effect"] == (
-        "withdrawal saved: other selections and folds still determine what appears. My story's drawn size is not "
-        "re-measured by a write: memory_read(story=true) measures it whole, each record's tokens and the pages no part "
-        "or account holds yet. This task's view is not refreshed; the next start re-measures its Max room.")
+    assert result["effect"] == "\n".join([f"account {later}: the one before had it shown; this one has it "
+                                          "not shown; it tells 0 records by room: none; this selection names 0 of them "
+                                          "directly", CLOSE])
     assert "the account tells 0 records" in result["receipt"]
     assert "the records it told return there" not in str(result)
 

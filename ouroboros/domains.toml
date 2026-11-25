@@ -279,11 +279,14 @@ D20 = "Presence"
 "ouroboros/context_mode_compat.py" = "D03"
 "ouroboros/memory_view.py" = "D03"  # the acting mind's resident memory view: roles, capture, story and live part
 "ouroboros/memory_room_activity.py" = "D03"  # captured room liveness, without page coverage
+"ouroboros/memory_reading.py" = "D03"  # what an actor was shown whole or read, and what its acts count as read
+"ouroboros/memory_coverage.py" = "D03"  # a delegated writer covers only what it was shown whole or read
 "ouroboros/memory_waiting.py" = "D03"  # waiting measures and their closure acts
 "ouroboros/memory_floor.py" = "D03"  # the memory view's physical floor: what a window shows only by address
 "ouroboros/chronicle_lead.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_forms.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_form_facts.py" = "D03"  # captured memory forms and their provenance
+"ouroboros/memory_fold_receipt.py" = "D03"  # what a fold returns to its writer
 "ouroboros/memory_view_work.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_view_conversation_forms.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_view_events.py" = "D03"  # ordinary place event facts and their catalogue readers
@@ -1517,6 +1520,7 @@ lazy_only = [
   "D16->D11",
   "D16->D15",
   "D17->D02",
+  "D17->D03",
   "D17->D13",
   "D17->D14",
   "D17->D20",

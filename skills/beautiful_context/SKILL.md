@@ -12,7 +12,7 @@ permissions:
   - widget
   - route
 ui_tab:
-  id: viewer
+  tab_id: viewer
   title: Beautiful Context
   render:
     kind: iframe

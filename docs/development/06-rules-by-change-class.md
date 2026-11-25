@@ -8,7 +8,7 @@ Imperative rules per change class: tool registration, skill payloads, live E2E, 
 - A tool writing the repo working tree also joins `_ROOT_ARG_REPO_WRITE_TOOLS` and canonicalizes its target paths (`_PATH_NORMALIZED_TOOLS` for a top-level `path`; `_payload_write_paths` plus `protected_repo_write_paths` for payload-borne ones): visibility checks pass without the write guard, so tests exercise the real guard chain (ARCHITECTURE §6 "Tool capability and execution").
 - Forwarding host wrappers take their own arguments positional-only; never rename or denylist a public tool keyword to avoid collision (`tests/test_pause_forwarding_names.py`).
 - Read-only producers report admitted absent targets as typed misses only after query, confinement, runtime and protected-artifact checks; denials and bad content remain errors (`tests/test_discovery_miss_warnings.py`).
-- New memory/data files: decide in the same change whether they enter LLM context (`context.py`).
+- New memory/data files: decide in the same change whether they enter LLM context (`context.py`); a change that adds or grows a request-resident part names who digests it and when (ARCHITECTURE §6 "Durable memory and project focus"; review-only).
 - One rule each: `ToolRegistry._builtin_hidden`, built-in visibility (`test_tool_visibility_golden.py`: regenerate it only for an intended visibility change, named in the PR); `workspace_copies.protected_write_admitted`, protected body paths at dispatch and apply doors (`test_isolated_copy_corrections.py`).
 
 Enforcement: CHECKLISTS items 11(g), 13 (`tool_registration`) and 22 (`context_building`); `ouroboros/tools/registry.py` (public schema), `tests/test_safety_policy.py` (one policy per tool).

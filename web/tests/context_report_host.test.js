@@ -15,7 +15,7 @@ const readyListeners = (win) => win.events.get('pywebviewready')?.length || 0;
 
 test('native action is offered once, and only shown on a positive shell fact', async (t) => {
     const { mount, window, document } = setup(t);
-    const dispose = bindLocalContextReport(mount);
+    const { dispose } = bindLocalContextReport(mount);
     notifyReady(window);
     assert.equal(mount.hidden, true, 'a browser keeps the mount hidden');
     assert.equal(mount.querySelector('button'), null);
@@ -51,11 +51,14 @@ test('native action is offered once, and only shown on a positive shell fact', a
     assert.equal(currentToast(document), null);
 
     const second = document.createElement('div');
-    const disposeSecond = bindLocalContextReport(second);
+    const { dispose: disposeSecond, retry } = bindLocalContextReport(second);
     await nextTurn();
     resolveShell({ local_context_archive: false });
     await nextTurn();
     assert.equal(second.hidden, true, 'a non-WebView2 shell cannot expose archive reading');
+    retry();
+    await nextTurn();
+    assert.equal(probes, 2, 'and its no is final: the next showing of Logs asks nothing more');
     disposeSecond();
 });
 
@@ -69,7 +72,7 @@ test('the latest toast reflects the native answer; an unavailable answer has a k
             return reply;
         },
     } };
-    const dispose = bindLocalContextReport(mount);
+    const { dispose } = bindLocalContextReport(mount);
     await nextTurn();
     const button = mount.querySelector('button');
     await button.fire('click');
@@ -102,7 +105,7 @@ test('acknowledgements use the shared timeout and warnings do not start one', as
             shell_info: async () => ({ local_context_archive: true }),
             open_local_context_report: async () => reply,
         } };
-        const dispose = bindLocalContextReport(mount);
+        const { dispose } = bindLocalContextReport(mount);
         await nextTurn();
         const button = mount.querySelector('button');
         await button.fire('click');
@@ -126,7 +129,7 @@ test('acknowledgements use the shared timeout and warnings do not start one', as
 
 test('dispose detaches readiness and blocks late capability, detached clicks and pending open answers', async (t) => {
     const { mount, window, document } = setup(t);
-    const disposeWaiting = bindLocalContextReport(mount);
+    const { dispose: disposeWaiting } = bindLocalContextReport(mount);
     assert.equal(readyListeners(window), 1);
     disposeWaiting();
     disposeWaiting();
@@ -137,7 +140,7 @@ test('dispose detaches readiness and blocks late capability, detached clicks and
         shell_info: () => new Promise((resolve) => { resolveShell = resolve; }),
         open_local_context_report: () => { opens++; return new Promise((resolve) => { finishOpen = resolve; }); },
     } };
-    const dispose = bindLocalContextReport(mount);
+    const { dispose } = bindLocalContextReport(mount);
     const button = mount.querySelector('button');
     await nextTurn();
     dispose();
@@ -149,7 +152,7 @@ test('dispose detaches readiness and blocks late capability, detached clicks and
     assert.equal(opens, 0);
 
     const second = document.createElement('div');
-    const disposeSecond = bindLocalContextReport(second);
+    const { dispose: disposeSecond } = bindLocalContextReport(second);
     await nextTurn();
     resolveShell({ local_context_archive: true });
     await nextTurn();

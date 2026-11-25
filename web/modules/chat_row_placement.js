@@ -3,7 +3,8 @@
 // it says neither who speaks, nor whether the row stands alone, nor whether it ends that task.
 import { cardRowSummary as summarizeCardRow, isNonTerminalMediaHistoryRow, positiveTaskTerminalFact } from './chat_activity.js';
 import { normalizeLogTs } from './log_events.js';
-import { detachAnchoredCardRow, itemMatchesExactAnchor, mergeHistoricalTimelineItem, sortBySource } from './chat_history_replay.js';
+import { clearAnchoredCardRows, detachAnchoredCardRow, exactRowAnchor, itemMatchesExactAnchor,
+    mergeHistoricalTimelineItem, mountedLineAnchor, sortBySource } from './chat_history_replay.js';
 import { updateLiveTimelineItem } from './chat_render_batch.js';
 
 const taskKey = value => String(value || '').trim();
@@ -48,6 +49,44 @@ export function mergePlacedCardRow(record, msg, { phase }, rawTs, { anchor = nul
     });
     if (detached) sortBySource(record);
     return !['none', 'duplicate-skip'].includes(timelineUpdate);
+}
+
+// One room's exact work-card line and the temporary revisions it keeps mounted. The room owns
+// page changes and viewport writes; placed-row replay owns which older lines those changes retire.
+export function createPlacedCardAnchors({ repaint, updateCount, withStableViewport }) {
+    let anchor = null;
+    const anchoredRecords = new Set();
+
+    function drop(renderNow = false, keepAddress = '') {
+        for (const { record, removed } of clearAnchoredCardRows(anchoredRecords, keepAddress)) {
+            record._timelineDirty = true;
+            if (record.isSubagent && record.root?.dataset?.expanded !== '1' && record.timelineEl) {
+                const gone = new Set(removed.map((item) => item.lineKey));
+                for (const child of Array.from(record.timelineEl.children)) {
+                    if (gone.has(child.dataset?.liveLineKey)) child.remove();
+                }
+            } else if (renderNow) repaint(record);
+            updateCount(record);
+        }
+    }
+
+    return {
+        forget(record) { anchoredRecords.delete(record); },
+        merge(record, msg, placed, rawTs) { return mergePlacedCardRow(record, msg, placed, rawTs, { anchor, anchoredRecords }); },
+        beginPage(direction, target) {
+            if (!['recent', 'latest', 'around', 'revisit'].includes(direction)) return;
+            anchor = direction === 'around' ? exactRowAnchor(target) : null;
+            drop();
+        },
+        pin(address, node) {
+            anchor = mountedLineAnchor(address, node);
+            drop(true, anchor?.row_address);
+        },
+        toPresent() {
+            anchor = null;
+            if (anchoredRecords.size) withStableViewport(() => { drop(true); return true; });
+        },
+    };
 }
 
 // project_dialogue.ORIGIN_ADDRESSED_NOTICE_TYPES: a routing refusal names the task it

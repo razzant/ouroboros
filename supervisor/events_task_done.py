@@ -848,7 +848,7 @@ def _resolve_lifecycle_fault(
         ),
         "status": status,
         "wake_silent": stored.get("wake_silent") is True, **report, **work_label(stored, task_row),
-        **{key: stored[key] for key in ("wake_summary", "fold_read", "schedule_name")
+        **{key: stored[key] for key in ("wake_summary", "fold_read", "read_spans", "schedule_name")
            if stored.get(key) and not (report and key == "wake_summary")},
         "quiet_effective": quiet_finish(stored),
         "reason_code": str(stored.get("reason_code") or ""),
@@ -1121,7 +1121,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
         "wake_silent": known_result.get("wake_silent") is True, **report, **work_label(known_result, task),
-        **{key: known_result[key] for key in ("wake_summary", "fold_read", "schedule_name")
+        **{key: known_result[key] for key in ("wake_summary", "fold_read", "read_spans", "schedule_name")
            if known_result.get(key) and not (report and key == "wake_summary")},
         "quiet_effective": quiet_finish(known_result),
         # The direct-turn fact rides the rebuilt terminal so the chat block keys

@@ -7,7 +7,6 @@ import re
 import textwrap
 import time
 import urllib.parse
-from collections.abc import Callable
 
 import pytest
 
@@ -1336,13 +1335,27 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     return {part: _painted(frame.locator(node).evaluate(_LAYERS), outside, theme)
                             for part, node in (("headline", "#headline"), ("button", "label[for='report-file']"))}
 
-                def readable(theme: str, label: str, control_scheme: Callable[[], str] | None) -> str:
+                def readable(label: str, theme: str, *, follow_frame_media: bool = False) -> str:
+                    """The frame renders readable text for the app's own `theme` choice.
+
+                    `follow_frame_media`: WebKit does not pass the embedder's color scheme into a
+                    URL-loaded frame's media query, so that document renders by its own selected or
+                    ambient preference (the documented fallback) and its paint is judged against the
+                    media it actually reports.
+                    """
+
                     def sample() -> tuple[str, dict, dict]:
-                        expected = control_scheme() if control_scheme is not None else theme
                         host = report.evaluate("""iframe => ({choice: document.documentElement.dataset.themeChoice,
                             theme: document.documentElement.dataset.theme,
                             topPrefersLight: matchMedia('(prefers-color-scheme: light)').matches,
                             embeddingScheme: getComputedStyle(iframe).colorScheme})""")
+                        if follow_frame_media:
+                            # The URL document's own media choice, not the host page's, answers for what it
+                            # renders: selected (the manual switch) or ambient (the device) — the fallback.
+                            expected = frame.locator("html").evaluate(
+                                "() => matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'")
+                        else:
+                            expected = theme
                         return expected, host, painted(expected)
 
                     def right(expected: str, host: dict, seen: dict) -> bool:
@@ -1369,9 +1382,9 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
 
                 appearance = page.locator("html")
 
-                def check_theme(label: str, theme: str, *, control_scheme: Callable[[], str] | None = None) -> None:
+                def check_theme(label: str, theme: str, *, follow_frame_media: bool = False) -> None:
                     expect(appearance).to_have_attribute("data-theme", theme)
-                    settled = readable(theme, label, control_scheme)
+                    settled = readable(label, theme, follow_frame_media=follow_frame_media)
                     assert first in facts.text_content() and stored_body.text_content() == stored and rows.count() == 4
                     expect(frame.locator("#report-result")).to_be_visible()
                     shoot(f"{label}-device-{settled}" if settled != theme else label)
@@ -1384,32 +1397,16 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 ambient = "light" if page.evaluate("() => matchMedia('(prefers-color-scheme: light)').matches") else "dark"
                 expect(appearance).to_have_attribute("data-theme", ambient)  # Still System before either manual choice.
                 opposite = "dark" if ambient == "light" else "light"
-                # An independent opaque-origin frame, without the report or its styles. Change its embedder's CSS
-                # directly so a broken theme hookup in the product cannot select the fallback for us.
-                page.evaluate("""scheme => {
-                    const probe = document.createElement('iframe');
-                    probe.id = 'context-theme-probe';
-                    probe.setAttribute('sandbox', 'allow-scripts');
-                    probe.srcdoc = '<!doctype html><meta name="color-scheme" content="light dark"><body id="probe"></body>';
-                    Object.assign(probe.style, {position: 'fixed', left: '-10px', width: '1px', height: '1px', colorScheme: scheme});
-                    document.body.append(probe);
-                }""", ambient)
-                probe = page.locator("#context-theme-probe")
-                probe_body = page.frame_locator("#context-theme-probe").locator("#probe")
-                scheme_of = "() => matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'"
-                assert probe_body.evaluate(scheme_of) == ambient
                 for label, theme in (("4-manual-opposite", opposite), ("5-manual-return", ambient)):
                     # Same setter as Appearance, without leaving Widgets and replacing the open frame.
                     page.evaluate("(choice) => window.ouroTheme.set(choice)", theme)
                     expect(appearance).to_have_attribute("data-theme-choice", theme)
-                    shot = f"{label}-{theme}"
-                    if theme == opposite:
-                        assert probe.evaluate("(node, scheme) => { node.style.colorScheme = scheme; "
-                                              "return getComputedStyle(node).colorScheme; }", theme) == theme
-                        check_theme(shot, theme, control_scheme=lambda: probe_body.evaluate(scheme_of))
-                    else:
-                        check_theme(shot, theme)
-                probe.evaluate("node => node.remove()")
+                    # A manual switch is where the engines differ on the URL-loaded frame: Chromium passes the
+                    # embedder's color scheme into its media query (the manual palette), while WebKit leaves that
+                    # document on its own selected or ambient preference (the documented fallback), so only the
+                    # paint that follows the frame's measured media is judged there.
+                    follow = theme == opposite and browser_name == "webkit"
+                    check_theme(f"{label}-{theme}", theme, follow_frame_media=follow)
                 page.evaluate("() => window.ouroTheme.set('system')")
                 page.emulate_media(color_scheme="dark")
                 expect(page.locator("html")).to_have_attribute("data-theme", "dark")

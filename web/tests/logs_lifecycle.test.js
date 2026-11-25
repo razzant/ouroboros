@@ -14,8 +14,9 @@ const logUrl = (name) => `/api/logs/${name}?view=compact&limit=150`;
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const STREAMS = ['events', 'tools', 'progress', 'supervisor'];
 
-function mountLogs(t, { page = 'dashboard', history = {}, beforeLeave } = {}) {
+function mountLogs(t, { page = 'dashboard', history = {}, beforeLeave, bridge } = {}) {
     const fixture = setup(t);
+    if (bridge) fixture.window.pywebview = { api: bridge };  // the desktop shell is there before Logs binds
     for (const name of STREAMS) fixture.routes.set(logUrl(name), response({ entries: history[name] || [] }));
     const state = { activePage: page, dashboardActiveSubtab: 'logs' };
     const controls = initLogs({ mount: fixture.mount, ws: fixture.ws, state, setBeforePageLeave: beforeLeave });
@@ -512,4 +513,40 @@ test('Logs offers the native recent-requests action beside Clear only on a capab
     assert.equal(slot.hidden, true);
     assert.equal(slot.children.length, 0);
     assert.deepEqual(logs.toasts(), []);
+});
+
+test('a failed first read of the shell is asked again at the next real showing of Logs, one read at a time', async (t) => {
+    const reads = [];
+    let opens = 0;
+    const logs = mountLogs(t, { bridge: {
+        shell_info: () => new Promise((resolve, reject) => { reads.push({ resolve, reject }); }),
+        open_local_context_report: async () => { opens += 1; return { state: 'opened' }; },
+    } });
+    const slot = logs.mount.querySelector('[data-local-context-report]');
+    await settle();
+    assert.equal(reads.length, 1, 'the binding and the first showing share one read');
+    reads[0].reject(new Error('bridge not ready'));
+    await settle();
+    assert.equal(slot.hidden, true);
+
+    logs.state.activePage = 'settings';
+    logs.window.dispatchEvent({ type: 'ouro:page-shown' });  // Logs is not on screen: no showing
+    await settle();
+    assert.equal(reads.length, 1, 'a failed read is not polled');
+
+    logs.show();  // the next real showing asks again
+    await settle();
+    logs.show();  // while that read is pending nothing asks twice
+    await settle();
+    assert.equal(reads.length, 2);
+    assert.equal(slot.querySelectorAll('button').length, 1);
+    assert.equal(slot.hidden, true, 'hidden until the shell confirms');
+    reads[1].resolve({ local_context_archive: true });
+    await settle();
+    assert.equal(slot.hidden, false);
+    assert.equal(slot.querySelector('button').textContent, 'Open recent requests');
+    logs.show();
+    await settle();
+    assert.equal(reads.length, 2, 'an answer is final');
+    assert.equal(opens, 0, 'asking again is never a press');
 });

@@ -38,7 +38,7 @@ def test_beautiful_context_manifest_catalog_and_authorship(tmp_path):
     assert manifest.permissions == ["widget", "route"]
     assert requested_skill_permissions(manifest.permissions, manifest.subscribe_events) == []
     assert manifest.ui_tab == {
-        "id": "viewer",
+        "tab_id": "viewer",
         "title": "Beautiful Context",
         "render": {"kind": "iframe", "route": "viewer", "start": "auto", "height": 680, "span": 2},
     }

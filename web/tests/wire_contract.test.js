@@ -294,7 +294,7 @@ test('delivered photo, video, and document rows keep their replay wire fields', 
     // Replay draws every delivery row through the one table in chat_media.js, before final handling.
     const media = moduleFile('chat_media.js');
     assert.match(media, /const replayed = \{ document: appendDocumentBubble, links: appendLinksMessage, quiz: appendQuizMessage,\s+card: appendCardMessage, photo: appendMediaBubble, video: appendMediaBubble \};/);
-    const replay = chat.indexOf('if (appendDelivery(msg)) continue;');
+    const replay = chat.indexOf('if (appendDelivery(msg, requestedAt)) continue;');
     assert.ok(replay > 0 && replay < chat.indexOf('if (taskId && replayConcludesTask(msg))'), 'deliveries replay before final handling');
 });
 

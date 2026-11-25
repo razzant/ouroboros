@@ -112,7 +112,7 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
 
     const filtersDiv = page.querySelector('#log-filters');
     bindScrollFade(filtersDiv, { axis: 'x' });  // a phone's one scrolling line fades where chips hide
-    const disposeLocalReport = bindLocalContextReport(page.querySelector('[data-local-context-report]'));
+    const { dispose: disposeLocalReport, retry: retryLocalReport } = bindLocalContextReport(page.querySelector('[data-local-context-report]'));
     const logEntries = page.querySelector('#log-entries');
     const historyStatus = page.querySelector('.logs-history-status');
     const emptyLine = page.querySelector('[data-log-empty]');
@@ -612,6 +612,7 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
             if (backfillAbort) { backfillAbort.abort(); backfillAbort = null; backfillRevision += 1; backfillOwed = true; }
             return;
         }
+        retryLocalReport();  // a failed shell read is asked again at a real showing: no timer, no other subscription
         if (backfillOwed) void backfillRecentLogs();
         paint();
         // A page shown again starts at scrollTop 0 in WebKit (chat.js): the reader's place is set now.
