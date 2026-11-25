@@ -738,6 +738,9 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
             controls.extend({"action": "resume", "target": member["task_id"], "scope": "single"}
                             for member in members if member["activity"] == "paused" and member.get("resumable")
                             and member.get("stop", {}).get("scope") != "tree")
+        closes = {member["task_id"]: member["close_expired"] for member in members if member.get("close_expired")}
+        controls = [*closes.values(), *(control for control in controls  # Close replaces Resume; a granted Stop stays
+                                        if control["target"] not in closes or control["action"] != "resume")]
         work.update(kind="direct" if str(room_row.get("kind") or "") == "direct_chat" else "task",
                     project_id=str(room_row.get("project_id") or ""), since=_since(room_row), controls=controls)
         if presence_turn or (current_row or {}).get("kind") == "presence":

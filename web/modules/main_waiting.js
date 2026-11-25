@@ -11,10 +11,10 @@ import { createModelWaitController } from './model_wait.js';
 import { createPanicRecovery, panicCards } from './panic_recovery.js';
 import { readBand } from './project_read_state.js';
 import { projectReference, nameProjectReference } from './project_reference.js';
-import { createTaskResumeButton, openTaskControlMenu, requestStop, hurryTaskAction, resumeEligible, resumePending,
+import { closeExpiredOffer, createTaskCloseButton, createTaskResumeButton, openTaskControlMenu, requestStop, hurryTaskAction, resumeEligible, resumePending,
     resumeTaskAction, ACTION_RESUME, ACTION_HURRY, TASK_CONTROL_TRIGGER_LABEL } from './task_control_menu.js';
 import { syncParkedPhase } from './task_phase_chip.js';
-import { memberState, reasonText, resumeAttemptWords, workOfEpisode } from './work_status.js';
+import { indexDeadlineExpired, memberState, reasonText, resumeAttemptWords, workLine, workOfEpisode } from './work_status.js';
 import { ANSWERABLE_QUIZ_STATES, questionWaits, unknownDeliveryRemovable, vouchedBy } from './question_presentation.js';
 import { createSystemMessageActions } from './ui_helpers.js';
 import { showToast } from './toast.js';
@@ -31,6 +31,7 @@ const SETTLED = ['answered', 'closed', 'superseded'];
 const waitsAnswer = row => ANSWERABLE_QUIZ_STATES.includes(row.quiz_state);
 const waitsOwner = questionWaits;  // the one rule the rooms' amber follows too (question_presentation.js)
 const rowKey = row => `${row.task_id}:${row.quiz_id}`;
+let nameSeq = 0;
 const REASONS = { budget: 'Paused at the spending limit. Change the limit if needed, then Resume.',
     restart: 'Needs Resume after the restart.', resume: 'Needs an explicit Resume.',
     model_access: 'Needs you to restore model access.' };
@@ -132,7 +133,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
     }
 
     const canResume = record => connected && record.available && records.get(record.groupId) === record
-        && record.row.can_resume === true && record.row.pause_cause !== 'owner';
+        && record.row.can_resume === true && record.row.pause_cause !== 'owner' && !record.expired;
 
     function paint(record, row) {
         if (record.reference && record.row.project_id !== row.project_id) {
@@ -140,15 +141,34 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
             record.reference = null;
         }
         record.row = row;
+        const close = closeExpiredOffer(row.close_expired, record.groupId);
+        // The status (deadline passed) and the offer (Close) are separate facts; either way nothing waits on the owner.
+        const expired = Boolean(close) || row.deadline_expired === true || row.attention_reason === 'deadline_expired';
+        record.expired = expired;
+        // A distinct request on the same task (a sign-in or model access it waits for) still needs the owner.
+        record.ownerMove = !expired || Object.keys(row.model_waits || {}).length > 0 || row.attention_reason === 'model_access';
+        if (record.close && record.close.offer !== close) { record.close.remove(); record.close = null; }
+        if (close && !record.close) {
+            record.title.id ||= `owner-action-name-${nameSeq += 1}`;
+            record.close = createTaskCloseButton(record.groupId, { onSettled: refresh, nameId: record.title.id,
+                tokenNow: () => connected && record.available && closeExpiredOffer(record.row.close_expired, record.groupId) === close ? close : '',
+            });
+            record.close.offer = close;
+            record.controls.append(record.close);
+        }
+        if (record.close) record.close.disabled = !connected || !record.available;
         record.title.textContent = row.suggested_name || row.task_name || row.title || row.project_name || tx('Task');
         // What it needs, then its latest refused Resume as dated history in the door's words (never a second message).
         const attempt = resumeAttemptWords(row.last_resume);
         // A named stop explains the button. A plain Resume needs no second instruction.
-        const needs = row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? reasonText(row.resumeReason)
-            : tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
-        // A wake held at its daily share: what its Resume beside these words may add, an estimate until the press.
-        const room = row.wakeRoom ? `${row.wakeRoom}.` : '';
-        record.reason.textContent = [needs, room, attempt && (/[.!?…]$/.test(attempt) ? attempt : `${attempt}.`)].filter(Boolean).join(' ');
+        // Past its deadline the pause keeps its dated author (the work line's own words), never a wait for Resume.
+        const needs = expired && row.attention_reason !== 'model_access' ? row.expiredLine || ''
+            : row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? reasonText(row.resumeReason)
+                : tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
+        const head = needs && attempt && !/[.!?…]$/.test(needs) ? `${needs}.` : needs;
+        // Only a wake that can still Resume has a prospective allowance.
+        const room = !expired && row.wakeRoom ? `${row.wakeRoom}.` : '';
+        record.reason.textContent = [head, room, attempt && (/[.!?…]$/.test(attempt) ? attempt : `${attempt}.`)].filter(Boolean).join(' ');
         record.reason.hidden = !record.reason.textContent;
         if (row.project_id) {
             const project = { id: row.project_id, name: row.project_name };
@@ -162,7 +182,8 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         // place: its Project reference leads to no room until a census names it again.
         if (record.reference) record.reference.disabled = !record.available;
         syncParkedPhase(record, connected ? row.phase : 'unknown', row);
-        if (canResume(record) && !record.resume) {
+        if (expired && record.resume) { record.resume.remove(); record.resume = null; }
+        if (canResume(record) && !record.resume && !expired) {
             record.resume = createTaskResumeButton(record.groupId, { canResume: () => canResume(record), onSettled: refresh });
             record.controls.append(record.resume);
         }
@@ -172,13 +193,15 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
             // taken before a press still names the task resumable until the read that follows the press says otherwise.
             record.resume.disabled = !resumeEligible(record.groupId, () => canResume(record));
         }
+        // A Stop an earlier read granted leaves with that grant once the deadline has passed; it never lingers disabled.
+        if (expired && row.cancelable !== true && record.stop) { record.stop.remove(); record.stop = null; }
         if (row.cancelable === true && !record.stop) {
             record.stop = stopControl(record.groupId, { row: () => record.row,
                 allowed: () => connected && record.available && record.row.cancelable === true,
                 // Resume rides the menu where the server allows it and no Resume button of its own stands beside it
                 // (an interrupted owner Resume of a member), and nothing of the task is pending — a request of its
                 // own, or the read that reconciles a Resume it just answered.
-                resume: () => record.row.can_resume === true && !canResume(record) && !resumePending(record.groupId) });
+                resume: () => record.row.can_resume === true && !record.expired && !canResume(record) && !resumePending(record.groupId) });
             record.controls.append(record.stop);
         }
         if (record.stop) record.stop.disabled = !connected || !record.available || row.cancelable !== true;
@@ -206,7 +229,8 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
     // Question rows carry ISO times, feed nodes epoch milliseconds: both order as milliseconds.
     function targets() {
         const list = questions.filter(stillWaits).map(row => ({ kind: 'question', row, at: Date.parse(row.ts || '') || 0 }));
-        for (const [id, record] of records) list.push({ kind: 'action', id, row: record.row, at: Number(record.bubble.dataset.ts) || 0 });
+        // A card that only offers Close (its deadline passed) needs nothing from the owner: it is never counted as waiting.
+        for (const [id, record] of records) if (record.ownerMove !== false) list.push({ kind: 'action', id, row: record.row, at: Number(record.bubble.dataset.ts) || 0 });
         const stopped = panic.target();  // the Panic choice is one action, however many works it names
         if (stopped) list.push({ kind: 'panic', id: '', row: {}, at: stopped.at });
         return list.sort((a, b) => a.at - b.at || identity(a).localeCompare(identity(b)));
@@ -331,6 +355,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
             // unreadable, or a row without its hold) leaves its card as the owner's only door here.
             const panicCovered = panicCards(data);
             const wake = heldWakeRoom(data);
+            const expiredIds = indexDeadlineExpired(data);
             mutate(() => {
                 const current = new Set();
                 for (const action of actions) {
@@ -339,8 +364,15 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
                     current.add(id);
                     // The same body's work projection says the task's latest refused Resume (`last_resume`).
                     const member = memberState(data, id);
-                    const row = { ...action, last_resume: member?.last_resume || workOfEpisode(data, id)?.last_resume || action.last_resume,
-                        resumeReason: !action.project_id ? member?.because?.[0] : null, wakeRoom: wake?.taskId === id ? wake.words : '' };
+                    const work = workOfEpisode(data, id);
+                    const source = member || work;
+                    const late = expiredIds.has(id);
+                    const row = { ...action, deadline_expired: action.deadline_expired === true || late,
+                        // Omit `last_resume` from `expiredLine`: `paint` appends the full dated refusal words once.
+                        ...(late && source ? { expiredLine: workLine({ ...source, last_resume: undefined }) } : {}),
+                        last_resume: member?.last_resume || work?.last_resume || action.last_resume,
+                        resumeReason: !action.project_id ? member?.because?.[0] : null,
+                        wakeRoom: wake?.taskId === id ? wake.words : '' };
                     const record = recordFor(row);
                     record.available = true;
                     paint(record, row);

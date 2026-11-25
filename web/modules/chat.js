@@ -24,7 +24,7 @@ import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
 import { SERVER_ANSWERS_EVENT } from './ws.js';
 import { disposeCardModel, followCardCatalogue } from './card_model.js';
-import { applyCardWorkViews, cardControls, changedOffers, emptyWorkState, memberActivityEvidenced, noteControlQueue, ownStopPress, promoteChildCard, reconcileWorkState, roomStatusView, syncCardControls } from './work_status.js';
+import { applyCardWorkViews, cardControls, changedOffers, emptyWorkState, memberActivityEvidenced, memberState, noteControlQueue, ownStopPress, promoteChildCard, reconcileWorkState, roomStatusView, syncCardControls } from './work_status.js';
 import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
 import { createHostStart } from './host_starting_status.js';
@@ -828,8 +828,8 @@ export function createChatInstance({
         groupId: record.groupId, isSubagent: record.isSubagent, finished: record.finished,
         cancelable: !record.historicalUnavailable && !record.historicalUnconfirmed && (isPortal(record)
             ? work === null && activity?.cancelable === true
-            : cancelableTaskIds.has(record.groupId) || activity?.cancelable === true
-                || activity && activity.kind !== 'direct_chat' && blockHasWork(record)),
+            : activity?.cancelable !== false && (cancelableTaskIds.has(record.groupId) || activity?.cancelable === true
+                || activity && activity.kind !== 'direct_chat' && blockHasWork(record))),
     });
 
     function cardOffer(record) {
@@ -840,8 +840,12 @@ export function createChatInstance({
         const stopOnly = attempt < Math.max(record.controlQueueAttempt ?? 0, record.cardAttempt ?? 0);
         const work = portal ? portals.workOf(record) : stopOnly ? null : undefined;
         const activity = stopOnly ? null : currentActivity(record);
-        return { ...cardControls(workState, record.groupId, work, portal), activity, stopOnly,
-            legacy: stopEligible(record, activity, work), episode: record.controlEpisode,
+        const offered = cardControls(workState, record.groupId, work, portal);
+        const memberClose = record.isSubagent && !record.finished && !stopOnly && !workState.memberReadFailed
+            ? memberState(workState, record.groupId)?.close_expired : null;
+        const close = offered.close || (memberClose?.target === record.groupId ? memberClose.close_expired : '');
+        return { ...offered, close, activity, stopOnly,
+            legacy: !offered.work && stopEligible(record, activity, work), episode: record.controlEpisode,
             scope: portal ? record.root.dataset.projectId : '' };
     }
 

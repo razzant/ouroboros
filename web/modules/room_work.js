@@ -26,10 +26,10 @@ import { questionPresentation, questionWords } from './question_presentation.js'
 import { taskCancelPending } from './log_events.js';
 import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
-import { closeTaskControlMenu, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
+import { closeTaskControlMenu, createTaskCloseButton, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
 import {
-    OUTCOME_TONES, amberNote, behindWords, clock, openWorkControls, resumeAttemptWords, workControls, workMenuActions,
-    workQuestion, workRowView,
+    OUTCOME_TONES, amberNote, behindWords, clock, openWorkControls, resumeAttemptWords, workCloseOffer, workControls,
+    workMenuActions, workQuestion, workRowView,
 } from './work_status.js';
 import { showToast } from './toast.js';
 import { errorWords } from './ui_primitives.js';
@@ -481,6 +481,7 @@ export function createRoomWork({
         // main: the row's one primary target, the way to its card or (no card loaded) its details
         const main = element('div', 'rw-main');
         const nameEl = element('span', 'rw-name');
+        nameEl.id = `${uid}-name-${(detailSequence + 1)}`;
         const state = element('span', 'rw-state');
         const mark = createStatusMark(doc);
         const word = element('span', 'rw-word');
@@ -643,6 +644,24 @@ export function createRoomWork({
         }
         // Resume stands only where the work's own Resume control names its exact target.
         const wantResume = row.settled ? '' : row.resume;
+        // Close stands only where the work's own Close names this row's exact episode, found among all its controls
+        // (a Stop for the same task may come first): a helper's Close sits on that helper's own card and Activity row.
+        const closeNow = (current) => (currentControls(current) ? workCloseOffer(workOf(current.id), current.episode) : '');
+        const wantClose = row.settled ? '' : closeNow(row);
+        if (view.close && (view.close.offer !== wantClose || view.close.targetId !== row.episode)) {
+            keepFocus(view.close); view.close.remove(); view.close = null;
+        }
+        if (wantClose && !view.close) {
+            const button = createTaskCloseButton(row.episode, { onSettled: refresh, nameId: view.nameEl.id,
+                tokenNow: () => (closeNow(view.row) === wantClose && view.row.episode === row.episode ? wantClose : ''),
+            });
+            button.offer = wantClose;
+            button.targetId = row.episode;
+            // The same neutral capsule as Resume beside it: closing a tail is not urgent.
+            button.classList.add('rw-action', 'rw-pill', 'rw-pill-resume');
+            view.close = button;
+            view.verb.append(button);
+        }
         if (view.resume && view.resumeTarget !== wantResume) {
             keepFocus(view.resume);
             view.resume.remove();
@@ -693,7 +712,7 @@ export function createRoomWork({
         }
         if (view.more) view.more.dataset.id = row.episode;  // Pause reads its exact target here, never the nearest card
         view.more?.setAttribute('aria-label', fmt('Task actions: {name}', { name: full }));
-        view.el.dataset.verb = view.question ? 'question' : view.resume ? 'resume' : '';
+        view.el.dataset.verb = view.question ? 'question' : (view.resume || view.close) ? 'resume' : '';
     }
 
     // The work's current controls, only while the list is shown over a live connection and the projection still

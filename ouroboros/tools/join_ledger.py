@@ -738,7 +738,11 @@ def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "", accept_
     )
 
 
-def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_id: str = "") -> str:
+_NO_CLOSE = object()
+
+
+def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_id: str = "",
+                 close_expired: Any = _NO_CLOSE) -> str:
     from supervisor.followup_policy import StopActionConflict
     try:
         tid = validate_task_id(task_id)
@@ -752,10 +756,17 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_i
     reason_text = " ".join(str(reason or "").split())
     reason_preview = _clip(reason_text, 500)
     status_drive_root = _status_drive_root(ctx)
-    # Only stamp the join-ledger parent_decision (+ post to the tree ledger) when the
-    # target is THIS task's own child — a cancel must not rewrite an unrelated task's
-    # parent_decision and hide it from its real parent's reminder (D#7 safety).
     own = _is_own_child(ctx, status_drive_root, tid)
+    if close_expired is not _NO_CLOSE and close_expired is not None:  # null is an unused optional, not a Close
+        from ouroboros.parked_deadline import record_parent_close
+        from ouroboros.tools.control import _emit_control_event
+
+        words, recorded = record_parent_close(status_drive_root, tid, close_expired, stop_action_id=stop_action_id,
+                                              requester=str(getattr(ctx, "task_id", "") or "") if own else "")
+        if recorded:  # the durable request survives a lost or coalesced event: the watchdog re-feeds it
+            _emit_control_event(ctx, {"type": "cancel_task", "task_id": tid, "requested_task_id": tid,
+                                      "reason": "the deadline expired", "ts": utc_now_iso()})
+        return words
     # Subagent isolation: a delegated child may cancel only its own children.
     # Project focus does not narrow an ordinary top-level principal; workspace
     # parents keep the same task-control authority as other top-level tasks.
@@ -943,11 +954,13 @@ def get_tools() -> list[ToolEntry]:
                            "(use discard_child_result for that). Delegated children may target only "
                            "their own children. Give a short reason — it is recorded on the shared "
                            "task-tree ledger, so a stopped child is an auditable decision, not a "
-                           "silent disappearance.",
+                           "silent disappearance. An exact close_expired offer closes only that saved park of your own "
+                           "direct child; it never becomes an ordinary Stop if the offer changed.",
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"},
                 "reason": {"type": "string", "default": "", "description": "Why you are stopping it (recorded for the tree + review)."},
                 "stop_action_id": {"type": "string", "maxLength": 200, "description": "Stable ID for this Stop action: reuse after an uncertain response; use a new ID for a later intended Stop. Omission preserves legacy behavior without exact-retry deduplication."},
+                "close_expired": {"type": "string", "description": "Exact offer from the host's deadline reminder. Do not omit it to retry a refused Close."},
             }, "required": ["task_id"]},
         }, _cancel_task),
         ToolEntry("peek_task", {

@@ -124,12 +124,11 @@ def _is_child(row: Dict[str, Any]) -> bool:
 def _parked_for_resume(row: Dict[str, Any], fences: Dict[str, Any]) -> bool:
     """A queued row whose only way on is an explicit Resume nobody has accepted; every unknown fact answers False."""
     from ouroboros.budget_pause import STATE_RESUME_GRANTED, budget_pause_row
-    from ouroboros.work_stop import SELECTION_KEY, pause_marker, queue_control
+    from ouroboros.parked_deadline import accepted_handoff
+    from ouroboros.work_stop import queue_control
 
     q, task_id = _queue(), str(row.get("id") or "")
-    # An accepted Resume's carrier lifts the stop it answered; under a standing pause marker a newer Pause spent it.
-    if not pause_marker(row) and (isinstance(row.get("_budget_pause_resume"), dict)
-                                  or isinstance(row.get(SELECTION_KEY), dict)):
+    if accepted_handoff(row):  # the one spent-versus-live grant reading, shared with the deadline's Close
         return False
     try:
         control = queue_control(q.DRIVE_ROOT, row, fences)
@@ -366,10 +365,10 @@ def _capture_workspace(q: Any, task: Dict[str, Any], task_id: str) -> str:
 
 
 def prepare_closure(q: Any, task_id: str, task: Dict[str, Any], intent: Optional[Dict[str, Any]], awaiting: Any,
-                    cost_fields: Dict[str, Any]) -> Union[None, str, Dict[str, Any]]:
+                    cost_fields: Dict[str, Any], *, exact: Any = None) -> Union[None, str, Dict[str, Any]]:
     """``None`` for any other cancel; this closure's verdict when it ended here; else what its one cancelled write adds,
     with the ``last_word`` that write must pass (``refused`` then says so)."""
-    if not closes_only_parked_row(intent) or awaiting is not None:
+    if exact is None and (not closes_only_parked_row(intent) or awaiting is not None):
         return None
     from ouroboros.budget_pause import STATE_RESUME_GRANTED
     from ouroboros.cancel_intents import _validated_single_cancel_target, claim_still_owned
@@ -386,6 +385,7 @@ def prepare_closure(q: Any, task_id: str, task: Dict[str, Any], intent: Optional
     from supervisor.task_lifecycle import SETTLED_ALREADY, _release_intent_claim, _restore_custody, _settle_intent
 
     root = pathlib.Path(q.DRIVE_ROOT)
+    verify = exact["verify"] if exact is not None else lambda: _still_abandoned(q, root, task)
 
     def give_back(error: str) -> str:
         _restore_custody(task_id, pending=task)
@@ -394,6 +394,8 @@ def prepare_closure(q: Any, task_id: str, task: Dict[str, Any], intent: Optional
 
     def withdraw() -> str:
         _restore_custody(task_id, pending=task)
+        if exact is not None:
+            return exact["withdraw"]()
         try:
             current = withdraw_closure(root, task_id, intent, "no longer abandoned")
         except Exception:
@@ -403,7 +405,7 @@ def prepare_closure(q: Any, task_id: str, task: Dict[str, Any], intent: Optional
             return CANCEL_NOT_FOUND
         return give_back("a Stop or cascade joined the closure" if current else "closure withdrawal unresolved")
 
-    if not _still_abandoned(q, root, task):  # a Resume, the work's Pause or retry, or a stop that is not ours got here first
+    if not verify():  # a Resume, the work's Pause or retry, or a stop that is not ours got here first
         return withdraw()
     try:
         stored = load_task_result(root, task_id, strict=True) or {}
@@ -420,19 +422,30 @@ def prepare_closure(q: Any, task_id: str, task: Dict[str, Any], intent: Optional
                 # the watchdog, whose next pass completes the same publication.
                 raise RuntimeError("terminal file publication is still pending")
         if terminal_task_files_ready(root, task, stored):  # it finished by itself: that result and its event stand
-            _settle_intent(q, task_id, outcome=SETTLED_ALREADY, detail=str(stored["status"]), intent=intent)
+            # An exact park Close tells its requester before the intent retires; unconfirmed keeps the request,
+            # whose replay reads the same kept result (``expired_park_close._kept_alone``).
+            told = exact is None or exact.get("announce", lambda _outcome: True)(CANCEL_ALREADY_SETTLED)
+            if told:
+                _settle_intent(q, task_id, outcome=SETTLED_ALREADY, detail=str(stored["status"]), intent=intent)
             q._emit_cancel_task_done(task, task_id, cost_fields=cost_fields, status=str(stored["status"]))
             q.persist_queue_snapshot(reason="cancel_pending")
-            return CANCEL_ALREADY_SETTLED
+            return CANCEL_ALREADY_SETTLED if told else CANCEL_FAILED
         note, _text, _path = _salvage_cancelled_output(q, task, task_id)
         captured = _capture_workspace(q, task, task_id)
     except Exception:
         log.warning("Closing %s with its ended work did not finish; it stays parked", task_id, exc_info=True)
         return give_back("closure capture failed")
-    if not _still_abandoned(q, root, task):  # those captures take time
+    if not verify():  # those captures take time
         return withdraw()
     if not claim_still_owned(root, task_id, intent or {}):
         return give_back("claim lost before terminal write")
+    if exact is not None:
+        return {"result": f"Closed: the deadline expired.{note}", "detail": "expired deadline closed",
+                "last_word": exact["last_word"], "commit_guard": exact["commit_guard"],
+                "refused": exact["refused"], "withdraw": withdraw,
+                "lineage": stored_helper_lineage(task), "cancel_fields": {"artifact_capture": captured,
+                    "pause_at_close": {**{key: task[key] for key in _PAUSE_FIELDS if isinstance(task.get(key), dict)},
+                                       "deadline_close": exact["group"], "close_token": exact["token"]}}}
     root_id = str(task.get("root_task_id") or "")
     try:
         leaf_id = _validated_single_cancel_target(root, root_id)

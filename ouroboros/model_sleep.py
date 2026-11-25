@@ -515,7 +515,7 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
             continue  # context only: unread, the next drain delivers it
         attention = entry.get("work_attention")
         attention = attention if isinstance(attention, dict) else {}
-        if (entry.get("provenance") == "system" and attention.get("kind") == "silence"
+        if (entry.get("provenance") == "system" and attention.get("kind") in {"silence", "deadline_expired"}
                 and attention.get("task_id") == source and attention.get("episode_id")
                 and attention.get("waiting_for_task_id") in chosen.get("tasks", [])):
             return f"work_attention:{source}"

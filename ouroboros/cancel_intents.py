@@ -186,12 +186,59 @@ def _load_intents(data: Dict[str, Any], *, strict: bool = False) -> Dict[str, An
     stay fail-soft (``active_intents``)."""
     intents = data.get("intents")
     if isinstance(intents, dict):
-        return intents
+        return _physical_intents(intents)
     if strict and intents is not None:
         raise ValueError(
             "cancel-intent projection 'intents' is malformed (not an object)"
         )
     return {}
+
+
+PARKED_CLOSE_SOURCE = "deadline_close"
+_CLOSE_KEY = "park-close:"
+
+
+def conditional_park_close(row: Any) -> bool:
+    return isinstance(row, dict) and row.get("source") == PARKED_CLOSE_SOURCE and not row.get("followup_stop")
+
+
+def _physical_intents(intents: dict) -> dict:
+    """Old bodies reject reserved keys as invalid task ids; they cannot replay Close as Stop.
+
+    An older body may mint an ordinary Stop beside a reserved Close: the explicitly authorized Stop
+    supersedes that Close, and the next write drops the Close row."""
+    decoded, reserved = {}, set()
+    for key, row in intents.items():
+        physical = key.removeprefix(_CLOSE_KEY)
+        if physical != key and (not conditional_park_close(row) or row.get("task_id") != physical):
+            raise ValueError("parked Close is not bound to its own physical task")
+        if physical in decoded:
+            if (physical in reserved) == (physical != key):
+                raise ValueError("more than one cancel intent for a physical task")
+            if physical != key:
+                continue  # the ordinary Stop already read wins
+        decoded[physical] = row
+        if physical != key:
+            reserved.add(physical)
+        else:
+            reserved.discard(physical)
+    return decoded
+
+
+def _encode_intents(intents: dict) -> dict:
+    return {"schema_version": _SCHEMA_VERSION, "intents": {
+        _CLOSE_KEY + key if conditional_park_close(row) else key: row for key, row in intents.items()}}
+
+
+def _close_replaced(close: dict, stop_fields: dict, *, source: str, reason: str, requested_by: str, scope: str,
+                    observed: Optional[Dict[str, Any]], policy: str) -> dict:
+    """Any ordinary Stop is its own authority: it replaces a pending Close whole (its source, scope and policy),
+    keeping only the claim, so the Close driver's last word refuses and the Stop drives."""
+    row = {key: value for key, value in close.items() if key not in {"parked_close", "observation", "stop_policy"}}
+    row.update(stop_fields, source=source, reason=reason, requested_by=requested_by, scope=scope or SCOPE_SINGLE,
+               **({"observation": observed} if observed is not None else {}),
+               **({"stop_policy": STOP_POLICY_FINALIZE} if policy == STOP_POLICY_FINALIZE else {}))
+    return row
 
 
 def settled_status(drive_root: Any, task_id: str) -> str:
@@ -358,6 +405,7 @@ def request_cancel(
     requested_stop_policy: str = "",
     observation: Optional[Dict[str, Any]] = None,
     stop_action_id: str = "",
+    parked_close: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Record cancel custody, keeping action identity separate from request_id.
 
@@ -408,7 +456,11 @@ def request_cancel(
         # on the leaf (Stop-now must harden the same owner request).  Do not
         # infer a new logical cascade: only an already-present, validated
         # cascade row is eligible for this reverse alias.
-        if not (
+        if parked_close is not None:
+            if requested_existing:  # the same offer joins its open Close; anything else is another request (no write)
+                return minted.update(requested_existing, already_requested=True, close_conflict=not conditional_park_close(
+                    requested_existing) or requested_existing["parked_close"].get("token") != parked_close.get("token"))
+        elif not (
             isinstance(requested_existing, dict)
             and requested_existing.get("request_id")
         ):
@@ -433,7 +485,9 @@ def request_cancel(
             ):
                 target_id = retry_root_id
                 requested_existing = retry_root_existing
-        if (
+        if parked_close is not None:  # this variant names one physical record and is never redirected
+            pass
+        elif (
             not (
                 isinstance(requested_existing, dict)
                 and requested_existing.get("request_id")
@@ -486,6 +540,9 @@ def request_cancel(
                 f"task-result authority is unreadable for {target_id}"
             ) from exc
         target_status = str(target_result.get("status") or "")
+        if parked_close is not None and not target_result:
+            minted.update(task_id=target_id, close_conflict=True)
+            return None
         resolved["status"] = target_status if target_status in SETTLED_STATUSES else ""
         stop_fields, replayed = new_stop_fields(source,
             previous=(existing or {}).get("followup_stop") or target_result.get("followup_stop"),
@@ -522,6 +579,11 @@ def request_cancel(
             updated_row = dict(existing)
             changed = rekeyed or bool(stop_fields)
             updated_row.update(stop_fields)
+            if conditional_park_close(existing):  # any ordinary Stop replaces a pending Close (``_close_replaced``)
+                updated_row = existing = _close_replaced(existing, stop_fields, source=source, reason=reason_text,
+                    requested_by=requested_by, scope=scope_text, observed=observed, policy=policy_text)
+                minted.pop("parked_close", None)
+                minted["already_requested"], changed = False, True
             if rekeyed and isinstance(updated_row.get("observation"), dict):
                 updated_row["observation"] = {**updated_row["observation"],
                     "matches_cancel_target": updated_row["observation"].get("observed_task_id") == target_id}
@@ -548,7 +610,7 @@ def request_cancel(
             if changed:
                 intents[target_id] = updated_row
                 minted.update(updated_row)
-                return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+                return _encode_intents(intents)
             return None
         row = {
             "request_id": f"ci_{uuid.uuid4().hex[:12]}",
@@ -562,13 +624,14 @@ def request_cancel(
             "scope": scope_text or SCOPE_SINGLE,
             **stop_fields,
             **({"observation": observed} if observed is not None else {}),
+            **({"parked_close": copy.deepcopy(parked_close)} if parked_close is not None else {}),
         }
         if policy_text == STOP_POLICY_FINALIZE:
             row["stop_policy"] = STOP_POLICY_FINALIZE
         intents[target_id] = row
         minted.update(row)
         minted["already_requested"] = False
-        return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+        return _encode_intents(intents)
 
     try:
         # GR3-9 strict read: a malformed projection file must REFUSE the mutation
@@ -587,14 +650,7 @@ def request_cancel(
         )
         raise
     except ValueError as exc:
-        _forensic(drive_root, {
-            "event": "projection_corrupt_refused", "task_id": tid,
-            "op": "request_cancel", "error": str(exc)[:200],
-        })
-        log.error(
-            "cancel-intent projection is corrupt; refusing to record intent for %s", tid,
-        )
-        raise CancelIntentProjectionCorrupt(str(exc)) from exc
+        raise _refuse_corrupt(drive_root, tid, "request_cancel", exc) from exc
     if minted.get("already_settled"):
         _forensic(drive_root, {
             "event": "already_settled",
@@ -676,7 +732,7 @@ def mark_finalize_control_drained(
             return None  # first drain wins: the stamp is immutable
         intents[tid] = {**row, "control_drained_at": stamp}
         recorded.update(intents[tid])
-        return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+        return _encode_intents(intents)
 
     try:
         update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
@@ -736,7 +792,7 @@ def mark_intent_scope(drive_root: Any, task_id: str, scope: str) -> bool:
             return None
         intents[tid] = {**row, "scope": scope_text}
         changed["value"] = True
-        return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+        return _encode_intents(intents)
 
     try:
         update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
@@ -758,7 +814,7 @@ def mark_intent_scope(drive_root: Any, task_id: str, scope: str) -> bool:
 
 
 def active_intents(
-    drive_root: Any, *, disclose_corruption: bool = False, strict: bool = False,
+    drive_root: Any, *, disclose_corruption: bool = False, strict: bool = False, include_close: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """All active intents keyed by task id (a private copy; read-only callers).
 
@@ -771,14 +827,18 @@ def active_intents(
     enforcement is degraded) before the read still returns ``{}`` — fail-soft
     read, fail-closed write.
     """
-    return read_active_intents(drive_root, disclose_corruption=disclose_corruption, strict=strict)[0]
+    return read_active_intents(drive_root, disclose_corruption=disclose_corruption, strict=strict,
+                               include_close=include_close)[0]
 
 
 def read_active_intents(
-    drive_root: Any, *, disclose_corruption: bool = False, strict: bool = False,
+    drive_root: Any, *, disclose_corruption: bool = False, strict: bool = False, include_close: bool = False,
 ) -> Tuple[Dict[str, Dict[str, Any]], Optional[List[str]]]:
     """``active_intents`` and, from the same one read, the task ids it could not see: the quarantined
-    malformed rows, or ``None`` when the projection itself is unreadable (every row unseen)."""
+    malformed rows, or ``None`` when the projection itself is unreadable (every row unseen).
+
+    A pending parked Close (``conditional_park_close``) is no Stop: it is read only with ``include_close``
+    (its own driver, the watchdog sweep and the deadline reaper), never by a live Stop reader."""
     path = _intents_path_read(drive_root)
     if not path.is_file():
         return {}, []
@@ -842,7 +902,7 @@ def read_active_intents(
     return {
         str(tid): dict(row)
         for tid, row in intents.items()
-        if isinstance(row, dict)
+        if isinstance(row, dict) and (include_close or not conditional_park_close(row))
     }, malformed
 
 
@@ -868,7 +928,7 @@ def _malformed_row_memo_key(drive_root: Any, task_id: str, row: Any) -> str:
 
 
 def active_intent(
-    drive_root: Any, task_id: str, *, strict: bool = False,
+    drive_root: Any, task_id: str, *, strict: bool = False, include_close: bool = False,
 ) -> Optional[Dict[str, Any]]:
     try:
         tid = _valid_task_id(task_id)
@@ -876,7 +936,7 @@ def active_intent(
         if strict:
             raise
         return None
-    row = active_intents(drive_root, strict=strict).get(tid)
+    row = active_intents(drive_root, strict=strict, include_close=include_close).get(tid)
     return dict(row) if isinstance(row, dict) else None
 
 
@@ -934,7 +994,8 @@ def has_active_intent(drive_root: Any, task_id: str, *, strict: bool = False) ->
     return active_intent(drive_root, task_id, strict=strict) is not None
 
 
-def claim_intent(drive_root: Any, task_id: str, *, owner: str) -> Optional[Dict[str, Any]]:
+def claim_intent(drive_root: Any, task_id: str, *, owner: str,
+                 only_if: Optional[Callable[[Dict[str, Any]], bool]] = None) -> Optional[Dict[str, Any]]:
     """Mark the intent claimed by one custody attempt; bumps the generation.
 
     EXCLUSIVE while the holder is alive: a LIVE claim is never stolen, because a
@@ -948,7 +1009,9 @@ def claim_intent(drive_root: Any, task_id: str, *, owner: str) -> Optional[Dict[
     An ABANDONED claim (its process is gone, or it aged past ``CLAIM_STALE_SEC``)
     is taken over and the generation is bumped, which is exactly what makes the
     old holder's late ``settle``/``release`` a no-op (see ``expected_generation``).
-    Returns None when no active intent exists.
+    Returns None when no active intent exists, or when ``only_if`` rejects the
+    current row in this same write: an exact parked Close takes no claim of an
+    ordinary Stop that replaced it (``_close_replaced`` keeps its request id).
     """
     try:
         tid = _valid_task_id(task_id)
@@ -969,7 +1032,7 @@ def claim_intent(drive_root: Any, task_id: str, *, owner: str) -> Optional[Dict[
                 f"malformed intent row(s): {', '.join(malformed[:5])}"
             )
         row = intents.get(tid)
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or only_if is not None and not only_if(dict(row)):
             return None
         if row.get("state") == INTENT_CLAIMED and not claim_is_abandoned(row):
             refused.update(row)
@@ -982,7 +1045,7 @@ def claim_intent(drive_root: Any, task_id: str, *, owner: str) -> Optional[Dict[
         row["generation"] = int(row.get("generation") or 0) + 1
         intents[tid] = row
         claimed.update(row)
-        return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+        return _encode_intents(intents)
 
     # Claiming is an enforcement write: an existing malformed projection must
     # raise instead of being treated as an empty store and returning ``None``.
@@ -1084,7 +1147,7 @@ def release_claim(
         row.pop("claimed_at", None)
         intents[tid] = row
         released.update(row)
-        return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+        return _encode_intents(intents)
 
     try:
         update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
@@ -1166,7 +1229,7 @@ def settle_intent(
                 released.pop("claimed_at", None)
                 intents[tid] = released
                 cascade_deferred["_claim_released"] = True
-                return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+                return _encode_intents(intents)
             return None
         reason = _generation_mismatch(row, expected_generation, request_id)
         if reason:
@@ -1188,7 +1251,7 @@ def settle_intent(
             patch_document(pathlib.Path(drive_root), tid, retain_stop)
         intents.pop(tid, None)
         settled.update(row)
-        return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+        return _encode_intents(intents)
 
     try:
         update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
@@ -1242,7 +1305,7 @@ def withdraw_intent(
             return None
         intents.pop(tid)
         seen["_withdrawn"] = True
-        return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+        return _encode_intents(intents)
 
     try:
         update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
@@ -1319,7 +1382,7 @@ def claim_still_owned(drive_root: Any, task_id: str, claim: Dict[str, Any]) -> b
     if not isinstance(claim, dict) or not claim.get("request_id"):
         return True
     try:
-        row = active_intent(drive_root, task_id)
+        row = active_intent(drive_root, task_id, include_close=True)
         if not isinstance(row, dict):
             return False
         return (

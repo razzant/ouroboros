@@ -440,7 +440,8 @@ test('isRootTaskRow mirrors the server lineage rule (task_results.resolve_task_l
 test('Activity marks root rows and hides Pause for a child; Chat cards stay root-only', () => {
     // A compact retry row can omit lineage; its own root-only census identity still counts.
     assert.match(activity, /phases\.has\(ownId\) \|\| isRootTaskRow\(t, ownId\)/);
-    assert.match(activity, /wholeTree: btn\.dataset\.root === '1'/);
+    assert.match(activity, /wholeTree: !hasHelperAttempt && btn\.dataset\.root === '1'/,
+        'a confirmed expired helper attempt has no tree to pause, exactly as the SPA census shows');
     // activity_work_truth.test.js checks the root and target on rendered census and tail-only buttons.
     // A chat card offers the menu only for a root (never a subagent card).
     assert.match(chat, /cancelRunEligibility\(\{\s*groupId: record\.groupId, isSubagent: record\.isSubagent/);

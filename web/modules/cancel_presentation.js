@@ -14,6 +14,7 @@ export const CANCEL_SOURCE_PHRASES = {
     agent_tool: 'Stopped by Ouroboros',
     silence_resolved: 'Silence check withdrawn: the observed work no longer needed it',
     work_finished: 'Closed with the work it helped',
+    deadline_close: 'Closed after deadline expired',
 };
 // The English control word each app-stop phrase names (owner decision: these five words stay English).
 export const CANCEL_CONTROL_WORDS = { http_single: 'Stop now', http_cascade: 'Stop now', http_graceful: 'Wrap up' };
@@ -23,6 +24,7 @@ export const CANCEL_SOURCE_LABELS = {
     owner_restart: 'Owner restart',
     snapshot_restore: 'server_shutdown',
     work_finished: 'the work it helped has ended',
+    deadline_close: 'the deadline expired',
 };
 // Twin of CANCEL_REASON_MAX_CHARS / CANCEL_REASON_PREVIEW_NOTE: the record keeps
 // the whole reason, so a shortened clause names itself a preview.
@@ -37,17 +39,24 @@ function reasonPreview(value) {
 
 export function cancelCauseClauses(origin, record = {}) {
     const source = String(origin.source || '');
-    // Ouroboros's own cancel_task stamps the run that asked, not a swept root.
-    const asker = source === 'agent_tool';
     const asked = String(origin.requested_by || '');
     const self = String(record.task_id || record.id || record.subagent_task_id || '');
     const parent = String(record.parent_task_id || '');
     const root = String(record.root_task_id || '');
-    const actor = origin.request_origin?.kind === 'agent_task' && origin.request_origin.task_id;
+    const actor = origin.request_origin?.kind === 'agent_task' ? String(origin.request_origin.task_id || '') : '';
+    // Ouroboros's own cancel_task stamps the run that asked, not a swept root, so there the relation is
+    // the asker's. A deadline Close is never "with" its parent or ancestor: only its typed actor — the
+    // record's own direct parent — proves "Requested by its parent task"; otherwise it states no
+    // relation, and an actor that is not the parent still names a task without claiming lineage.
+    const closed = source === 'deadline_close';
+    const asker = source === 'agent_tool' || (closed && Boolean(actor) && actor === asked && asked === parent);
     const relation = asked && asked !== self && asked === parent
-        ? (asker ? tr('cancel.relation.requested_by_parent', 'Requested by its parent task') : tr('cancel.relation.stopped_with_parent', 'Stopped with its parent task'))
+        ? (asker ? tr('cancel.relation.requested_by_parent', 'Requested by its parent task')
+            : closed ? '' : tr('cancel.relation.stopped_with_parent', 'Stopped with its parent task'))
         : asked && asked !== self && parent && asked === root
-            ? (asker ? tr('cancel.relation.requested_by_ancestor', 'Requested by an ancestor task') : tr('cancel.relation.stopped_with_ancestor', 'Stopped with an ancestor task')) : '';
+            ? (asker ? tr('cancel.relation.requested_by_ancestor', 'Requested by an ancestor task')
+                : closed ? '' : tr('cancel.relation.stopped_with_ancestor', 'Stopped with an ancestor task'))
+            : '';
     const stated = String(origin.reason || '');
     const label = Object.hasOwn(CANCEL_SOURCE_LABELS, source) ? CANCEL_SOURCE_LABELS[source] : null;
     const control = origin.stop_policy === 'immediate' ? 'Stop now'
@@ -63,7 +72,7 @@ export function cancelCauseClauses(origin, record = {}) {
         stated.split(/\s+/).filter(Boolean).join(' ') === label ? '' : reasonPreview(stated),
         origin.scope === 'cascade' ? tr('cancel.scope_cascade', 'this task and its sub-tasks') : '',
         relation,
-        actor && !(asker && relation && String(actor) === asked) ? tr('cancel.relation.requested_by_task', 'Requested by a task') : '',
+        actor && !(asker && relation && actor === asked) ? tr('cancel.relation.requested_by_task', 'Requested by a task') : '',
     ];
 }
 

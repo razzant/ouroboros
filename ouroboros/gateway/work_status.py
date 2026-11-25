@@ -309,6 +309,9 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
             state["turn"].append({"kind": "action", "task_id": task_id, "code": view["reason"]["code"]})
         if raw.get("execution_transport") is not None:  # a stopped call has ended; it never resumes
             state.update(release="none", turn=[], resumable=False)
+        if (offer := row.get("close_expired")) or raw.get("deadline_expired"):  # withheld Close: Stop, never Resume
+            state.update(release="none", turn=[], resumable=False, **({"close_expired": offer} if offer else {}))
+            state["reasons"].insert(0, {"code": "deadline_expired", "text": "Deadline expired"})
         return state
     wait = _owner_wait(row)
     if wait == "owner_wait":
@@ -569,8 +572,13 @@ def _member_state(member: Mapping[str, Any], runs: List[Mapping[str, Any]],
     tails += awaited + model_tails(handoffs)
     return {**state, "because": member["reasons"], "tails": tails,
             "mark": mark_of(member["activity"], member["confirmed"], live=member["live"]),
+            **({"close_expired": member["close_expired"]} if member.get("close_expired") else {}),
             **({"queue_attempt": member["queue_attempt"]} if "queue_attempt" in member else {}),
             **({"last_resume": member["last_resume"]} if member.get("last_resume") else {})}
+
+
+def _expired(member: Mapping[str, Any]) -> bool:
+    return (member.get("reasons") or [{}])[0].get("code") == "deadline_expired"
 
 
 def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mapping[str, Any],
@@ -629,7 +637,9 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
         calls = {member["call"] for member in working_helpers if member["call"]}
         call = calls.pop() if len(calls) == 1 and not live_runs else ""
     elif members:
-        lead = speaker = min(members, key=lambda member: _rank(member["activity"]))
+        # Among equal words a resumable paused helper speaks before an expired one: the work says Deadline expired
+        # only when every paused member's deadline has passed, in whatever order the members arrive.
+        lead = speaker = min(members, key=lambda member: (_rank(member["activity"]), _expired(member)))
         reasons = list(lead["reasons"])
         activity, transition, call, release = lead["activity"], lead["transition"], lead["call"], lead["release"]
     else:
@@ -785,8 +795,11 @@ def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True,
     confirmed = complete and all(work["confirmed"] for work in works)
     live = any(work.get("live") for work in works)
     unknown = any(tail.get("state") == "unknown" for work in works for tail in work.get("tails") or ())
+    expires = activity == "paused" and all((work.get("because") or [{}])[0].get("code") == "deadline_expired"
+                                            for work in works if work.get("activity") == "paused")
     return {"activity": activity, "transition": transition, "call": calls.pop() if len(calls) == 1 else "",
             "turn": turn, "amber": bool(turn), "mark": mark_of(activity, confirmed, live=live, unknown=unknown),
+            **({"deadline_expired": True} if confirmed and expires else {}),
             "confirmed": confirmed, "works": [work["work_id"] for work in works]}
 
 

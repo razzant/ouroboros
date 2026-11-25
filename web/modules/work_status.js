@@ -21,8 +21,8 @@ import {
 } from './task_phase_chip.js';
 import {
     ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_RESUME, ACTION_STOP_EARLIER, ACTION_STOP_NOW, REUSABLE_TASK_IDS,
-    TASK_CONTROL_TRIGGER_LABEL, createTaskResumeButton,
-    hurryTaskAction, openTaskControlMenu, openTaskControls, requestStop, requestStopAll, resumePending, resumeTaskAction,
+    TASK_CONTROL_TRIGGER_LABEL, createTaskResumeButton, createTaskCloseButton, closeExpiredOffer, deadlineExpiredWord,
+    hurryTaskAction, isRootTaskRow, openTaskControlMenu, openTaskControls, requestStop, requestStopAll, resumePending, resumeTaskAction,
     taskControlActions, taskControlBusy,
 } from './task_control_menu.js';
 
@@ -143,8 +143,61 @@ export function reconcileWorkState(prior, data, chatId, connected = true, reques
         memberReadFailed: false, attempts, complete, main, tiers, leads, processings, questions };
 }
 
+/** Whether the server says a parked state's hard deadline has passed: its own boolean or reason, never a clock here.
+ *  The word is the status; Close is a separate offer (`workCloseOffer`), so a state may say this and offer no action. */
+export function deadlineExpiredState(state) {
+    return state?.deadline_expired === true || list(state?.because).some((reason) => reason?.code === 'deadline_expired');
+}
+
+/** Index every task id whose hard deadline one accepted `/api/state` body marks as passed, once per census
+ *  (never per row) and separately from Close tokens: activity/attention flags, each confirmed displayed member
+ *  state, and each confirmed live episode's work state. Never a clock here, and never inferred from Close or Stop. */
+export function indexDeadlineExpired(census) {
+    const expired = new Set();
+    if (!census || typeof census !== 'object') return expired;
+    const noteRow = (row) => {
+        const id = String(row?.activity_id || row?.task_id || '');
+        if (id && (row.deadline_expired === true || row.attention_reason === 'deadline_expired')) expired.add(id);
+    };
+    for (const row of list(census.active_chat_activities)) noteRow(row);
+    for (const row of list(census.main_attention)) noteRow(row);
+    const seenEpisodes = new Set();
+    const seenMembers = new Set();
+    for (const work of list(census.works)) {
+        if (!work || typeof work !== 'object') continue;
+        if (work.confirmed !== false && work.episode?.live) {
+            const epId = String(work.episode.task_id || '');
+            if (epId && !seenEpisodes.has(epId)) {
+                seenEpisodes.add(epId);
+                if (deadlineExpiredState(work)) expired.add(epId);
+            }
+        }
+        const states = work.members?.states;
+        if (!states || typeof states !== 'object' || Array.isArray(states)) continue;
+        for (const [id, member] of Object.entries(states)) {
+            if (!member || seenMembers.has(id)) continue;
+            seenMembers.add(id);
+            if (deadlineExpiredState(displayedMember(member))) expired.add(id);
+        }
+    }
+    return expired;
+}
+
+/** Whether one `/api/state` body names a task's hard deadline as passed, by the task's own exact identity: its census
+ *  activity, its owner-action card, its member state or its confirmed work, each saying the server's `deadline_expired`
+ *  boolean or reason. Never a clock here, and never read from the presence or absence of a Close offer or a Stop. */
+export function deadlineExpiredIn(data, taskId) {
+    const id = String(taskId || '');
+    if (!id || !data || typeof data !== 'object') return false;
+    const marked = (row) => String(row?.activity_id || row?.task_id || '') === id
+        && (row.deadline_expired === true || row.attention_reason === 'deadline_expired');
+    return list(data.active_chat_activities).some(marked) || list(data.main_attention).some(marked)
+        || deadlineExpiredState(memberState(data, id)) || deadlineExpiredState(workOfEpisode(data, id));
+}
+
 /** A work's or a room's one short word, from its activity, transition and exact call (the cards' chip words). */
 export function activityWord(state = {}) {
+    if (deadlineExpiredState(state)) return deadlineExpiredWord();
     switch (state.activity) {
     case 'working':
         if (state.transition === 'finalizing') return chipWord('finalizing');
@@ -292,8 +345,14 @@ export function resumeAttemptWords(attempt) {
  * it, one sentence per tail, then its latest refused Resume with its time, joined " · ". The line never repeats
  * `word`: an answer wait's own words are compared by their code, in any language.
  */
+// What a Pause says of itself once its deadline has passed: who or what stopped it, dated. The instruction to wait
+// for a Resume (or a held word) is no longer true there, so it is not carried beside `Deadline expired`.
+const PAUSE_ATTRIBUTION = new Set(['paused_by_owner', 'paused_by_mind', 'paused_unattributed', 'saved_on_stop',
+    'after_restart', 'after_panic', 'spending_limit', 'technical_pause']);
+
 export function workLine(work = {}, word = activityWord(work)) {
-    const first = list(work.because)[0];
+    const reasons = list(work.because).filter((reason) => reason?.code !== 'deadline_expired');
+    const first = deadlineExpiredState(work) ? reasons.find((reason) => PAUSE_ATTRIBUTION.has(reason?.code)) : reasons[0];
     const said = first?.code === 'owner_answer' && word === chipWord('ownerWait') ? '' : reasonText(first);
     const sentence = said === word ? '' : said;
     const pressed = sentence && first.code === 'paused_by_owner' ? clock(first.since) : '';
@@ -564,6 +623,10 @@ export function workControls(work) {
     return out;
 }
 
+export function workCloseOffer(work, taskId) {
+    return list(work?.controls).map(offer => closeExpiredOffer(offer, taskId)).find(Boolean) || '';
+}
+
 /** The confirmed work whose live current episode is `taskId` in one body, else null. */
 export function workOfEpisode(data, taskId) {
     const id = String(taskId || '');
@@ -571,12 +634,26 @@ export function workOfEpisode(data, taskId) {
         && String(work.episode.task_id || '') === id) || null;
 }
 
-/** Whether the confirmed work holding `taskId` as a member, in any room, has it paused (its own server state): what
- *  such a task is sent waits for its Resume. */
+/** Whether the confirmed work holding `taskId` as a member, in any room, has it paused and not past its own hard
+ *  deadline (its own server state): what such a task is sent waits for its Resume. */
 export function memberPaused(state, taskId) {
     const id = String(taskId || '');
-    return [...(state?.episodes?.values?.() || [])].some((work) => work?.confirmed !== false
-        && work.members?.states?.[id]?.activity === 'paused');
+    if (!id || state?.memberReadFailed || (state?.memberStates instanceof Map && !state.memberStates.has(id))) return false;
+    return [...(state?.episodes?.values?.() || [])].some((work) => {
+        const member = work?.confirmed !== false ? work.members?.states?.[id] : null;
+        return member?.confirmed !== false && member?.activity === 'paused' && !deadlineExpiredState(member);
+    });
+}
+
+/** Whether the current reconciled per-member state positively confirms `taskId`'s hard deadline expired.
+ *  Reads only the authoritative current `memberStates` entry and its own `confirmed === true` flag, so an
+ *  unrelated unknown sibling making the aggregate work unconfirmed never erases a confirmed member's expiry,
+ *  and a failed, disconnected or partial read never carries a stale expiry forward. */
+export function memberDeadlineExpired(state, taskId) {
+    const id = String(taskId || '');
+    if (!id || state?.memberReadFailed || !(state?.memberStates instanceof Map)) return false;
+    const member = state.memberStates.get(id);
+    return member?.confirmed === true && deadlineExpiredState(member);
 }
 
 /** The server's state for an individual member, without interpreting queue carriers in the browser. */
@@ -587,12 +664,103 @@ export function memberState(data, taskId) {
     return displayedMember(row?.members.states[id]);
 }
 
+function isExplicitChildQueueRow(q, ownId) {
+    const id = String(ownId || '').trim();
+    const t = q?.task;
+    if (!id || REUSABLE_TASK_IDS.has(id) || !t || typeof t !== 'object' || t._presence_run) return false;
+    const rowId = String(q.id ?? '').trim();
+    const taskId = String(t.id ?? '').trim();
+    if ((rowId || taskId) !== id || (rowId && rowId !== id) || (taskId && taskId !== id)) return false;
+    if (isRootTaskRow(t, id)) return false;
+    const field = (key) => String(t[key] ?? t.metadata?.[key] ?? '').trim();
+    const parentId = field('parent_task_id');
+    const rootId = field('root_task_id');
+    const role = field('delegation_role').toLowerCase();
+    if (rootId && rootId === id) return false;
+    return (Boolean(parentId) && parentId !== id) || (role === 'subagent' && Boolean(rootId) && rootId !== id);
+}
+
+/** Matched safe-integer attempt when an explicit child queue row joins its own confirmed paused member in `/api/state`
+ *  (outside root-only census; real producers `queue_publication._capture`, `gateway/state._raw_work_facts`), else null. */
+export function confirmedPausedHelperAttempt(q, census, ownId) {
+    const id = String(ownId || '').trim();
+    if (!id || !census || census.supervisor_ready === false || !isExplicitChildQueueRow(q, id)) return null;
+    if (list(census.active_chat_activities).some((entry) => String(entry?.activity_id || '') === id)) return null;
+    if (workOfEpisode(census, id)) return null;
+    const member = list(census.works).find((entry) => entry?.members?.states && Object.hasOwn(entry.members.states, id))
+        ?.members.states[id];
+    if (member?.confirmed !== true || member.activity !== 'paused') return null;
+    const qAttempt = q.attempt;
+    const mAttempt = member.queue_attempt;
+    return Number.isSafeInteger(qAttempt) && qAttempt >= 0
+        && Number.isSafeInteger(mAttempt) && mAttempt >= 0
+        && qAttempt === mAttempt ? qAttempt : null;
+}
+
+/** Recheck the latest accepted queue + census for one exact confirmed paused helper row and return its attempt, or null. */
+export function confirmedHelperAttemptInQueue(queue, census, taskId) {
+    const id = String(taskId || '').trim();
+    if (!id || !Array.isArray(queue?.running) || !Array.isArray(queue?.pending)) return null;
+    const rows = [...queue.running.filter((q) => !q?.task?._presence_run), ...queue.pending]
+        .filter((q) => String(q?.id || q?.task?.id || '').trim() === id);
+    return rows.length === 1 ? confirmedPausedHelperAttempt(rows[0], census, id) : null;
+}
+
 /** Every task a confirmed work's Resume control names in one body: where Activity may offer Resume. */
 export function resumeTargets(data) {
     return new Set(list(data?.works).filter((work) => work?.confirmed !== false)
         .flatMap((work) => list(work.controls).filter((control) => control.action === 'resume')
             .map((control) => String(control.target || '').trim()))
         .filter((target) => target && !REUSABLE_TASK_IDS.has(target)));
+}
+
+/** Index every exact Close offer in one accepted census by target task id, once per census (never per row).
+ *  Precedence: confirmed live episode controls, confirmed member close_expired, census activity close_expired,
+ *  then any remaining confirmed work Close control. */
+export function indexCloseOffers(census) {
+    const offers = new Map();
+    if (!census || typeof census !== 'object') return offers;
+    const put = (offer, target) => {
+        const id = String(target || '').trim();
+        if (!id || offers.has(id)) return;
+        const token = closeExpiredOffer(offer, id);
+        if (token) offers.set(id, token);
+    };
+    const works = list(census.works);
+    const seenEpisodes = new Set();
+    const fallbackControls = [];
+    for (const work of works) {
+        if (!work || work.confirmed === false) continue;
+        const epId = work.episode?.live ? String(work.episode.task_id || '') : '';
+        const firstEp = Boolean(epId) && !seenEpisodes.has(epId);
+        if (firstEp) seenEpisodes.add(epId);
+        const controls = work.controls;
+        if (!Array.isArray(controls)) continue;
+        for (const control of controls) {
+            if (control?.action !== 'close') continue;
+            if (firstEp && control.target === epId) put(control, epId);
+            else fallbackControls.push(control);
+        }
+    }
+    const seenMembers = new Set();
+    for (const work of works) {
+        const states = work?.members?.states;
+        if (!states || typeof states !== 'object' || Array.isArray(states)) continue;
+        for (const [id, member] of Object.entries(states)) {
+            if (!member || seenMembers.has(id)) continue;
+            seenMembers.add(id);
+            if (member.confirmed === true && Object.hasOwn(MEMBER_MARKS, member.activity)) put(member.close_expired, id);
+        }
+    }
+    const seenActivities = new Set();
+    for (const row of list(census.active_chat_activities)) {
+        const id = String(row?.activity_id || '');
+        if (!id || seenActivities.has(id)) continue;
+        seenActivities.add(id);
+        put(row?.close_expired, id);
+    }
+    for (const control of fallbackControls) put(control, control.target);
+    return offers;
 }
 
 /** The shared menu's items for a work's controls. Resume is its own button wherever one stands beside the menu;
@@ -617,7 +785,9 @@ export function cardControls(state, taskId, work = state?.episodes?.get(String(t
     const grouped = work && (roomMatched || work.confirmed !== false) ? workControls(work) : null;
     const resume = Boolean(grouped && grouped.resume === String(taskId || ''));
     const menu = Boolean(grouped && workMenuActions(grouped).length);
-    return { work: grouped && (work.episode?.live || resume || menu) ? work : null, resume, menu };
+    const close = grouped ? workCloseOffer(work, taskId) : '';
+    return { work: grouped && (work.episode?.live || resume || menu || close) ? work : null, resume, menu,
+        ...(close ? { close } : {}) };
 }
 
 /**
@@ -627,7 +797,8 @@ export function cardControls(state, taskId, work = state?.episodes?.get(String(t
 export function changedOffers(records, before, after) {
     return [...(records?.values?.() || [])].filter((record) => record?.root
         && (cardControls(before, record.groupId).work !== cardControls(after, record.groupId).work
-            || before.attempts?.get(record.groupId) !== after.attempts?.get(record.groupId)));
+            || before.attempts?.get(record.groupId) !== after.attempts?.get(record.groupId)
+            || memberState(before, record.groupId)?.close_expired !== memberState(after, record.groupId)?.close_expired));
 }
 
 // An ordinal from the state body owns projection and menu continuity, never the
@@ -667,7 +838,7 @@ const targetKey = (target) => JSON.stringify(Array.isArray(target) ? [...target]
 export function cardControlGuard(record, read, opened = read(record)) {
     const targetOf = (offer, action) => {
         if (action === ACTION_RESUME) return offer.resume ? record.groupId : '';
-        if ((!offer.menu && !offer.legacy) || !cardMenuActions(null, record, offer.activity, offer.work, offer.stopOnly).includes(action)) return '';
+        if ((!offer.menu && (offer.work || !offer.legacy)) || !cardMenuActions(null, record, offer.activity, offer.work, offer.stopOnly).includes(action)) return '';
         return offer.work ? actionTarget(workControls(offer.work), action) : record.groupId;
     };
     const targets = new Map([ACTION_RESUME, ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_STOP_EARLIER, ACTION_STOP_NOW]
@@ -706,14 +877,32 @@ function openCardControls(anchor, record, read, { stop, afterAction }) {
     return openWorkControls(anchor, work, { cancelPending, canAct, afterAction, stopOne });
 }
 
+let cardNameSeq = 0;
+
 /** Reconcile a card's Resume and Stop… doors in place from the same current offer each press will read. */
 export function syncCardControls(record, { read, actionsOf, stop, afterAction }) {
     if (!record?.root) return false;
     const canResume = () => read(record).resume;
     const offer = read(record);
     record.observeControlMenu?.(offer);
-    const { resume, menu, legacy } = offer;
+    const { resume, menu, legacy, close } = offer;
     let changed = false;
+    if (record.closeRunBtn && record.closeRunBtn.offer !== close) {
+        record.closeRunBtn.remove(); record.closeRunBtn = null; changed = true;
+    }
+    if (close && !record.closeRunBtn) {
+        const actions = actionsOf(record);
+        if (actions) {
+            const titleEl = record.titleEl || record.root.querySelector?.('[data-live-title]') || null;
+            const nameId = titleEl ? (titleEl.id ||= `chat-card-name-${cardNameSeq += 1}`) : '';
+            record.closeRunBtn = createTaskCloseButton(record.groupId, {
+                tokenNow: () => read(record).close === close ? close : '', onSettled: afterAction, nameId,
+            });
+            record.closeRunBtn.offer = close;
+            actions.insertBefore(record.closeRunBtn, actions.querySelector('[data-cancel-run]'));
+            changed = true;
+        }
+    }
     if (resume && !record.resumeRunBtn) {
         record.resumeRunBtn = createTaskResumeButton(record.groupId, { canResume, onSettled: afterAction });
         const actions = actionsOf(record);
@@ -723,7 +912,7 @@ export function syncCardControls(record, { read, actionsOf, stop, afterAction })
         record.resumeRunBtn.remove(); record.resumeRunBtn = null; changed = true;
     }
     const existing = record.root.querySelector('[data-cancel-run]');
-    if (!menu && !legacy) {
+    if (!menu && (offer.work || !legacy)) {
         if (!existing) return changed;
         existing.remove(); record.cancelRunBtn = null;
         return true;

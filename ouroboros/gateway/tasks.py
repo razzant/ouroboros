@@ -1335,9 +1335,9 @@ async def api_task_cancel(request: Request) -> JSONResponse:
     if raw_policy is not None and not isinstance(raw_policy, str):
         return json_error("stop_policy must be a string", 400, task_id=task_id)
     stop_policy_value = str(raw_policy or "").strip()
-    if stop_policy_value not in {"", "immediate", "finalize_then_cancel"}:
+    if stop_policy_value not in {"", "immediate", "finalize_then_cancel", "close_expired"}:
         return json_error(
-            "stop_policy must be 'immediate' or 'finalize_then_cancel'",
+            "stop_policy must be 'immediate', 'finalize_then_cancel', or 'close_expired'",
             400, task_id=task_id,
         )
     action_id = body.get("stop_action_id", "")
@@ -1345,6 +1345,14 @@ async def api_task_cancel(request: Request) -> JSONResponse:
         return json_error("stop_action_id must be a string of at most 200 characters", 400, task_id=task_id)
     if migrating := await run_sync_to_completion(migrating_error, request_drive_root(request)):
         return migrating  # P1: Cancel writes the result's custody; 503 while the boot import owns the store
+    if stop_policy_value == "close_expired":
+        # The mandatory policy discriminator is rejected by older bodies, never an ordinary Stop.
+        if set(body) != {"stop_policy", "close_expired"}:
+            return json_error("Close takes only the exact expired park offer", 400, task_id=task_id)
+        from ouroboros.gateway.task_close import close_expired_response
+        return await asyncio.to_thread(close_expired_response, task_id, body["close_expired"])
+    if "close_expired" in body:
+        return json_error("Close needs stop_policy='close_expired'", 400, task_id=task_id)
     if stop_policy_value == "finalize_then_cancel":
         # Graceful ingress: immediate typed pending acknowledgement; the hard
         # Stop below records its intent first and answers once it was driven.

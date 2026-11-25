@@ -280,9 +280,13 @@ def test_resume_refuses_cancel_intent_and_paused_root(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
 
     task, _row = _parked(tmp_path, monkeypatch)
-    monkeypatch.setattr("ouroboros.cancel_intents.has_active_intent", lambda *_a, **_k: True)
+    from ouroboros import cancel_intents
+
+    real = cancel_intents.active_intent
+    ordinary = {"source": "agent_tool", "request_id": "ci_stop", "task_id": task["id"]}
+    monkeypatch.setattr(cancel_intents, "active_intent", lambda _r, tid, **_k: ordinary if tid == task["id"] else None)
     assert queue.resume_budget_paused_task(task["id"])["error"] == "cancel_intent_active"
-    monkeypatch.setattr("ouroboros.cancel_intents.has_active_intent", lambda *_a, **_k: False)
+    monkeypatch.setattr(cancel_intents, "active_intent", real)
 
     workers.PENDING[:] = []
     root, _r = _parked(tmp_path, monkeypatch, task_id="root-1", scope="root")

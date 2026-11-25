@@ -363,6 +363,7 @@ def get_tools() -> List[ToolEntry]:
                         "empty keeps the message this run answers, with its files. A held message's files never refuse the start; "
                         "a turn's own fresh files stage what they can and refuse it only if none can; others' stay named, not given. "
                         "Only a root your human started.")},
+                    "mine": {"type": "boolean", "description": "true: your own work, not your human's: consciousness switch, allowance and task cap apply."},
                 },
                 "required": ["objective", "title"],
             },

@@ -51,7 +51,7 @@
  * @property {Array<Object>=} main_attention Live human recovery owners, including children; the activity census stays root-only.
  * @property {boolean=} main_attention_complete False retains previously observed actions.
  * @property {Array<Object>=} main_attention_gaps Typed gaps in current action evidence.
- * @property {Array<{task_id: string, task_name: string, panic_hold_id: string, project_id?: string, chat_id?: number, root_task_id?: string}>=} panic_recovery  // every room's work a Panic stop holds for the owner's Resume (panic_recovery.js)
+ * @property {Array<{task_id: string, task_name: string, panic_hold_id: string, project_id?: string, chat_id?: number, root_task_id?: string, close_expired?: import('./work_types.js').WorkControl}>=} panic_recovery  // every room's work a Panic stop holds for the owner's Resume (panic_recovery.js)
  * @property {boolean=} panic_recovery_complete  // true only when that list is the whole set; false or absent: never offer all
  * @property {import('./work_types.js').Work[]} works  // one row per work: a request with its Continue episodes and live members
  * @property {Object<string, import('./work_types.js').RoomStatus>} rooms  // one status per room (chat_id), from its works
@@ -1401,8 +1401,9 @@
  * Stop needs a new ID, distinct from server request_id. No ID means no exact retry.
  * @typedef {Object} TaskCancelRequest
  * @property {boolean=} cascade
- * @property {string=} stop_policy
+ * @property {string=} stop_policy  // "immediate" | "finalize_then_cancel" | "close_expired"
  * @property {string=} stop_action_id
+ * @property {string=} close_expired  // requires the close_expired policy, without cascade or Stop id
  */
 /**
  * @typedef {Object} TaskCancelResponse
@@ -1411,14 +1412,13 @@
  * @property {boolean=} cascade
  *   Echoed when the Stop ran as a cascade (requested, or an already recorded cascade scope); single-task envelope unchanged.
  * @property {string=} cancel_state
- *   "pending" on every 202: the durable intent stays open — bounded graceful finalization, or an immediate
- *   teardown not confirmed yet that the supervisor finishes; absent on 200.
+ *   "pending" on every 202 (Stop finalization/unconfirmed teardown, or an owed Close); absent on 200.
  * @property {string=} stop_policy
- *   On 202, the effective durable "immediate" | "finalize_then_cancel"; a graceful request never softens a hard intent.
+ *   On a Stop 202, effective "immediate" | "finalize_then_cancel" (never softened); absent on Close.
  * @property {string=} request_id
- *   On an immediate 202, the open intent's custody id (distinct from the client's stop_action_id).
+ *   Custody id on immediate Stop 202, Close 200/202, or recorded unconfirmed/corrupt Close 503 (distinct from stop_action_id).
  * @property {string=} reason_code
- *   On an immediate 202, "teardown_unconfirmed".
+ *   Stop 202: "teardown_unconfirmed". Close (gateway/task_close.py): 200 "result_kept"; 409 "expired_park_changed" (this request made no change; a retry after Stop replacement establishes only that the retry did nothing), "expired_park_partly_closed", or "not_found"; 503 "cancel_intent_projection_corrupt" (an unconfirmed Close 503, including an in-flight call replaced by Stop, omits reason_code).
  * @property {string=} error
  */
 /**
