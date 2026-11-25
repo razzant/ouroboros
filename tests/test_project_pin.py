@@ -27,6 +27,11 @@ def pin_client(tmp_path):
         yield client, tmp_path
 
 
+def _covered(url, complete):
+    """What a list answer says of its registry read's coverage: only the complete list (``all=1``) says it."""
+    return {"complete": complete} if "all=1" in url else {}
+
+
 def test_pin_partial_update_persists_without_changing_room_authority(pin_client):
     client, root = pin_client
     before = registry.create_project(root, "alpha", name="Alpha", working_dir="/example")
@@ -239,13 +244,13 @@ def test_project_list_accepts_known_empty_and_hides_tombstones(pin_client, url):
             assert registry.readable_rooms(root) == set()
             snapshot.assert_called_once()
         response = client.get(url)
-        assert response.status_code == 200 and response.json() == {"projects": []}
+        assert response.status_code == 200 and response.json() == {"projects": [], **_covered(url, True)}
     project = registry.create_project(root, "hidden", origin="owner_ui")
     registry.begin_project_deletion(root, project["id"])
     registry.complete_project_deletion(root, project["id"])
     assert registry.readable_rooms(root) == {project["chat_id"]}
     response = client.get(url)
-    assert response.status_code == 200 and response.json() == {"projects": []}
+    assert response.status_code == 200 and response.json() == {"projects": [], **_covered(url, True)}
 
 
 @pytest.mark.parametrize("url", ["/api/projects", "/api/projects?all=1"])
@@ -257,6 +262,7 @@ def test_project_list_refuses_unreadable_rooms_then_recovers(pin_client, url):
     assert path.with_name("projects.json.committed").is_file()
     healthy = client.get(url)
     assert healthy.status_code == 200 and [p["id"] for p in healthy.json()["projects"]] == [project["id"]]
+    assert {key: value for key, value in healthy.json().items() if key != "projects"} == _covered(url, True)
 
     invalid = {"chat_id": 7}  # no valid reservation identity
     for source, detail in ((None, "Project registry is missing beside its commit witness"),
@@ -275,7 +281,7 @@ def test_project_list_refuses_unreadable_rooms_then_recovers(pin_client, url):
     path.write_text(json.dumps(data), encoding="utf-8")
     assert registry.readable_rooms(root) == {project["chat_id"]}
     beside = client.get(url)
-    assert beside.status_code == 200 and beside.json() == healthy.json()
+    assert beside.status_code == 200 and beside.json() == {**healthy.json(), **_covered(url, False)}
 
     path.write_bytes(intact)
     restored = client.get(url)
@@ -303,10 +309,53 @@ def test_project_list_refuses_a_damaged_lifecycle_instead_of_claiming_no_project
     response = client.get(url)
     assert response.status_code == 500 and "invalid lifecycle" in response.json()["error"]
     write([{**template, "id": "gone", "chat_id": 40002, "lifecycle": "tombstoned"}])
-    assert client.get(url).json() == {"projects": []}  # only tombstones: a legitimately empty list
+    assert client.get(url).json() == {"projects": [], **_covered(url, True)}  # only tombstones: legitimately empty
     write([])
-    assert client.get(url).json() == {"projects": []}  # a provably empty registry
+    assert client.get(url).json() == {"projects": [], **_covered(url, True)}  # a provably empty registry
     write([{**template, "id": "healthy", "chat_id": 40010},
            {**template, "id": "damaged", "chat_id": 40011, "lifecycle": "unknown"}])
     response = client.get(url)
     assert response.status_code == 200 and [row["id"] for row in response.json()["projects"]] == ["healthy"]
+    assert response.json().get("complete") == _covered(url, False).get("complete"), "the damaged room is unknown"
+
+
+def test_the_complete_list_says_whether_its_one_registry_read_covered_every_row(pin_client):
+    """``all=1`` carries the coverage of the read its rows came from: a healthy room beside one the registry cannot
+    read is listed with ``complete: false`` (the missing room is unknown, not gone), a fully read registry says true,
+    and each answer reads the registry once (its coverage never comes from a second, possibly different, read)."""
+    from unittest.mock import patch
+
+    from ouroboros import project_admission
+
+    client, root = pin_client
+    for pid in ("alpha", "beta"):
+        registry.create_project(root, pid, origin="owner_ui")
+    path = root / "state/projects.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    rows = {row["id"]: row for row in data["projects"]}
+    for written, listed, complete in (([rows["beta"], {**rows["alpha"], "chat_id": 0}], ["beta"], False),
+                                      ([rows["beta"], rows["alpha"]], ["alpha", "beta"], True)):
+        path.write_text(json.dumps({**data, "projects": written}), encoding="utf-8")
+        with patch.object(project_admission, "_registry_snapshot", wraps=project_admission._registry_snapshot) as read:
+            answer = client.get("/api/projects?all=1")
+        assert answer.status_code == 200 and answer.json()["complete"] is complete, answer.json()
+        assert sorted(row["id"] for row in answer.json()["projects"]) == listed
+        read.assert_called_once()
+        assert "complete" not in client.get("/api/projects").json(), "the capped list proves no absence"
+
+
+def test_every_list_answer_names_the_serving_profile_and_none_without_one(pin_client):
+    """Each branch answers with the serving generation's frozen data-profile scope, as history does (#3294), so a
+    client erases saved words only of the profile that answered; an app that applied none names none."""
+    from types import SimpleNamespace
+
+    client, root = pin_client
+    project = registry.create_project(root, "alpha", origin="owner_ui")
+    urls = ("/api/projects", "/api/projects?all=1", f"/api/projects?id={project['id']}", "/api/projects?id=gone",
+            "/api/projects?id=../state", f"/api/projects?chat_id={project['chat_id']}", "/api/projects?chat_id=7")
+    for scope in (None, "profile-a", ""):
+        if scope is not None:
+            client.app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda scope=scope: scope)
+        for url in urls:
+            answer = client.get(url)
+            assert answer.status_code == 200 and answer.json().get("profile_scope") == (scope or None), (scope, url)

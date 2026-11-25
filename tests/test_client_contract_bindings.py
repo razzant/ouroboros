@@ -106,7 +106,7 @@ def test_the_project_journey_answers_its_published_shapes(client):
     # The complete list and the exact id answer the same published rows.
     complete = client.get("/api/projects?all=1")
     assert assert_bound("GET /api/projects", complete) == "ProjectListResponse"
-    assert complete.json() == listed.json()
+    assert complete.json() == {**listed.json(), "complete": True}  # its registry read covered every row
     exact = client.get(f"/api/projects?id={project['id']}")
     assert assert_bound("GET /api/projects", exact) == "ProjectListResponse"
     assert [row["chat_id"] for row in exact.json()["projects"]] == [project["chat_id"]]

@@ -30,7 +30,7 @@ from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_provenance import agent_note_text, declared_author
 from ouroboros.project_registry_recovery import recovery_notice
 from ouroboros.room_archive import registry_reservations
-from ouroboros.gateway._helpers import coerce_int
+from ouroboros.gateway._helpers import coerce_int, request_profile_scope
 from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noqa: F401 — historical import path (router)
 from ouroboros.gateway.history_paging import (
     HistoryCursorError, RegistryUnavailable, deferred_before, delivered_history_gaps, failed_read_facts, history_page_coverage, history_page_tokens, progress_quota_predicate,
@@ -1577,8 +1577,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         # ONE thread hop for the whole assembly (perf2 P3): reads, transforms,
         # slicing, annotation, and the JSON encode all run off the event loop.
         cursor, around = (request.query_params.get(name) for name in ("cursor", "around"))
-        served_ui = getattr(getattr(getattr(request, "app", None), "state", None), "served_ui", None)
-        profile_scope = served_ui.serving_profile_scope() if served_ui is not None else ""  # frozen at apply (#3294)
+        profile_scope = request_profile_scope(request)  # frozen at apply (#3294)
         try:
             body = await asyncio.to_thread(_assemble_history_response, data_dir, thread_id, n_human, n_progress,
                                            cursor, around, profile_scope)

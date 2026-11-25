@@ -1081,6 +1081,8 @@
  * project of that room; either answers none otherwise.
  * @typedef {Object} ProjectListResponse
  * @property {import('./api_types.js').ProjectEntry[]} projects
+ * @property {boolean=} complete `?all=1` only: its registry read covered every row; only `true` proves an absence
+ * @property {string=} profile_scope the serving generation's frozen data-profile scope, as history's; absent: none
  */
 
 /**

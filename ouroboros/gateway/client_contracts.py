@@ -700,6 +700,8 @@ class ProjectListResponse(TypedDict):
     last_message_at, lifecycle, optional closed, routing_generation, visible_revision, delete_error, has_thread_activity."""
 
     projects: List[ProjectEntry]
+    complete: NotRequired[bool]  # ``?all=1`` only: its registry read covered every row; only true proves an absence
+    profile_scope: NotRequired[str]  # the serving generation's frozen data-profile scope, as history's; absent: none
 
 
 class ProjectCreateResponse(TypedDict):
