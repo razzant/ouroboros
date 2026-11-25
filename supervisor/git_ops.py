@@ -7,7 +7,6 @@ import logging
 import os
 import pathlib
 import re
-import shutil  # noqa: F401
 import subprocess
 import sys
 import tempfile
@@ -20,6 +19,7 @@ from supervisor.state import (
 )
 from ouroboros import config as _config
 from ouroboros.git_observation import host_git_env
+from ouroboros.git_selection import selected_git
 from ouroboros.utils import utc_now_iso  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -376,7 +376,7 @@ def _run_git_process_bounded(
                 piped = None
             with tracked_start() as publish:
                 proc = publish(contained_popen(
-                    subprocess.Popen, cmd,
+                    subprocess.Popen, [selected_git(), *cmd[1:]] if cmd and cmd[0] == "git" else cmd,
                     cwd=str(cwd or current_repo_dir()),
                     stdin=source if piped is None else subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -725,7 +725,7 @@ def _attach_detached_head_locked(branch: str, head: str) -> Tuple[bool, str]:
     try:
         with tracked_start() as publish:
             proc = publish(subprocess.Popen(
-                ["git", "update-ref", "--no-deref", "--stdin"], cwd=str(current_repo_dir()),
+                [selected_git(), "update-ref", "--no-deref", "--stdin"], cwd=str(current_repo_dir()),
                 env=host_git_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, **subprocess_new_group_kwargs()))
         # Bytes avoid CRLF translation in Git's line protocol on Windows.
@@ -918,11 +918,11 @@ def ensure_repo_present() -> None:
 
         rc, _, _ = git_capture(["git", "status", "--porcelain"])
         if rc == 0:
-            subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
-            subprocess.run(["git", "commit", "-m", "Initial commit from bundle"], cwd=str(repo), check=False)
+            subprocess.run([selected_git(), "add", "-A"], cwd=str(repo), check=True)
+            subprocess.run([selected_git(), "commit", "-m", "Initial commit from bundle"], cwd=str(repo), check=False)
 
-        subprocess.run(["git", "branch", "-M", BRANCH_DEV], cwd=str(repo), check=False)
-        subprocess.run(["git", "branch", BRANCH_STABLE], cwd=str(repo), check=False)
+        subprocess.run([selected_git(), "branch", "-M", BRANCH_DEV], cwd=str(repo), check=False)
+        subprocess.run([selected_git(), "branch", BRANCH_STABLE], cwd=str(repo), check=False)
 
     if not _is_launcher_managed_repo():
         try:

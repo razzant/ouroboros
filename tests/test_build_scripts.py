@@ -588,6 +588,23 @@ class TestBuildWindowsPs1:
         assert all(match.start() < _find_pyinstaller_cmd_pos(src) for match in installs)
 
 
+@pytest.mark.parametrize(("script", "proof"), [
+    ("build.sh", 'download_git_standalone.py --check "$APP_PATH/Contents/Frameworks/git-standalone"'),
+    ("build_linux.sh", "download_git_standalone.py --check dist/Ouroboros/_internal/git-standalone"),
+    ("build_windows.ps1", "download_git_standalone.py --check dist\\Ouroboros\\_internal\\git-standalone"),
+])
+def test_builds_stage_the_pinned_git_before_pyinstaller_and_prove_the_collected_copy(script, proof):
+    source = _read(script)
+    staging = re.search(r"scripts/download_git_standalone\.py\r?\n", source).start()
+    assert staging < _find_pyinstaller_cmd_pos(source) < source.index(proof)
+    if script == "build.sh":
+        signed = source[source.index('if [ "$SIGN_MODE" != "0" ]; then'):source.index("Skipping signing")]
+        assert signed.index('codesign --verify --strict --deep "$APP_PATH"') < signed.index(proof)
+    if script == "build_windows.ps1":  # Windows PowerShell 5 does not stop on a native failure by itself
+        for step in ("Git runtime staging", "Collected Git proof"):
+            assert f'Invoke-NativeChecked "{step}"' in source
+
+
 def test_python_standalone_pin_is_the_fixed_sqlite_release():
     """Desktop packages take python-build-standalone 20261009 (SQLite 3.53.1, the WAL-reset fix).
 
@@ -1351,14 +1368,6 @@ def test_launcher_retains_cross_platform_runtime_hooks():
     reaper = _pkg_read("ouroboros/launcher_server_reaper.py")
     assert "kill_process_on_port(int(companion_port))" in reaper
     assert "force_kill_pid(child.pid)" in reaper
-
-
-@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
-def test_launcher_preserves_macos_git_setup_path():
-    launcher_source = _pkg_read("launcher.py")
-    assert '_hidden_popen(["xcode-select", "--install"], bootstrap=True)' in launcher_source  # owned, no window flag off Windows
-    assert "Install Git (Xcode CLI Tools)" in launcher_source
-    assert "Installing... A system dialog may appear." in launcher_source
 
 
 def test_cross_platform_build_scripts_are_present():

@@ -46,6 +46,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ouroboros import evidence_packs, store, store_import, usage_store
+from ouroboros.git_selection import selected_git
 from ouroboros.store import EXPORTING, GENERATION_KEY, PUBLISHED, RETIRED, supervisor_row, utc_stamp as _stamp
 from ouroboros.usage_ledger import LEDGER_REL, UsageAccountingError
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
@@ -158,7 +159,7 @@ def _write_receipt(root: pathlib.Path, receipt: Dict[str, Any]) -> None:
 
 def target_file_bytes(repo_dir: Any, sha: str, rel: str) -> Optional[bytes]:
     """The bytes of ``rel`` in the target commit, ``None`` when the target lacks it."""
-    result = subprocess.run(["git", "cat-file", "-p", f"{sha}:{rel}"], cwd=str(repo_dir), capture_output=True,
+    result = subprocess.run([selected_git(), "cat-file", "-p", f"{sha}:{rel}"], cwd=str(repo_dir), capture_output=True,
                             env={**os.environ, "LC_ALL": "C", "LANG": "C"})
     return result.stdout if result.returncode == 0 else None
 
@@ -312,8 +313,8 @@ def _unbound(recorded: str, intent: Dict[str, Any], what: str) -> Optional[Tuple
 
 def rev_parse(repo_dir: Any, ref: str) -> str:
     """The commit ``ref`` names in ``repo_dir``, ``""`` when it names none."""
-    result = subprocess.run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=str(repo_dir), capture_output=True,
-                            text=True, env={**os.environ, "LC_ALL": "C", "LANG": "C"})
+    result = subprocess.run([selected_git(), "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=str(repo_dir),
+                            capture_output=True, text=True, env={**os.environ, "LC_ALL": "C", "LANG": "C"})
     return result.stdout.strip() if result.returncode == 0 else ""
 
 

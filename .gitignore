@@ -40,6 +40,7 @@ node-standalone/
 ripgrep-standalone/
 /betterleaks-standalone/
 /claudexor-runtime/
+/git-standalone/
 
 # OS
 .DS_Store

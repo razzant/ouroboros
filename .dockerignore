@@ -41,6 +41,7 @@ env/
 /ripgrep-standalone/
 /betterleaks-standalone/
 /claudexor-runtime/
+/git-standalone/
 
 # Other
 /.devcontainer

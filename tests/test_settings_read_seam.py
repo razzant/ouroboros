@@ -801,7 +801,7 @@ def test_the_packaged_bootstrap_writes_the_path_the_prologue_reads(isolated_sett
     # ...and the bootstrap wires its saver to exactly that file: the context it hands
     # `bootstrap_repo` names the file, and its saver persists there in seam bytes.
     contexts: list = []
-    monkeypatch.setattr(packaged_cli, "check_git", lambda _windows: True)
+    monkeypatch.setattr(packaged_cli, "select_git", lambda *a, **kw: "system")
     monkeypatch.setattr(packaged_cli, "bootstrap_repo", contexts.append)
     scratch = packaged_cli.PackagedRuntime(
         bundle_root=tmp_path, embedded_python=tmp_path / "python", app_root=tmp_path,

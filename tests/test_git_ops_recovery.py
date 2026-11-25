@@ -178,7 +178,7 @@ def test_git_capture_default_timeout_is_unbounded(monkeypatch, tmp_path):
     communicate = subprocess.Popen.communicate
 
     def observed(proc, *args, **kwargs):
-        if proc.args == ["git", "status", "--porcelain"]:
+        if proc.args[1:] == ["status", "--porcelain"]:
             waits.append((proc, kwargs.get("timeout"), proc in shell_process._active_subprocesses, proc.stdin))
         return communicate(proc, *args, **kwargs)
 
@@ -280,6 +280,58 @@ def test_git_capture_unconfirmed_cleanup_keeps_custody_and_original_error(monkey
         shell_process._active_subprocesses.discard(child)
         child.stdout.close()
         child.stderr.close()
+
+
+@pytest.mark.parametrize("chosen_git", [
+    pytest.param("/fixture/System Git/bin/git", id="system"),
+    pytest.param(r"Q:\Fixture App\git-standalone\cmd\git.exe", id="bundled"),
+    pytest.param(None, id="no-selection"),
+])
+def test_supervisor_git_uses_launcher_selected_executable(monkeypatch, chosen_git):
+    from contextlib import nullcontext
+    from pathlib import Path
+
+    from ouroboros import update_channels
+    from ouroboros.git_selection import SELECTED_GIT_ENV
+    from ouroboros.tools import shell_process
+
+    if chosen_git is None:
+        monkeypatch.delenv(SELECTED_GIT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(SELECTED_GIT_ENV, chosen_git)
+    repo = Path("fixture checkout")
+    prepared_env = {"LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"}
+    monkeypatch.setattr(git_ops, "current_repo_dir", lambda: repo)
+    monkeypatch.setattr(git_ops, "host_git_env", lambda: prepared_env)
+    monkeypatch.setattr(update_channels, "get_rescue_git_timeout_sec", lambda: 5)
+    monkeypatch.setattr(shell_process, "tracked_start", lambda: nullcontext(lambda proc: proc))
+    starts = []
+
+    def refuse_spawn(argv, **kwargs):
+        starts.append((argv, kwargs))
+        raise FileNotFoundError("in-memory spawn refusal")
+
+    monkeypatch.setattr(git_ops, "subprocess", SimpleNamespace(
+        Popen=refuse_spawn, PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT,
+    ))
+    tail = ["--no-optional-locks", "status", "--porcelain"]
+    cmd = ["git", *tail]
+    env = {"LC_ALL": "C", "LANG": "C"}
+    assert git_ops._run_git_process_bounded(cmd, timeout=5, cwd=repo, env=env) == (
+        127, "", "in-memory spawn refusal",
+    )
+    assert git_ops._attach_detached_head_locked("fixture-branch", "a" * 40) == (
+        False, "FileNotFoundError: in-memory spawn refusal",
+    )
+
+    executable = chosen_git or "git"
+    assert cmd == ["git", *tail]
+    [(bounded, bounded_kwargs), (prepared, prepared_kwargs)] = starts
+    assert bounded == [executable, *tail]
+    assert prepared == [executable, "update-ref", "--no-deref", "--stdin"]
+    assert bounded_kwargs["cwd"] == prepared_kwargs["cwd"] == str(repo)
+    assert bounded_kwargs["env"] is env
+    assert prepared_kwargs["env"] is prepared_env
 
 
 def test_bounded_git_process_kills_tree_and_is_panic_tracked(monkeypatch):

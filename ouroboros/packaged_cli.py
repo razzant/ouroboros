@@ -28,14 +28,16 @@ from typing import Iterable, Sequence
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
+from ouroboros.git_selection import GitUnverified, select_git
 from ouroboros.launch_roots import TUPLE_KEYS, WORK_ROOT_KEYS, configured_roots
 from ouroboros.launcher_bootstrap import (
-    BootstrapContext, appimage_extracts_and_runs, bootstrap_repo, check_git, embedded_python_env,
+    BootstrapContext, appimage_extracts_and_runs, bootstrap_repo, embedded_python_env,
 )
 from ouroboros.platform_layer import (
     BUNDLE_DIR_ENV,
     IS_MACOS,
     IS_WINDOWS,
+    common_tool_directories,
     embedded_python_candidates,
     git_install_hint,
 )
@@ -201,7 +203,15 @@ def _read_version(bundle_root: pathlib.Path) -> str:
 
 
 def _bootstrap_runtime(runtime: PackagedRuntime) -> None:
-    if not check_git(IS_WINDOWS):
+    from ouroboros.desktop_media import host_environment
+
+    try:  # the terminal's PATH stays first; common tool folders are only searched after it
+        choice = select_git(runtime.bundle_root, extra_dirs=common_tool_directories(os.environ.get("PATH", "")),
+                            host=host_environment if sys.platform == "linux" else None)
+    except GitUnverified as unverified:  # unjudged is not absent: no install advice
+        raise PackagedCLIError(f"Git did not answer in time: could not finish checking {unverified}. "
+                               "Run the command again.") from None
+    if choice == "missing":
         raise PackagedCLIError(f"Git is required before first CLI use. {git_install_hint()}")
     runtime.data_dir.mkdir(parents=True, exist_ok=True)
     context = BootstrapContext(

@@ -691,7 +691,7 @@ def test_the_packaged_cli_uses_app_roots_tuple_and_carries_it_into_the_macos_app
             runtime.port_file) == (a, a / "repo", a / "data", a / "data" / "settings.json", a / "ouroboros.pid",
                                    a / "data" / "state" / "server_port")
     contexts: list = []
-    monkeypatch.setattr(packaged_cli, "check_git", lambda _windows: True)
+    monkeypatch.setattr(packaged_cli, "select_git", lambda *a, **kw: "system")
     monkeypatch.setattr(packaged_cli, "bootstrap_repo", contexts.append)
     packaged_cli._bootstrap_runtime(runtime)
     assert contexts[0].settings_path == a / "data" / "settings.json" and contexts[0].repo_dir == a / "repo"

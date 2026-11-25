@@ -489,6 +489,25 @@ def _proof_files(
     return records, android
 
 
+def _git_sources(directory: Path, pin_path: Path) -> list[dict]:
+    """The corresponding source of the Git the desktop builds carry (GPLv2): every source set the pin publishes,
+    present with exactly the pinned bytes. Named by the Git pin, so releases with one pin share one archive."""
+    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    records = []
+    for layout, entry in sorted(pin["sources"].items()):
+        if not entry["release"]:
+            continue
+        path = directory / entry["archive"]
+        if not path.is_file():
+            raise ValueError(f"missing the Git source archive {entry['archive']} for {entry['label']}")
+        digest = sha256_file(path)
+        if (path.stat().st_size, digest) != (entry["size_bytes"], entry["sha256"]):
+            raise ValueError(f"{entry['archive']} is not the archive {pin_path.as_posix()} pins")
+        records.append({"name": path.name, "size": entry["size_bytes"], "sha256": digest, "layout": layout,
+                        "label": entry["label"], "gitVersion": pin["git_version"]})
+    return records
+
+
 def _checksum_targets(directory: Path, records: Iterable[dict]) -> list[Path]:
     paths: list[Path] = []
     for record in records:
@@ -529,6 +548,7 @@ def _release_notes(
     android: dict,
     run_url: str,
     verdict: dict[str, list[dict]],
+    git_sources: list[dict],
 ) -> str:
     short_commit = commit[:12]
     verify_base = (
@@ -617,6 +637,9 @@ def _release_notes(
         "",
         "Files named `SHA256SUMS`, `release-evidence.json`, `release-smoke-*.json`, "
         "and `sbom-*.cdx.json` are verification evidence, not additional installers.",
+        *(f"`{row['name']}` is the corresponding source (GNU GPL version 2) of the Git {row['gitVersion']} "
+          f"that the {row['label']} builds carry for computers without a working Git of their own."
+          for row in git_sources),
         "",
         "## What's new",
         "",
@@ -631,7 +654,8 @@ def _release_notes(
         "smoke tests before publication.",
         *_verdict_lines(verdict, repository),
         "",
-        "- `SHA256SUMS` covers every installable platform artifact, its SBOM, and its smoke receipt.",
+        "- `SHA256SUMS` covers every installable platform artifact, its SBOM, and its smoke receipt"
+        + (f", and the Git source archive{'s' * (len(git_sources) > 1)}." if git_sources else "."),
         "- `release-evidence.json` binds the tag, commit, workflow run, each release job's actual conclusion, artifact hashes, SBOMs, and smoke receipts.",
         "- Each installable platform artifact has GitHub build provenance and a CycloneDX SBOM attestation.",
         f"- Verify build provenance with `{verify_base}`.",
@@ -671,7 +695,9 @@ def command_assemble(args: argparse.Namespace) -> None:
         android_attestation_result=args.android_attestation_result,
         windows_signer_thumbprint=args.windows_signer_thumbprint,
     )
-    checksum_targets = _checksum_targets(args.directory, records)
+    git_sources = _git_sources(args.directory, args.git_pin)
+    checksum_targets = sorted([*_checksum_targets(args.directory, records),
+                               *(args.directory / row["name"] for row in git_sources)], key=lambda path: path.name)
     checksums = "".join(
         f"{sha256_file(path)}  {path.name}\n" for path in checksum_targets
     )
@@ -680,7 +706,8 @@ def command_assemble(args: argparse.Namespace) -> None:
     generated_at = args.generated_at or dt.datetime.now(dt.timezone.utc).isoformat()
     evidence = {
         # 3: gates carry actual job conclusions; the run's FLAKY and ACCEPTED tests are recorded.
-        "schemaVersion": 3,
+        # 4: the Git source archives the release carries.
+        "schemaVersion": 4,
         "kind": "build_time_release_proof",
         "product": "Ouroboros",
         "version": version,
@@ -703,6 +730,7 @@ def command_assemble(args: argparse.Namespace) -> None:
         "experimentalAndroid": android,
         "generatedAt": generated_at,
         "artifacts": records,
+        "gitSources": git_sources,
         "verification": {
             "checksums": "SHA256SUMS",
             "attestationCommands": [
@@ -733,12 +761,12 @@ def command_assemble(args: argparse.Namespace) -> None:
             android=android,
             run_url=args.run_url,
             verdict=verdict,
+            git_sources=git_sources,
         ),
         encoding="utf-8",
     )
     if args.github_output:
-        files = [*_checksum_targets(args.directory, records),
-                 args.directory / "SHA256SUMS", args.directory / "release-evidence.json"]
+        files = [*checksum_targets, args.directory / "SHA256SUMS", args.directory / "release-evidence.json"]
         _append_github_output(args.github_output, {
             "files_json": json.dumps("\n".join(path.as_posix() for path in files)),
         })
@@ -759,6 +787,7 @@ def command_verify_uploaded(args: argparse.Namespace) -> None:
     if not isinstance(records, list):
         raise ValueError("release evidence has no proof-accepted artifact list")
     local_names = {path.name for path in _checksum_targets(args.directory, records)}
+    local_names.update(row["name"] for row in evidence.get("gitSources") or [])
     local_names.update({"SHA256SUMS", "release-evidence.json"})
     if set(remote) != local_names:
         raise ValueError(
@@ -802,6 +831,8 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--directory", type=Path, required=True)
     assemble.add_argument("--version-file", type=Path, default=Path("VERSION"))
     assemble.add_argument("--readme", type=Path, default=Path("README.md"))
+    # Names the Git source archives a release must carry and their exact bytes.
+    assemble.add_argument("--git-pin", type=Path, default=Path("scripts/git_standalone_pin.json"))
     assemble.add_argument("--repository", required=True)
     assemble.add_argument("--tag", required=True)
     assemble.add_argument("--commit", required=True)

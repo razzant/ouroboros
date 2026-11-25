@@ -18,13 +18,15 @@ def official_ref_has_constitution(
     ref: str, *, repo_dir: os.PathLike[str] | str | None = None
 ) -> bool:
     """Whether *ref* contains the non-empty regular ``BIBLE.md`` required by P4."""
+    from ouroboros.git_selection import selected_git
+
     if repo_dir is None:
         from supervisor import git_ops as _g
 
         repo_dir = _g.REPO_DIR
     try:
         result = subprocess.run(
-            ["git", "ls-tree", "-l", ref, "--", "BIBLE.md"],
+            [selected_git(), "ls-tree", "-l", ref, "--", "BIBLE.md"],
             cwd=str(repo_dir),
             capture_output=True,
             text=True,

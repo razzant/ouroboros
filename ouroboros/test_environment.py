@@ -479,6 +479,20 @@ def gate_root(*, evidence=None) -> Path:
     return root
 
 
+def bundled_git_paths(env) -> dict[str, str]:
+    """The app's macOS/Linux Git (``git-standalone``, ouroboros/git_selection.py) first on ``env``'s PATH looks for
+    its helpers and templates under ``/`` unless told; scrubbing every ``GIT_*`` must not take those two away."""
+    for folder in env.get("PATH", "").split(os.pathsep):
+        git = Path(folder) / "git"
+        if folder and git.is_file() and os.access(git, os.X_OK):  # the Git a bare ``git`` runs
+            root = git.resolve().parent.parent
+            if root.name != "git-standalone" or not (root / "libexec" / "git-core").is_dir():
+                return {}  # the person's Git knows its own paths
+            return {"GIT_EXEC_PATH": str(root / "libexec" / "git-core"),
+                    "GIT_TEMPLATE_DIR": str(root / "share" / "git-core" / "templates")}
+    return {}  # none, or Windows: MinGit finds its own tree
+
+
 def isolated_environment(root: Path, repo: Path, *, source=None, keep=(), create=True,
                          process_temp=None) -> dict[str, str]:
     """Create all writable defaults beneath a caller-owned disposable directory.
@@ -524,5 +538,6 @@ def isolated_environment(root: Path, repo: Path, *, source=None, keep=(), create
         # A git started in a process temp outside ``root`` stops there too.
         "GIT_CEILING_DIRECTORIES": os.pathsep.join(dict.fromkeys((str(root), str(temp.parent)))),
         "PIP_REQUIRE_VIRTUALENV": "true",
+        **bundled_git_paths(env),
     })
     return env
