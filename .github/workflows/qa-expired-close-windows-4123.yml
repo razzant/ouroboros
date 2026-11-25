@@ -1,0 +1,40 @@
+# Verification branch only. Run the two missed Windows checks on the exact merged product tree.
+name: Deadline Close targeted Windows verification
+'on':
+  push:
+    branches: [qa/expired-close-windows-4123]
+permissions:
+  contents: read
+jobs:
+  deadlines:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Select and verify the #4230 merge, without this workflow file
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse 'HEAD^')" = '99c209651a3f151b9206dea85ff2e1b16cea9be3'
+          git checkout --detach 'HEAD^'
+          test "$(git rev-parse 'HEAD^{tree}')" = '2a9110285dced4a24c7fd489e0d9b39395bcf3c1'
+          git rev-parse HEAD 'HEAD^{tree}'
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: setup-python
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Previously failing Windows nodes, both required
+        run: >-
+          python -m pytest -o addopts= -vv -ra
+          tests/test_batch4_launch_completion.py::test_focused_node_control_consumers
+          tests/test_project_chat_continuity.py::test_active_chat_activity_contract_mirrors_direct_turn_shape
