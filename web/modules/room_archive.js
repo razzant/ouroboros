@@ -298,7 +298,7 @@ export function archiveDoor({ open = openRoomArchive, notes = null, returnFocus 
                         onDismiss: async readable => {
                             reader = null;
                             if (disposed || !isVisible?.()) return;
-                            if (readable && !door.hidden) await syncHistory();
+                            if (readable && !door.hidden) await syncHistory({ reason: 'navigate', decision: 'archive_return' });
                             if (!disposed && !reader && isVisible()) readReceipt.note({ discrete: true });
                         } });
                     readReceipt?.cancel();

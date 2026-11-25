@@ -73,6 +73,21 @@ export function historyCoverage(recent, pages = []) {
 // a chain away from the present and fails on its own, while the present (`latest`, also ↓'s) is the window's read.
 const navigates = direction => direction === 'around' || direction === 'revisit';
 
+// Why a physical read is made (CLIENT_CONTRACT "Reading history"): `reason`, the selector it sends (`mode`), the gate
+// or fallback leg that chose it (`decision`) and what that leg met (`detail`). The server counts them; nothing here
+// or there selects by them. A navigation's reason is `navigate` unless its caller names another; empty names go.
+const MODES = { older: 'older', newer: 'page', revisit: 'page', around: 'around', latest: 'newest', recent: 'newest' };
+const why = tags => Object.fromEntries(Object.entries(tags).filter(([, value]) => value));
+// The newest read that answers for arrivals: a typed 409 (with the server's cause; an older one says only its code),
+// a 200 this window cannot admit (or a profile it does not serve), or a failure (its status, else the network).
+function fallbackLeg(error) {
+    if (error?.status === 409) {
+        return { decision: 'after_refused', detail: error.body?.detail || String(error.body?.reason_code || '').replace('history_', '') };
+    }
+    if (error?.rejected || error?.foreignProfile) return { decision: 'after_rejected', detail: error.rejected || 'profile_mismatch' };
+    return { decision: 'after_failed', detail: error?.status ? `http_${error.status}` : 'network' };
+}
+
 /** Chat's bounded archive-page owner. DOM, reading protection and live rows stay
  * with the chat instance; only fetchPage is asynchronous. Cursors are opaque.
  * It also owns the open window's `after_cursor` (CLIENT_CONTRACT §5 "Reading
@@ -87,6 +102,7 @@ export function createChatHistoryPager({
     applyArrivals = () => {},
     readNewest = async () => false,
     canArrive = () => false,  // a hydrated, healthy window that needs no rebuild
+    arrivalGate = () => '',  // the gate `canArrive` closed, by name: it labels the newest read sent instead
     newestInFlight = () => null,
     isPageProtected = () => false,
     onState = () => {},
@@ -269,11 +285,11 @@ export function createChatHistoryPager({
     // `stillWanted` marks a read made for one intent (a navigation, ↓): it is dropped before it lands once the reader
     // moved on, and a newer navigation supersedes it while it loads. A navigation waits out a window read rather
     // than replacing it, and its failure is its own, never the window's Retry; ↓'s `latest` is the window's read.
-    function request(direction, index, cursor, newChain = false, { query = null, stillWanted = null, prepared = null } = {}) {
+    function request(direction, index, cursor, newChain = false, { query = null, stillWanted = null, prepared = null, tags = null } = {}) {
         if (!alive()) return Promise.resolve({ status: 'disposed' });
         const navigation = navigates(direction);
         const again = () => (stillWanted()
-            ? request(direction, index, cursor, newChain, { query, stillWanted, prepared }) : { status: 'superseded' });
+            ? request(direction, index, cursor, newChain, { query, stillWanted, prepared, tags }) : { status: 'superseded' });
         const newest = navigation && newestInFlight();
         if (newest) return newest.then(again);
         if (pending && navigation && pending.stillWanted) { pending.abort.abort(); pending = null; }
@@ -287,19 +303,22 @@ export function createChatHistoryPager({
         }
         if (pending) return pending.direction === direction
             ? pending.promise : Promise.resolve({ status: 'busy' });
-        const operation = { direction, index, cursor, newChain, stillWanted, abort: new AbortController(), landed: landedArrivals };
+        const operation = { direction, index, cursor, newChain, stillWanted, abort: new AbortController(), landed: landedArrivals,
+            tags: { reason: 'navigate', mode: MODES[direction], ...tags } };
         if (!navigation) failure = null;
         pending = operation;
         operation.promise = Promise.resolve()
             .then(() => alive() && pending === operation
-                ? prepared || fetchPage(cursor, { signal: operation.abort.signal, ...query }) : null)
+                ? prepared || fetchPage(cursor, { signal: operation.abort.signal, ...query, tags: why(operation.tags) }) : null)
             .then(data => {
                 if (!alive() || pending !== operation) return { status: 'disposed' };
                 const result = land(data, operation);
                 // Arrivals that landed meanwhile may lie past this newest page, which let
                 // them go: they are read again from its cursor, else on the newest page. A page around one
                 // place is not the present: the window's arrivals go on from their own cursor.
-                if (direction === 'latest' && landedArrivals !== operation.landed && canArrive()) void read();
+                if (direction === 'latest' && landedArrivals !== operation.landed && canArrive()) {
+                    void read({ reason: operation.tags.reason, decision: 'base_superseded' });
+                }
                 return result;
             })
             .catch(error => {
@@ -307,7 +326,7 @@ export function createChatHistoryPager({
                 // The window's read keeps its failure for Retry while it is wanted; one the reader left is no failure.
                 // A claim still on it at failure is ↓'s own (a read ↓ only joined is its asker's).
                 if (!navigation && operation.stillWanted?.() !== false) {
-                    failure = { direction, index, cursor, newChain, error, returning: Boolean(operation.stillWanted) };
+                    failure = { direction, index, cursor, newChain, error, returning: Boolean(operation.stillWanted), tags: operation.tags };
                 }
                 return { status: 'error', error, cursor };
             })
@@ -329,17 +348,23 @@ export function createChatHistoryPager({
     // read again from the newer cursor, so it never rolls rows or the newest message back.
     function readArrivals(ask) {
         const cursor = after, abort = new AbortController();
+        let admitted = false;
         const promise = Promise.resolve()
-            .then(() => fetchPage(cursor, { signal: abort.signal }))
+            .then(() => fetchPage(cursor, { signal: abort.signal,
+                tags: why({ reason: ask.reason, mode: 'after', decision: ask.decision }) }))
             .then(data => {
                 if (!alive() || abort.signal.aborted) return { status: 'disposed' };
-                if (after !== cursor) return startArrivals(ask);
+                if (after !== cursor) return startArrivals(Object.assign(ask, { decision: 'base_superseded' }));
                 const gap = data?.window?.truncated_by?.some?.(cause => /^(chat|progress)_/.test(String(cause))
                     && String(cause) !== 'progress_incomplete_live_line');
-                if (!Array.isArray(data?.messages) || typeof data.after_cursor !== 'string' || !data.after_cursor
-                    || gap || data.window?.latest_message === null) {
-                    throw new TypeError('History arrivals do not account for everything stored since the last read');
+                // The first fact the answer lacks to account for what was stored since; it names the newest read sent instead.
+                const rejected = !Array.isArray(data?.messages) ? 'bad_messages'
+                    : typeof data.after_cursor !== 'string' || !data.after_cursor ? 'no_continuation'
+                        : gap ? 'stream_gap' : data.window?.latest_message === null ? 'latest_unknown' : '';
+                if (rejected) {
+                    throw Object.assign(new TypeError('History arrivals do not account for everything stored since the last read'), { rejected });
                 }
+                admitted = true;
                 after = data.after_cursor;
                 arrived += rowCount(data.messages);
                 landedArrivals += 1;
@@ -350,7 +375,8 @@ export function createChatHistoryPager({
             .catch(error => {
                 if (abort.signal.aborted) return { status: 'disposed' };
                 if (after === cursor) after = null;
-                return alive() ? { status: 'reset', error } : { status: 'disposed' };
+                const leg = admitted ? { decision: 'after_rejected', detail: 'apply_failed' } : fallbackLeg(error);
+                return alive() ? { status: 'reset', error, leg } : { status: 'disposed' };
             })
             .finally(() => { if (arrival?.promise === promise) arrival = null; });
         arrival = { promise, abort };
@@ -360,15 +386,16 @@ export function createChatHistoryPager({
     // 150 conversation and 60 narration rows, CLIENT_CONTRACT §5) reads the newest
     // page again, which re-anchors it and lets go of what that page no longer holds.
     const arrivable = () => Boolean(after) && arrived <= Math.max(windowRows, 210);
+    const unarrivable = () => ({ decision: after ? 'window_overflow' : 'no_cursor' });  // the gate `arrivable` closed
     const startArrivals = ask => (!alive() ? Promise.resolve({ status: 'disposed' })
-        : arrivable() ? readArrivals(ask) : Promise.resolve({ status: 'unavailable' }));
+        : arrivable() ? readArrivals(ask) : Promise.resolve({ status: 'unavailable', leg: unarrivable() }));
     // One read in flight and at most one queued behind it, so every caller gets a read
     // begun after its call; a queued read reconciles as a reconnect when any caller it
-    // serves is one.
-    function arrivals(fromReconnect) {
+    // serves is one, and is made for the reason of the first.
+    function arrivals(fromReconnect, tags) {
         if (queued) { queued.fromReconnect ||= fromReconnect; return queued.promise; }
-        if (!arrival) return startArrivals({ fromReconnect });
-        const ask = { fromReconnect };
+        if (!arrival) return startArrivals({ fromReconnect, ...tags });
+        const ask = { fromReconnect, ...tags };
         ask.promise = arrival.promise.then(() => {
             if (queued !== ask) return { status: 'disposed' };
             queued = null; return startArrivals(ask);
@@ -379,21 +406,24 @@ export function createChatHistoryPager({
     // A read begun after this call, once chat's newest read in flight settled: what
     // arrived since the newest read, else the newest page (`whole`, no cursor yet, a
     // window grown full, one `canArrive` declines, a refusal or a failure). When
-    // arrivals cannot answer, chat's newest read starts within this very call.
-    function read({ fromReconnect = false, whole = false, current = () => true } = {}) {
+    // arrivals cannot answer, chat's newest read starts within this very call. `reason`
+    // and `decision` (a `whole` read's, else the arrivals read's) say why, with `detail`.
+    function read({ fromReconnect = false, whole = false, current = () => true, reason = '', decision = '', detail = '' } = {}) {
         const started = visit;
         // A superseded reconnect leaves its queued read to the current catch-up.
         if (!alive() || !current()) return Promise.resolve(false);
         const inFlight = newestInFlight();
-        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole, current }));
+        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole, current, reason, decision, detail }));
         if (whole || !canArrive() || !(arrival || arrivable())) {
-            return readNewest({ fromReconnect });
+            // The first gate that chose the newest page, in the order they are weighed.
+            const gate = whole ? decision || 'explicit_whole' : !canArrive() ? arrivalGate() : unarrivable().decision;
+            return readNewest({ fromReconnect, ...why({ reason, decision: gate, detail }) });
         }
-        return arrivals(fromReconnect).then(result => started === visit && (result.status === 'applied'
-            || (result.status !== 'disposed' && alive() && readNewest({ fromReconnect }))));
+        return arrivals(fromReconnect, { reason, decision }).then(result => started === visit && (result.status === 'applied'
+            || (result.status !== 'disposed' && alive() && readNewest({ fromReconnect, ...why({ reason, detail, ...result.leg }) }))));
     }
 
-    return {
+    const pager = {
         getState,
         read,
         arrivalsLanded: () => landedArrivals,
@@ -428,26 +458,41 @@ export function createChatHistoryPager({
                 return { status: 'error', error, cursor: null };
             }
         },
-        older() {
+        older(tags = null) {
             if (!pages.length) return Promise.resolve({ status: 'unavailable' });
             const index = bounds().last + 1;
             const cursor = pages[index]?.requestCursor ?? pages[index - 1].nextCursor;
             if (index === pages.length && !pages[index - 1].hasMore) {
                 return Promise.resolve({ status: 'unavailable' });
             }
-            return request('older', index, cursor);
+            return request('older', index, cursor, false, { tags: { ...(pages[index] && { mode: 'page' }), ...tags } });
         },
-        newer() {
+        newer(tags = null) {
             const index = bounds().first - 1;
             return index < 0 || !pages.length
                 ? Promise.resolve({ status: 'unavailable' })
-                : request('newer', index, pages[index].requestCursor);
+                : request('newer', index, pages[index].requestCursor, false, { tags });
         },
         // Explicit return to latest starts a new snapshot only after success.
         // Old protected pages remain mounted until the reader unpins them. ↓ passes its claim (`stillWanted`):
         // pages still loading yield to it (`toPresent`), a read of the present already out is shared, and once the
         // reader has moved on its answer is dropped before it lands.
-        latest: (stillWanted = null) => request('latest', 0, null, true, { stillWanted }),
+        latest: (stillWanted = null, tags = null) => request('latest', 0, null, true, { stillWanted, tags }),
+        // `older` or `newer` until a page brings rows or the chain ends: an empty page crosses the server's read ceiling.
+        // `rebase(state)` true first reads the present (a horizon gap below the window); `current` guards each request.
+        async edge(direction, { current = () => true, tags = null, rebase = () => false } = {}) {
+            const state = getState();
+            if (current() && rebase(state)) {
+                const rebased = await pager.latest(null, { ...tags, decision: 'horizon_gap' });
+                if (destroyed || rebased.status !== 'applied') return rebased;
+            }
+            let result;
+            do {
+                result = current() ? await pager[direction](tags) : {};
+            } while (!destroyed && result.status === 'applied' && result.messageCount === 0
+                && getState()[direction === 'older' ? 'canOlder' : 'canNewer']);
+            return result;
+        },
         toPresent,
         // One explicit navigation to one place, as a new chain: the page around `address`
         // (`task:<id>`, DESIGN "Room work status"), or a page the reader left read again by its
@@ -461,8 +506,8 @@ export function createChatHistoryPager({
         whenIdle: () => pending?.promise || Promise.resolve(),
         retry() {
             if (!failure) return Promise.resolve({ status: 'unavailable' });
-            const { direction, index, cursor, newChain } = failure;
-            return request(direction, index, cursor, newChain);
+            const { direction, index, cursor, newChain, tags } = failure;
+            return request(direction, index, cursor, newChain, { tags: { ...tags, reason: 'retry' } });
         },
         trim() {
             if (!alive()) return [];
@@ -492,4 +537,5 @@ export function createChatHistoryPager({
             pages = [];
         },
     };
+    return pager;
 }

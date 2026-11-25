@@ -9,7 +9,7 @@ import test from 'node:test';
 import { markIngressSaved } from '../modules/chat_activity.js';
 import { createUnconfirmedSends, placeIngressNote } from '../modules/chat_attachments.js';
 import { createChatInstance } from '../modules/chat.js';
-import { ordinaryUnavailability } from '../modules/chat_preview.js';
+import { ordinaryUnavailability, previewEntryKey, PREVIEW_FAMILY, PREVIEW_KEY } from '../modules/chat_preview.js';
 import { installDom, PREVIEW_SCOPE, restoreDom, roomKey } from './chat_dom_fixture.js';
 
 const ME = 'session-me';
@@ -309,8 +309,10 @@ function keptTab({ chatId = 7 } = {}) {
         url: `/api/files/download?upload=${upload}` };
     // `socket`: the page's one socket (null while it is down); `profile`: whether it proved the page's data profile
     // (ws.js `connection_profile`); `ordinary`: whether the core still counts the room among the profile's ordinary rooms;
-    // `gate`: a promise the history door's answers wait for, when a case holds them.
-    const host = { history: [], fails: false, calls: [], socket: { readyState: 1 }, profile: true, ordinary: true, gate: null };
+    // `gate`: a promise the history door's answers wait for, when a case holds them; `status`: another answer it gives
+    // instead (a refusal, say); `previews`: whether the socket lets this browser's saved text paint (ws.js).
+    const host = { history: [], fails: false, calls: [], socket: { readyState: 1 }, profile: true, ordinary: true, gate: null,
+        status: 0, previews: false };
     const env = installDom(async (url, init = {}) => {
         host.calls.push([String(url), String(init.method || 'GET')]);
         const reply = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
@@ -319,6 +321,7 @@ function keptTab({ chatId = 7 } = {}) {
         }
         if (String(url).startsWith('/api/chat/history')) {
             if (host.gate) await host.gate;
+            if (host.status) return reply({ error: 'Refused', reason_code: 'refused' }, host.status);
             // The core's answer while the room's source cannot be read (gateway/history.py): a 503 naming its reason and,
             // while the room is still one of the profile's ordinary rooms, that room under the profile's scope.
             return host.fails ? reply({ messages: [], error: 'history_source_unavailable', reason_code: 'history_source_unavailable',
@@ -346,6 +349,7 @@ function keptTab({ chatId = 7 } = {}) {
                 isConnected: () => host.socket !== null,
                 // The profile the current socket's server named at accept (ws.js `connection_profile`), once it has.
                 servingProfileScope: () => (host.socket && host.profile ? PREVIEW_SCOPE : ''),
+                canShowSavedProfile: () => host.previews,
                 send(frame, options) {
                     const id = frame.client_message_id || `cm-${++coined}`;
                     sent.push({ frame: { ...frame, client_message_id: id }, options });
@@ -361,6 +365,7 @@ function keptTab({ chatId = 7 } = {}) {
         const room = {
             instance, sent, bubble,
             bubbles: (cmid) => messages.children.filter((node) => node.dataset.clientMessageId === cmid).length,
+            preview: () => messages.children.find((node) => node.dataset.savedPreview === 'true'),
             fire: (type, payload) => [...(handlers.get(type) || [])].forEach((fn) => fn(payload)),
             notes: (cmid) => bubble(cmid)?.querySelectorAll('.msg-pending') || [],
             actions: (cmid) => room.notes(cmid).flatMap((note) => note.children.filter((node) => node.tagName === 'BUTTON')),
@@ -669,6 +674,122 @@ test('leaving the room takes a copy shown on the core\'s word off the feed; the 
         await until(() => room.actions('cm-1').length === 2, 'the fresh word shows it again');
         assert.equal(room.bubbles('cm-1'), 1, 'one bubble, drawn again');
         assert.deepEqual(room.sent, [], 'nothing was sent by itself');
+    } finally { tab.close(); }
+});
+
+// Astra 8: Send again's own read is one of the room's reads. A current refusal for authentication takes this browser's
+// saved text and every copy painted from it, as the room's other reads' does; any other failure, or an answer that
+// comes after the room left, leaves both.
+for (const [status, leaves, takes] of [[401, false, true], [403, false, true], [500, false, false], [401, true, false]]) {
+    test(`Send again's read answered ${status}${leaves ? ' after the room left' : ''} ${takes ? 'takes' : 'leaves'} the saved text`, async () => {
+        const tab = keptTab();
+        const family = () => [...localStorage.values.keys()].filter((key) => key.startsWith(PREVIEW_FAMILY));
+        try {
+            const first = tab.open();
+            await first.send('maybe');
+            first.instance.destroy();
+            localStorage.setItem(PREVIEW_KEY, '{"v":3}');
+            localStorage.setItem(previewEntryKey(PREVIEW_SCOPE, [7, '']), JSON.stringify({ read: 1, rows: [
+                { id: 'chat:1', role: 'assistant', text: 'Saved words', speaker: 'Ouroboros' }] }));
+            Object.assign(tab.host, { fails: true, previews: true });
+            const room = tab.open();
+            await until(() => room.actions('cm-1').length === 2, 'shown on the core\'s word');
+            assert.equal(room.preview()?.children[0].textContent, 'Saved text preview · not current', 'painted, read failing');
+            const stored = family();
+            let answer;
+            tab.host.gate = new Promise((resolve) => { answer = resolve; });
+            tab.host.status = status;
+            room.press('cm-1', 'Send again');
+            await settle();
+            if (leaves) room.instance.leave();
+            answer();
+            await settle();
+            assert.deepEqual(family(), takes ? [] : stored);
+            assert.equal(Boolean(room.preview()), !takes, takes ? 'the painted copy goes at once' : 'the copy stays');
+            assert.deepEqual(room.sent, [], 'nothing was sent');
+        } finally { tab.close(); }
+    });
+}
+
+// Astra 4: Send again's read belongs to the visit and the socket it was asked on. Its refusal, landing once the room has
+// left and come back (its return read the room and saved its newest text), or once that socket gave way, takes nothing.
+for (const after of ['return', 'socket']) {
+    test(`Send again's read refused after ${after === 'return' ? 'the room left and came back' : 'its socket gave way'} takes no saved text`, async () => {
+        const tab = keptTab();
+        const family = () => [...localStorage.values].filter(([key]) => key.startsWith(PREVIEW_FAMILY));
+        try {
+            const first = tab.open();
+            await first.send('maybe');
+            first.instance.destroy();
+            localStorage.setItem(PREVIEW_KEY, '{"v":3}');
+            localStorage.setItem(previewEntryKey(PREVIEW_SCOPE, [7, '']), JSON.stringify({ read: 1, rows: [
+                { id: 'chat:1', role: 'assistant', text: 'Saved words', speaker: 'Ouroboros' }] }));
+            Object.assign(tab.host, { fails: true, previews: true });
+            const room = tab.open();
+            await until(() => room.actions('cm-1').length === 2, 'shown on the core\'s word');
+            // The press's own read is held, and refused when released; every other read answers as the host does.
+            let refuse = null;
+            const host = globalThis.fetch;
+            globalThis.fetch = (url, init) => (!refuse && String(url).startsWith('/api/chat/history') && String(url).includes('reason=retry')
+                ? new Promise((resolve) => { refuse = () => resolve({ ok: false, status: 401, json: async () => ({ error: 'Refused' }) }); })
+                : host(url, init));
+            room.press('cm-1', 'Send again');
+            await until(() => refuse, 'the press asks the core');
+            if (after === 'return') {
+                room.instance.leave();
+                Object.assign(tab.host, { fails: false, history: [{ role: 'assistant', text: 'Saved on the return', ts: TS,
+                    chat_id: 7, history_id: 'chat:2' }] });
+                room.instance.stay();
+                room.fire('open', { previouslyConnected: true, resumed: true });
+                await until(() => room.instance.hasPaintedHistory(), 'the return reads the room');
+                assert.match(JSON.stringify(family()), /Saved on the return/, 'and saves its newest text');
+            } else tab.host.socket = { readyState: 1 };  // the socket the press asked on gives way to another
+            const saved = family();
+            refuse();
+            await settle();
+            assert.deepEqual(family(), saved, 'the late refusal takes nothing');
+            assert.deepEqual(room.sent, [], 'nothing was sent');
+        } finally { tab.close(); }
+    });
+}
+
+// Each read a kept send makes says why (history_attribution.py): Send again's and its hand-over to the ordinary read
+// are a retry, as is a failed newest read asked again on the socket that serves the profile now (its proof, or a
+// socket that changed under it); the registry's word on the room is a refresh.
+test('the reads the kept sends make name their action', async () => {
+    const tab = keptTab();
+    let since = 0;  // the reads of the room under test, after the earlier tab's
+    const reads = () => tab.host.calls.filter(([url]) => url.startsWith('/api/chat/history')).slice(since)
+        .map(([url]) => new URL(url, 'http://local').searchParams.get('reason'));
+    try {
+        const first = tab.open();
+        await first.send('maybe');
+        first.instance.destroy();
+        Object.assign(tab.host, { fails: true, profile: false });
+        since = reads().length;
+        const room = tab.open();
+        await until(() => reads().length === 1, 'the opening read');
+        await settle();
+        tab.host.profile = true;
+        room.fire('connection_profile', { type: 'connection_profile', profile_scope: PREVIEW_SCOPE });
+        await until(() => room.actions('cm-1').length === 2, 'asked again on the proving socket: shown');
+        assert.deepEqual(reads(), ['open', 'retry']);
+        room.fire('projects_changed', { type: 'projects_changed', chat_id: 7 });
+        await until(() => room.actions('cm-1').length === 2 && reads().length === 3, 'the registry\'s word, asked again');
+        assert.equal(reads()[2], 'refresh');
+        let answer;
+        tab.host.gate = new Promise((resolve) => { answer = resolve; });
+        room.fire('projects_changed', { type: 'projects_changed', chat_id: 7 });
+        await until(() => reads().length === 4, 'asked again');
+        tab.host.socket = { readyState: 1 };  // the socket changes under the read: its answer is asked again on the new one
+        tab.host.gate = null;
+        answer();
+        await until(() => reads().length === 5 && room.actions('cm-1').length === 2, 'asked again on this socket: shown');
+        assert.equal(reads()[4], 'retry');
+        tab.host.fails = false;  // history reads again
+        room.press('cm-1', 'Send again');
+        await until(() => room.instance.hasPaintedHistory(), 'the ordinary read takes over');
+        assert.deepEqual(reads().slice(5), ['retry', 'retry'], 'Send again\'s read and its hand-over to the ordinary read');
     } finally { tab.close(); }
 });
 

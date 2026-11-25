@@ -21,6 +21,7 @@ never "no older history".
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import json
 import logging
@@ -141,10 +142,24 @@ def room_member_predicate(row_matches_thread, stored_chat_id):
     return member
 
 
+# Why an ``after`` read refused (``history_delta_reset``), named by the branch that knew it: its error body's
+# ``detail`` (CLIENT_CONTRACT "Reading history"); ``history_view_changed`` is a code of its own.
+DELTA_RESET_DETAILS = frozenset({
+    "notes_changed", "task_settled", "task_missing", "task_versions_unavailable", "stream_rewound",
+    "delta_byte_limit", "replay_gap", "historical_import", "lifecycle_ended", "cursor_size"})
+
+
+# The kind of the cursor a request's selection decoded, for the route's read count (``history_attribution``): a
+# per-request mapping the route sets around the read; nothing selects, authorizes or answers by it.
+DECODED_CURSOR: contextvars.ContextVar = contextvars.ContextVar("history_decoded_cursor", default=None)
+
+
 class HistoryCursorError(ValueError):
-    def __init__(self, reason: str, status: int = 409):
+    def __init__(self, reason: str, status: int = 409, detail: str = "", stream: str = ""):
         super().__init__(reason)
         self.reason, self.status = reason, status
+        # What the error body adds for a client: the refusing branch's cause and the stream it met, when one did.
+        self.fields = {key: value for key, value in (("detail", detail), ("stream", stream)) if value}
 
 
 class RegistryUnavailable(StoreError):
@@ -156,12 +171,14 @@ def failed_read_facts(exc: Exception, data_dir: Any, thread_id: int, newest: boo
     """What a failed read's answer says beside its reason, read off the event loop. Main's refusal offers its archive
     (``RegistryUnavailable.fields``). A newest read whose room is still one of this profile's ordinary rooms
     (``room_archive.ordinary_room``) names that room with the serving generation's scope: the one fact on which a page
-    shows the sends it kept for that room while the room's history cannot be read. Any other failure names nothing."""
+    shows the sends it kept for that room while the room's history cannot be read. A refused cursor read adds the cause
+    its branch knew (``HistoryCursorError.fields``, ``DELTA_RESET_DETAILS``). Any other failure names nothing."""
     if isinstance(exc, RegistryUnavailable):
         return dict(exc.fields)
+    facts = dict(exc.fields) if isinstance(exc, HistoryCursorError) else {}
     if profile_scope and newest and ordinary_room(data_dir, thread_id):
-        return {"ordinary_room": thread_id, "profile_scope": profile_scope}
-    return {}
+        facts.update(ordinary_room=thread_id, profile_scope=profile_scope)
+    return facts
 
 
 def parse_around(value):
@@ -555,9 +572,12 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
         return _select_around(data_dir, thread_id, view, parse_around(around), quotas, predicates, lens, notes, warm,
                               room_member_predicate(*thread_filter), row_target)
     continuation = decode_cursor(cursor, thread_id, view) if cursor else None
-    if continuation and continuation["kind"] == "after" and (
-            continuation["notes"] != notes or _settled_since(data_dir, continuation["tasks"])):
-        raise HistoryCursorError("history_delta_reset")
+    if continuation and (decoded := DECODED_CURSOR.get()) is not None:
+        decoded["kind"] = continuation["kind"]
+    if continuation and continuation["kind"] == "after":
+        changed = "notes_changed" if continuation["notes"] != notes else _settled_since(data_dir, continuation["tasks"])
+        if changed:
+            raise HistoryCursorError("history_delta_reset", detail=changed)
     if continuation:
         quotas = continuation["quotas"]
         if any(quotas[key] > caps[key] for key in quotas):
@@ -580,14 +600,15 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
         if after:
             seen = continuation["upper"][source]
             if not seen <= reader.upper or reader.upper - seen > _DELTA_CEILING_BYTES:
-                raise HistoryCursorError("history_delta_reset")
+                raise HistoryCursorError("history_delta_reset", stream=source,
+                                         detail="delta_byte_limit" if seen <= reader.upper else "stream_rewound")
             selections[source] = reader.replay(seen, reader.upper)
             if selections[source][2]:  # rows it could not read stay unaccounted for
-                raise HistoryCursorError("history_delta_reset")
+                raise HistoryCursorError("history_delta_reset", detail="replay_gap", stream=source)
             if lens[source].chrono and any(isinstance(entry.get("historical_import"), dict)
                                            for entry in selections[source][0]):
                 # Earlier messages imported since land inside the window's past, not after it.
-                raise HistoryCursorError("history_delta_reset")
+                raise HistoryCursorError("history_delta_reset", detail="historical_import", stream=source)
         elif continuation and continuation["kind"] == "page":
             selections[source] = reader.replay(continuation["lower"][source], page_ends[source])
         elif continuation:
@@ -685,25 +706,26 @@ def _select_around(data_dir, thread_id, view, task_id, quotas, predicates, lens,
 
 
 def _settled_since(data_dir, tasks):
-    """Whether a task the window shows changed since its read while it no longer runs: a question
-    that closed, a late phase that settled. Its own rows cannot say so, so the window reads its
-    newest page again; a running task's rows carry its facts. Unknown is a change."""
+    """Which change of a task the window shows sends it to its newest page again, "" for none: one
+    that changed since its read while it no longer runs (``task_settled``: a question that closed,
+    a late phase that settled). Its own rows cannot say so; a running task's rows carry its facts.
+    Unknown is a change: a task gone (``task_missing``) or versions unread (``task_versions_unavailable``)."""
     if not tasks:
-        return False
+        return ""
     from ouroboros import task_store
     from ouroboros.task_status import FINAL_STATUSES
 
     try:
         now = task_store.task_versions(data_dir, tasks)
     except Exception:
-        return True
+        return "task_versions_unavailable"
     for task_id, seen in tasks.items():
         if task_id not in now:
-            return True
+            return "task_missing"
         seq, status, owes = now[task_id]
         if seq != seen and status in FINAL_STATUSES and not (owes and status in ("completed", "failed")):
-            return True  # settled since (a cancelled record is terminal even while it owes its late phase)
-    return False
+            return "task_settled"  # settled since (a cancelled record is terminal even while it owes its late phase)
+    return ""
 
 
 def history_page_coverage(page, stream_gaps):
@@ -774,8 +796,8 @@ def history_page_tokens(page, messages=(), reads=None):
              and row.get("system_type") not in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES,
                                                 *MAIN_PINNED_ROW_TYPES, *WORK_SPEECH_ELSEWHERE_TYPES)}
     lifecycle = any(row.get("lifecycle_virtual") for row in messages)
-    if page.get("after") and page.get("lifecycle") and not lifecycle:
-        raise HistoryCursorError("history_delta_reset")  # the shown operation ended: nothing here says so
+    if page.get("after") and page.get("lifecycle") and not lifecycle:  # the shown operation ended: nothing here says so
+        raise HistoryCursorError("history_delta_reset", detail="lifecycle_ended")
     arrivals = {**state, "kind": "after", "before": dict(page["upper"]), "quiet": False, "notes": page["notes"],
                 "tasks": {**page.get("tasks", {}),
                           **{tid: versions[tid] for tid in sorted(overlaid(shown)) if tid in versions}},
@@ -784,7 +806,7 @@ def history_page_tokens(page, messages=(), reads=None):
     after_cursor = after_cursor if len(after_cursor) <= _CURSOR_CHARS else None
     if page.get("after"):  # a read of what arrived after the window's last read: it never pages older
         if after_cursor is None:
-            raise HistoryCursorError("history_delta_reset")
+            raise HistoryCursorError("history_delta_reset", detail="cursor_size")
         return {"has_more": False, "next_cursor": None, "page_cursor": None, "after_cursor": after_cursor}
     keys = (page.get("chrono") or {}).get("chat")  # a time-ordered room continues from row keys
     origin = {"origin": keys["origin"]} if keys and keys.get("origin") is not None else {}  # a pivot's own chain

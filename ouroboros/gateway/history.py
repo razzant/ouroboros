@@ -24,12 +24,13 @@ from starlette.responses import JSONResponse, Response
 
 from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
+from ouroboros.chat_annotations import page_receipts
 from ouroboros.chat_uploads import attachment_views
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_provenance import agent_note_text, declared_author
 from ouroboros.project_registry_recovery import recovery_notice
 from ouroboros.room_archive import registry_reservations
-from ouroboros.gateway._helpers import coerce_int
+from ouroboros.gateway._helpers import coerce_int, request_profile_scope
 from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noqa: F401 — historical import path (router)
 from ouroboros.gateway.history_paging import (
     HistoryCursorError, RegistryUnavailable, deferred_before, delivered_history_gaps, failed_read_facts, history_page_coverage, history_page_tokens, progress_quota_predicate,
@@ -211,8 +212,9 @@ def _user_annotation(
     return {key: annotation[key] for key in (*ROUTING_RECEIPT_FIELDS, "detail") if key in annotation}
 
 
-def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotations=None, quotes=None) -> list:
-    """Render missing bound origins by source ref, with their files, receipt, question quote and any coverage gaps."""
+def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotations=None, quotes=None, asked=None) -> list:
+    """Render missing bound origins by source ref, with their files, receipt, question quote and any coverage gaps.
+    ``annotations`` holds the receipts of the ids ``asked``; an origin this read renders beyond them is asked here."""
     from ouroboros.project_dialogue import opening_words, project_origin_rows
     from ouroboros.chat_references import origin_projection
 
@@ -235,6 +237,9 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
         from ouroboros.chat_chain import format_address
         projection = origin_projection(data_dir, ref, thread_id, quotes, typed=row.get("source_input"))
         address = format_address(ref) if ref.get("row_sha256") else projection.get("row_address", "")
+        if address and cmid and asked is not None and cmid not in asked:  # its binding: the refs read failed or predates it
+            unasked = {str((later.get("ref") or {}).get("client_message_id") or "") for later in origin_rows[index:]} - asked
+            asked, annotations = asked | unasked, {**(annotations or {}), **page_receipts(data_dir, unasked - {""})}
         annotation = _user_annotation("user", cmid, annotations or {}, original_chat, address) if address else None
         synthesized.append({
             **({"chat_id": original_chat} if original_chat is not None else {}),
@@ -1113,6 +1118,7 @@ def _apply_window_quotas(
     order: Optional[Callable[[dict], str]] = None,
     chat_annotations=None,
     quotes=None,
+    asked=None,  # the ids whose receipts ``chat_annotations`` holds; an origin beyond them is asked when rendered
 ) -> tuple[list, Dict[str, Dict[str, Any]], bool, bool, bool, str, set]:
     """Quota slicing, origin fallback, and the lineage floor/cap (perf2 P3). ``order``: the rows'
     sort key, ``ts`` unless the room reads by its reading key (``_reading_order``).
@@ -1188,7 +1194,7 @@ def _apply_window_quotas(
     # post-quota, identity-deduped, capped with disclosed omissions.
     if thread_id in project_chat_ids and n_human > 0:
         try:
-            synthesized = _origin_fallback_rows(data_dir, thread_id, human_tail, chat_annotations, quotes)
+            synthesized = _origin_fallback_rows(data_dir, thread_id, human_tail, chat_annotations, quotes, asked)
             if synthesized:
                 human_tail = sorted(
                     human_tail + synthesized, key=order
@@ -1389,12 +1395,6 @@ def _assemble_history_response(
     project_chat_ids, project_source_refs, bindings_by_task, rooms, classified = (
         _project_history_context(data_dir, thread_id, strict=exact)
     )
-    try:  # each owner message's latest routing annotation: a journal history's rows read, a word search never
-        from ouroboros.chat_annotations import addressed_chat_annotations
-
-        chat_annotations = addressed_chat_annotations(data_dir)
-    except Exception:
-        chat_annotations = {}
     row_target = None
     if exact:
         from ouroboros.chat_references import history_row_anchor
@@ -1423,6 +1423,13 @@ def _assemble_history_response(
     selections, before, recent = page["selections"], page["before"], page["recent"]
     order = _reading_order(selections["chat"][0])
     n_human, n_progress = page["quotas"]["human"], page["quotas"]["progress"]
+    owners = (entry for entry in selections["chat"][0] if entry.get("role") != "system"  # the rows that wear receipts
+              and str(entry.get("direction", "")).lower() == "in" and not declared_author(entry))
+    # Receipts for its owner rows and, on the newest page that renders them, its origins; never the install's others.
+    asked = {str(cmid) for entry in owners if (cmid := entry.get("client_message_id")) not in (None, "")}  # 0 too
+    asked |= {str(ref.get("client_message_id") or "")  # an origin as its copy looks one up (_origin_fallback_rows)
+              for ref in (project_source_refs if recent and n_human > 0 else ())} - {""}
+    chat_annotations = page_receipts(data_dir, asked)
     historical_terminals: Dict[str, dict] = {}
     replay_evidence: list = []
     from ouroboros.task_reads import TaskReads
@@ -1457,7 +1464,8 @@ def _assemble_history_response(
         {} if classified else {"latest_message": None})  # an unclassified room may be a Project
     if recent:  # arrival is named above, before the tail and the annotation
         (messages, result_cache, human_rows_dropped, lineage_truncated, review_overlays_truncated, floor, anchored_children) = _apply_window_quotas(
-            data_dir, thread_id, project_chat_ids, combined, n_human, n_progress, result_cache, order, chat_annotations, quotes=row_matches_thread.quotes)
+            data_dir, thread_id, project_chat_ids, combined, n_human, n_progress, result_cache, order, chat_annotations,
+            quotes=row_matches_thread.quotes, asked=asked)
         for source in ("chat", "progress"):
             before[source] = deferred_before(source, selections[source][0], candidates, messages, before[source])
     else:
@@ -1570,8 +1578,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         # ONE thread hop for the whole assembly (perf2 P3): reads, transforms,
         # slicing, annotation, and the JSON encode all run off the event loop.
         cursor, around = (request.query_params.get(name) for name in ("cursor", "around"))
-        served_ui = getattr(getattr(getattr(request, "app", None), "state", None), "served_ui", None)
-        profile_scope = served_ui.serving_profile_scope() if served_ui is not None else ""  # frozen at apply (#3294)
+        profile_scope = request_profile_scope(request)  # frozen at apply (#3294)
         try:
             body = await asyncio.to_thread(_assemble_history_response, data_dir, thread_id, n_human, n_progress,
                                            cursor, around, profile_scope)

@@ -15,6 +15,9 @@ def history(texts, *, after: str = 'after:recent', start: int = 0) -> dict:
                           'history_id': f'chat:{start + i}',
                           'history_position': {'source': 'chat:fixture', 'offset': start + i}}
                          for i, text in enumerate(texts)],
+            # The profile the fixture document proves (tests/test_subscription_setup_browser.py PREVIEW_SCOPE): a
+            # scoped document reads only its own profile's history (web/modules/api_client.js chatHistory).
+            'profile_scope': '0123456789abcdef',
             'page_cursor': 'page:recent', 'next_cursor': None, 'after_cursor': after, 'has_more': False,
             'window': {'complete': True, 'truncated_by': []},
             'coverage': {'v': 1, 'view': 'phone', 'upper': {'chat': 100},

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { installDom, restoreDom, ElementStub, PREVIEW_SCOPE, walkCard } from './chat_dom_fixture.js';
-import { PREVIEW_KEY } from '../modules/chat_preview.js';
+import { previewEntryKey, PREVIEW_FAMILY, PREVIEW_KEY } from '../modules/chat_preview.js';
 import { roomSocket } from '../modules/room_retire.js';
 
 const TS = '2026-09-12T12:00:00.000Z';
@@ -20,11 +20,12 @@ const page = (messages, cursor = 'page:recent', next = null) => ({
 // the test settles, or `{ httpStatus, body }` for a refused read.
 function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShowSavedProfile = () => true } = {}) {
     let response = initial, revision = 0;
-    const calls = [], handlers = new Map();
+    const calls = [], urls = [], handlers = new Map();
     const { prior, mount } = installDom(async (url, init) => {
         if (String(url).startsWith('/api/chat/history')) {
             const cursor = new URL(String(url), 'http://local').searchParams.get('cursor');
             calls.push(cursor);
+            urls.push(new URL(String(url), 'http://local'));
             const data = cursor && fetchPage ? await fetchPage(cursor, init) : await response;
             if (data?.httpStatus) return { ok: false, status: data.httpStatus, json: async () => data.body };
             return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...data }) };
@@ -46,7 +47,7 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShow
     t.after(() => { instance.destroy(); restoreDom(prior); globalThis.WebSocket = priorSocket; });
     const messages = globalThis.document.byId.get('chat-messages');
     return {
-        instance, calls, messages,
+        instance, calls, urls, messages,
         bubbles: () => messages.children.filter((node) => node.classList.contains('chat-bubble')
             && !node.classList.contains('typing-bubble') && node.dataset.ephemeral !== '1'),
         emit: (message) => handlers.get('chat')({ chat_id: 2, ...message }),
@@ -54,6 +55,8 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShow
         emitQuizState: (message) => handlers.get('quiz_state')(message),
         reconnect: (flags = {}) => handlers.get('open')({ previouslyConnected: true, ...flags }),
         disconnect: () => handlers.get('close')(),
+        // The current socket's first frame names its serving profile (ws.js `connection_profile`).
+        proveProfile: () => handlers.get('connection_profile')({ type: 'connection_profile', profile_scope: PREVIEW_SCOPE }),
         respond: next => { response = next; },
         async refresh(next = response) {
             response = next;
@@ -116,9 +119,11 @@ function recordRenderedMarkup(t) {
 }
 
 // This room's rows in this origin's saved preview (chat_preview.js): Project chat 2 under the document's proven profile.
-const PREVIEW_ROOM = JSON.stringify([PREVIEW_SCOPE, [2, '']]);
-const savedTexts = () => (JSON.parse(localStorage.getItem(PREVIEW_KEY) || '{"rooms":[]}').rooms
-    .find((entry) => entry.key === PREVIEW_ROOM)?.rows || []).map((item) => item.text);
+const PREVIEW_ROOM = previewEntryKey(PREVIEW_SCOPE, [2, '']);
+const savedRows = () => JSON.parse(localStorage.getItem(PREVIEW_ROOM) || '{"rows":[]}').rows;
+const savedTexts = () => savedRows().map((item) => item.text);
+// Every key of the saved preview this origin holds (the record and each room's entry), as stored.
+const savedStore = () => JSON.stringify([...localStorage.values].filter(([key]) => key.startsWith(PREVIEW_FAMILY)));
 const settle = async (check = () => false) => {
     for (let n = 0; n < 80 && !check(); n += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 };
@@ -385,10 +390,10 @@ for (const systemType of ['reminder', 'skill_notice']) for (const historyFirst o
             assert.equal(original.dataset.historyId, 'chat:100');
             assert.equal(original.dataset.historySource, 'chat:rotation-1');
             assert.equal(original.dataset.historyOffset, '100');
-            const saved = localStorage.getItem(PREVIEW_KEY);
+            const saved = savedStore();
             assert.deepEqual(savedTexts(), [message.text], 'the saved preview holds the newest read\'s row');
             f.emit(live);
-            assert.equal(localStorage.getItem(PREVIEW_KEY), saved, 'a late live copy is not saved again');
+            assert.equal(savedStore(), saved, 'a late live copy is not saved again');
             await f.refresh(page([message]));
         }
         assert.equal(f.bubbles().length, 1);
@@ -418,7 +423,7 @@ test('repeated physical history identity updates the routing annotation on the s
     assert.notEqual(note.textContent, 'Choosing the right destination…');
     assert.match(note.textContent, /Investigation/);
     const annotationText = note.textContent, metadata = { ...bubble.dataset };
-    const saved = localStorage.getItem(PREVIEW_KEY);
+    const saved = savedStore();
     f.emit({ role: message.role, content: message.text, ts: message.ts,
         client_message_id: message.client_message_id, source: message.source,
         sender_session_id: message.sender_session_id });
@@ -427,7 +432,7 @@ test('repeated physical history identity updates the routing annotation on the s
     assert.equal(bubble.querySelector('.msg-routing-annotation'), note);
     assert.equal(note.textContent, annotationText, 'the live echo cannot clear the saved routing receipt');
     assert.deepEqual(bubble.dataset, metadata);
-    assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
+    assert.equal(savedStore(), saved);
 });
 
 test('a live echo preserves the projected saved-context note and origin metadata', async t => {
@@ -444,7 +449,7 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(original.dataset.originId, origin.origin_id);
     assert.equal(original.dataset.originProjected, '1');
     const metadata = { ...original.dataset }, noteText = note.textContent;
-    const saved = localStorage.getItem(PREVIEW_KEY);
+    const saved = savedStore();
     f.emit({ role: origin.role, content: origin.text, ts: origin.ts,
         source: origin.source, sender_session_id: origin.sender_session_id });
     assert.equal(f.bubbles().length, 1);
@@ -452,7 +457,7 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(original.querySelector('.saved-project-context'), note);
     assert.equal(note.textContent, noteText);
     assert.deepEqual(original.dataset, metadata);
-    assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
+    assert.equal(savedStore(), saved);
 });
 
 test('an opening with its stored address keeps one bubble when the original arrives live', async t => {
@@ -1035,14 +1040,14 @@ test('only an admitted newest read writes the saved preview; ↓\'s latest page 
     await settle(() => f.calls.length > 4 && savedTexts().length === 2);
     assert.deepEqual(f.calls.slice(4), [null]);
     assert.deepEqual(savedTexts(), ['Newest saved message', 'Arrived while reading']);
-    const before = localStorage.getItem(PREVIEW_KEY);
+    const before = savedStore();
     // A newest window that could not read the conversation stream keeps the record; so does a refused read.
     await f.refresh({ ...page([]), window: { complete: false, truncated_by: ['chat_source_unavailable'] } });
-    assert.equal(localStorage.getItem(PREVIEW_KEY), before);
+    assert.equal(savedStore(), before);
     f.respond({ httpStatus: 503, body: { messages: [], error: 'history_source_unavailable',
         reason_code: 'history_source_unavailable', has_more: true, next_cursor: null } });
     await f.instance.refreshHistory({ revision: 90 });
-    assert.equal(localStorage.getItem(PREVIEW_KEY), before);
+    assert.equal(savedStore(), before);
     // A bounded window that is merely incomplete is still the room's newest text.
     await f.refresh({ ...page([row('chat:960', 'Bounded newest')]), window: { complete: false, truncated_by: ['quota'] } });
     assert.deepEqual(savedTexts(), ['Bounded newest']);
@@ -1063,7 +1068,10 @@ test('a newest read answered after its room left writes nothing', async (t) => {
     assert.equal(f.bubbles().some((node) => node.innerHTML.includes('Answered after')), false);
 });
 
-const seedPreview = (rows) => () => localStorage.setItem(PREVIEW_KEY, JSON.stringify({ v: 2, rooms: [{ key: PREVIEW_ROOM, rows }] }));
+const seedPreview = (rows) => () => {
+    localStorage.setItem(PREVIEW_KEY, '{"v":3}');
+    localStorage.setItem(PREVIEW_ROOM, JSON.stringify({ read: 1, rows }));
+};
 const SAVED_ROWS = [{ id: 'chat:5', role: 'user', text: 'Saved question', speaker: 'You' },
     { id: 'chat:6', role: 'assistant', text: 'Saved <b>answer</b>\nsecond line', speaker: 'Ouroboros' }];
 const previewNode = (f) => f.messages.children.find((node) => node.dataset.savedPreview === 'true');
@@ -1083,6 +1091,7 @@ test('a warm opening paints the saved text before its first read, grants it noth
         assert.equal(shown.querySelectorAll(selector).length, 0, `no ${selector}: no action, link or history identity`);
     }
     assert.equal(f.instance.hasPaintedHistory(), false);
+    assert.equal(f.instance.hasPaintedWords(), true, 'the docked panel comes in with the saved text (app.js)');
     assert.equal(f.messages.dataset.historyHydrated, undefined);
     // The reader never moved: whatever the painted text did to the layout, the first canonical read opens at the newest
     // message.
@@ -1110,18 +1119,152 @@ test('matching history paints even while the room cannot show saved text', async
     assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:10']);
 });
 
+// Opus F4 (#4211): after a disconnect only the current socket proves the profile (ws.js canShowSavedProfile), and an
+// opening shows its saved text once. A room opened in that gap paints it when the proof arrives, once, unless a
+// canonical read landed first.
+test('an opening held back by the socket\'s missing proof paints its saved text when the proof arrives', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    assert.equal(previewNode(f), undefined, 'this socket has not proven the profile yet');
+    assert.equal(f.instance.hasPaintedWords(), false);
+    proven = true;
+    f.proveProfile();
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · updating', 'painted while the read is out');
+    assert.equal(f.instance.hasPaintedWords(), true);
+    assert.equal(f.instance.hasPaintedHistory(), false);
+    read.release(page([row('chat:6', 'Canonical answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    assert.equal(previewNode(f), undefined, 'the canonical page replaces it');
+    f.proveProfile();  // a later socket's proof
+    assert.equal(previewNode(f), undefined, 'once, and never over canonical history');
+});
+
+// Astra 7, neon 3: the opening's first read failed before the proof came (Retry stands); the copy painted then says
+// it is not current, never that it is updating.
+test('saved text painted on the proof after the first read failed says it is not current', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    read.release({ httpStatus: 500, body: { error: 'Internal error' } });
+    const retry = () => f.messages.querySelector('.chat-load-older')?.querySelector('.chat-load-older-btn');
+    await settle(() => retry()?.textContent === 'Retry loading messages');
+    assert.equal(retry()?.textContent, 'Retry loading messages', 'the failed read offers Retry');
+    proven = true;
+    f.proveProfile();
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · not current');
+});
+
+// Astra 9: a room away hears no socket frame (room_retire.js roomSocket), the proof too. An opening that left before
+// its read landed and comes back once the page's socket proved the profile spends its one attempt on that return.
+test('an opening away when the proof came paints its saved text on its return, once', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    assert.equal(previewNode(f), undefined, 'this socket has not proven the profile yet');
+    f.instance.leave();  // room_retire.js `leave`: the room leaves, its socket view pauses
+    f.instance.ws.pause();
+    proven = true;  // the page's socket proves the profile; the room away hears nothing of it
+    read.release(page([row('chat:6', 'Answered after the room left')]));
+    await settle();
+    assert.equal(previewNode(f), undefined, 'a room away paints nothing');
+    const back = held();
+    f.respond(back.promise);
+    f.instance.stay();  // room_retire.js `show`: back, its socket view resumes and the room reads what it missed
+    f.instance.ws.resume();
+    await settle(() => f.calls.length === 2);
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · updating', 'painted as its return reads');
+    assert.equal(f.instance.hasPaintedWords(), true);
+    back.release(page([row('chat:7', 'Canonical answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    assert.equal(previewNode(f), undefined, 'the canonical page replaces it');
+    f.proveProfile();
+    assert.equal(previewNode(f), undefined, 'once');
+});
+
+// Astra 9: the return paints where the proof came as the room comes back on screen, before the preferences its return
+// asks for or the read that follows them; holding the preferences holds nothing of it.
+test('an opening away when the proof came paints its saved text as it comes back, before its preferences answer', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    f.instance.leave();
+    f.instance.ws.pause();
+    proven = true;  // the page's socket proves the profile; the room away hears nothing of it
+    read.release(page([row('chat:6', 'Answered after the room left')]));
+    await settle();
+    const prefs = held(), host = globalThis.fetch, asked = [];
+    globalThis.fetch = (url, init) => (String(url).startsWith('/api/ui/preferences')
+        ? (asked.push(url), prefs.promise.then(() => host(url, init))) : host(url, init));
+    const back = held();
+    f.respond(back.promise);
+    f.instance.stay();
+    f.instance.ws.resume();
+    assert.equal(asked.length, 1, 'its return asks for the preferences, held here');
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · updating', 'painted as it comes back');
+    assert.equal(f.calls.length, 1, 'before its return reads');
+    prefs.release();
+    await settle(() => f.calls.length === 2);
+    assert.equal(f.calls.length, 2, 'the return reads once the preferences answer');
+    back.release(page([row('chat:7', 'Canonical answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    assert.equal(previewNode(f), undefined, 'the canonical page replaces it');
+});
+
+test('a proof after the canonical read paints no saved text over it', async (t) => {
+    let proven = false;
+    const f = fixture(t, page([row('chat:6', 'Canonical answer')]), null,
+        { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    proven = true;
+    f.proveProfile();
+    assert.equal(previewNode(f), undefined, 'the canonical page stands alone');
+    assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:6']);
+});
+
+// The paint its caller names (app.js: a Project's opening, its Retry) says so on the read it makes; any other is the
+// read receipt's own (history_attribution.py).
+test('a paint whose caller names its action says so on its read; one that names none is a receipt\'s', async (t) => {
+    const f = fixture(t, page([row('chat:1', 'Answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    const reason = () => f.urls.at(-1).searchParams.get('reason');
+    const reads = f.urls.length;
+    await f.instance.refreshHistory({ revision: 1, why: { reason: 'retry' } });
+    assert.equal(f.urls.length, reads + 1);
+    assert.equal(reason(), 'retry');
+    await f.instance.refreshHistory({ revision: 2 });
+    assert.equal(reason(), 'read_receipt');
+});
+
+test('the opening\'s one retry is spent on the first proof, even one that still refused', async (t) => {
+    const read = held();
+    let permits = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => permits });
+    await settle(() => f.calls.length === 1);
+    f.proveProfile();  // a proof that still does not permit it (another profile's, say)
+    permits = true;
+    f.proveProfile();
+    assert.equal(previewNode(f), undefined, 'once');
+    read.release(page([]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+});
+
 test('a confirmed different history profile retires painted text without erasing the saved room', async (t) => {
     const read = held();
     const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS) });
     await settle(() => f.calls.length === 1);
     assert.ok(previewNode(f), 'the currently eligible document shows its own saved preview');
-    const saved = localStorage.getItem(PREVIEW_KEY);
+    const saved = savedStore();
     const otherScope = PREVIEW_SCOPE === '0'.repeat(16) ? '1'.repeat(16) : '0'.repeat(16);
     read.release({ ...page([]), profile_scope: otherScope });
     await settle(() => !previewNode(f));
     assert.equal(previewNode(f), undefined);
     assert.equal(f.instance.hasPaintedHistory(), false);
-    assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
+    assert.equal(savedStore(), saved);
     await f.refresh(page([row('chat:20', 'Current history')]));
     assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:20']);
 });
@@ -1135,7 +1278,7 @@ for (const status of [500, 401]) test(`a warm opening whose first read fails wit
     assert.equal(f.instance.hasPaintedHistory(), false);
     if (status === 401) {
         assert.equal(previewNode(f), undefined);
-        assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'a refused session keeps no conversation text');
+        assert.equal(savedStore(), '[]', 'a refused session keeps no conversation text');
         return;
     }
     assert.equal(previewNode(f).children[0].textContent, 'Saved text preview · not current');
@@ -1166,8 +1309,8 @@ for (const [read, status] of [['older', 401], ['older', 403], ['latest', 401], [
             await settle(() => f.calls.length > 4);
             assert.deepEqual(f.calls, [null, 'before:1', 'before:2', 'before:3', null]);
         }
-        await settle(() => localStorage.getItem(PREVIEW_KEY) === null);
-        if (status < 500) assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'a refused session keeps no conversation text');
+        await settle(() => savedStore() === '[]');
+        if (status < 500) assert.equal(savedStore(), '[]', 'a refused session keeps no conversation text');
         else assert.deepEqual(savedTexts(), ['Newest saved message'], 'a failed page erases nothing');
     });
 }
@@ -1185,7 +1328,7 @@ test('the saved preview keeps the feed\'s order: an accepted delayed arrival lan
     await f.refresh();
     await f.refresh();
     assert.deepEqual(f.calls, [null, 'after:recent'], 'the arrivals read, not a newest page, brought the row');
-    const saved = () => JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id);
+    const saved = () => savedRows().map((item) => item.id);
     assert.deepEqual(f.bubbles().map((node) => node.dataset.historyId), ['chat:1', 'chat:3', 'chat:2']);
     assert.deepEqual(saved(), ['chat:1', 'chat:3', 'chat:2'], 'reopening must not reorder the accepted conversation');
 });
@@ -1196,7 +1339,7 @@ test('a newest window listing a delayed row after newer ones is saved in the ord
     const f = fixture(t, page(rows));
     await f.refresh();
     assert.deepEqual(f.bubbles().map((node) => node.dataset.historyId), ['chat:1', 'chat:3', 'chat:2']);
-    assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), ['chat:1', 'chat:3', 'chat:2']);
+    assert.deepEqual(savedRows().map((item) => item.id), ['chat:1', 'chat:3', 'chat:2']);
 });
 
 // Equal times: the feed (insertTimelineNode) breaks the tie by stream position, comparing the source as text, so after a
@@ -1211,7 +1354,7 @@ test('equal times: a newest window is saved in the order the feed draws it, by s
     await f.refresh();
     const canonical = f.bubbles().map((node) => node.dataset.historyId);
     assert.deepEqual(canonical, ['chat:0', 'chat:20', 'chat:500'], 'the feed orders the tie by position');
-    assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), canonical);
+    assert.deepEqual(savedRows().map((item) => item.id), canonical);
 });
 
 test('equal times: an accepted arrival is saved where the feed places it', async (t) => {
@@ -1224,7 +1367,7 @@ test('equal times: an accepted arrival is saved where the feed places it', async
     assert.deepEqual(f.calls, [null, 'after:recent'], 'the arrivals read brought the row');
     const canonical = f.bubbles().map((node) => node.dataset.historyId);
     assert.deepEqual(canonical, ['chat:1', 'chat:0', 'chat:500']);
-    assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), canonical);
+    assert.deepEqual(savedRows().map((item) => item.id), canonical);
 });
 
 test('a newest read refused while the Project registry cannot be read keeps the feed and says so', async (t) => {

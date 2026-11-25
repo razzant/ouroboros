@@ -8,6 +8,7 @@ selection_lifecycle.js), not an iPhone or Telegram client.
 """
 from __future__ import annotations
 
+import json
 from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 
@@ -16,12 +17,20 @@ import pytest
 from tests._phone_room_shared import facts, history, shot
 from tests.test_design_system_gate_browser import PROJECTS, rest, seed_page, settle
 from tests.test_shell_interactions_browser import open_project, shell_ui
-from tests.test_subscription_setup_browser import subscription_ui
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
 __all__ = ['shell_ui', 'subscription_ui']
-PREVIEW_KEY = 'ouroboros.chat-preview.v1'
-SAVED = "key => localStorage.getItem(key) || ''"
+# Every key of this origin's saved preview (web/modules/chat_preview.js PREVIEW_FAMILY: the record and each room's
+# entry), read as one text.
+PREVIEW_FAMILY = 'ouroboros.chat-preview.'
+SAVED = ("family => Object.keys(localStorage).filter(key => key.startsWith(family))"
+         ".map(key => localStorage.getItem(key)).join('\\n')")
+
+
+def saved_has(text):
+    """A page expression: the saved preview holds `text`."""
+    return f"({SAVED})('{PREVIEW_FAMILY}').includes('{text}')"
 
 
 def wait_for_reads(page, pending, count=1, seconds=10):
@@ -102,8 +111,8 @@ def test_a_new_document_shows_saved_text_before_history_and_reconciles(shell_ui,
         page.evaluate('window.__deltaChat.destroy()')
     else:
         page.locator('#chat-messages .chat-bubble').filter(has_text='Saved answer').wait_for()
-    page.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('Saved answer')")
-    stored = page.evaluate(SAVED, PREVIEW_KEY)
+    page.wait_for_function(saved_has('Saved answer'))
+    stored = page.evaluate(SAVED, PREVIEW_FAMILY)
     assert 'another-window-private' not in stored and 'sender_session_id' not in stored
 
     context = page.context.browser.new_context(storage_state=page.context.storage_state(),
@@ -159,11 +168,15 @@ def test_a_new_document_shows_saved_text_before_history_and_reconciles(shell_ui,
             assert preview.count() == 0, 'the page around the task is canonical: it replaces the preview'
             assert 'Obsolete preview row' not in other.locator('#chat-messages').inner_text()
             assert other.locator('#chat-messages .chat-bubble button').count() > 0
-            assert 'Canonical formatted' not in other.evaluate(SAVED, PREVIEW_KEY), 'a page around a task is no newest window'
-            # ↓ from a navigation's chain reads the present as a `latest` page: that window refreshes the saved text.
-            other.route('**/api/chat/history', lambda route: route.fulfill(json=history(['Latest after the reference'])))
+            assert 'Canonical formatted' not in other.evaluate(SAVED, PREVIEW_FAMILY), 'a page around a task is no newest window'
+            # ↓ from a navigation's chain reads the present as a `latest` page: that window refreshes the saved text. The
+            # present is Main's read without a cursor or an anchor; its reasons (CLIENT_CONTRACT §5) ride the query.
+            def present(url):
+                parts = urlsplit(url)
+                return parts.path.endswith('/api/chat/history') and not {'cursor', 'around', 'chat_id'} & parse_qs(parts.query).keys()
+            other.route(present, lambda route: route.fulfill(json=history(['Latest after the reference'])))
             other.evaluate("document.getElementById('chat-scroll-bottom').click()")
-            other.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('Latest after the reference')")
+            other.wait_for_function(saved_has('Latest after the reference'))
             return
         if mode == 'selected-empty':
             selected = select_preview_text(other)
@@ -176,7 +189,7 @@ def test_a_new_document_shows_saved_text_before_history_and_reconciles(shell_ui,
             shot(other, f'reopen-selected-retained-{ui["engine"]}')
             other.evaluate("getSelection().removeAllRanges()")
             preview.wait_for(state='detached')
-            assert 'Saved answer' not in other.evaluate(SAVED, PREVIEW_KEY), 'the empty read replaced the saved text'
+            assert 'Saved answer' not in other.evaluate(SAVED, PREVIEW_FAMILY), 'the empty read replaced the saved text'
             return
         pending.pop(0).fulfill(json=history(['Saved answer', 'Fresh answer']))
         other.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
@@ -198,7 +211,7 @@ def test_a_long_warm_preview_lands_before_the_canonical_handover_keeping_draft_a
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=saved))
     page.goto(shell_ui['url'])
     page.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
-    page.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('Line 49')")
+    page.wait_for_function(saved_has('Line 49'))
     pending = []
     page.route('**/api/chat/history**', lambda route: pending.append(route))
     page.reload()
@@ -254,7 +267,7 @@ def test_a_selected_preview_passage_outlasts_a_covered_room_and_an_ordinary_clic
     page = seed_page(shell_ui, 390, 844, telegram=True)
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=history(['A passage the owner selects', 'Second line'])))
     page.goto(shell_ui['url'])
-    page.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('A passage the owner selects')")
+    page.wait_for_function(saved_has('A passage the owner selects'))
     pending = []
     main_reads(page, pending)
     page.reload()
@@ -323,7 +336,7 @@ def test_a_refused_session_takes_the_saved_text_at_once_even_while_selected(shel
     recent['coverage']['spans']['chat']['from'] = 50
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=recent))
     page.goto(shell_ui['url'])
-    page.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('Private saved words')")
+    page.wait_for_function(saved_has('Private saved words'))
     pending = []
     main_reads(page, pending)
     page.reload()
@@ -345,7 +358,7 @@ def test_a_refused_session_takes_the_saved_text_at_once_even_while_selected(shel
     if status == 500:
         page.get_by_role('button', name='Retry loading messages').wait_for()
         observed = {'preview': preview.count(), 'note': preview.locator('.chat-load-older-note').text_content(),
-                    'selection': page.evaluate(SELECTION), 'stored': 'Private saved words' in page.evaluate(SAVED, PREVIEW_KEY)}
+                    'selection': page.evaluate(SELECTION), 'stored': 'Private saved words' in page.evaluate(SAVED, PREVIEW_FAMILY)}
         facts(name, observed)
         shot(page, name)
         assert observed == {'preview': 1, 'note': 'Saved text preview · retained until selection is released',
@@ -355,11 +368,11 @@ def test_a_refused_session_takes_the_saved_text_at_once_even_while_selected(shel
         page.close()
         return
     preview.wait_for(state='detached')
-    assert page.evaluate(f"localStorage.getItem('{PREVIEW_KEY}')") is None
+    assert page.evaluate(SAVED, PREVIEW_FAMILY) == ''
     if read == 'newest':  # no canonical read ever drew these words
         assert 'Private saved words' not in page.locator('#chat-messages').inner_text()
     assert page.locator('#chat-input').input_value() == 'Draft kept by the composer'
-    facts(name, {'preview': preview.count(), 'stored': page.evaluate(f"localStorage.getItem('{PREVIEW_KEY}')")})
+    facts(name, {'preview': preview.count(), 'stored': page.evaluate(SAVED, PREVIEW_FAMILY)})
     shot(page, name)
     page.close()
 
@@ -369,7 +382,7 @@ def test_main_says_welcome_after_an_authoritative_empty_read_never_after_a_faile
     page.route('**/api/ui/preferences', lambda route: route.fulfill(json={'welcome': {'mode': 'default'}}))
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=history(['Stale saved text'])))
     page.goto(shell_ui['url'])
-    page.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('Stale saved text')")
+    page.wait_for_function(saved_has('Stale saved text'))
     pending = []
     main_reads(page, pending)
     page.reload()
@@ -385,7 +398,7 @@ def test_main_says_welcome_after_an_authoritative_empty_read_never_after_a_faile
     page.get_by_role('button', name='Retry loading messages').click()
     page.locator('.chat-empty-welcome').wait_for()
     assert page.locator('[data-saved-preview]').count() == 0
-    assert 'Stale saved text' not in page.evaluate(SAVED, PREVIEW_KEY)
+    assert 'Stale saved text' not in page.evaluate(SAVED, PREVIEW_FAMILY)
     shot(page, f'empty-read-replaces-preview-with-welcome-{shell_ui["engine"]}')
     page.close()
 
@@ -412,25 +425,31 @@ def test_a_project_read_answered_after_its_room_was_left_is_neither_drawn_nor_sa
     except Exception as error:  # noqa: BLE001 - an aborted read may refuse its late answer; either way it is late
         print('late fulfil refused:', error)
     page.wait_for_timeout(400)
-    assert 'Late project answer' not in page.evaluate(SAVED, PREVIEW_KEY)
+    assert 'Late project answer' not in page.evaluate(SAVED, PREVIEW_FAMILY)
     assert page.locator('text=Late project answer').count() == 0
     open_project(page)
     wait_for_reads(page, held)
     held.pop(0).fulfill(json=history(['Fresh project answer'], start=50))
     page.locator('.chat-instance-panel .chat-bubble').filter(has_text='Fresh project answer').wait_for()
-    page.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('Fresh project answer')")
-    assert 'Late project answer' not in page.evaluate(SAVED, PREVIEW_KEY)
+    page.wait_for_function(saved_has('Fresh project answer'))
+    assert 'Late project answer' not in page.evaluate(SAVED, PREVIEW_FAMILY)
     page.close()
 
 
-@pytest.mark.parametrize('case', ['registry-deleting', 'answered-then-gone', 'refused', 'absent-only'])
+@pytest.mark.parametrize('case', ['registry-deleting', 'answered-then-gone', 'refused', 'absent-only', 'unproven'])
 def test_a_projects_saved_text_leaves_only_on_the_word_that_it_is_going_away(shell_ui, case):
-    """Astra R2: a deleted Project's room kept its saved text (up to 80 rows) until eight newer rooms pushed it out. Two
+    """Astra R2: a deleted Project's room kept its saved text until newer rooms' words filled the total. Two
     words take it, and only its rooms: the registry's `deleting` (app.js, where its room is let go too) and the core's
     answer to this browser's delete, which fenced it `deleting` before replying, so a tombstone may land before any
     read shows `deleting` (answered-then-gone). A refused delete keeps it, and so does absence alone from the bounded
-    list: no deletion is inferred. Moving between rooms takes nothing."""
+    list: no deletion is inferred. Moving between rooms takes nothing. Neither word names a data profile: each speaks
+    for this page's once its socket proved it serves that profile (the core's first frame); a `deleting` row heard on
+    a socket that proved none takes nothing (unproven; astra w3 3)."""
     page = seed_page(shell_ui, 1280, 800, telegram=False, touch=False)
+    if case != 'unproven':  # the serving socket's first frame names the profile it serves (gateway/ws.py)
+        page.route_web_socket('**/ws', lambda ws: (
+            ws.send(json.dumps({'type': 'connection_profile', 'profile_scope': PREVIEW_SCOPE})),
+            ws.send(json.dumps({'type': 'heartbeat'}))))
     words = {'chat_id=100': 'Words of the deleted Project', 'chat_id=101': 'Another Project keeps these'}
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=history([next(
         (text for query, text in words.items() if query in route.request.url), 'Main keeps these')])))
@@ -438,15 +457,15 @@ def test_a_projects_saved_text_leaves_only_on_the_word_that_it_is_going_away(she
     page.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
     for index, text in enumerate(words.values()):
         open_project(page, index)
-        page.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('{text}')")
+        page.wait_for_function(saved_has(text))
         page.keyboard.press('Escape')
         page.wait_for_function("() => window.__ouroLayers.size() === 0")
         rest(page)
-    before = page.evaluate(SAVED, PREVIEW_KEY)
+    before = page.evaluate(SAVED, PREVIEW_FAMILY)
     assert all(text in before for text in ['Main keeps these', *words.values()]), 'navigation takes nothing'
     listed = ([project for project in PROJECTS if project['id'] != 'gate-0'] if case in ('answered-then-gone', 'absent-only')
               else [dict(project, lifecycle='deleting') if project['id'] == 'gate-0' else project for project in PROJECTS]
-              if case == 'registry-deleting' else PROJECTS)
+              if case in ('registry-deleting', 'unproven') else PROJECTS)
     reads = []
 
     def state(route):
@@ -465,7 +484,7 @@ def test_a_projects_saved_text_leaves_only_on_the_word_that_it_is_going_away(she
             page.locator('.confirm-dialog [data-confirm-ok]').click()
     gone = case in ('registry-deleting', 'answered-then-gone')
     if gone:
-        page.wait_for_function(f"!(localStorage.getItem('{PREVIEW_KEY}') || '').includes('Words of the deleted Project')",
+        page.wait_for_function(f"!{saved_has('Words of the deleted Project')}",
                                timeout=10_000)
     else:  # the shell's own next read (its poll, at most 3 s) has landed and been drawn
         reads.clear()
@@ -476,8 +495,10 @@ def test_a_projects_saved_text_leaves_only_on_the_word_that_it_is_going_away(she
         assert reads, 'a state read came after the change'
         if case == 'absent-only':
             page.wait_for_function('() => !document.querySelector(\'[data-nav-project-id="gate-0"]\')')
+        if case == 'unproven':  # its `deleting` row is drawn: the word was heard
+            page.locator('.nav-project-item.is-deleting[data-nav-project-id="gate-0"]').wait_for(state='attached')
         rest(page)
-    after = page.evaluate(SAVED, PREVIEW_KEY)
+    after = page.evaluate(SAVED, PREVIEW_FAMILY)
     facts(f'project-preview-{case}-{shell_ui["engine"]}', {'before': len(before), 'after': len(after),
                                                            'kept': 'Words of the deleted Project' in after})
     assert ('Words of the deleted Project' in after) is not gone, after
@@ -494,17 +515,18 @@ def test_the_sign_in_page_every_sign_out_reaches_releases_the_saved_text_and_not
     page = seed_page(shell_ui, 390, 844, telegram=False)
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=history(['Words that leave with the session'])))
     page.goto(shell_ui['url'])
-    page.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('Words that leave with the session')")
+    page.wait_for_function(saved_has('Words that leave with the session'))
     page.evaluate("localStorage.setItem('ouroboros.theme', 'light')")
     page.route('**/auth/login**', lambda route: route.fulfill(status=401, content_type='text/html',
                                                               body=server_auth._login_page('/')))
     page.goto(shell_ui['url'] + '/auth/login?next=%2F')
     page.locator('input[name="password"]').wait_for()
-    observed = page.evaluate("key => ({saved: localStorage.getItem(key), theme: localStorage.getItem('ouroboros.theme'),"
-                             " appearance: document.documentElement.dataset.theme || null})", PREVIEW_KEY)
+    observed = page.evaluate("family => ({saved: Object.keys(localStorage).filter(key => key.startsWith(family)),"
+                             " theme: localStorage.getItem('ouroboros.theme'),"
+                             " appearance: document.documentElement.dataset.theme || null})", PREVIEW_FAMILY)
     facts(f'sign-in-page-releases-preview-{shell_ui["engine"]}', observed)
     shot(page, f'sign-in-page-releases-preview-{shell_ui["engine"]}')
-    assert observed == {'saved': None, 'theme': 'light', 'appearance': 'light'}, observed
+    assert observed == {'saved': [], 'theme': 'light', 'appearance': 'light'}, observed
     page.close()
 
 
@@ -516,7 +538,7 @@ def test_a_link_read_outside_the_room_takes_the_saved_text_only_when_currently_r
     page = seed_page(shell_ui, 390, 844, telegram=True)
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=history(['A passage the owner selects', 'Second line'])))
     page.goto(shell_ui['url'])
-    page.wait_for_function(f"localStorage.getItem('{PREVIEW_KEY}')?.includes('A passage the owner selects')")
+    page.wait_for_function(saved_has('A passage the owner selects'))
     pending = []
     main_reads(page, pending)
     page.reload()
@@ -537,12 +559,12 @@ def test_a_link_read_outside_the_room_takes_the_saved_text_only_when_currently_r
         open_project(page)  # a newer navigation: the link's read is no longer current
     status = int(answer.split('-')[1])
     around.pop(0).fulfill(status=status, json={'error': 'Authentication required.'})
-    stored = f"() => localStorage.getItem('{PREVIEW_KEY}')"
+    stored = f"() => ({SAVED})('{PREVIEW_FAMILY}') !== ''"
     if answer.startswith('refused'):
         preview.wait_for(state='detached')
     else:
         page.wait_for_timeout(600)
-    observed = {'preview': preview.count(), 'stored': page.evaluate(stored) is not None,
+    observed = {'preview': preview.count(), 'stored': page.evaluate(stored),
                 'selection': page.evaluate(SELECTION), 'draft': page.locator('#chat-input').input_value(),
                 'top': page.evaluate('window.__ouroLayers.top() || null')}
     name = f'link-read-{answer}-{shell_ui["engine"]}'

@@ -235,11 +235,13 @@ def _load_sections() -> Dict[str, Callable[[], Dict[str, Any]]]:
     ``conversation_lane`` the lane's carriers now, each with its last own RSS report, and ``machine``
     the machine's load averages and cores now)."""
     from ouroboros import dialogue_retry, store_timing
+    from ouroboros.gateway import history_attribution
     from supervisor import conversation_lane, loop_load, queue
 
     return {
         "queue_lock": lambda: queue._queue_lock.drain(),
         "store_locks": store_timing.drain,
+        "history_reads": history_attribution.drain,  # why and how fast the history route answered (GETs write nothing)
         "dialogue_retry": dialogue_retry.snapshot,
         "conversation_lane": conversation_lane.carrier_vitals,
         "machine": loop_load.machine_load,

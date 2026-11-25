@@ -93,6 +93,13 @@ def request_drive_root(request: Request) -> pathlib.Path:
     return pathlib.Path(drive_root) if drive_root is not None else pathlib.Path(DATA_DIR)
 
 
+def request_profile_scope(request: Request) -> str:
+    """The serving generation's data-profile scope, frozen when it applied (``ServedUI.serving_profile_scope``, #3294);
+    ``""`` on an app that applied none. Read from memory: no disk I/O on the request."""
+    served_ui = getattr(getattr(getattr(request, "app", None), "state", None), "served_ui", None)
+    return served_ui.serving_profile_scope() if served_ui is not None else ""
+
+
 def request_repo_dir(request: Request) -> pathlib.Path:
     """Repo dir pinned on ``request.app.state`` or the configured default."""
     from ouroboros.config import REPO_DIR

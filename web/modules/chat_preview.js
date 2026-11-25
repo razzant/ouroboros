@@ -1,31 +1,46 @@
 /** This browser's bounded copy of each room's newest text, painted before the room's first canonical read
  * (docs/DESIGN.md "History edges"). It is never history: it sets no coverage, read receipt, unread credit, action or
  * `historyLoaded`, and a row's `data-preview-history-id` only locates a passage for the reading anchor
- * (chat_render_batch.js). One same-origin record keeps, under the data profile the serving document proves, the rooms
- * read most recently (MAX_ROOMS rooms, MAX_ROWS rows, MAX_CHARS serialized; whole rows give way, a person's text is
- * never cut). chat.js writes only what it admitted: its newest window replaces a room's rows, an arrivals read that
- * accounted for everything since merges into them; a failed, unavailable, older, around, stale or late read writes
- * nothing; bounded newest windows are valid. Each row goes where the feed puts its bubble (chat_render_batch.js
- * insertTimelineNode): by the time it is stamped with (a
- * missing one is the moment it is drawn, a delayed delivery keeps its earlier one), equal times by stream position
+ * (chat_render_batch.js). Every room read in this origin keeps, under the data profile the serving document proves,
+ * an entry of its own (MAX_ROWS rows within ROOM_CHARS; whole rows give way, a person's text is never cut), all of
+ * them within TOTAL_CHARS: past it the entries saved least recently give way (each newest read saves its room; a show
+ * writes nothing), and a room's show reads its own entry alone. chat.js writes only what it admitted: its newest
+ * window replaces a room's rows, an arrivals read that accounted for everything since merges into them; a failed,
+ * unavailable, older, around, stale or late read writes nothing; bounded newest windows are valid. Each row goes where
+ * the feed puts its bubble (chat_render_batch.js insertTimelineNode): by the time it is stamped with (a missing one is
+ * the moment it is drawn, a delayed delivery keeps its earlier one), equal times by stream position
  * (chat_history_replay.js compareHistoryPosition), a row already there keeping its place; time and position are kept
  * for that alone, and the bound keeps the rows that placement puts last. Live echoes, controls, attachments and
  * session metadata never enter it; another origin, a document proving no data profile, or refused storage opens cold.
  *
- * The first canonical replay retires the painted copy. A passage the owner holds selected stays, labelled, until the
- * selection is released: the live selection, or the copy room_retire.js keeps on the room (`kept`) while an inert
- * layer covers it or it is away, where WebKit drops the live range. A history read refused for authentication, current
- * and not aborted (the room's fetchHistory below, app.js's link preparation, a Place's in place_history.js),
- * removes the record and every copy painted in this document at once, selection or not (`previewsRefused`);
- * api_client.js clears the record on sign-in, the core's sign-in page on every sign-out, and the registry's word that
- * a Project is going away takes its rooms' rows (`forgetProjectPreviews`, app.js). Its imports are the feed's tie
- * rule and the words a bubble draws (a host notice's line), so neither the order nor the words fork. */
+ * The first canonical replay retires the painted copy, and no later show paints one. A passage the owner holds
+ * selected stays, labelled, until the selection is released: the live selection, or the copy room_retire.js keeps on
+ * the room (`kept`) while an inert layer covers it or it is away, where WebKit drops the live range. A history read
+ * refused for authentication, current and not aborted (the room's fetchHistory below, app.js's link preparation, a
+ * Place's in place_history.js), removes every entry and every copy painted in this document at once, selection or not
+ * (`previewsRefused`); api_client.js clears them on sign-in, the core's sign-in page on every sign-out (server_auth.py,
+ * by PREVIEW_FAMILY). The registry's word that a Project is gone or going takes its rooms' entries under the data
+ * profile that word speaks for (app.js: a `deleting` row, an exact lookup of it: `forgetProjectPreviews`), as its
+ * list that says it is complete takes those of the Projects it no longer names (`forgetUnlistedProjectPreviews`); a
+ * Project deleted where this origin hears none of these keeps its entry until one comes or the total gives it way, and
+ * the same Project's rooms under another profile keep theirs. Its imports are the feed's tie rule and the words a
+ * bubble draws (a host notice's line), so neither the order nor the words fork. */
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 
+// The record names the form, under the one key every eraser of every earlier version removes: entries are read only
+// beside it, so such an eraser (it takes this key alone) still takes their words at this version's next touch.
 export const PREVIEW_KEY = 'ouroboros.chat-preview.v1';
+// Every key this preview writes: the record, and each room's entry (previewEntryKey). An eraser takes them all.
+export const PREVIEW_FAMILY = 'ouroboros.chat-preview.';
 export const PREVIEW_SCOPE_META = 'ouroboros-chat-preview-scope';
-const MAX_CHARS = 200000, MAX_ROOMS = 8, MAX_ROWS = 80;
+const RECORD = '{"v":3}';  // the entries' form; {"v":2,"rooms":[…]} was every room in this one key
+// v2's one record held 200,000 characters in all. A room keeps as much: its newest 80 rows within that many characters
+// of entry text, so no room keeps less than it did. Every room: 1,000,000 with their keys, about 2 MB at WebKit's 2
+// bytes a character, under half an origin's 5 MB localStorage, the rest left to the shell's own keys.
+const V2_CHARS = 200000, MAX_ROWS = 80, ROOM_CHARS = V2_CHARS, TOTAL_CHARS = 1000000;
+/** The key of one room's entry under a proven profile; `room` is chat.js's [chatId, projectId]. */
+export const previewEntryKey = (scope, room) => `${PREVIEW_KEY}:${JSON.stringify([scope, room])}`;
 // server_web.chat_preview_scope: a 16-hex digest of the profile identity the current state and its completed
 // witness both name. Only that fact makes a saved record this profile's; an installation scope, an older document
 // and any other text are no proof, so their rooms read the canonical history and save nothing here.
@@ -62,37 +77,102 @@ export function dropPaintedPreviews() {
     for (const release of [...painted]) release();
 }
 
+const savedRow = row => Boolean(row) && ROLES.includes(row.role) && typeof row.id === 'string'
+    && typeof row.text === 'string' && typeof row.speaker === 'string';
+// The family's keys in `store`, as its `length` and `key` list them (a store without them lists none).
+const familyOf = store => Array.from({ length: store.length }, (_, index) => store.key(index))
+    .filter(name => typeof name === 'string' && name.startsWith(PREVIEW_FAMILY));
+// The record first: without it no entry is read again, even where listing the rest fails.
+function erase(store) {
+    store.removeItem(PREVIEW_KEY);
+    for (const name of familyOf(store)) store.removeItem(name);
+}
+// `{"read":<ms>,"rows":[…]}`: when the copy was saved, and the newest whole rows that keep its text within ROOM_CHARS.
+function entryText(rows, read) {
+    const head = `{"read":${read},"rows":[`;
+    const pieces = rows.slice(-MAX_ROWS).map(row => JSON.stringify(row));
+    let budget = ROOM_CHARS - head.length - ']}'.length;
+    let from = pieces.length;
+    while (from > 0 && pieces[from - 1].length + 1 <= budget) budget -= pieces[--from].length + 1;
+    return `${head}${pieces.slice(from).join(',')}]}`;
+}
+const readOf = text => Number(/^\{"read":(\d+),/.exec(text)?.[1]) || 0;
+// The origin's storage is full (QuotaExceededError; NS_ERROR_DOM_QUOTA_REACHED in older Firefox).
+const full = error => ['QuotaExceededError', 'NS_ERROR_DOM_QUOTA_REACHED'].includes(error?.name);
+// The profile and the Project an entry's key names (previewEntryKey); '' for Main, the record or a key of no such form.
+const roomOf = (name) => {
+    let key = null;
+    try { key = JSON.parse(name.slice(PREVIEW_KEY.length + 1)); } catch { /* the record, or not an entry */ }
+    return { scope: Array.isArray(key) ? String(key[0] ?? '') : '',
+        project: Array.isArray(key?.[1]) ? String(key[1][1] ?? '') : '' };
+};
+// Whether `store` holds this form's record. v2's one record moves into entries once, the order it kept by time read,
+// stamped below any time this page could have asked the registry (its list then still takes a Project it omits);
+// entries standing without a record (an eraser took it) are erased before anything is read or written. `create` starts
+// an empty record.
+function current(store, create = false) {
+    const raw = store.getItem(PREVIEW_KEY);
+    if (raw === RECORD) return true;
+    let rooms = [];
+    try {
+        const data = raw && raw.length <= V2_CHARS ? JSON.parse(raw) : null;
+        if (data?.v === 2 && Array.isArray(data.rooms)) rooms = data.rooms.filter(room => typeof room?.key === 'string'
+            && Array.isArray(room.rows));
+    } catch { /* unreadable: nothing to move */ }
+    erase(store);
+    if (!rooms.length && !create) return false;
+    store.setItem(PREVIEW_KEY, RECORD);
+    rooms.forEach(({ key, rows }, index) => {
+        store.setItem(`${PREVIEW_KEY}:${key}`, entryText(rows.filter(savedRow), rooms.length - index));
+    });
+    return true;
+}
+
 export function clearChatPreviews(storage) {
-    try { (storage || globalThis.localStorage)?.removeItem(PREVIEW_KEY); } catch { /* storage unavailable */ }
+    try { erase(storage || globalThis.localStorage); } catch { /* storage unavailable */ }
     dropPaintedPreviews();
 }
 
-/** The registry says these Projects are going away (app.js, where their rooms are let go): their rooms' rows leave the
- * record in every scope; every other room keeps its own as it was, and nothing to remove writes nothing. */
-export function forgetProjectPreviews(projectIds, storage) {
-    const going = new Set((projectIds || []).filter(Boolean).map(String));
-    if (!going.size) return;
+// Removes the entries of the proven profile `scope`'s Project rooms that `going(project)` names, saved before `before`.
+function forgetRooms(storage, scope, going, before = Infinity) {
     try {
         const store = storage || globalThis.localStorage;
-        const raw = store?.getItem(PREVIEW_KEY);
-        const data = raw ? JSON.parse(raw) : null;
-        if (data?.v !== 2 || !Array.isArray(data.rooms)) return;
-        const project = (entry) => { try { return String(JSON.parse(entry?.key)?.[1]?.[1] ?? ''); } catch { return ''; } };
-        const rooms = data.rooms.filter(entry => !going.has(project(entry)));
-        if (rooms.length < data.rooms.length) store.setItem(PREVIEW_KEY, JSON.stringify({ v: 2, rooms }));
+        if (!current(store)) return;
+        for (const name of familyOf(store)) {
+            const room = roomOf(name);
+            if (room.scope === scope && room.project && going(room.project)
+                && (before === Infinity || readOf(store.getItem(name) || '') < before)) store.removeItem(name);
+        }
     } catch { /* storage unavailable or unreadable: nothing here to take */ }
 }
 
-/** A history read made in this document, current and refused for authentication: the record and every painted copy go,
- * selection or not. True when it was one; any other failure changes nothing here. */
+/** The registry says these Projects are gone or going (app.js, where their rooms are let go), for the data profile
+ * `scope` (app.js `registryScope`): that profile's rooms of them leave. Every other room keeps its own as it was, the
+ * same Project's under another profile too; a word for no proven profile, or nothing to remove, writes nothing. */
+export function forgetProjectPreviews(projectIds, scope, storage) {
+    const going = new Set((projectIds || []).filter(Boolean).map(String)), profile = provenScope(scope);
+    if (going.size && profile) forgetRooms(storage, profile, project => going.has(project));
+}
+
+/** The registry's list of every Project (`GET /api/projects?all=1`, app.js), asked at `asked` (Date.now()). Only an
+ * answer that says it is complete under the data profile it names (`complete: true`, `profile_scope`:
+ * CLIENT_CONTRACT §6) proves absence: that profile's Project rooms saved before the list was asked, whose Project it
+ * names nowhere or names `deleting`, leave; Main, other profiles' rooms and rooms saved since stay. Any other answer (an
+ * older core, an incomplete snapshot) takes nothing, and nothing to remove writes nothing. */
+export function forgetUnlistedProjectPreviews(answer, asked, storage) {
+    const profile = answer?.complete === true ? provenScope(answer.profile_scope) : '';
+    if (!profile || !Array.isArray(answer.projects)) return;
+    const listed = new Set(answer.projects.filter(row => row?.id && row.lifecycle !== 'deleting').map(row => String(row.id)));
+    forgetRooms(storage, profile, project => !listed.has(project), asked);
+}
+
+/** A history read made in this document, current and refused for authentication: every entry and every painted copy
+ * go, selection or not. True when it was one; any other failure changes nothing here. */
 export function previewsRefused(error, storage) {
     if (!refusal(error)) return false;
     clearChatPreviews(storage);
     return true;
 }
-
-const savedRow = row => Boolean(row) && ROLES.includes(row.role) && typeof row.id === 'string'
-    && typeof row.text === 'string' && typeof row.speaker === 'string';
 
 /** `label(role, isProgress, systemType, opts)` is chat_activity.js `senderLabel`: the speaker frozen as the canonical
  * bubble names it, never the row's source or session. `mutate` is the room's stable-viewport write. */
@@ -101,37 +181,56 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     storage = () => globalThis.localStorage }) {
     const doc = feed.ownerDocument;
     const profile = provenScope(scope);
-    const key = JSON.stringify([profile, room]);
-    let root = null, retiring = false, disposed = false;
-    const rooms = () => {
-        try {
-            const raw = storage()?.getItem(PREVIEW_KEY);
-            const data = raw && raw.length <= MAX_CHARS ? JSON.parse(raw) : null;
-            return data?.v === 2 && Array.isArray(data.rooms) ? data.rooms : [];
-        } catch { return []; }
-    };
-    // This room's rows; null when it has no record (never read here, or it gave way to rooms read since).
+    const entry = previewEntryKey(profile, room);
+    // `landed`: a canonical replay drew the room; `stale`: its newest read failed (a copy painted since says so).
+    let root = null, retiring = false, disposed = false, landed = false, stale = false;
+    // This room's entry text; '' when it has none (never read here, or it gave way to rooms read since).
+    const stored = store => (store && current(store) ? store.getItem(entry) || '' : '');
     const saved = () => {
-        const rows = rooms().find(entry => entry?.key === key)?.rows;
-        return Array.isArray(rows) ? rows.filter(savedRow) : null;
+        try {
+            const raw = stored(storage());
+            const rows = raw && raw.length <= ROOM_CHARS ? JSON.parse(raw)?.rows : null;
+            return Array.isArray(rows) ? rows.filter(savedRow) : null;
+        } catch { return null; }
     };
-    // This room first (an empty one too: it was read empty), newest rows kept; then the other rooms, most recent
-    // first, while they fit. Every row and room is serialized once and charged a separator: the record stays under
-    // MAX_CHARS.
+    // This room's entry first (an empty one too: it was read empty), stamped with when it was saved; once it landed,
+    // the others as they stand then (another tab may have erased or replaced any meanwhile), saved least recently
+    // first, give way until all fit TOTAL_CHARS. An origin too full to take it: the others give way one at a time,
+    // saved least recently first, the write asked again after each, until it lands or none is left. Nothing that gave
+    // way is written back (another tab may have erased or replaced it since): a write that cannot land even then leaves
+    // them gone, and goes itself, alone: an older text never stands for a newer read. Only a save writes this entry: a
+    // show or a read with nothing new never rewrites words another tab may have replaced or erased.
     const write = (rows) => {
-        const head = `{"key":${JSON.stringify(key)},"rows":[`;
-        const pieces = rows.slice(-MAX_ROWS).map(row => JSON.stringify(row));
-        let budget = MAX_CHARS - '{"v":2,"rooms":[]}'.length - head.length - ']},'.length;
-        let from = pieces.length;
-        while (from > 0 && pieces[from - 1].length + 1 <= budget) budget -= pieces[--from].length + 1;
-        const parts = [`${head}${pieces.slice(from).join(',')}]}`];
-        for (const entry of rooms().filter(item => item?.key !== key).slice(0, MAX_ROOMS - 1)) {
-            const text = JSON.stringify(entry);
-            if (text.length + 1 > budget) break;  // it and every older room give way
-            budget -= text.length + 1;
-            parts.push(text);
-        }
-        try { storage()?.setItem(PREVIEW_KEY, `{"v":2,"rooms":[${parts.join(',')}]}`); } catch { /* the room still works */ }
+        let store = null, written = false;
+        try {
+            store = storage();
+            if (!store || !current(store, true)) return;
+            const text = entryText(rows, Date.now());
+            // The other rooms' entries as they stand now, saved least recently first.
+            const others = () => familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
+                const value = store.getItem(name) || '';
+                return { name, size: name.length + value.length, read: readOf(value) };
+            }).sort((a, b) => a.read - b.read);
+            const put = () => {
+                try { store.setItem(entry, text); } catch (error) { if (full(error)) return false; throw error; }
+                return true;
+            };
+            written = put();
+            const giving = written ? [] : others();  // only a full origin surveys them before its write lands
+            while (!written && giving.length) {
+                store.removeItem(giving.shift().name);
+                written = put();
+            }
+            const rest = written ? others() : [];
+            let total = PREVIEW_KEY.length + RECORD.length + entry.length + text.length
+                + rest.reduce((sum, other) => sum + other.size, 0);
+            while (total > TOTAL_CHARS && rest.length) {
+                const other = rest.shift();
+                store.removeItem(other.name);
+                total -= other.size;
+            }
+        } catch { /* storage unavailable, or a refusal other than a full origin */ }
+        if (!written) try { store?.removeItem(entry); } catch { /* storage unavailable */ }
     };
     // Each row keeps the time and position its bubble is stamped with (chat.js addMessage, stampNodeTimestamp,
     // stampHistoryNode): a missing time is the moment it is drawn, one that does not parse leaves it untimed.
@@ -164,6 +263,7 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
         return [...live, ...(kept() || [])].some(covers);
     };
     const retire = () => {
+        landed = true;
         if (!root) return;
         retiring = true;
         if (held()) note('retained until selection is released');
@@ -174,20 +274,20 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     const release = () => { if (root) mutate(() => { drop(); return true; }); drop(); };
     painted.add(release);
     const discard = () => {
-        try { storage()?.removeItem(PREVIEW_KEY); } catch { /* storage unavailable */ }
+        try { erase(storage()); } catch { /* storage unavailable */ }
         dropPaintedPreviews();
     };
     return {
         /** Paints the saved rows once, before any canonical read; false when there is nothing valid to show. */
         show() {
-            const rows = disposed || !profile || root || !canShow() ? null : saved();
+            const rows = disposed || landed || !profile || root || !canShow() ? null : saved();
             if (!rows?.length) return false;
             root = doc.createElement('div');
             root.className = 'chat-saved-preview';
             root.dataset.savedPreview = 'true';
             root.append(doc.createElement('div'));
             root.firstElementChild.className = 'chat-load-older-note';
-            note('updating');
+            note(stale ? 'not current' : 'updating');
             for (const row of rows) {
                 const bubble = doc.createElement('div');
                 bubble.className = `chat-bubble ${row.role}`;
@@ -203,17 +303,22 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             feed.prepend(root);
             return true;
         },
+        /** A painted copy stands in the feed: the room has words to come in with (app.js's docked panel). */
+        shown: () => Boolean(root),
         /** The room's newest window, admitted (chat.js): its rows replace this room's. A window that could not read
-         * the conversation stream, or a refusal, keeps the record; a bounded `complete: false` window is a window. */
+         * the conversation stream, or a refusal, keeps its entry; a bounded `complete: false` window is a window. */
         save(messages, { window: frame = null, reason_code: refused = '' } = {}) {
             if (!profile || disposed || refused || frame?.truncated_by?.includes?.('chat_source_unavailable')) return;
             write(fromHistory(messages).reduce(place, []));
         },
         /** Rows an arrivals read accounted for since the newest window: one the room has stays where it stands, a new
-         * one goes where the feed puts it. A room without a record waits for its next newest window. */
+         * one goes where the feed puts it; one that brought none writes nothing. A room without an entry waits for its
+         * next newest window. */
         append(messages) {
-            const incoming = profile && !disposed ? fromHistory(messages) : [];
-            const rows = incoming.length ? saved() : null;
+            if (!profile || disposed) return;
+            const incoming = fromHistory(messages);
+            if (!incoming.length) return;
+            const rows = saved();
             if (!rows) return;
             for (const row of incoming) {
                 const at = rows.findIndex(other => other.id === row.id);
@@ -229,10 +334,10 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             if (refusal(error)) discard();
             else if (error?.foreignProfile && provenScope(error.servingScope)) dropPaintedPreviews();
         },
-        /** The room's newest read failed: a refusal discards, anything else leaves the text labelled. */
+        /** The room's newest read failed: a refusal discards, anything else labels the text, now or as it paints. */
         failed(error) {
             if (refusal(error)) discard();
-            else note('not current');
+            else { stale = true; note('not current'); }
         },
         destroy() {
             disposed = true;
@@ -283,6 +388,8 @@ export function createRoomProfileLifecycle({
     // return shows it again only on a word read after it, and its Send again asks anew.
     let canonical = false, proof = null, failure = null, epoch = 0;
     const asked = new WeakMap();  // a failed read -> the socket and the room's epoch it was sent under
+    // Why these reads are made (history_attribution.py): a Send again's, or a failed newest read asked again.
+    const RETRY = { reason: 'retry' };
     const servingSocket = () => (profileScope && ws?.isConnected?.() !== false
         && ws?.servingProfileScope?.() === profileScope ? ws.ws || null : null);
     const lapse = () => { proof = null; kept()?.withdraw(); };
@@ -291,24 +398,33 @@ export function createRoomProfileLifecycle({
     // current at the press must still serve that profile: the ordinary write path the frame then takes (ws.js `send`,
     // which checks it again), where the core's acceptance asks the room once more (gateway/ws.py). Only then `true`.
     // Readable history hands the copy to the ordinary read; another current answer of the core ends the word; an answer
-    // asked before the room changed or was left, or on another socket, changes nothing, nor does no answer.
+    // asked before the room changed or was left, or on another socket, changes nothing, nor does no answer. A current
+    // refusal for authentication takes the saved text, as one of the room's own reads does (`fetchHistory`); a late one
+    // never takes what the room saved since.
     async function confirmNow() {
         const socket = servingSocket(), at = epoch;
         if (canonical || !socket || proof !== socket) return false;
         let answer = null, readable = false;
-        try { await readHistory({ chatId, cursor: null }); readable = true; } catch (error) { answer = error; }
+        try { await readHistory({ chatId, cursor: null, tags: RETRY }); readable = true; } catch (error) { answer = error; }
         if (isDestroyed() || isLeaving()) return false;
-        if (readable) { void syncHistory(); return false; }
+        if (readable) { void syncHistory(RETRY); return false; }
         if (servingSocket() !== socket || epoch !== at) return false;
+        getPreview().refused(answer);
         if (ordinaryUnavailability(answer, chatId, profileScope)) { proof = socket; return true; }
         if (answer?.status || answer?.foreignProfile) lapse();
         return false;
     }
     // `room`: the room the word names, which a Send again standing on it names to the core (`ChatInbound.ordinary_room`).
     const word = { room: chatId, holds: () => canonical || (proof !== null && proof === servingSocket()), confirm: confirmNow };
+    // The opening's saved text waits for this socket's proof (ws.js canShowSavedProfile: after a disconnect only the
+    // current socket proves the profile): `profileConfirmed` paints it then, once, unless a canonical read landed first.
+    // A room away hears no proof (room_retire.js roomSocket): back on screen (`stayed`) it paints it where the proof
+    // came, before the preferences or any read its return asks for.
+    let previewOwed = false;
+    const showPreview = () => { if (getPreview().show()) onPreviewShown(); };
 
     // Hydration triggers share one sticky request; reconnect/resync read again.
-    const awaitInitialHydration = () => isLeaving() ? Promise.resolve(false) : (initialHydrationPromise ||= syncHistory());
+    const awaitInitialHydration = () => isLeaving() ? Promise.resolve(false) : (initialHydrationPromise ||= syncHistory({ reason: 'open' }));
 
     // Main briefly yields hydration to an opening Project, with a hard bound.
     function waitForHydrationWindow() {
@@ -338,7 +454,10 @@ export function createRoomProfileLifecycle({
     async function startOpening() {
         // The owners below exist first: no read stands between opening and saved text.
         await null;
-        if (!isDestroyed() && getPreview().show()) onPreviewShown();
+        if (!isDestroyed()) {
+            showPreview();
+            previewOwed = !getPreview().shown() && !foreignProfile() && ws?.canShowSavedProfile?.() !== true;
+        }
         await loadUiPreferences();
         // Main waits for hydration; Projects pass through. History reads share one flight.
         await waitForHydrationWindow();
@@ -346,7 +465,7 @@ export function createRoomProfileLifecycle({
         await awaitInitialHydration();
     }
 
-    return {
+    const lifecycle = {
         storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow, startOpening,
         get initialHydration() { return initialHydrationPromise; },
         settleInitialHydration(promise) { initialHydrationPromise = promise; },
@@ -370,13 +489,17 @@ export function createRoomProfileLifecycle({
             lapse();
             // The word came before this socket proved the profile, or before the room changed: asked again on this one.
             failure = ordinary ? error : null;
-            if (failure && servingSocket()) void Promise.resolve().then(() => syncHistory());
+            if (failure && servingSocket()) void Promise.resolve().then(() => syncHistory(RETRY));
         },
         /** A socket proved the profile it serves (ws.js `connection_profile`): a word read on another socket lapses, and one
          *  that waited for this proof is asked again. */
         profileConfirmed() {
             kept()?.withdraw();
-            if (failure && !canonical) void syncHistory();
+            if (failure && !canonical) void syncHistory(RETRY);
+            // An opening this proof held back paints its saved text now, once; a room away paints nothing.
+            const owed = previewOwed;
+            previewOwed = false;
+            if (owed && !isDestroyed() && !isLeaving()) showPreview();
         },
         /** The registry's `projects_changed` naming this Project room, or no room: the core's word on it lapses, asked again. */
         roomChanged(frame) {
@@ -385,10 +508,23 @@ export function createRoomProfileLifecycle({
             const held = proof !== null || failure !== null;
             epoch += 1;
             lapse();
-            if (held) void syncHistory();
+            if (held) void syncHistory({ reason: 'refresh' });
         },
         /** The room leaves the screen (chat.js `leave`): the core's word lapses and what it showed leaves the feed, kept; no
          *  answer asked before can bring it back, so a return shows it only on a word read after it. */
         left() { epoch += 1; lapse(); },
+        /** The room is back on screen (chat.js `stay`): an opening's saved text owed since paints now, where the page's
+         *  socket proved the profile while the room was away, once. */
+        stayed() {
+            if (!previewOwed || ws?.canShowSavedProfile?.() !== true || isDestroyed() || isLeaving()) return;
+            previewOwed = false;
+            showPreview();
+        },
+        /** The room's socket words, on chat.js's own subscriptions (`onWs`: released with the room). */
+        listen(on) {
+            on('connection_profile', lifecycle.profileConfirmed);
+            on('projects_changed', lifecycle.roomChanged);
+        },
     };
+    return lifecycle;
 }
