@@ -1,0 +1,181 @@
+name: First-start qualification
+'on':
+  push:
+    branches: [qa/first-start-nine-7a67b95d]
+permissions: {contents: read}
+env:
+  PRODUCT: '81b022571158125eac11ec4db5c4be80792f9e41'
+  LIGHT_CASES: >-
+    ["tests/test_context_runtime_section.py::test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an_unreadable_binding[first_boot]", "tests/test_context_runtime_section.py::test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an_unreadable_binding[talked]", "tests/test_context_runtime_section.py::test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an_unreadable_binding[unread_binding]", "tests/test_onboarding_consciousness_offer.py::test_only_a_root_the_next_boot_would_mint_counts_as_no_state_yet", "tests/test_onboarding_consciousness_offer.py::test_a_copy_that_cannot_be_read_is_a_state_that_exists_on_a_root_due_its_first_state", "tests/test_own_time_seed.py::test_a_first_start_respects_an_authored_note_or_seeds_once_after_prior_deletion[kept]", "tests/test_own_time_seed.py::test_a_first_start_respects_an_authored_note_or_seeds_once_after_prior_deletion[deleted]", "tests/test_own_time_seed.py::test_the_seed_publishes_its_own_commit_beside_an_identical_earlier_authored_note[moved]", "tests/test_own_time_seed.py::test_the_seed_publishes_its_own_commit_beside_an_identical_earlier_authored_note[edited]", "tests/test_own_time_seed.py::test_a_publication_restored_onto_this_initializations_source_honors_a_later_deletion"]
+jobs:
+  verify:
+    name: First start on ${{ matrix.os }}
+    strategy: {fail-fast: false, matrix: {os: [ubuntu-24.04, windows-2025]}}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults: {run: {shell: bash}}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {ref: '${{ github.sha }}', fetch-depth: 2, persist-credentials: false}
+      - name: Bind the workflow-only commit to the product under test
+        id: bind
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = razzant/ouroboros
+          test "$GITHUB_REF" = refs/heads/qa/first-start-nine-7a67b95d
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P HEAD)" = "$PRODUCT"
+          test "$(git diff --name-status --no-renames "$PRODUCT" HEAD --)" = $'A\t.github/workflows/qa-first-start-nine-7a67b95d.yml'
+          git checkout --detach "$PRODUCT"
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          test -z "$(git status --porcelain)"
+          printf 'Product `%s`; QA overlay `%s`\n' "$PRODUCT" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Put Windows scratch on the work disk
+        if: runner.os == 'Windows'
+        run: printf 'TEMP=%s\nTMP=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with: {interpreter: shipped, install-project: 'false'}
+      - name: Install Chromium and its Ubuntu dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 30
+        env: {PLAYWRIGHT_BROWSERS_PATH: '${{ runner.temp }}/ui-browsers'}
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium
+      - name: Install Chromium on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 20
+        env: {PLAYWRIGHT_BROWSERS_PATH: '${{ runner.temp }}/ui-browsers'}
+        run: python -m playwright install chromium
+      - name: Check selection, execute once, report each node
+        env: {OUROBOROS_RUN_UI_SMOKE: '1', PLAYWRIGHT_BROWSERS_PATH: '${{ runner.temp }}/ui-browsers'}
+        run: |
+          python -I - <<'PY'
+          import json, os, re, subprocess, sys, tempfile
+          from pathlib import Path
+
+          node_re = re.compile(r'tests/(?:[\w-]+/)*test_[\w-]+\.py(?:::[A-Za-z_]\w*)*::test_\w+(?:\[[ -~]+\])?', re.A)
+          reset_id = 'tests/test_settings_policy_browser.py::test_reset_from_about_shows_the_successors_completed_receipt_in_the_same_tab[_seed_reset_note]'
+          light = json.loads(os.environ['LIGHT_CASES'])
+          expected = [*light, reset_id] if isinstance(light, list) and light else []
+          if not expected or any(not isinstance(x, str) or not node_re.fullmatch(x) for x in expected) or len(set(expected)) != len(expected):
+              raise SystemExit('Expected a non-empty list of distinct, complete pytest node IDs')
+          work = Path(tempfile.mkdtemp(prefix='qa-first-start-', dir=os.environ['RUNNER_TEMP']))
+          if sys.platform.startswith('linux'):
+              os.environ['PLAYWRIGHT_NODEJS_PATH'] = str(Path('node-standalone/bin/node').resolve())
+          py = sys.executable
+          loc = work / 'failure-sites.tsv'
+          loc_runner = r'''
+          import os, sys
+          from traceback import walk_tb
+          import pytest
+
+          dest, *args = sys.argv[1:]
+          root = os.getcwd()
+          def key(path):
+              return os.path.normcase(os.path.normpath(os.path.join(root, path)))
+          nodes = {a for a in args if a.startswith('tests/') and '::' in a}
+          files = {key(n.split('::', 1)[0]): n.split('::', 1)[0] for n in nodes}
+          kinds = {'AssertionError': 'assertion', 'TimeoutError': 'timeout', 'Failed': 'pytest-failure'}
+
+          class Sites:
+              @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+              def pytest_runtest_makereport(self, item, call):
+                  result = yield
+                  if item.nodeid not in nodes or call.excinfo is None or not result.get_result().failed:
+                      return
+                  site = None
+                  for frame, line in walk_tb(call.excinfo.tb):
+                      if (name := files.get(key(frame.f_code.co_filename))) and line > 0:
+                          site = (name, line)
+                  if site is not None:
+                      try:
+                          with open(dest, 'a', encoding='ascii') as out:
+                              print(*site, kinds.get(call.excinfo.type.__name__, 'other'), sep='\t', file=out)
+                      except OSError:
+                          pass  # Missing diagnostics do not change the test's result.
+
+          raise SystemExit(pytest.main(args, plugins=[Sites()]))
+          '''
+
+          def run_pytest(tag, *extra_args):
+              ev = work / f'{tag}-ev'
+              launcher = [py, '-B', '-c', loc_runner, str(loc)] if tag == 'run' else [py, '-B', '-m', 'pytest']
+              cmd = [py, '-I', '-S', 'scripts/safe_test.py', '--timeout', '2400', '--evidence-dir', str(work / f'{tag}-raw'), '--',
+                     *launcher, '-o', 'addopts=', '-v', '--tb=short', '--timeout=900',
+                     f'--ci-evidence-dir={ev}', *extra_args, *expected]
+              with (work / f'{tag}.log').open('wb') as log:
+                  rc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT).returncode
+              p = ev / 'results.json'
+              return (rc if rc >= 0 else 128 - rc), (json.loads(p.read_text(encoding='utf-8')) if p.is_file() else None)
+
+          def check(rc, data, label):
+              if not isinstance(data, dict) or not isinstance(data.get('reports'), list):
+                  return [f'{label}: MISSING RESULTS (rc={rc})']
+              sel, issues = data.get('selected_nodeids'), []
+              if rc != 0 or data.get('session_exit_code') != 0:
+                  issues.append(f'{label}: exit safe_test={rc}, pytest={data.get("session_exit_code")}')
+              if data.get('collection_failures') or data.get('collection_skips'):
+                  issues.append(f'{label}: collection failed or skipped')
+              if not isinstance(sel, list):
+                  return [*issues, f'{label}: no selection report']
+              for name, n in (('duplicate', len(sel)-len(set(sel))), ('missing', len(set(expected)-set(sel))), ('extra', len(set(sel)-set(expected)))):
+                  if n:
+                      issues.append(f'{label}: {name} selected IDs={n}')
+              return issues
+
+          rc, col = run_pytest('collect', '--collect-only')
+          pre = check(rc, col, 'collect')
+          if pre:
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+                  out.write('No tests executed.\n' + '\n'.join(pre) + '\n')
+              raise SystemExit('\n'.join(pre))
+
+          rc, data = run_pytest('run')
+          issues, by_node = check(rc, data, 'run'), {}
+          reports = data['reports'] if isinstance(data, dict) and isinstance(data.get('reports'), list) else []
+          for row in reports:
+              if isinstance(row, dict) and isinstance(row.get('nodeid'), str):
+                  by_node.setdefault(row['nodeid'], []).append(row)
+              else:
+                  issues.append('Invalid report row')
+          missing, extra = set(expected) - set(by_node), set(by_node) - set(expected)
+          if missing or extra:
+              issues.append(f'Missing results={len(missing)}, extra={len(extra)}')
+          def tag(row):
+              outcome = row.get('outcome')
+              if row.get('wasxfail') is not None and outcome in ('passed', 'skipped'):
+                  return 'xpass' if outcome == 'passed' else 'xfail'
+              return str(outcome)
+          lines = []
+          for node in expected:
+              rows = by_node.get(node, [])
+              phases = [r.get('phase') for r in rows if not r.get('is_subtest')]
+              if rows and (len(phases) != 3 or set(phases) != {'setup', 'call', 'teardown'}):
+                  issues.append(f'Incomplete or duplicate phases: {node}')
+              if any(r.get('phase') == 'crash' or tag(r) != 'passed' for r in rows):
+                  issues.append(f'Non-pass result: {node}')
+              facts = ' '.join(f"{'subtest:' if r.get('is_subtest') else ''}{r['phase']}:{tag(r)}" for r in rows)
+              lines.append(f'{node}: {facts or "NO REPORT"}')
+          allowed_files = {n.split('::', 1)[0] for n in expected}
+          try:
+              sites = loc.read_text(encoding='ascii').splitlines()
+          except (OSError, UnicodeError):
+              sites = []
+          for site in dict.fromkeys(sites):
+              fields = site.split('\t')
+              if len(fields) == 3:
+                  name, line, kind = fields
+                  if (name in allowed_files and re.fullmatch(r'[1-9][0-9]{0,6}', line)
+                          and kind in {'assertion', 'timeout', 'pytest-failure', 'other'}):
+                      lines.append(f'{name}:{line} [{kind}]')
+          body = '\n'.join([*lines, *issues])
+          print(body)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              out.write(f'### {sys.platform} (safe_test exit={rc})\n```\n{body}\n```\n')
+          if issues:
+              raise SystemExit(1)
+          PY
+      - name: Recheck the product checkout
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          git diff --quiet HEAD --
