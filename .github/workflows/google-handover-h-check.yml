@@ -1,0 +1,130 @@
+name: Google handover H - focused check
+on:
+  push:
+    branches: [ci-check/google-skill-handover-v2-b6dec86f]
+permissions:
+  contents: read
+jobs:
+  focused:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXPECTED_TREE: b6dec86f9b9aa53c5249f74b0d90b6b37999b92d
+      EXPECTED_BASE: e5e99eeb8420ee74cc64eb71e4f0735298251284
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify and check out the product parent
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          product="$(git rev-parse --verify HEAD^1)"
+          test "$(git rev-list --parents -n 1 HEAD)" = "$GITHUB_SHA $product"
+          test "$(git rev-list --parents -n 1 "$product")" = "$product $EXPECTED_BASE"
+          test "$(git rev-parse "${product}^{tree}")" = "$EXPECTED_TREE"
+          test "$(git diff --name-only "$product" "$GITHUB_SHA" --)" = ".github/workflows/google-handover-h-check.yml"
+          git checkout --detach "$product"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+      - name: Run fixed in-memory cases and verify JUnit
+        id: cases
+        run: |
+          git diff --exit-code HEAD --
+          python -I - <<'PY'
+          import hashlib, json, os, subprocess, sys, tempfile
+          import xml.etree.ElementTree as ET
+          from collections import Counter
+          from pathlib import Path
+
+          handover = 'tests/test_service_sign_in_handover.py'
+          selected = [
+              (handover, 'test_late_consent_replaces_only_its_saved_predecessor'),
+              (handover, 'test_a_moved_grants_first_refresh_reaches_the_skill_once_the_provider_names_its_account'),
+              (handover, 'test_a_verified_import_reads_back_with_its_consent_and_a_write_may_bind_that_consent'),
+              (handover, 'test_disconnect_ends_access_before_publishing_the_break'),
+              (handover, 'test_a_strict_first_offer_cut_off_before_its_attempt_continues_after_another_withdrawal[False-/.well-known/]'),
+              ('tests/test_gateway_parity.py', 'test_sign_in_contracts_have_field_identical_javascript_twins'),
+          ]
+          expected = Counter((f.removesuffix('.py').replace('/', '.'), n) for f, n in selected)
+          def rev(ref):
+              return subprocess.check_output(['git', 'rev-parse', '--verify', ref], text=True).strip()
+          proof = Path(os.environ['RUNNER_TEMP']) / 'google-h-proof'
+          proof.mkdir(exist_ok=True)
+          product = rev('HEAD')
+          tree = rev('HEAD^{tree}')
+          qa = os.environ['GITHUB_SHA']
+          if product != rev(qa + '^1') or tree != os.environ['EXPECTED_TREE']:
+              raise SystemExit('Product checkout changed before pytest')
+
+          with tempfile.TemporaryDirectory() as tmp:
+              raw = Path(tmp) / 'raw-junit.xml'
+              code = subprocess.run([
+                  sys.executable, '-I', '-S', 'scripts/safe_test.py', '--timeout', '180',
+                  '--evidence-dir', str(Path(tmp) / 'local-only'), '--', sys.executable,
+                  '-m', 'pytest', f'--junitxml={raw}', *[f'{f}::{n}' for f, n in selected],
+              ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT).returncode
+              try:
+                  root = ET.parse(raw).getroot()
+              except (OSError, ET.ParseError):
+                  root = None
+
+          suites = list(root.iter('testsuite')) if root is not None else []
+          cases = list(root.iter('testcase')) if root is not None else []
+          ids = [(c.get('classname'), c.get('name')) for c in cases]
+          tags = {'failure': 'failures', 'error': 'errors', 'skipped': 'skipped'}
+          exact = Counter(ids) == expected
+          bad = {attr: sum(c.find(tag) is not None for c in cases) for tag, attr in tags.items()}
+          ok = (code == 0 and exact and not any(bad.values()) and len(suites) == 1
+                and suites[0].get('tests') == str(len(selected))
+                and all(suites[0].get(a) == '0' for a in tags.values()))
+          report = dict(qa_commit=qa, product_commit=product, product_tree=tree,
+                        runner_os=os.environ['RUNNER_OS'], launcher_exit=code,
+                        expected_count=len(selected), observed_count=len(cases),
+                        exact_cases=exact, junit_parsed=root is not None, ok=ok, **bad)
+          if root is not None:
+              # Publish a projection, never raw pytest XML, traces, hostnames or output.
+              clean = ET.Element('testsuite', name='google-h')
+              for case, key in zip(cases, ids):
+                  if key in expected:
+                      row = ET.SubElement(clean, 'testcase', classname=key[0], name=key[1])
+                      for tag in tags:
+                          if case.find(tag) is not None:
+                              ET.SubElement(row, tag)
+              clean.set('tests', str(len(clean)))
+              for tag, attr in tags.items():
+                  clean.set(attr, str(len(clean.findall(f'testcase/{tag}'))))
+              junit = proof / 'junit.xml'
+              ET.ElementTree(clean).write(junit, encoding='utf-8', xml_declaration=True)
+              report['junit_sha256'] = hashlib.sha256(junit.read_bytes()).hexdigest()
+          (proof / 'proof.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(report))
+          sys.exit(0 if ok else 1)
+          PY
+      - name: Capture the imported-client form on the product checkout
+        if: runner.os == 'Linux'
+        run: |
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/test-chromium"
+          py="$(python -c 'import sys; print(sys.executable)')"
+          "$py" -m playwright install --with-deps chromium
+          "$py" -I -S scripts/safe_test.py --timeout 180 --evidence-dir "$RUNNER_TEMP/visual-local" -- \
+            /usr/bin/env OUROBOROS_RUN_UI_SMOKE=1 PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            OUROBOROS_UI_EVIDENCE_OUT="$RUNNER_TEMP/google-h-proof" "$py" -m pytest -p no:cacheprovider -o addopts= -q \
+            tests/test_skill_sign_in_browser.py::test_unknown_return_client_renames_without_return_and_stays_out_of_new_sign_in
+          test -s "$RUNNER_TEMP/google-h-proof/skills-chromium-1280-sign-in-unknown-return-client.png"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() && (steps.cases.outcome == 'success' || steps.cases.outcome == 'failure') }}
+        with:
+          name: google-h-${{ runner.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/google-h-proof/
+          if-no-files-found: error
+          retention-days: 7
