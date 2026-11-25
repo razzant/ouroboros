@@ -252,7 +252,7 @@ ouroboros/ — agent core and shared runtime (§6)
   context_mode_compat.py — normalizes/persists `OUROBOROS_CONTEXT_MODE`/`OUROBOROS_CONTEXT_MODE_AUTO_LOW` (§7 Default settings)
   context_layout.py — doc-layout SSOT; reduction relocates (§6 Context fitting)
   context_runtime_facts.py, engine_facts.py — runtime-section fact builders
-  memory_view.py, memory_view_legacy.py, memory_view_account.py, memory_room_activity.py, memory_waiting.py — story, legacy retellings, cross-room accounts, room considered points, waiting acts (§6)
+  memory_view.py, memory_view_legacy.py, memory_view_account.py, memory_room_activity.py, memory_reading.py, memory_coverage.py, memory_waiting.py — story, legacy retellings, cross-room accounts, room considered points, reads, waiting acts (§6)
   memory_reader.py — extensions' `read_memory` (§6)
   memory_view_conversations.py, memory_view_conversation_forms.py — other conversations capture/forms (§6 Durable memory and project focus)
   memory_view_work.py — completion gists, work forms, source readers (§6)

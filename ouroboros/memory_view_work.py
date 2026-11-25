@@ -172,7 +172,9 @@ def task_gists_before_work_lines(room, gone):
 
 def conversation_task_lines(group, *, with_sources=False):
     """Each work's task telling once within this conversation, beside all its host facts."""
-    told = {(room.get("folded") or {}).get("task") for room in group["rooms"]}
+    from ouroboros.memory_view_conversation_forms import folds
+
+    told = {fold.get("task") for room in group["rooms"] for fold in folds(room)}
     lines = {}
     for room in group["rooms"]:
         lines[room["room_id"]] = []
