@@ -20,6 +20,7 @@ import contextlib
 import contextvars
 import functools
 import hashlib
+import json
 import math
 import os
 import pathlib
@@ -188,9 +189,11 @@ def _matches_provider(row: Dict[str, Any], binding: Dict[str, Any]) -> bool:
     return "endpoints" in row and all(row.get(key) == binding[key] for key in ("issuer", "endpoints"))
 
 
-def _client_rows(skill: str, binding: Dict[str, Any], rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _client_rows(skill: str, binding: Dict[str, Any], rows: Iterable[Dict[str, Any]], *,
+                 for_sign_in: bool = False) -> List[Dict[str, Any]]:
     sources = ("owner", "registered", f"handover:{skill}")
-    return [row for row in rows if row.get("source") in sources and _matches_provider(row, binding)]
+    return [row for row in rows if row.get("source") in sources and _matches_provider(row, binding)
+            and (not for_sign_in or row.get("return") != "unknown")]
 
 
 def _account_files(skill: str, service: str) -> List[pathlib.Path]:
@@ -251,7 +254,7 @@ async def _endpoints(service: declaration.Service, http: httpx.AsyncClient) -> T
 
 
 def _client_row(skill: str, binding: Dict[str, Any], client: str, *, registering: bool = False) -> Dict[str, Any]:
-    rows = _client_rows(skill, binding, clients())
+    rows = _client_rows(skill, binding, clients(), for_sign_in=True)
     if registering and rows:
         raise SignInRequired("client_required", "a client is now available; choose it on the card")
     if client:
@@ -294,6 +297,8 @@ async def client_save(issuer: str, client: Dict[str, Any], *, endpoints: Any = N
             row = next((saved for saved in rows if saved.get("id") == row_id), None)
             if row is None or not _matches_provider(row, binding):
                 raise ValueError("this client does not belong to the selected provider; add it separately")
+            if row.get("return") == "unknown" and ret is not None:
+                raise ValueError("add a separate client with a known return address for new sign-ins")
             if row.get("source") != "owner" and (
                     (client_id and client_id != row.get("client_id")) or (secret and secret != row.get("client_secret"))):
                 raise ValueError("add a separate owner client to change this registration")
@@ -422,6 +427,8 @@ async def begin(skill: str, service_id: str, *, client: str = "", optional_scope
     async with oauth_engine.locked(pending):
         _declared(skill, service_id, True)  # a deletion or a switch-off while this waited for the lock ends it here
         current = oauth_engine.load(pending)
+        if account in await _finish_withdrawals(skill, service_id, pending, current):
+            account = ""  # its owner disconnected it: this sign-in starts afresh
         active = _single_account(skill, service)
         if active and account and active != account:
             raise SignInRequired("account_mismatch", "disconnect the current account before choosing another")
@@ -481,7 +488,7 @@ async def _register_if_empty(skill: str, service_id: str, binding: Dict[str, Any
         if current != binding:
             raise SignInRequired("sign_in_choices_changed", "the skill's provider changed meanwhile; nothing was saved")
         rows = clients()
-        if _client_rows(skill, binding, rows):
+        if _client_rows(skill, binding, rows, for_sign_in=True):
             raise SignInRequired("client_required", "a client is now available; choose it on the card")
         try:
             registered = await oauth_engine.register_client(metadata, redirect, http, issuer=issuer)
@@ -549,10 +556,12 @@ async def _identity(tokens: Dict[str, Any], pending: Dict[str, Any], *, skill: s
 def _before_filing(skill: str, service: declaration.Service, pending: Dict[str, Any], target: oauth_engine.Grant) -> None:
     """A sign-in sent to repair one account never rewrites another saved one. Another subject files as a new
     account (``many``) or, for ``one``, in place of the unconfirmed moved row it was sent to (``_retire_replaced``);
-    it is never matched to that row by label or email."""
+    it is never matched to that row by label or email. An account whose owner's withdrawal has not finished (``_ended``) was
+    disconnected after this attempt began: a new attempt's ``begin`` finishes that withdrawal first."""
     service = _declared(skill, service.id)
     key, asked, active = target.path.stem, pending.get("account"), _single_account(skill, service)
-    if key in (pending.get("excluded_accounts") or []):
+    if key in (pending.get("excluded_accounts") or []) or any(
+            _ended(_load_account(_grant(skill, service.id, name))) for name in {key, asked} if name):
         raise SignInRequired("sign_in_superseded", "this account was disconnected after the attempt began")
     if service.accounts == "one":
         others = [value for value in {active, asked} if value and value != key
@@ -726,15 +735,19 @@ async def _prove_refresh(grant: oauth_engine.Grant, doc: Dict[str, Any]) -> bool
 
 
 async def token(skill: str, service_id: str, account: str = "", *, rejected: Optional[str] = None,
-                required_scope: str = "", min_valid: float = 0, connection_id: str = "") -> Dict[str, Any]:
-    """The skill's bearer for one account. An expected ``connection_id`` is compared under the account's lock before any
-    refresh: only a confirmed account with exactly that one matches, never a missing one."""
+                required_scope: str = "", min_valid: float = 0, connection_id: str = "",
+                consent: Optional[str] = None) -> Dict[str, Any]:
+    """The skill's bearer for one account. An expected ``connection_id`` and an expected ``consent`` (``oauth_engine.consent_ref``)
+    are compared under the account's lock before any refresh: only a confirmed account with exactly that connection and
+    consent matches, never a missing one; the answer repeats ``consent`` when one was expected."""
     service = _declared(skill, service_id)
     grant = _pick(skill, service, account)
 
     def qualify(doc: Dict[str, Any]) -> Optional[str]:
         if connection_id and _connection(doc).get("connection_id") != connection_id:
             raise SignInRequired("connection_changed", "this account is not the connection the skill expects")
+        if consent is not None and oauth_engine.consent_ref(doc) != consent:
+            raise SignInRequired("consent_changed", "this sign-in no longer has the consent the skill expects")
         current = _declared(skill, service_id)
         minimum = _qualify(current, _bound_account(grant, doc))
         declared = oauth_engine._scope_words(" ".join(current.declared_scopes()), doc)
@@ -765,7 +778,8 @@ async def token(skill: str, service_id: str, account: str = "", *, rejected: Opt
     tokens = doc["tokens"]
     return {"access_token": tokens["access_token"], "token_type": tokens["token_type"],
             "expires_at": tokens.get("expires_at"), "scope": tokens["scope"],
-            "account": {"key": grant.path.stem, "label": (doc.get("account") or {}).get("label", "")}, **_connection(doc)}
+            "account": {"key": grant.path.stem, "label": (doc.get("account") or {}).get("label", "")}, **_connection(doc),
+            **({"consent": oauth_engine.consent_ref(doc)} if consent is not None else {})}
 
 
 async def withdraw(skill: str, service_id: str, account: str, *, revoke_at_provider: bool,
@@ -773,7 +787,9 @@ async def withdraw(skill: str, service_id: str, account: str, *, revoke_at_provi
     """Withdraw one skill grant, whether or not the skill may start a sign-in now. Disconnect and Revoke both answer for the consent
     shown (``oauth_engine.consent_ref``). Disconnect forgets the account here and asks nobody; Revoke asks the provider and forgets it
     only once the provider confirmed every token: any other outcome keeps it, tokens included, for the owner to check at the provider
-    and then Disconnect."""
+    and then Disconnect. The owner's either first ends the account's access (its file keeps no tokens, connection or origin, only
+    the break it publishes: ``sign_in.withdrawal``), then writes the no-refile fact and the break and forgets the account; one
+    interrupted after its first write serves no token and finishes at the next Disconnect or ``begin``."""
     if account and not _ACCOUNT.fullmatch(account):
         raise SignInNotFound("unknown account")
     control = _grant(skill, service_id, "pending")
@@ -792,23 +808,19 @@ async def withdraw(skill: str, service_id: str, account: str, *, revoke_at_provi
                 return {"ok": True, "withdrawn": False}
             if expect is None and consent != oauth_engine.consent_ref(doc):  # a public action answers for the consent shown
                 raise SignInRequired("consent_changed", "this account was signed in again after it was shown; review it first")
-            current, key = oauth_engine.load(control), grant.path.stem
-            current["withdrawn_accounts"] = list(dict.fromkeys([*(current.get("withdrawn_accounts") or []), key]))
-            pending = current.get("pending") or {}
-            target = (pending.get("exchange") or {}).get("filing_target")
-            if pending and (target == key or pending.get("account") == key):
-                current.pop("pending", None)
-            elif pending and not target:
-                pending["excluded_accounts"] = list(dict.fromkeys([*(pending.get("excluded_accounts") or []), key]))
-            if (current.get("last_filed") or {}).get("filing_target") == key:
-                current.pop("last_filed", None)
+            current = oauth_engine.load(control)
+            _no_refile(current, grant.path.stem)
             outcome = await _request_revocation(doc) if revoke_at_provider else {}
             if revoke_at_provider and not outcome.get("revoked"):  # not confirmed or not asked: kept, nothing is forgotten
                 return {"ok": False, "code": "SIGN_IN_UNAVAILABLE", "error": outcome["reason"], **outcome}
-            if expect is None:  # the owner's break reaches the skill's own folder before the host forgets anything
-                await _record_withdrawal(skill, service_id, doc)
             # Write the no-refile fact before forgetting the account. A failure at unlink is not a success.
-            oauth_engine._save_sign_in(control, current)
+            if expect is None:  # the owner's: the account without access first, then that fact, then its break
+                row = doc["sign_in"]["withdrawal"] if _ended(doc) else _withdrawal_row(service_id, doc)  # an unfinished one's own
+                ended = {**{k: v for k, v in doc.items() if k not in ("tokens", "connection_id", "origin")}, "sign_in": {
+                    "state": SIGN_IN_REQUIRED, "reason": "account_disconnected", "since": utc_now_iso(), "withdrawal": row}}
+                await _record_withdrawal(skill, row, ((grant, ended), (control, current)))
+            else:
+                oauth_engine._save_sign_in(control, current)
             grant.path.unlink(missing_ok=True)
             return {"ok": True, **outcome}
 
@@ -849,28 +861,78 @@ def _withdrawals(skill: str) -> Optional[List[Dict[str, Any]]]:
     return rows if (not doc or doc.get("v") == 1) and isinstance(rows, list) and all(isinstance(row, dict) for row in rows) else None
 
 
-def _broken(skill: str, service_id: str, item: Dict[str, Any]) -> bool:
-    """A recorded break of the handed grant's account, by its legacy key or subject. A record that cannot be read is no
-    knowledge either way, so a refusal is then never ``none``."""
-    rows, names = _withdrawals(skill), (("legacy_key", item.get("legacy_key")), ("subject", item.get("subject")))
-    return rows is None or any(row.get("service") == service_id and any(
-        value and row.get(field) == value for field, value in names) for row in rows)
+def _unbroken(skill: str, service_id: str) -> bool:
+    """No break of the service is known: no row in the skill's record and no unfinished withdrawal (``_ended``). An offer's subject
+    is the skill's word, so any break of the service may be its account's; an unreadable record raises ``sign_in_storage_unavailable``."""
+    if (rows := _withdrawals(skill)) is None:
+        raise SignInRequired("sign_in_storage_unavailable", "the skill's record of withdrawals cannot be read")
+    return not any(row.get("service") == service_id for row in rows) and not any(_ended(doc) for doc in _account_documents(skill, service_id))
 
 
-async def _record_withdrawal(skill: str, service_id: str, doc: Dict[str, Any]) -> None:
-    """Append the owner's break as one non-secret row; a repeated break adds its own. A record that cannot be read is
-    never replaced and a failed write is never confirmed: either fails the withdrawal before the host forgets anything."""
+def _ended(doc: Dict[str, Any]) -> bool:
+    """An owner's withdrawal ended this account's access and has not finished: its file holds the break to publish."""
+    return isinstance((doc.get("sign_in") or {}).get("withdrawal"), dict)
+
+
+def _disconnected(current: Dict[str, Any], skill: str, service_id: str, key: Any) -> bool:
+    """The owner disconnected that account here: its key is withdrawn, or a withdrawal ended its access and has not finished."""
+    return bool(key) and (key in (current.get("withdrawn_accounts") or [])
+                          or _ended(_load_account(_grant(skill, service_id, key))))
+
+
+def _no_refile(current: Dict[str, Any], key: str) -> None:
+    """An owner's break in the service's control document: the key is withdrawn, an attempt sent to or filing into it ends,
+    another unclaimed one excludes it, and its last filing is no longer replayed."""
+    current["withdrawn_accounts"] = list(dict.fromkeys([*(current.get("withdrawn_accounts") or []), key]))
+    pending = current.get("pending") or {}
+    target = (pending.get("exchange") or {}).get("filing_target")
+    if pending and (target == key or pending.get("account") == key):
+        current.pop("pending", None)
+    elif pending and not target:
+        pending["excluded_accounts"] = list(dict.fromkeys([*(pending.get("excluded_accounts") or []), key]))
+    if (current.get("last_filed") or {}).get("filing_target") == key:
+        current.pop("last_filed", None)
+
+
+async def _finish_withdrawals(skill: str, service_id: str, control: oauth_engine.Grant, current: Dict[str, Any]) -> List[str]:
+    """At ``begin``, its service lock held: a withdrawal that ended an account's access without finishing publishes its break
+    with the no-refile fact and forgets that account before a new attempt starts; the keys it forgot."""
+    finished = []
+    for path in _account_files(skill, service_id):
+        grant = _grant(skill, service_id, path.stem)
+        if not _ended(_load_account(grant)):  # read without its lock: only ``withdraw`` and this, under the service lock, end
+            continue  # or finish one, so a new consent never waits for another account's refresh, which holds that lock
+        async with oauth_engine.locked(grant):
+            held = _load_account(grant)
+            if _ended(held):
+                _no_refile(current, path.stem)
+                await _record_withdrawal(skill, held["sign_in"]["withdrawal"], ((control, current),))
+                grant.path.unlink(missing_ok=True)
+                finished.append(path.stem)
+    return finished
+
+
+def _withdrawal_row(service_id: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """The owner's break of one account as one non-secret row, built once from the live grant (``withdraw`` keeps it)."""
     account, origin = doc.get("account") or {}, doc.get("origin") or {}
-    row = {"service": service_id, "account": account.get("key", ""),
-           **({"subject": account["subject"]} if account.get("verified") is True and account.get("subject") else {}),
-           **{name: origin[name] for name in ("legacy_key", "legacy_generation") if origin.get(name)},
-           **({"connection_id": doc["connection_id"]} if doc.get("connection_id") else {}),
-           "via": (doc.get("consent") or {}).get("via", ""), "at": utc_now_iso()}
+    return {"service": service_id, "account": account.get("key", ""),
+            **({"subject": account["subject"]} if account.get("verified") is True and account.get("subject") else {}),
+            **{name: origin[name] for name in ("legacy_key", "legacy_generation") if origin.get(name)},
+            **({"connection_id": doc["connection_id"]} if doc.get("connection_id") else {}),
+            "via": (doc.get("consent") or {}).get("via", ""), "at": utc_now_iso()}
+
+
+async def _record_withdrawal(skill: str, row: Dict[str, Any], ends: Iterable[Tuple[oauth_engine.Grant, Dict[str, Any]]]) -> None:
+    """Under the skill's record lock: ``ends`` (the account without access first), then the owner's break, once (its time aside).
+    A record that cannot be read ends nothing and is never replaced; a failed write is never confirmed: either fails the
+    withdrawal before the host forgets the account."""
     target = _withdrawals_file(skill)
     async with oauth_engine.locked(target):
         rows = _withdrawals(skill)
         if rows is None:
             raise SignInRequired("sign_in_storage_unavailable", "the skill's record of withdrawals cannot be read; nothing was forgotten")
+        for grant, value in ends:
+            oauth_engine._save_sign_in(grant, value)
         if not any({k: v for k, v in old.items() if k != "at"} == {k: v for k, v in row.items() if k != "at"} for old in rows):
             target.path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_json(target.path, {"v": 1, "accounts": [*rows, row]})
@@ -969,7 +1031,9 @@ def status(*, return_base: str = "") -> Dict[str, Any]:
                              if doc.get("skill") == skill.name and doc.get("service") == service.id],
                 "pending": ({"started": pending.get("started"), "attempt_id": pending.get("attempt_id"),
                              "client": (pending.get("client") or {}).get("label", "")} if pending.get("nonce") else None),
-                "clients": [{**_public_client(row), "registration": oauth_engine.registration_ref(row, return_base), "used_by": [
+                "clients": [{**_public_client(row), **(
+                    {} if row.get("return") == "unknown" else {"registration": oauth_engine.registration_ref(row, return_base)}),
+                    "used_by": [
                     {"skill": d.get("skill"), "account": (d.get("account") or {}).get("label", "")} for d in everyone
                     if (d.get("client") or {}).get("id") == row.get("id")]}
                     for row in _client_rows(skill.name, binding, known)]})
@@ -980,13 +1044,16 @@ def status(*, return_base: str = "") -> Dict[str, Any]:
 
 
 def _handover_receipt(service: declaration.Service, legacy: str, account: Dict[str, Any], result: str,
-                      legacy_generation: Optional[str], connection: Optional[str]) -> Dict[str, Any]:
-    """``connection``: the one recorded with that transfer (``_settle``), never one read from a later sign-in."""
+                      legacy_generation: Optional[str], connection: Optional[str], *,
+                      consent: Optional[str] = None) -> Dict[str, Any]:
+    """``connection`` and ``consent`` (an imported verified grant's own): the ones recorded with that transfer (``_settle``),
+    never read from a later sign-in."""
     row = _account_row(account, service, [])
     return {"legacy_key": legacy, "result": result, "account": {"key": row["key"], "label": row["label"]},
             "state": row["state"], "via": row["via"], **({"reason": row["reason"]} if row.get("reason") else {}),
             **({"legacy_generation": legacy_generation} if legacy_generation else {}),
-            **({"connection_id": connection} if connection else {})}
+            **({"connection_id": connection} if connection else {}),
+            **({"consent": consent} if consent else {})}
 
 
 def _confirmed_handover(doc: Dict[str, Any], slot: Dict[str, Any]) -> bool:
@@ -1005,18 +1072,76 @@ def _settle_published(skill: str, service_id: str, slot: Dict[str, Any]) -> bool
     return True
 
 
-def _settle(slot: Dict[str, Any], attempt: Dict[str, Any], key: str, filed: Dict[str, Any]) -> None:
-    """The confirmed transfer: its generations, account, the token it took (``source``) and the connection it filed."""
+def _settle(slot: Dict[str, Any], attempt: Dict[str, Any], key: str, filed: Dict[str, Any], result: str = "imported") -> None:
+    """The confirmed transfer: its generations, account, the token it took (``source``), its registration (``client_id``), the
+    connection it filed and its ``result``, an unverified offer's too; a verified offer keeps that only for a tagged generation and,
+    once imported, with the ``consent`` its pointer recorded before the account write (``_file_handover``), never one read later; an
+    older pointer without one stays unclassified and names none."""
     slot.clear()
     slot.update(generation=attempt["generation"], legacy_generation=attempt.get("legacy_generation"), target=key,
-                filed=True, source=attempt["source"], **_connection(filed))
+                filed=True, source=attempt["source"], **_connection(filed),
+                **({"client_id": attempt["client_id"]} if attempt.get("client_id") else {}))
+    if attempt.get("require_verified") is True:
+        slot["require_verified"] = True
+    if not slot.get("require_verified") or slot["legacy_generation"] and (result != "imported" or attempt.get("consent")):
+        slot["result"] = result
+        if slot.get("require_verified") and result == "imported":
+            slot["consent"] = attempt["consent"]
+
+
+async def read_handover_receipt(skill: str, service_id: str, legacy: str, generation: str) -> Dict[str, Any]:
+    """One verified offer's saved outcome, read without the provider (never a token, never a transfer). Success is the receipt an
+    exact repeat of the offer gets (``_handover_receipt``): its transfer's recorded result and consent, beside the account's state
+    now. The latest generation refused before any exchange (``declined``) repeats that refusal while no newer attempt, transfer or disconnected
+    earlier target is recorded: its recorded ``resubmit``, else ``none`` while no break of the service is known (``_unbroken``, whose
+    unreadable record is no receipt); its kept final refusal of the renewal answers ``refresh_rejected``, a declaration that no longer fits the
+    account a lasting ``provider_approval_required``; whatever else the slot and its account do not confirm together, ``exchange: unknown``."""
+    if not legacy.strip() or not declaration._text(generation, 128):
+        raise ValueError("supply a nonempty legacy_key and exact legacy_generation")
+    service = _declared(skill, service_id)
+    control = _grant(skill, service.id, "pending")
+    unknown = {"legacy_key": legacy, "result": "refused", "reason": "handover_unconfirmed", "exchange": "unknown"}
+    async with oauth_engine.locked(control):
+        current = oauth_engine.load(control)
+        slot = (current.get("handovers") or {}).get(oauth_engine._digest(legacy)) or {}
+        attempt = slot.get("attempt") or {}
+        if attempt.get("legacy_generation") == generation:
+            if attempt.get("refresh") == "rejected" and attempt.get("require_verified") is True:  # final: it never files
+                return {**unknown, "reason": "refresh_rejected"}
+            _settle_published(skill, service.id, slot)  # reads only: this view saves nothing
+        key, connection = slot.get("target"), slot.get("connection_id")
+        declined = slot.get("declined") or {}
+        if (declined.get("legacy_generation") == generation and not slot.get("attempt") and slot.get("legacy_generation") != generation
+                and not _disconnected(current, skill, service.id, key)
+                and (declined.get("exchange") == "resubmit" or _unbroken(skill, service.id))):
+            return {**unknown, **declined, "exchange": declined.get("exchange", "none")}
+        if (slot.get("require_verified") is not True or slot.get("legacy_generation") != generation
+                or not key or not connection):
+            return unknown
+        account = _load_account(_grant(skill, service.id, key))
+        if key in (current.get("withdrawn_accounts") or []) or _ended(account):
+            return {**unknown, "reason": "account_disconnected"}
+        if not _confirmed_handover(account, slot) or _connection(account).get("connection_id") != connection:
+            return unknown
+        try:
+            _check_binding(service, account)
+        except SignInRequired as exc:  # the skill's declaration changed since: a lasting refusal, never a retry
+            return {**unknown, "reason": exc.reason}
+        result = slot.get("result") or ("already_present" if (account.get("origin") or {}).get("generation") == slot["generation"] else "kept_newer")
+        return _handover_receipt(service, legacy, account, result, generation, connection,
+                                 consent=slot.get("consent") if result == "imported" else None)
 
 
 def _terms(row: Dict[str, Any], item: Dict[str, Any], prior: Optional[str]) -> Dict[str, Any]:
     """The conditions a transfer attempt is claimed on; only the same grant on the same ones resumes it."""
     scope = (item.get("tokens") or {}).get("scope")
     return {"client_ref": row.get("id"), "ceiling": _words(scope) if isinstance(scope, str) else [], "prior": prior,
-            "legacy_generation": item.get("legacy_generation")}
+            "legacy_generation": item.get("legacy_generation"),
+            **({"require_verified": True} if item.get("require_verified") is True else {})}
+
+
+def _same_terms(attempt: Dict[str, Any], terms: Dict[str, Any]) -> bool:
+    return all(attempt.get(name) == terms.get(name) for name in terms.keys() | {"require_verified"})
 
 
 def _compatible(skill: str, service: declaration.Service, item: Dict[str, Any], slot: Dict[str, Any]) -> bool:
@@ -1025,8 +1150,25 @@ def _compatible(skill: str, service: declaration.Service, item: Dict[str, Any], 
     row = next((row for row in clients() if row.get("source") == f"handover:{skill}" and _matches_provider(row, binding)
                 and row.get("client_id") == wanted), None) if wanted else None
     prior = slot.get("target") if "previous_legacy_generation" in item and slot.get("generation") else None
-    return row is not None and all((slot.get("attempt") or {}).get(name) == value
-                                   for name, value in _terms(row, item, prior).items())
+    return (row is not None and isinstance(item.get("require_verified", False), bool)
+            and _same_terms(slot.get("attempt") or {}, _terms(row, item, prior)))
+
+
+def _bearer_offer(item: Dict[str, Any]) -> Optional[str]:
+    """The exact fresh bearer a verified, tagged offer hands over (its known expiry still ahead), as a digest; else None."""
+    tokens = item.get("tokens") or {}
+    access, expiry = tokens.get("access_token"), _epoch(tokens.get("expires_at"))
+    if not (item.get("require_verified") is True and item.get("legacy_generation")
+            and isinstance(access, str) and expiry is not None
+            and oauth_engine.fresh({"access_token": access, "expires_at": expiry}, None)):
+        return None
+    return oauth_engine._digest(json.dumps([access, expiry, item.get("subject"), item.get("connection_id")]))
+
+
+def _kept_bearer(attempt: Dict[str, Any], item: Dict[str, Any]) -> bool:
+    """Whether the attempt kept this offer's exact bearer and sent no refresh, so a recover may verify it as it stands."""
+    offer = attempt.get("bearer_offer")
+    return bool(offer and not attempt.get("refresh") and offer == _bearer_offer(item))
 
 
 async def _note_attempt(control: oauth_engine.Grant, slot_key: str, generation: str, **facts: Any) -> None:
@@ -1071,15 +1213,20 @@ async def _import_one(skill: str, service: declaration.Service, issuer: str, end
                       recover: bool = False, offline: bool = False, own: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """``pending.json`` keeps one slot per legacy key: ``generation``, ``legacy_generation``, ``target`` and ``filed``
     name its confirmed transfer; ``attempt`` the one in progress: its handed refresh token's digest (``source``), its
-    terms (``client_ref``, ``ceiling``, ``prior``, ``legacy_generation``) and its one refresh (``refresh``: ``sent``,
+    terms (``client_ref``, ``ceiling``, ``prior``, ``legacy_generation``, optional ``require_verified``) and its one refresh (``refresh``: ``sent``,
     then ``renewed`` with the provider's answer kept here, or ``rejected``). Only the same grant on the same terms
     resumes that attempt; while the slot keeps it, its refresh token is not exchanged again, and no attempt for another
-    token displaces one that left. A confirmed transfer also keeps its token's digest (``source``) and the connection it
-    filed. ``recover`` starts no attempt and files only a kept answer; ``offline`` stops where the provider is first
-    needed (``provider_needed``); ``own`` receives this request's attempt for ``_refused``."""
+    token displaces one that left. A confirmed transfer also keeps its token's digest (``source``), its registration (``client_id``,
+    which an exact verified repeat must name) and the connection it filed. ``recover`` starts no attempt and files a kept answer
+    or verifies its exact fresh bearer without refreshing it (``bearer_offer``, a verified tagged offer's digest); ``offline``
+    starts nothing either and stops where the provider is first needed (``provider_needed``) or at a verified grant's exact kept
+    final refusal (``refresh_rejected``); ``own`` receives this request's attempt for ``_refused``."""
     legacy, tokens = str(item.get("legacy_key") or ""), item.get("tokens") or {}
     if not legacy or not isinstance(tokens, dict) or not isinstance(tokens.get("refresh_token"), str) or not tokens["refresh_token"]:
         raise SignInRequired("incomplete", "the old sign-in is incomplete")
+    require_verified = item.get("require_verified", False)
+    if not isinstance(require_verified, bool):
+        raise SignInRequired("invalid_require_verified", "require_verified must be true or false")
     local_gen, previous = item.get("legacy_generation"), item.get("previous_legacy_generation")
     renewal = "previous_legacy_generation" in item
     if (any(value is not None and not declaration._text(value, 128) for value in (local_gen, previous))
@@ -1101,9 +1248,9 @@ async def _import_one(skill: str, service: declaration.Service, issuer: str, end
             oauth_engine._save_sign_in(control, current)
         if slot.get("generation"):
             key = slot.get("target")
-            if key and key in (current.get("withdrawn_accounts") or []):
-                raise SignInRequired("account_disconnected", "this transferred account was disconnected here")
             account = _load_account(_grant(skill, service.id, key)) if key else {}
+            if key and (key in (current.get("withdrawn_accounts") or []) or _ended(account)):
+                raise SignInRequired("account_disconnected", "this transferred account was disconnected here")
             if not _confirmed_handover(account, slot):
                 raise SignInRequired("handover_unconfirmed", "the earlier transfer could not be confirmed; use the skill's sign-in card")
             _check_binding(service, account)
@@ -1112,10 +1259,19 @@ async def _import_one(skill: str, service: declaration.Service, issuer: str, end
             if confirmed and item.get("subject") and item["subject"] != confirmed:
                 raise SignInRequired("identity_mismatch", "the old account does not match the confirmed identity")
             if local_gen is None or local_gen == slot.get("legacy_generation"):
-                if recover and (slot.get("source") != source or local_gen != slot.get("legacy_generation")):  # only the exact kept sign-in
+                if (recover or require_verified) and (slot.get("source") != source or local_gen != slot.get("legacy_generation")
+                                or slot.get("require_verified", False) != require_verified or require_verified
+                                and slot.get("client_id") not in (None, _client_id_text(item.get("client_id")))):
                     raise SignInRequired("handover_unconfirmed", "the kept transfer is not this exact sign-in; use the skill's sign-in card")
-                result = "already_present" if (account.get("consent") or {}).get("via") == "handover" else "kept_newer"
-                return _handover_receipt(service, legacy, account, result, local_gen, slot.get("connection_id"))
+                if require_verified and (not confirmed or not slot.get("connection_id")
+                                         or _connection(account).get("connection_id") != slot["connection_id"]):
+                    raise SignInRequired("identity_unavailable", "the transfer has no confirmed connection still in use")
+                written = (account.get("origin") or {}).get("generation") == slot["generation"]  # the account holds this transfer's grant
+                result = (slot.get("result") or ("already_present" if written else "kept_newer")) if require_verified and local_gen else (
+                    "already_present" if written and slot.get("result", "imported") == "imported"  # its own record, never today's via alone
+                    and (account.get("consent") or {}).get("via") == "handover" else "kept_newer")  # a later card consent extends none
+                return _handover_receipt(service, legacy, account, result, local_gen, slot.get("connection_id"),
+                                         consent=slot.get("consent") if require_verified and local_gen else None)
             if not renewal or previous != slot.get("legacy_generation"):
                 raise SignInRequired("handover_generation_changed", "the earlier transfer changed; use the skill's sign-in card")
             if not confirmed or item.get("subject") != confirmed:
@@ -1128,15 +1284,26 @@ async def _import_one(skill: str, service: declaration.Service, issuer: str, end
         elif renewal:
             raise SignInRequired("handover_unconfirmed", "the prior transfer is not saved; use the skill's sign-in card")
         attempt = slot.get("attempt") or {}
-        if attempt.get("target") in (current.get("withdrawn_accounts") or []):  # Disconnect wins over a pending move
+        if _disconnected(current, skill, service.id, attempt.get("target")):  # Disconnect wins over a pending move
             raise SignInRequired("account_disconnected", "this transferred account was disconnected here")
         if attempt.get("source") == source and attempt.get("refresh") == "sent":
             raise SignInRequired("handover_unconfirmed", "this sign-in's earlier renewal got no clear answer; use the skill's sign-in card")
         if attempt.get("refresh") and attempt.get("source") != source:  # an exchange that left stays until filed: never displaced
             raise SignInRequired("handover_unconfirmed", "an earlier transfer of this account is unresolved; recover it or use the skill's sign-in card")
-        if recover and not (attempt.get("source") == source and attempt.get("refresh") in ("renewed", "rejected")):
+        same_source = attempt.get("source") == source
+        kept_answer = same_source and attempt.get("refresh") in ("renewed", "rejected")
+        resume_bearer = recover and same_source and _kept_bearer(attempt, item)
+        if recover and not (kept_answer or resume_bearer):
+            if same_source and attempt.get("bearer_offer"):
+                raise SignInRequired("handover_unconfirmed", "the held transfer has no matching fresh bearer")
             raise SignInRequired("handover_not_started", "nothing of this transfer is kept here; recover starts none")
+        if recover and attempt.get("require_verified", False) != require_verified:
+            raise SignInRequired("handover_unconfirmed", "this sign-in was renewed for other transfer terms; use the skill's sign-in card")
         if offline:
+            if resume_bearer and not _compatible(skill, service, item, slot):
+                raise SignInRequired("handover_unconfirmed", "the held transfer has other terms")
+            if require_verified and kept_answer and attempt["refresh"] == "rejected" and _compatible(skill, service, item, slot):
+                raise SignInRequired("refresh_rejected", "the provider refused this sign-in's renewal; use the skill's sign-in card")
             raise SignInRequired("provider_needed", "its kept answer is filed with the provider")
         if row is None:
             raise SignInRequired("unknown_client", "this skill has no matching imported client")
@@ -1155,11 +1322,14 @@ async def _import_one(skill: str, service: declaration.Service, issuer: str, end
         if service.accounts == "one" and (current.get("pending") or {}).get("nonce"):
             raise SignInRequired("sign_in_pending", "finish the owner's current sign-in first")
         terms = _terms(row, item, prior_key)
-        if attempt.get("source") == source and attempt.get("refresh") in ("renewed", "rejected"):
-            if any(attempt.get(name) != value for name, value in terms.items()):  # never another transfer's answer
+        if kept_answer or resume_bearer:
+            if not _same_terms(attempt, terms):  # never another transfer's answer
                 raise SignInRequired("handover_unconfirmed", "this sign-in was renewed for other transfer terms; use the skill's sign-in card")
         else:
-            attempt = slot["attempt"] = {"generation": "h-" + secrets.token_hex(16), "source": source, **terms}
+            slot.pop("declined", None)  # a new attempt supersedes the refusal an earlier one of this legacy key ended with
+            attempt = slot["attempt"] = {"generation": "h-" + secrets.token_hex(16), "source": source, "client_id": row["client_id"], **terms}
+            if offer := _bearer_offer(item):
+                attempt["bearer_offer"] = offer
             oauth_engine._save_sign_in(control, current)  # claim before any provider call
     generation, state = attempt["generation"], attempt.get("refresh")
     if own is not None:
@@ -1167,9 +1337,11 @@ async def _import_one(skill: str, service: declaration.Service, issuer: str, end
     reason = "refresh_rejected" if state == "rejected" else ""
     record, renewed = ({} if reason else attempt.get("tokens") or record), state == "renewed"
     if not reason and not renewed and not oauth_engine.fresh(record, None):
+        if recover:
+            raise SignInRequired("handover_unconfirmed", "the held bearer is no longer fresh")
         (record, reason), renewed = await _renew_once(control, slot_key, generation, snapshot, record, ceiling), True
     info = await _identity_info(record, snapshot) if oauth_engine.fresh(record, None) else {}
-    if info is None and not renewed and record["expires_at"] is None:  # a refused bearer of unknown age: its refresh
+    if info is None and not renewed and not recover and record["expires_at"] is None:  # a refused bearer of unknown age: its refresh
         (record, reason), renewed = await _renew_once(control, slot_key, generation, snapshot, record, ceiling), True
         info = await _identity_info(record, snapshot) if oauth_engine.fresh(record, None) else {}
     if renewed and not reason and not oauth_engine.fresh(record, None):  # a renewed answer is read, never exchanged again
@@ -1178,6 +1350,8 @@ async def _import_one(skill: str, service: declaration.Service, issuer: str, end
         raise SignInRequired("token_rejected", "the provider refused the handed sign-in; use the skill's sign-in card")
     fields = snapshot["identity_fields"]
     subject, label = _subject(info, fields), str(info.get(fields["label"]) or item.get("label") or legacy)
+    if require_verified and not subject:
+        raise SignInRequired(reason or "identity_unavailable")
     if subject and item.get("subject") and str(item["subject"]) != subject:
         raise SignInRequired("identity_mismatch", "the provider confirmed a different account")
     key = account_key(issuer, subject) if subject else account_key(issuer, legacy, skill=skill)
@@ -1191,19 +1365,21 @@ async def _import_one(skill: str, service: declaration.Service, issuer: str, end
         "sign_in": {"state": SIGN_IN_REQUIRED if reason else SIGNED_IN, "since": utc_now_iso(),
                     **({"reason": reason} if reason else {})}, "consent": {"via": "handover", "at": utc_now_iso()},
         "origin": {"skill_version": version, "legacy_key": legacy, "generation": generation,
-                   "legacy_generation": local_gen, "at": utc_now_iso(), **proven}}, prior_origin=prior_origin)
+                   "legacy_generation": local_gen, "at": utc_now_iso(), **proven}}, prior_origin=prior_origin, resume_bearer=resume_bearer)
 
 
 async def _file_handover(skill: str, service: declaration.Service, control: oauth_engine.Grant, slot_key: str,
                          generation: str, key: str, legacy: str, expected: Any, candidate: Dict[str, Any], *,
-                         prior_origin: Optional[str] = None) -> Dict[str, Any]:
+                         prior_origin: Optional[str] = None, resume_bearer: bool = False) -> Dict[str, Any]:
     async with oauth_engine.locked(control):
         current = oauth_engine.load(control)
         slot = (current.get("handovers") or {}).get(slot_key) or {}
         attempt = slot.get("attempt") or {}
         if attempt.get("generation") != generation:
             raise SignInRequired("handover_superseded", "a newer transfer of this sign-in started")
-        if key in (current.get("withdrawn_accounts") or []):
+        if resume_bearer and (attempt.get("refresh") or not oauth_engine.fresh(candidate["tokens"], None)):
+            raise SignInRequired("handover_unconfirmed", "the held bearer is no longer the current transfer step")
+        if _disconnected(current, skill, service.id, key):
             raise SignInRequired("account_disconnected", "the transfer is no longer eligible to file here")
         active = _single_account(skill, service)
         if (active and active != key) or (service.accounts == "one" and not active
@@ -1213,6 +1389,13 @@ async def _file_handover(skill: str, service: declaration.Service, control: oaut
         target = _grant(skill, service.id, key)
         async with oauth_engine.locked(target):
             held, local_gen = _load_account(target), attempt.get("legacy_generation")
+            if (attempt.get("require_verified") is True and local_gen and attempt.get("target") == key
+                    and (held.get("origin") or {}).get("generation") == generation):  # v2: this attempt's own write, its reply lost
+                _check_binding(service, held)  # as the ordinary path checks a held account
+                _settle(slot, attempt, key, held)
+                oauth_engine._save_sign_in(control, current)
+                return _handover_receipt(service, legacy, held, slot.get("result") or "already_present", local_gen,
+                                         slot.get("connection_id"), consent=slot.get("consent"))
             replace = bool(prior_origin and (held.get("consent") or {}).get("via") == "handover")
             if prior_origin and (not held or held["account"].get("verified") is not True
                                  or held["account"].get("subject") != candidate["account"]["subject"]):
@@ -1225,13 +1408,18 @@ async def _file_handover(skill: str, service: declaration.Service, control: oaut
                 _check_binding(service, held)
             filed, result = held, "kept_newer"
             if not held or replace:
-                attempt["target"] = key
-                oauth_engine._save_sign_in(control, current)  # pointer first; the account proves publication after a lost reply
                 filed, result = {**candidate, "connection_id": held.get("connection_id") or _connection_id()}, "imported"
+                attempt["target"] = key  # the pointer first and, for a v2 offer, the consent it files (_settle)
+                if attempt.get("require_verified") is True and local_gen:
+                    attempt["consent"] = oauth_engine.consent_ref(filed)
+                oauth_engine._save_sign_in(control, current)  # the account proves publication after a lost reply (_settle_published)
                 oauth_engine._save_sign_in(target, filed)
-            _settle(slot, attempt, key, filed)
+            elif attempt.get("require_verified") is True and not _connection(held):
+                raise SignInRequired("identity_unavailable", "the saved account has no confirmed connection")
+            _settle(slot, attempt, key, filed, result)
             oauth_engine._save_sign_in(control, current)
-            return _handover_receipt(service, legacy, filed, result, local_gen, slot.get("connection_id"))
+            return _handover_receipt(service, legacy, filed, result, local_gen, slot.get("connection_id"),
+                                     consent=slot.get("consent"))
 
 
 async def _handover_clients(skill: str, service_id: str, binding: Dict[str, Any], items: Iterable[Dict[str, Any]]) -> tuple:
@@ -1262,7 +1450,8 @@ async def _handover_clients(skill: str, service_id: str, binding: Dict[str, Any]
                     unavailable.add(client_id)
                 continue
             try:
-                ret = _return_rule(item.get("return_hint"))
+                hint = item.get("return_hint")
+                ret = "unknown" if hint == "unknown" else _return_rule(hint)
             except ValueError:
                 added.append({**result, "result": "refused", "reason": "invalid_return"})
                 unavailable.add(client_id)
@@ -1287,43 +1476,60 @@ async def _handover_clients(skill: str, service_id: str, binding: Dict[str, Any]
 
 
 async def _refused(skill: str, service: declaration.Service, item: Dict[str, Any], reason: str,
-                   own: Optional[str] = None, recover: bool = False) -> Dict[str, Any]:
+                   own: Optional[str] = None, recover: bool = False, row: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """A refused grant's receipt with what this host knows of its handed refresh token, read under the service's lock
-    (``exchange``): ``none`` when an ordinary request never sent it (refused before its exchange, or its own refresh never
-    left) and the slot records nothing else for it: no other attempt, no transfer of this generation or token, no break
-    of its account, a readable record of breaks; ``saved`` when only an unreachable provider stopped the grant's own
-    compatible attempt that keeps the provider's answer (``recover`` files it); else ``unknown``, never repeated. Only
-    this request's own unsent claim is removed; ``recover`` never answers ``none``."""
-    from ouroboros.store import StoreBusy
-
+    (``exchange``): ``none`` when an ordinary request never sent it (refused before its exchange, a fresh bearer's identity check
+    included, or its own refresh never left) and the slot records nothing else for it: no other attempt, no transfer of this
+    generation or token, no disconnected target, and no break of the service is known, published or not (``_unbroken``: an offer's
+    subject is the skill's word, under either contract); ``saved`` when only an unreachable provider stopped the grant's compatible
+    attempt that keeps the provider's answer or an exact fresh bearer offer not ended here, or stopped a tagged first transfer
+    before its attempt while a known break rules out its ``none``: its exact fresh bearer, this request's usable registration
+    ``row`` (passed only then) and terms are recorded as that attempt, which ``recover`` finishes by checking only its identity;
+    without that bearer, such a stop with a usable ``row``, or an outage before its own claim's refresh left, is ``resubmit``: that
+    offer again, never its old path; else ``unknown``, never repeated. Unreadable storage the answer needs raises, guessing and
+    saving nothing. This request's own unsent claim is ended here. A tagged ``require_verified`` offer's ``none`` or ``resubmit``,
+    kept only for the slot's first transfer or a renewal of its confirmed one, stays with that word as the latest ``declined``
+    refusal until a newer attempt. Its kept final refusal of the renewal is never ``saved``. ``recover`` answers neither."""
     legacy, tokens = str(item.get("legacy_key") or ""), item.get("tokens")
     refresh = tokens.get("refresh_token") if isinstance(tokens, dict) else None
     answer: Dict[str, Any] = {"legacy_key": legacy, "result": "refused", "reason": reason, "exchange": "unknown"}
+    if reason in ("sign_in_storage_unavailable", "sign_in_busy"):  # its answer depends on what could not be read
+        raise SignInRequired(reason, "the saved sign-ins could not be read; recover or read the receipts later")
     if not legacy or not isinstance(refresh, str) or not refresh or reason == "account_disconnected":
         return answer
-    source = oauth_engine._digest(refresh)
+    source, generation, verified = oauth_engine._digest(refresh), item.get("legacy_generation"), item.get("require_verified") is True
+    strict = verified and declaration._text(generation, 128)  # a v2 offer whose receipt reads back
     try:
         control = _grant(skill, service.id, "pending")
         async with oauth_engine.locked(control):
             current = oauth_engine.load(control)
-            slot = (current.get("handovers") or {}).get(oauth_engine._digest(legacy)) or {}
-            settled = _settle_published(skill, service.id, slot)
+            slot = current.setdefault("handovers", {}).setdefault(oauth_engine._digest(legacy), {})
+            changed = _settle_published(skill, service.id, slot)
             attempt = slot.get("attempt") or {}
             mine, left = bool(own) and attempt.get("generation") == own, attempt.get("refresh")
-            kept = left == "rejected" or (left == "renewed" and oauth_engine.fresh(attempt.get("tokens") or {}, None))
-            if reason == "provider_unreachable" and kept and (mine or (
+            kept = (left == "rejected" and not verified or (left == "renewed" and oauth_engine.fresh(attempt.get("tokens") or {}, None))
+                    or _kept_bearer(attempt, item))
+            keeps = not slot.get("generation") or (  # a strict offer's none: the slot's first transfer or its confirmed one's renewal
+                "previous_legacy_generation" in item and item["previous_legacy_generation"] == slot.get("legacy_generation"))
+            if (not recover and (mine and not left or not attempt and (not strict or keeps))
+                    and not (slot.get("generation") and (slot.get("legacy_generation") == generation or slot.get("source") in (None, source))
+                             or _disconnected(current, skill, service.id, slot.get("target")))
+                    and ((unbroken := _unbroken(skill, service.id)) or strict and not _bearer_offer(item)
+                         and (row is not None or mine and reason == "provider_unreachable"))):  # an outage before its refresh left
+                answer["exchange"] = "none" if unbroken else "resubmit"  # resubmit: a known break keeps its old path shut
+                slot.pop("attempt", None)  # its owner ends a claim whose refresh token never left (a fresh bearer's too), or made none
+                if strict:  # read back with its word until a newer attempt or another generation's own refusal replaces it
+                    slot["declined"] = {"legacy_generation": generation, "reason": reason, "exchange": answer["exchange"]}
+            elif reason == "provider_unreachable" and kept and (mine or (
                     not own and attempt.get("source") == source and _compatible(skill, service, item, slot))):
                 answer["exchange"] = "saved"
-            elif not recover and (not attempt or (mine and not left)) and not (
-                    slot.get("generation") and slot.get("legacy_generation") == item.get("legacy_generation")
-                    or slot.get("generation") and slot.get("source") in (None, source) or slot.get("target") in (current.get("withdrawn_accounts") or [])
-                    or _broken(skill, service.id, item)):
-                answer["exchange"] = "none"
-                if mine:
-                    slot.pop("attempt")  # this request's own claim, never sent
-            if settled or (mine and answer["exchange"] == "none"):
+            elif row is not None and not (recover or attempt or own or slot.get("generation")) and (claim := _bearer_offer(item)):
+                slot["attempt"] = {"generation": "h-" + secrets.token_hex(16), "source": source, "client_id": row["client_id"],
+                                   **_terms(row, item, None), "bearer_offer": claim}
+                answer["exchange"], changed = "saved", True  # recover checks only this exact fresh bearer's identity
+            if changed or answer["exchange"] in ("none", "resubmit") and (mine or strict):
                 oauth_engine._save_sign_in(control, current)
-    except (SignInRequired, SignInNotFound, StoreBusy, OSError, AttributeError, TypeError):
+    except (SignInNotFound, AttributeError, TypeError):
         answer["exchange"] = "unknown"  # nothing proven
     return answer
 
@@ -1333,31 +1539,41 @@ async def handover(skill: str, service_id: str, *, clients_in: Iterable[Dict[str
     """Take over the skill's own registrations and grants; eligibility does not extend to other skills. Every refused grant,
     an unreachable provider's included, says what this host knows of its token (``_refused``). ``recover`` repeats a lost
     request: it imports no client and starts no transfer; the slots answer first, before any provider call, and only a
-    kept provider answer waits for the provider."""
+    kept answer or an exact fresh bearer offer reaches the provider again. An ordinary ``require_verified`` offer its slot already
+    answers gets that answer before any provider call too, and only a new registration or a waiting grant asks the provider:
+    a registration already saved here does not, and v1's offers keep their provider-first path."""
     service = _declared(skill, service_id)
     binding = _provider_binding(service)
     client_items, grant_items = [] if recover else list(clients_in), list(grants)
     answers: Dict[int, Dict[str, Any]] = {}
-    for index, item in enumerate(grant_items if recover else []):
+    for index, item in enumerate(grant_items):  # what the slots already answer, before any provider call
+        if not recover and item.get("require_verified") is not True:
+            continue
         try:
             answers[index] = await _import_one(skill, service, "", {}, version, item, row=None, metadata=None,
-                                               recover=True, offline=True)
+                                               recover=recover, offline=True)
         except SignInRequired as exc:
             if exc.reason != "provider_needed":
-                answers[index] = await _refused(skill, service, item, exc.reason, recover=True)
+                answers[index] = await _refused(skill, service, item, exc.reason, recover=recover)
     waiting = [(index, item) for index, item in enumerate(grant_items) if index not in answers]
     added: List[Dict[str, Any]] = []
     if waiting or client_items:
         try:
-            async with oauth_engine.http_client() as http:
-                endpoints, issuer, metadata = await _endpoints(service, http)
+            saved = {row.get("client_id") for row in clients() if row.get("source") == f"handover:{skill}" and _matches_provider(row, binding)}
+            if waiting or any(_client_id_text(item.get("client_id")) not in saved for item in client_items):
+                async with oauth_engine.http_client() as http:  # only a new registration or a waiting grant needs the provider
+                    endpoints, issuer, metadata = await _endpoints(service, http)
             added, available = await _handover_clients(skill, service_id, binding, client_items)
         except (SignInRequired, httpx.HTTPError, ValueError) as exc:
             reason = exc.reason if isinstance(exc, SignInRequired) else "provider_unreachable"
-            added = [{"client_id": _client_id_text(item.get("client_id"))[-4:], "result": "refused", "reason": reason}
-                     for item in client_items]
+            if reason in ("sign_in_storage_unavailable", "sign_in_busy"):  # a store its answers need: unavailable, however few grants
+                raise
+            added, available = [{"client_id": _client_id_text(item.get("client_id"))[-4:], "result": "refused", "reason": reason}
+                                for item in client_items], {}
+            if reason == "provider_unreachable":  # a registration needs no provider: saved under its approved declaration all the same
+                added, available = await _handover_clients(skill, service_id, binding, client_items)
             for index, item in waiting:
-                answers[index] = await _refused(skill, service, item, reason, recover=recover)
+                answers[index] = await _refused(skill, service, item, reason, recover=recover, row=available.get(_client_id_text(item.get("client_id"))))
             waiting = []
     for index, item in waiting:
         own: Dict[str, Any] = {}

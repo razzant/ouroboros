@@ -7,12 +7,13 @@ A transfer resumes after a lost identity answer without a second refresh, a sing
 confirmed sign-in replaces its unconfirmed moved row, and a moved grant's first refresh reaches the skill
 once the provider names the same account, due again only when its request never left. A refused grant says what this
 host knows of its token (``exchange``), ``recover`` answers from the slot first and starts nothing, an exchange that
-left is never displaced, a receipt keeps its transfer's connection and each owner's break reaches the skill. No answer,
+left is never displaced, a receipt keeps its transfer's connection and each owner's break reaches the skill. A verified offer's receipt reads back without the provider, an imported grant's own consent with it, after a lost reply or a late writer of the same attempt too, and a token request may bind the consent it saw; a verified generation whose fresh bearer's check failed reads back as that refusal until anything newer, and a later generation's own refusal before exchange then reads back as its own. A record of withdrawals that cannot be read makes both handover answers unavailable; two legacy keys of one person read back by their own transfers; after another person's withdrawal a strict first offer cut off before its attempt keeps its exact fresh bearer, with the registration saved from that same first POST, for a recover that checks only its identity, and one without such a bearer, cut off there or before its own refresh left, is recorded as ``resubmit`` and moves when the same offer comes again; a new sign-in finishes an interrupted withdrawal without waiting for another account. No answer,
 log line or printed text carries a token or a secret.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import replace
@@ -20,7 +21,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from tests.test_service_sign_in_loopback import CAL, ISSUER, _sign_in, world  # noqa: F401 -- the fixture
+from tests.test_service_sign_in_loopback import CAL, ISSUER, _save_client, _shown, _sign_in, world  # noqa: F401 -- the fixture
 
 from ouroboros import oauth_engine, service_sign_in
 
@@ -125,6 +126,46 @@ def test_a_handed_web_client_keeps_its_exact_return_and_one_that_is_not_https_is
     assert answer["clients"][1]["reason"] == "invalid_return"
     rows = owner.get("/api/sign-in/status").json()["services"][0]["clients"]
     assert [row["return"] for row in rows] == [good]
+
+
+def test_unknown_return_moves_a_verified_grant_and_a_configured_client_can_sign_in(world):  # noqa: F811
+    provider, owner, host = world
+    scope = "openid email calendar.events"
+    issued = provider._issue("old-application", dict(provider.person), scope)
+    body = {"service": "google", "clients": [{"client_id": "old-application", "return_hint": "unknown"}],
+            "grants": [{"legacy_key": "earlier-account", "legacy_generation": "g1", "client_id": "old-application",
+                        "require_verified": True, "tokens": issued}]}
+    moved = host.post("/sign-in/handover", headers=HEADERS, json=body).json()["grants"][0]
+    assert (moved["result"], moved["state"]) == ("imported", "signed_in") and moved["connection_id"]
+    recovered = host.post("/sign-in/handover", headers=HEADERS, json={**body, "recover": True}).json()["grants"][0]
+    assert (recovered["result"], recovered["consent"], recovered["connection_id"]) == (
+        "imported", moved["consent"], moved["connection_id"])
+    assert provider.counts["refresh"] == 0
+    key = moved["account"]["key"]
+
+    def view():
+        return owner.get("/api/sign-in/status").json()["services"][0]
+
+    [client] = view()["clients"]
+    assert client["return"] == "unknown" and "registration" not in client
+    renamed = owner.post("/api/sign-in", json={"action": "client_save", "issuer": ISSUER,
+                         "client": {"id": client["id"], "label": "Earlier app"}}).json()
+    assert renamed["client"]["return"] == "unknown"
+    read = host.post("/sign-in/token", headers=HEADERS, json={"service": "google", "account": key,
+                     "connection_id": moved["connection_id"], "rejected": issued["access_token"]}).json()
+    assert read["ok"] and read["connection_id"] == moved["connection_id"]
+    assert read["access_token"] != issued["access_token"] and provider.counts["refresh"] == 1
+    configured = _save_client(owner, client_id="configured-application")
+    provider.person = {"sub": "sub-2", "email": "second@example.test"}
+    started = owner.post("/api/sign-in", json={"action": "begin", "skill": CAL, "service": "google",
+                         "scope_words": scope.split(), **_shown(owner, CAL, configured)}).json()
+    assert started["ok"] and started["client"]["id"] == configured
+    assert owner.post("/api/sign-in", json={"action": "complete", "returned_url": provider.approve(started["url"])}).json()["ok"]
+    consent = next(row["consent"] for row in view()["accounts"] if row["key"] == key)
+    revoked = owner.post("/api/sign-in", json={"action": "revoke", "skill": CAL, "service": "google",
+                         "account": key, "consent": consent}).json()
+    assert revoked["revoked"] and provider.counts["revoke"] == 2
+    assert [row["label"] for row in view()["accounts"]] == ["second@example.test"]
 
 
 @pytest.mark.parametrize("expired", [False, True], ids=["current", "renewed"])
@@ -344,6 +385,41 @@ def test_a_transfers_receipt_keeps_its_connection_and_each_owners_break_reaches_
     assert [a["key"] for a in host.get("/sign-in/accounts", headers=HEADERS).json()["services"][0]["accounts"]] == [key]
 
 
+def test_disconnect_ends_access_before_publishing_the_break(world, monkeypatch):  # noqa: F811
+    provider, owner, _host = world
+    _save_client(owner)
+    assert _sign_in(provider, owner, CAL)["ok"] is True
+    services = owner.get("/api/sign-in/status").json()["services"]
+    [account] = next(row["accounts"] for row in services if row["skill"] == CAL)
+    key = account["key"]
+    grant = service_sign_in._grant(CAL, "google", key)
+    ledger = service_sign_in._withdrawals_file(CAL).path
+    had_bearer = bool((oauth_engine.load(grant).get("tokens") or {}).get("access_token"))
+    no_prior_break = service_sign_in._withdrawals(CAL) == []
+    assert had_bearer and no_prior_break
+    write, observed = service_sign_in.atomic_write_json, []
+
+    def observe(path, payload, **kwargs):
+        if path != ledger:
+            return write(path, payload, **kwargs)
+        saved = oauth_engine.load(grant)
+        ended = bool(saved) and not saved.get("tokens")
+        result = write(path, payload, **kwargs)
+        rows = service_sign_in._withdrawals(CAL) or []
+        published = any(row.get("service") == "google" and row.get("account") == key for row in rows)
+        observed.append((ended, published, grant.path.is_file()))
+        return result
+
+    with monkeypatch.context() as probe:
+        probe.setattr(service_sign_in, "atomic_write_json", observe)
+        response = owner.post("/api/sign-in", json={"action": "disconnect", "skill": CAL, "service": "google",
+                                                    "account": key, "consent": account["consent"]})
+    assert (response.status_code, response.json().get("ok")) == (200, True)
+    assert observed == [(True, True, True)]  # no local tokens, break on disk, account file still present
+    assert not grant.path.exists()
+    assert _sign_in(provider, owner, CAL)["state"] == "signed_in"
+
+
 def test_only_the_rate_limits_refusal_before_reading_a_handover_says_it_never_started(world, monkeypatch):  # noqa: F811
     _provider, _owner, host = world
     stranger = host.post("/sign-in/handover", headers={"x-skill-token": "nobody"}, json={"service": "google", "grants": []})
@@ -407,3 +483,319 @@ def test_a_renewal_replaces_only_the_connection_its_transfer_recorded(world):  #
     lost = send(second, recover=True)
     assert [(answer["result"], answer["reason"], answer["exchange"]) for answer in (unproven, lost)] == [
         ("refused", "connection_changed", "unknown"), ("refused", "handover_unconfirmed", "unknown")]
+
+
+def _strict_offer(provider, **tokens):
+    scope = "openid email calendar.events"
+    issued = provider._issue("personal-client", dict(provider.person), scope)
+    offer = {"legacy_key": "temporary-calendar-row", "legacy_generation": "local-offer-1"}
+    body = {"service": "google", "clients": [{"client_id": "personal-client", "client_secret": SECRET}],
+            "grants": [{**offer, "client_id": "personal-client", "require_verified": True, "tokens": {**issued, **tokens}}]}
+    return issued, offer, body
+
+
+def _read_without_the_provider(host, provider, monkeypatch, offer):
+    paths, handle = [], provider.handle
+    monkeypatch.setattr(provider, "handle", lambda request: paths.append(request.url.path) or handle(request))
+    read = host.post("/sign-in/handover", headers=HEADERS, json={"service": "google", "receipt": offer}).json()
+    assert read["ok"] is True and paths == []  # discovery, identity and token addresses were never asked
+    assert "access_token" not in json.dumps(read) and "refresh_token" not in json.dumps(read)
+    return read["receipt"]
+
+
+def test_a_verified_import_reads_back_with_its_consent_and_a_write_may_bind_that_consent(world, monkeypatch):  # noqa: F811
+    provider, _owner, host = world
+    issued, offer, body = _strict_offer(provider)
+    first = host.post("/sign-in/handover", headers=HEADERS, json=body).json()["grants"][0]
+    assert first["result"] == "imported" and first["consent"] and first["connection_id"]
+    [row] = host.get("/sign-in/accounts", headers=HEADERS).json()["services"][0]["accounts"]
+    assert row["consent"] == first["consent"]
+    receipt = _read_without_the_provider(host, provider, monkeypatch, offer)
+    assert (receipt["result"], receipt["legacy_key"], receipt["legacy_generation"], receipt["consent"]) == (
+        "imported", offer["legacy_key"], offer["legacy_generation"], first["consent"])
+    assert (receipt["account"]["key"], receipt["connection_id"]) == (row["key"], row["connection_id"])
+    bound = host.post("/sign-in/token", headers=HEADERS, json={
+        "service": "google", "account": row["key"], "connection_id": row["connection_id"], "consent": row["consent"]}).json()
+    assert bound["ok"] and bound["consent"] == first["consent"] and bound["access_token"] == issued["access_token"]
+
+
+def test_a_kept_newer_receipt_reads_back_without_becoming_write_consent(world, monkeypatch):  # noqa: F811
+    provider, owner, host = world
+    _save_client(owner)
+    _sign_in(provider, owner, CAL)
+    [selected] = host.get("/sign-in/accounts", headers=HEADERS).json()["services"][0]["accounts"]
+    _issued, offer, body = _strict_offer(provider)
+    first = host.post("/sign-in/handover", headers=HEADERS, json=body).json()["grants"][0]
+    assert first["result"] == "kept_newer" and "consent" not in first
+    receipt = _read_without_the_provider(host, provider, monkeypatch, offer)
+    assert (receipt["result"], receipt["legacy_key"], receipt["legacy_generation"]) == (
+        "kept_newer", offer["legacy_key"], offer["legacy_generation"])
+    assert (receipt["account"]["key"], receipt["connection_id"]) == (selected["key"], selected["connection_id"])
+    assert "consent" not in receipt
+    token = host.post("/sign-in/token", headers=HEADERS, json={
+        "service": "google", "account": selected["key"], "connection_id": selected["connection_id"],
+        "consent": selected["consent"]}).json()  # a new operation binds the consent its own row names
+    assert token["ok"] and token["consent"] == selected["consent"]
+
+
+@pytest.mark.parametrize("after", ["offered_again", "card_break"])
+def test_a_fresh_bearers_failed_identity_check_ends_its_generation_with_no_exchange(world, monkeypatch, after):  # noqa: F811
+    provider, owner, host = world
+    _issued, offer, body = _strict_offer(provider, expires_at="2999-01-01T00:00:00Z")
+    handle, outage = provider.handle, ["/userinfo"]
+
+    def once_unavailable(request):
+        if outage and request.url.path == outage[0]:
+            outage.clear()
+            return httpx.Response(503)
+        return handle(request)
+
+    monkeypatch.setattr(provider, "handle", once_unavailable)
+    first = host.post("/sign-in/handover", headers=HEADERS, json=body).json()["grants"][0]
+    assert (first["result"], first["reason"], first["exchange"]) == ("refused", "provider_unreachable", "none")
+    receipt = _read_without_the_provider(host, provider, monkeypatch, offer)  # as a process that never saw that answer
+    assert receipt == {**offer, "result": "refused", "reason": "provider_unreachable", "exchange": "none"}
+    lost = host.post("/sign-in/handover", headers=HEADERS, json={**body, "recover": True}).json()["grants"][0]
+    assert (lost["reason"], lost["exchange"], provider.counts["refresh"]) == ("handover_not_started", "unknown", 0)
+    assert host.get("/sign-in/accounts", headers=HEADERS).json()["services"][0]["accounts"] == []
+    if after == "offered_again":  # a new attempt of that generation supersedes the refusal
+        again = host.post("/sign-in/handover", headers=HEADERS, json=body).json()["grants"][0]
+        assert (again["result"], again["legacy_generation"], provider.counts["refresh"]) == (
+            "imported", offer["legacy_generation"], 0)
+        assert _read_without_the_provider(host, provider, monkeypatch, offer)["result"] == "imported"
+    else:  # the owner signs someone in on the card and disconnects them: an offer naming no subject cannot rule that out
+        key = _sign_in(provider, owner, CAL)["account"]["key"]
+        shown = next(s for s in owner.get("/api/sign-in/status").json()["services"] if s["skill"] == CAL)
+        consent = next(a["consent"] for a in shown["accounts"] if a["key"] == key)
+        assert owner.post("/api/sign-in", json={"action": "disconnect", "skill": CAL, "service": "google",
+                                                "account": key, "consent": consent}).json() == {"ok": True}
+        assert _read_without_the_provider(host, provider, monkeypatch, offer)["exchange"] == "unknown"
+
+
+def test_recover_verifies_an_exact_fresh_bearer_after_a_lost_reply_without_a_refresh(world, monkeypatch):  # noqa: F811
+    provider, _owner, host = world
+    _issued, offer, body = _strict_offer(provider, expires_at="2999-01-01T00:00:00Z")
+    handle, outage, refused = provider.handle, ["/userinfo"], service_sign_in._refused
+
+    def once_unavailable(request):
+        if outage and request.url.path == outage[0]:
+            outage.clear()
+            return httpx.Response(503)
+        return handle(request)
+
+    async def exited(*_args, **_kwargs):  # the process ended before this refusal was recorded: no answer arrived
+        return {}
+
+    monkeypatch.setattr(provider, "handle", once_unavailable)
+    monkeypatch.setattr(service_sign_in, "_refused", exited)
+    host.post("/sign-in/handover", headers=HEADERS, json=body)  # its claim is kept, nothing is settled
+    monkeypatch.setattr(service_sign_in, "_refused", refused)
+    unsettled = _read_without_the_provider(host, provider, monkeypatch, offer)
+    assert (unsettled["result"], unsettled["exchange"]) == ("refused", "unknown")  # a claim nobody ended proves nothing
+    recovered = host.post("/sign-in/handover", headers=HEADERS, json={**body, "recover": True}).json()["grants"][0]
+    assert (recovered["result"], recovered["state"], provider.counts["refresh"]) == ("imported", "signed_in", 0)
+    receipt = _read_without_the_provider(host, provider, monkeypatch, offer)
+    assert (receipt["result"], receipt["consent"], receipt["connection_id"]) == (
+        "imported", recovered["consent"], recovered["connection_id"])
+
+
+@pytest.mark.parametrize("pointer", ["recorded", "older", "late_writer"])
+def test_a_lost_reply_settles_with_its_transfers_own_consent_never_a_later_sign_ins(world, monkeypatch, pointer):  # noqa: F811
+    provider, owner, host = world
+    _issued, offer, body = _strict_offer(provider)
+    control, slot_key = service_sign_in._grant(CAL, "google", "pending"), oauth_engine._digest(offer["legacy_key"])
+    account = service_sign_in._grant(CAL, "google", service_sign_in.account_key(ISSUER, "sub-1"))
+    pointers, save = [], oauth_engine._save_sign_in
+
+    def observed(grant, doc):  # each control write naming a target, and whether the account file existed by then
+        if grant.path == control.path and (((doc.get("handovers") or {}).get(slot_key) or {}).get("attempt") or {}).get("target"):
+            pointers.append((json.loads(json.dumps(doc)), account.path.exists()))
+        save(grant, doc)
+
+    monkeypatch.setattr(oauth_engine, "_save_sign_in", observed)
+    first = host.post("/sign-in/handover", headers=HEADERS, json=body).json()["grants"][0]
+    monkeypatch.setattr(oauth_engine, "_save_sign_in", save)
+    [(saved, published)] = pointers
+    attempt = saved["handovers"][slot_key]["attempt"]
+    assert (published, attempt["consent"]) == (False, first["consent"])  # the pointer and its consent precede the account
+    if pointer == "older":
+        attempt.pop("consent")  # the same pointer as an older core wrote it
+    oauth_engine.save(control, saved)  # the account write landed; the reply and the slot's settling were lost
+    if pointer == "late_writer":  # an accepted writer of that same attempt arrives after the write: the same receipt
+        late = asyncio.run(service_sign_in._file_handover(CAL, service_sign_in._declared(CAL, "google"), control, slot_key,
+                                                          attempt["generation"], account.path.stem, offer["legacy_key"],
+                                                          None, oauth_engine.load(account)))
+        assert (late["result"], late["consent"]) == ("imported", first["consent"])
+    _sign_in(provider, owner, CAL)  # then the same person signs in again on the card: a later consent, the same origin
+    [row] = host.get("/sign-in/accounts", headers=HEADERS).json()["services"][0]["accounts"]
+    assert row["consent"] != first["consent"] and row["legacy_generation"] == offer["legacy_generation"]
+    receipt = _read_without_the_provider(host, provider, monkeypatch, offer)
+    assert receipt["connection_id"] == first["connection_id"]
+    if pointer == "older":  # never given a consent it did not record
+        assert receipt["result"] == "already_present" and "consent" not in receipt
+    else:  # of the two consents this account was given, the transfer's own
+        assert (receipt["result"], receipt["consent"]) == ("imported", first["consent"]) and receipt["consent"] != row["consent"]
+
+
+def test_a_write_bound_to_a_saved_consent_must_confirm_again_after_the_persons_new_consent(world, monkeypatch):  # noqa: F811
+    provider, owner, host = world
+    _issued, _offer, body = _strict_offer(provider)
+    saved = host.post("/sign-in/handover", headers=HEADERS, json=body).json()["grants"][0]
+    assert saved["result"] == "imported" and saved["consent"] and saved["connection_id"]
+
+    def request_token(account, connection, consent):
+        return host.post("/sign-in/token", headers=HEADERS, json={
+            "service": "google", "account": account, "connection_id": connection, "consent": consent})
+
+    held = (saved["account"]["key"], saved["connection_id"], saved["consent"])
+    began = request_token(*held)
+    assert (began.status_code, began.json()["consent"]) == (200, saved["consent"])
+    assert _sign_in(provider, owner, CAL)["ok"] is True  # the same person consents again on the card
+    [row] = host.get("/sign-in/accounts", headers=HEADERS).json()["services"][0]["accounts"]
+    assert (row["key"], row["connection_id"]) == held[:2] and row["consent"] != held[2]
+    handle, paths = provider.handle, []
+    monkeypatch.setattr(provider, "handle", lambda request: paths.append(request.url.path) or handle(request))
+    stale = request_token(*held)
+    assert (stale.status_code, stale.json()["code"], stale.json()["reason"]) == (409, "SIGN_IN_REQUIRED", "consent_changed")
+    assert not {"access_token", "refresh_token", "client_secret"}.intersection(stale.json()) and paths == []
+    current = request_token(row["key"], row["connection_id"], row["consent"])
+    assert (current.status_code, current.json()["connection_id"], current.json()["consent"]) == (
+        200, row["connection_id"], row["consent"])
+    assert current.json()["access_token"]
+
+
+def test_a_strict_offer_is_not_moved_when_the_providers_ordinary_answer_names_no_account(world, monkeypatch):  # noqa: F811
+    provider, _owner, host = world
+    _issued, offer, body = _strict_offer(provider, expires_at="2999-01-01T00:00:00Z")
+    handle = provider.handle
+
+    def names_no_account(request):
+        if request.url.path == "/userinfo":  # a display address without a provider subject
+            return httpx.Response(200, json={"email": provider.person["email"]})
+        return handle(request)
+
+    monkeypatch.setattr(provider, "handle", names_no_account)
+    refused = host.post("/sign-in/handover", headers=HEADERS, json=body).json()["grants"][0]
+    assert (refused["result"], refused["reason"], refused["exchange"]) == ("refused", "identity_unavailable", "none")
+    assert provider.counts["token_calls"] == 0
+    assert host.get("/sign-in/accounts", headers=HEADERS).json()["services"][0]["accounts"] == []
+    receipt = _read_without_the_provider(host, provider, monkeypatch, offer)
+    assert receipt == {**offer, "result": "refused", "reason": "identity_unavailable", "exchange": "none"}
+
+
+def test_a_later_generations_refusal_before_exchange_reads_back_as_its_own(world, monkeypatch):  # noqa: F811
+    provider, _owner, host = world
+    _issued, offer, body = _strict_offer(provider)
+    tokens = body["grants"][0]["tokens"]
+
+    def submit(generation, handed):
+        grant = {**body["grants"][0], "legacy_generation": generation, "tokens": handed}
+        return host.post("/sign-in/handover", headers=HEADERS, json={**body, "grants": [grant]}).json()["grants"][0]
+
+    unscoped = {name: value for name, value in tokens.items() if name != "scope"}  # the old sign-in's permissions are not known
+    answers = [submit(generation, unscoped) for generation in ("local-offer-1", "local-offer-2")]
+    assert [(answer["reason"], answer["exchange"]) for answer in answers] == [("provider_scope_unconfirmed", "none")] * 2
+    later = {**offer, "legacy_generation": "local-offer-2"}
+    assert _read_without_the_provider(host, provider, monkeypatch, later) == {
+        **later, "result": "refused", "reason": "provider_scope_unconfirmed", "exchange": "none"}
+    assert _read_without_the_provider(host, provider, monkeypatch, offer)["exchange"] == "unknown"  # the later refusal replaced it
+    assert submit("local-offer-2", tokens)["result"] == "imported" and provider.counts["refresh"] == 0
+    assert _read_without_the_provider(host, provider, monkeypatch, later)["result"] == "imported"
+
+
+def test_a_record_of_withdrawals_that_cannot_be_read_makes_both_handover_answers_unavailable(world, monkeypatch):  # noqa: F811
+    provider, _owner, host = world
+    _issued, offer, body = _strict_offer(provider)
+    grant = {**body["grants"][0], "tokens": {k: v for k, v in body["grants"][0]["tokens"].items() if k != "scope"}}
+    first = host.post("/sign-in/handover", headers=HEADERS, json={**body, "grants": [grant]}).json()["grants"][0]
+    assert (first["reason"], first["exchange"]) == ("provider_scope_unconfirmed", "none")
+    record = service_sign_in._withdrawals_file(CAL).path
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text("{not json", encoding="utf-8")  # the record both answers depend on cannot be read
+    answers = [host.post("/sign-in/handover", headers=HEADERS, json=request) for request in (
+        {"service": "google", "receipt": offer}, {"service": "google", "grants": [grant]})]
+    assert [(answer.status_code, answer.json()["reason"]) for answer in answers] == [(503, "sign_in_storage_unavailable")] * 2
+    record.unlink()
+    assert _read_without_the_provider(host, provider, monkeypatch, offer)["exchange"] == "none"  # nothing was guessed meanwhile
+    service_sign_in._clients_file().path.write_text("{not json", encoding="utf-8")  # unreadable saved clients, no grant offered
+    alone = host.post("/sign-in/handover", headers=HEADERS, json={"service": "google", "clients": body["clients"], "grants": []})
+    assert (alone.status_code, alone.json()["reason"]) == (503, "sign_in_storage_unavailable")  # never 200 with refused clients
+
+
+def test_two_legacy_keys_of_one_person_read_back_by_their_own_transfers(world):  # noqa: F811
+    provider, _owner, host = world
+    _first, _issued, body = _handover(host, provider)  # imported: the account holds this transfer's own grant
+
+    def send(legacy):
+        issued = provider._issue("personal-client", dict(provider.person), "openid email calendar.events")
+        item = {"legacy_key": legacy, "label": "owner@example.com", "client_id": "personal-client", "tokens": issued}
+        return host.post("/sign-in/handover", headers=HEADERS, json={"service": "google", "grants": [item]}).json()["grants"][0]
+
+    assert send("google:second-copy")["result"] == "kept_newer"  # that person's account already holds the first one's grant
+    again = send("google:second-copy")
+    assert again["result"] == "kept_newer" and "consent" not in again  # by its own record, never as a transfer of that grant
+    assert send(body["grants"][0]["legacy_key"])["result"] == "already_present"  # the unchanged first transfer, as before
+
+
+@pytest.mark.parametrize(("bearer", "cut"), [(True, "/.well-known/"), (False, "/.well-known/"), (False, "/token")])
+def test_a_strict_first_offer_cut_off_before_its_attempt_continues_after_another_withdrawal(world, monkeypatch, bearer, cut):  # noqa: F811
+    provider, owner, host = world
+    _save_client(owner)
+    withdrawn = _sign_in(provider, owner, CAL)["account"]["key"]  # the first confirmed person, then the owner's Disconnect
+    [row] = next(s for s in owner.get("/api/sign-in/status").json()["services"] if s["skill"] == CAL)["accounts"]
+    assert owner.post("/api/sign-in", json={"action": "disconnect", "skill": CAL, "service": "google", "account": withdrawn,
+                                            "consent": row["consent"]}).json() == {"ok": True}
+    provider.person = {"sub": "sub-2", "email": "second@example.com"}  # another person's own fresh grant and registration
+    issued = provider._issue("personal-client", dict(provider.person), "openid email calendar.events")
+    body = {"service": "google", "clients": [{"client_id": "personal-client", "client_secret": SECRET}], "grants": [{
+        "legacy_key": "second-row", "legacy_generation": "second-1", "client_id": "personal-client", "require_verified": True,
+        "tokens": {**issued, "expires_at": "2999-01-01T00:00:00Z"}}]}
+    if not bearer:  # an older saved grant: only its refresh token and its recorded permissions go along
+        body["grants"][0]["tokens"] = {"refresh_token": issued["refresh_token"], "scope": issued["scope"]}
+    handle, outage = provider.handle, [cut]  # the discovery, or the refresh that then never leaves (NOT_SENT)
+
+    def unreachable_once(request):
+        if outage and request.url.path.startswith(outage[0]):
+            outage.clear()
+            raise httpx.ConnectError("fixture", request=request)
+        return handle(request)
+
+    monkeypatch.setattr(provider, "handle", unreachable_once)
+    first = host.post("/sign-in/handover", headers=HEADERS, json=body).json()
+    held = first["grants"][0]
+    assert first["clients"][0]["result"] == "imported"  # its registration, saved in that same first POST under the declaration
+    assert (held["reason"], held["exchange"]) == ("provider_unreachable", "saved" if bearer else "resubmit")  # never none: that break may be its account's
+    slot = oauth_engine.load(service_sign_in._grant(CAL, "google", "pending"))["handovers"][oauth_engine._digest("second-row")]
+    if bearer:  # its exact bearer is kept as the attempt a recover checks
+        attempt = slot["attempt"]
+        assert (attempt["legacy_generation"], "refresh" in attempt, bool(attempt["bearer_offer"])) == ("second-1", False, True)
+    else:  # no attempt is kept: its own recorded word reads back, and only an ordinary repeat of the same offer goes on
+        assert "attempt" not in slot and _read_without_the_provider(host, provider, monkeypatch, {
+            "legacy_key": "second-row", "legacy_generation": "second-1"})["exchange"] == "resubmit"
+    moved = host.post("/sign-in/handover", headers=HEADERS, json={**body, "recover": bearer}).json()["grants"][0]
+    assert (moved["result"], moved["account"]["key"], provider.counts["refresh"]) == (
+        "imported", service_sign_in.account_key(ISSUER, "sub-2"), 0 if bearer else 1)  # its identity alone, or its one refresh
+
+
+def test_a_new_sign_in_finishes_an_interrupted_withdrawal_without_waiting_for_another_account(world, monkeypatch):  # noqa: F811
+    provider, owner, host = world
+    _save_client(owner)
+    ended = _sign_in(provider, owner, CAL)["account"]["key"]
+    provider.person = {"sub": "sub-2", "email": "second@example.com"}
+    other = _sign_in(provider, owner, CAL)["account"]["key"]  # an unrelated account of the same service
+    grant = service_sign_in._grant(CAL, "google", ended)
+    doc = oauth_engine.load(grant)
+    row = service_sign_in._withdrawal_row("google", doc)
+    oauth_engine.save(grant, {"account": doc["account"], "sign_in": {  # its withdrawal's first write, no tokens: nothing more
+        "state": "sign_in_required", "reason": "account_disconnected", "since": row["at"], "withdrawal": row}})
+    offer = {"legacy_key": "another-row", "label": "third@example.com", "client_id": "never-handed", "tokens": {
+        "refresh_token": "synthetic-refresh", "access_token": "synthetic-access", "scope": "openid email calendar.events"}}
+    refused = host.post("/sign-in/handover", headers=HEADERS, json={"service": "google", "grants": [offer]}).json()["grants"][0]
+    assert (refused["reason"], refused["exchange"]) == ("unknown_client", "unknown")  # an unpublished break counts for v1 too
+    taken, locked = [], oauth_engine.locked
+    monkeypatch.setattr(oauth_engine, "locked", lambda held: taken.append(held.path.stem) or locked(held))
+    provider.person = {"sub": "sub-3", "email": "third@example.com"}
+    assert _sign_in(provider, owner, CAL)["state"] == "signed_in"
+    assert ended in taken and other not in taken  # it finished that withdrawal and waited for no other account's lock
+    rows = json.loads(service_sign_in._withdrawals_file(CAL).path.read_text(encoding="utf-8"))["accounts"]
+    assert [(entry["account"], entry["subject"]) for entry in rows] == [(ended, "sub-1")] and not grant.path.exists()

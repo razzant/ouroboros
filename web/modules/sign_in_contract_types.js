@@ -52,7 +52,7 @@
  */
 
 /**
- * One of the owner's clients of an issuer; `return` is `loopback` or `exact:<address>`.
+ * A client of an issuer; `return` is `loopback`, `exact:<address>` or a handover's `unknown`.
  * @typedef {Object} SignInClientRow
  * @property {string} id
  * @property {string=} label
@@ -61,7 +61,7 @@
  * @property {string=} return
  * @property {string=} source
  * @property {boolean=} secret_set
- * @property {string=} registration  // names the exact registration shown, never a secret
+ * @property {string=} registration  // only with a known return: names the exact registration shown, never a secret
  * @property {Object[]=} used_by
  */
 
