@@ -71,9 +71,11 @@ def _room_reading_routes(data_dir: pathlib.Path) -> list[BaseRoute]:
     from ouroboros.gateway.chat_archive import make_chat_archive_endpoint
     from ouroboros.gateway.chat_search import make_chat_search_endpoint
     from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.gateway.history_attribution import recorded
     from ouroboros.gateway.recall import make_recall_endpoint
 
-    return [Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
+    # Each history read is recorded with why its client made it (history_attribution: server.log, telemetry only).
+    return [Route("/api/chat/history", endpoint=recorded(make_chat_history_endpoint(data_dir))),
             Route("/api/chat/search", endpoint=make_chat_search_endpoint(data_dir)),
             Route("/api/recall", endpoint=make_recall_endpoint(data_dir), methods=["GET"]),
             Route("/api/chat/archive", endpoint=make_chat_archive_endpoint(data_dir))]

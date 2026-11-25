@@ -404,6 +404,7 @@ D20 = "Presence"
 "ouroboros/gateway/chat_archive.py" = "D11"  # GET /api/chat/archive over room_archive: read-only, no read credit
 "ouroboros/gateway/place_history.py" = "D11"
 "ouroboros/gateway/history_paging.py" = "D11"
+"ouroboros/gateway/history_attribution.py" = "D11"
 "ouroboros/gateway/history_chronology.py" = "D11"
 "ouroboros/gateway/history_contracts.py" = "D11"
 "ouroboros/gateway/host_service.py" = "D11"

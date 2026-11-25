@@ -308,7 +308,7 @@ export function createRoomProfileLifecycle({
     const word = { room: chatId, holds: () => canonical || (proof !== null && proof === servingSocket()), confirm: confirmNow };
 
     // Hydration triggers share one sticky request; reconnect/resync read again.
-    const awaitInitialHydration = () => isLeaving() ? Promise.resolve(false) : (initialHydrationPromise ||= syncHistory());
+    const awaitInitialHydration = () => isLeaving() ? Promise.resolve(false) : (initialHydrationPromise ||= syncHistory({ reason: 'open' }));
 
     // Main briefly yields hydration to an opening Project, with a hard bound.
     function waitForHydrationWindow() {

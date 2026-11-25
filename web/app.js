@@ -886,7 +886,7 @@ async function revealQuotedSource(address, chatId, isCurrent, locate = null) {
     // message gives around-history a row to find.
     if (chatId !== 1 || !address.startsWith('task:') || !mainChat.drawsSource(address)) {
         // A current refusal takes the saved text and every copy painted from it, as a room's own reads do.
-        page = await apiClient.chatHistory({ chatId, around: address })
+        page = await apiClient.chatHistory({ chatId, around: address, tags: { reason: 'navigate', mode: 'around' } })
             .catch((error) => { if (current()) previewsRefused(error); throw error; });
         if (!current()) return null;
         if (page?.anchor?.state !== 'found') return page?.anchor || { state: 'unknown' };

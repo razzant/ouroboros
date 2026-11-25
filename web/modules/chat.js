@@ -1054,7 +1054,7 @@ export function createChatInstance({
         if (lifecycle.classification === 'source_complete') {
             return withStableViewport(() => {
                 const attached = attachReviewGroup(lifecycle.group, rawTs || row?.ts || row?.timestamp || '');
-                if (lifecycle.group.activeCount === 0 && lifecycle.group.lifecycleStatus) scheduleHistorySync();
+                if (lifecycle.group.activeCount === 0 && lifecycle.group.lifecycleStatus) scheduleHistorySync('settled');
                 return attached;
             });
         }
@@ -1078,7 +1078,7 @@ export function createChatInstance({
             ensureLiveCardVisible(record, { suppressDomInsert });
             // Only new review rows trigger a read; a live receipt on a settled card re-reads its stored line.
             if (fresh && placement === 'reviews') hydrateCardReviews(taskId);
-            if (fresh && !msg.history_id && record.finished && msg.terminal_receipt) scheduleHistorySync();
+            if (fresh && !msg.history_id && record.finished && msg.terminal_receipt) scheduleHistorySync('settled');
             return Boolean(changed || liveCardProjectionChanged(before, record));
         });
     }
@@ -1490,16 +1490,16 @@ export function createChatInstance({
         }
     }
 
-    function scheduleHistorySync() {
+    function scheduleHistorySync(reason) {
         if (destroyed || leaving) return;
-        historyResyncScheduler.schedule(liveCardBound.isArmed());
+        historyResyncScheduler.schedule(liveCardBound.isArmed(), { reason });
     }
 
     const historyResyncScheduler = createHistoryResyncScheduler({
         isReplayActive: () => _historyReplayActive,
         // Re-arm if the joined sync fetched its window before the arm.
-        run: () => historyPager.read().catch(() => {}).then(() => {
-            if (!destroyed && !leaving && lastHistorySyncSucceeded && liveCardBound.isArmed()) scheduleHistorySync();
+        run: tags => historyPager.read({ ...tags }).catch(() => {}).then(() => {
+            if (!destroyed && !leaving && lastHistorySyncSucceeded && liveCardBound.isArmed()) scheduleHistorySync('bound_recheck');
         }),
     });
 
@@ -1687,7 +1687,7 @@ export function createChatInstance({
         modelWaits.finish(record.groupId);
         // A lost task_done is healed only by refetching; a block nobody sees
         // owes no refetch.
-        if (!wasFinished && blockVisible(record)) scheduleHistorySync();
+        if (!wasFinished && blockVisible(record)) scheduleHistorySync('settled');
         if (!wasFinished && record.isSubagent) hydrateOpenSettledChild(record, hydrateCardReviews);
         syncLiveCardToggle(record);
     }
@@ -2374,7 +2374,7 @@ export function createChatInstance({
         syncChatStatus();
     }
 
-    async function syncHistory({ fromReconnect = false } = {}) {
+    async function syncHistory({ fromReconnect = false, ...tags } = {}) {
         if (destroyed || leaving) return false;
         if (foreignProfile()) return false;  // the socket serves another profile: read nothing into this window (#3294)
         if (historySyncPromise) return historySyncPromise;
@@ -2391,7 +2391,7 @@ export function createChatInstance({
                 emptyWelcome?.historyPending();
                 // An empty feed shows the read in flight (#1102); a painted one stays.
                 if (historyControls.beginRecent()) syncLoadOlderControl();
-                const data = await fetchHistory(null, { signal: abort.signal });
+                const data = await fetchHistory(null, { signal: abort.signal, tags: { ...tags, mode: 'newest' } });
                 // A closed, left or superseded room takes no late response.
                 if (destroyed || startedVisit !== visit || foreignProfile()) {
                     lastHistorySyncSucceeded = false;
@@ -2413,7 +2413,7 @@ export function createChatInstance({
                 withStableViewport(() => releaseHistoryIds(!admitted || rechainRecent || reader
                     || historyPager.getState().canNewer ? [] : oldRecentIds));
                 // Arrivals that landed meanwhile may lie past this page: read them again.
-                if (historyPager.arrivalsLanded() !== landedAtStart) void historyPager.read();
+                if (historyPager.arrivalsLanded() !== landedAtStart) void historyPager.read({ reason: tags.reason, decision: 'base_superseded' });
                 if (armedAtStart) {
                     const represented = new Set(messages.map(row => row.presentation_owner_task_id || row.task_id));
                     for (const id of cardsAtStart) if (!represented.has(id)) pendingLiveEvictions.add(id);
@@ -2456,7 +2456,7 @@ export function createChatInstance({
                 // Migration keeps a calm note and retries through the existing 700 ms scheduler.
                 historyControls.endRecent(err); syncLoadOlderControl();
                 roomProfile.noteHistoryFailure(err);  // kept sends may still show, on current proof (chat_preview.js)
-                if (isStoreMigrating(err)) { historyResyncScheduler.schedule(true); return false; }
+                if (isStoreMigrating(err)) { historyResyncScheduler.schedule(true, { reason: 'retry', detail: 'migrating' }); return false; }
                 // A fetch that failed while the socket is down is that outage, not an error to report.
                 const expectedDisconnect = ws?.ws?.readyState !== WebSocket.OPEN && err instanceof TypeError;
                 if (!expectedDisconnect) console.error('Failed to load chat history:', err);
@@ -2476,9 +2476,11 @@ export function createChatInstance({
     // A message this room shares with another is read once wherever it was shown whole (read_ahead.js).
     const sharedRead = createSharedReadTracker({ chatId, feed: messagesDiv, band,
         shown: () => !destroyed && !leaving && !page.hidden && isInstanceVisible() });
+    const RECEIPT = { reason: 'read_receipt' };  // its reads and the pages its opening walks
     const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample,
         read: async (fresh, whole) => {
-            await (!fresh && (catchUp.reading || !catchUp.owed && roomProfile.initialHydration) || historyPager.read({ whole }));
+            await (!fresh && (catchUp.reading || !catchUp.owed && roomProfile.initialHydration)
+                || historyPager.read({ whole, ...RECEIPT, decision: whole && 'latest_unknown' }));
             return lastHistorySyncSucceeded && !catchUp.owed;
         },
         // A destroyed page reports hidden===false, hence the lifecycle flag.
@@ -2493,10 +2495,11 @@ export function createChatInstance({
             if (!current()) return {};
             const direction = readReceipt.continuation(pagerRecent);
             // A failed present keeps the existing horizon repair.
-            if (direction === 'latest' || (direction && !historyPager.getState().error)) return historyPager[direction]();
-            return loadHistoryAtEdge('older', current);
+            if (direction === 'latest') return historyPager.latest(null, RECEIPT);
+            if (direction && !historyPager.getState().error) return historyPager.older(RECEIPT);
+            return loadHistoryAtEdge('older', current, RECEIPT);
         },
-        present: current => historyPager.whenIdle().then(() => current() && historyPager.getState().canNewer && historyPager.latest()),
+        present: current => historyPager.whenIdle().then(() => current() && historyPager.getState().canNewer && historyPager.latest(null, RECEIPT)),
         land: (latest, token) => reading.land(() => newestMessageOffset(latest, newestFacts), token),
     });
 
@@ -2575,7 +2578,7 @@ export function createChatInstance({
         return historyLoaded && !catchUp.owed && !historyWindow?.failed && !historyPager.getState().away && !historyWindow?.horizonGap;
     }
     // ↓ moves now. One claim owns the read and landing; new reading cancels it, repeated physical presses share it.
-    async function showLatest({ arrive = false } = {}) {
+    async function showLatest({ arrive = false, reason = 'navigate' } = {}) {
         if (reading.returning && reading.arriving === null && !arrive) { reading.followAfterLayout(); return; }
         const at = visit, claim = reading.claim(arrive === true);
         const current = () => !destroyed && at === visit && claim();
@@ -2596,7 +2599,7 @@ export function createChatInstance({
             await shared;
             await catchUp.settled(current);
             if (!current() || shared && !lastHistorySyncSucceeded) return;
-            if (!presentHeld() && (await historyPager.latest(current)).status !== 'applied') return;
+            if (!presentHeld() && (await historyPager.latest(current, { reason })).status !== 'applied') return;
             await catchUp.settled(current);  // a reconnect during that read still owes feedback
             if (current() && !catchUp.owed && arrive) follow();
         } finally { reading.wait(current, false); }
@@ -2608,7 +2611,7 @@ export function createChatInstance({
         if ((reading.target || reading).stick === false) {
             _hasNewActivity ||= arrive; reading.position(); updateScrollButton(); return;
         }
-        const returning = showLatest({ arrive });
+        const returning = showLatest({ arrive, reason: 'resume' });
         reading.request(); // Restore following even on failure, without fresh read credit.
         return returning;
     }
@@ -2833,6 +2836,9 @@ export function createChatInstance({
     });
     const { olderButton: loadOlderBtn } = historyControls;
 
+    // The first gate closed to arrivals ('' none: a hydrated, healthy window that needs no rebuild).
+    const arrivalGate = () => (!historyLoaded ? 'not_loaded' : !lastHistorySyncSucceeded ? 'prior_failed'
+        : catchUp.owed ? 'catch_up_owed' : liveCardBound.isArmed() ? 'live_card_bound' : '');
     const historyPager = createChatHistoryPager({
         fetchPage: fetchHistory,
         isAlive: () => !destroyed && !leaving,
@@ -2866,7 +2872,7 @@ export function createChatInstance({
             readReceipt.arrived(window);
         },
         readNewest: syncHistory, newestInFlight: () => historySyncPromise,
-        canArrive: () => historyLoaded && lastHistorySyncSucceeded && !catchUp.owed && !liveCardBound.isArmed(),
+        canArrive: () => !arrivalGate(), arrivalGate,
         isPageProtected: isHistoryPageProtected,
         onState: snapshot => syncLoadOlderControl(snapshot),
     });
@@ -2893,29 +2899,29 @@ export function createChatInstance({
     async function loadOlderHistory() {
         if (historyControls.recentFailed()) {
             const owned = onHistoryRetry?.();
-            return historySyncPromise ? owned : syncHistory();
+            return historySyncPromise ? owned : syncHistory({ reason: 'retry' });
         }
         const snapshot = historyPager.getState();
         // ↓'s own failed read is a fresh ↓, later reading supersedes it; a changed view reads the present in place.
-        if (snapshot.retryReturn) return showLatest();
+        if (snapshot.retryReturn) return showLatest({ reason: 'retry' });
         if (snapshot.error?.body?.reason_code === 'history_view_changed') {
             reading.cancel();
-            return historyPager.latest();
+            return historyPager.latest(null, { reason: 'retry', decision: 'view_changed' });
         }
         return snapshot.error ? historyPager.retry() : loadHistoryAtEdge('older');
     }
     // `Load more history` reads older, ↓ the present (owner 2026-09-14, 10-05). Empty pages cross
     // server read ceiling: continue to rows or chat start. Growth re-anchors unless reader walks
     // older chain; `current` guards each request.
-    async function loadHistoryAtEdge(direction, current = () => true) {
+    async function loadHistoryAtEdge(direction, current = () => true, tags = null) {
         const { canNewer, canOlder } = historyPager.getState();
         if (direction === 'older' && current() && historyWindow?.horizonGap && !canNewer && !(canOlder && readingHistory())) {
-            const rebased = await historyPager.latest();
+            const rebased = await historyPager.latest(null, { ...tags, decision: 'horizon_gap' });
             if (destroyed || rebased.status !== 'applied') return rebased;
         }
         let result;
         do {
-            result = current() ? await historyPager[direction]() : {};
+            result = current() ? await historyPager[direction](tags) : {};
         } while (!destroyed && result.status === 'applied' && result.messageCount === 0
             && historyPager.getState()[direction === 'older' ? 'canOlder' : 'canNewer']);
         return result;
@@ -3313,10 +3319,13 @@ export function createChatInstance({
         onQuestionFrame: reread,
     });
 
-    let wsHasConnectedOnce = false;
+    let wsHasConnectedOnce = false, closedSinceOpen = false;
 
     onWs('open', (msg) => {
         const openedVisit = visit, readOnOpen = recentRequest;
+        // A return across a close it heard (shown or away) is a reconnect.
+        const reason = msg?.resumed && !closedSinceOpen ? 'resume' : 'reconnect';
+        closedSinceOpen = false;
         // The socket's previouslyConnected covers newly mounted Projects too;
         // per-instance state is only the fallback for legacy open events.
         const isReconnect = typeof msg?.previouslyConnected === 'boolean'
@@ -3349,7 +3358,7 @@ export function createChatInstance({
             // a read newer than any it interrupted.
             .then(() => (destroyed || openedVisit !== visit ? false
                 : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
-                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, current: () => catchUp.reading === read })
+                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read })
                     : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
         if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen);
@@ -3358,6 +3367,7 @@ export function createChatInstance({
     // A disconnect: written sends not yet saved say so and the room shows the outage; away, which sends it doubts is
     // decided now (custody) and both are drawn on its return (`stay`).
     onWs('close', () => {
+        closedSinceOpen = true;
         catchUp.cancel(recentRequest);
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
         showOutage();
