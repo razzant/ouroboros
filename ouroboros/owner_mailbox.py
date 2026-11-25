@@ -115,9 +115,10 @@ def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, ent
     A False from the append itself is NOT write-free: bytes of a torn row may have landed. They stay
     as they are, and the record boundary keeps the next row from being glued onto them."""
     from ouroboros.task_custody import task_mail_lock
-
+    reminder = (entry.get("work_attention") or {}).get("kind") == "deadline_expired"  # stays once after its drain too
     with task_mail_lock(drive_root, task_id) as locked:
-        if locked and entry.get("provenance") == "place_event" and _holds(path, entry["msg_id"]):
+        if locked and (entry.get("provenance") == "place_event" or reminder) and (_holds(path, entry["msg_id"]) or (
+                reminder and _holds(_ack_path(drive_root, task_id), entry["msg_id"]))):
             return True
         if locked and admit is not None and not admit():
             return False

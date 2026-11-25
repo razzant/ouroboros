@@ -285,6 +285,10 @@ function recordPhase(record = {}, terminalPhase = 'done') {
 // The private chat record is an adapter, never the shared task-fact contract.
 export function desiredLiveCardPhase(record = {}, terminalPhase = 'done') {
     const view = recordPhase(record, terminalPhase);
+    if (record.expiredPark && !record.finished && record.parkedPhase === 'budget_paused' && !record.cancelPendingPolicy && !record.workView) {
+        return { phase: view.phase, text: tr('task.status.deadline_expired', 'Deadline expired'),
+            className: view.className, ...chipLook(view), ...(view.secondary ? { secondary: view.secondary } : {}) };
+    }
     // A detached work (FINAL_DESIGN D4) that is plainly running says so beside the chip: a fact the
     // chip's own words do not carry. Every other state keeps the chip's established wording.
     const secondary = view.secondary || (record.detached && !record.finished && view.text === CHIP.working()
@@ -316,6 +320,8 @@ export function syncParkedPhase(record, phase = '', activity = {}, observedFacts
     const parked = ['budget_paused', 'budget_pausing', 'unknown', 'queued', 'owner_wait'].includes(observed) ? observed : '';
     const cause = ['budget_paused', 'budget_pausing'].includes(parked) ? String(activity.pause_cause || '') : '';
     record.parkedPhase = parked;
+    record.expiredPark = Boolean(activity.close_expired || activity.deadline_expired === true
+        || activity.attention_reason === 'deadline_expired');
     record.pauseCause = cause;
     record.pauseReason = cause ? activity.pause_reason || '' : '';
     record.censusPhase = phase;

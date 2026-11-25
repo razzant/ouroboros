@@ -473,6 +473,24 @@ def test_finalizing_answer_and_paused_work():
     assert (work["tails"], work["live"], work["mark"]) == ([], False, "pause") and "paused_by" not in work
 
 
+def test_a_finished_roots_expired_and_resumable_helpers_say_paused_in_either_order_each_with_its_own_control():
+    """#4123: the work's word never depends on which paused helper arrives first; Deadline expired is the work's (and
+    the room's) only when every paused member's deadline passed, while each member keeps its own Close or Resume."""
+    def helper(task_id, expired):
+        return ws.classify_member(row(task_id, "budget_paused", pause_cause="owner", parent_task_id="t",
+                                      root_task_id="t"), {"pause_by": {"actor": "owner"}, "deadline_expired": expired})
+
+    for members in ([helper("x", True), helper("r", False)], [helper("r", False), helper("x", True)]):
+        work = ws.roll_up_work("t", members, episode={"task_id": "t"}, outcome="done")
+        states = work["members"]["states"]
+        assert (work["activity"], work["because"][0]["code"], work["release"]) == ("paused", "paused_by_owner", "mind")
+        assert "deadline_expired" not in ws.roll_up_room([work]) and ws.roll_up_room([work])["activity"] == "paused"
+        assert (states["x"]["release"], states["r"]["release"]) == ("none", "mind")
+        assert states["x"]["because"][0]["code"] == "deadline_expired"
+    both = ws.roll_up_work("t", [helper("x", True), helper("y", True)], episode={"task_id": "t"}, outcome="done")
+    assert both["because"][0]["code"] == "deadline_expired" and ws.roll_up_room([both])["deadline_expired"] is True
+
+
 def test_any_members_turn_is_the_works_turn_and_unknown_never_erases_known_work():
     asked = ws.classify_member(row("h", owner_wait={"quiz_id": "q", "owner_wait_state": "waiting"},
                                    parent_task_id="t", root_task_id="t"))

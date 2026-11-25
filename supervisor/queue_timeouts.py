@@ -19,8 +19,6 @@ pass indexes every tree's live members once (``_tree_activity``), never a scan p
 
 from __future__ import annotations
 
-import datetime
-
 import logging
 import pathlib
 import time
@@ -67,22 +65,10 @@ REASON_ABSOLUTE_CEILING, REASON_DEADLINE, REASON_IDLE_TIMEOUT = TIMEOUT_TERMINAL
 
 
 def _task_deadline_ts(task: Dict[str, Any], *, missing: float = 0.0) -> float:
-    raw = str(task.get("deadline_at") or "").strip()
-    if not raw:
-        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-        raw = str(metadata.get("deadline_at") or "").strip()
-    if not raw:
-        contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
-        raw = str(contract.get("deadline_at") or "").strip()
-    if not raw:
-        return missing
-    try:
-        parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-        return float(parsed.timestamp())
-    except Exception:
-        return missing
+    from ouroboros.deadline_utils import task_deadline
+
+    deadline = task_deadline(task)
+    return deadline.timestamp() if deadline is not None else missing
 
 
 def _task_drive_for_task(task: Dict[str, Any], task_id: str, *, canonical: Any = None) -> pathlib.Path:
@@ -219,13 +205,15 @@ def _retain_unsubmitted_deadline(task: dict, before: dict) -> None:
         _queue_pending_deadline(task)
 
 
-def pending_deadline_expirable(task: Dict[str, Any]) -> bool:
+def pending_deadline_expirable(task: Dict[str, Any], *, strict: bool = False) -> bool:
     """Expire ordinary waits and positively authorized, unstarted continuations.
 
     The selected continuation must retain its authority; historical carriers
     neither veto it nor grant a fallback. A caller-owned non-put marker binds
     only its own working claim. Pause and unknown facts keep custody; the
-    reaper reads source, claim and controls again before settlement.
+    reaper reads source, claim and controls again before settlement. Close
+    offers no park this would expire (``expired_park_close._reaper_expires``);
+    ``strict`` lets that reader see an unanswered store instead of a refusal.
     """
     from types import SimpleNamespace
     from ouroboros.owner_pause import member_fence
@@ -324,6 +312,8 @@ def pending_deadline_expirable(task: Dict[str, Any]) -> bool:
                     and planned_handoff_resume_allowed(q.DRIVE_ROOT, task))
         return True
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):  # a store that cannot answer (StoreError) is not open
+        if strict:
+            raise
         return False
 
 
@@ -351,7 +341,15 @@ def _expire_pending_deadlines_locked(workers: Any, now: float) -> float:
         deadline = _task_deadline_ts(task)
         if deadline > now:
             next_due = min(next_due, deadline)
-        if not deadline or now < deadline or not pending_deadline_expirable(task):
+        if not deadline or now < deadline:
+            continue
+        if not pending_deadline_expirable(task):
+            from supervisor.expired_park_close import observe_due_child
+            from supervisor.queue_transitions import budget_pause_fact
+
+            # Unstarted work still expires here (#939); a park it keeps may be Close's: tell its direct parent.
+            if task.get("parent_task_id") and budget_pause_fact(task, _queue().BUDGET_ROOT_FENCES):
+                observe_due_child(_queue(), task)
             continue
         task.update(workers._make_terminalization_retry_task(
             task, str(task.get("id") or ""), status="failed", trigger=REASON_DEADLINE,
@@ -472,7 +470,7 @@ def _settle_pending_deadline(task: Dict[str, Any], *, event_already_published: b
                     or task.get("_is_direct_chat") and _direct_actor_still_registered(task_id)):
                 return False
             retry_root = _validated_retry_root_cancel_key(q.DRIVE_ROOT, task_id, task_hint=task)
-            intents = active_intents(q.DRIVE_ROOT, strict=True)
+            intents = active_intents(q.DRIVE_ROOT, strict=True, include_close=True)  # a pending Close keeps its row
             if task_id in intents or retry_root and retry_root in intents:
                 return False
             stored = load_task_result(q.DRIVE_ROOT, task_id, strict=True) or {}
@@ -787,7 +785,7 @@ def _enforce_task_timeouts_locked(
                 retry_root = _validated_retry_root_cancel_key(
                     _queue().DRIVE_ROOT, str(task_id), task_hint=task,
                 )
-                intents = active_intents(_queue().DRIVE_ROOT, strict=True)
+                intents = active_intents(_queue().DRIVE_ROOT, strict=True)  # a pending Close is no Stop here
                 cancel_target = next(
                     (
                         candidate

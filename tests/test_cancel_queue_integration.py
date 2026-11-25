@@ -207,6 +207,44 @@ def test_timeout_reaper_does_not_clone_over_unreadable_cancel_authority(
     assert not {"will_retry", "retry_task_id"} & set(jobs[0])  # a hard bound requests no retry
     assert task_id not in running
 
+@pytest.mark.parametrize("intent", ["parked_close", "ordinary_stop"])
+def test_a_pending_close_never_suspends_a_running_workers_hard_deadline(tmp_path, monkeypatch, intent):
+    """#4123: a pending expired-park Close carries no authority over a running worker; only a Stop takes the rail."""
+    import datetime as dt
+
+    from supervisor import queue, workers
+
+    now, task_id = 10_000.0, "running-past-its-deadline"
+    task = {"id": task_id, "type": "task", "chat_id": 0,
+            "deadline_at": dt.datetime.fromtimestamp(now + 100.0, tz=dt.timezone.utc).isoformat()}
+    meta = {"task": task, "started_at": now - 1000.0, "last_heartbeat_at": now, "last_progress_at": now,
+            "attempt": 1, "worker_id": -1}
+    running = {task_id: meta}
+    queue.init_queue_refs([], running, {"value": 0})
+    monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0.0)
+    monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 60.0)
+    monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 10_000_000.0)
+    monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": True)
+    jobs: list[dict] = []
+    monkeypatch.setattr(queue, "_reap_queue", types.SimpleNamespace(put=jobs.append))  # a stub: no process stop
+    monkeypatch.setattr(workers, "WORKERS", {})
+    write_task_result(tmp_path, task_id, "running")
+    if intent == "parked_close":
+        ci.request_cancel(tmp_path, task_id, source=ci.PARKED_CLOSE_SOURCE, requested_by="parent",
+                          parked_close={"requested_by": "parent", "token": "a" * 64})
+    else:
+        ci.request_cancel(tmp_path, task_id, reason="stop", source="agent_tool")
+
+    queue._enforce_task_timeouts_locked(workers, now + 200.0, 0, {})
+
+    if intent == "parked_close":
+        assert [job["terminal_reason"] for job in jobs] == ["deadline"] and task_id not in running
+    else:
+        assert jobs == [] and task_id in running  # the Stop's custody stays the sole killer
+
+
 def test_snapshot_restore_refuses_a_task_with_active_intent(qenv, monkeypatch):
     from ouroboros.utils import utc_now_iso
 

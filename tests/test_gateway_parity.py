@@ -505,7 +505,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "model_waits", "model_activity", "context_attempt", "task_attempt", "turn_phase", "executor", "carrier", "required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait",
         "status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
         "timeout_retry_from", "original_task_id", "finalization_recovery", "terminal_origin",
-        "finishing_reviews", "late_work", "can_resume", "cancelable", "presence_pause",
+        "finishing_reviews", "late_work", "can_resume", "close_expired", "cancelable", "presence_pause",
         "last_line", "last_line_at", "tool_calls", "detached", "place_origin", "project_name", "lead", "processing",
     }, "ActiveChatActivity adds optional outcome/retry/review evidence without changing required activity facts"
     from ouroboros.physical_attempt_context import ContextAttemptFact
@@ -519,7 +519,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     question_keys = {"required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait"}
     question_keys |= {"status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
                       "timeout_retry_from", "original_task_id", "finalization_recovery", "terminal_origin"}
-    question_keys |= {"finishing_reviews", "late_work", "can_resume", "cancelable", "presence_pause"}
+    question_keys |= {"finishing_reviews", "late_work", "can_resume", "close_expired", "cancelable", "presence_pause"}
     question_keys |= {"last_line", "last_line_at", "tool_calls", "detached", "place_origin", "project_name"}
     assert {key: value for key, value in activity_fields.items() if key not in question_keys} == get_type_hints(ActiveDirectTurn, include_extras=True), (
         "ActiveChatActivity must mirror ActiveDirectTurn's field shape so one client reducer hydrates both"
@@ -538,7 +538,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         assert activity_schema["properties"].pop(field)["type"] == "boolean"
     for field in ("status", "reason_code", "timeout_retry_from", "original_task_id", "terminal_origin"):
         assert activity_schema["properties"].pop(field)["type"] == "string"
-    for field in ("outcome_axes", "cancel_origin", "finalization_recovery", "root_phase_checkpoint", "late_work"):
+    for field in ("outcome_axes", "cancel_origin", "finalization_recovery", "root_phase_checkpoint", "late_work", "close_expired"):
         assert activity_schema["properties"].pop(field)["type"] == "object"
     assert activity_schema["properties"].pop("finishing_reviews")["type"] == "boolean"
     assert activity_schema["properties"].pop("delegated_runs_unreconciled") == {"type": "array", "items": {"type": "string"}}

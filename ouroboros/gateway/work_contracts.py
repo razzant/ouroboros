@@ -247,12 +247,22 @@ class WorkTurn(TypedDict):
     code: NotRequired[str]
 
 
+class TaskCancelRequest(TypedDict, total=False):
+    """Optional body; stop_action_id retries one action, distinct from custody ID.
+    Omission preserves legacy ingress without exact-replay assurance."""
+    cascade: bool
+    stop_policy: str
+    stop_action_id: str
+    close_expired: str  # only with stop_policy="close_expired", no cascade or Stop action id
+
+
 class WorkControl(TypedDict):
     """An action the named door accepts now, on its exact target."""
 
     action: str
     target: str
     scope: NotRequired[str]
+    close_expired: NotRequired[str]
 
 
 class WorkEpisode(TypedDict):
@@ -275,6 +285,7 @@ class WorkMemberState(TypedDict):
     mark: str  # the member's own mark, independent of its tails
     queue_attempt: NotRequired[int]  # observed queue ordinal of this member's state, not an executor ordinal
     last_resume: NotRequired[LastResume]
+    close_expired: NotRequired[WorkControl]
 
 
 class WorkMembers(TypedDict):
@@ -335,6 +346,7 @@ class RoomStatus(TypedDict):
     mark: str
     confirmed: bool
     works: List[str]
+    deadline_expired: NotRequired[bool]
 
 
 class WorkSummary(TypedDict):
@@ -349,6 +361,7 @@ class PanicRecoveryMember(TypedDict):
     task_id: str
     task_name: str
     panic_hold_id: str
+    close_expired: NotRequired[WorkControl]
     project_id: NotRequired[str]
     chat_id: NotRequired[int]
     root_task_id: NotRequired[str]

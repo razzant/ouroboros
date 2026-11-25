@@ -1566,7 +1566,10 @@ what still runs beside it (subagents, external runs, review work beside a task t
 running, such as the review a Pause lets finish, a run nobody can confirm); a work card's chip says the same word with the same line
 beside it, and the sidebar's name says both. An outcome stays beside `Finalizing…`; `Paused` stays until Resume, its
 line saying who or what paused it (the owner's press with its time, Ouroboros, nobody when a press declared no one),
-the words the declaring press recorded following its head verbatim whoever declared it (`You paused it: …`);
+the words the declaring press recorded following its head verbatim whoever declared it (`You paused it: …`); a park
+past its hard deadline says `Deadline expired` instead, even for work remaining after an answer, keeping that author,
+time, answer and outcome without a wait-to-resume line, while `Close` is a separate neutral offer, once on its exact
+task's own row or card, described by that name (a granted Stop stays, Panic selection leaves it out, materials stay);
 `Waiting` says what it waits for and goes on by itself when that happens (a sleep: each source it chose, joined by
 `or` — the subagent by its name, else how many, its external run, a service, a reviewer, a sender by its name, else a
 message — and its time last, in the viewer's clock, a time alone also waking on a message; a record

@@ -30,7 +30,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import ProcessingTiers, WorkLeadFields, WorkStateFields
+from ouroboros.gateway.work_contracts import ProcessingTiers, TaskCancelRequest, WorkLeadFields, WorkStateFields  # noqa: F401
 from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
@@ -733,6 +733,7 @@ class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also pre
     finishing_reviews: NotRequired[bool]  # review work an owner Pause lets finish runs on; display only, no count
     late_work: NotRequired[Dict[str, Any]]  # answered root whose late work remains: title, answered_at; display only
     can_resume: NotRequired[bool]
+    close_expired: NotRequired[Dict[str, Any]]  # exact WorkControl, not Resume authority
     cancelable: NotRequired[bool]
     presence_pause: NotRequired[bool]  # a live Presence turn moved to a Project as text (never a live call): Pause saves it, Restart returns it
 
@@ -1312,22 +1313,14 @@ class ContinuationOffer(TypedDict, total=False):
     action_nonce: str
 
 
-class TaskCancelRequest(TypedDict, total=False):
-    """Optional body; stop_action_id retries one action, distinct from custody ID.
-    Omission preserves legacy ingress without exact-replay assurance."""
-    cascade: bool
-    stop_policy: str
-    stop_action_id: str
-
-
 class TaskCancelResponse(TypedDict, total=False):
     ok: bool
     task_id: str
     # Cascade echoes subtree scope; immediate success follows teardown.
     cascade: bool
-    # Every 202 keeps the recorded intent pending and echoes the EFFECTIVE policy,
-    # never softening an immediate intent: a soft stop, or an immediate teardown not
-    # yet confirmed (request_id, reason_code "teardown_unconfirmed"). 200 omits them.
+    # A Stop's 202 keeps its recorded intent pending and echoes the EFFECTIVE policy, never softening an immediate
+    # intent: a soft stop, or a teardown not yet confirmed (request_id, reason_code "teardown_unconfirmed"); its 200
+    # omits them. A Close (gateway/task_close.py) has no stop_policy: 202 only while owed; 200 closed or "result_kept".
     cancel_state: str
     stop_policy: str
     request_id: str

@@ -7,27 +7,19 @@
 
 import { fetchJson, isStoreMigrating, readStateJson } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
-import { errorWords } from './ui_primitives.js';
+import { errorWords, escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { fmt, tr } from './i18n.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { taskCancelPending } from './log_events.js';
 import { waitingModel } from './project_activity.js';
 import {
-    memberState, openWorkControls, resumeTargets, workControls, workLine, workMenuActions, workOfEpisode, workRowView,
+    confirmedHelperAttemptInQueue, confirmedPausedHelperAttempt, deadlineExpiredState, indexCloseOffers, indexDeadlineExpired, memberState, openWorkControls, resumeTargets, workCloseOffer, workControls, workLine, workMenuActions, workOfEpisode, workRowView,
 } from './work_status.js';
 import { censusTaskFacts, censusTaskPhase, paintTaskPhase } from './task_phase_chip.js';
 import {
-    ACTION_HURRY,
-    ACTION_RESUME,
-    heldWorkFacts,
-    hurryTaskAction,
-    isRootTaskRow,
-    openTaskControlMenu,
-    requestStop,
-    resumeTaskAction,
-    taskControlActions,
-    taskControlBusy,
-    taskControlTriggerLabel,
+    ACTION_HURRY, ACTION_RESUME, ACTION_STOP_NOW, closeExpiredAction, closeExpiredOffer, deadlineExpiredWord,
+    heldWorkFacts, hurryTaskAction, isRootTaskRow, openTaskControlMenu, requestStop, resumeTaskAction,
+    taskControlActions, taskControlBusy, taskControlTriggerLabel,
 } from './task_control_menu.js';
 import { markView, statusMarkHtml } from './status_mark.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
@@ -74,7 +66,9 @@ function ownCensusView(activity, withHold = true) {
 // Those words in one line: the chip's word, then the quieter fact it says beside it.
 function censusWords(activity) {
     const { view } = ownCensusView(activity);
-    return [view.text, view.secondary].filter(Boolean).join(' · ');
+    // A census row whose own hard deadline passed says so, with no work to say it for it.
+    const expired = Boolean(activity.close_expired) || activity.deadline_expired === true;
+    return [expired ? deadlineExpiredWord() : view.text, view.secondary].filter(Boolean).join(' · ');
 }
 
 /** The shared chip for a row whose own census facts know its outcome; null keeps the row's own
@@ -105,13 +99,14 @@ function lateState(a, work) {
  * its own work, when it answered, and that only the work after the answer waits — never a generic turn.
  * A confirmed `work` says that state, then its own line (who paused it, what still runs or nobody can confirm). */
 function lateWorkHtml(a, late, work = null) {
+    const expired = Boolean(a.close_expired) || deadlineExpiredState(work) || a.deadline_expired === true;
     const at = new Date(String(late.answered_at || ''));
     const iso = Number.isNaN(at.getTime()) ? '' : at.toISOString();
     const when = iso ? ` <time datetime="${esc(iso)}" title="${esc(iso)}">${esc(whenLabel(iso))}</time>` : '';
     const line = work ? workLine(work) : '';
     // The state leads: a narrow row's ellipsis may cut the time, never what waits.
     return { name: esc(late.title || 'Answered task'),
-        sub: `Remaining work ${lateState(a, work)} · answer delivered${when}${line ? ` · ${esc(line)}` : ''}` };
+        sub: `${expired ? `${esc(deadlineExpiredWord())} · ` : ''}Remaining work ${lateState(a, work)} · answer delivered${when}${line ? ` · ${esc(line)}` : ''}` };
 }
 
 /** The name of the work a Presence turn's id belongs to ('' when no work names it): its correspondent's words never are. */
@@ -130,6 +125,15 @@ function presenceWorkName(census, taskId) {
  * episode is offered that work's controls only (the click handler, never the generic menu), and a parked row whose
  * work lists none (an unbound start no door reaches) shows no trigger at all. With no census row (`a === null`),
  * the server's tail-only work supplies the ended episode, name, outcome and controls without a synthetic phase. */
+// Optional and never urgent: the neutral capsule. The button is described by its row's name, which says which task.
+function closeButtonHtml(taskId, token, nameId = '') {
+    return `<button type="button" class="btn btn-sm btn-default" data-act="close-expired" data-id="${esc(taskId)}" data-close-expired="${esc(token)}"${nameId ? ` aria-describedby="${esc(nameId)}"` : ''}>${escapeHtml(tr('task.control.close_expired', 'Close'))}</button>`;
+}
+
+let nameSeq = 0;
+
+export { indexCloseOffers, indexDeadlineExpired };
+
 export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume = false, work = null) {
     const tailOnly = a === null;
     a ??= {};
@@ -146,20 +150,29 @@ export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume =
     const named = !late && (presence || tailOnly ? work?.name : String(a.suggested_name || '').trim());
     const line = presence && work ? workLine(work) : truth?.secondary || '';
     const said = (text) => `<span data-i18n-skip>${esc(text)}</span>`;
-    // The trigger says what a press will offer: its work's controls, else the card-state set the click opens.
+    const target = tailOnly ? work.episode.task_id : a.activity_id;
+    const close = workCloseOffer(work, target) || closeExpiredOffer(a.close_expired, target);
+    // Close is one more action beside the row's own: what the host grants (Stop) stays, a dead Resume never does.
+    const expired = Boolean(close) || a.deadline_expired === true || deadlineExpiredState(work);
+    // The trigger says what a press will offer: its work's controls, else the card-state set the click opens. Past its
+    // deadline that set is the Stop the host grants (the work's own control, else its census `cancelable`) and nothing
+    // a parked, expired task cannot do: no Resume, Hurry, Pause or Wrap up.
     const actions = work ? workMenuActions(workControls(work), { resume: true })
-        : taskControlActions({ budgetPaused: a.phase === 'budget_paused', resume, wholeTree: true });
+        : taskControlActions({ budgetPaused: expired || a.phase === 'budget_paused', resume: resume && !expired, wholeTree: true });
+    const granted = work ? workControls(work).stop.length > 0 : a.cancelable === true;
     const offers = !truth || actions.length > 0;
     const look = truth || ownCensusView(a).view;
     const mark = late || outcome ? '' : stateMark(look);
-    const target = tailOnly ? work.episode.task_id : a.activity_id;
     const tail = tailOnly ? ` data-tail-work="${esc(work.work_id)}"` : '';
     // A work the server marks with an accepted unbound start (#3428): its Stop confirmation says the request.
     const unbound = work?.unbound_start ? ' data-unbound-start="1"' : '';
-    const trigger = (presence && a.cancelable === false) || !offers ? ''
-        : `<div class="ui-row-actions activity-row-actions"><button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${esc(target || '')}" data-root="1"${tail}${unbound}${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button></div>`;
+    const nameId = `activity-name-${nameSeq += 1}`;
+    const control = (presence && a.cancelable === false) || !offers || (expired && !granted) ? ''
+        : `<button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${esc(target || '')}" data-root="1"${tail}${unbound}${expired || a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume && !expired ? ' data-resume="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button>`;
+    const trigger = close || control
+        ? `<div class="ui-row-actions activity-row-actions">${close ? closeButtonHtml(target, close, nameId) : ''}${control}</div>` : '';
     return `<div class="ui-row activity-row">
-                <span class="ui-row-title activity-name"${named ? ' data-i18n-authored' : ''}>${late ? late.name : esc(named || names[tailOnly ? 'managed_task' : a.kind] || 'Live turn')}</span>
+                <span class="ui-row-title activity-name"${close ? ` id="${nameId}"` : ''}${named ? ' data-i18n-authored' : ''}>${late ? late.name : esc(named || names[tailOnly ? 'managed_task' : a.kind] || 'Live turn')}</span>
                 <span class="ui-row-meta activity-sub">${late ? late.sub : `${mark}${outcome ? `${slot(outcome)}${line ? ` · ${said(line)}` : ''}`
                     : said([truth ? truth.word : censusWords(a), line].filter(Boolean).join(' · '))}${elapsed}`}</span>
                 ${trigger}
@@ -480,9 +493,18 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     // Known-outcome chips of the last queue render; paintTaskPhase writes them into
     // their slots once the markup is mounted. The words come from the translation seam.
     let phaseViews = [];
-    // The body the queue was last drawn from — set the moment the accepted state settles, so a work's controls
-    // (the door that reads it, at their exact targets) never wait for a repaint unrelated reads could hold.
+    // The bodies the queue was last drawn from — set the moment each accepted read settles, so a work's controls
+    // and an expired helper's Stop recheck read the latest accepted state without waiting for unrelated sections.
     let lastCensus = null;
+    let lastCloseOffers = new Map();
+    let lastExpiredIds = new Set();
+    let lastHelperCensus = null;
+    let lastQueue = null;
+    const acceptCensus = (census) => {
+        lastCensus = lastHelperCensus = census;
+        lastCloseOffers = indexCloseOffers(census);
+        lastExpiredIds = indexDeadlineExpired(census);
+    };
     // The state read the last refresh performed: the ONE accepted state. A Resume settles against this very
     // read — the same one its repaint draws from — never a second GET of its own.
     let stateRead = Promise.resolve(null);
@@ -493,16 +515,17 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             <summary>${esc(label)}</summary>
             <div class="activity-group-rows">${rows.join('')}</div>
         </details>`;
-    // The list reads by state: what works now, what waits, what is queued, then paused work under its count (open
-    // until the owner folds it: its rows keep their Resume and Stop one press away).
-    const RANKS = { working: 0, waiting: 1, unknown: 1, queued: 2, paused: 3 };
+    // Order by state: active, waiting, queued, healthy paused under its count, then expired parks apart under theirs.
+    const RANKS = { working: 0, waiting: 1, unknown: 1, queued: 2, paused: 3, expired: 4 };
 
     function renderQueue(queue, census) {
         if (!Array.isArray(queue?.running) || !Array.isArray(queue?.pending)) throw new Error('Queue unavailable');
-        lastCensus = census;
+        lastQueue = queue;
+        if (census !== lastCensus) acceptCensus(census);
+        else lastHelperCensus = census;
         const { running, pending } = queue;
         const activities = Array.isArray(census?.active_chat_activities) ? census.active_chat_activities : [];
-        const phases = new Map(activities.map((a) => [String(a?.activity_id || ''), a?.phase]));
+        const phases = new Map(activities.map((a) => [String(a?.activity_id || ''), a]));
         // Resume is offered only on a task a work's Resume control names (the server's door decision).
         const resumable = resumeTargets(census);
         phaseViews = [];
@@ -517,7 +540,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             // The queue and census are independent reads. Compare the same task's attempts; a helper's witness
             // comes from its own member state, not its root. If they cannot be joined, keep the known phase by itself.
             // Names, orders and control targets still address the task, not its attempt.
-            const censusRow = ownId ? activities.find((entry) => entry?.activity_id === ownId) : undefined;
+            const censusRow = ownId ? phases.get(ownId) : undefined;
             const ownWork = workOfEpisode(census, ownId);
             const member = ownWork ? null : memberState(census, ownId);
             const projected = ownWork || member;
@@ -532,7 +555,10 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             const shown = censusBehind ? null : projected;  // the state the row may say; the controls keep `projected`
             const view = workRowView(shown || { activity: 'unknown', confirmed: false });
             const parked = projected?.activity === 'paused';
-            const kindLabel = view.word;
+            const close = !censusBehind && (lastCloseOffers.get(ownId) || '');
+            // The same body's word that THIS attempt's deadline passed; an older census says nothing of a newer one.
+            const expired = !censusBehind && (Boolean(close) || lastExpiredIds.has(ownId));
+            const kindLabel = expired && !shown ? deadlineExpiredWord() : view.word;
             const outcome = ownId && !censusBehind && ownOutcomePhase(censusRow,
                 view.outcome || (shown?.activity === 'working' && shown.transition === 'none') ? '' : kindLabel);
             // The chip already says Finalizing beside its outcome; retain only the work's other facts.
@@ -547,22 +573,35 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             const projectWait = hold?.label ? ` · ${esc(hold.label)}: ${esc(hold.detail || hold.reason)}` : '';
             // The trigger says what the press offers: a root's work controls, else the card-state set (click handler).
             const root = phases.has(ownId) || isRootTaskRow(t, ownId);
-            const work = root ? workOfEpisode(census, ownId) : null;
+            const work = root ? ownWork : null;
             const budgetPaused = parked || resumable.has(ownId);
             const actions = work ? workMenuActions(workControls(work), { resume: true })
-                : taskControlActions({ budgetPaused, resume: resumable.has(ownId), wholeTree: root });
+                : taskControlActions({ budgetPaused: budgetPaused || expired, resume: resumable.has(ownId) && !expired, wholeTree: root });
+            // A deadline that has passed leaves Resume, Hurry and Pause nothing to do: the set is the Stop the host
+            // grants (a root's work control or census `cancelable`; for a helper outside the root-only census, its
+            // own confirmed paused member joined to this exact child queue row by equal safe-integer attempt, never
+            // borrowed from its root's Stop). Where a newer queue attempt makes the census older than this row, its
+            // expiry stands on nothing for the attempt: no control until it agrees.
+            const helperAttempt = expired && !root && !work ? confirmedPausedHelperAttempt(q, census, ownId) : null;
+            const granted = work ? workControls(work).stop.length > 0
+                : root ? censusRow?.cancelable === true : helperAttempt !== null;
+            const control = (expired && !granted) || (censusBehind && lastExpiredIds.has(ownId)) ? ''
+                : `<button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${id}"${budgetPaused || expired ? ' data-budget-paused="1"' : ''}${resumable.has(ownId) && !expired ? ' data-resume="1"' : ''}${root ? ' data-root="1"' : ''}${expired && helperAttempt !== null ? ` data-helper-expired-attempt="${helperAttempt}"` : ''}${work?.unbound_start ? ' data-unbound-start="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button>`;
+            const nameId = `activity-name-${nameSeq += 1}`;
             // The whole order is the record: it waits behind the row's Details (owner seed S2).
             const order = t._presence_turn ? '' : String(t.description || t.objective || t.text || '');
             // The held cause is what the owner reads before Resume: it wraps, never ellipsized.
             const html = `<div class="ui-row activity-row${shown?.activity === 'waiting' ? ' activity-held' : ''}">
-                <span class="ui-row-title activity-name"${named ? ' data-i18n-authored' : ''}>${label}</span>
+                <span class="ui-row-title activity-name"${close ? ` id="${nameId}"` : ''}${named ? ' data-i18n-authored' : ''}>${label}</span>
                 <span class="ui-row-meta activity-sub">${meta}${projectWait}</span>
                 <div class="ui-row-actions activity-row-actions">
-                    <button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${id}"${budgetPaused ? ' data-budget-paused="1"' : ''}${resumable.has(ownId) ? ' data-resume="1"' : ''}${root ? ' data-root="1"' : ''}${work?.unbound_start ? ' data-unbound-start="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button>
+                    ${close ? closeButtonHtml(ownId, close, nameId) : ''}${control}
                 </div>
                 ${rowDetailsHtml({ key: `order:${ownId}`, open: isOpen(`order:${ownId}`), text: order, title: named })}
             </div>`;
-            return { html, rank: RANKS[shown?.activity] ?? (kind === 'pending' ? RANKS.queued : RANKS.working) };
+            const rank = expired && shown?.confirmed !== false && shown?.activity !== 'working'
+                ? RANKS.expired : (RANKS[shown?.activity] ?? (kind === 'pending' ? RANKS.queued : RANKS.working));
+            return { html, rank };
         };
         // Queue facts keep their runtime/budget controls. The census adds only
         // missing identities; queued direct turns can appear in both sources. A live Presence turn its
@@ -575,11 +614,15 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         const tails = delegatedTailWorks(census).filter((work) => !represented.has(String(work.episode.task_id)));
         const items = [...queued.map((q) => row(q, 'running')), ...pending.map((q) => row(q, 'pending')),
             ...live.map((a) => {
-                const work = workOfEpisode(census, a.activity_id);
-                return { html: liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(String(a.activity_id || '')), work),
-                    rank: a.phase === 'budget_paused' || work?.activity === 'paused' ? RANKS.paused : RANKS.working };
+                const id = String(a.activity_id || '');
+                const work = workOfEpisode(census, id);
+                const rowExpired = Boolean(workCloseOffer(work, id) || closeExpiredOffer(a.close_expired, id))
+                    || a.deadline_expired === true || deadlineExpiredState(work);
+                return { html: liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(id), work),
+                    rank: rowExpired && work?.activity !== 'working' ? RANKS.expired
+                        : a.phase === 'budget_paused' || work?.activity === 'paused' ? RANKS.paused : RANKS.working };
             }), ...tails.map((work) => ({ html: liveActivityRowHtml(null, Date.now(), phaseSlot, false, work),
-                rank: RANKS[work.activity] ?? RANKS.unknown }))];
+                rank: deadlineExpiredState(work) && work.activity !== 'working' ? RANKS.expired : (RANKS[work.activity] ?? RANKS.unknown) }))];
         if (!items.length) {
             // An empty list needs BOTH completeness proofs: a complete census beside an incomplete work
             // projection (an unreadable delegated custody) can hide an ended task's unconfirmed helper
@@ -591,8 +634,10 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         }
         const ordered = items.map((item, index) => ({ ...item, index })).sort((a, b) => a.rank - b.rank || a.index - b.index);
         const paused = ordered.filter((item) => item.rank === RANKS.paused).map((item) => item.html);
-        return [...ordered.filter((item) => item.rank !== RANKS.paused).map((item) => item.html),
-            paused.length ? groupHtml('paused', `Paused (${paused.length})`, paused, { open: true }) : ''].join('');
+        const expired = ordered.filter((item) => item.rank === RANKS.expired).map((item) => item.html);
+        return [...ordered.filter((item) => item.rank !== RANKS.paused && item.rank !== RANKS.expired).map((item) => item.html),
+            paused.length ? groupHtml('paused', `Paused (${paused.length})`, paused, { open: true }) : '',
+            expired.length ? groupHtml('expired', `${deadlineExpiredWord()} (${expired.length})`, expired, { open: true }) : ''].join('');
     }
 
     function renderBg(stateData, kept) {
@@ -686,8 +731,16 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         // (and the control rights their buttons carry) for state a Resume has already accepted.
         stateRead = readStateJson();
         // This view renders only the queue; queue_only skips the whole task-results scan server-side (v6.9x P2).
+        const queueRead = getJson('/api/tasks?queue_only=1');
+        // Apply accepted queue/state immediately so work controls, the per-census Close index and expired-helper Stop
+        // rechecks see changes at once and renderQueue reuses the already-indexed census.
+        queueRead.then((data) => {
+            if (!destroyed && revision === refreshRevision) lastQueue = Array.isArray(data?.queue?.running) && Array.isArray(data?.queue?.pending) ? data.queue : null;
+        }, () => { if (!destroyed && revision === refreshRevision) lastQueue = null; });
+        stateRead.then((census) => { if (!destroyed && revision === refreshRevision) acceptCensus(census); },
+            () => { if (!destroyed && revision === refreshRevision) lastHelperCensus = null; });
         const reads = [
-            Promise.allSettled([getJson('/api/tasks?queue_only=1'), stateRead]).then(([queue, state]) => {
+            Promise.allSettled([queueRead, stateRead]).then(([queue, state]) => {
                 if (queue.status === 'rejected') throw queue.reason;  // an unreadable queue is unknown, never empty
                 return { rows: queue.value, census: state.status === 'fulfilled' ? state.value : null };
             }),
@@ -697,9 +750,6 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             }),
             getJson('/api/schedules'),
         ];
-        // The accepted state, applied the moment it settles: the work-controls door reads `lastCensus` before any
-        // repaint lands, so a control the fresh snapshot withdrew is withdrawn at once, not after unrelated reads.
-        stateRead.then((census) => { if (!destroyed && revision === refreshRevision) lastCensus = census; }, () => {});
         const paintSection = (index, outcome) => {
             const section = sections[index];
             const { root, status, content } = section;
@@ -774,7 +824,19 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         const act = btn.dataset.act;
         const id = btn.dataset.id || '';
         if (act === 'bg-open') { openDashboardTab?.('consciousness'); return; }
+        if (act === 'close-expired') {
+            const current = lastCloseOffers.get(id) || '';
+            if (current && current === btn.dataset.closeExpired) await closeExpiredAction(id, current, { settle: resumeSettled });
+            return;
+        }
         if (act === 'task-control') {
+            const hasHelperAttempt = Object.hasOwn(btn.dataset, 'helperExpiredAttempt');
+            const helperAttempt = hasHelperAttempt ? Number(btn.dataset.helperExpiredAttempt) : null;
+            const canStopHelper = (requireAnchor = true) => !destroyed && mount.isConnected !== false
+                && (!requireAnchor || btn.isConnected !== false) && ws?.isConnected?.() !== false
+                && Number.isSafeInteger(helperAttempt) && helperAttempt >= 0
+                && confirmedHelperAttemptInQueue(lastQueue, lastHelperCensus, id) === helperAttempt;
+            if (hasHelperAttempt && !canStopHelper(true)) return;
             // S3 (Q2/HQ1): owner product-wide parity — the SAME three-action
             // dropdown as the Chat card (one shared module: same actions,
             // endpoint bindings, request-id retry, and typed refusals).
@@ -787,6 +849,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             } catch (exc) {
                 if (exc?.status !== 404) showToast(`Could not refresh task state. ${errorWords(exc).text}`, 'error');
             }
+            if (hasHelperAttempt && !canStopHelper(true)) return;
             // A work's current episode offers that work's controls: Stop reaches every episode root still
             // running, Stop earlier attempt the earlier ones, each at the server's exact target. It offers
             // only those: a work that lists none opens nothing, never the generic menu below, whose Stop or
@@ -803,9 +866,10 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             openTaskControlMenu(btn, {
                 cancelPending: taskCancelPending(stored),
                 budgetPaused: btn.dataset.budgetPaused === '1',
-                resume: btn.dataset.resume === '1',
+                resume: !hasHelperAttempt && btn.dataset.resume === '1',
                 // A child's Pause would not name its own tree (the server refuses it).
-                wholeTree: btn.dataset.root === '1',
+                wholeTree: !hasHelperAttempt && btn.dataset.root === '1',
+                ...(hasHelperAttempt ? { actions: [ACTION_STOP_NOW], canAct: (action) => action === ACTION_STOP_NOW && canStopHelper(false) } : {}),
                 busy: taskControlBusy(id),
                 onAction: async (action) => {
                     busy = true;
@@ -917,6 +981,10 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
 
     return { refresh, destroy() {
         destroyed = true;
+        lastQueue = null;
+        lastCensus = lastHelperCensus = null;
+        lastCloseOffers = new Map();
+        lastExpiredIds = new Set();
         clearTimeout(migrationTimer);
         window.removeEventListener('ouro:dashboard-subtab-shown', shown);
     } };

@@ -278,6 +278,16 @@ export function cancelTask(taskId, { cascade = false, stopPolicy = '', stopActio
     return Object.keys(body).length ? jsonPost(url, body) : fetchJson(url, { method: 'POST' });
 }
 
+/** Exact parked Close; old bodies reject the policy instead of treating it as a Stop.
+ * @param {string} taskId
+ * @param {string} closeExpired
+ * @returns {Promise<import('./api_types.js').TaskCancelResponse>} */
+export function closeExpiredTask(taskId, closeExpired) {
+    /** @type {import('./api_types.js').TaskCancelRequest} */
+    const body = { stop_policy: 'close_expired', close_expired: closeExpired };
+    return jsonPost(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, body);
+}
+
 const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
 const plainSegments = (text) => typeof text === 'string' && !!text && !text.includes('\\') && !text.includes('\0')

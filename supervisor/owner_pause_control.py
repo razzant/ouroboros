@@ -542,15 +542,16 @@ def refresh_owner_pause_tree(root_task_id: str, *, gaps: Optional[List[Dict[str,
     return FENCE_PAUSED
 
 
-def _release_settled_late_work(q: Any, root_drive: Any, root_task_id: str, fence: Dict[str, Any]) -> str:
-    """An answered root's Pause with nothing left: reopen its fence and drop its latch. Returns the fence state."""
+def _release_settled_late_work(q: Any, root_drive: Any, root_task_id: str, fence: Dict[str, Any], **closure: str) -> str:
+    """An answered root's Pause with nothing left: reopen its fence and drop its latch. Returns the fence state.
+    ``closure``: an exact deadline Close's request and offer, written onto the fence in the same CAS."""
     from ouroboros.owner_pause import FENCE_RELEASED, set_fence_state
 
     try:
         # CAS on the read state: a concurrent Resume or newer Pause wins.
         set_fence_state(root_drive, root_task_id, fence_id=str(fence.get("fence_id") or ""),
                         state=FENCE_RELEASED, expected_state=str(fence.get("state") or ""),
-                        release_reason="late_work_settled")
+                        release_reason="late_work_settled", **closure)
     except Exception:
         log.debug("Settled late-work Pause of %s was not released", root_task_id, exc_info=True)
         return str(fence.get("state") or "")

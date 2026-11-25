@@ -113,6 +113,20 @@ def naive_instant(raw: str) -> bool:
         return False
 
 
+def task_deadline(task: dict, *, late_phase: bool = False) -> Optional[datetime]:
+    """Hard calendar limit of the queue row, or of an answered root's late-phase Resume.
+
+    The late-phase door historically gives the saved contract priority over ingress metadata.
+    A malformed selected value is not permission to substitute a deadline from another carrier.
+    """
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
+    if late_phase:
+        return parse_deadline_ts(task.get("deadline_at") or contract.get("deadline_at") or metadata.get("deadline_at"))
+    raw = (str(source.get("deadline_at") or "").strip() for source in (task, metadata, contract))
+    return parse_deadline_ts(next((value for value in raw if value), ""))
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
