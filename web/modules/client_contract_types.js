@@ -726,7 +726,8 @@
  * @property {ChatHistoryAnchor=} anchor  // an `around` read only
  * @property {string=} error
  * @property {string=} reason_code
- * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one
+ * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one; a 409 history_delta_reset: why
+ * @property {('chat'|'progress')=} stream  // a 409 history_delta_reset met in one stream: that stream
  * @property {('unavailable'|'restored')=} project_registry  // Main only: its refusal, or the list back from its copy
  * @property {number=} ordinary_room  // a newest read's 503: the room read, still one of this profile's ordinary rooms
  * @property {string=} profile_scope  // the serving generation's frozen scope; a proven foreign value never paints (#3294)
