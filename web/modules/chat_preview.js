@@ -19,11 +19,12 @@
  * refused for authentication, current and not aborted (the room's fetchHistory below, app.js's link preparation, a
  * Place's in place_history.js), removes every entry and every copy painted in this document at once, selection or not
  * (`previewsRefused`); api_client.js clears them on sign-in, the core's sign-in page on every sign-out (server_auth.py,
- * by PREVIEW_FAMILY). The registry's word that a Project is gone or going takes its rooms' entries (app.js: a
- * `deleting` row, an exact lookup of it: `forgetProjectPreviews`), as its complete list takes those of the Projects
- * it no longer names (`forgetUnlistedProjectPreviews`); a Project deleted where this origin hears none of these keeps
- * its entry until one comes or the total gives it way. Its imports are the feed's tie rule and the words a bubble
- * draws (a host notice's line), so neither the order nor the words fork. */
+ * by PREVIEW_FAMILY). The registry's word that a Project is gone or going takes its rooms' entries under the data
+ * profile that word speaks for (app.js: a `deleting` row, an exact lookup of it: `forgetProjectPreviews`), as its
+ * list that says it is complete takes those of the Projects it no longer names (`forgetUnlistedProjectPreviews`); a
+ * Project deleted where this origin hears none of these keeps its entry until one comes or the total gives it way, and
+ * the same Project's rooms under another profile keep theirs. Its imports are the feed's tie rule and the words a
+ * bubble draws (a host notice's line), so neither the order nor the words fork. */
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 
@@ -105,7 +106,8 @@ const roomOf = (name) => {
     return { scope: Array.isArray(key) ? String(key[0] ?? '') : '',
         project: Array.isArray(key?.[1]) ? String(key[1][1] ?? '') : '' };
 };
-// Whether `store` holds this form's record. v2's one record moves into entries once, the order it kept by time read;
+// Whether `store` holds this form's record. v2's one record moves into entries once, the order it kept by time read,
+// stamped below any time this page could have asked the registry (its list then still takes a Project it omits);
 // entries standing without a record (an eraser took it) are erased before anything is read or written. `create` starts
 // an empty record.
 function current(store, create = false) {
@@ -120,9 +122,8 @@ function current(store, create = false) {
     erase(store);
     if (!rooms.length && !create) return false;
     store.setItem(PREVIEW_KEY, RECORD);
-    const read = Date.now();
     rooms.forEach(({ key, rows }, index) => {
-        store.setItem(`${PREVIEW_KEY}:${key}`, entryText(rows.filter(savedRow), read - index));
+        store.setItem(`${PREVIEW_KEY}:${key}`, entryText(rows.filter(savedRow), rooms.length - index));
     });
     return true;
 }
@@ -132,35 +133,37 @@ export function clearChatPreviews(storage) {
     dropPaintedPreviews();
 }
 
-/** The registry says these Projects are gone or going (app.js, where their rooms are let go): their rooms' entries
- * leave, in every scope; every other room keeps its own as it was, and nothing to remove writes nothing. */
-export function forgetProjectPreviews(projectIds, storage) {
-    const going = new Set((projectIds || []).filter(Boolean).map(String));
-    if (!going.size) return;
-    try {
-        const store = storage || globalThis.localStorage;
-        if (!current(store)) return;
-        for (const name of familyOf(store)) if (going.has(roomOf(name).project)) store.removeItem(name);
-    } catch { /* storage unavailable or unreadable: nothing here to take */ }
-}
-
-/** The registry's complete list of Projects (`GET /api/projects?all=1`, app.js), asked at `asked` (Date.now()) under
- * the profile `scope` this page proves: every Project still there is in it. A Project room's entry of that profile
- * read before the list was asked, whose Project it names nowhere or names `deleting`, leaves; Main, another profile's
- * entries and entries read since stay, and nothing to remove writes nothing. */
-export function forgetUnlistedProjectPreviews(projects, asked, scope, storage) {
-    const profile = provenScope(scope);
-    if (!profile || !Array.isArray(projects)) return;
-    const listed = new Set(projects.filter(row => row?.id && row.lifecycle !== 'deleting').map(row => String(row.id)));
+// Removes the entries of the proven profile `scope`'s Project rooms that `going(project)` names, saved before `before`.
+function forgetRooms(storage, scope, going, before = Infinity) {
     try {
         const store = storage || globalThis.localStorage;
         if (!current(store)) return;
         for (const name of familyOf(store)) {
             const room = roomOf(name);
-            if (room.scope === profile && room.project && !listed.has(room.project)
-                && readOf(store.getItem(name) || '') < asked) store.removeItem(name);
+            if (room.scope === scope && room.project && going(room.project)
+                && (before === Infinity || readOf(store.getItem(name) || '') < before)) store.removeItem(name);
         }
     } catch { /* storage unavailable or unreadable: nothing here to take */ }
+}
+
+/** The registry says these Projects are gone or going (app.js, where their rooms are let go), for the data profile
+ * `scope` (app.js `registryScope`): that profile's rooms of them leave. Every other room keeps its own as it was, the
+ * same Project's under another profile too; a word for no proven profile, or nothing to remove, writes nothing. */
+export function forgetProjectPreviews(projectIds, scope, storage) {
+    const going = new Set((projectIds || []).filter(Boolean).map(String)), profile = provenScope(scope);
+    if (going.size && profile) forgetRooms(storage, profile, project => going.has(project));
+}
+
+/** The registry's list of every Project (`GET /api/projects?all=1`, app.js), asked at `asked` (Date.now()). Only an
+ * answer that says it is complete under the data profile it names (`complete: true`, `profile_scope`:
+ * CLIENT_CONTRACT §6) proves absence: that profile's Project rooms saved before the list was asked, whose Project it
+ * names nowhere or names `deleting`, leave; Main, other profiles' rooms and rooms saved since stay. Any other answer (an
+ * older core, an incomplete snapshot) takes nothing, and nothing to remove writes nothing. */
+export function forgetUnlistedProjectPreviews(answer, asked, storage) {
+    const profile = answer?.complete === true ? provenScope(answer.profile_scope) : '';
+    if (!profile || !Array.isArray(answer.projects)) return;
+    const listed = new Set(answer.projects.filter(row => row?.id && row.lifecycle !== 'deleting').map(row => String(row.id)));
+    forgetRooms(storage, profile, project => !listed.has(project), asked);
 }
 
 /** A history read made in this document, current and refused for authentication: every entry and every painted copy

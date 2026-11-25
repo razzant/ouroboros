@@ -216,31 +216,36 @@ test('the feed\'s own tie rule orders the preview: imported from chat_history_re
     assert.doesNotMatch(source, /localeCompare/, 'no second copy of the stream comparison');
 });
 
-test('a Project the registry says is going away takes its saved text with it; every other room keeps its own', t => {
+test('a Project the registry says is going away takes its saved text in the profile that said so; every other room keeps its own', t => {
+    // Astra 2: two data profiles of this origin can hold the same Project id; one profile's word takes its own room's.
     const f = fixture(t);
     f.make({ room: [1, ''] }).save([row('chat:1', 'Main words')]);
     f.make({ room: [100, 'gate-0'] }).save([row('chat:1', 'Words of the deleted Project')]);
     f.make({ room: [100, 'gate-0'], scope: OTHER_PROFILE }).save([row('chat:1', 'Its words in another profile')]);
     f.make({ room: [101, 'gate-1'] }).save([row('chat:1', 'Another Project keeps these')]);
-    const others = [...f.values].filter(([key]) => !key.includes('"gate-0"'));
-    forgetProjectPreviews(['gate-0'], f.storage);
-    assert.deepEqual([...f.values], others, 'the others keep their entries byte for byte');
-    assert.doesNotMatch(JSON.stringify([...f.values]), /deleted Project|another profile/);
+    const gone = previewEntryKey(PREVIEW_SCOPE, [100, 'gate-0']);
+    const others = [...f.values].filter(([key]) => key !== gone);
+    forgetProjectPreviews(['gate-0'], PREVIEW_SCOPE, f.storage);
+    assert.deepEqual([...f.values], others, 'the others keep their entries byte for byte, the same id in another profile too');
+    assert.doesNotMatch(JSON.stringify([...f.values]), /deleted Project/);
     assert.equal(f.make({ room: [100, 'gate-0'] }).show(), false);
+    assert.equal(f.make({ room: [100, 'gate-0'], scope: OTHER_PROFILE }).show(), true);
     assert.equal(f.make({ room: [101, 'gate-1'] }).show(), true);
-    // Nothing to forget writes nothing; storage refused throws nothing.
+    // A word for no proven profile takes nothing; nothing to forget writes nothing; storage refused throws nothing.
     const before = [...f.values];
     const writes = [];
-    forgetProjectPreviews(['unknown', ''], { ...f.storage, setItem: (...args) => writes.push(args),
-        removeItem: (...args) => writes.push(args) });
-    forgetProjectPreviews([], { getItem() { throw new Error('not even read'); } });
+    const watching = { ...f.storage, setItem: (...args) => writes.push(args), removeItem: (...args) => writes.push(args) };
+    for (const scope of ['', 'installation', undefined]) forgetProjectPreviews(['gate-0'], scope, watching);
+    forgetProjectPreviews(['unknown', ''], OTHER_PROFILE, watching);
+    forgetProjectPreviews([], PREVIEW_SCOPE, { getItem() { throw new Error('not even read'); } });
     assert.deepEqual([writes, [...f.values]], [[], before]);
-    assert.doesNotThrow(() => forgetProjectPreviews(['gate-1'], { getItem() { throw new Error('denied'); } }));
+    assert.doesNotThrow(() => forgetProjectPreviews(['gate-1'], PREVIEW_SCOPE, { getItem() { throw new Error('denied'); } }));
 });
 
-test('the registry\'s complete list takes the entries of the Projects it no longer names, read before it was asked', t => {
-    // Astra 1, owner 2A («копии надо стирать … при удалении проекта»): a Project deleted where this browser did not hear
-    // the word. Main, another profile's rooms and a room read after the list was asked (a Project created since) stay.
+test('a list that says it is complete under its profile takes that profile\'s rooms of the Projects it omits, saved before it was asked', t => {
+    // Astra 1, 2 (owner 2A «копии надо стирать … при удалении проекта»): only an answer that says it is complete
+    // (`complete: true`) and names its data profile (`profile_scope`) proves a Project gone, for that profile. Main,
+    // another profile's rooms and a room saved after the list was asked (a Project created since) stay.
     const f = fixture(t);
     t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
     f.make({ room: [1, ''] }).save([row('chat:1', 'Main words')]);
@@ -252,17 +257,52 @@ test('the registry\'s complete list takes the entries of the Projects it no long
     const asked = Date.now();
     t.mock.timers.tick(1000);
     f.make({ room: [103, 'new'] }).save([row('chat:1', 'A Project created after the list was asked')]);
-    forgetUnlistedProjectPreviews([{ id: 'kept', lifecycle: 'active' }, { id: 'going', lifecycle: 'deleting' }], asked,
-        PREVIEW_SCOPE, f.storage);
-    assert.deepEqual(f.family().map(key => key.slice(PREVIEW_KEY.length + 1)), ['', JSON.stringify([PREVIEW_SCOPE, [1, '']]),
-        JSON.stringify([PREVIEW_SCOPE, [102, 'kept']]), JSON.stringify([OTHER_PROFILE, [100, 'gone']]),
+    const keys = () => f.family().map(key => key.slice(PREVIEW_KEY.length + 1));
+    const listed = [{ id: 'kept', lifecycle: 'active' }, { id: 'going', lifecycle: 'deleting' }];
+    const all = keys();
+    // No proof of absence: an incomplete snapshot that still lists its healthy neighbour, an older core's answer (neither
+    // word), a complete one naming no profile or no proven one, one with no list, none at all.
+    for (const answer of [{ projects: listed, complete: false, profile_scope: PREVIEW_SCOPE }, { projects: listed },
+        { projects: listed, complete: true }, { projects: listed, complete: true, profile_scope: 'installation' },
+        { projects: listed, complete: 'true', profile_scope: PREVIEW_SCOPE }, { complete: true, profile_scope: PREVIEW_SCOPE },
+        undefined]) {
+        forgetUnlistedProjectPreviews(answer, asked, f.storage);
+        assert.deepEqual(keys(), all, `${JSON.stringify(answer)} takes nothing`);
+    }
+    // Another profile's complete list takes its own room alone; this profile's, the two of its Projects it omits.
+    forgetUnlistedProjectPreviews({ projects: [], complete: true, profile_scope: OTHER_PROFILE }, asked, f.storage);
+    assert.deepEqual(all.filter(key => !keys().includes(key)), [JSON.stringify([OTHER_PROFILE, [100, 'gone']])]);
+    forgetUnlistedProjectPreviews({ projects: listed, complete: true, profile_scope: PREVIEW_SCOPE }, asked, f.storage);
+    assert.deepEqual(keys(), ['', JSON.stringify([PREVIEW_SCOPE, [1, '']]), JSON.stringify([PREVIEW_SCOPE, [102, 'kept']]),
         JSON.stringify([PREVIEW_SCOPE, [103, 'new']])]);
-    // An answer that is no list or a page that proves no profile takes nothing; storage refused throws nothing.
-    const before = JSON.stringify([...f.values]);
-    forgetUnlistedProjectPreviews(undefined, Date.now() + 1, PREVIEW_SCOPE, f.storage);
-    forgetUnlistedProjectPreviews([], Date.now() + 1, '', f.storage);
-    assert.equal(JSON.stringify([...f.values]), before);
-    assert.doesNotThrow(() => forgetUnlistedProjectPreviews([], 1, PREVIEW_SCOPE, { getItem() { throw new Error('denied'); } }));
+    assert.doesNotThrow(() => forgetUnlistedProjectPreviews({ projects: [], complete: true, profile_scope: PREVIEW_SCOPE }, 1,
+        { getItem() { throw new Error('denied'); } }));
+});
+
+test('v2 rooms moved into entries were saved before any list was asked: a complete list still takes the ones it omits', t => {
+    // Astra 7: when a list's answer is the first reader of the family, the v2 record moves then; its rooms keep their
+    // order below any time this page could have asked, so that answer, or any asked after, takes the Projects it omits.
+    const f = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 2000 });
+    const words = text => [{ id: 'chat:1', role: 'user', text, speaker: 'You' }];
+    const v2 = () => f.values.set(PREVIEW_KEY, JSON.stringify({ v: 2, rooms: [
+        { key: JSON.stringify([PREVIEW_SCOPE, [100, 'gone']]), rows: words('Words of a Project deleted since') },
+        { key: JSON.stringify([PREVIEW_SCOPE, [102, 'kept']]), rows: words('A listed Project keeps these') },
+        { key: JSON.stringify([PREVIEW_SCOPE, [1, '']]), rows: words('Main words') }] }));
+    const list = { projects: [{ id: 'kept', lifecycle: 'active' }], complete: true, profile_scope: PREVIEW_SCOPE };
+    const projects = () => f.family().filter(key => key !== PREVIEW_KEY)
+        .map(key => JSON.parse(key.slice(PREVIEW_KEY.length + 1))[1][1]);
+    v2();
+    const asked = Date.now();
+    t.mock.timers.tick(100);
+    forgetUnlistedProjectPreviews(list, asked, f.storage);  // its answer moves the record at 2100
+    assert.deepEqual(projects(), ['kept', ''], 'asked before the record moved');
+    clearChatPreviews(f.storage);
+    v2();
+    assert.equal(f.make({ room: [1, ''] }).show(), true, 'moved by a show');
+    t.mock.timers.tick(100);
+    forgetUnlistedProjectPreviews(list, Date.now(), f.storage);
+    assert.deepEqual(projects(), ['kept', ''], 'asked after the record moved');
 });
 
 test('a refusal anywhere in this document takes every entry and every painted copy, selection or not; nothing else does', t => {

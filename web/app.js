@@ -2,7 +2,7 @@
 
 import { createWS } from './modules/ws.js';
 import { apiClient, apiFetch, fetchJson } from './modules/api_client.js';
-import { documentScope, forgetProjectPreviews, forgetUnlistedProjectPreviews, previewsRefused } from './modules/chat_preview.js';
+import { documentScope, forgetProjectPreviews, forgetUnlistedProjectPreviews, previewsRefused, provenScope } from './modules/chat_preview.js';
 import { loadVersion } from './modules/utils.js';
 import { bindScrollFade, replaceScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
@@ -852,11 +852,19 @@ async function landInProject(project, inst, { taskId, quizId, latest, sourceReve
     await acknowledgeProjectAfterPaint(project, inst, { forcePaint, why });
 }
 
+// The data profile a registry answer speaks for (CLIENT_CONTRACT §6): the one it names, else this document's while
+// its socket proves it (ws.js canShowSavedProfile), else none. Its word that a Project is gone takes only that
+// profile's saved text of it (chat_preview.js): the same Project id under another profile keeps its own.
+function registryScope(answer) {
+    return answer?.profile_scope ? provenScope(answer.profile_scope)
+        : ws.canShowSavedProfile?.() === true ? documentScope(document) : '';
+}
+
 // The registry's row for `id` in its exact answer (`?id=`), else null. No row, or one `deleting`, is its word that the
-// Project is gone or going, which takes its rooms' saved text (chat_preview.js); an answer it cannot read says nothing.
-function projectAnswer(id, rows) {
-    const row = Array.isArray(rows) && rows.length === 1 && rows[0]?.id === id ? rows[0] : null;
-    if (Array.isArray(rows) && (!rows.length || row?.lifecycle === 'deleting')) forgetProjectPreviews([id]);
+// Project is gone or going, which takes its rooms' saved text (registryScope); an answer it cannot read says nothing.
+function projectAnswer(id, answer) {
+    const rows = answer?.projects, row = Array.isArray(rows) && rows.length === 1 && rows[0]?.id === id ? rows[0] : null;
+    if (Array.isArray(rows) && (!rows.length || row?.lifecycle === 'deleting')) forgetProjectPreviews([id], registryScope(answer));
     return row;
 }
 
@@ -865,9 +873,9 @@ function projectAnswer(id, rows) {
 // supersedes the read; a missing, deleting or unreadable answer keeps the room on screen and says so. Never Main.
 async function resolveProjectRoom(project, navigation) {
     const name = project.name || project.id;
-    let rows = null, error = '';
-    try { rows = (await apiClient.projectById(project.id))?.projects; } catch (err) { error = err?.message || 'unknown error'; }
-    const room = projectAnswer(project.id, rows);
+    let answer = null, error = '';
+    try { answer = await apiClient.projectById(project.id); } catch (err) { error = err?.message || 'unknown error'; }
+    const rows = answer?.projects, room = projectAnswer(project.id, answer);
     if (navigation !== projectNavigationGeneration) return null;
     const valid = room && Number.isSafeInteger(room.chat_id) && room.chat_id > 1;
     if (valid && room.lifecycle === 'active') return room;
@@ -999,12 +1007,11 @@ async function acknowledgeProjectAfterPaint(project, instance = null, { forcePai
 document.getElementById('project-panel-close')?.addEventListener('click', () => layers.back('control'));
 projectPanelBackdrop?.addEventListener('click', () => layers.back('scrim'));
 
-// The registry's complete list (Find a project, Show more: projects_nav.js) names every Project still there: a Project
-// room's saved text read before it was asked goes with a Project it omits (chat_preview.js). Only a list this page's
-// socket proves is its own profile's (ws.js canShowSavedProfile) speaks for its rooms.
+// The registry's list of every Project (Find a project, Show more: projects_nav.js): one that says it is complete
+// under the profile it names takes that profile's saved text of the Projects it omits (chat_preview.js).
 async function readProjectList(options) {
     const asked = Date.now(), data = await apiClient.projectList(options);
-    if (ws.canShowSavedProfile?.() === true) forgetUnlistedProjectPreviews(data?.projects, asked, documentScope(document));
+    forgetUnlistedProjectPreviews(data, asked);
     return data;
 }
 
@@ -1036,7 +1043,7 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
     // asks again) and its saved text (chat_preview.js); absence from this bounded list never does.
     const going = rows.filter(p => p.lifecycle === 'deleting').map(p => p.id);
     rooms.forget(...going);
-    forgetProjectPreviews(going);
+    forgetProjectPreviews(going, registryScope());
     const json = JSON.stringify([state.projectMessagesRevision, ...rows.map(p => [p.id, p.name, p.chat_id, p.lifecycle,
         p.visible_revision, p._unread, p.delete_error, p.pinned === true, p.last_message_at])]);  // a moved time repaints
     if (readOrder) projectsFeedOrder = readOrder;  // with its rows: nothing reads the one under the other's order
@@ -1212,7 +1219,7 @@ function openProjectMenu(item, { anchor = null, point = null } = {}) {
                 paintProjectsNav();
             } else refreshProjectsNav();
             // A delete the core answered is going away even if it is gone before a read shows it `deleting`.
-            if (change.authoritative && change.lifecycle === 'deleting') forgetProjectPreviews([change.projectId]);
+            if (change.authoritative && change.lifecycle === 'deleting') forgetProjectPreviews([change.projectId], registryScope());
             projectsNav.refresh();  // a row beyond the feed takes its new name or lifecycle from the registry's list
             knownProjectsJson = '';
         },
@@ -1382,7 +1389,7 @@ ws.on('projects_changed', (msg) => {
         // elsewhere cannot leave a panel with a title for a room that no longer exists. Read failures keep the panel:
         // an unavailable answer is not proof of deletion.
         void apiClient.projectById(openId).then((data) => {
-            const row = projectAnswer(openId, data?.projects);
+            const row = projectAnswer(openId, data);
             if (navigation !== projectNavigationGeneration || navState.activeProjectId !== openId) return;
             if (!row || row.lifecycle === 'deleting') closeProjectPanel();
         }).catch(() => {});

@@ -7,7 +7,9 @@ import test from 'node:test';
 import vm from 'node:vm';
 import * as readAhead from '../modules/read_ahead.js';
 import { createRoomRetirement } from '../modules/room_retire.js';
-import { forgetProjectPreviews } from '../modules/chat_preview.js';
+import { forgetProjectPreviews, forgetUnlistedProjectPreviews, previewEntryKey, provenScope, PREVIEW_KEY }
+    from '../modules/chat_preview.js';
+import { memoryStorage, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 
 // The span below is delimited by line breaks; normalize CRLF so a Windows
 // checkout (core.autocrlf) reads the same bytes the delimiters expect.
@@ -299,11 +301,27 @@ test('a room back from away never joins the paint cancelled when it left', async
     assert.deepEqual(h.acked, [['p1', 5]]);
 });
 
+// This browser's saved text of Project p1 (room 9) under two data profiles of this origin: the one this document
+// proves and another (astra 2). `forget` is chat_preview.js's eraser over this store; `kept` names the profiles left.
+const OTHER_PROFILE = '1234567890abcdef';
+function savedProfiles() {
+    const storage = memoryStorage();
+    storage.setItem(PREVIEW_KEY, '{"v":3}');
+    const keys = [PREVIEW_SCOPE, OTHER_PROFILE].map(scope => [scope, previewEntryKey(scope, [9, 'p1'])]);
+    for (const [, key] of keys) storage.setItem(key, '{"read":1,"rows":[]}');
+    return { storage, kept: () => keys.filter(([, key]) => storage.values.has(key)).map(([scope]) => scope),
+        forget: (ids, scope) => forgetProjectPreviews(ids, scope, storage),
+        forgetUnlisted: (answer, asked) => forgetUnlistedProjectPreviews(answer, asked, storage) };
+}
+// What app.js's registryScope reads: the page's socket (ws.js canShowSavedProfile) and the document's proven profile.
+const pageProfile = proven => ({ ws: { canShowSavedProfile: () => proven }, document: { scope: PREVIEW_SCOPE },
+    documentScope: doc => doc.scope, provenScope });
+
 // A state snapshot that still shows the open room unread offers the read decision
 // again through the real renderProjectsNav → acknowledgeProjectAfterPaint path: a
 // failed POST is retried by the next poll even when the snapshot is unchanged, and
 // the retry still posts only a read (painted, shown, the reader at the newest message).
-function pollHarness({ read = true, hidden = false, failures = 1 } = {}) {
+function pollHarness({ read = true, hidden = false, failures = 1, proven = true, saved = savedProfiles() } = {}) {
     const posts = [], refreshes = [];
     let failing = failures;
     const inst = {
@@ -312,7 +330,7 @@ function pollHarness({ read = true, hidden = false, failures = 1 } = {}) {
     };
     const context = vm.createContext({
         ...readAhead,  // app.js imports these (DESIGN "Unread": a message read in another room)
-        forgetProjectPreviews,
+        ...pageProfile(proven), forgetProjectPreviews: saved.forget,
         state: { projectSeenRevision: {} }, navState: { activeProjectId: 'p1' },
         projectInstances: new Map([['p1', inst]]), projectPaintRequests: new Map(), projectReveals: new Map(),
         projectActivityIndex: null, knownProjectsJson: '', lastProjectRows: [], projectsNav: { unreadRows: () => [] }, rooms: { forget() {} },
@@ -327,9 +345,10 @@ function pollHarness({ read = true, hidden = false, failures = 1 } = {}) {
         console: { error() {} },
     });
     vm.runInContext(`${unreadRule}${ackSource}\n${lift('markProjectViewed')}\n${lift('mergeProjectSeenRevisions')}
-        ${lift('renderProjectsNav')}
-        globalThis.poll = () => renderProjectsNav([{ id: 'p1', name: 'P', chat_id: 9, lifecycle: 'active',
-            visible_revision: 5 }], [9]);`, context);
+        ${lift('renderProjectsNav')}\n${lift('registryScope')}
+        globalThis.render = (lifecycle) => renderProjectsNav([{ id: 'p1', name: 'P', chat_id: 9, lifecycle,
+            visible_revision: 5 }], [9]);
+        globalThis.poll = () => render('active');`, context);
     const poll = async () => { context.poll(); for (let i = 0; i < 5; i++) await flush(); };
     return { context, posts, refreshes, poll, unread: () => context.lastProjectRows[0]?._unread };
 }
@@ -362,8 +381,8 @@ for (const [name, options, refreshes] of [
 // its detail read is held, then reopening it ordinarily, is a new navigation: the old
 // reveal neither blocks nor decides that showing's read, whether the reopen reuses a
 // hidden pending-work survivor (its draft and staged files) or builds a new instance.
-function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, covers = stack }) {
-    const acked = [], built = [], held = [], forgotten = [];
+function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, covers = stack, proven = true }) {
+    const acked = [], built = [], held = [], saved = savedProfiles();
     const instance = (options) => {
         const inst = {
             options, whys: [],  // what app.js built it with, and the action each paint it asked named
@@ -410,18 +429,19 @@ function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, cove
         markProjectViewed: async (id, revision) => { acked.push([id, revision]); },
         mainReads: 0, acknowledgeMainAfterPaint() { context.mainReads += 1; },  // Main's read decision (its own tests)
         mainUnread: 0, mainUnreadCount: () => context.mainUnread,
-        console: { error() {} }, createRoomRetirement, roomSocket: (socket) => socket, ws: {},
-        forgetProjectPreviews: (ids) => forgotten.push(...ids),  // chat_preview.js: a Project's saved text goes
+        console: { error() {} }, createRoomRetirement, roomSocket: (socket) => socket,
+        ...pageProfile(proven), forgetProjectPreviews: saved.forget,  // chat_preview.js: a Project's saved text goes
     });
     vm.runInContext(`let projectNavigationGeneration = 0, projectPanelOpeningSince = 0;\n${unreadRule}
         ${['mainOnScreen', 'enterMain', 'syncMainLifetime', 'cancelProjectPaint', 'closeProjectPanel', 'openProjectPanel',
-        'landInProject', 'projectAnswer', 'resolveProjectRoom', 'freshProjectRow', 'revealProjectQuestion'].map(lift).join('\n')}\n${ackSource}
+        'landInProject', 'registryScope', 'projectAnswer', 'resolveProjectRoom', 'freshProjectRow', 'revealProjectQuestion']
+        .map(lift).join('\n')}\n${ackSource}
         const rooms = createRoomRetirement({ instances: projectInstances, cancelPaint: cancelProjectPaint });
         Object.assign(globalThis, { rooms, openProjectPanel });
         globalThis.api = { open: (options) => openProjectPanel(lastProjectRows[0], options), close: () => closeProjectPanel(),
             openAs: (project, options) => openProjectPanel(project, options) };`,
     context);
-    return { acked, built, held, forgotten, project, context, api: context.api };
+    return { acked, built, held, saved, project, context, api: context.api };
 }
 
 // A document a chat opened (the reader, the file dialog) is a modal over the whole
@@ -465,11 +485,18 @@ test('a row that names its room opens as it stands; a newer answer is never repl
     assert.equal(h.built.length, 1);
 });
 
-for (const [answer, says] of [[{ projects: [] }, 'gone'], [{ projects: [{ id: 'p1', name: 'P', chat_id: 9, lifecycle: 'deleting' }] }, 'deleting'],
-    [{}, 'unreadable']]) {
+// Its word that the Project is gone or going takes the room's saved text too (astra 1), for the data profile that word
+// speaks for (astra 2): the profile the answer names, else this document's while its socket proves it, else none. The
+// same Project id under another profile keeps its own; an unreadable answer takes nothing.
+const DELETING = { id: 'p1', name: 'P', chat_id: 9, lifecycle: 'deleting' };
+for (const [answer, says, proven, kept] of [
+    [{ projects: [], profile_scope: OTHER_PROFILE }, 'gone in another profile', true, [PREVIEW_SCOPE]],
+    [{ projects: [DELETING], profile_scope: PREVIEW_SCOPE }, 'deleting in this profile', false, [OTHER_PROFILE]],
+    [{ projects: [] }, 'gone, naming no profile, to a socket that proves this one', true, [OTHER_PROFILE]],
+    [{ projects: [DELETING] }, 'deleting, naming no profile, to a socket that proves none', false, [PREVIEW_SCOPE, OTHER_PROFILE]],
+    [{}, 'unreadable', true, [PREVIEW_SCOPE, OTHER_PROFILE]]]) {
     test(`a reference reads its room by its id: an older feed row opens nothing the registry answers ${says}`, async () => {
-        // Its word that the Project is gone or going takes the rooms' saved text too (astra 1); an unreadable one does not.
-        const h = navigationHarness({ pendingWork: false });
+        const h = navigationHarness({ pendingWork: false, proven });
         const reads = [], toasts = [];
         Object.assign(h.context, { fmt: (text) => text, showToast: (text) => toasts.push(text),
             apiClient: { projectById: async (id) => { reads.push(id); return answer; } } });
@@ -478,7 +505,7 @@ for (const [answer, says] of [[{ projects: [] }, 'gone'], [{ projects: [{ id: 'p
         assert.equal(h.built.length, 0, 'no room is built');
         assert.equal(h.context.navState.activeProjectId, null, 'the view stays');
         assert.equal(toasts.length, 1, 'and says why');
-        assert.deepEqual(h.forgotten, says === 'unreadable' ? [] : ['p1']);
+        assert.deepEqual(h.saved.kept(), kept, 'the saved text of p1 left, by profile');
     });
 }
 
@@ -495,50 +522,72 @@ for (const [answer, says, forgets] of [[{ projects: [] }, 'no row', true],
     [{ projects: [{ id: 'p1', chat_id: 9, lifecycle: 'active' }] }, 'active', false], [{}, 'unreadable', false],
     [null, 'a failed read', false]]) {
     test(`the open Project's exact row read on projects_changed, ${says}, ${forgets ? 'takes' : 'keeps'} its saved text`, async () => {
-        const forgotten = [], heard = new Map(), closes = [];
+        const saved = savedProfiles(), heard = new Map(), closes = [];
         let reply;
         const context = vm.createContext({
-            ws: { on: (type, fn) => heard.set(type, fn) }, state: { projectChatIds: new Set() },
+            ...pageProfile(true), state: { projectChatIds: new Set() },
             navState: { activeProjectId: 'p1' }, projectsNav: { refresh() {} }, refreshProjectsNav() {},
             apiClient: { projectById: () => new Promise((resolve, reject) => { reply = data => (data ? resolve(data) : reject(new Error('offline'))); }) },
-            forgetProjectPreviews: (ids) => forgotten.push(...ids), closeProjectPanel: () => closes.push('closed'),
+            forgetProjectPreviews: saved.forget, closeProjectPanel: () => closes.push('closed'),
         });
-        vm.runInContext(`let projectNavigationGeneration = 0;\n${lift('projectAnswer')}\n${projectsChanged}
+        context.ws.on = (type, fn) => heard.set(type, fn);
+        vm.runInContext(`let projectNavigationGeneration = 0;\n${lift('registryScope')}\n${lift('projectAnswer')}\n${projectsChanged}
             globalThis.leave = () => { projectNavigationGeneration += 1; navState.activeProjectId = null; };`, context);
         heard.get('projects_changed')({ type: 'projects_changed' });
         context.leave();  // the owner went elsewhere before the answer came
         reply(answer);
         await flush();
-        assert.deepEqual(forgotten, forgets ? ['p1'] : []);
+        assert.deepEqual(saved.kept(), forgets ? [OTHER_PROFILE] : [PREVIEW_SCOPE, OTHER_PROFILE],
+            'this document\'s profile, which its socket proves, loses p1\'s saved text');
         assert.deepEqual(closes, [], 'a room no longer on screen is closed by nothing');
     });
 }
 
-// The registry's complete list (projects_nav.js reads it for Find a project and Show more): the Projects it omits are
-// gone, and so is their rooms' saved text read before it was asked (chat_preview.js) — under the profile this page's
-// socket proves; a list it cannot prove is its own profile's prunes nothing, and its answer reaches the list unchanged.
-for (const proven of [true, false]) {
-    test(`the complete list, read under ${proven ? 'a proven' : 'an unproven'} profile, ${proven ? 'prunes' : 'leaves'} the saved Project rooms`, async () => {
-        const pruned = [], answer = { projects: [{ id: 'kept', lifecycle: 'active' }] };
-        const context = vm.createContext({
-            apiClient: { projectList: async () => answer }, ws: { canShowSavedProfile: () => proven },
-            document: { scope: '0123456789abcdef' }, documentScope: (doc) => doc.scope,
-            forgetUnlistedProjectPreviews: (...args) => pruned.push(args),
-        });
+// The registry's list of every Project (projects_nav.js reads it for Find a project and Show more): one that says it is
+// complete under the profile it names takes that profile's saved text of the Projects it omits (chat_preview.js),
+// whichever profile this page proves; any other answer takes nothing (astra 1, 2). Its answer reaches the list unchanged.
+const NEIGHBOUR = { id: 'kept', chat_id: 8, lifecycle: 'active' };
+for (const [answer, says, kept] of [
+    [{ projects: [NEIGHBOUR], complete: true, profile_scope: OTHER_PROFILE }, 'complete in another profile', [PREVIEW_SCOPE]],
+    [{ projects: [NEIGHBOUR], complete: true, profile_scope: PREVIEW_SCOPE }, 'complete in this profile', [OTHER_PROFILE]],
+    [{ projects: [NEIGHBOUR], complete: false, profile_scope: PREVIEW_SCOPE }, 'incomplete, with a healthy neighbour',
+        [PREVIEW_SCOPE, OTHER_PROFILE]],
+    [{ projects: [NEIGHBOUR] }, 'from a core that says neither', [PREVIEW_SCOPE, OTHER_PROFILE]]]) {
+    test(`the list of every Project, ${says}, ${kept.length === 2 ? 'takes nothing' : 'takes the omitted Project\'s saved text there'}`, async () => {
+        const saved = savedProfiles();
+        const context = vm.createContext({ ...pageProfile(true), apiClient: { projectList: async () => answer },
+            forgetUnlistedProjectPreviews: saved.forgetUnlisted });
         vm.runInContext(lift('readProjectList'), context);
-        const before = Date.now();
         assert.equal(await context.readProjectList({ signal: null }), answer);
-        assert.equal(pruned.length, proven ? 1 : 0);
-        if (proven) {
-            const [projects, asked, scope] = pruned[0];
-            assert.deepEqual([projects, scope], [answer.projects, '0123456789abcdef']);
-            assert.ok(asked >= before && asked <= Date.now(), 'dated as it was asked');
-        }
+        assert.deepEqual(saved.kept(), kept);
         context.apiClient.projectList = async () => { throw new Error('offline'); };
         await assert.rejects(context.readProjectList({}), /offline/);
-        assert.equal(pruned.length, proven ? 1 : 0, 'a failed read prunes nothing');
+        assert.deepEqual(saved.kept(), kept, 'a failed read takes nothing');
     });
 }
+
+// The sidebar's `deleting` rows (the state read, which names no profile) and the delete action's own answer speak for
+// this document's profile while its socket proves it (registryScope), and for none otherwise.
+for (const proven of [true, false]) {
+    test(`a deleting row of the state read ${proven ? 'takes this profile\'s saved text of it' : 'takes nothing while the socket proves no profile'}`, async () => {
+        const saved = savedProfiles(), h = pollHarness({ failures: 0, proven, saved });
+        h.context.render('deleting');
+        assert.deepEqual(saved.kept(), proven ? [OTHER_PROFILE] : [PREVIEW_SCOPE, OTHER_PROFILE]);
+    });
+}
+test('the profile a registry word speaks for: the one it names, else the document\'s while its socket proves it', () => {
+    const scopeOf = (answer, proven, document = { scope: PREVIEW_SCOPE }) => {
+        const context = vm.createContext({ ...pageProfile(proven), document });
+        vm.runInContext(lift('registryScope'), context);
+        return context.registryScope(answer);
+    };
+    assert.equal(scopeOf({ profile_scope: OTHER_PROFILE }, false), OTHER_PROFILE, 'named: whatever the page proves');
+    assert.equal(scopeOf({ profile_scope: 'not a profile' }, true), '', 'named but unproven: none, never the document\'s');
+    assert.equal(scopeOf({ projects: [] }, true), PREVIEW_SCOPE);
+    assert.equal(scopeOf(undefined, true), PREVIEW_SCOPE, 'the delete action\'s own answer names none');
+    assert.equal(scopeOf(undefined, false), '');
+    assert.equal(scopeOf(undefined, true, { scope: '' }), '', 'a document that proves no profile');
+});
 
 // The read a Project's paint makes names its action (history_attribution.py): the room built now asks it as its
 // opening, its Retry as a retry; a kept room's return, as an unread receipt's own.

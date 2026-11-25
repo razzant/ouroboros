@@ -281,6 +281,7 @@ function listHarness({ host = {}, beyond = [], seen = {}, main = [90, 90] } = {}
         document: { querySelectorAll: (selector) => (selector === '[data-mobile-nav-toggle]' ? [toggle] : []) },
         closeProjectPanel() {}, syncNavigationState() {}, acknowledgeProjectAfterPaint() {}, acknowledgeMainAfterPaint() {},
         updateUnreadBadge() {}, rooms: { forget() {} },  // every read names the projects going away (room_retire.js)
+        registryScope: () => '',  // the profile a deleting row's word speaks for (project_history_ack.test.js): none here
         fetchJson: (url, init = {}) => new Promise((resolve) => {
             assert.equal(url, '/api/ui/preferences');
             assert.equal(init.method || 'GET', 'GET');
