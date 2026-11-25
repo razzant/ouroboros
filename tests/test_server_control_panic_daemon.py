@@ -252,7 +252,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
             assert set(diagnostics[0]["requests"]) == {
                 "local-model", "daemon", "commands", "executors", "services", "companions",
                 "restart-successor", "scope-census", "child-123", "startup-audit", "maintenance", "storage-count",
-                "storage-free",
+                "storage-free", "kept-services",
             }
             # The installation-scope census is one more independent request; this root planted no marker.
             assert diagnostics[0]["requests"]["scope-census"] == {"requested": False, "reason": "no installation marker planted"}
@@ -261,3 +261,39 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
                  "model": "local-model", "daemon": "daemon", "request-thread": "commands"}[fault]
         assert diagnostics[0]["requests"][owner]["requested"] is False
         assert "injected " + fault in diagnostics[0]["requests"][owner]["error"]
+
+
+@pytest.mark.parametrize("failure", ["stalled", "raises"])
+def test_indexed_stop_never_holds_panic_exit(monkeypatch, tmp_path, failure):
+    """An indexed stop is independent of the hard exit, just like other owners."""
+    release = threading.Event()
+    expired = threading.Event()
+    diagnostics = []
+
+    def indexed(_root):
+        if failure == "raises":
+            raise OSError("index unreadable")
+        if not release.wait(10):
+            expired.set()
+        return {"state": "completed"}
+
+    def report_exit(code):
+        # Release only at the hard exit, after its diagnostic captured the unfinished request.
+        release.set()
+        raise _ExitCalled(code)
+
+    def configure():
+        monkeypatch.setattr("ouroboros.launch_custody.panic_stop_kept", indexed)
+        monkeypatch.setattr("ouroboros.server_control.os._exit", report_exit)
+
+    try:
+        _run_panic(monkeypatch, tmp_path, daemon_stop=lambda: True,
+                   diagnostics=diagnostics, configure=configure)
+        request = diagnostics[0]["requests"]["kept-services"]
+        if failure == "raises":
+            assert request["requested"] is False and "index unreadable" in request["error"]
+        else:
+            assert release.is_set() and not expired.is_set()
+            assert request == "unfinished", "Panic must report the blocked request before releasing it"
+    finally:
+        release.set()

@@ -1244,6 +1244,42 @@ def test_task_level_service_teardown_keep(tmp_path, monkeypatch):
     kill_all_services(drive, wait=True)
 
 
+def test_a_failed_custody_handoff_is_no_kept_service(tmp_path, monkeypatch):
+    """``spawn_supervised`` publishes the Popen, then custody refuses it (here: the ownership set would not name the
+    kept launch) and its own cleanup ends it. The start reports that cause, and the task's teardown, even under a
+    task-level keep, stops what is left instead of reporting a kept service. Synthetic: no process, no signal."""
+    from ouroboros import process_custody
+    from ouroboros.tools import services as services_mod
+
+    _force_advanced_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(services_mod, "_SERVICES", {})  # this test's own service table
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-refused-keep"
+    registry._ctx.task_metadata = {"service_teardown": "keep"}
+    handle = SimpleNamespace(pid=999_999_931, poll=lambda: -9, returncode=-9)  # ended by the spawner's own cleanup
+
+    def refused(cmd, *, on_spawn, **_kwargs):
+        on_spawn(handle)
+        raise RuntimeError("spawned process could not enter durable custody: this kept service could not enter "
+                           "the installation's ownership set, so nothing would stop it once its worker exits")
+
+    monkeypatch.setattr(process_custody, "spawn_supervised", refused)
+    text = registry.execute("start_service", {"name": "page", "cmd": [sys.executable, "-c", "pass"],
+                                              "keep_alive": True})
+    assert "SERVICE_START_ERROR" in text and "ownership set" in text, text
+    stops = []
+    monkeypatch.setattr(services_mod, "_stop_service_launch", lambda ctx, name: (
+        stops.append(name), services_mod.ServiceStop({"name": name, "state": "exited"}, services_mod.STOP_CONFIRMED))[1])
+    monkeypatch.setattr(services_mod, "publish_stop", lambda *a, **k: None)
+
+    finalized = services_mod.stop_task_services(registry._ctx)
+
+    assert stops == ["page"] and [item["lifecycle"] for item in finalized] == ["stopped"], finalized
+
+
 def test_default_teardown_still_stops_services(tmp_path, monkeypatch):
     from ouroboros.platform_layer import pid_is_alive
     from ouroboros.tools.services import stop_task_services
