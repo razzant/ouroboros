@@ -145,7 +145,10 @@ def record_process(
     """Append a custody record for an already-spawned process.
 
     A launch with its own ``scope_marker`` (a service) also records it and the leader's census
-    birth (``scope_birth``): the identity its owned stop ends by, wherever the leader went."""
+    birth (``scope_birth``): the identity its owned stop ends by, wherever the leader went. A kept
+    launch (``launch_custody._kept_row``) also records its leader's validated kernel birth
+    (``kernel_birth``, ``""`` when unreadable: unknown), the one identity a later worker kill or
+    Panic proves it by (``launch_custody._kept_leaders``)."""
     if scope not in _VALID_SCOPES:
         raise ValueError(f"process custody scope must be one of {_VALID_SCOPES}, got {scope!r}")
     from ouroboros.install_identity import require_owned_root
@@ -169,12 +172,23 @@ def record_process(
         from ouroboros.process_census import birth_text
 
         entry.update(scope_marker=str(scope_marker), scope_birth=birth_text(pid))
+    from ouroboros.launch_custody import _kept_row
+
+    if _kept_row(entry):
+        from ouroboros.process_identity import process_kernel_birth
+
+        entry["kernel_birth"] = process_kernel_birth(pid) or ""
     if not append_jsonl(ledger_path(drive_root), entry):
         raise OSError("process custody record could not be written")
     from ouroboros.owned_shutdown import record_ledgered_process
 
-    # The ledger stays the reaper's custody; the installation's ownership set names the row too.
+    # The ledger stays the reaper's custody; the installation's ownership set names the row too. A kept launch
+    # outlives its worker, and only the set hands it to the stops that end it then: unnamed there, it is no kept
+    # service (``spawn_supervised`` ends it with its own handle before anything is promised).
     if not record_ledgered_process(drive_root, entry):
+        if _kept_row(entry):
+            raise OSError("this kept service could not enter the installation's ownership set, so nothing would "
+                          "stop it once its worker exits")
         log.warning("process %s (%s) is ledgered but not in the ownership set", pid, purpose)
     return entry
 
@@ -239,9 +253,12 @@ def spawn_supervised(
             proc.wait(timeout=5)
         except Exception:
             pass
-        if proc.poll() is not None:
+        ended = proc.poll() is not None
+        if ended:
             confirmed()
-        raise RuntimeError("spawned process could not enter durable custody") from exc
+        # The caller's report names why and whether its own handle ended the process.
+        raise RuntimeError(f"spawned process could not enter durable custody: {exc}"
+                           + ("" if ended else "; its end is not confirmed")) from exc
     confirmed()
     return proc
 
@@ -719,20 +736,26 @@ def start_parent_lifeline(*, poll_sec: float = 5.0, label: str = "", stop_socket
 
 
 def live_kept_service_pids(drive_root: pathlib.Path) -> "set[int]":
-    """PIDs of still-alive, deliberately-kept (session-scope) services.
+    """PIDs of still-alive, deliberately-kept (session-scope) services a worker kill spares.
 
-    Used by the cancel/hard-timeout worker kill to spare ``service_teardown=keep``
-    services that are direct children of the worker: tree-killing the worker
-    would otherwise destroy services a verifier still needs, even though the
-    keep contract says they outlive the task. Only live, fingerprint-matching
-    session-scoped service entries are returned across the installation's indexed
-    drives, using the same custody selection as kept-service observation and stop.
+    Used by the cancel/hard-timeout and idle-retirement worker kills to spare
+    ``keep_alive`` / ``service_teardown=keep`` services that are children of the
+    worker: tree-killing the worker would otherwise destroy services a verifier or
+    the owner still needs, even though the keep contract says they outlive the task.
+    This drive's own ledger keeps its rule (``_ledger_kept_pids``); a kept launch the
+    ownership set names that this rule leaves out (a forked task's) is spared by its
+    leader's recorded kernel birth (``launch_custody.kept_service_spare``). Never stop authority.
     """
-    from ouroboros.launch_custody import read_custody
+    from ouroboros.launch_custody import kept_service_spare
 
+    return kept_service_spare(drive_root).pids
+
+
+def _ledger_kept_pids(drive_root: pathlib.Path) -> "set[int]":
+    """The live, fingerprint-matching session-scoped service rows of ``drive_root``'s own ledger."""
     pids: set[int] = set()
     try:
-        for entry in read_custody(drive_root, strict=False, every_drive=True).rows:
+        for entry in _read_ledger(pathlib.Path(drive_root)):
             if str(entry.get("scope") or "") != "session":
                 continue
             # Both the in-process service path (purpose "service:<name>") and the

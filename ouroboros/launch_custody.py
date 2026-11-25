@@ -8,7 +8,8 @@ new store: this reads the two that exist, and it neither signals nor reads a pro
 
 Kept services (``start_service(keep_alive=True)``, a task's ``service_teardown=keep``) are one such selection: the
 session-scope service launches a task left running, read here for every reader (Activity › Background, the Runtime
-section, ``stop_service(service_id=...)``), whatever worker started them, and stopped through the one owned stop.
+section, ``stop_service(service_id=...)``, the spare of a worker kill, Panic's request), whatever worker started them,
+and stopped through the one owned stop.
 """
 
 from __future__ import annotations
@@ -405,6 +406,118 @@ def _kept_selection(drive_root: Any) -> tuple:
                        "backend": "docker" if stored.get("executor_type") == "docker_exec" else "local_executor",
                        "pid": int(stored.get("host_pid") or 0)}, [record]))
     return found, not notes, "; ".join(notes)
+
+
+def _kept_launches(root: pathlib.Path) -> tuple:
+    """``(rows, indexed, unknown, gaps)``: the kept launch rows (``_kept_row``) of this installation's ledger and of
+    every launch its ownership set names on another drive, in ONE read of the set and each named ledger
+    (``read_custody``, lenient lines), no census and no signal. ``indexed``: the record ids the set names; ``unknown``:
+    ``id(row)`` of each row whose stores could not be read whole; ``gaps``: why a kept launch may be missing."""
+    custody = read_custody(root, strict=False, every_drive=True)
+    rows = [row for row in custody.rows if _kept_row(row) and int(row.get("pid") or 0) > 0]
+    gaps = [note for note in (custody.blind, "" if custody.readable else "the process ledger cannot be read") if note]
+    return rows, {str(record.get("record_id") or "") for record in custody.records}, custody.unknown, gaps
+
+
+def _kept_leaders(rows: List[Dict[str, Any]]) -> Dict[int, Optional[bool]]:
+    """``{id(row): True | False | None}`` for kept launch rows that recorded their leader's kernel birth
+    (``process_custody.record_process``): True while the process on the row's pid has that validated birth
+    (``process_identity.same_birth``; it survives an ``exec``), False once it provably exited or another validated
+    birth of that kind holds the pid, None when no such answer can be read. A pid, a ``ps`` start second, a command or
+    a launch id alone proves nothing. Never signals."""
+    from ouroboros.process_identity import process_kernel_birth, same_birth
+
+    leaders: Dict[int, Optional[bool]] = {}
+    for row in rows:
+        pid = int(row["pid"])
+        same = same_birth(process_kernel_birth(pid), str(row.get("kernel_birth") or ""))
+        leaders[id(row)] = same if same is not None else (False if _exit_proven(pid) else None)
+    return leaders
+
+
+class KeptSpare(NamedTuple):
+    pids: set  # kept leaders a worker kill spares, with their descendants
+    blind: str  # why a kept launch may be missed now (a store gap, a leader whose identity could not be read)
+
+
+def kept_service_spare(drive_root: Any) -> KeptSpare:
+    """What a worker kill that keeps services spares (``process_custody.live_kept_service_pids``: a cancelled or timed
+    out task's worker, an idle worker retiring). The rows of ``drive_root``'s own ledger keep their rule
+    (``process_custody._ledger_kept_pids``); a kept launch of this release (its row records ``kernel_birth``) that the
+    ownership set names and that rule leaves out, a forked task's among them, is spared only by its leader's kernel
+    birth (``_kept_leaders``). An older row stays as it was. Sparing grants no stop authority. Never raises: what could
+    not be read is ``blind``, on which idle retirement, the one kill that may wait, defers."""
+    from ouroboros.owned_shutdown import installation_root
+
+    pids = pc._ledger_kept_pids(pathlib.Path(drive_root))
+    try:
+        rows, indexed, unknown, gaps = _kept_launches(installation_root(drive_root))
+        rows = [row for row in rows if "kernel_birth" in row and pc.custody_record_id(row) in indexed
+                and int(row["pid"]) not in pids]
+        leaders = _kept_leaders(rows)
+        pids |= {int(row["pid"]) for row in rows if leaders[id(row)] is True}
+        unread = sorted(pc.custody_record_id(row) for row in rows if leaders[id(row)] is None or id(row) in unknown)
+        if unread:
+            gaps.append(f"kept launch(es) {', '.join(unread)} may run: their leader or their stores could not be read")
+        return KeptSpare(pids, "; ".join(gaps))
+    except Exception as exc:
+        log.warning("kept services of %s could not be read", drive_root, exc_info=True)
+        return KeptSpare(pids, f"kept services could not be read: {type(exc).__name__}")
+
+
+_PANIC_RECORD_STOP_SEC = 0.2  # the record stop's share of Panic's request window; what it leaves stays stamped
+
+
+def panic_stop_kept(drive_root: Any) -> Dict[str, Any]:
+    """Panic's request for the kept launches no Popen here holds (ARCHITECTURE §9 "Panic path").
+
+    A kept launch outlives the worker that started it, so no worker tree or Popen reaches it once that worker
+    retired, and on macOS a platform binary hides its markers from the scope census. A launch of this release that
+    the ownership set names, that neither this process's service nor executor table holds (their native requests
+    do) and whose leader its kernel birth proves (``_kept_leaders``) is stamped ``stop_requested_at`` with no lock
+    wait (a contended stamp lands as a pending copy), so ``finish_unconfirmed_stops`` retries what the hard exit cuts
+    short, then ended by the exit's own record stop (``owned_shutdown._stop_records``: its measured identity, owed
+    members and daemon roots), never by a signal of its own. That stop reads the process table first, and may wait
+    for a ledger lock, so its first signal can come after the hard exit; the census and the stamp remain. Never
+    joined past Panic's deadline. ``completed``: every target's exit confirmed by a strict re-read of the set;
+    ``unconfirmed`` names what stays recorded; ``unknown`` adds ``note``: a store, a leader or a stamp it could not
+    read or write."""
+    from ouroboros import workspace_executor as executor
+    from ouroboros.owned_shutdown import _stamp, _stop_records, installation_root, owned_records
+    from ouroboros.process_census import launch_id
+    from ouroboros.tools import services
+
+    root = installation_root(drive_root)
+    rows, indexed, unknown, gaps = _kept_launches(root)
+    held = {launch_id(record.scope_marker) for record in services._SERVICES.copy().values()}
+    held |= {launch_id(record.scope_marker) for record in executor._SERVICES.copy().values()
+             if record.local_proc is not None}
+    wanted = indexed - held
+    rows = [row for row in rows if "kernel_birth" in row and pc.custody_record_id(row) in wanted]
+    leaders = _kept_leaders(rows)
+    ids = {pc.custody_record_id(row) for row in rows if leaders[id(row)] is True}
+    unread = sorted(pc.custody_record_id(row) for row in rows if leaders[id(row)] is None or id(row) in unknown)
+    try:
+        targets = (_stamp(root, "stop_requested_at", lambda entry: entry.get("record_id") in ids, timeout_sec=0.0)
+                   if ids else [])
+    except Exception:
+        log.warning("Panic could not stamp the kept launches of %s", root, exc_info=True)
+        targets = []
+    remaining = _stop_records(root, targets, time.monotonic() + _PANIC_RECORD_STOP_SEC) if targets else []
+    unstamped = sorted(ids - {entry["record_id"] for entry in targets})
+    if ids:  # the stop's own last read is lenient, and a contended stamp's pending write is not checked: read strictly
+        try:
+            named = {str(record.get("record_id") or ""): record for record in owned_records(root, strict=True)}
+            remaining = sorted(ids & set(named))
+            unstamped = [record_id for record_id in remaining
+                         if not (named[record_id].get("stop_requested_at") or named[record_id].get("unconfirmed_since"))]
+        except Exception:
+            gaps.append("the ownership set cannot be re-read after the stop")
+    gaps += [*([f"kept launch(es) {', '.join(unread)}: their leader or their stores could not be read"] if unread
+               else []), *([f"not stamped: {', '.join(unstamped)}"] if unstamped else [])]
+    return {"state": "unknown" if gaps else "unconfirmed" if remaining else "completed",
+            "requested": sorted(entry["record_id"] for entry in targets), "unconfirmed": remaining,
+            **({"note": "; ".join(gaps)} if gaps else {})}
 
 
 def _exit_proven(pid: int) -> bool:

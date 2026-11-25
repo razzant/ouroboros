@@ -667,6 +667,44 @@ def test_an_ordinary_idle_exit_retires_in_one_reaper_pass_and_is_journaled(assig
         "worker_id": 1, "pid": 43, "process_birth": "test-birth", "token": probe["token"], "replaced": False}
 
 
+def test_idle_retirement_decides_its_spare_once_before_the_first_signal(assigning, monkeypatch):
+    """Retirement is discretionary. A kept-service read that may miss a live kept service before the first signal
+    withdraws the reservation: nothing is signalled, the job settles, and the worker is assignable again but must
+    confirm its quiescence anew. The next retirement, its read whole, kills sparing exactly what it read; the health
+    re-drive of that begun stop keeps that spare without a new read, though custody has turned blind meanwhile."""
+    from ouroboros import launch_custody
+    from supervisor.task_reaper import TerminalFileRecoveryPending
+    blind = "the ownership set cannot be read: it may name more launches"
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(3))
+    workers.RUNNING.clear()
+    assigning.original.busy_task_id = None
+    surplus = affirm_ready(workers.Worker(1, _ReapedOnJoin(43), InputQueue()))
+    workers.WORKERS[1] = surplus
+    acknowledge(surplus)
+    assert lifecycle.retire_quiescent_worker(surplus)
+    kills, reads = [], []
+    monkeypatch.setattr(lifecycle, "kill_worker_tree", lambda pid, **kw: kills.append((pid, kw)))
+    reading = launch_custody.KeptSpare({999_999_901}, blind)
+    monkeypatch.setattr(launch_custody, "kept_service_spare", lambda root: (reads.append(root), reading)[1])
+    lifecycle.reap_idle_worker(queue._reap_queue.get_nowait())  # settles: no TerminalFileRecoveryPending
+    assert kills == [] and workers.WORKERS[1] is surplus
+    assert not (surplus.retiring or surplus.reaping or surplus.quiescence_token or surplus.quiescence_confirmed)
+    assert surplus in lifecycle.idle_project_slots() and not lifecycle.retire_quiescent_worker(surplus)
+
+    acknowledge(surplus)  # quiescence confirmed anew; this read is whole
+    assert lifecycle.retire_quiescent_worker(surplus)
+    job = queue._reap_queue.get_nowait()
+    reading = launch_custody.KeptSpare({999_999_901}, "")
+    with pytest.raises(TerminalFileRecoveryPending, match="not yet confirmed"):
+        lifecycle.reap_idle_worker(job)  # the first signal went out; the worker has not died yet
+    reading = launch_custody.KeptSpare(set(), blind)
+    monkeypatch.setattr(lifecycle, "kill_worker_tree",
+                        lambda pid, **kw: (kills.append((pid, kw)), setattr(surplus.proc, "killed", True)))
+    lifecycle.reap_idle_worker(job)  # the health re-drive of the begun stop
+    assert kills == [(43, {"keep_services": True, "kept": {999_999_901}})] * 2
+    assert workers.WORKERS == {0: assigning.original} and reads == [str(assigning.root)] * 2
+
+
 @pytest.mark.parametrize("retained", [0, 2])
 def test_a_retired_idle_worker_journals_the_dialogue_rows_it_still_held(assigning, monkeypatch, retained):
     import json
