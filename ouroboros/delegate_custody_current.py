@@ -1051,7 +1051,7 @@ def fold(rows) -> Dict[str, Any]:
         if kind == c.START_REQUESTED:
             key = inv.operation_key(str(row.get("operation_id") or ""), str(row.get("slot_id") or ""))
             operations.setdefault(key, {"invocation_id": iid, "request_ordinal": ordinal})
-        if iid and kind in (c.START_REQUESTED, c.STARTED, c.START_UNSENT, c.START_FAILED, c.START_RISK_ACCEPTED):
+        if iid and kind in (c.START_REQUESTED, c.STARTED, c.START_UNSENT, c.START_FAILED, c.START_RISK_ACCEPTED, c.START_HANDOFF):
             invocations[iid] = inv.advance(invocations.get(iid), row, ordinal)
         if kind == c.START_REQUESTED and iid and iid not in requests:
             requests[iid] = row

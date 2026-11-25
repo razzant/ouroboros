@@ -188,3 +188,31 @@ def test_addressed_lookup_work_is_independent_of_foreign_history(tmp_path, monke
             assert c.invocation_record(tmp_path, "inv") == expected
             costs.append(len(steps))
     assert costs[0] > 0 and costs[1] <= costs[0] + 20, costs
+
+
+def test_a_selected_continues_handoff_moves_one_way_in_the_store_the_chain_and_a_rebuild(tmp_path):
+    """A newly selected review Continue's START is recorded ``unsent``; START_HANDOFF, written right before its first
+    transport call, makes it ``entered``, and a replayed request never turns it back. The store answers what the chain
+    oracle answers at every prefix, and an explicit rebuild from the chain agrees."""
+    history = [_request(handoff=inv.HANDOFF_UNSENT), {"type": c.START_HANDOFF, "invocation_id": "inv", "task_id": "task"},
+               _request(handoff=inv.HANDOFF_UNSENT), _started("run")]
+    seen = []
+    for number, event in enumerate(history):
+        _publish(tmp_path, event, number)
+        expected = c.invocation_record(tmp_path, "inv", rows=list(c.custody_rows(tmp_path)))
+        assert c.invocation_record(tmp_path, "inv") == expected
+        seen.append(expected.get("handoff"))
+    assert seen == [inv.HANDOFF_UNSENT, inv.HANDOFF_ENTERED, inv.HANDOFF_ENTERED, inv.HANDOFF_ENTERED]
+    current.rebuild(tmp_path, replace=True)
+    assert c.invocation_record(tmp_path, "inv") == expected
+
+
+def test_an_older_or_ordinary_start_and_a_legacy_read_claim_no_handoff(tmp_path):
+    """A START recorded without the fact (any ordinary start, any row written before it existed) and a record the
+    store can answer only through its legacy path carry no ``handoff``: unknown, never ``unsent``."""
+    _publish(tmp_path, _request(), 0)
+    assert "handoff" not in c.invocation_record(tmp_path, "inv")
+    _publish(tmp_path, _request("selected", handoff=inv.HANDOFF_UNSENT), 1)
+    assert c.invocation_record(tmp_path, "selected")["handoff"] == inv.HANDOFF_UNSENT
+    _legacy_rows(tmp_path)
+    assert "handoff" not in (c.invocation_record(tmp_path, "selected") or {})

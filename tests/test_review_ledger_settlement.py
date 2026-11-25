@@ -254,3 +254,79 @@ def test_unavailable_lock_writes_nothing_and_normal_lock_recovers(tmp_path, monk
     assert recovered["revision"] == 2
     if operation == "collect":
         assert recovered["rows"][0]["status"] == "responded"
+
+
+def test_settled_mixed_record_updates_only_matching_open_additional_adviser(tmp_path):
+    """On an already-settled mixed record (counted verdict closed, additional adviser still open),
+    settle_from_collected updates only that open additional adviser with matching nonempty operation/wave identity,
+    leaving counted answers, verdict/both questions, author decision and settled state untouched; adviser-only
+    settled records remain unchanged."""
+    from tests.test_review_ledger import CRITICAL, _answer, _plan
+
+    raws = [
+        _raw("s1", "m1", "responded", parts=BOTH, operation_id="op-s1", operation_state="settled"),
+        _raw("s2", "m2", "responded", parts=("change",), operation_id="op-s2", operation_state="settled"),
+        _raw("a1", "m3", "pending", parts=BOTH, operation_id="op-a1", operation_state="in_flight", late_result_pending=True),
+        _raw("a2", "m4", "pending", parts=("change",), operation_id="op-a2", operation_state="in_flight", late_result_pending=True),
+    ]
+    plans = [
+        _plan("s1", "m1", parts=BOTH), _plan("s2", "m2", parts=("change",)),
+        _plan("a1", "m3", parts=BOTH, additional=True), _plan("a2", "m4", parts=("change",), additional=True),
+    ]
+    built = ledger.build_commit_gate_record(
+        _facts(raws, rows=plans, blocked=True, block_reason="binding_mismatch", review_wave_id="wave-1"),
+        drive_root=tmp_path,
+    )
+    record = ledger.write_record(tmp_path, built)
+    record = ledger.note_author_decision(tmp_path, record["record_id"], {"disposition": "deferred", "rationale": "keep gate block"})
+    assert record["state"] == "settled" and record["verdict"]["reason"] == "gate_block:binding_mismatch"
+    assert record["verdict"]["per_question"] == {"change": "PASS", "coupling": "PASS"}
+    assert ledger.open_additional_seats(record)
+
+    # No-op cases: empty raws, pending raw, empty/mismatched operation_id, wrong wave, counted/unknown seat.
+    fail_ans = {"change": _answer("change", "FAIL", [{**CRITICAL, "reason": "late-change"}]),
+                "coupling": _answer("coupling", "FAIL", [{**CRITICAL, "reason": "late-coupling"}])}
+    for bad in (
+        [],
+        [_raw("a1", "m3", "pending", parts=BOTH, operation_id="op-a1", operation_state="in_flight", late_result_pending=True)],
+        [_raw("a1", "m3", "responded", parts=BOTH, operation_id="", answers=fail_ans)],
+        [_raw("a1", "m3", "responded", parts=BOTH, operation_id="op-other", answers=fail_ans)],
+        [_raw("a1", "m3", "responded", parts=BOTH, operation_id="op-a1", review_wave_id="other-wave", answers=fail_ans)],
+        [_raw("s1", "m1", "responded", parts=BOTH, operation_id="op-s1", answers=fail_ans)],
+        [_raw("stranger", "mx", "responded", parts=BOTH, operation_id="op-x", answers=fail_ans)],
+    ):
+        same = ledger.settle_from_collected(tmp_path, record["record_id"], bad)
+        assert same["revision"] == record["revision"] and same["rows"] == record["rows"]
+
+    # Matching terminal answer for a1 closes only a1; state stays settled (not reopened despite a2 still open),
+    # counted answers, gate_block verdict/both questions, and author_decision remain intact.
+    a1_late = _raw("a1", "m3", "responded", parts=BOTH, operation_id="op-a1", operation_state="late_settled",
+                   review_wave_id="wave-1", answers=fail_ans, raw_text="adviser late fail")
+    after_a1 = ledger.settle_from_collected(tmp_path, record["record_id"], [a1_late])
+    assert after_a1["revision"] == record["revision"] + 1 and after_a1["state"] == "settled"
+    assert after_a1["rows"][:2] == record["rows"][:2] and after_a1["rows"][3] == record["rows"][3]
+    assert after_a1["rows"][2]["status"] == "responded" and after_a1["author_decision"] == record["author_decision"]
+    assert after_a1["verdict"]["aggregate"] == "NOT_PERFORMED" and after_a1["verdict"]["reason"] == "gate_block:binding_mismatch"
+    assert after_a1["verdict"]["per_question"] == {"change": "PASS", "coupling": "PASS"}
+    assert after_a1["verdict"]["critical_findings"] == [] and after_a1["verdict"]["advisory_findings"] == []
+    assert after_a1["verdict"]["per_row"] == {"s1": "PASS", "s2": "PASS", "a1": "FAIL", "a2": "pending"}
+    assert {f["reason"] for f in after_a1["verdict"]["additional_findings"]} == {"late-change", "late-coupling"}
+    assert ledger.open_additional_seats(after_a1)
+    assert ledger.settle_from_collected(tmp_path, record["record_id"], [a1_late])["revision"] == after_a1["revision"]
+
+    # Closing a2 finishes the last open adviser; state stays settled and open_additional_seats becomes False.
+    after_a2 = ledger.settle_from_collected(
+        tmp_path, record["record_id"],
+        [_raw("a2", "m4", "responded", parts=("change",), operation_id="op-a2", operation_state="late_settled")],
+    )
+    assert after_a2["revision"] == after_a1["revision"] + 1 and after_a2["state"] == "settled"
+    assert after_a2["verdict"]["per_row"]["a2"] == "PASS" and not ledger.open_additional_seats(after_a2)
+
+    # Adviser-only settled commit_gate record (Cyber Pro) must remain untouched.
+    alone_raw = [_raw("a1", "m3", "pending", parts=BOTH, operation_id="op-alone", operation_state="in_flight", late_result_pending=True)]
+    alone = ledger.write_record(tmp_path, ledger.build_commit_gate_record(
+        _facts(alone_raw, rows=[_plan("a1", "m3", parts=BOTH, additional=True)], pending=True), drive_root=tmp_path))
+    assert alone["state"] == "settled" and ledger.advisers_only(alone) and not ledger.open_additional_seats(alone)
+    untouched = ledger.settle_from_collected(
+        tmp_path, alone["record_id"], [_raw("a1", "m3", "responded", parts=BOTH, operation_id="op-alone")])
+    assert untouched["revision"] == alone["revision"] and untouched["rows"][0]["status"] == "pending"

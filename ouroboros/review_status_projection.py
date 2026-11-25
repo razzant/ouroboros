@@ -26,6 +26,10 @@ def build_review_projection(
     attempt: int | None = None,
     reader_task_id: str = "",
     canonical_root: Any = None,
+    predecessor_rows: Any = (),
+    predecessor_ids: Any = (),
+    predecessor_gap: str = "",
+    predecessor_unread: Any = (),
 ) -> Dict[str, Any]:
     """Build the semantic read-model shared by review_status-style renderers.
 
@@ -43,6 +47,8 @@ def build_review_projection(
     state = load_state(drive_root_path)
     state.attempts, canonical_unreadable = with_canonical_change_attempts(
         state.attempts, canonical_root, drive_root_path, reader_task_id)
+    if predecessor_rows or predecessor_ids:
+        state.attempts = _with_predecessor_attempts(state.attempts, predecessor_rows, predecessor_ids)
     repo_filter = repo_key or (make_repo_key(repo_dir_path) if repo_dir_path is not None else None)
     tool_filter = tool_name or None
     task_filter = task_id or None
@@ -55,6 +61,13 @@ def build_review_projection(
     selected_attempt = attempts[-1] if attempts else (
         None if (repo_filter or tool_filter or task_filter or attempt is not None) else state.latest_attempt()
     )
+    # Predecessor history that could not be read, or that this filter does not read (``predecessor_unread``): another
+    # task's row on this drive is then a historical local row, never authorized evidence, so it offers no continuation
+    # reference.
+    held = {id(row) for row in predecessor_rows}
+    unproven = bool(selected_attempt is not None and id(selected_attempt) not in held
+                    and selected_attempt.task_id != reader_task_id
+                    and (predecessor_gap or selected_attempt.task_id in predecessor_unread))
     # Without a preflight look nothing is fresh or stale: a stale marker no look precedes
     # was written by the retired advisory lane and stays history in the file (owner decision).
     stale_from_edit, effective_status, stale_ts, stale_reason, marker = False, "none", None, None, {}
@@ -94,6 +107,8 @@ def build_review_projection(
         "preflight": look,
         "advisory_overrides": advisory_overrides,
         "canonical_attempts_unreadable": canonical_unreadable,
+        "predecessor_attempts_gap": str(predecessor_gap or ""),
+        "predecessor_row_unproven": unproven,
         "advisory_run_archive": _advisory_run_archive(state, drive_root_path),
         "obligation_archive": _obligation_archive(state, drive_root_path),
     }
@@ -151,6 +166,18 @@ def _obligation_archive(state: Any, drive_root: pathlib.Path) -> Dict[str, Any]:
         return {}
     return {"path": str(drive_root.resolve(strict=False) / _STATE_RELPATH), "open_obligations": len(obligations),
             "commit_readiness_debts": len(debts), "note": _OBLIGATION_ARCHIVE_NOTE}
+
+
+def _with_predecessor_attempts(attempts: List[Any], rows: Any, dropped_ids: Any) -> List[Any]:
+    """``attempts`` with the Continue predecessors' commit rows read from their own drives. The fork's copy of a known
+    predecessor (read, or named in the gap) is no source and is dropped; every other local row stays. The whole is in
+    the same order contract as every merged projection (``_attempt_order_key``)."""
+    from ouroboros.review_state_records import _attempt_identity_tuple, _attempt_order_key
+
+    held = {_attempt_identity_tuple(row) for row in rows}
+    kept = [row for row in attempts if _attempt_identity_tuple(row) not in held and not (
+        row.task_id in dropped_ids and row.tool_name in {"commit_reviewed", "vcs_commit_reviewed"})]
+    return sorted([*kept, *rows], key=_attempt_order_key)
 
 
 def with_canonical_change_attempts(attempts: List[Any], canonical_root: Any, drive_root: Any,
@@ -240,7 +267,8 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
     # A bound settled record (``selected_settled``, read by the caller) offers the same reference before a consumer
     # repairs the row's own projection; this read-only diagnostic writes nothing.
     settled = bool(projection.get("selected_settled"))
-    if selected_attempt is not None and (settled or selected_attempt.phase in {"review_only", "late_wait"}):
+    if selected_attempt is not None and not projection.get("predecessor_row_unproven") and (
+            settled or selected_attempt.phase in {"review_only", "late_wait"}):
         from ouroboros.review_records import review_outcome_received
 
         received = settled or review_outcome_received(
@@ -255,6 +283,8 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
                 "commit_reviewed, this review_reference and no author_disposition; the review_reference that call returns, with an explicit author_disposition/rationale, commits the current bytes of the paths it reviewed (or the paths you name) without a new panel. Independent checks still apply.")
     if projection.get("canonical_attempts_unreadable"):
         payload["canonical_attempts_unreadable"] = projection["canonical_attempts_unreadable"]
+    if projection.get("predecessor_attempts_gap"):
+        payload["predecessor_attempts_gap"] = projection["predecessor_attempts_gap"]
     for archive in ("advisory_run_archive", "obligation_archive"):
         if projection.get(archive):
             payload[archive] = projection[archive]
@@ -435,4 +465,6 @@ def _review_status_message(projection: Dict[str, Any]) -> str:
     if projection.get("canonical_attempts_unreadable"):
         current = (f"{current}  |  This task's canonically held review_change attempts are not listed: "
                    f"{projection['canonical_attempts_unreadable']}")
+    if projection.get("predecessor_attempts_gap"):
+        current = f"{current}  |  {projection['predecessor_attempts_gap']}"
     return current

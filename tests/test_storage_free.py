@@ -200,6 +200,71 @@ def test_preview_lists_finished_not_live_folders_and_copies_and_names_the_rest(t
     assert view["done"] == view["total"] == 4
 
 
+def test_the_preview_keeps_a_folder_a_continue_still_borrows_in_use(tmp_path, monkeypatch):
+    """The retirer's loan gate holds in the preview too: a finished folder a verified Continue's selection lent while one
+    of its after-end duties is owed is named in use; a spent loan's folder and an unlent one are offered, and the preview
+    forgets nothing. The loan set is read once however many folders it judges: more folders add no loan transaction."""
+    from ouroboros import store
+    from ouroboros.late_review_marks import OWED_SET
+    from ouroboros.review_state_custody import SOURCE_LOANS, source_drive_key
+
+    root = tmp_path / "data"
+    lent, spent = root / headless.HEADLESS_TASKS_DIR / "lent" / "data", root / headless.TASK_DRIVES_DIR / "spent"
+    probes = _drives(root, [("lent", "headless", "completed", OLD), ("spent", "direct", "completed", OLD),
+                            ("free", "direct", "completed", OLD)])
+    with store.open_store(root, write=True) as txn:
+        txn.put_row(OWED_SET, "synthetic-duty", {"left_review": {"task_id": "synthetic-successor"}, "after_end": True})
+        txn.put_row(SOURCE_LOANS, source_drive_key(root, lent)[0], {"duties": ["synthetic-duty"]})
+        txn.put_row(SOURCE_LOANS, source_drive_key(root, spent)[0], {"duties": ["synthetic-discharged"]})
+    _fake_sizer(monkeypatch)
+    reads, real_rows, real_row = [], store.Txn.set_rows, store.Txn.get_row
+    monkeypatch.setattr(store.Txn, "set_rows", lambda txn, name: reads.append(("rows", name)) or real_rows(txn, name))
+    monkeypatch.setattr(store.Txn, "get_row", lambda txn, name, key: reads.append(("row", name)) or real_row(txn, name, key))
+
+    def judge():
+        reads.clear()
+        owner = _owner(probes)
+        offered = {item["id"] for item in _group(_preview(owner, root, tmp_path), "work_folders")["items"]}
+        held = next(group for group in owner._plan["groups"] if group["id"] == "work_folders")["excluded"]
+        assert [(item.key, item.cause) for item in held] == [("headless:lent", "review_custody_active")]
+        return offered, (reads.count(("rows", SOURCE_LOANS)), reads.count(("row", SOURCE_LOANS)))
+
+    assert judge() == ({"direct:spent", "direct:free"}, (1, 0))
+    probes.update(_drives(root, [(f"more-{n}", layout, "completed", OLD) for n, layout in
+                                 enumerate(("direct", "headless", "direct", "headless"))]))
+    offered, loan_reads = judge()
+    assert len(offered) == 6 and loan_reads == (1, 0)
+    with store.open_store(root, write=False) as txn:
+        assert txn.get_row(SOURCE_LOANS, source_drive_key(root, spent)[0]) == {"duties": ["synthetic-discharged"]}
+
+
+@pytest.mark.parametrize("failure, cause", [
+    (lambda: task_store.StoreBusy("synthetic contention", reason="contention"), "store_busy"),
+    (lambda: task_store.StoreLost("synthetic loss"), "review_state_unreadable"),
+])
+def test_an_unreadable_loan_set_holds_every_folder_after_one_attempt(tmp_path, monkeypatch, failure, cause):
+    """A busy or unreadable loan set offers nothing on an unproven gate: each finished folder is named in use under the
+    retirer's own reason, after one read of the set, not one per folder."""
+    from ouroboros.review_state_custody import SOURCE_LOANS
+
+    root = tmp_path / "data"
+    probes = _drives(root, [(f"done-{n}", layout, "completed", OLD) for n, layout in enumerate(("direct", "headless", "direct"))])
+    _fake_sizer(monkeypatch)
+    attempts, real_rows = [], task_store.Txn.set_rows
+
+    def rows(txn, name):
+        if name != SOURCE_LOANS:
+            return real_rows(txn, name)
+        attempts.append(name)
+        raise failure()
+
+    monkeypatch.setattr(task_store.Txn, "set_rows", rows)
+    owner = _owner(probes)
+    folders = _group(_preview(owner, root, tmp_path), "work_folders")
+    held = next(group for group in owner._plan["groups"] if group["id"] == "work_folders")["excluded"]
+    assert folders["items"] == [] and [item.cause for item in held] == [cause] * 3 and len(attempts) == 1
+
+
 def test_preview_is_pure(tmp_path, monkeypatch):
     root = tmp_path / "data"
     probes = _drives(root, [("done", "direct", "completed", OLD), ("helper", "headless", "completed", OLD)])

@@ -128,8 +128,12 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     # retired): the reviewed-commit description, author_disposition and its subagent_check, reason, reviewers and
     # review_rebuttal drop their Blocking branches and the identical-diff refusal. #3319: since_review says no PASS or
     # finding carries over. Descriptions only, in both aliases; the structure is unchanged from e7ad640f….
+    # #2901: review_reference in both aliases says only the task's OWN reference with exactly staged reviewed bytes
+    # resumes its paid gate; a predecessor's (or any with a different index) is read back without staging or
+    # committing; author_disposition is the caller's own decision on the current bytes; continue_seats sends over
+    # the original reviewed subject. That one property's text is the only change from f2341717….
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "f2341717365cbb39ddbd9f94db0e7d5448ae43d4f1dc5acf000bce234e333f91"
+        "263fd1d7deba9540d5165959eff4bf628e25c8a89e7a69c62f2fbbf05c36e587"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

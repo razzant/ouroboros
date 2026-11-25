@@ -388,7 +388,8 @@ def _prepare(ctx: Any, custody: Any, record: Dict[str, Any], roster: Roster, sea
         raise refuse("not_a_session_route", f"seat {seat_id} ran no engine session that could be continued")
     rejoin = next((entry for entry in seat.get("continuations") or [] if entry.get("supersedes") == named), None)
     if rejoin is not None:
-        return _Choice(seat_id, named, rejoin=dict(rejoin))
+        actor = str(getattr(ctx, "task_id", "") or "")
+        return _Choice(seat_id, named, rejoin=dict(rejoin), entry={"holder_task_id": actor} if actor else {})
     if str(seat.get("operation_id") or "") != named:
         raise refuse("not_current", f"seat {seat_id}'s current operation is {seat.get('operation_id')}, not {named}")
     offer = next((item for item in offers if item["seat_id"] == seat_id), None)
@@ -463,23 +464,18 @@ def _prepare(ctx: Any, custody: Any, record: Dict[str, Any], roster: Roster, sea
     return _Choice(seat_id, named, entry=entry, body=body, prompt_payload=prompt_payload)
 
 
-def _admit_new_generation(ctx: Any, starts: List[Tuple[str, str, str, Any, int]], offers: List[Dict[str, Any]]) -> None:
+def _admit_new_generation(ctx: Any, custody: Any, roster: Roster,
+                          starts: List[Tuple[str, Dict[str, Any], str, Any, int]],
+                          offers: List[Dict[str, Any]]) -> None:
     """A successor START is new generation, so before one is decided or written it rides the known-spend admission
-    every review wave rides (``review_wave_budget_gate``: the global, root and original-group fences, fail-open on
-    an unknown); a fence already reached refuses at $0. ``starts``: (seat, surface, model, max tokens, prompt chars).
-    A recorded start is admitted again where it is POSTed, a replay included (``continuation_send_admitted``);
-    collecting a known run is never admitted."""
-    from ouroboros.review_substrate import review_usage_category
-    from ouroboros.tools.review_helpers import review_wave_binding_fence, review_wave_budget_gate
+    every review wave rides (``review_wave_budget_gate``: global, root and original-group fences, fail-open on an
+    unknown) under its original payer's scope (``admit_continuation_starts``); a fence already reached refuses at
+    $0. ``starts``: (seat, decision, model, max tokens, prompt chars). Admitted again where it is POSTed, replays
+    included (``continuation_send_admitted``); collecting a known run is never admitted."""
+    from ouroboros.review_substrate import admit_continuation_starts
+    from ouroboros.tools.review_helpers import review_wave_binding_fence
 
-    if not starts:
-        return
-    admission = review_wave_budget_gate(
-        ctx, surface=starts[0][1], models=[model for _seat, _surface, model, _tokens, _chars in starts],
-        prompt_chars=[chars for *_rest, chars in starts],
-        max_completion_tokens=[int(tokens or 65536) for _seat, _surface, _model, tokens, _chars in starts],
-        categories=[review_usage_category(surface) for _seat, surface, *_rest in starts],
-        slot_ids=[seat for seat, *_rest in starts], extra={"continuation": True})
+    admission = admit_continuation_starts(ctx, custody, task_id=roster.task_id, root_task_id=roster.root_task_id, starts=starts)
     if admission is not None:
         fence, remedy = review_wave_binding_fence(admission)
         raise ContinuationRefused("budget_insufficient", f"known spend has reached the {fence}; no successor was "
@@ -526,26 +522,30 @@ def _reopen(seat: Dict[str, Any], entry: Dict[str, Any]) -> None:
 
 
 def _record_choice(drive: Any, record: Dict[str, Any], choices: List[_Choice]) -> Dict[str, Any]:
-    """The one canonical write: a locked compare of each chosen seat, no other lock, no external I/O."""
+    """The one canonical write: a locked compare of each chosen seat (new choice or active holder claim)."""
     from ouroboros import review_ledger as ledger
+    from ouroboros.review_state_custody import claim_rejoined_holder
     from ouroboros.utils import utc_now_iso
 
     decided_at = utc_now_iso()
 
     def mutate(payload: Dict[str, Any]) -> Dict[str, Any]:
-        rows, changed = [dict(row) for row in payload.get("rows") or []], False
+        rows, changed, reopened = [dict(row) for row in payload.get("rows") or []], False, False
         for choice in choices:
             seat = next((row for row in rows if str(row.get("seat_id") or "") == choice.seat_id), None)
             current = str((seat or {}).get("operation_id") or "")
-            if current == choice.entry["operation_id"]:
-                continue  # an identical concurrent choice landed first; its body, clock and paths stand
+            if choice.rejoin is not None or current == choice.entry.get("operation_id"):
+                changed = claim_rejoined_holder(payload, seat, choice) or changed
+                continue
             if (seat is None or current != choice.named or ledger.seat_open(seat)
                     or str(seat.get("status") or "") in ledger.ANSWERED_STATUSES):
                 raise ContinuationRefused("state_changed", f"seat {choice.seat_id} changed before the choice was recorded")
             _reopen(seat, {**choice.entry, "decided_at": decided_at})
-            changed = True
+            changed = reopened = True
         if not changed:
             raise ledger.RecordUnchanged()
+        if not reopened:
+            return {**payload, "rows": rows}
         before = dict(payload.get("verdict") or {})
         verdict = ledger.reduce_verdict(rows, dispatch_refusal=payload.get("dispatch_refusal"), pending=True)
         verdict.update({key: list(before.get(key) or []) for key in (*ledger.HEAVY_VERDICT_FIELDS, "degraded_reasons", "wave_failures")})
@@ -563,45 +563,80 @@ def current_decisions(record: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
             if seat_open(row) and (decision := _last_decision(row))}
 
 
-def continued_operations(drive: Any, record_id: str) -> List[str]:
+def continued_operations(record: Dict[str, Any]) -> List[str]:
     """The current operations of a record's continued seats: a left wave's duty and late mark name them,
     so a continued seat's later settlement is never deduplicated into the earlier one's."""
-    from ouroboros.review_ledger import load_record
-
-    try:
-        record = load_record(drive, record_id) if record_id else None
-    except ValueError:
-        return []
-    return sorted(str(row.get("operation_id") or "") for row in (record or {}).get("rows") or []
+    return sorted(str(row.get("operation_id") or "") for row in record.get("rows") or []
                   if row.get("superseded_operation_ids"))
 
 
-def unsent_decisions(drive: Any, record_id: str, seats: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """For an author that ended: each recorded choice no roster row ever carried was never sent, a typed
-    ``not_dispatched`` seat for the final settlement (no maintenance sends it; its target run stays history)."""
-    from ouroboros.review_ledger import load_record
+def _decision_author(record: Dict[str, Any], decision: Dict[str, Any]) -> str:
+    return str(decision.get("decided_by_task") or record.get("task_id") or "")
+
+
+def _decision_holder(record: Dict[str, Any], decision: Dict[str, Any]) -> str:
+    return str(decision.get("holder_task_id") or _decision_author(record, decision))
+
+
+def _generation(record: Dict[str, Any], seat: Dict[str, Any], decision: Dict[str, Any]) -> Tuple[Any, ...]:
+    """One choice's exact generation: its successor, target and START token, its author and active holder, and its
+    seat's superseded chain and continuation count. A later choice or holder claim moves at least one of them."""
+    return (*(str(decision.get(key) or "") for key in ("operation_id", "supersedes", "invocation_id")),
+            _decision_author(record, decision), _decision_holder(record, decision),
+            len(seat.get("continuations") or ()), tuple(str(op) for op in seat.get("superseded_operation_ids") or ()))
+
+
+def unsent_decisions(drive: Any, record_id: str, seats: List[Dict[str, Any]], *, author: str = "",
+                     attempt: Any = None, attempt_root: Any = None, settlement: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Plan ``not_dispatched`` closures for choices whose verified holder ended before dispatch (uncarried or stopped at
+    ``HANDOFF_UNSENT``); the attempt-row CAS and START retirement run inside ``settlement["accept"]`` under the ledger lock."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.review_state_custody import confirm_unsent_continuation_row, continuation_decision_state, plan_unsent_continuation_rows
 
     try:
-        record = load_record(drive, record_id) if record_id else None
-    except ValueError:
+        doc = (ledger.load_record(drive, record_id) if record_id else None) or {}
+    except (OSError, ValueError):
         return []
-    carried = {(str(seat.get("slot_id") or ""), str(seat.get("operation_id") or "")) for seat in seats}
-    return [{"slot_id": seat_id, "operation_id": decision["operation_id"], "operation_state": "not_dispatched",
-             "status": "not_dispatched", "parts": list(row.get("parts") or []), "late_result_pending": False,
-             "error": "continuation decided, never sent"}
-            for seat_id, decision in current_decisions(record or {}).items()
-            for row in (record or {}).get("rows") or [] if row.get("seat_id") == seat_id
-            if (seat_id, str(decision["operation_id"])) not in carried]
+    owner, decisions = str(author or ""), current_decisions(doc)
+    rows_by_seat = {str(r.get("seat_id") or ""): r for r in doc.get("rows") or [] if isinstance(r, dict)}
+    carried = {(str(s.get("slot_id") or ""), str(s.get("operation_id") or "")) for s in seats
+               if str(s.get("operation_state") or "") != "not_dispatched"}
+    live_ops, closable = continuation_decision_state(drive, doc, seats, ended_owner=owner)
+    observed = {(sid, str(d["operation_id"])): _generation(doc, rows_by_seat.get(sid) or {}, d)
+                for sid, d in decisions.items() if d.get("operation_id")}
+    planned = plan_unsent_continuation_rows(drive, attempt_root, attempt, decisions, closable, carried, live_ops)
+    confirmed_seats: Dict[str, Dict[str, Any]] = {}
+    if settlement is not None:
+        def accept(prior: Dict[str, Any], seat: Dict[str, Any], raw: Dict[str, Any]) -> bool:
+            state, op_id, dec = str(raw.get("operation_state") or ""), str(raw.get("operation_id") or ""), _last_decision(seat)
+            if state not in {"not_dispatched", "custody_lost"} or not dec or str(dec.get("operation_id") or "") != op_id:
+                return True
+            sid = str(seat.get("seat_id") or "")
+            key, gen = (sid, op_id), _generation(prior, seat, dec)
+            if observed.get(key) != gen or op_id in continuation_decision_state(drive, prior, seats, ended_owner=owner)[0]:
+                return False
+            if state == "not_dispatched":
+                if key not in planned or (after := confirm_unsent_continuation_row(drive, attempt_root, attempt, sid, dec)) is None:
+                    return False
+                confirmed_seats[sid] = after
+            return True
+        settlement.update(live_operations=live_ops, accept=accept, confirmed_seats=confirmed_seats)
+    return [{"slot_id": sid, "operation_id": op, "operation_state": "not_dispatched", "status": "not_dispatched",
+             "parts": list((rows_by_seat.get(sid) or {}).get("parts") or []), "late_result_pending": False,
+             "failure_code": str(preview.get("failure_code") or START_UNSENT),
+             **{key: str(preview.get(key) or "continuation decided, never sent") for key in ("reported_cause", "error")}}
+            for (sid, op), preview in planned.items()]
 
 
 def _fenced(ctx: Any, task_id: str) -> bool:
-    """Stop (a durable cancellation), a budget pause or the owner's Pause of this task: nothing new is decided.
-    The owner's fence is read as an author's drain reads it (``review_pause.author_paused``): unreadable is open."""
+    """Stop (a durable cancellation), a budget pause or the owner's Pause of the deciding task (a Continue successor,
+    not the review's ended task): nothing new is decided. Its Stop is the canonical one (``review_stop_cause``). The
+    owner's fence is read as an author's drain reads it (``review_pause.author_paused``): unreadable is open."""
     from ouroboros.budget_pause import dispatch_fenced
     from ouroboros.owner_pause import _member_coordinates, fence_closed, read_fence
     from ouroboros.review_custody import review_retry_cancelled
 
-    if review_retry_cancelled(ctx) or dispatch_fenced(task_id):
+    if review_retry_cancelled(ctx) or dispatch_fenced(str(getattr(ctx, "task_id", "") or task_id)):
         return True
     root_drive, root_task_id, member = _member_coordinates(ctx)
     try:
@@ -663,6 +698,7 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
     here is the choice's typed unsent refusal."""
     from ouroboros import delegate_custody as custody_module
     from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
+    from ouroboros.delegate_invocation import HANDOFF_UNSENT
     from ouroboros.deadline_utils import bounded_seconds
     from ouroboros.observability import read_blob_ref
     from ouroboros.review_execution import _CLAUDEXOR_MAX_SECONDS
@@ -738,6 +774,7 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
             run_id="", task_id=task_id, idempotency_key=token, invocation_id=token,
             daemon_store_id=predecessor_store, registration_workspace=workspace,
             operation_id=decision["operation_id"], max_seconds=int(body.get("maxSeconds") or 0), request=body,
+            handoff=HANDOFF_UNSENT,  # this newly selected START has left nowhere yet (``delegate_invocation``)
             continuation_of="" if decision.get("thread_id") else str(decision.get("continues_run") or ""),
             surface=decision["surface"], slot_id=slot_id, route=str(source.get("route") or ""),
             project_id=project_id, project_owned=owned, review_source_delivery=facts, work_order_source_request=facts,
@@ -839,9 +876,7 @@ def project_decisions(ctx: Any, custody: Any, record: Dict[str, Any], roster: Ro
 
 def _project(ctx: Any, custody: Any, record: Dict[str, Any], roster: Roster,
              decisions: Dict[str, Dict[str, Any]], drive: Any) -> Dict[str, Any]:
-    from ouroboros.budget_pause import dispatch_fenced
     from ouroboros.delegate_custody import invocation_record
-    from ouroboros.review_custody import review_retry_cancelled
     from ouroboros.review_dispatch import review_operation_binding
     from ouroboros.review_operation import recorded_review_assignment
 
@@ -866,7 +901,7 @@ def _project(ctx: Any, custody: Any, record: Dict[str, Any], roster: Roster,
             raise ContinuationRefused("roster_changed", f"seat {seat_id}'s roster row names {operation or 'nothing'}, "
                                       f"not {decision['supersedes']}")
         # Collectors send only what a roster row carries: a row still naming the stopped operation proves no POST.
-        if review_retry_cancelled(ctx) or dispatch_fenced(roster.task_id):
+        if _fenced(ctx, roster.task_id):  # the deciding task's controls, as at the choice: before any START or copy
             raise ContinuationRefused("stopped_or_paused", "the owning task is stopped or entering a pause")
         closes = _window_closes(ctx, str(decision.get("window_end") or ""))
         left = _seconds_left(closes)
@@ -884,9 +919,9 @@ def _project(ctx: Any, custody: Any, record: Dict[str, Any], roster: Roster,
         from ouroboros.observability import read_blob_ref
 
         bodies = {seat_id: read_blob_ref(custody, decisions[seat_id]["request_ref"], expected_kind="json") for seat_id in fresh}
-        _admit_new_generation(ctx, [(seat_id, str(decisions[seat_id]["surface"]), str(slots[seat_id].model),
-                                     slots[seat_id].max_tokens, len(str(bodies[seat_id].get("prompt") or "")))
-                                    for seat_id in fresh], [])
+        _admit_new_generation(ctx, custody, roster, [(seat_id, decisions[seat_id], str(slots[seat_id].model),
+                                                      slots[seat_id].max_tokens, len(str(bodies[seat_id].get("prompt") or "")))
+                                                     for seat_id in fresh], [])
     for seat_id, closes in fresh.items():
         decision = decisions[seat_id]
         transfer_checking_copy(custody, roster.task_id, str(decision["supersedes"]), str(decision["operation_id"]))
@@ -919,18 +954,20 @@ def continued_row(row: Dict[str, Any], decision: Dict[str, Any], binding: Dict[s
             "superseded_operation_ids": [*(row.get("superseded_operation_ids") or []), str(decision["supersedes"])]}
 
 
-def arm(ctx: Any, record: Dict[str, Any], roster: Roster, selections: Any, *, drive: Any, custody: Any) -> Dict[str, Any]:
+def arm(ctx: Any, record: Dict[str, Any], roster: Roster, selections: Any, *, drive: Any, custody: Any,
+        attempt: int = 0, attempt_root: Any = None) -> Dict[str, Any]:
     """Validate, retain, record and project one explicit choice; the caller's collector sends it."""
-    chosen = parse_selections(selections)
-    choices = [_prepare(ctx, custody, record, roster, seat_id, named) for seat_id, named in chosen]
+    from ouroboros.review_state_custody import record_explicit_selection
+
+    choices = [_prepare(ctx, custody, record, roster, seat_id, named) for seat_id, named in parse_selections(selections)]
     new = [choice for choice in choices if choice.rejoin is None]
     if new:
         _await_publication(ctx, roster.task_id, new, continuable_seats(record))
-        _admit_new_generation(ctx, [(choice.seat_id, str(choice.entry["surface"]), str(choice.prompt_payload["slot"]["model"]),
-                                     choice.prompt_payload["slot"].get("max_tokens"), len(choice.body["prompt"])) for choice in new],
+        _admit_new_generation(ctx, custody, roster, [(c.seat_id, c.entry, str(c.prompt_payload["slot"]["model"]),
+                                                      c.prompt_payload["slot"].get("max_tokens"), len(c.body["prompt"])) for c in new],
                               continuable_seats(record))
         _retain_sources(custody, roster.task_id, new)
-        record = _record_choice(drive, record, new)
+    record = record_explicit_selection(ctx, drive, record, roster, choices, _record_choice, attempt=attempt, attempt_root=attempt_root)
     decided = {str(row.get("seat_id") or ""): row for row in record.get("rows") or []}
     decisions = {}
     for choice in choices:

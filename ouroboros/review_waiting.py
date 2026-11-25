@@ -13,19 +13,111 @@ import dataclasses
 import hashlib
 import json
 import logging
+import pathlib
 
 log = logging.getLogger(__name__)
 
 
+def _refresh_reviewer_pins(record, pins):
+    rows = {str(row.get("seat_id") or ""): row for row in (record or {}).get("rows") or ()
+            if isinstance(row, dict) and not row.get("additional")}
+    wave = str((record or {}).get("review_wave_id") or "")
+    refreshed = []
+    for pin in pins or ():
+        if not isinstance(pin, dict):
+            continue
+        row = rows.get(str(pin.get("slot_id") or ""))
+        if (row and (not wave or pin.get("wave_id") == wave) and row.get("operation_id")
+                and pin.get("operation_id") in (row.get("superseded_operation_ids") or ())):
+            pin = {**pin, "operation_id": row["operation_id"]}
+        if pin not in refreshed:
+            refreshed.append(dict(pin))
+    return refreshed
+
+
+def _wave_selection(selection, record=None):
+    chosen = selection if isinstance(selection, dict) else {}
+    pins = _refresh_reviewer_pins(record, chosen.get("reviewers"))
+    slots = list(chosen.get("reviewer_slots") or [])
+    if not (pins or slots):
+        return {}
+    record_id = str((record or {}).get("record_id") or chosen.get("record_id") or "")
+    return {"senders": [], "tasks": [], "runs": [],
+            "any_mail": bool(chosen.get("any_mail", not (pins or slots))),
+            "reviewer_slots": slots, "reviewers": pins,
+            **({"record_id": record_id} if record_id else {})}
+
+
+def _wait_owner(record, waiting=None):
+    """Who a non-empty wait state belongs to: its explicit ``task_id``, else the addressed record's ``task_id``."""
+    wait = (waiting if waiting is not None else (record or {}).get("waiting")) or {}
+    if not wait:
+        return ""
+    ref = wait.get("review_reference") if isinstance(wait.get("review_reference"), dict) else {}
+    return str(wait.get("task_id") or ref.get("task_id") or (record or {}).get("task_id") or "")
+
+
+def _listener_wait(ctx, record):
+    waiting = (record or {}).get("waiting") or {}
+    if not waiting:
+        return {}
+    own = str(getattr(ctx, "task_id", "") or "")
+    holder = _wait_owner(record, waiting)
+    if holder in ("", own):
+        state = copy.deepcopy(waiting)
+        if isinstance(state.get("selection"), dict) and state["selection"].get("reviewers"):
+            state["selection"]["reviewers"] = _refresh_reviewer_pins(record, state["selection"]["reviewers"])
+        return state
+    return {"task_id": own,
+            "attempt_task_id": str((record or {}).get("task_id") or waiting.get("attempt_task_id") or ""),
+            "record_id": str((record or {}).get("record_id") or waiting.get("record_id") or ""),
+            "selection": _wave_selection(waiting.get("selection"), record),
+            "seen_helpers": [], "seen_outcomes": [], "seen_outcome_states": []}
+
+
+def saved_selection(ctx, record_id):
+    from ouroboros.review_ledger import ledger_root, load_record
+
+    record = load_record(ledger_root(ctx), record_id) or {}
+    state = _listener_wait(ctx, record)
+    return {key: copy.deepcopy(state.get(key) or ({} if key == "selection" else []))
+            for key in ("selection", "seen_helpers", "seen_outcomes")}
+
+
 def select_helpers(ctx, wake_on=None):
-    """Retain a saved selection; a new wait selects only explicitly named sources."""
+    """Retain this listener's saved selection; a new wait selects only explicitly named sources."""
     from ouroboros.model_sleep import selectors, _owned_runs
+    from ouroboros.review_ledger import ledger_root, load_record
+
+    own = str(getattr(ctx, "task_id", "") or "")
     prior = getattr(ctx, "_left_review_wait", None)
-    if isinstance(prior, dict):
+    record, record_id = {}, ""
+    if isinstance(prior, dict) and prior:
+        sel = prior.get("selection") if isinstance(prior.get("selection"), dict) else {}
+        ref = prior.get("review_reference") if isinstance(prior.get("review_reference"), dict) else {}
+        record_id = str(prior.get("record_id") or sel.get("record_id") or ref.get("record_id") or "")
+        if record_id and (not prior.get("task_id") or str(prior.get("task_id") or "") != own or sel.get("reviewers")):
+            try:
+                record = load_record(ledger_root(ctx), record_id)
+            except Exception:
+                record = None
+    holder = _wait_owner(record, prior) if isinstance(prior, dict) and prior else ""
+    foreign = bool(isinstance(prior, dict) and prior and ((record is None and record_id and not prior.get("task_id"))
+                                                          or holder not in ("", own)))
+    if isinstance(prior, dict) and not foreign and (prior or wake_on is None):
         # Legacy waits mean the whole wave, not a newly inferred helper roster.
-        state = {key: copy.deepcopy(prior.get(key) or ([] if key != "selection" else {}))
-                 for key in ("selection", "seen_helpers", "seen_outcomes")}
+        state = {"task_id": own, **{key: copy.deepcopy(prior.get(key) or ([] if key != "selection" else {}))
+                                    for key in ("selection", "seen_helpers", "seen_outcomes")}}
+        if record and (state["selection"] or {}).get("reviewers"):
+            state["selection"]["reviewers"] = _refresh_reviewer_pins(record, state["selection"]["reviewers"])
+    elif foreign and wake_on is None:
+        state = {"task_id": own, "selection": _wave_selection(prior.get("selection"), record or {}),
+                 "seen_helpers": [], "seen_outcomes": []}
+        ctx._left_review_wait = ({**copy.deepcopy(state), "record_id": record_id}
+                                 if record_id and state["selection"] else None)
     else:
+        if foreign:
+            ctx._left_review_wait = None
         if wake_on is not None and not isinstance(wake_on, dict):
             raise ValueError("wake_on must be an object of explicit source ids")
         args = dict(wake_on or {})
@@ -36,9 +128,9 @@ def select_helpers(ctx, wake_on=None):
         owned = _owned_runs(ctx) if chosen["runs"] else {}
         if any(owned[rid].review_owned for rid in chosen["runs"]):
             raise ValueError("wake_on.runs names ordinary owned runs; select review seats with reviewers")
-        state = {"selection": chosen, "seen_helpers": [], "seen_outcomes": []}
+        state = {"task_id": own, "selection": chosen, "seen_helpers": [], "seen_outcomes": []}
     ctx._review_wait_selection = state
-    return copy.deepcopy(state)
+    return {key: copy.deepcopy(state[key]) for key in ("selection", "seen_helpers", "seen_outcomes")}
 
 
 def bind_panel(ctx, panel):
@@ -89,10 +181,23 @@ def review_terminals(ctx, chosen, seen=(), entries=()):
     from ouroboros.review_ledger import ledger_root, load_record
 
     ready, errors = [], []
-    record = None
+    own, record, seats, pins = str(ctx.task_id), None, set(), list(chosen.get("reviewers") or ())
+    if chosen.get("record_id"):
+        try:  # the current listener of this exact record reads its wave's seat outcomes only
+            record = load_record(ledger_root(ctx), chosen["record_id"]) or {}
+            if not _current_listener(ctx, record):
+                return []
+            pins = _refresh_reviewer_pins(record, pins)
+            if record.get("task_id") != own:
+                seats = {(record.get("review_wave_id"), row.get("operation_id"), row.get("seat_id"))
+                         for row in record.get("rows") or ()}
+        except Exception as exc:
+            record = None
+            errors.append(exc)
     live = {entry.operation_id: entry for entry in entries if entry is not None}
-    for pin in chosen.get("reviewers") or ():
+    for pin in pins:
         operation, slot, wave = (pin[key] for key in ("operation_id", "slot_id", "wave_id"))
+        reader = str(record["task_id"]) if (wave, operation, slot) in seats else own
         actor, entry = None, live.get(operation)
         if entry is not None:
             if entry.event.is_set() and entry.actor is not None:
@@ -100,7 +205,7 @@ def review_terminals(ctx, chosen, seen=(), entries=()):
         else:
             for suffix in ("response", "error"):
                 try:
-                    manifest, payload, _ = read_call_payload(ledger_root(ctx), task_id=ctx.task_id,
+                    manifest, payload, _ = read_call_payload(ledger_root(ctx), task_id=reader,
                                                            call_id=f"{operation}_{suffix}")
                     if manifest.get("producer_complete"):
                         actor = payload.get("producer_outcome")
@@ -109,11 +214,9 @@ def review_terminals(ctx, chosen, seen=(), entries=()):
                     pass
                 except Exception as exc:
                     errors.append(exc)
-        if actor is None and chosen.get("record_id"):
+        if actor is None and record:
             try:
-                if record is None:
-                    record = load_record(ledger_root(ctx), chosen["record_id"]) or {}
-                if record.get("task_id") == ctx.task_id and record.get("review_wave_id") == wave:
+                if record.get("task_id") == reader and record.get("review_wave_id") == wave:
                     actor = next(({**row, "review_wave_id": wave} for row in record.get("rows") or ()
                                   if row.get("operation_id") == operation and row.get("seat_id") == slot), None)
             except Exception as exc:
@@ -181,15 +284,43 @@ def wake_on_schema():
 
 
 def save_wait(ctx, record_id, state):
-    from ouroboros.review_ledger import ledger_root, revise_record
+    from ouroboros.review_ledger import RecordUnchanged, ledger_root, revise_record
+
+    own = str(getattr(ctx, "task_id", "") or "")
+    accepted = False
 
     def merge(record):
+        nonlocal accepted
+        if not _current_listener(ctx, record):
+            raise RecordUnchanged()
+        accepted = True
+        origin = str(record.get("task_id") or "")
         old = record.get("waiting") or {}
-        record["waiting"] = {**copy.deepcopy(state), **{key: sorted(set(old.get(key) or ()) | set(state.get(key) or ()))
-                             for key in ("seen_helpers", "seen_outcomes", "seen_outcome_states")}}
+        old_owner = _wait_owner(record, old) or origin
+        same_owner = not old or old_owner == own
+        by_task = copy.deepcopy(old.get("outcome_states_by_task") or {})
+        if old.get("seen_outcome_states") and old_owner:
+            by_task[old_owner] = sorted(set(by_task.get(old_owner) or ()) | set(old["seen_outcome_states"]))
+        incoming = copy.deepcopy(state)
+        incoming.setdefault("task_id", own)
+        if own != origin:
+            incoming.setdefault("attempt_task_id", origin)
+        if not same_owner and incoming.get("duty_id") == old.get("duty_id"):
+            incoming.pop("duty_id", None)
+        merged = {**incoming, **{key: sorted((set(old.get(key) or ()) if same_owner else set())
+                                             | set(incoming.get(key) or ()))
+                                 for key in ("seen_helpers", "seen_outcomes", "seen_outcome_states")}}
+        if merged.get("seen_outcome_states") and own:
+            by_task[own] = sorted(set(by_task.get(own) or ()) | set(merged["seen_outcome_states"]))
+        if by_task:
+            merged["outcome_states_by_task"] = by_task
+        record["waiting"] = merged
         return record
+
     record = revise_record(ledger_root(ctx), record_id, merge)
-    if record and (record.get("waiting") or {}).get("duty_id"):
+    if not accepted or not record:
+        return None
+    if (record.get("waiting") or {}).get("duty_id"):
         from ouroboros.late_review_marks import update_wait_cursors
         update_wait_cursors(ledger_root(ctx), record["waiting"]["duty_id"], record["waiting"])
     return record
@@ -255,9 +386,12 @@ def publish_delivery(ctx, text, record, rendered_rows=None):
     record_id = str(record.get("record_id") or "")
     if not record_id:
         return text
-    state = (getattr(ctx, "_left_review_wait", None) or getattr(ctx, "_review_wait_selection", None)
-             or record.get("waiting") or {})
-    helpers = delivery_ready(ctx, state)
+    own = str(getattr(ctx, "task_id", "") or "")
+    left, mem = getattr(ctx, "_left_review_wait", None), getattr(ctx, "_review_wait_selection", None)
+    own_left = left if isinstance(left, dict) and left and _wait_owner(record, left) in ("", own) else None
+    own_mem = mem if isinstance(mem, dict) and mem and _wait_owner(record, mem) in ("", own) else None
+    state = own_left or own_mem or _listener_wait(ctx, record)
+    helpers = delivery_ready(ctx, state) if not record.get("task_id") or _current_listener(ctx, record) else []
     from ouroboros.model_sleep import question_sources
     questions = question_sources(ctx)
     shown = record if rendered_rows is None else {**record, "rows": list(rendered_rows)}  # identity stays the record's
@@ -277,11 +411,53 @@ def publish_delivery(ctx, text, record, rendered_rows=None):
 
 
 def _carries_whole(record, receipt):
-    """Whether this receipt carried all of ``record`` as it stands now: the wave settled and every current outcome
-    state is one its response rendered (``publish_delivery``). Cursor ids prove nothing here: a helper notice names
-    them and a report that renders no rows certifies none, and a seat that settled after the render leaves it short."""
+    """Whether this receipt carried all of ``record`` as it stands now: the wave settled with no open additional seat,
+    and every current outcome state is one its response rendered (``publish_delivery``). Cursor ids prove nothing here:
+    a helper notice names them and a report that renders no rows certifies none, and a seat that settled after the
+    render leaves it short."""
+    from ouroboros.review_ledger import open_additional_seats
+
     current = set(outcome_states(record))
-    return record.get("state") == "settled" and bool(current) and current <= set(receipt.get("outcome_states") or ())
+    return (record.get("state") == "settled" and not open_additional_seats(record)
+            and bool(current) and current <= set(receipt.get("outcome_states") or ()))
+
+
+def received_whole(record, prior=None, *, task_id=""):
+    source = (prior if prior is not None else record) or {}
+    waiting = source.get("waiting") or {}
+    owner = str(task_id or (record or {}).get("task_id") or source.get("task_id") or "")
+    holder = _wait_owner(source or record, waiting)
+    states = (waiting.get("seen_outcome_states") if waiting and holder in ("", owner)
+              else (waiting.get("outcome_states_by_task") or {}).get(owner))
+    return _carries_whole(record or {}, {"outcome_states": states})
+
+
+def _verified_listener(ctx, record):
+    """A Continue successor for this commit record on the same checkout, never behind a newer listener (#2901). One
+    fresh read of the recorded chain from the record's task to this one answers both questions: only that task and its
+    verified successors save a wait, so its holder lies on the same path and is no newer listener exactly when the
+    chain passes through it."""
+    from ouroboros.owner_continue import continuation_chain
+    from ouroboros.review_ledger import ledger_root
+    from ouroboros.review_state import make_repo_key
+
+    own, origin = str(getattr(ctx, "task_id", "") or ""), str(record.get("task_id") or "")
+    waiting, root = record.get("waiting") or {}, str((record.get("subject") or {}).get("root") or "")
+    holder, attempt_owner = _wait_owner(record, waiting), str(waiting.get("attempt_task_id") or "")
+    repo = getattr(ctx, "repo_dir", None)
+    if not (bool(own and origin) and own != origin and record.get("surface") == "commit_gate"
+            and attempt_owner in ("", origin) and bool(root and repo)
+            and make_repo_key(pathlib.Path(root)) == make_repo_key(pathlib.Path(repo))):
+        return False
+    chain = continuation_chain(ledger_root(ctx), origin, own)
+    return bool(chain) and (not holder or holder == own or holder in chain)
+
+
+def _current_listener(ctx, record):
+    own, origin = str(getattr(ctx, "task_id", "") or ""), str((record or {}).get("task_id") or "")
+    if not record or not own or not origin:
+        return False
+    return _wait_owner(record) in ("", own) if own == origin else _verified_listener(ctx, record)
 
 
 def acknowledge_delivery(ctx, receipt):
@@ -297,25 +473,31 @@ def acknowledge_delivery(ctx, receipt):
     except (OSError, ValueError):
         log.warning("Review delivery cursor stays unacknowledged", exc_info=True)
         return
-    if not record or record.get("task_id") != str(ctx.task_id):
+    if not _current_listener(ctx, record):
         return
     if receipt.get("questions"):
         from ouroboros.sleep_custody import record_question_notice
         record_question_notice(ctx, receipt["questions"])
-    state = copy.deepcopy(record.get("waiting") or getattr(ctx, "_review_wait_selection", None) or {})
+    own, origin = str(ctx.task_id), str(record.get("task_id") or "")
+    mem = getattr(ctx, "_review_wait_selection", None)
+    own_mem = copy.deepcopy(mem) if isinstance(mem, dict) and mem and _wait_owner(record, mem) in ("", own) else {}
+    state = _listener_wait(ctx, record) or copy.deepcopy(own_mem)
+    state.update(task_id=own, record_id=record_id, **({"attempt_task_id": origin} if own != origin else {}))
+    if not state.get("selection") and own_mem.get("selection"):
+        state["selection"] = copy.deepcopy(own_mem["selection"])
     for target, source in (("seen_helpers", "helpers"), ("seen_outcomes", "outcomes"),
                            ("seen_outcome_states", "outcome_states")):
-        state[target] = sorted(set(state.get(target) or ()) | set(receipt.get(source) or ()))
+        state[target] = sorted(set(state.get(target) or ()) | set(own_mem.get(target) or ())
+                               | set(receipt.get(source) or ()))
     ctx._review_wait_selection = state
     wait = getattr(ctx, "_left_review_wait", None)
-    if isinstance(wait, dict) and wait.get("record_id") == record_id:
+    if isinstance(wait, dict) and wait.get("record_id") == record_id and _wait_owner(record, wait) in ("", own):
         wait.update({key: copy.deepcopy(state[key]) for key in ("selection", "seen_helpers", "seen_outcomes", "seen_outcome_states")
                      if key in state})
 
     def commit():
         saved = save_wait(ctx, record_id, state)
-        if (saved and saved.get("surface") == "result"
-                and _carries_whole(saved, {"outcome_states": saved["waiting"]["seen_outcome_states"]})):
+        if saved and saved.get("surface") == "result" and received_whole(saved, saved, task_id=own):
             from ouroboros.review_pause import retire_unread_review
 
             retire_unread_review(ctx, surface="result", record_id=record_id)
@@ -377,7 +559,8 @@ def _recorded_wait_wave(ctx, drive, entry, operation):
         return None
 
     left = getattr(ctx, "_left_review_wait", None) or {}
-    if (isinstance(left, dict) and left.get("task_id") == entry.task_id and left.get("retry_key") == entry.review_wave_id
+    if (isinstance(left, dict) and (left.get("attempt_task_id") or left.get("task_id")) == entry.task_id
+            and left.get("retry_key") == entry.review_wave_id
             and left.get("record_id") and (found := matching(left["record_id"]))):
         return found  # exact checkpoint address, even after rotation
     # Reuse the task-card's bounded hot projection; never search the archival index or attempt history.
@@ -431,7 +614,8 @@ def _review_wait_redirect(ctx, entry):
         # and repository, and refuses rather than dispatches when those facts are no longer available.
         reference["surface"] = "commit"
         wait = record.get("waiting") or {}
-        if (isinstance(wait, dict) and wait.get("record_id") == record["record_id"] and wait.get("task_id") == entry.task_id
+        if (isinstance(wait, dict) and wait.get("record_id") == record["record_id"]
+                and (wait.get("attempt_task_id") or wait.get("task_id")) == entry.task_id
                 and wait.get("retry_key") == wave and type(wait.get("attempt")) is int and wait["attempt"] > 0):
             reference["attempt"] = wait["attempt"]
     return {"status": "collect_existing", "surface": kind, **_call(

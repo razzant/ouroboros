@@ -140,6 +140,167 @@ def review_usage_category(surface: str) -> str:
     return f"{surface}_review"
 
 
+def build_review_usage_scope(
+    usage_ctx: Any,
+    *,
+    drive_root: Any,
+    task_id: str = "",
+    root_task_id: str = "",
+    parent_task_id: str = "",
+    surface: str = "",
+    source: str = "review_substrate",
+    continuing: bool = False,
+    review_meta: Optional[Dict[str, Any]] = None,
+    review_wave_id: str = "",
+) -> UsageScope:
+    """Resolve the usage scope a review wave or explicit continuation charges under.
+
+    The caps travel with their root (``usage_accounting._merge_scope``). A selected continuation is charged to
+    its recorded payer: with no scope of that same root it takes no ambient caps or group and never today's
+    default cap; the payer's own recorded cap and durable group govern it, none invented where none is recorded.
+    """
+    base_scope = current_usage_scope() or UsageScope()
+    usage_meta = getattr(usage_ctx, "task_metadata", {}) if usage_ctx is not None else {}
+    if not isinstance(usage_meta, dict):
+        usage_meta = {}
+    meta = review_meta if isinstance(review_meta, dict) else {}
+    task_id = str(task_id or base_scope.task_id or "")
+    explicit_payer = bool(root_task_id)
+    root_task_id = str(root_task_id or usage_meta.get("root_task_id") or base_scope.root_task_id or task_id)
+    bound_root = str(base_scope.root_task_id or base_scope.task_id or "")
+    own_caps = bound_root == root_task_id or not (bound_root or continuing)
+    parent = (str(parent_task_id or "") if explicit_payer
+              else str(parent_task_id or usage_meta.get("parent_task_id") or base_scope.parent_task_id or ""))
+    budget_root = (
+        usage_meta.get("budget_drive_root")
+        or getattr(usage_ctx, "budget_drive_root", "")
+        or base_scope.drive_root
+        or drive_root
+    )
+    if base_scope.global_limit_usd is not None:
+        global_limit = base_scope.global_limit_usd
+    else:
+        try:
+            from ouroboros.settings_setup_contract import resolve_total_budget_usd
+            global_limit = resolve_total_budget_usd()
+        except Exception:
+            global_limit = None
+    if own_caps and (base_scope.root_limit_source or base_scope.root_limit_usd is not None):
+        root_limit = base_scope.root_limit_usd
+    elif not own_caps or continuing:
+        root_limit = None
+    else:
+        try:
+            configured_root_limit = float(runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
+            root_limit = configured_root_limit if configured_root_limit > 0 else None
+        except (TypeError, ValueError):
+            root_limit = None
+    return UsageScope(
+        drive_root=budget_root,
+        task_id=task_id,
+        root_task_id=root_task_id,
+        parent_task_id=parent,
+        category=review_usage_category(surface),
+        source=source,
+        non_task_operation=not bool(
+            (base_scope.task_id and not base_scope.non_task_operation)
+            or ((getattr(usage_ctx, "task_id", "") or (continuing and task_id))
+                and getattr(usage_ctx, "task_lifecycle_bound", None) is not False)
+        ),
+        review_skill=str(meta.get("review_skill") or base_scope.review_skill or ""),
+        review_wave_id=review_wave_id,
+        cache_wave=str(meta.get("review_wave_id") or base_scope.cache_wave or ""),
+        global_limit_usd=global_limit,
+        global_limit_source=(base_scope.global_limit_source if base_scope.global_limit_usd is not None
+                             else "settings_budget_resolver"),
+        global_limit_revision=(base_scope.global_limit_revision if base_scope.global_limit_usd is not None else None),
+        root_limit_usd=root_limit,
+        # A reviewer spends from its task's whole-work group, the original root's included.
+        **({key: getattr(base_scope, key) for key in ("billing_group_id", "billing_group_limit_usd",
+            "billing_group_limit_source", "billing_group_limit_revision", "root_limit_source")} if own_caps else {}),
+    )
+
+
+def continuation_payer_scope(
+    usage_ctx: Any,
+    custody: Any,
+    *,
+    task_id: str,
+    root_task_id: str = "",
+    decision: Optional[Dict[str, Any]] = None,
+    surface: str = "",
+) -> UsageScope:
+    """Resolve the original payer's usage scope for one explicit continuation choice or START."""
+    from ouroboros.delegate_invocation import invocation_record
+
+    entry = decision or {}
+    source = (invocation_record(custody, str(entry.get("predecessor_invocation_id") or ""))
+              or invocation_record(custody, str(entry.get("origin_invocation_id") or "")) or {})
+    payer_task = str(source.get("task_id") or task_id or "")
+    payer_root = str(source.get("root_task_id") or root_task_id or payer_task)
+    return build_review_usage_scope(
+        usage_ctx,
+        drive_root=custody,
+        task_id=payer_task,
+        root_task_id=payer_root,
+        parent_task_id=str(source.get("parent_task_id") or ""),
+        surface=surface,
+        source="review_continuation",
+        continuing=True,
+    )
+
+
+def admit_continuation_starts(
+    ctx: Any,
+    custody: Any,
+    *,
+    task_id: str,
+    root_task_id: str = "",
+    starts: List[tuple],
+) -> Optional[Dict[str, Any]]:
+    """Run ``review_wave_budget_gate`` for each original payer AND (when active) the deciding author's own ambient
+    scope before choice or START projection, without cross-comparing one task's spend against another's limit."""
+    from ouroboros.tools.review_helpers import review_wave_budget_gate
+
+    if not starts:
+        return None
+
+    def _gate(group: List[tuple]) -> Optional[Dict[str, Any]]:
+        return review_wave_budget_gate(
+            ctx,
+            surface=str(group[0][1]["surface"]),
+            models=[model for _seat, _dec, model, _tokens, _chars in group],
+            prompt_chars=[chars for *_rest, chars in group],
+            max_completion_tokens=[int(tokens or 65536) for _seat, _dec, _model, tokens, _chars in group],
+            categories=[review_usage_category(str(dec["surface"])) for _seat, dec, *_rest in group],
+            slot_ids=[seat for seat, *_rest in group],
+            extra={"continuation": True},
+        )
+
+    by_payer: Dict[tuple, tuple] = {}
+    for item in starts:
+        decision = item[1]
+        scope = continuation_payer_scope(
+            ctx, custody, task_id=task_id, root_task_id=root_task_id,
+            decision=decision, surface=str(decision.get("surface") or ""),
+        )
+        key = (scope.task_id, scope.root_task_id, scope.parent_task_id)
+        by_payer.setdefault(key, (scope, []))[1].append(item)
+    ambient = current_usage_scope()
+    if ambient is not None and ambient.root_task_id:
+        ambient_root = str(ambient.root_task_id)
+        if any(scope.root_task_id != ambient_root for scope, _group in by_payer.values()):
+            admission = _gate(starts)
+            if admission is not None:
+                return admission
+    for scope, group in by_payer.values():
+        with usage_scope(scope):
+            admission = _gate(group)
+        if admission is not None:
+            return admission
+    return None
+
+
 class ReviewCoordinator:
     def __init__(
         self,
@@ -214,57 +375,16 @@ class ReviewCoordinator:
             request.task_attempt = getattr(self.usage_ctx, "task_attempt", None)
         task_id = str(request.task_id or base_scope.task_id or "")
         review_meta = request.usage_attribution if isinstance(request.usage_attribution, dict) else {}
-        root_task_id = str(
-            usage_meta.get("root_task_id") or base_scope.root_task_id or task_id
-        )
-        budget_root = (
-            usage_meta.get("budget_drive_root")
-            or getattr(self.usage_ctx, "budget_drive_root", "")
-            or base_scope.drive_root
-            or self.drive_root
-        )
-        if base_scope.global_limit_usd is not None:
-            global_limit = base_scope.global_limit_usd
-        else:
-            try:
-                from ouroboros.settings_setup_contract import resolve_total_budget_usd
-                global_limit = resolve_total_budget_usd()
-            except Exception:
-                global_limit = None
-        if base_scope.root_limit_source or base_scope.root_limit_usd is not None:
-            root_limit = base_scope.root_limit_usd
-        else:
-            try:
-                configured_root_limit = float(
-                    runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0
-                )
-                root_limit = configured_root_limit if configured_root_limit > 0 else None
-            except (TypeError, ValueError):
-                root_limit = None
-        review_usage_scope = UsageScope(
-            drive_root=budget_root,
+        review_usage_scope = build_review_usage_scope(
+            self.usage_ctx,
+            drive_root=self.drive_root,
             task_id=task_id,
-            root_task_id=root_task_id,
-            parent_task_id=str(usage_meta.get("parent_task_id") or base_scope.parent_task_id or ""),
-            category=review_usage_category(request.surface),
-            source="review_substrate",
-            non_task_operation=not bool((base_scope.task_id and not base_scope.non_task_operation)
-                                        or (getattr(self.usage_ctx, "task_id", "")
-                                            and getattr(self.usage_ctx, "task_lifecycle_bound", None) is not False)),
-            review_skill=str(review_meta.get("review_skill") or base_scope.review_skill or ""),
+            surface=request.surface,
+            continuing=bool(getattr(self.usage_ctx, "_review_receptive_continuation", False)),
+            review_meta=review_meta,
             review_wave_id=resolve_review_wave(request, review_meta, base_scope.review_wave_id),
-            cache_wave=str(review_meta.get("review_wave_id") or base_scope.cache_wave or ""),
-            global_limit_usd=global_limit,
-            global_limit_source=(base_scope.global_limit_source if base_scope.global_limit_usd is not None
-                                 else "settings_budget_resolver"),
-            global_limit_revision=(base_scope.global_limit_revision if base_scope.global_limit_usd is not None else None),
-            root_limit_usd=root_limit,
-            # A reviewer spends from its task's whole-work group, the original root's included.
-            billing_group_id=base_scope.billing_group_id, billing_group_limit_usd=base_scope.billing_group_limit_usd,
-            billing_group_limit_source=base_scope.billing_group_limit_source,
-            billing_group_limit_revision=base_scope.billing_group_limit_revision,
-            root_limit_source=base_scope.root_limit_source,
         )
+        root_task_id = review_usage_scope.root_task_id
 
         from ouroboros.review_custody import run_custodied_review_slots
         from ouroboros.review_dispatch import review_reconciliation_identity
@@ -453,6 +573,7 @@ class ReviewCoordinator:
         executor.answer_observer = lambda: answer_received(self.usage_ctx, request, slot)
         executor.usage_observer = lambda usage: self._emit_usage(request, slot, usage, prompt_chars=executor.prompt_chars())
         executor._logical_deadline_monotonic = logical_deadline_monotonic
+        executor._first_send_only = bool(getattr(self.usage_ctx, "_review_continuation_first_send_only", False))
         # The physical session and the logical waiter must share this exact
         # mutable cell.  A fresh cell is normally empty, so ``state or {}``
         # would silently replace it and hide a just-started invocation from a
