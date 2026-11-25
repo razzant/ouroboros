@@ -195,35 +195,44 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     };
     // This room's entry first (an empty one too: it was read empty), stamped with when it was saved; then the entries
     // saved least recently give way until all fit TOTAL_CHARS. An origin too full to take it frees what the write adds
-    // first (its text less the text it replaces, or with its key when the room has none), then asks once more. One that
-    // cannot be written goes, alone: an older text never stands for a newer read. Only a save writes this entry: a show
-    // or a read with nothing new never rewrites words another tab may have replaced or erased.
+    // first (its text less the text it replaces, or with its key when the room has none), then asks once more; if that
+    // fails too, the rooms that gave way come back. One that cannot be written goes, alone: an older text never stands
+    // for a newer read. Only a save writes this entry: a show or a read with nothing new never rewrites words another
+    // tab may have replaced or erased.
     const write = (rows) => {
         let store = null, written = false;
         try {
             store = storage();
             if (!store || !current(store, true)) return;
             const text = entryText(rows, Date.now());
-            // The others, saved least recently first, give way until all fit and `need` more characters are free.
+            // The others, saved least recently first, give way until all fit and `need` more characters are free;
+            // the ones taken, with their text.
             const giveWay = (need) => {
                 const others = familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
                     const value = store.getItem(name) || '';
-                    return { name, size: name.length + value.length, read: readOf(value) };
+                    return { name, value, size: name.length + value.length, read: readOf(value) };
                 }).sort((a, b) => a.read - b.read);
                 let total = PREVIEW_KEY.length + RECORD.length + entry.length + text.length
                     + others.reduce((sum, other) => sum + other.size, 0);
+                const taken = [];
                 for (const other of others) {
                     if (total <= TOTAL_CHARS && need <= 0) break;
                     store.removeItem(other.name);
+                    taken.push(other);
                     total -= other.size;
                     need -= other.size;
                 }
+                return taken;
             };
             try { store.setItem(entry, text); } catch (error) {
                 if (!full(error)) throw error;
                 const old = store.getItem(entry);
-                giveWay(old === null ? entry.length + text.length : text.length - old.length);
-                store.setItem(entry, text);
+                const taken = giveWay(old === null ? entry.length + text.length : text.length - old.length);
+                try { store.setItem(entry, text); } catch (again) {
+                    // They fitted a moment ago: a write that did not land takes no other room's words.
+                    for (const other of taken) try { store.setItem(other.name, other.value); } catch { /* taken meanwhile */ }
+                    throw again;
+                }
             }
             written = true;
             giveWay(0);

@@ -480,10 +480,15 @@ test('a room\'s own entry is written before any other gives way: one that fails 
     storing(refusing('SecurityError')).save([]);
     assert.equal(f.values.has(target), false, 'a write that did not land leaves no older text for the newer read');
     read([11, 'p']);
-    const stand = others();
+    const stand = Object.fromEntries(others());
     storing(refusing('QuotaExceededError')).save([...BIG].reverse());
     assert.equal(f.values.has(target), false, 'an origin that stays full: its older text goes too');
-    assert.deepEqual(others(), stand, 'and a write that adds nothing to the origin frees nothing');
+    assert.deepEqual(Object.fromEntries(others()), stand, 'and a write that adds nothing to the origin frees nothing');
+    // Fable w2 1: a first write the origin stays too full for makes room, asks again, fails again: the rooms that
+    // gave way for it come back as they were.
+    storing(refusing('QuotaExceededError')).save(BIG);
+    assert.equal(f.values.has(target), false, 'still full: not written');
+    assert.deepEqual(Object.fromEntries(others()), stand, 'every other room stands');
     assert.ok(f.size() <= TOTAL_CHARS);
 });
 
@@ -532,6 +537,12 @@ test('an origin too full for a write frees what the write adds, the rooms saved 
     saving(first, longer, words);
     assert.deepEqual(keys(first), [entryOf(longer)], 'both gave way and the new room is saved');
     assert.deepEqual(JSON.parse(first.values.get(entryOf(longer))).rows.map(item => item.text), [words[0].text]);
+    // Fable w2 1: free room and every other room's place together are less than a new room's text (in a real origin
+    // the shell's own keys hold the rest): all three give way, the second ask fails too, and they come back as they were.
+    const three = filled([[[1, 'a'], words], [[2, 'b'], words], [[3, 'c'], words]]);
+    const before = new Map(three.values);
+    saving(three, [4, 'd'], [row('chat:1', 'w'.repeat(5000))]);
+    assert.deepEqual(new Map(three.values), before, 'the new room is not written and every other room stands');
 });
 
 test('a room over its own share keeps its newest whole rows; a person\'s text is never cut', t => {
