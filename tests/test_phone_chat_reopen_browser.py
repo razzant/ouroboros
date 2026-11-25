@@ -8,6 +8,7 @@ selection_lifecycle.js), not an iPhone or Telegram client.
 """
 from __future__ import annotations
 
+import json
 from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 
@@ -16,7 +17,7 @@ import pytest
 from tests._phone_room_shared import facts, history, shot
 from tests.test_design_system_gate_browser import PROJECTS, rest, seed_page, settle
 from tests.test_shell_interactions_browser import open_project, shell_ui
-from tests.test_subscription_setup_browser import subscription_ui
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
 __all__ = ['shell_ui', 'subscription_ui']
@@ -435,14 +436,20 @@ def test_a_project_read_answered_after_its_room_was_left_is_neither_drawn_nor_sa
     page.close()
 
 
-@pytest.mark.parametrize('case', ['registry-deleting', 'answered-then-gone', 'refused', 'absent-only'])
+@pytest.mark.parametrize('case', ['registry-deleting', 'answered-then-gone', 'refused', 'absent-only', 'unproven'])
 def test_a_projects_saved_text_leaves_only_on_the_word_that_it_is_going_away(shell_ui, case):
     """Astra R2: a deleted Project's room kept its saved text until newer rooms' words filled the total. Two
     words take it, and only its rooms: the registry's `deleting` (app.js, where its room is let go too) and the core's
     answer to this browser's delete, which fenced it `deleting` before replying, so a tombstone may land before any
     read shows `deleting` (answered-then-gone). A refused delete keeps it, and so does absence alone from the bounded
-    list: no deletion is inferred. Moving between rooms takes nothing."""
+    list: no deletion is inferred. Moving between rooms takes nothing. Neither word names a data profile: each speaks
+    for this page's once its socket proved it serves that profile (the core's first frame); a `deleting` row heard on
+    a socket that proved none takes nothing (unproven; astra w3 3)."""
     page = seed_page(shell_ui, 1280, 800, telegram=False, touch=False)
+    if case != 'unproven':  # the serving socket's first frame names the profile it serves (gateway/ws.py)
+        page.route_web_socket('**/ws', lambda ws: (
+            ws.send(json.dumps({'type': 'connection_profile', 'profile_scope': PREVIEW_SCOPE})),
+            ws.send(json.dumps({'type': 'heartbeat'}))))
     words = {'chat_id=100': 'Words of the deleted Project', 'chat_id=101': 'Another Project keeps these'}
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=history([next(
         (text for query, text in words.items() if query in route.request.url), 'Main keeps these')])))
@@ -458,7 +465,7 @@ def test_a_projects_saved_text_leaves_only_on_the_word_that_it_is_going_away(she
     assert all(text in before for text in ['Main keeps these', *words.values()]), 'navigation takes nothing'
     listed = ([project for project in PROJECTS if project['id'] != 'gate-0'] if case in ('answered-then-gone', 'absent-only')
               else [dict(project, lifecycle='deleting') if project['id'] == 'gate-0' else project for project in PROJECTS]
-              if case == 'registry-deleting' else PROJECTS)
+              if case in ('registry-deleting', 'unproven') else PROJECTS)
     reads = []
 
     def state(route):
@@ -488,6 +495,8 @@ def test_a_projects_saved_text_leaves_only_on_the_word_that_it_is_going_away(she
         assert reads, 'a state read came after the change'
         if case == 'absent-only':
             page.wait_for_function('() => !document.querySelector(\'[data-nav-project-id="gate-0"]\')')
+        if case == 'unproven':  # its `deleting` row is drawn: the word was heard
+            page.locator('.nav-project-item.is-deleting[data-nav-project-id="gate-0"]').wait_for(state='attached')
         rest(page)
     after = page.evaluate(SAVED, PREVIEW_FAMILY)
     facts(f'project-preview-{case}-{shell_ui["engine"]}', {'before': len(before), 'after': len(after),

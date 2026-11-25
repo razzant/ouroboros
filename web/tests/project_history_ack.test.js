@@ -9,6 +9,7 @@ import * as readAhead from '../modules/read_ahead.js';
 import { createRoomRetirement } from '../modules/room_retire.js';
 import { forgetProjectPreviews, forgetUnlistedProjectPreviews, previewEntryKey, provenScope, PREVIEW_KEY }
     from '../modules/chat_preview.js';
+import { WS } from '../modules/ws.js';
 import { memoryStorage, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 
 // The span below is delimited by line breaks; normalize CRLF so a Windows
@@ -313,8 +314,11 @@ function savedProfiles() {
         forget: (ids, scope) => forgetProjectPreviews(ids, scope, storage),
         forgetUnlisted: (answer, asked) => forgetUnlistedProjectPreviews(answer, asked, storage) };
 }
-// What app.js's registryScope reads: the page's socket (ws.js canShowSavedProfile) and the document's proven profile.
-const pageProfile = proven => ({ ws: { canShowSavedProfile: () => proven }, document: { scope: PREVIEW_SCOPE },
+// What app.js's registryScope reads: the profile the page's current socket proved it serves (ws.js servingProfileScope:
+// '' until its first frame names one) and the document's proven profile. The paint gate stays open, as on a fresh
+// document before any socket spoke (canShowSavedProfile): it proves nothing (astra w3 3).
+const pageProfile = (proven, serving = proven ? PREVIEW_SCOPE : '') => ({ ws: { servingProfileScope: () => serving,
+    isConnected: () => true, canShowSavedProfile: () => true }, document: { scope: PREVIEW_SCOPE },
     documentScope: doc => doc.scope, provenScope });
 
 // A state snapshot that still shows the open room unread offers the read decision
@@ -575,18 +579,45 @@ for (const proven of [true, false]) {
         assert.deepEqual(saved.kept(), proven ? [OTHER_PROFILE] : [PREVIEW_SCOPE, OTHER_PROFILE]);
     });
 }
-test('the profile a registry word speaks for: the one it names, else the document\'s while its socket proves it', () => {
-    const scopeOf = (answer, proven, document = { scope: PREVIEW_SCOPE }) => {
-        const context = vm.createContext({ ...pageProfile(proven), document });
+test('the profile a registry word speaks for: the one it names, else the document\'s where its socket proved it', () => {
+    const scopeOf = (answer, serving, document = { scope: PREVIEW_SCOPE }, connected = true) => {
+        const page = pageProfile(true, serving);
+        page.ws.isConnected = () => connected;
+        const context = vm.createContext({ ...page, document });
         vm.runInContext(lift('registryScope'), context);
         return context.registryScope(answer);
     };
-    assert.equal(scopeOf({ profile_scope: OTHER_PROFILE }, false), OTHER_PROFILE, 'named: whatever the page proves');
-    assert.equal(scopeOf({ profile_scope: 'not a profile' }, true), '', 'named but unproven: none, never the document\'s');
-    assert.equal(scopeOf({ projects: [] }, true), PREVIEW_SCOPE);
-    assert.equal(scopeOf(undefined, true), PREVIEW_SCOPE, 'the delete action\'s own answer names none');
-    assert.equal(scopeOf(undefined, false), '');
-    assert.equal(scopeOf(undefined, true, { scope: '' }), '', 'a document that proves no profile');
+    assert.equal(scopeOf({ profile_scope: OTHER_PROFILE }, ''), OTHER_PROFILE, 'named: whatever the socket proved');
+    assert.equal(scopeOf({ profile_scope: 'not a profile' }, PREVIEW_SCOPE), '', 'named but unproven: none, never the document\'s');
+    assert.equal(scopeOf({ projects: [] }, PREVIEW_SCOPE), PREVIEW_SCOPE);
+    assert.equal(scopeOf(undefined, PREVIEW_SCOPE), PREVIEW_SCOPE, 'the delete action\'s own answer names none');
+    assert.equal(scopeOf(undefined, ''), '', 'a socket that proved nothing yet: the open paint gate is no proof');
+    assert.equal(scopeOf(undefined, OTHER_PROFILE), '', 'a socket that proved another profile');
+    assert.equal(scopeOf(undefined, PREVIEW_SCOPE, undefined, false), '', 'a socket no longer connected');
+    assert.equal(scopeOf(undefined, '', { scope: '' }), '', 'a document that proves no profile');
+});
+
+// Astra w3 3 on the page's real socket (ws.js): a fresh document may paint before any socket spoke, but a registry word
+// naming no profile heard then takes nothing; once the current socket proved this document's profile, it takes that
+// profile's saved text; a socket that proved another profile takes none.
+test('a word naming no profile takes saved text only where the real socket proved this document\'s profile', (t) => {
+    const native = globalThis.WebSocket;
+    globalThis.WebSocket = class { static CONNECTING = 0; static OPEN = 1; readyState = 1; send() {} close() {} };
+    t.after(() => { globalThis.WebSocket = native; });
+    for (const [serving, says, kept] of [['', 'a fresh socket that proved nothing yet', [PREVIEW_SCOPE, OTHER_PROFILE]],
+        [PREVIEW_SCOPE, 'the current socket proved this document\'s profile', [OTHER_PROFILE]],
+        [OTHER_PROFILE, 'the current socket proved another profile', [PREVIEW_SCOPE, OTHER_PROFILE]]]) {
+        const ws = new WS('ws://unused'), saved = savedProfiles();
+        if (serving) {  // the serving socket's first frame names its profile (gateway/ws.py)
+            ws.connect();
+            ws.ws.onmessage({ data: JSON.stringify({ type: 'connection_profile', profile_scope: serving }) });
+        } else assert.equal(ws.canShowSavedProfile(), true, 'the fresh document may paint');
+        const context = vm.createContext({ ws, document: { scope: PREVIEW_SCOPE }, documentScope: doc => doc.scope,
+            provenScope, forgetProjectPreviews: saved.forget });
+        vm.runInContext(`${lift('registryScope')}\n${lift('projectAnswer')}`, context);
+        assert.equal(context.projectAnswer('p1', { projects: [] }), null, `${says}: the exact lookup names no row`);
+        assert.deepEqual(saved.kept(), kept, `${says}: the saved text of p1 left, by profile`);
+    }
 });
 
 // The read a Project's paint makes names its action (history_attribution.py): the room built now asks it as its
