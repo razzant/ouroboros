@@ -1,0 +1,613 @@
+name: Focused successor-start Resume verification (A + B + C) — TEMPORARY BRANCH TOOLING
+
+# What this is.
+# A one-off GitHub overlay for the three-part lifecycle repair under test:
+#   A — a fresh ordinary delegated Continue whose start was refused BEFORE admission must be
+#       recorded as a definite sent-but-rejected START_FAILED, never START_UNSENT; the
+#       job↔canonical-run alias needs positive same-store proof (otherwise UNKNOWN stays), and
+#       the proven continuation version pin (6.3.0) drift-checks against the runtime pin.
+#   B — an OWNER-CHOSEN, ADDRESSED Resume of a never-started Continue successor: the census
+#       must positively prove read-only starts; a list-shaped Resume must not take the
+#       addressed decision; the old request is never re-sent (lookup-only); late activity
+#       re-holds the successor; Stop/Panic/expired-deadline and history keep priority.
+#   C — the card and menu truth: a waiting Continue over unconfirmed starts gets exactly one
+#       addressed Resume as a CHECK (never pause), the answered episode lays the card while the
+#       earlier root keeps its Stop, and the dialog says the choice in the singular for one
+#       start. Web: task_control_menu.js one/plural wording + work_status projection tests.
+#
+# Division of proof:
+#   * A and B are proven by their WHOLE modules and named witnesses below (parameters
+#     included). The former separate "existing guards" and "grant seam" pytest steps are gone:
+#     the same cases run inside those modules, and the bind gate names them.
+#   * C is proven by whole modules tests/test_work_status.py +
+#     tests/test_work_projection_pause_producers.py, the new B-module choice-recording case,
+#     and the Node suites task_control_menu, work_status, activity_work_truth and room_work.
+#   * The browser job runs THREE real-Chromium cases: the synthetic addressed-Resume scenario
+#     (synthetic_resume_choice_ui.py, imports B's own _held_continue with
+#     before=_own_earlier_choice and drives the REAL projected card and REAL gateway owner
+#     Resume — bare press 409, cancel sends nothing, recheck asks again with the same choice
+#     and the read-only wording survives the changed historical risk record, confirm 200
+#     releases the SAME successor exactly once and queues that same id, repeat refused, no
+#     engine dispatch, no money inference) plus the merged product-owned
+#     tests/test_held_continue_browser.py::test_held_continue_toast_activity_reason_and_resume_check,
+#     which supplies the geometry witness, plus the real Project room card over a fixture transport.
+#
+# How to bind (the parent packages this; nothing runs until then):
+#   1. Final product commit P = composed A+B+C (exact reviewed bytes), on top of Development
+#      base D. 2. Make ONE CI-only commit over P adding exactly these two files at
+#      .github/workflows/focused.yml and ci/synthetic_resume_choice_ui.py. 3. Fill PRODUCT=P,
+#      PRODUCT_PARENT=D below; push to a branch named ci/verify-successor-start-<unique>.
+#      The workflow never triggers on ouroboros/ or any PR, has permissions contents:read
+#      only, and the pin step detaches to PRODUCT so the tested tree never contains this
+#      overlay. No write, no id-token, no secrets, no provider calls, no real state replay.
+#   Honest-red: no continue-on-error; unbound sentinels FAIL naming what to fill; a missing
+#   named node fails the bind gate; every check step re-reads the JUnit by classname+function.
+#   The pinned product tree supplies the named cases; the bind step checks that they exist.
+#
+# Known deltas this run cannot yet close (reconcile at final composition):
+#   * C-only names (test_the_waiting_continue_offers_resume_as_a_check…, the toast test, the
+#     singular dialog wording) bind ONLY if C is inside P; if composition renames any of them,
+#     update the env lists below — the logic is name-agnostic. Never edit a name to green.
+#   * The browser scenario binds to production interfaces:
+#     delegate_resume blocker {choice_id, read_only}, gateway passthrough of
+#     error/blockers/acceptable_unknown/accepted_start_risks, task_control_menu dialog
+#     title 'Resume without this result?'/'these results', confirmLabel 'Resume anyway',
+#     api_client POST {accept_unknown, reason}. If any drifts, the scenario fails by name.
+#   * Full-repo suites, other markers and any real account are out of scope by design.
+
+on:
+  push:
+    branches:
+      - 'ci/verify-successor-start-90c1d528dd7f'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: successor-start-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ── pins: fill at packaging; sentinels fail loudly ──
+  PRODUCT: "90c1d528dd7f88568040f421051c9cd8d4f62a76"
+  PRODUCT_PARENT: "ef95fba2af1ee31f25f8a527f42885b1e8dc8a4d"
+
+  # ── A: whole modules + exact witnesses (names verified in the product source) ──
+  A_MODULES: tests/test_delegate_continuation.py,tests/test_delegated_subagent_transport.py,tests/test_delegate_accepted_lookup.py,tests/test_delegate_documents.py,tests/test_delegate_input_files_admission.py,tests/test_delegate_plan.py,tests/test_delegate_documents_admission.py,tests/test_delegate_plan_edges.py,tests/test_start_refusal_fate.py
+  A_EXACT_NODES: >-
+    tests/test_claudexor_owned_daemon.py::test_control_problem_required_actions_are_top_level_and_bounded
+  A_NAMED_NODES: >-
+    tests/test_delegate_continuation.py::test_pre_admission_continuation_superseded_settles_readonly_continuation_durably,
+    tests/test_delegate_continuation.py::test_pre_admission_continuation_superseded_keeps_snapshots_and_owes_owned_registration,
+    tests/test_delegate_continuation.py::test_pre_admission_continuation_superseded_admitted_failed_job_stays_on_accepted_recovery,
+    tests/test_delegate_continuation.py::test_pre_admission_continuation_superseded_stays_unknown_on_empty_store_rotated_descriptor_retry_thread_or_lookup_gap,
+    tests/test_delegate_continuation.py::test_pre_admission_continuation_superseded_stays_unknown_on_possession_lookup_or_store_gap,
+    tests/test_delegate_continuation.py::test_pre_admission_continuation_superseded_proves_queued_job_to_canonical_run_alias_in_same_store,
+    tests/test_delegate_continuation.py::test_pre_admission_continuation_superseded_refuses_unproven_job_alias_cases,
+    tests/test_delegate_continuation.py::test_pre_admission_continuation_reducer_guard_refuses_races_risk_choice_drift_or_lock_failure,
+    tests/test_delegated_subagent_transport.py::test_pre_admission_continuation_producers_tracks_pinned_runtime_without_open_ended_future_versions,
+    tests/test_delegate_accepted_lookup.py::test_every_answer_short_of_a_binding_keeps_the_start_pending_unknown_and_unsent,
+    tests/test_delegated_subagent_transport.py::test_start_run_captures_one_endpoint_generation_only_for_direct_continuation[ordinary-start],
+    tests/test_delegated_subagent_transport.py::test_start_run_captures_one_endpoint_generation_only_for_direct_continuation[direct-continuation]
+
+  # ── B: the WHOLE module (parameters included). The tenth node is C's addition to this
+  # same file: the real census+projection offer the addressed Resume, a cancelled press
+  # records nothing and asks again, the confirmed press records the choice and releases ──
+  B_MODULE: tests/test_successor_start_choice.py
+  B_MIN_CASES: "20"
+  B_REQUIRED_NODES: >-
+    tests/test_successor_start_choice.py::test_the_successor_names_the_proven_read_only_start_once_and_carries_it,
+    tests/test_successor_start_choice.py::test_the_waiting_continue_offers_resume_as_a_check_and_only_the_confirmed_press_records_the_choice,
+    tests/test_successor_start_choice.py::test_without_positive_no_write_proof_the_predecessor_refusal_stays,
+    tests/test_successor_start_choice.py::test_the_choice_meets_the_grants_money_refusal,
+    tests/test_successor_start_choice.py::test_the_owner_paused_successor_binds_its_choice_to_that_pause_and_a_new_pause_asks_again,
+    tests/test_successor_start_choice.py::test_a_failed_release_reuses_its_recorded_choice_for_the_same_hold,
+    tests/test_successor_start_choice.py::test_a_list_or_panic_resume_never_offers_records_or_reuses_the_successors_choice[shown_key],
+    tests/test_successor_start_choice.py::test_a_list_or_panic_resume_never_offers_records_or_reuses_the_successors_choice[saved_choice],
+    tests/test_successor_start_choice.py::test_the_resume_proof_has_the_same_member_bound_as_admission[at-limit],
+    tests/test_successor_start_choice.py::test_the_resume_proof_has_the_same_member_bound_as_admission[too-long],
+    tests/test_successor_start_choice.py::test_the_resume_proof_has_the_same_member_bound_as_admission[cycle],
+    tests/test_successor_start_choice.py::test_the_resume_proof_has_the_same_member_bound_as_admission[unreadable],
+    tests/test_successor_start_choice.py::test_old_start_proof_does_not_infer_a_whole_group_override[omitted],
+    tests/test_successor_start_choice.py::test_old_start_proof_does_not_infer_a_whole_group_override[empty],
+    tests/test_successor_start_choice.py::test_old_start_proof_does_not_infer_a_whole_group_override[explicit],
+    tests/test_successor_start_choice.py::test_old_start_proof_does_not_infer_a_whole_group_override[explicit-no-aux],
+    tests/test_successor_start_choice.py::test_old_start_proof_does_not_infer_a_whole_group_override[old-writer],
+    tests/test_successor_start_choice.py::test_old_start_proof_does_not_infer_a_whole_group_override[prior-body-unavailable],
+    tests/test_successor_start_choice.py::test_read_only_proof_reuses_the_owner_continue_binding[recorded-continue],
+    tests/test_successor_start_choice.py::test_read_only_proof_reuses_the_owner_continue_binding[different-work],
+    tests/test_successor_start_choice.py::test_the_census_reads_only_the_carried_invocation_ids,
+    tests/test_successor_start_choice.py::test_the_write_takes_a_successor_choice_only_over_its_own_lineage_and_never_past_a_stop,
+    tests/test_successor_start_choice.py::test_an_answered_successor_is_held_again_only_while_its_tree_still_runs[child],
+    tests/test_successor_start_choice.py::test_an_answered_successor_is_held_again_only_while_its_tree_still_runs[review],
+    tests/test_successor_start_choice.py::test_an_answered_successor_is_held_again_only_while_its_tree_still_runs[upkeep],
+    tests/test_successor_start_choice.py::test_an_answered_successor_is_held_again_only_while_its_tree_still_runs[closed-absent],
+    tests/test_successor_start_choice.py::test_an_answered_successor_is_held_again_only_while_its_tree_still_runs[none],
+    tests/test_successor_start_choice.py::test_late_activity_holds_the_successor_under_its_launch_lock_until_the_old_run_settles,
+    tests/test_successor_start_choice.py::test_the_next_continue_names_the_carried_start_afresh_and_its_late_activity_holds_it[writer_hold],
+    tests/test_successor_start_choice.py::test_the_next_continue_names_the_carried_start_afresh_and_its_late_activity_holds_it[owner_pause],
+    tests/test_successor_start_choice.py::test_activity_without_the_successors_launch_lock_lands_nothing,
+    tests/test_successor_start_choice.py::test_boot_discovery_reads_a_successor_fence_by_its_holder
+  B_COMPANION_MODULES: >-
+    tests/test_delegated_start_resume.py,tests/test_continue_resume_writer_wait.py,
+    tests/test_owner_pause_ended_members.py,tests/test_delegate_body_collection.py,
+    tests/test_body_tick_reads.py,tests/test_project_conversion_continue_family.py,
+    tests/test_panic_recovery_selection.py,tests/test_continue_successor_integration.py,
+    tests/test_review_reference_collection.py,tests/test_review_explicit_continuation.py
+  B_COMPANION_NODES: >-
+    tests/test_delegated_start_resume.py::test_exact_resume_observes_the_choice_at_grant_and_consumption,
+    tests/test_delegated_start_resume.py::test_owner_http_names_all_five_unbound_starts_across_two_tasks,
+    tests/test_panic_recovery_selection.py::test_conditional_http_resume_uses_only_this_hold_and_owner_door,
+    tests/test_continue_successor_integration.py::test_a_continue_chain_reaches_the_first_predecessors_child[short],
+    tests/test_continue_successor_integration.py::test_a_continue_chain_reaches_the_first_predecessors_child[65-episodes]
+
+  # ── C: card/menu truth, whole modules with every announced function named ──
+  C_MODULES: tests/test_work_status.py,tests/test_work_projection_pause_producers.py
+  C_REQUIRED_NODES: >-
+    tests/test_work_status.py::test_a_continue_waiting_only_over_unconfirmed_starts_may_be_asked_to_check_them,
+    tests/test_work_status.py::test_a_wait_over_anything_else_offers_no_resume_check,
+    tests/test_work_status.py::test_the_resume_check_is_offered_until_something_in_this_read_outranks_it,
+    tests/test_work_status.py::test_an_answered_continue_is_the_works_episode_while_its_earlier_attempt_keeps_its_stop,
+    tests/test_work_status.py::test_a_claim_not_confirmed_admitted_moves_the_episode_only_for_a_terminal_successor,
+    tests/test_work_status.py::test_a_link_the_read_cannot_prove_leaves_the_outcome_unsaid_and_names_the_gap,
+    tests/test_work_status.py::test_a_later_episode_that_owns_a_run_takes_its_own_pause_and_the_older_tail_keeps_its_stop,
+    tests/test_work_status.py::test_a_stop_is_dropped_only_for_the_target_whose_door_has_nothing_to_reach,
+    tests/test_work_status.py::test_a_held_continue_offers_stop_earlier_only_where_the_stop_door_reaches,
+    tests/test_work_projection_pause_producers.py::test_an_answered_continue_with_its_predecessors_accepted_start_open_keeps_that_stop_and_says_its_own_outcome,
+    tests/test_work_projection_pause_producers.py::test_the_same_writer_wait_refreshes_its_resume_check_only_after_publication,
+    tests/test_work_projection_pause_producers.py::test_answered_continue_keeps_earlier_pause_and_deduplicates_identical_stop_targets,
+    tests/test_work_projection_pause_producers.py::test_answered_continue_projects_unambiguous_controls_across_earlier_tails,
+    tests/test_work_projection_pause_producers.py::test_unproven_continue_over_unbound_start_keeps_single_stop_and_unknown_outcome,
+    tests/test_work_projection_pause_producers.py::test_the_ended_work_projection_uses_the_admission_episode_bound_and_names_the_gap[at-limit],
+    tests/test_work_projection_pause_producers.py::test_the_ended_work_projection_uses_the_admission_episode_bound_and_names_the_gap[too-long],
+    tests/test_work_projection_pause_producers.py::test_the_ended_work_projection_uses_the_admission_episode_bound_and_names_the_gap[cycle],
+    tests/test_work_projection_pause_producers.py::test_the_ended_work_projection_uses_the_admission_episode_bound_and_names_the_gap[unreadable]
+
+jobs:
+  python:
+    name: focused (${{ matrix.leg }}, ${{ matrix.journal }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: linux
+            os: ubuntu-latest
+            interpreter: shipped          # fresh installs: SQLite WAL
+            journal: WAL
+          - leg: windows
+            os: windows-latest
+            interpreter: setup-python     # in-place-updated installs keep PERSIST
+            journal: PERSIST
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 3   # QA tip, product head, size-lane base
+
+      - name: Test the pinned product head, not this branch's tip
+        id: pin
+        run: |
+          set -euo pipefail
+          case "$PRODUCT$PRODUCT_PARENT" in *'<<FILL'*) echo "PIN UNBOUND — set PRODUCT and PRODUCT_PARENT to the real candidate SHAs"; exit 1;; esac
+          test "$(git rev-parse 'HEAD^1')" = "$PRODUCT" || { echo "the QA commit is not directly over the pinned product head"; exit 1; }
+          git cat-file -e "$PRODUCT_PARENT^{commit}" || { echo "the size-lane base object is missing from the fetch"; exit 1; }
+          git checkout --detach "$PRODUCT"
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          echo "tested tree: $(git rev-parse 'HEAD^{tree}')"
+
+      - uses: ./.github/actions/setup-python-env
+        id: setup
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'   # dependencies only; the tests import this checkout
+
+      - name: The stores run ${{ matrix.journal }} here
+        id: journal
+        run: >-
+          python -c "import pathlib, sys, tempfile; from ouroboros import store;
+          probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch();
+          mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode);
+          sys.exit(mode != sys.argv[1])" ${{ matrix.journal }}
+
+      - name: Bind gate — every named node and module exists in the pinned tree
+        id: bind
+        run: |
+          set -euo pipefail
+          split() { printf '%s' "$1" | tr ',' '\n' | sed '/^[[:space:]]*$/d'; }
+          fail=0
+          for name in A_NAMED_NODES A_EXACT_NODES B_REQUIRED_NODES B_COMPANION_NODES C_REQUIRED_NODES; do
+            if split "${!name}" | grep -q '<<FILL'; then
+              echo "UNBOUND: $name still carries a fill sentinel — the run would prove nothing"; fail=1
+            fi
+          done
+          for list in A_NAMED_NODES A_EXACT_NODES B_REQUIRED_NODES B_COMPANION_NODES C_REQUIRED_NODES; do
+            for node in $(split "${!list}" | sed 's/[[:space:]]*$//'); do
+              file="${node%%::*}"; fn="${node##*::}"; fn="${fn%%\[*}"
+              git cat-file -e "HEAD:$file" 2>/dev/null || { echo "absent in product tree: $file"; fail=1; continue; }
+              git grep -q -E "^(async )?def ${fn}([(:]|$)" -- "$file" || { echo "no such test in product tree: $node"; fail=1; }
+            done
+          done
+          for m in "$B_MODULE" $(split "$A_MODULES") $(split "$B_COMPANION_MODULES") $(split "$C_MODULES"); do
+            git cat-file -e "HEAD:$m" || { echo "module absent at this product head: $m"; fail=1; }
+          done
+          test "$fail" = 0 || { echo "BIND INCOMPLETE — name the exact final nodes; this job must stay red until then"; exit 1; }
+          echo "all named nodes resolve in $PRODUCT"
+
+      - name: Write the report checker (counts and names only, never report bodies)
+        id: checker
+        run: |
+          mkdir -p "$RUNNER_TEMP/ci-private"
+          cat > "$RUNNER_TEMP/focused_check.py" <<'PY'
+          """One pytest xunit2 report: what ran, by classname + function, plus per-group totals.
+
+          Writes one line per group into "$RUNNER_TEMP/ci-private/total.env" as KEY=case-count.
+          A module is recognised by its classname; a node by classname plus the function name
+          before its parameter part. No log bodies, no scratch tree.
+          """
+          import argparse, os, re, sys
+          import xml.etree.ElementTree as ET
+
+          def status_of(case):
+              for child in case:
+                  if child.tag in ("failure", "error"):
+                      return "failed"
+                  if child.tag == "skipped":
+                      return "skipped"
+              return "passed"
+
+          def module_of(path):
+              return path[:-3].replace("/", ".").replace("\\", ".") if path.endswith(".py") else path
+
+          def main():
+              ap = argparse.ArgumentParser()
+              ap.add_argument("junit")
+              ap.add_argument("--key", default="")
+              ap.add_argument("--min", type=int, default=1)
+              ap.add_argument("--modules", default="")
+              ap.add_argument("--nodes", default="")
+              a = ap.parse_args()
+              split = lambda text: [p.strip() for p in re.split(r",\s*", text) if p.strip()]
+              label = os.path.basename(a.junit)
+              if not os.path.exists(a.junit):
+                  print(f"CHECK {label}: MISSING — the pytest step produced no report")
+                  return 1
+              try:
+                  cases = list(ET.parse(a.junit).getroot().iter("testcase"))
+              except ET.ParseError as exc:
+                  print(f"CHECK {label}: UNREADABLE report ({type(exc).__name__})")
+                  return 1
+              rows = [(c.get("classname") or "", c.get("name") or "", status_of(c)) for c in cases]
+              counts = {k: sum(1 for _, _, s in rows if s == k) for k in ("passed", "skipped", "failed")}
+              problems = [] if rows else ["collected nothing"]
+              if len(rows) < a.min:
+                  problems.append(f"expected at least {a.min} cases, saw {len(rows)}")
+              for klass, name, status in rows:
+                  if status == "failed":
+                      problems.append(f"failed {klass}::{name}")
+                  elif status == "skipped":
+                      problems.append(f"skipped {klass}::{name}")   # a focused overlay skips nothing
+              for path in split(a.modules):
+                  if not any(klass == module_of(path) for klass, _, _ in rows):
+                      problems.append(f"no case ran from {path}")
+              for node in split(a.nodes):
+                  path, _, func = node.partition("::")
+                  module = module_of(path)
+                  if not any(k == module and (n == func or ("[" not in func and n.startswith(func + "["))) for k, n, _ in rows):
+                      problems.append(f"required node absent: {node}")
+              print(f"CHECK {label}: {len(rows)} cases, {counts['passed']} passed, "
+                    f"{counts['skipped']} skipped, {counts['failed']} failed")
+              for problem in problems:
+                  print("  " + problem)
+              if a.key:
+                  with open(os.path.join(os.environ["RUNNER_TEMP"], "ci-private", "total.env"), "a") as fh:
+                      fh.write(f"{a.key}={len(rows)}\n")
+              return 1 if problems else 0
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY
+
+      - name: Preparation is complete
+        id: ready
+        if: ${{ always() && steps.pin.outcome == 'success' && steps.setup.outcome == 'success' && steps.journal.outcome == 'success' && steps.bind.outcome == 'success' && steps.checker.outcome == 'success' }}
+        run: echo "ready to test $PRODUCT on the ${{ matrix.leg }} leg (${{ matrix.journal }})"
+
+      # ── 1. A: source and normal-start consumers + the exact owned-daemon node ──
+      - name: A definite rejection, alias proof, transport pin and accepted lookup
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          selection=$(printf '%s,%s' "$A_MODULES" "$A_EXACT_NODES" | tr ',' '\n' | sed '/^[[:space:]]*$/d')
+          count=$(printf '%s\n' "$selection" | grep -c . || true)
+          test "$count" -eq 10 || { echo "the A selection has $count targets; expected nine modules + one node"; exit 1; }
+          # shellcheck disable=SC2086
+          python -m pytest $selection --junitxml="$RUNNER_TEMP/ci-private/a.xml" -q --tb=short
+      - name: Check A ran every witness
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        env:
+          KEY: A_TOTAL
+        run: >-
+          python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/a.xml"
+          --key "$KEY" --modules "$A_MODULES" --nodes "$A_NAMED_NODES,$A_EXACT_NODES"
+
+      # ── 2. B: the WHOLE module (parameters and C's new case included) ──
+      - name: B successor-start choice, whole module
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 45
+        run: >-
+          python -m pytest "$B_MODULE"
+          --junitxml="$RUNNER_TEMP/ci-private/b.xml" -q --tb=short
+      - name: Check B ran every required case
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        env:
+          KEY: B_TOTAL
+        run: >-
+          python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/b.xml"
+          --key "$KEY" --min "$B_MIN_CASES" --modules "$B_MODULE" --nodes "$B_REQUIRED_NODES"
+
+      # ── 3. B companions + the focused regressions the composition must not break ──
+      - name: B companion and focused regression modules
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 45
+        run: >-
+          python -m pytest $(printf '%s' "$B_COMPANION_MODULES" | tr ',' '\n' | sed '/^[[:space:]]*$/d')
+          --junitxml="$RUNNER_TEMP/ci-private/b-companions.xml" -q --tb=short
+      - name: Check the companions ran, grant seam included
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        env:
+          KEY: B_COMPANIONS
+        run: >-
+          python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/b-companions.xml"
+          --key "$KEY" --modules "$B_COMPANION_MODULES" --nodes "$B_COMPANION_NODES"
+
+      # ── 4. C: card and menu truth, whole modules with named functions ──
+      - name: C work status and pause-producer projection, whole modules
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 45
+        run: >-
+          python -m pytest $(printf '%s' "$C_MODULES" | tr ',' '\n' | sed '/^[[:space:]]*$/d')
+          --junitxml="$RUNNER_TEMP/ci-private/c.xml" -q --tb=short
+      - name: Check C ran every announced case
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        env:
+          KEY: C_TOTAL
+        run: >-
+          python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/c.xml"
+          --key "$KEY" --modules "$C_MODULES" --nodes "$C_REQUIRED_NODES"
+
+      # ── 5. cross-group total: no vacuous green; floor = the bind-gate names ──
+      - name: Cross-group total check
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/ci-private/total.env"
+          count() { printf '%s' "$(printf '%s' "$1" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | grep -c .)"; }
+          floor=$(( $(count "$A_NAMED_NODES") + $(count "$A_EXACT_NODES") + $(count "$B_REQUIRED_NODES") + $(count "$B_COMPANION_NODES") + $(count "$C_REQUIRED_NODES") ))
+          echo "floor=$floor  groups: A=${A_TOTAL:-?} B=${B_TOTAL:-?} B_COMPANIONS=${B_COMPANIONS:-?} C=${C_TOTAL:-?}"
+          for k in A_TOTAL B_TOTAL B_COMPANIONS C_TOTAL; do
+            v="${!k:-0}"; test "$v" -ge 1 || { echo "group $k ran no cases"; exit 1; }
+          done
+          total=$(( ${A_TOTAL:-0} + ${B_TOTAL:-0} + ${B_COMPANIONS:-0} + ${C_TOTAL:-0} ))
+          test "$total" -ge "$floor" || { echo "only $total named-node cases ran, expected at least $floor"; exit 1; }
+
+      # ── 6. Linux only: the price the composed diff must pay in the same pass ──
+      - name: Size-ratchet lane against the product parent
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' && matrix.leg == 'linux' }}
+        timeout-minutes: 20
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.PRODUCT_PARENT }}
+        run: python -m pytest tests/ -m size_ratchet -q --tb=short
+      - name: Domain manifest gate
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' && matrix.leg == 'linux' }}
+        timeout-minutes: 10
+        run: python scripts/check_domains.py
+      - name: Generated inventories and docs sync
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' && matrix.leg == 'linux' }}
+        timeout-minutes: 20
+        run: >-
+          python -m pytest tests/test_domain_manifest.py tests/test_domain_report.py
+          tests/test_architecture_facts.py tests/test_generated_inventories.py tests/test_docs_sync.py
+          --junitxml="$RUNNER_TEMP/ci-private/inventories.xml" -q --tb=short
+      - name: Check every inventory module ran
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' && matrix.leg == 'linux' }}
+        run: >-
+          python "$RUNNER_TEMP/focused_check.py" "$RUNNER_TEMP/ci-private/inventories.xml"
+          --modules tests/test_domain_manifest.py,tests/test_domain_report.py,tests/test_architecture_facts.py,tests/test_generated_inventories.py,tests/test_docs_sync.py
+
+  browser:
+    name: real Chromium — addressed Resume, Activity and Project room, plus C Node suites
+    # The repo's own UI lane (.github/workflows/ui-browser.yml, #2735) records that the pinned
+    # Chrome for Testing cannot start its sandbox on Ubuntu 23.10+ runners without a host
+    # sysctl change. This job does NOT touch runner protections: it selects ubuntu-22.04,
+    # where the pinned Chromium starts sandboxed as-is. If that image or the pinned browser
+    # stops serving, this job goes honestly red — no --no-sandbox, no sysctl fallback, by design.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Take the fixture, then test the pinned product head
+        id: pin
+        run: |
+          set -euo pipefail
+          case "$PRODUCT" in *'<<FILL'*) echo "PIN UNBOUND — set PRODUCT to the real candidate SHA"; exit 1;; esac
+          mkdir -p "$RUNNER_TEMP/ci-private" "$RUNNER_TEMP/ci-raw/browser/ui" "$RUNNER_TEMP/upload"
+          test "$(git rev-parse 'HEAD^1')" = "$PRODUCT" || { echo "the QA commit is not directly over the pinned product head"; exit 1; }
+          git show "$GITHUB_SHA:ci/synthetic_resume_choice_ui.py" > "$RUNNER_TEMP/synthetic_resume_choice_ui.py"
+          test -s "$RUNNER_TEMP/synthetic_resume_choice_ui.py"
+          git checkout --detach "$PRODUCT"
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          echo "tested tree: $(git rev-parse 'HEAD^{tree}')"
+          git cat-file -e "HEAD:tests/test_held_continue_browser.py"
+          git grep -q 'def test_held_continue_toast_activity_reason_and_resume_check' -- tests/test_held_continue_browser.py || {
+            echo "the merged product toast/resume browser case is absent — C is not in this product head"; exit 1; }
+
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+
+      - name: Install the pinned Chromium and the reviewed Node
+        id: install_browsers
+        timeout-minutes: 45
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node --pinned-chromium chromium
+
+      # The Node suites C touched, on the SAME reviewed Node the UI lane stages
+      # (narrow form of scripts/run_tests.py _node_lane: node --test, cwd web/).
+      - name: Node lane, narrowed to the touched suites
+        id: node_test
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          NODE: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          set -euo pipefail
+          test -x "$NODE" || { echo "the reviewed Node is missing"; exit 1; }
+          for f in web/tests/task_control_menu.test.js web/tests/work_status.test.js web/tests/activity_work_truth.test.js web/tests/room_work.test.js; do
+            git cat-file -e "HEAD:$f" || { echo "$f absent at the product head"; exit 1; }
+          done
+          cd web && "$NODE" --test tests/task_control_menu.test.js tests/work_status.test.js tests/activity_work_truth.test.js tests/room_work.test.js
+
+      # The synthetic scenario enters the product tree only for this run; the QA commit is
+      # never part of the tested checkout, and no other UI file is collected here.
+      - name: Place the synthetic scenario
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        run: cp "$RUNNER_TEMP/synthetic_resume_choice_ui.py" tests/test_ci_synthetic_successor_resume_ui.py
+
+      - name: Run the three sandboxed Chromium cases under safe_test
+        id: browser
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/ci-raw/browser/ui
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: >-
+          python -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP"
+          --evidence-dir "$RUNNER_TEMP/ci-raw/browser" --
+          python -m pytest -p tests.test_ci_synthetic_successor_resume_ui
+          tests/test_ci_synthetic_successor_resume_ui.py
+          'tests/test_held_continue_browser.py::test_held_continue_toast_activity_reason_and_resume_check[chromium]'
+          'tests/test_held_continue_room_browser.py::test_a_continue_waiting_over_one_unconfirmed_start_offers_its_card_a_resume_whose_choice_asks_first[chromium]'
+          -m ui_browser -q --tb=short --timeout=900
+          --junitxml="$RUNNER_TEMP/ci-private/browser.xml"
+
+      - name: Prove the addresses, the one-shot release, the lookup-only retention and the screen
+        if: ${{ !cancelled() && steps.browser.outcome != 'skipped' }}
+        env:
+          JUNIT: ${{ runner.temp }}/ci-private/browser.xml
+          EVIDENCE_DIR: ${{ runner.temp }}/ci-raw/browser/ui
+          UPLOAD: ${{ runner.temp }}/upload
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, pathlib, sys
+          import xml.etree.ElementTree as ET
+
+          junit = pathlib.Path(os.environ["JUNIT"])
+          if not junit.is_file():
+              print("CHECK browser.xml: MISSING — the pytest step produced no report"); raise SystemExit(1)
+          cases = list(ET.parse(junit).getroot().iter("testcase"))
+          bad = [f"{c.get('classname')}::{c.get('name')} {child.tag}"
+                 for c in cases for child in c if child.tag in ("failure", "error", "skipped")]
+          names = {(c.get("classname") or "") + "::" + (c.get("name") or "").split("[", 1)[0] for c in cases}
+          need = {"tests.test_ci_synthetic_successor_resume_ui::test_addressed_resume_of_a_never_started_successor",
+                  "tests.test_held_continue_browser::test_held_continue_toast_activity_reason_and_resume_check",
+                  "tests.test_held_continue_room_browser::test_a_continue_waiting_over_one_unconfirmed_start_offers_its_card_a_resume_whose_choice_asks_first"}
+          missing = need - names
+          print(f"CHECK browser.xml: {len(cases)} case(s) ran; missing={sorted(missing)}")
+          for note in bad:
+              print("  " + note)
+          if len(cases) != 3 or bad or missing:
+              raise SystemExit(1)
+
+          parent = pathlib.Path(os.environ["EVIDENCE_DIR"])
+          png = parent / "successor-resume-confirmed.png"
+          ask = parent / "successor-resume-ask.png"
+          if not png.is_file() or png.stat().st_size == 0 or not ask.is_file() or ask.stat().st_size == 0:
+              print("the scenario left no screenshot pair (ask + confirmed)"); raise SystemExit(1)
+          facts = parent / "successor-resume-facts.json"
+          if not facts.is_file():
+              print("the scenario facts are missing from the evidence directory"); raise SystemExit(1)
+          row = json.loads(facts.read_text(encoding="utf-8"))
+
+          # Synthetic fixture addresses only (B's own _held_continue with before=_own_earlier_choice).
+          # The claims that matter (list refusal, pre-admission rejection and Stop/Close/limits
+          # are proven by the Python job, not by a press):
+          #  * bare press 409; Cancel sent NOTHING else; recheck asks again with the same choice,
+          #    still read_only with the earlier choice still in history; confirm 200 releases
+          #    the SAME never-started successor exactly once and queues that same id;
+          #  * repeat refused; old handshake row stays pending/lookup-only, never re-issued;
+          #  * no engine starts/cancels; predecessor unchanged; no money amount inferred;
+          #  * singular read-only dialog wording; page rendered clean (no errors).
+          print("facts:", json.dumps({k: v for k, v in row.items() if k != 'rows'}, indent=None))
+          checks = {
+              "flow is predecessor→successor": row.get("flow") == \
+                  "ended-predecessor -> held Continue -> addressed successor Resume",
+              "same successor id": bool(row.get("expected_successor_id"))
+                  and row.get("resumed_task_id") == row.get("expected_successor_id"),
+              "released queue row is that successor": row.get("saved_row_released") is True,
+              "same S still queued exactly once": row.get("same_id_queued_once") is True,
+              "only three dialog POSTs with expected statuses": row.get("dialog_presses") == ["bare", "recheck", "confirm"]
+                  and row.get("statuses") == [409, 409, 200],
+              "cancel sent nothing further": row.get("posts_after_cancel") == 1,
+              "recheck asked again, same choice": row.get("recheck_same_choice") is True,
+              "recheck kept read_only": row.get("recheck_read_only") is True,
+              "release happened exactly once": row.get("grant_uses") == 1,
+              "choice targeted the lost read-only start": row.get("choice_targets_lost_start") is True,
+              "singular read-only wording, no file-change claim": row.get("refusal_read_only_words") is True,
+              "cancel left it held": row.get("cancel_left_it_held") is True,
+              "addressed release named this successor": row.get("released_same_successor") is True,
+              "acceptance recorded on the successor": row.get("acceptance_recorded_on_successor") is True,
+              "old start kept UNKNOWN/lookup-only": row.get("unknown_start_kept_lookup_only") is True,
+              "one repeat POST refused": row.get("repeat_status") in (409, 404)
+                  and row.get("repeat_statuses") == [row.get("repeat_status")],
+              "no engine dispatch": row.get("engine_starts_delta") == 0
+                  and row.get("engine_cancels_delta") == 0,
+              "money not inferred": row.get("money_amount_claimed") is False,
+              "predecessor unchanged": row.get("predecessor_unchanged") is True,
+              "no page errors": not row.get("page_errors"),
+          }
+          for name, ok in checks.items():
+              print(("  ok   " if ok else "  FAIL ") + name)
+          if not all(checks.values()):
+              raise SystemExit(1)
+          out = pathlib.Path(os.environ["UPLOAD"]); out.mkdir(parents=True, exist_ok=True)
+          room = parent / "room-work" / "chromium"
+          room_frames = sorted(room.glob("*held-continue-resume-choice*.png"))
+          geometry = parent / "held-continue"
+          phone = geometry / "chromium-3-held-row-menu-390.png"
+          states = [geometry / f"chromium-2-activity-page-{theme}-{width}.png"
+                    for theme in ("dark", "light") for width in (390, 1440)]
+          if len(room_frames) != 1:
+              print("Project room Resume frame is missing or ambiguous", room_frames); raise SystemExit(1)
+          for f in (png, ask, parent / "successor-resume-dialog.txt", facts, phone, *states, *room_frames):
+              (out / f.name).write_bytes(f.read_bytes())
+          PY
+
+      - name: Upload only this scenario's visual evidence
+        if: ${{ !cancelled() && steps.browser.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: successor-resume-visual-evidence
+          path: ${{ runner.temp }}/upload/
+          if-no-files-found: error
+          retention-days: 14
