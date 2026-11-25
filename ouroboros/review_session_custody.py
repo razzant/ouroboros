@@ -371,6 +371,59 @@ def _legacy_capture(root: Any, entry: Any, invocation: Any, successor: Any, chec
     return successor
 
 
+def lookup_recorded_continuation_start(root: Any, request: Any, slot: Any, row: Dict[str, Any],
+                                       token: str) -> tuple[bool, Any]:
+    """Strictly non-creating lookup for a cold foreign continuation whose START is not proven unsent.
+
+    Returns ``(True, None)`` once ``delegate_accepted.recover`` binds an accepted run (``STARTED``) so the caller
+    joins and observes it without POSTing. On any miss, refusal or transport gap returns ``(False, actor)`` without
+    persisting producer ``_error`` CAS or marking ``_NO_RESEND``, keeping ``START_UNBOUND`` so a later lookup on the
+    same key/service can still bind the accepted run (while ``final=True`` still settles lost).
+    """
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_accepted import NO_REPLAY, recover
+    from ouroboros.execution_domain import seat_gateway
+    from ouroboros.review_operation import START_UNBOUND, _row_actor
+
+    operation_id = str(row.get("operation_id") or "")
+    gateway = None
+    code = "review_continuation_handoff_unknown"
+    reason = ("this continuation's recorded start is not proven unsent and no accepted run could be "
+              "bound to it now; nothing was re-posted and its outcome stays unknown")
+    try:
+        record, run_id, _started = recover_review_start(
+            custody, root, token, str(request.task_id or ""), str(request.surface or ""))
+        if run_id:
+            return True, None
+        if record is not None and record.get("state") == "pending":
+            run_request = record.get("request")
+            review_recovery_facts(
+                record, run_request, None, root=str(request.session_root or ""),
+                prompt=str((run_request or {}).get("prompt") or ""),
+                claimant_task_id=str(request.task_id or ""), claimant_surface=str(request.surface or ""),
+                claimant_slot_id=str(slot.slot_id or ""), claimant_operation_id=operation_id)
+            _seat_engine, gateway = seat_gateway(record, str(request.session_root or ""))
+            held, read = recover(root, gateway, {**record, "invocation_id": token})
+            if held is not None:
+                return True, None
+            if read["reason"] in NO_REPLAY:
+                code = str(read["reason"])
+                reason = (f"the engine answered for this review's recorded start ({read['lookup']}) but no "
+                          "run could be bound to it now; nothing was re-sent and its outcome stays unknown")
+    except Exception:
+        pass
+    finally:
+        if gateway is not None:
+            try:
+                gateway.close()
+            except Exception:
+                pass
+    actor = _row_actor(slot, operation_id, row, state="custody_lost", reason=reason)
+    actor.failure_code = code  # every miss stays retryable, a found run its bind could not take included
+    actor.usage.update(pending_invocation_id=token, custody_state=START_UNBOUND)
+    return False, actor
+
+
 def rejoin_recorded_review(invocation: Any, data_root: Any, gateway: Any, record: Dict[str, Any],
                            run_id: str, started: Any) -> tuple[str, Any, Optional[float]]:
     """A recovered seat's first step on its recorded engine: ``(run_id, started custody, generation end)``.
@@ -385,6 +438,7 @@ def rejoin_recorded_review(invocation: Any, data_root: Any, gateway: Any, record
     send exactly as before, an explicit continuation's first send included."""
     if not run_id and record.get("state") == "pending":
         from ouroboros.delegate_accepted import NO_REPLAY, recover
+        from ouroboros.delegate_invocation import HANDOFF_UNSENT
 
         token = str((getattr(invocation, "retry_state", None) or {}).get("pending_invocation_id") or "")
         held, read = recover(data_root, gateway, {**record, "invocation_id": token})
@@ -396,6 +450,12 @@ def rejoin_recorded_review(invocation: Any, data_root: Any, gateway: Any, record
             raise ReviewRouteUnavailable(f"the engine answered for this review's recorded start ({read['lookup']}) but no "
                                          "run could be bound to it now; nothing was re-sent and its outcome stays unknown",
                                          code=read["reason"])
+        elif getattr(invocation, "first_send_only", False) and record.get("handoff") != HANDOFF_UNSENT:
+            from ouroboros.review_execution import ReviewRouteUnavailable
+
+            raise ReviewRouteUnavailable("this continuation's recorded start is not proven unsent and no accepted run "
+                                         "could be bound to it now; nothing was re-posted and its outcome stays unknown",
+                                         code="review_continuation_handoff_unknown")
     prepare_continuation_send(invocation, data_root, record, run_id)  # every continuation POST, replays too
     return run_id, started, continuation_generation_end(invocation, record, run_id)
 
@@ -407,12 +467,74 @@ def continuation_send(invocation: Any) -> bool:
     return str(getattr(invocation, "operation_id", "") or "").startswith(PREFIX)
 
 
+def continuation_send_source(invocation: Any) -> Any:
+    """The deciding author's launch coordinates, not the review's historical billing coordinates."""
+    from ouroboros.review_operation import current_review_operation
+
+    operation = current_review_operation() if continuation_send(invocation) else None
+    return operation.continuation_author if operation is not None else None
+
+
+def refuse_budget_pausing_send(invocation: Any, task_id: str, end: Optional[float] = None,
+                               request: Optional[Dict[str, Any]] = None, model: str = "", root: Any = None) -> None:
+    """Observation-only while the owning task pauses (#1196): a fresh start AND a pending-invocation replay are both a
+    new POST, so neither is sent while ``task_id`` (a selected continuation's deciding task) enters an exact budget
+    pause; the row stays pending. A selected continuation meets its other refusals first (``_continuation_ended``)
+    and is held for Resume only while its START is durably never handed off (``never_handed_off``)."""
+    from ouroboros.budget_pause import dispatch_fenced
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    if not dispatch_fenced(task_id):
+        return
+    if continuation_send(invocation):
+        _continuation_ended(invocation, end, request or {}, model)
+    raise ReviewRouteUnavailable("the owning task is entering an exact pause; no delegated review is started or "
+                                 "re-posted while it pauses", code="budget_pausing_no_send",
+                                 held_before_send=never_handed_off(root, invocation))
+
+
+def _start_token(invocation: Any) -> str:
+    return str((getattr(invocation, "retry_state", None) or {}).get("pending_invocation_id") or "")
+
+
+def never_handed_off(root: Any, invocation: Any) -> bool:
+    """Whether a selected continuation's START is durably proven never handed to a transport: still pending, recorded
+    ``unsent`` by its choice and never marked (``delegate_invocation.HANDOFF_UNSENT``, read now from the shared store).
+    An unreadable record, an older row without the fact or any entered handoff proves nothing."""
+    from ouroboros.delegate_custody import invocation_record
+    from ouroboros.delegate_invocation import HANDOFF_UNSENT
+
+    token = _start_token(invocation)
+    if root is None or not token or not continuation_send(invocation):
+        return False
+    try:
+        record = invocation_record(root, token) or {}
+    except Exception:  # an unread record is no proof
+        return False
+    return record.get("state") == "pending" and record.get("handoff") == HANDOFF_UNSENT
+
+
+def continuation_held(root: Any, invocation: Any, end: Optional[float], request: Dict[str, Any], model: str) -> bool:
+    """A pause that refused this send holds it for Resume only when no Stop, unreadable control, closed window or
+    reached budget fence also refuses it and its START is durably never handed off."""
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    if not never_handed_off(root, invocation):
+        return False
+    try:
+        _continuation_ended(invocation, end, request, model)
+    except ReviewRouteUnavailable:
+        return False
+    return True
+
+
 def prepare_continuation_send(invocation: Any, data_root: Any, record: Optional[Dict[str, Any]], run_id: str) -> None:
     """Before EVERY POST of an explicit continuation's recorded start (no run bound yet), the first send and a crash or
     restart replay alike: the released read-only checkout its START names is put back from the START row's exact
-    mapping (``review_continuation.RESTORE_KEY``, ``review_subject.restore_released_subject``). A failure raises before
-    any POST, so the start stays pending, decided and unsent, for a later collection to repair; a start with no
-    mapping (a writable seat, a live root, an older row) is untouched."""
+    mapping (``review_continuation.RESTORE_KEY``, ``review_subject.restore_released_subject``), marked for the task now
+    sending it (``continuation_send_source``), whose live operation the checkout pass keeps, else the recorded decider.
+    A failure raises before any POST, so the start stays pending, decided and unsent, for a later collection to
+    repair; a start with no mapping (a writable seat, a live root, an older row) is untouched."""
     from ouroboros.review_continuation import RESTORE_KEY
 
     mapping = (record or {}).get(RESTORE_KEY)
@@ -421,8 +543,9 @@ def prepare_continuation_send(invocation: Any, data_root: Any, record: Optional[
     from ouroboros.review_execution import ReviewRouteUnavailable
     from ouroboros.tools.review_subject import restore_released_subject
 
+    author = continuation_send_source(invocation)
     try:
-        restore_released_subject(data_root, mapping)
+        restore_released_subject(data_root, {**mapping, "owner_task": getattr(author, "task_id", "") or mapping.get("owner_task")})
     except ValueError as exc:
         raise ReviewRouteUnavailable(f"the reviewed checkout this continuation reads is unavailable: {exc}; its "
                                      "recorded start was not POSTed", code="review_subject_unavailable") from exc
@@ -450,21 +573,73 @@ def continuation_generation_end(invocation: Any, record: Optional[Dict[str, Any]
     return end
 
 
-def continuation_send_admitted(invocation: Any, end: Optional[float], request: Dict[str, Any], model: str) -> None:
+def continuation_send_admitted(invocation: Any, end: Optional[float], request: Dict[str, Any], model: str,
+                               root: Any = None) -> None:
     """Admit the POST of an explicit continuation's start (``continuation_send``) in the send callback itself, after
     its gateway, START, checkpoint and launch steps, since any POST of a start with no run bound may begin new paid
     work: known spend is below every budget fence, as every review wave is admitted (``review_wave_budget_gate``:
     the global, root and original-group fences, fail-open on an unknown), and its window (``end``,
     ``continuation_generation_end``) has not closed. A refusal keeps its key and bytes: its outcome stays UNKNOWN,
-    never a definite absence. Every other send, and every known run's collection, passes untouched."""
+    never a definite absence, and its other refusals precede the deciding task's own Pause or budget pause, which holds
+    only a START never handed off. An admitted send marks its START handed off (``START_HANDOFF``, one way) before the
+    transport call; a mark that did not land sends nothing. Every other send, and every known run's collection,
+    passes untouched."""
+    if not continuation_send(invocation):
+        return
+    from ouroboros.budget_pause import dispatch_fenced
+    from ouroboros.review_execution import ReviewRouteUnavailable
+    from ouroboros.review_operation import current_review_operation
+
+    _continuation_ended(invocation, end, request, model)  # never a hold: Stop, unknown control, window, budget
+    operation = current_review_operation()
+    author = operation.continuation_author if operation is not None else None
+    if author is not None and (operation.continuation_pause_seen or dispatch_fenced(author.task_id)):
+        raise ReviewRouteUnavailable("The deciding task's Pause holds this continuation's send until Resume.",
+                                     code="review_continuation_author_paused",
+                                     held_before_send=never_handed_off(root, invocation))
+    import contextlib
+    from ouroboros.delegate_custody import START_HANDOFF, actor_decision_lock, emit
+
+    token = _start_token(invocation)
+    if root is not None and token:
+        owner_task = str(invocation.task_id or "")
+        lock_ctx = actor_decision_lock(root, owner_task) if owner_task else contextlib.nullcontext()
+        try:  # short local read+transition only under the existing actor decision lock; network stays outside
+            with lock_ctx:
+                if getattr(invocation, "first_send_only", False) and not never_handed_off(root, invocation):
+                    raise ReviewRouteUnavailable(
+                        "this continuation's recorded start is not proven unsent; nothing was re-posted "
+                        "and its outcome stays unknown", code="review_continuation_handoff_unknown")
+                handed = emit(root, START_HANDOFF, {"invocation_id": token, "task_id": owner_task})
+        except ReviewRouteUnavailable:
+            raise
+        except Exception as exc:
+            raise ReviewRouteUnavailable(
+                f"this continuation's handoff could not be serialized ({exc}), so its recorded start was not "
+                "POSTed; its outcome stays unknown", code="review_continuation_handoff_unrecorded") from exc
+        if not handed:
+            raise ReviewRouteUnavailable("this continuation's handoff could not be recorded, so its recorded start was "
+                                         "not POSTed; its outcome stays unknown",
+                                         code="review_continuation_handoff_unrecorded")
+
+
+def _continuation_ended(invocation: Any, end: Optional[float], request: Dict[str, Any], model: str) -> None:
+    """The refusals no pause turns into a hold, in order: the deciding task's Stop or unreadable control, the known
+    spend at a budget fence, the original window closed."""
     from types import SimpleNamespace
 
+    from ouroboros.review_custody import review_retry_cancelled
     from ouroboros.review_execution import ReviewRouteUnavailable
+    from ouroboros.review_operation import current_review_operation
     from ouroboros.review_substrate import review_usage_category
     from ouroboros.tools.review_helpers import review_wave_binding_fence, review_wave_budget_gate
 
-    if not continuation_send(invocation):
-        return
+    operation = current_review_operation()
+    author = operation.continuation_author if operation is not None else None
+    if author is not None and (operation.control() or operation.control_state == "unknown"
+                               or review_retry_cancelled(author)):
+        raise ReviewRouteUnavailable("The deciding task no longer admits this continuation's send.",
+                                     code="review_continuation_author_fenced")
     admission = review_wave_budget_gate(
         SimpleNamespace(task_id=invocation.task_id), surface=invocation.surface, models=[model],
         prompt_chars=[len(str(request.get("prompt") or ""))], categories=[review_usage_category(invocation.surface)],

@@ -44,6 +44,7 @@ START_STATE_OBSERVED = "delegate_run_start_state_observed"
 START_UNSENT = "delegate_run_start_handoff_refused"
 STARTED = "delegate_run_started"
 START_FAILED = "delegate_run_start_failed"
+START_HANDOFF = "delegate_run_start_handoff_entered"  # a selected review Continue's START may have left (one way)
 TERMINAL_OBSERVED = "delegate_run_terminal_observed"
 INTERACTIONS_OBSERVED = "delegate_run_interactions_observed"
 LEDGER_RECORDED = "delegate_run_ledger_recorded"

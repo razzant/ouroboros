@@ -48,13 +48,14 @@ commit, and every write owner asks it right before each copy, placement or unlin
 (``publication_fence``): a close observed there starts no further effect. Phase B
 runs under the caller's ``guard`` - the supervisor's queue lock, which admission and
 assignment hold - and, under fresh custody and mail locks, re-takes the occupant
-census, re-asks the probe, re-checks every row and mailbox, and only then moves the
-drive out of its place. Nothing under the queue lock copies or hashes, so Phase A is
-not atomic with queue admission: an owner admitted after its probe can meet the
-settled attempt's create-only canonical files, while the attempt basis refuses the
-row write and Phase B's probe keeps the drive. Lock order: supervisor queue lock ->
-task custody lock -> task mail lock -> task-result row lock -> jsonl append lock.
-Row projectors and effective reads never take a lock.
+census, re-asks the probe, re-checks every row, mailbox and a Continue's loan of the
+drive (``review_state_custody.source_lending_hold``), and only then moves it. Nothing
+under the queue lock copies or hashes, so Phase A is not atomic with queue admission:
+an owner admitted after its probe can meet the settled attempt's create-only canonical
+files, while the attempt basis refuses the row write and Phase B's probe keeps the
+drive. Lock order: supervisor queue lock -> task custody lock -> task mail lock ->
+task-result row lock -> jsonl append lock. Row projectors and effective reads never
+take a lock.
 
 Unread mail (V10): an accepted terminal transition captures the exact mailbox
 lines no attempt acknowledged (read before the row lock, unioned under it), and
@@ -1220,7 +1221,7 @@ def _require_not_live(task_ids: List[str], live: LiveProbe) -> None:
 TRANSIENT_RETENTIONS = frozenset({"liveness_unknown", "task_live", "generation_closed", "custody_busy",
                                    "mailbox_busy", "store_busy", "canonical_changed", "drive_occupant_changed",
                                    "call_inventory_changed", "task_result_unreadable", "review_environment_held",
-                                   "kept_service_capture_owed", "service_logs_uncustodied"})
+                                   "review_custody_active", "review_state_unreadable", "kept_service_capture_owed", "service_logs_uncustodied"})
 
 
 def settlement_basis(parent: pathlib.Path, task_id: str, task_dir: pathlib.Path, drive: pathlib.Path) -> list:
@@ -1369,12 +1370,12 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             raise _Retained("not_own_drive")
         if live is None:
             raise _Retained("liveness_unknown")
+        from ouroboros.review_state_custody import source_lending_hold
         from ouroboros.tools.kept_service_outputs import owed_output_hold
         from ouroboros.workspace_preflight import review_scratch_held
-        if review_scratch_held(canonical, drive):
-            raise _Retained("review_environment_held")
-        if owed_output_hold(canonical, base, owed=owed):  # a kept service's declared outputs here still owe their capture
-            raise _Retained("kept_service_capture_owed")
+        if hold := ("review_environment_held" if review_scratch_held(canonical, drive) else source_lending_hold(
+                canonical, drive) or ("kept_service_capture_owed" if owed_output_hold(canonical, base, owed=owed) else "")):
+            raise _Retained(hold)
         occupants = _occupants(drive, tid)
         prepared = [_prepare_occupant(canonical, drive, occupant, live=live, staging=staging,
                                       admission_rollback=admission_rollback and occupant == tid, stop=closed)
@@ -1408,10 +1409,9 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                 raise _Retained("generation_closed")
             if _occupants(drive, tid) != occupants:
                 raise _Retained("drive_occupant_changed")
-            if review_scratch_held(canonical, drive):
-                raise _Retained("review_environment_held")
-            if owed_output_hold(canonical, base):
-                raise _Retained("kept_service_capture_owed")
+            if hold := ("review_environment_held" if review_scratch_held(canonical, drive) else
+                        "kept_service_capture_owed" if owed_output_hold(canonical, base) else ""):
+                raise _Retained(hold)
             _require_not_live([item["task_id"] for item in prepared], live)
             under_q.append(time.monotonic())
             with contextlib.ExitStack() as stack:
@@ -1422,8 +1422,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                     if not stack.enter_context(task_mail_lock(canonical, item["task_id"],
                                                               timeout_sec=_INTERLOCK_LOCK_TIMEOUT_SEC)):
                         raise _Retained("mailbox_busy")
-                if closed():
-                    raise _Retained("generation_closed")  # closed while the locks were awaited: no move
+                if hold := ("generation_closed" if closed() else source_lending_hold(canonical, drive, forget=True)):
+                    raise _Retained(hold)  # closed while the locks were awaited, or lent by a Continue under its owner's lock: no move
                 for item in prepared:
                     _recheck_occupant(canonical, drive, item)
                 under_q.append(time.monotonic())
