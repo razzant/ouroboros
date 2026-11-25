@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 from . import outbox_files
 from .custody import CustodyStore
 from .delivery import tool_origin
+from .events import utf8_safe
 from .file_access import (
     caller_scope,
     idempotency_fingerprint,
@@ -486,7 +487,7 @@ def make_send_tool(api: Any, confirmed_account=lambda: "", place_binder=lambda *
             raise
         if isinstance(binding, dict):
             payload["_place_binding"] = binding
-        receipt = str(request_id or uuid.uuid4().hex).strip()
+        receipt = utf8_safe(str(request_id or uuid.uuid4().hex).strip())
         delivery_id, store = f"telegram-send:{receipt}", None
         fp = idempotency_fingerprint(payload)
         try:

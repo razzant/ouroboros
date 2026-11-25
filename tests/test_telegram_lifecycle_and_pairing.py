@@ -836,11 +836,32 @@ def test_pairing_settings_replace_eio_recovery_max_attempts_durability_and_unive
         lambda self, *a, **k: (_ for _ in ()).throw(PermissionError("denied")) if self.name == "owner_pairing.json" else real_unlink(self, *a, **k),
     )
     assert oa.redeem_owner_pairing_code(s2, 18, "/pair WRONG") is False
-    assert json.loads((s2 / "owner_pairing.json").read_text(encoding="utf-8"))["failed_attempts"] == 5
+    tombstone = json.loads((s2 / "owner_pairing.json").read_text(encoding="utf-8"))
+    assert tombstone["failed_attempts"] == 5 and "code" not in tombstone
     oa._BURNED_HASHES.clear()
     oa._BURNED_ORDER.clear()
     assert oa.redeem_owner_pairing_code(s2, 18, f"/pair {code2}") is False
+
+    # 2b) When BOTH unlink and write fail on 5th bad attempt AND its retry, cursor stays unchanged until storage recovers
+    s2b = tmp_path / "max_attempts_retry_io"
+    api2b = _StubApi(s2b)
+    oa.issue_owner_pairing_code(s2b)
     monkeypatch.setattr(pathlib.Path, "unlink", real_unlink)
+    for _ in range(4):
+        assert oa.redeem_owner_pairing_code(s2b, 18, "/pair WRONG") is False
+    cur2b = pb.PollCursor(s2b / "cursor.json", "https://api.telegram.org", "123456")
+    u_bad = {"update_id": 20, "message": {"chat": {"id": 18, "type": "private"}, "from": {"id": 18}, "message_id": 200, "date": 1700000000, "text": "/pair WRONG"}}
+    real_wpj = oa._write_private_json
+    monkeypatch.setattr(pathlib.Path, "unlink", lambda self, *a, **k: (_ for _ in ()).throw(PermissionError("denied")) if self.name == "owner_pairing.json" else real_unlink(self, *a, **k))
+    monkeypatch.setattr(oa, "_write_private_json", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.EIO, "write denied")))
+    for _ in range(2):
+        with pytest.raises(ts.TelegramSettingsError):
+            asyncio.run(pb.handle_poll_batch(api2b, cl1, [u_bad], cur2b, types.SimpleNamespace(current=lambda _g: True), 1, "", 10, "strict", "en", is_panic=lambda _u: False, authorize=plugin._authorized_owner, on_callback=lambda *a, **k: asyncio.sleep(0, result="en"), on_message=plugin._handle_owner_message_inner, on_non_owner=lambda a, c, u, p: bridge.handle_non_owner_update(a, c, u, p, runtime_getter=lambda _a: None)))
+        assert cur2b.offset == 0
+    monkeypatch.setattr(pathlib.Path, "unlink", real_unlink)
+    monkeypatch.setattr(oa, "_write_private_json", real_wpj)
+    asyncio.run(pb.handle_poll_batch(api2b, cl1, [u_bad], cur2b, types.SimpleNamespace(current=lambda _g: True), 1, "", 10, "strict", "en", is_panic=lambda _u: False, authorize=plugin._authorized_owner, on_callback=lambda *a, **k: asyncio.sleep(0, result="en"), on_message=plugin._handle_owner_message_inner, on_non_owner=lambda a, c, u, p: bridge.handle_non_owner_update(a, c, u, p, runtime_getter=lambda _a: None)))
+    assert cur2b.offset == 21 and not (s2b / "owner_pairing.json").exists()
 
     # 3) Double-encoded link_preview_options.url, poll.question, and document.file_name burn active codes in groups
     s3 = tmp_path / "carriers"
@@ -969,5 +990,10 @@ def test_lone_surrogates_end_to_end_poll_sightings_custody_host_fifo_and_outbox(
         monkeypatch.setattr(tr_cl, "_new_async_client", lambda *_a, **_k: _CaptureClient())
         asyncio.run(tr_cl._post_json("sendMessage", {"chat_id": "-1001", "text": "out \ud800"}))
         assert sent_json == [{"chat_id": "-1001", "text": "out ?"}]
+        # Surrogate error text in format_error and CustodyStore last_error binds never raises UnicodeEncodeError
+        assert "\ud800" not in outbox_worker.format_error(RuntimeError("Bad \ud800 thing"))
+        store.enqueue_outbox("d-sur-err", {"kind": "message", "account_id": "123456", "chat_id": "-1001", "text": "hi"})
+        lease = store.claim_outbox()
+        assert lease is not None and store.release_outbox(lease.delivery_id, reason="Bad \ud800 err", retry_after_sec=0, attempts=lease.attempts, lease_token=lease.lease_token) is True
     finally:
         store.close()

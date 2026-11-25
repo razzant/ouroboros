@@ -17,7 +17,7 @@ from .custody_schema import (
     unmarked_reaction, unregister_runtime_owner, unproven_earlier_attempt, with_album_position, with_reaction_target,
 )
 from .delivery import stored_answers
-from .events import TelegramEvent
+from .events import TelegramEvent, utf8_safe
 from .file_access import idempotency_fingerprint
 
 _SHARED: "weakref.WeakValueDictionary[str, CustodyStore]" = weakref.WeakValueDictionary()
@@ -195,7 +195,7 @@ class CustodyStore:
             cur = conn.execute(
                 "UPDATE inbox SET state='pending', available_at=?, lease_until=0, lease_token='', last_error=? "
                 "WHERE event_id=? AND state='leased'" + held,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id, *args),
+                (time.time() + max(0.0, retry_after_sec), utf8_safe(str(reason)[:500]), event_id, *args),
             )
             return cur.rowcount == 1
 
@@ -207,7 +207,7 @@ class CustodyStore:
             cur = conn.execute(
                 "UPDATE inbox SET state='pending', available_at=?, lease_until=0, lease_token='', last_error=?, "
                 "attempts=MAX(0, attempts-1) WHERE event_id=? AND state='leased'" + held,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id, *args),
+                (time.time() + max(0.0, retry_after_sec), utf8_safe(str(reason)[:500]), event_id, *args),
             )
             return cur.rowcount == 1
 
@@ -259,7 +259,7 @@ class CustodyStore:
                                          ELSE first_failed_at END,
                     last_failed_at=excluded.last_failed_at, last_error=excluded.last_error
                 """,
-                (event_id, int(ordinal), int(counted), now if counted else 0.0, now, str(error)[:500]),
+                (event_id, int(ordinal), int(counted), now if counted else 0.0, now, utf8_safe(str(error)[:500])),
             )
             return dict(
                 conn.execute(
@@ -323,7 +323,7 @@ class CustodyStore:
             cur = conn.execute(
                 "UPDATE inbox SET state='failed', lease_until=0, lease_token='', failed_at=?, last_error=?, "
                 "host_receipt_json=COALESCE(?, host_receipt_json) WHERE event_id=? AND state='leased'" + held,
-                (time.time(), str(reason)[:500], compact_json(receipt) if receipt else None, event_id, *args),
+                (time.time(), utf8_safe(str(reason)[:500]), compact_json(receipt) if receipt else None, event_id, *args),
             )
             return cur.rowcount == 1
 
@@ -544,7 +544,7 @@ class CustodyStore:
             cur = conn.execute(
                 "UPDATE presence_work SET state='pending', available_at=?, lease_until=0, lease_token='', last_error=? "
                 "WHERE work_ref=? AND state='leased'" + held,
-                (now + max(0.0, retry_after_sec), str(reason)[:500], work_ref, *args),
+                (now + max(0.0, retry_after_sec), utf8_safe(str(reason)[:500]), work_ref, *args),
             )
             conn.commit()
             return cur.rowcount == 1
@@ -699,7 +699,7 @@ class CustodyStore:
             updated = conn.execute(
                 "UPDATE outbox SET state='pending', available_at=?, lease_until=0, lease_token='', last_error=? "
                 "WHERE delivery_id=? AND state='leased'" + held,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], delivery_id, *args),
+                (time.time() + max(0.0, retry_after_sec), utf8_safe(str(reason)[:500]), delivery_id, *args),
             )
             return updated.rowcount == 1
 
@@ -714,7 +714,7 @@ class CustodyStore:
                 "last_error=?,attempts=MAX(0,attempts-1),payload_json=CASE WHEN "
                 "json_extract(payload_json,?)=attempts THEN json_set(payload_json,?,MAX(0,attempts-1)) "
                 "ELSE payload_json END WHERE delivery_id=? AND state='leased'" + held,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], STAMP_PATH, STAMP_PATH, delivery_id, *args),
+                (time.time() + max(0.0, retry_after_sec), utf8_safe(str(reason)[:500]), STAMP_PATH, STAMP_PATH, delivery_id, *args),
             )
             return updated.rowcount == 1
 
@@ -747,7 +747,7 @@ class CustodyStore:
             updated = conn.execute(
                 "UPDATE outbox SET state='failed', lease_until=0, lease_token='', failed_at=?, last_error=?, "
                 "payload_json=COALESCE(?,payload_json) WHERE delivery_id=? AND state='leased'" + held,
-                (time.time(), str(reason)[:500], compact_json(payload) if payload is not None else None, delivery_id, *args),
+                (time.time(), utf8_safe(str(reason)[:500]), compact_json(payload) if payload is not None else None, delivery_id, *args),
             )
             if (attempts is not None or lease_token) and updated.rowcount != 1:
                 conn.rollback()

@@ -66,7 +66,7 @@ def retry_delay(attempts: int) -> float:
 
 
 def format_error(exc: Exception) -> str:
-    return f"{type(exc).__name__}: {exc}"[:500]
+    return utf8_safe(f"{type(exc).__name__}: {exc}"[:500])
 
 
 def optional_int(value: Any) -> Optional[int]:

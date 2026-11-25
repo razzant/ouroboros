@@ -128,6 +128,17 @@ def _best_effort_clear_pairing_unlocked(path: pathlib.Path) -> None:
         pass
 
 
+def _persist_terminal_burn_unlocked(path: pathlib.Path) -> None:
+    """Remove ``owner_pairing.json`` or write a codeless terminal tombstone; raise if both fail."""
+    try:
+        _clear_pairing_unlocked(path)
+    except TelegramSettingsError:
+        try:
+            _write_private_json(path, {"failed_attempts": _PAIRING_MAX_ATTEMPTS})
+        except OSError as exc:
+            raise TelegramSettingsError("Could not persist terminal owner pairing failure.") from exc
+
+
 def clear_owner_pairing(state_dir: Any) -> None:
     root = _resolve_state_dir(state_dir)
     with settings_lock(root):
@@ -223,10 +234,7 @@ def redeem_owner_pairing_code(
                     _best_effort_clear_pairing_unlocked(path)
                     return False
                 if pending_cid == int(chat_id) and _const_eq(redeemed_hash, _sha256_text(candidate)) and not _is_burned_in_memory(candidate):
-                    try:
-                        merge_settings_unlocked(root, {"TELEGRAM_CHAT_ID": str(int(chat_id))})
-                    except OSError as exc:
-                        raise TelegramSettingsError("Could not persist owner binding.") from exc
+                    merge_settings_unlocked(root, {"TELEGRAM_CHAT_ID": str(int(chat_id))})
                     try:
                         _write_private_json(path, {"redeemed_sha256": redeemed_hash, "redeemed_at": redeemed_at})
                     except OSError:
@@ -236,7 +244,7 @@ def redeem_owner_pairing_code(
             _best_effort_clear_pairing_unlocked(path)
             return False
         if _is_burned_in_memory(expected):
-            _best_effort_clear_pairing_unlocked(path)
+            _persist_terminal_burn_unlocked(path)
             return False
         bounds = _parse_pairing_bounds(record)
         if bounds is None:
@@ -252,21 +260,14 @@ def redeem_owner_pairing_code(
                 failed += 1
                 if failed >= _PAIRING_MAX_ATTEMPTS:
                     _mark_burned_in_memory(expected)
-                    record["failed_attempts"] = failed
-                    try:
-                        _clear_pairing_unlocked(path)
-                    except TelegramSettingsError:
-                        try:
-                            _write_private_json(path, record)
-                        except OSError as exc:
-                            raise TelegramSettingsError("Could not persist terminal owner pairing failure.") from exc
+                    _persist_terminal_burn_unlocked(path)
                 else:
                     record["failed_attempts"] = failed
                     try:
                         _write_private_json(path, record)
                     except OSError:
                         _mark_burned_in_memory(expected)
-                        _clear_pairing_unlocked(path)
+                        _persist_terminal_burn_unlocked(path)
             return False
         redeemed_hash = _sha256_text(expected)
         pending_sentinel = {"redeemed_sha256": redeemed_hash, "redeemed_at": ts, "pending_chat_id": int(chat_id)}
@@ -274,10 +275,7 @@ def redeem_owner_pairing_code(
             _write_private_json(path, pending_sentinel)
         except OSError as exc:
             raise TelegramSettingsError("Could not persist owner pairing redemption.") from exc
-        try:
-            merge_settings_unlocked(root, {"TELEGRAM_CHAT_ID": str(int(chat_id))})
-        except OSError as exc:
-            raise TelegramSettingsError("Could not persist owner binding.") from exc
+        merge_settings_unlocked(root, {"TELEGRAM_CHAT_ID": str(int(chat_id))})
         try:
             _write_private_json(path, {"redeemed_sha256": redeemed_hash, "redeemed_at": ts})
         except OSError:
