@@ -194,51 +194,39 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
         } catch { return null; }
     };
     // This room's entry first (an empty one too: it was read empty), stamped with when it was saved; then the entries
-    // saved least recently give way until all fit TOTAL_CHARS. An origin too full to take it frees what the write adds
-    // first (its text less the text it replaces, or with its key when the room has none), then asks once more; if that
-    // fails too, the rooms that gave way come back. One that cannot be written goes, alone: an older text never stands
-    // for a newer read. Only a save writes this entry: a show or a read with nothing new never rewrites words another
-    // tab may have replaced or erased.
+    // saved least recently give way until all fit TOTAL_CHARS. An origin too full to take it: the others give way one
+    // at a time, saved least recently first, the write asked again after each, until it lands or none is left. Nothing
+    // that gave way is written back (another tab may have erased or replaced it since): a write that cannot land even
+    // then leaves them gone, and goes itself, alone: an older text never stands for a newer read. Only a save writes
+    // this entry: a show or a read with nothing new never rewrites words another tab may have replaced or erased.
     const write = (rows) => {
         let store = null, written = false;
         try {
             store = storage();
             if (!store || !current(store, true)) return;
             const text = entryText(rows, Date.now());
-            // The others, saved least recently first, give way until all fit and `need` more characters are free;
-            // the ones taken, with their text.
-            const giveWay = (need) => {
-                const others = familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
-                    const value = store.getItem(name) || '';
-                    return { name, value, size: name.length + value.length, read: readOf(value) };
-                }).sort((a, b) => a.read - b.read);
-                let total = PREVIEW_KEY.length + RECORD.length + entry.length + text.length
-                    + others.reduce((sum, other) => sum + other.size, 0);
-                const taken = [];
-                for (const other of others) {
-                    if (total <= TOTAL_CHARS && need <= 0) break;
-                    store.removeItem(other.name);
-                    taken.push(other);
-                    total -= other.size;
-                    need -= other.size;
-                }
-                return taken;
+            const others = familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
+                const value = store.getItem(name) || '';
+                return { name, size: name.length + value.length, read: readOf(value) };
+            }).sort((a, b) => a.read - b.read);
+            const put = () => {
+                try { store.setItem(entry, text); } catch (error) { if (full(error)) return false; throw error; }
+                return true;
             };
-            try { store.setItem(entry, text); } catch (error) {
-                if (!full(error)) throw error;
-                const old = store.getItem(entry);
-                const taken = giveWay(old === null ? entry.length + text.length : text.length - old.length);
-                try { store.setItem(entry, text); } catch (again) {
-                    // They fitted a moment ago: a write that did not land takes no other room's words.
-                    for (const other of taken) try { store.setItem(other.name, other.value); } catch { /* taken meanwhile */ }
-                    throw again;
-                }
+            written = put();
+            while (!written && others.length) {
+                store.removeItem(others.shift().name);
+                written = put();
             }
-            written = true;
-            giveWay(0);
-        } catch {
-            if (!written) try { store?.removeItem(entry); } catch { /* storage unavailable */ }
-        }
+            let total = PREVIEW_KEY.length + RECORD.length + entry.length + text.length
+                + others.reduce((sum, other) => sum + other.size, 0);
+            while (written && total > TOTAL_CHARS && others.length) {
+                const other = others.shift();
+                store.removeItem(other.name);
+                total -= other.size;
+            }
+        } catch { /* storage unavailable, or a refusal other than a full origin */ }
+        if (!written) try { store?.removeItem(entry); } catch { /* storage unavailable */ }
     };
     // Each row keeps the time and position its bubble is stamped with (chat.js addMessage, stampNodeTimestamp,
     // stampHistoryNode): a missing time is the moment it is drawn, one that does not parse leaves it untimed.

@@ -458,9 +458,9 @@ test('a show and what follows it never undo another tab\'s erasure, nor put olde
     }
 });
 
-test('a room\'s own entry is written before any other gives way: one that fails takes no other room\'s', t => {
+test('a room\'s own entry is written before any other gives way: a refusal other than a full origin takes no other room\'s', t => {
     // Grok 1: a write that does not land takes this room's older text (it never stands for a newer read) and nothing
-    // else; only an origin too full to take it makes room (how much: the next test), and asks once more.
+    // else; only an origin too full to take it makes others give way (the next tests).
     const f = fixture(t), read = tenRooms(f, t);
     const target = entryOf([11, 'p']);  // an eleventh room: its text does not fit beside the ten
     const others = () => [...f.values].filter(([key]) => key !== target);
@@ -479,16 +479,6 @@ test('a room\'s own entry is written before any other gives way: one that fails 
     assert.equal(f.values.has(entryOf([1, 'p'])), false);
     storing(refusing('SecurityError')).save([]);
     assert.equal(f.values.has(target), false, 'a write that did not land leaves no older text for the newer read');
-    read([11, 'p']);
-    const stand = Object.fromEntries(others());
-    storing(refusing('QuotaExceededError')).save([...BIG].reverse());
-    assert.equal(f.values.has(target), false, 'an origin that stays full: its older text goes too');
-    assert.deepEqual(Object.fromEntries(others()), stand, 'and a write that adds nothing to the origin frees nothing');
-    // Fable w2 1: a first write the origin stays too full for makes room, asks again, fails again: the rooms that
-    // gave way for it come back as they were.
-    storing(refusing('QuotaExceededError')).save(BIG);
-    assert.equal(f.values.has(target), false, 'still full: not written');
-    assert.deepEqual(Object.fromEntries(others()), stand, 'every other room stands');
     assert.ok(f.size() <= TOTAL_CHARS);
 });
 
@@ -496,31 +486,33 @@ test('a room\'s own entry is written before any other gives way: one that fails 
 // QuotaExceededError, a replacement counted by what it replaces (an origin's quota, counted in characters).
 function cappedStorage(capacity) {
     const storage = memoryStorage(), { values, setItem } = storage;
+    storage.capacity = capacity;
     storage.setItem = (key, value) => {
         let used = key.length + String(value).length;
         for (const [name, text] of values) if (name !== key) used += name.length + text.length;
-        if (used > capacity) throw Object.assign(new Error('full'), { name: 'QuotaExceededError' });
+        if (used > storage.capacity) throw Object.assign(new Error('full'), { name: 'QuotaExceededError' });
         setItem(key, value);
     };
     return storage;
 }
+// Characters a store holds, keys and values.
+const used = storage => [...storage.values].reduce((sum, [key, text]) => sum + key.length + text.length, 0);
 
-test('an origin too full for a write frees what the write adds, the rooms saved least recently first', t => {
-    // Astra 6: a replacement is credited the text it replaces and a first insertion is charged its key too, so a
-    // room grown by one character takes one room's place and a new room with a longer key still finds room. Each
-    // origin here holds exactly what it stores.
+test('an origin too full for a write: the others give way one at a time, saved least recently first, until it lands', t => {
+    // Astra 6 and w3 6: the write is asked again after each room that gives way, so only as many go as it needs, however
+    // much room the origin already had: a room grown by one character on a full origin takes one room's place, a new
+    // room with a longer key two, and a new room one character past the room already free one. Each origin here holds
+    // what it stores and the room it is said to have free.
     const { mount } = fixture(t);
     t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
     const keys = storage => [...storage.values.keys()].filter(key => key !== PREVIEW_KEY);
-    const saving = (storage, room, rows) => {
-        createChatPreview({ feed: mount, room, scope: PREVIEW_SCOPE, label: senderLabel, mutate: fn => fn(),
-            storage: () => storage }).save(rows);
-        t.mock.timers.tick(1000);
-    };
+    const preview = (storage, room) => createChatPreview({ feed: mount, room, scope: PREVIEW_SCOPE, label: senderLabel,
+        mutate: fn => fn(), storage: () => storage });
+    const saving = (storage, room, rows) => { preview(storage, room).save(rows); t.mock.timers.tick(1000); };
     const filled = (rooms) => {
         const storage = cappedStorage(Infinity);
         for (const [room, rows] of rooms) saving(storage, room, rows);
-        const capped = cappedStorage([...storage.values].reduce((sum, [key, text]) => sum + key.length + text.length, 0));
+        const capped = cappedStorage(used(storage));
         for (const [key, text] of storage.values) capped.values.set(key, text);
         return capped;
     };
@@ -537,12 +529,58 @@ test('an origin too full for a write frees what the write adds, the rooms saved 
     saving(first, longer, words);
     assert.deepEqual(keys(first), [entryOf(longer)], 'both gave way and the new room is saved');
     assert.deepEqual(JSON.parse(first.values.get(entryOf(longer))).rows.map(item => item.text), [words[0].text]);
-    // Fable w2 1: free room and every other room's place together are less than a new room's text (in a real origin
-    // the shell's own keys hold the rest): all three give way, the second ask fails too, and they come back as they were.
-    const three = filled([[[1, 'a'], words], [[2, 'b'], words], [[3, 'c'], words]]);
-    const before = new Map(three.values);
-    saving(three, [4, 'd'], [row('chat:1', 'w'.repeat(5000))]);
-    assert.deepEqual(new Map(three.values), before, 'the new room is not written and every other room stands');
+    // Astra w3 6: ten rooms of about 1,000 characters, and the origin has room free for all but one character of a new
+    // room's key and text (8,000 characters): the room saved least recently gives way, and only it.
+    const ten = Array.from({ length: 10 }, (_, i) => [[i + 1, 'q'], [row('chat:1', 'v'.repeat(1000))]]);
+    const partial = filled(ten), wide = [row('chat:1', 'u'.repeat(8000))], probe = cappedStorage(Infinity);
+    preview(probe, [11, 'q']).save(wide);  // what that room takes, saved now
+    partial.capacity += entryOf([11, 'q']).length + probe.values.get(entryOf([11, 'q'])).length - 1;
+    saving(partial, [11, 'q'], wide);
+    assert.deepEqual(keys(partial), [...ten.slice(1).map(([room]) => entryOf(room)), entryOf([11, 'q'])],
+        'one character past the room already free: one room gave way, the one saved least recently');
+    // A write that adds nothing to a full origin lands where it stands.
+    const same = filled([[[1, 'a'], words], [[2, 'b'], words]]);
+    saving(same, [2, 'b'], [row('chat:1', 'y'.repeat(1000))]);
+    assert.deepEqual(keys(same), [entryOf([1, 'a']), entryOf([2, 'b'])], 'nothing gave way');
+    assert.equal(JSON.parse(same.values.get(entryOf([2, 'b']))).rows[0].text, 'y'.repeat(1000));
+    // Fable w2 1, astra w3 1: a write that cannot land even once every other room gave way (in a real origin the
+    // shell's own keys hold the rest). What gave way stays gone (a cache), nothing is written back, and the room's own
+    // older text goes: no older text stands for its newer read.
+    const three = filled([[[1, 'a'], words], [[2, 'b'], words], [[3, 'c'], words]]), asked = [], { setItem } = three;
+    three.setItem = (key, value) => { asked.push(key); setItem(key, value); };
+    saving(three, [3, 'c'], [row('chat:1', 'w'.repeat(5000))]);
+    assert.deepEqual(keys(three), [], 'every other room gave way, and the room keeps no older text');
+    assert.deepEqual([...new Set(asked)], [entryOf([3, 'c'])], 'no room that gave way was written back');
+});
+
+test('a full origin\'s write never writes back a room that gave way: another tab\'s erasure or newer save meanwhile stands', t => {
+    // Astra w3 1: while a room that gave way is absent, another tab may take it (its Project was deleted: the record
+    // stays, so words written back would paint again) or save newer words under it; then this write fails all the same.
+    const { mount } = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    const gone = [9, 'gone'], preview = (storage, room) => createChatPreview({ feed: mount, room, scope: PREVIEW_SCOPE,
+        label: senderLabel, mutate: fn => fn(), storage: () => storage });
+    for (const [other, act, left] of [
+        ['erases its Project', storage => forgetProjectPreviews(['gone'], PREVIEW_SCOPE, storage), undefined],
+        ['saves newer words', storage => preview(storage, gone).save([row('chat:2', 'n'.repeat(1000))]), 'n'.repeat(1000)]]) {
+        const storage = cappedStorage(Infinity);
+        preview(storage, gone).save([row('chat:1', 'o'.repeat(1000))]);
+        t.mock.timers.tick(1000);
+        storage.capacity = used(storage);  // full: and a new room larger than the one that gives way
+        // The other tab acts once, right after this tab's write made the room give way.
+        const { removeItem } = storage;
+        storage.removeItem = (key) => {
+            removeItem(key);
+            if (key === entryOf(gone)) { storage.removeItem = removeItem; act(storage); }
+        };
+        preview(storage, [10, 'p']).save([row('chat:1', 'x'.repeat(5000))]);
+        storage.removeItem = removeItem;
+        assert.equal(storage.values.has(entryOf([10, 'p'])), false, `another tab ${other}: this write did not land`);
+        const kept = storage.values.get(entryOf(gone));
+        assert.deepEqual(kept && JSON.parse(kept).rows.map(item => item.text), left && [left], `another tab ${other}: that stands`);
+        assert.equal(preview(storage, gone).show(), Boolean(left),
+            `another tab ${other}: a later opening paints ${left ? 'its words' : 'nothing'}, never the older words`);
+    }
 });
 
 test('a room over its own share keeps its newest whole rows; a person\'s text is never cut', t => {
