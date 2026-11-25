@@ -12,7 +12,9 @@ def _book(chapter):
 
 
 @pytest.mark.parametrize("fact,obsolete", [
-    ("Local delete unloads and removes payload and the entire state directory under the lifecycle lock",
+    ("Local Delete refuses name collisions; under lifecycle and sign-in locks it unloads and removes "
+     "payload, state, own sign-ins and handover clients without provider calls, tombstone or deferred "
+     "cleanup",
      "Local delete removes payload and records the uninstall tombstone"),
     ("without the configured GitHub token (host credentials still apply)", "HTTPS unauthenticated"),
     ("authentication refusals once with it alone, without a credential helper", "retrying only auth refusals once with the configured token"),
