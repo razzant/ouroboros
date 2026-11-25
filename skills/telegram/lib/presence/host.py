@@ -722,13 +722,14 @@ class PresenceHostClient:
             exc.binding_id = binding_id
             raise
         status = str(response.get("status") or "")
+        turn_ref = _utf8_ref(response.get("turn_ref"), "turn_ref")
         continuation_ref = ""
         if status == "continuing" and early:
-            continuation_ref = str(response.get("continuation_ref") or "").strip()
+            continuation_ref = _utf8_ref(response.get("continuation_ref"), "continuation_ref")
             if (
                 response.get("continuation_version") != _EARLY_CONTINUATION
                 or not continuation_ref
-                or continuation_ref != str(response.get("turn_ref") or "").strip()
+                or continuation_ref != turn_ref
             ):
                 raise PresenceHostError("continuing presence answer lacks its version-2 continuation_ref")
         elif status != "completed":
@@ -736,19 +737,20 @@ class PresenceHostClient:
         outcome = str(response.get("outcome") or "")
         if outcome not in _OUTCOMES:
             raise PresenceHostError("presence Host returned an invalid outcome")
-        work_ref = str(response.get("work_ref") or "").strip()
+        work_ref = _utf8_ref(response.get("work_ref"), "work_ref")
+        output_ref = _utf8_ref(response.get("output_ref"), "output_ref")
         if outcome == "deferred" and not work_ref and not continuation_ref:
             raise PresenceHostError("deferred presence result is missing work_ref")
         return PresenceSubmission(
             status=status,
             outcome=outcome,
             text=str(response.get("text") or ""),
-            turn_ref=str(response.get("turn_ref") or "").strip(),
+            turn_ref=turn_ref,
             work_ref=work_ref,
             binding_id=binding_id,
             delivery_reporting_version=int(response.get("delivery_reporting_version") == 1),
             continuation_ref=continuation_ref,
-            output_ref=str(response.get("output_ref") or "").strip(),
+            output_ref=output_ref,
             reply_anchor=_reply_anchor(response.get("reply_anchor")),
         )
 
@@ -829,6 +831,15 @@ def _selected_outputs(response: Dict[str, Any]) -> tuple[Dict[str, Any], ...]:
         if output["outcome"] in {"message", "deferred"} and str(output.get("text") or "").strip():
             selected.append({**output, "reply_anchor": _reply_anchor(output.get("reply_anchor"))})
     return tuple(selected)
+
+
+def _utf8_ref(value: Any, label: str) -> str:
+    text = str(value or "").strip()
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise PresenceHostError(f"presence Host returned non-UTF-8 {label}") from exc
+    return text
 
 
 def _reply_anchor(value: Any) -> Optional[Dict[str, Any]]:

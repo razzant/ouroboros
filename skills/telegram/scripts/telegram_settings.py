@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Optional
 
@@ -64,12 +65,12 @@ def _settings_path(state_dir: Path) -> Path:
 def load_settings(state_dir: Path) -> dict[str, Any]:
     path = _settings_path(state_dir)
     try:
-        path.stat()
+        st = path.stat()
     except FileNotFoundError:
         return {}
     except OSError as exc:
         raise TelegramSettingsError("Could not read Telegram settings.") from exc
-    if not path.is_file():
+    if not stat.S_ISREG(st.st_mode):
         raise TelegramSettingsError("Telegram settings are invalid.")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -259,11 +260,8 @@ def settings_lock(state_dir: Path):
     """Cross-process exclusive lock guarding Telegram settings and owner pairing transitions."""
     path = _settings_path(state_dir)
     lock_path = path.with_name(_LOCK_NAME)
-    try:
-        if path_is_link_or_reparse(lock_path):
-            raise TelegramSettingsError("Telegram settings lock is unsafe.")
-    except OSError as exc:
-        raise TelegramSettingsError("Could not access Telegram settings lock.") from exc
+    if path_is_link_or_reparse(lock_path):
+        raise TelegramSettingsError("Telegram settings lock is unsafe.")
     try:
         fd = acquire_file_lock(lock_path, timeout_sec=2.0)
     except Exception as exc:
@@ -288,7 +286,7 @@ def merge_settings_unlocked(state_dir: Path, patch: dict[str, Any]) -> dict[str,
             pass
         os.replace(tmp, path)
         return current
-    except OSError as exc:
+    except (OSError, UnicodeEncodeError) as exc:
         raise TelegramSettingsError("Could not persist Telegram settings.") from exc
     finally:
         try:

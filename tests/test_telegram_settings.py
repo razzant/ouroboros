@@ -643,13 +643,17 @@ def test_settings_path_resolve_oserror_raises_telegram_settings_error_in_load_lo
             pass
     with pytest.raises(TelegramSettingsError, match="state directory"):
         telegram_settings_module.merge_settings_unlocked(state, {"TELEGRAM_CHAT_ID": "18"})
+    monkeypatch.setattr(Path, "resolve", real_resolve)
+    with pytest.raises(TelegramSettingsError, match="persist"):
+        telegram_settings_module.merge_settings_unlocked(state, {"TELEGRAM_SILENT_MODE": "\ud800"})
 
 
 def test_presence_tools_validate_request_id_consistently_and_preserve_identity(tmp_path):
+    import asyncio
     from tests.test_telegram_security_boundaries import _StubApi, _load_plugin
 
     _load_plugin("tg_req_id")
-    from tg_req_id.lib.presence import custody, tools
+    from tg_req_id.lib.presence import custody, host, tools
 
     state = tmp_path / "tools_state"
     api = _StubApi(state)
@@ -659,25 +663,42 @@ def test_presence_tools_validate_request_id_consistently_and_preserve_identity(t
     operation = tools.make_operation_tool(api, confirmed_account=lambda: "123456")
     react = tools.make_react_tool(operation)
 
-    # Lone surrogates are rejected with structured invalid_request_id across all 5 tools before SQLite/staging
-    for bad_id in ("x\ud800", "x\udfff"):
+    # Lone surrogates, whitespace-only, and padded IDs are rejected with invalid_request_id across all 5 tools before SQLite/staging
+    for bad_id in ("x\ud800", "x\udfff", "  ", " \tx?\u00a0"):
         assert send(chat_id="-1001", text="hi", request_id=bad_id)["code"] == "invalid_request_id"
         assert receipt(request_id=bad_id, operation="send")["code"] == "invalid_request_id"
         assert moderate(action="ban_member", chat_id="-1001", request_id=bad_id, user_id=5)["code"] == "invalid_request_id"
         assert operation(method="editMessageText", chat_id="-1001", message_id=5, request_id=bad_id, text="ed")["code"] == "invalid_request_id"
         assert react(action="set", chat_id="-1001", message_id=5, request_id=bad_id, emoji="👍")["code"] == "invalid_request_id"
+    assert moderate(action="ban_member", chat_id="-1001", request_id="", user_id=5)["ok"] is False
     assert not (state / "custody.sqlite3").exists()
 
-    # Distinct valid IDs (including literal '?') never collapse, same-ID retries deduplicate, and receipt looks up exact ID
+    # Distinct valid IDs (including literal '?') never collapse, same-ID retries deduplicate, omitted generates UUID, and receipt looks up exact ID
     r1 = send(chat_id="-1001", text="hi", request_id="x?")
     r2 = send(chat_id="-1001", text="hi", request_id="x?")
     r3 = send(chat_id="-1001", text="hi", request_id="x2")
+    r_omitted = send(chat_id="-1001", text="hi")
     assert r1["ok"] is True and r1["state"] == "queued" and r1["request_id"] == "x?"
     assert r2["ok"] is True and r2["state"] == "already_queued" and r2["request_id"] == "x?"
     assert r3["ok"] is True and r3["state"] == "queued" and r3["request_id"] == "x2"
+    assert r_omitted["ok"] is True and r_omitted["state"] == "queued" and len(r_omitted["request_id"]) == 32
     assert receipt(request_id="x?", operation="send")["state"] == "pending"
     assert receipt(request_id="x2", operation="send")["state"] == "pending"
+    assert receipt(request_id=r_omitted["request_id"], operation="send")["state"] == "pending"
     store = custody.CustodyStore.shared(state / "custody.sqlite3")
     with store._connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 3
     store.close()
+
+    # Non-UTF-8 host deferred work_ref fails cleanly as PresenceHostError instead of crashing SQLite
+    class _BadRefTransport:
+        async def request_json(self, *a, **k):
+            return {"status": "completed", "outcome": "deferred", "turn_ref": "", "work_ref": "w\udfff"}
+
+    hc = host.PresenceHostClient(state_dir=state, token_provider=lambda: "tok", host_base="http://127.0.0.1:8765", transport=_BadRefTransport())
+    hc.delivery_reporting_status = "unsupported"
+    hc._identity_discovered_at = 1e18
+    hc.places_version = 1
+    ev = {k: "" for k in host._EVENT_KEYS}
+    with pytest.raises(host.PresenceHostError, match="non-UTF-8 work_ref"):
+        asyncio.run(hc.submit(ev, []))

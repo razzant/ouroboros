@@ -386,17 +386,15 @@ def _positive_id(value: Any, name: str) -> int:
 
 
 def _validated_request_id(request_id: Any, *, allow_generated: bool = False) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
-    raw = "" if request_id is None else str(request_id).strip()
-    if not raw:
+    if request_id is None or request_id == "":
         return (uuid.uuid4().hex if allow_generated else "", None)
+    raw = str(request_id)
+    if not raw.strip() or raw != raw.strip():
+        return None, {"ok": False, "code": "invalid_request_id", "error": "request_id must be non-empty UTF-8 text without surrounding whitespace."}
     try:
         raw.encode("utf-8")
     except UnicodeEncodeError:
-        return None, {
-            "ok": False,
-            "code": "invalid_request_id",
-            "error": "request_id must be valid UTF-8 text.",
-        }
+        return None, {"ok": False, "code": "invalid_request_id", "error": "request_id must be valid UTF-8 text."}
     return raw, None
 
 
@@ -602,6 +600,8 @@ def make_moderation_tool(api: Any, confirmed_account=lambda: "", place_binder=la
         receipt, id_err = _validated_request_id(request_id)
         if id_err is not None:
             return id_err
+        if not receipt:
+            return {"ok": False, "error": "request_id is required for a retryable operation"}
         store = CustodyStore.shared(pathlib.Path(api.get_state_dir()) / "custody.sqlite3")
         account = _resolve_tool_account(ctx, confirmed_account)
         if not account:
@@ -615,8 +615,6 @@ def make_moderation_tool(api: Any, confirmed_account=lambda: "", place_binder=la
             target = str(chat_id).strip()
             if re.fullmatch(r"-?[0-9]+", target) is None:
                 raise ValueError("chat_id must be an exact numeric Telegram id")
-            if not receipt:
-                raise ValueError("request_id is required for a retryable operation")
             local_topic_id = _positive_id(topic_id, "topic_id") if topic_id is not None else None
             parameters: dict[str, Any] = {"chat_id": target}
             if action == "delete_message":
