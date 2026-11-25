@@ -1,0 +1,61 @@
+name: qa-f8-narrow
+
+on:
+  push:
+    branches: ['qa/work-roster-93c04deb']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-f8-narrow-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # One dialect on both runners: Windows runners ship Git Bash (claudexor-platform-gate.yml does the same).
+    shell: bash
+
+env:
+  CANDIDATE_SHA: '93c04deb03778e92fe24994e5c33919ef41fe819'
+  PYTHONUTF8: '1'
+
+jobs:
+  qa:
+    name: qa · ${{ matrix.os }} · four test homes through safe_test
+    if: ${{ github.ref == 'refs/heads/qa/work-roster-93c04deb' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: The candidate is a full commit id
+        run: |
+          printf '%s' "$CANDIDATE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: The checkout is exactly the named candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - uses: ./.github/actions/setup-python-env
+      - name: Test homes through safe_test (the step exits with safe_test's own status)
+        timeout-minutes: 20
+        run: |
+          # The environment's own interpreter: on Windows a bare `python` under the scrubbed environment resolved
+          # outside the virtualenv (#1641).
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          status=0
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" --evidence-dir "$RUNNER_TEMP/qa-evidence" --timeout 900 \
+            -- "$py" -m pytest -o addopts= -q -p no:cacheprovider --tb=short -rA \
+            tests/test_live_works_present.py \
+            tests/test_live_works_holds.py \
+            tests/test_detached_focus.py \
+            tests/test_work_projection_pause_producers.py || status=$?
+          echo "safe_test exit status: $status"
+          echo "safe_test exit status on $RUNNER_OS: $status" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
