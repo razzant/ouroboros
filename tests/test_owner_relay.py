@@ -1640,6 +1640,279 @@ def test_a_relayed_quote_that_carried_only_a_file_keeps_its_descriptor_in_the_co
     assert shown["attachments"][0]["staged"].startswith(NOT_GIVEN)
 
 
+@pytest.mark.parametrize("carried", [False, True], ids=["held", "carried-without-row-sha"])
+def test_file_only_quiz_answer_opens_start_task_by_owner_source_with_empty_owner_words(tmp_path, monkeypatch, carried):
+    """An ordinary answered quiz row carrying only a measured file (no option, no caption) works as start_task's
+    explicit owner_source (held or carried), stages its file, binds cross-room cleanly, and keeps owner words empty."""
+    import json
+    import pathlib
+
+    from ouroboros.agent_startup_checks import validate_task_authority_sources
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.owner_relay import (
+        owner_row_address,
+        owner_row_source,
+        retain_owner_message,
+        source_placeholder_text,
+        source_words,
+    )
+    from ouroboros.owner_words import REPLY_TARGET, task_owner_words
+    from ouroboros.project_dialogue import (
+        _entry_source_identities,
+        _text_sha256,
+        opening_view,
+        opening_words,
+        project_origin_rows,
+        resolve_owner_message_source,
+    )
+    from ouroboros.projects_registry import create_project, project_binding_for_task
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.control_routing import _start_task
+    from ouroboros.utils import atomic_write_json
+    from supervisor import queue as task_queue, workers
+    from supervisor.events import _handle_promote_chat_to_task
+
+    payload = b"bed,seeds\nsouth,4\n"
+    _path, ref = store_upload(payload, "counts.csv", data_dir=tmp_path)
+    claim_refs([ref], tmp_path)
+    opening_row, _ = source(tmp_path)
+    quiz_block = {
+        "quiz_id": "q-file", "question": "Send the seed table", "options": ["Skip"],
+        "state": "answered", "comment": "", "answered_at": "2026-11-20T12:00:00+00:00", "attachments": [ref],
+    }
+    quiz_row = {
+        "direction": "system", "chat_id": 1, "user_id": 0,
+        "text": "[Owner quiz answer] Host frame for q-file",
+        "ts": "2026-11-20T12:00:00+00:00", "source": "owner_quiz_answer", "task_id": "asker-1",
+        "client_message_id": "quiz_answer:asker-1:q-file", "type": "quiz_answer", "quiz": quiz_block,
+    }
+    dialogue_store.append(tmp_path, "chat", quiz_row)
+    handle = owner_row_address(quiz_row)
+    project = create_project(tmp_path, "seed-audit", name="Seed Audit")
+
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers, "WORKERS", {0: SimpleNamespace()})
+    monkeypatch.setattr(task_queue, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(task_queue, "PENDING", [])
+    monkeypatch.setattr(task_queue, "RUNNING", {})
+    atomic_write_json(tmp_path / "state" / "queue_snapshot.json", {"worker_total": 1, "pending": [], "running": []})
+    host = SimpleNamespace(
+        DRIVE_ROOT=tmp_path, WORKERS={0: SimpleNamespace()}, PENDING=task_queue.PENDING, bridge=None,
+        append_jsonl=lambda *_a, **_kw: None, persist_queue_snapshot=lambda **_kw: True,
+        enqueue_task=task_queue.enqueue_task, load_state=lambda: {"owner_chat_id": 1},
+    )
+
+    emitted = []
+    ctx = context(tmp_path, opening_row)
+    ctx.event_queue = SimpleNamespace(put_nowait=lambda evt: (emitted.append(dict(evt)),
+                                                              _handle_promote_chat_to_task(evt, host))[1])
+    if carried:
+        held_owner_messages(ctx)[handle] = {
+            **quiz_row, "_owner_source_root": str(tmp_path),
+            "carried": {"from": "root", "went_to": "", "at": "2026-11-20T12:01:00+00:00"},
+        }
+    else:
+        assert retain_owner_message(ctx, quiz_row) is not None
+
+    out = _start_task(
+        ctx, "Audit the seed counts", title="Seed counts audit",
+        project_id=project["id"], workspace="none", owner_source=handle,
+    )
+    assert out.startswith("OK: task"), out
+    assert "(no words of theirs)" in out and "counts.csv (staged at start)" in out
+    assert "(file attached)" not in out and "Host frame" not in out and "unavailable" not in out
+
+    [evt] = emitted
+    [task] = task_queue.PENDING
+    assert evt["source_text"] == "(file attached)"
+    assert evt["source_ref"]["text_sha256"] == _text_sha256("(file attached)") and "row_sha256" in evt["source_ref"]
+    assert resolve_owner_message_source(tmp_path, evt["source_ref"]) is not None
+    assert _text_sha256(quiz_row["text"]) not in {key[3] for key in _entry_source_identities(quiz_row)}
+
+    # File is staged; owner words stay empty everywhere.
+    [staged] = task["attachments"]
+    assert staged["status"] == "staged" and staged["label"] == "counts.csv"
+    assert pathlib.Path(staged["abs_path"]).read_bytes() == payload
+    assert task["origin_message_text"] == ""
+    assert load_task_result(tmp_path, task["id"])["origin_message_text"] == ""
+    opening_corpus = task["metadata"]["owner_corpus"][0]
+    assert (opening_corpus["source"], opening_corpus["content"], opening_corpus["quiz_id"]) == (
+        "owner_quiz_answer", "", "q-file")
+    assert opening_corpus["source_task_id"] == "asker-1" and opening_corpus["attachments"][0]["name"] == "counts.csv"
+    owner_rows = [row for row in task_owner_words(tmp_path, task["id"], task=task)[0]
+                  if row["source"] != REPLY_TARGET]
+    assert owner_rows and owner_rows[0]["text"] == "" and owner_rows[0]["source"] == "owner_quiz_answer"
+    assert owner_rows[0]["attachments"][0]["name"] == "counts.csv"
+
+    # Cross-room Project origin projection keeps empty owner words and exact card attribution.
+    binding = project_binding_for_task(tmp_path, task["id"])
+    assert binding["source_text_placeholder"] is True and binding["source_projectable"] is True
+    assert binding["source_input"] == {"source": "owner_quiz_answer", "source_task_id": "asker-1",
+                                       "content": "", "quiz_id": "q-file"}
+    [origin] = project_origin_rows(tmp_path, project["chat_id"])
+    assert opening_words(origin)["content"] == "" and opening_words(origin)["source"] == "owner_quiz_answer"
+    assert opening_view(origin)["text"] == "" and origin["attachments"][0]["name"] == "counts.csv"
+
+    # Resume check passes with empty owner text.
+    env = SimpleNamespace(drive_root=tmp_path, budget_drive_root=tmp_path)
+    resumed = json.loads(json.dumps({key: value for key, value in task.items() if not key.startswith("_")}))
+    assert "unavailable" not in str(validate_task_authority_sources(env, resumed)), resumed
+    assert resumed["origin_message_text"] == ""
+
+    # Negative controls and unchanged non-file / option / comment / secret semantics.
+    empty_row = {**quiz_row, "client_message_id": "quiz_answer:asker-1:q-empty",
+                 "quiz": {**quiz_block, "quiz_id": "q-empty", "attachments": []}}
+    assert source_placeholder_text(empty_row) == "" and source_words(empty_row) is None
+    assert _entry_source_identities(empty_row) == set()
+    assert resolve_owner_message_source(tmp_path, owner_row_source(empty_row)[0]) is None
+    empty_handle = owner_row_address(empty_row)
+    held_owner_messages(ctx)[empty_handle] = {**empty_row, "_owner_source_root": str(tmp_path)}
+    refused = _start_task(ctx, "Should refuse", title="Refuse", owner_source=empty_handle)
+    assert not refused.startswith("OK: task") and len(task_queue.PENDING) == 1, refused
+
+    option_row = {**quiz_row, "quiz": {**quiz_block, "answered_index": 0, "attachments": []}}
+    pressed_oob_row = {**quiz_row, "quiz": {**quiz_block, "answered_index": 5}}
+    comment_row = {**quiz_row, "quiz": {**quiz_block, "comment": "Use option two", "attachments": []}}
+    secret_row = {**quiz_row, "quiz": {**quiz_block, "secret_request": {"plugin_name": "x"}}}
+    secret_outcome_row = {**quiz_row, "quiz": {**quiz_block, "secret_outcome": {"event": "secret_filled"}}}
+    assert source_placeholder_text(option_row) == "" and source_words(option_row) == "1. Skip"
+    assert source_placeholder_text(pressed_oob_row) == "" and source_words(pressed_oob_row) is None
+    assert source_placeholder_text(comment_row) == "" and source_words(comment_row) == "Use option two"
+    assert source_placeholder_text(secret_row) == "" and source_words(secret_row) is None
+    assert source_placeholder_text(secret_outcome_row) == "" and source_words(secret_outcome_row) is None
+    assert _entry_source_identities(secret_row) == _entry_source_identities(secret_outcome_row) == set()
+
+
+def test_retained_card_input_projects_verified_attachments_for_captioned_and_file_only_quiz_answers(
+        tmp_path, monkeypatch):
+    """One canonical projection (answer_facts.retained_card_input) preserves verified attachment evidence for both
+    captioned and file-only quiz_answer rows without duplicate file-only workarounds, while rejecting display-only,
+    empty, out-of-range-press, and secret rows."""
+    import json
+    import pathlib
+
+    from ouroboros import project_dialogue
+    from ouroboros.agent_startup_checks import validate_task_authority_sources
+    from ouroboros.answer_facts import OWNER_CARD_INPUT, OWNER_PRESS, retained_card_input
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.owner_relay import owner_row_address, retain_owner_message
+    from ouroboros.owner_words import REPLY_TARGET, task_owner_words
+    from ouroboros.project_dialogue import opening_input, opening_view, opening_words, project_origin_rows
+    from ouroboros.projects_registry import create_project, project_binding_for_task
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.control_routing import _start_task
+    from ouroboros.utils import atomic_write_json
+    from supervisor import queue as task_queue, workers
+    from supervisor.events import _handle_promote_chat_to_task
+
+    assert not hasattr(project_dialogue, "file_only_quiz_answer_input")
+    payload = b"bed,seeds\neast,7\n"
+    _path, ref = store_upload(payload, "east-counts.csv", data_dir=tmp_path)
+    claim_refs([ref], tmp_path)
+
+    base_block = {
+        "quiz_id": "q-canonical", "question": "Send the east counts", "options": ["Skip"],
+        "state": "answered", "answered_at": "2026-11-20T12:10:00+00:00",
+    }
+
+    def quiz_row(block):
+        return {
+            "direction": "system", "chat_id": 1, "user_id": 0,
+            "text": "[Owner quiz answer] Host frame",
+            "ts": "2026-11-20T12:10:00+00:00", "source": "owner_quiz_answer", "task_id": "asker-2",
+            "client_message_id": f"quiz_answer:asker-2:{block['quiz_id']}", "type": "quiz_answer", "quiz": block,
+        }
+
+    file_only = retained_card_input(quiz_row({**base_block, "comment": "", "attachments": [ref]}), tmp_path)
+    assert (file_only["source"], file_only["content"], file_only["quiz_id"], file_only["source_task_id"]) == (
+        "owner_quiz_answer", "", "q-canonical", "asker-2")
+    assert file_only["attachments"] == [ref] and file_only["reply_to"]["address"] == "quiz q-canonical of task asker-2"
+
+    captioned_row = quiz_row({**base_block, "quiz_id": "q-cap", "comment": "Check east counts", "attachments": [ref]})
+    captioned = retained_card_input(captioned_row, tmp_path)
+    assert (captioned["source"], captioned["content"], captioned["quiz_id"], captioned["source_task_id"]) == (
+        "owner_quiz_answer", "Check east counts", "q-cap", "asker-2")
+    assert captioned["attachments"] == [ref]
+
+    press_with_file = retained_card_input(
+        quiz_row({**base_block, "answered_index": 0, "comment": "", "attachments": [ref]}), tmp_path)
+    assert (press_with_file["source"], press_with_file["content"], press_with_file["pressed"]) == (
+        OWNER_PRESS, "1. Skip", "1. Skip")
+    assert press_with_file["attachments"] == [ref]
+
+    press_and_caption = retained_card_input(
+        quiz_row({**base_block, "answered_index": 0, "comment": "Use row 2", "attachments": [ref]}), tmp_path)
+    assert (press_and_caption["source"], press_and_caption["content"], press_and_caption["pressed"]) == (
+        "owner_quiz_answer", "Use row 2", "1. Skip")
+    assert press_and_caption["attachments"] == [ref]
+
+    for bad_block in (
+        {**base_block, "comment": "", "attachments": []},
+        {**base_block, "comment": "", "attachments": [{"name": "display-only.csv"}]},
+        {**base_block, "answered_index": 5, "comment": "", "attachments": [ref]},
+        {**base_block, "secret_request": {"plugin_name": "x"}, "attachments": [ref]},
+        {**base_block, "secret_outcome": {"event": "secret_filled"}, "attachments": [ref]},
+    ):
+        assert retained_card_input(quiz_row(bad_block), tmp_path)["source"] == OWNER_CARD_INPUT
+
+    assert opening_input(quiz_row({**base_block, "comment": "", "attachments": [ref]}), tmp_path) == {
+        "source": "owner_quiz_answer", "source_task_id": "asker-2", "content": "", "quiz_id": "q-canonical",
+    }
+    assert opening_input(captioned_row, tmp_path) == {
+        "source": "owner_quiz_answer", "source_task_id": "asker-2", "content": "Check east counts", "quiz_id": "q-cap",
+    }
+
+    # End-to-end explicit owner_source start with a captioned + file quiz_answer row.
+    opening_row, _ = source(tmp_path)
+    dialogue_store.append(tmp_path, "chat", captioned_row)
+    handle = owner_row_address(captioned_row)
+    project = create_project(tmp_path, "east-audit", name="East Audit")
+
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers, "WORKERS", {0: SimpleNamespace()})
+    monkeypatch.setattr(task_queue, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(task_queue, "PENDING", [])
+    monkeypatch.setattr(task_queue, "RUNNING", {})
+    atomic_write_json(tmp_path / "state" / "queue_snapshot.json", {"worker_total": 1, "pending": [], "running": []})
+    host = SimpleNamespace(
+        DRIVE_ROOT=tmp_path, WORKERS={0: SimpleNamespace()}, PENDING=task_queue.PENDING, bridge=None,
+        append_jsonl=lambda *_a, **_kw: None, persist_queue_snapshot=lambda **_kw: True,
+        enqueue_task=task_queue.enqueue_task, load_state=lambda: {"owner_chat_id": 1},
+    )
+    ctx = context(tmp_path, opening_row)
+    ctx.event_queue = SimpleNamespace(put_nowait=lambda evt: _handle_promote_chat_to_task(evt, host))
+    assert retain_owner_message(ctx, captioned_row) is not None
+
+    out = _start_task(ctx, "Audit east counts", title="East counts audit",
+                      project_id=project["id"], workspace="none", owner_source=handle)
+    assert out.startswith("OK: task") and "east-counts.csv (staged at start)" in out, out
+    assert "Check east counts" in out and "(no words of theirs)" not in out
+
+    [task] = task_queue.PENDING
+    [staged] = task["attachments"]
+    assert staged["status"] == "staged" and staged["label"] == "east-counts.csv"
+    assert pathlib.Path(staged["abs_path"]).read_bytes() == payload
+    assert task["origin_message_text"] == "Check east counts"
+    assert load_task_result(tmp_path, task["id"])["origin_message_text"] == "Check east counts"
+    opening_corpus = task["metadata"]["owner_corpus"][0]
+    assert (opening_corpus["source"], opening_corpus["content"], opening_corpus["quiz_id"]) == (
+        "owner_quiz_answer", "Check east counts", "q-cap")
+    assert opening_corpus["attachments"][0]["name"] == "east-counts.csv"
+    owner_rows = [row for row in task_owner_words(tmp_path, task["id"], task=task)[0] if row["source"] != REPLY_TARGET]
+    assert owner_rows[0]["source"] == "owner_quiz_answer" and owner_rows[0]["text"] == "Check east counts"
+    assert owner_rows[0]["attachments"][0]["name"] == "east-counts.csv"
+
+    binding = project_binding_for_task(tmp_path, task["id"])
+    assert not binding.get("source_text_placeholder") and binding["source_projectable"] is True
+    assert binding["source_input"] == {"source": "owner_quiz_answer", "source_task_id": "asker-2",
+                                       "content": "Check east counts", "quiz_id": "q-cap"}
+    [origin] = project_origin_rows(tmp_path, project["chat_id"])
+    assert opening_words(origin)["content"] == "Check east counts" and opening_view(origin)["text"] == "Check east counts"
+    assert origin["attachments"][0]["name"] == "east-counts.csv"
+
+    env = SimpleNamespace(drive_root=tmp_path, budget_drive_root=tmp_path)
+    resumed = json.loads(json.dumps({key: value for key, value in task.items() if not key.startswith("_")}))
+    assert "unavailable" not in str(validate_task_authority_sources(env, resumed)), resumed
 def _replies(tmp_path, *words):
     """My human's rows in Main, each with its address."""
     rows = []

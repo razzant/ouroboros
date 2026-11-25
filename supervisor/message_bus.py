@@ -975,6 +975,10 @@ class LocalChatBridge:
         wait_for_answer = bool(block.get("wait_for_answer"))
         host_facts = str(block.get("host_facts") or host_facts or "")
         lifecycle = {key: block[key] for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS) if key in block}
+        if block.get("attachments"):  # a Telegram Reply's files as the card states them (no stored id, path or link)
+            from ouroboros.chat_uploads import answer_files
+
+            lifecycle["attachments"] = answer_files(block["attachments"])
         if delivery := question_delivery_projection(block):
             lifecycle["question_delivery"] = delivery
         materials = list(block.get("materials") or [])
@@ -1082,7 +1086,7 @@ class LocalChatBridge:
                     }
                     # The complete pointer row (ChatOutbound mirrors): present only when known.
                     for key in ("question", "options", "option_details", "stake", "assumption", "recommended_index",
-                                "answered_index", "comment", "wait_for_answer", "wait_ended_at",
+                                "answered_index", "comment", "attachments", "wait_for_answer", "wait_ended_at",
                                 "owner_wait_resume_reason", "host_facts", "materials", "closed_reason", "question_delivery",
                                 "secret_request", "secret_outcome", "secret_save"):
                         if key in pointer:
@@ -1112,6 +1116,7 @@ class LocalChatBridge:
         closed_by_task_id: Optional[str] = None,
         question_delivery: Optional[Dict[str, str]] = None,
         secret_outcome: Optional[Dict[str, Any]] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Broadcast a quiz lifecycle update to already-rendered cards.
 
@@ -1120,8 +1125,9 @@ class LocalChatBridge:
         must never masquerade as a new card. Durability lives in the
         owner_quiz task-result projection (history replay merges it) — this
         frame is the live half only, so a lost broadcast heals on reload.
-        ``comment`` is the owner's recorded free-text answer (#471): the live
-        card renders it exactly as the replayed one does; absent when empty.
+        ``comment`` is the owner's recorded free-text answer (#471) and ``attachments``
+        its Reply's files (``chat_uploads.answer_files``): the live card renders them
+        exactly as the replayed one does; each absent when empty.
         """
         msg: Dict[str, Any] = {
             "type": "quiz_state",
@@ -1148,6 +1154,8 @@ class LocalChatBridge:
             msg["answered_index"] = int(answered_index)
         if str(comment or ""):
             msg["comment"] = str(comment)
+        if attachments:
+            msg["attachments"] = [dict(item) for item in attachments]
         if wait_for_answer is not None:
             # Additive: ``False`` after a bounded wait closed — the card stops saying
             # "waiting" while it stays answerable.

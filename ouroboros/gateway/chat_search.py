@@ -229,12 +229,13 @@ def _candidate(entry, data_dir, answers=None) -> Dict[str, Any]:
     return found
 
 
-def _question_words(quiz, comment: Optional[str] = None) -> Dict[str, Any]:
+def _question_words(quiz, answer: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """A question row's card as its words are drawn (``ChatSearchQuestion``; the question is the row's ``text``, as
     the card reads it): its ``quiz_id``, the offered answers' labels and details as stored (a legacy row's plain
-    labels with ``option_details``; an option of another shape stays one the card refuses), the stake and the
-    owner's own words of a card settled as answered (``comment``, question_presentation.js ``renderOwnerAnswer``),
-    never its lifecycle, assumption, materials or a recommendation."""
+    labels with ``option_details``; an option of another shape stays one the card refuses), the stake, the owner's
+    own words (``comment``) and recorded answer files (``attachments``, ``chat_uploads.answer_files``) of a card
+    settled as answered (question_presentation.js ``renderOwnerAnswer``), never its lifecycle, assumption, materials
+    or a recommendation."""
     words: Dict[str, Any] = {"quiz_id": str(quiz.get("quiz_id") or "")}
     if isinstance(quiz.get("options"), list):
         words["options"] = [
@@ -245,8 +246,11 @@ def _question_words(quiz, comment: Optional[str] = None) -> Dict[str, Any]:
         words["option_details"] = [str(detail or "") for detail in quiz["option_details"]]
     if quiz.get("stake"):
         words["stake"] = str(quiz["stake"])
-    if comment:
-        words["comment"] = comment
+    if isinstance(answer, dict):
+        if answer.get("comment"):
+            words["comment"] = answer["comment"]
+        if answer.get("attachments"):
+            words["attachments"] = answer["attachments"]
     return words
 
 
@@ -255,14 +259,17 @@ def _question_key(entry) -> tuple:
     return str(entry.get("task_id") or ""), str(quiz.get("quiz_id") or "")
 
 
-def _owner_answers(data_dir, found, rows, upper: Optional[int] = None) -> Dict[tuple, str]:
-    """The owner's words on each found question its card shows settled as answered, by ``(task_id, quiz_id)``: its
-    lifecycle as history replays it (``history._collect_chat_rows``) -- the asking task's stored question projection
-    (``owner_quiz``, one strict read per asking task), else the answer or closure row, else the row. An answer row
-    lies after its question, often on a newer page than the one that found it, where the room's feed already holds
-    it: a question whose projection is gone and whose answer the page does not hold reads the asking tasks' chat rows
-    after the oldest such question, below ``upper`` (the search's frozen end), in one indexed probe of at most
-    ``_PROBE_ROWS`` rows and ``_SCAN_BYTES`` stored bytes. A card whose answer lies past it stays as its row froze it."""
+def _owner_answers(data_dir, found, rows, upper: Optional[int] = None) -> Dict[tuple, Dict[str, Any]]:
+    """The recorded owner words and display-only file outcomes on each found question its card shows settled as
+    answered, by ``(task_id, quiz_id)``: its lifecycle as history replays it (``history._collect_chat_rows``) -- the
+    asking task's stored question projection (``owner_quiz``, one strict read per asking task), else the answer or
+    closure row, else the row. An answer row lies after its question, often on a newer page than the one that found
+    it, where the room's feed already holds it: a question whose projection is gone and whose answer the page does
+    not hold reads the asking tasks' chat rows after the oldest such question, below ``upper`` (the search's frozen
+    end), in one indexed probe of at most ``_PROBE_ROWS`` rows and ``_SCAN_BYTES`` stored bytes. A card whose answer
+    lies past it stays as its row froze it. File outcomes are pure metadata projections (``chat_uploads.answer_files``):
+    never disk reads or upload locators."""
+    from ouroboros.chat_uploads import answer_files
     from ouroboros.task_store import read_document
 
     asked = [entry for entry in found if entry.get("type") == "quiz" and isinstance(entry.get("quiz"), dict)]
@@ -289,16 +296,19 @@ def _owner_answers(data_dir, found, rows, upper: Optional[int] = None) -> Dict[t
                               before=upper, lower=min(pending.values()) + 1, limit=_PROBE_ROWS, newest_first=False,
                               max_bytes=_SCAN_BYTES)
         evidence.update({key: quiz for key, quiz in lifecycle(row.row for row in later).items() if key in pending})
-    answers: Dict[tuple, str] = {}
+    answers: Dict[tuple, Dict[str, Any]] = {}
     for entry in asked:
         key = _question_key(entry)
         live = (projections[key[0]].get(key[1]) or evidence.get(key)) if key[0] else None
         stored = entry["quiz"]
         live = live if isinstance(live, dict) else {}
         state = str(live.get("state") or stored.get("state") or "open")
+        if state != "answered":
+            continue
         comment = str((live if "comment" in live else stored).get("comment") or "")
-        if state == "answered" and comment:
-            answers[key] = comment
+        files = answer_files((live if "attachments" in live else stored).get("attachments"))
+        if comment or files:
+            answers[key] = {**({"comment": comment} if comment else {}), **({"attachments": files} if files else {})}
     return answers
 
 

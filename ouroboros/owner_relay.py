@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.chat_chain import _FULL_DIGEST, _row_chat_id, format_address, row_address
+from ouroboros.chat_uploads import row_attachments, upload_specs
 from ouroboros.context_budget import OWNER_WORDS_KIND
 from ouroboros.safety_evidence import CLOSED_STAMP, UNKINDED_STAMP
 
@@ -74,13 +75,25 @@ def owner_text(row) -> str:
     return "" if row.get("text_placeholder") else str(row.get("text") or "")
 
 
+def source_placeholder_text(row) -> str:
+    """Host placeholder for a file-only owner row (inbound ``text_placeholder`` or ordinary file-only ``quiz_answer``)."""
+    if not isinstance(row, dict) or row.get("type") != "quiz_answer":
+        return str(row.get("text") or "") if isinstance(row, dict) and row.get("text_placeholder") is True else ""
+    if not (row.get("direction") != "in" and row.get("source") == "owner_quiz_answer" and isinstance(quiz := row.get("quiz"), dict)
+            and quiz.get("state") == "answered" and quotable_owner_row(row) and quiz.get("answered_index") is None
+            and not (quiz.get("secret_request") or quiz.get("secret_outcome")) and not owner_text(row)):
+        return ""
+    from ouroboros.chat_uploads import answer_evidence, attachment_placeholder
+    return attachment_placeholder(None, {"chat_attachments": files}) if (files := answer_evidence(row_attachments(row))) else ""
+
+
 def source_words(row) -> str | None:
     """The words an owner row's identity checksum covers (``project_dialogue``): an inbound row's stored text, a host
-    placeholder included; an answered card's recorded answer (``owner_text``), never its frame; ``None`` for any other
-    row. A source reference and its text copy are built from these words, so a binding's integrity check reads them."""
+    placeholder included; an answered card's recorded answer (``owner_text``) or file-only placeholder, never its frame;
+    ``None`` for any other row. A source reference and its text copy are built from these words."""
     if str(row.get("direction") or "") == "in":
         return str(row.get("text") or "")
-    return (owner_text(row) or None) if row.get("type") == "quiz_answer" and quotable_owner_row(row) else None
+    return (owner_text(row) or source_placeholder_text(row) or None) if row.get("type") == "quiz_answer" and quotable_owner_row(row) else None
 
 
 def owner_row_source(row) -> tuple[dict, str]:
@@ -173,14 +186,13 @@ def origin_snapshot(row, root, *, include_reply=False) -> dict:
     files = origin_files(row, root)
     if files:
         facts.update(attachments=files, source=str(clean.get("source") or ""))
-    if clean.get("text_placeholder") is True:
-        facts["placeholder_text"] = str(clean.get("text") or "")
+    if placeholder := source_placeholder_text(clean):
+        facts["placeholder_text"] = placeholder
     return facts
 
 
 def origin_files(row, root) -> list:
-    from ouroboros.chat_uploads import stored_refs
-    files = stored_refs(row.get("attachments"))
+    files = row_attachments(row, row.get("_owner_source_root") or root)
     if row.get("_owner_source_root") and (not root or Path(row["_owner_source_root"]).resolve() != Path(root).resolve()):
         for file in files:
             file.pop("upload", None)
@@ -951,7 +963,7 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
                                                slot=ctx, kind=OWNER_WORDS_KIND)
             if kind == OWNER_PRESS:
                 mark_press_arrival(ctx, messages[-1])
-        elif row.get("attachments") and ctx is not None and not passive_mail(entry):
+        elif ctx is not None and not passive_mail(entry) and row_attachments(row, row.get("_owner_source_root") or entry.get("relay_canonical_root")):
             stage_quoted(ctx, entry, row)  # its words stand in the first request; its bytes are on this drive
         if seen and (went or not from_context):
             continue  # shown at birth under the standing it has now: nothing more
@@ -970,7 +982,6 @@ def stage_quoted(ctx, entry, row) -> list:
     (idempotent: a copy already there is kept); the manifest rows, staged or rejected under their names. The
     uploads are read from the root the row was read from (``_owner_source_root``), else the entry's root."""
     from ouroboros.artifacts import stage_task_attachments
-    from ouroboros.chat_uploads import upload_specs
     from ouroboros.tool_access import canonical_data_root
     root = row.get("_owner_source_root") or entry.get("relay_canonical_root") or canonical_data_root(ctx)
     return stage_task_attachments(ctx.drive_root, ctx.task_id, upload_specs(row, root))
@@ -1071,8 +1082,8 @@ def stage_birth_files(drive_root: Any, record: dict, task_id: str, rows: list[di
 
 def quote_content(ctx, entry, row, body):
     """The quoted row's content for the model: its body and, for a row with files, their copies staged here."""
-    if not row.get("attachments") or ctx is None:
-        return body
+    if ctx is None or not row_attachments(row, row.get("_owner_source_root") or entry.get("relay_canonical_root")):
+        return body  # a card answer row's files are its recorded winner's (``row_attachments``)
     from ouroboros.artifacts import attachment_manifest_projection
     from ouroboros.context import build_incoming_user_content
     from ouroboros.gateway.tasks import _render_attachment_lines

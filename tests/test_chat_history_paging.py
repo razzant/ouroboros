@@ -1100,3 +1100,40 @@ def test_main_reads_on_a_fresh_install_without_a_project_registry(tmp_path, monk
     assert [message["text"] for message in json.loads(response.body)["messages"]] == ["main owner"]
     assert ds.room(tmp_path, 1) == room
     assert not registry.exists()
+
+
+def test_quiz_answer_replay_evidence_and_around_project_files_without_internal_locators(tmp_path):
+    """Hidden quiz_answer replay evidence across pages and around=<answer_row_address>
+    carry display-only QuizAnswerFile entries (never upload/mtime_ns/url) for file-only answers."""
+    raw_refs = [
+        {"upload": "u-9_shot.png", "name": "shot.png", "kind": "image", "mime": "image/png",
+         "size": 42, "sha256": "b" * 64, "mtime_ns": 987654321},
+        {"name": "big.bin", "kind": "file", "unavailable": "too_large", "limit_bytes": 20 * 1024 * 1024},
+        {"name": "lost.pdf", "kind": "file", "unavailable": "missing"},
+    ]
+    expected = [
+        {"name": "shot.png", "kind": "image", "mime": "image/png", "size": 42, "sha256": "b" * 64},
+        {"name": "big.bin", "kind": "file", "unavailable": "too_large", "limit_bytes": 20 * 1024 * 1024},
+        {"name": "lost.pdf", "kind": "file", "unavailable": "missing"},
+    ]
+    quiz = {"quiz_id": "file-only", "question": "Attach logs", "state": "open", "options": [{"label": "Skip"}]}
+    winning = {**quiz, "state": "answered", "comment": "", "attachments": raw_refs}
+    write(tmp_path / "logs" / "chat.jsonl", [
+        row(0, direction="out", type="quiz", task_id="quiz-files", quiz=quiz),
+        *[row(index) for index in range(1, 170)],
+        row(171, direction="system", type="quiz_answer", task_id="quiz-files", quiz=winning),
+    ])
+    loaded = list(pages(tmp_path))
+    [evidence] = [m for m in loaded[0]["messages"] if m.get("system_type") == "quiz_answer"]
+    assert evidence["quiz"]["attachments"] == expected
+    assert "answered_index" not in evidence["quiz"]
+    for item in evidence["quiz"]["attachments"]:
+        assert not (set(item) & {"upload", "mtime_ns", "url", "available", "path"})
+
+    status, around = request(tmp_path, around=evidence["row_address"])
+    assert status == 200 and around["anchor"]["state"] == "found"
+    [ask] = [m for m in around["messages"] if m.get("msg_type") == "quiz"]
+    assert ask["quiz"]["state"] == "answered"
+    assert "answered_index" not in ask["quiz"]
+    assert ask["quiz"]["attachments"] == expected
+    assert ask["quiz"]["answer_row_address"] == evidence["row_address"]

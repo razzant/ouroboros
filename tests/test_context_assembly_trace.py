@@ -426,3 +426,90 @@ def test_a_book_map_step_keeps_old_witnesses_off_the_changed_blocks():
     assert all(by_block[i] == 'located' for i in range(len(system) - 1))
     fresh = projection_fields(stepped, _)['assembly_witnesses']
     assert [row['carrier_sha256'] for row in fresh] == [digest(block['text']) for block in stepped]
+
+
+def test_quiz_answer_attachment_observation_avoids_ambient_mail_source(tmp_path, monkeypatch):
+    """An ordinary live Reply quiz answer stays a typed owner-words row (``protected_input``, never the
+    ``secret_request_outcome`` form) and records genuine attachment_manifest observations on it, without
+    forging an owner_input fact, borrowing an earlier mail row's ambient last_owner_delivery source
+    address, or logging file bytes."""
+    import base64
+    import json
+    import queue
+    from types import SimpleNamespace
+
+    from ouroboros.artifacts import stage_task_attachments
+    from ouroboros.context_assembly_trace import bind_contribution_input, verified_contributions
+    from ouroboros.llm_messages import project_wire_messages
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message
+    from ouroboros.owner_relay import owner_row_address, owner_row_source
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
+    from supervisor.message_ingress import log_chat
+
+    root = tmp_path / 'quiz-trace'
+    monkeypatch.setenv('OUROBOROS_DATA_DIR', str(root))
+    task_id = 'quiz-trace-task'
+    png = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1V8AAAAASUVORK5CYII=')
+    img_path = tmp_path / 'answer.png'
+    img_path.write_bytes(png)
+    doc_path = tmp_path / 'secret-note.txt'
+    doc_path.write_text('PRIVATE_FILE_BYTES_NEVER_LOGGED', encoding='utf-8')
+    staged = stage_task_attachments(root, task_id, [
+        {'path': str(img_path), 'label': 'answer.png'},
+        {'path': str(doc_path), 'label': 'secret-note.txt'},
+    ])
+
+    mail_row = log_chat('in', 1, 1, 'Ordinary mail first', ts='2026-11-25T00:00:00Z',
+                        source='web', client_message_id='mail-1', drive_root=root, require_write=True)
+    mail_addr = owner_row_address(mail_row)
+
+    incoming = queue.Queue()
+    incoming.put({
+        'msg_id': 'direct-mail-1', 'client_message_id': 'mail-1', 'text': 'Ordinary mail first',
+        'ts': mail_row['ts'], 'origin_message_ref': owner_row_source(mail_row)[0],
+    })
+    write_owner_message(
+        root, '[Owner quiz answer] See attached reply', task_id, msg_id='quiz-reply-1', kind=KIND_QUIZ_ANSWER,
+        quiz_delivery={'task_id': task_id, 'quiz_id': 'q-reply', 'canonical_root': str(root), 'answer_snapshot': {
+            'quiz_id': 'q-reply', 'question': 'Any files?', 'options': ['A'],
+            'comment': 'See attached reply', 'attachments': staged}},
+        attachment_manifest=staged,
+    )
+
+    ctx = SimpleNamespace(drive_root=root, budget_drive_root=root, task_id=task_id, current_chat_id=1)
+    messages = []
+    _drain_incoming_messages(messages, incoming, root, task_id, None, set(), owner_ctx=ctx)
+    assert len(messages) == 3  # ordinary mail, ordinary file-reply quiz answer, owner_quote_handles
+    assert isinstance(messages[1]['content'], list)
+
+    # The producer binds the trace to the rows as it typed them; ``project_wire_messages`` is only the
+    # physical candidate, whose host stamps are stripped before the provider sees them. Binding to that
+    # copy would lose the typed row family, so the two roles stay separate here as in the send path.
+    wire = {'messages': project_wire_messages(messages)}
+    assert '_host_context_kind' not in json.dumps(wire)
+    fit = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False)
+    bound = bind_contribution_input(fit, {'messages': messages}, messages, ctx)
+    entries = verified_contributions(wire, bound.contribution_input)['entries']
+    assert 'PRIVATE_FILE_BYTES_NEVER_LOGGED' not in json.dumps(entries)
+
+    by_path = {}
+    for entry in entries:
+        by_path.setdefault(entry.get('path'), []).append(entry)
+    assert any(item['family'] == 'owner_input' and item.get('row_address') == mail_addr for item in by_path['$.messages[0]'])
+
+    reply_notes = {item['family']: item for item in by_path['$.messages[1]']}
+    assert 'owner_input' not in reply_notes
+    assert reply_notes['protected_input']['form'] == 'typed_row'
+    assert reply_notes['attachment_image']['form'] == 'pixels'
+    assert reply_notes['attachment_image']['count'] == 1
+    assert reply_notes['attachment_manifest']['manifest_items'] == 2
+    assert reply_notes['attachment_manifest']['manifest_path_only'] == 1
+    assert reply_notes['attachment_manifest']['manifest_pixels'] == 1
+    assert reply_notes['attachment_manifest']['attachment_items'] == [
+        {'number': 1, 'decision': 'prepared_pixels'},
+        {'number': 2, 'decision': 'not_selected_as_image'},
+    ]
+    assert 'row_address' not in reply_notes['attachment_manifest']
+    assert 'source_id_sha256' not in reply_notes['attachment_manifest']

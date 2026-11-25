@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 import logging
+from pathlib import Path
 from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
@@ -116,22 +117,30 @@ def private_answer_row(root, ref) -> dict:
     return row if _private_answer(row) and quotable_owner_row(row, root) else {}
 
 
-def _private_start_source_fields(row: dict) -> dict:
+def _private_start_source_fields(row: dict, root=None) -> dict:
     """The private answer's event projection, shared by its producer and admission reader."""
     from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY, private_contact
-    from ouroboros.owner_relay import owner_row_address, owner_text
-    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.owner_relay import (
+        origin_snapshot,
+        owner_row_address,
+        owner_row_source,
+        source_placeholder_text,
+        upload_specs,
+    )
 
-    words = owner_text(row)
-    ref = build_owner_message_ref(chat_id=row["chat_id"], client_message_id=row.get("client_message_id"),
-                                  ts=row.get("ts"), text=words)
-    return {"chat_id": ref["chat_id"], "client_message_id": ref["client_message_id"], "attachment_uploads": [],
+    ref, words = owner_row_source(row)
+    canonical_root = Path(root).resolve(strict=False) if root is not None else None
+    uploads = [{**spec, "inherited": True} for spec in upload_specs(row, canonical_root)] if canonical_root is not None else []
+    extra = ({"origin_message_snapshot": origin_snapshot(row, canonical_root)}
+             if canonical_root is not None and (uploads or source_placeholder_text(row)) else {})
+    return {"chat_id": ref["chat_id"], "client_message_id": ref["client_message_id"], "attachment_uploads": uploads,
             "source_ref": ref, "source_text": words, "work_kind": "owner", "owner_quote": owner_row_address(row),
-            PRESENCE_BINDING_RELATION_KEY: {"binding_id": private_contact(row)["binding_id"]}}
+            PRESENCE_BINDING_RELATION_KEY: {"binding_id": private_contact(row)["binding_id"]}, **extra}
 
 
-def private_start_fields(ctx, handle) -> dict:
-    """What a Presence caller's start of the owner's private work puts on its event, or ``ContactRequestInvalid``.
+def private_start_source(ctx, handle) -> tuple[dict, dict]:
+    """``(event fields, verified Main answer row)`` for a Presence caller's private owner start, or
+    ``ContactRequestInvalid``.
 
     ``handle`` names an answer this work holds: the owner's reply to the private question this work
     or its recorded predecessor asked for the same binding. The event then asks for the root a private
@@ -166,15 +175,20 @@ def private_start_fields(ctx, handle) -> dict:
                                     "retry when it can.") from exc
     if not owned:
         raise ContactRequestInvalid("that answer replies to a question another work asked.")
-    fields = _private_start_source_fields(row)
+    lookup_ref = _private_start_source_fields(row)["source_ref"]
     try:
-        verified = private_answer_row(root, fields["source_ref"])
+        verified = private_answer_row(root, lookup_ref)
     except StoreError as exc:
         raise ContactRequestInvalid(f"that answer's saved row cannot be read now ({type(exc).__name__}); "
                                     "retry when it can.") from exc
     if not verified:
         raise ContactRequestInvalid("that answer has no matching saved row.")
-    return fields
+    return _private_start_source_fields(verified, root), verified
+
+
+def private_start_fields(ctx, handle) -> dict:
+    """What a Presence caller's start of the owner's private work puts on its event, or ``ContactRequestInvalid``."""
+    return private_start_source(ctx, handle)[0]
 
 
 def private_start_refusal(root, evt: dict) -> str:
@@ -188,13 +202,20 @@ def private_start_refusal(root, evt: dict) -> str:
         return "private_owner_source_invalid" if evt.get("owner_quote") not in (None, "") else ""
     if str(evt.get("source") or "").strip():
         return "private_owner_source_invalid"
+    ref = evt.get("source_ref")
     try:
-        row = private_answer_row(root, evt.get("source_ref"))
+        row = private_answer_row(root, ref)
     except StoreError:
         return "private_owner_source_unavailable"
     if not row:
         return "private_owner_source_invalid"
-    matching = all(evt.get(key) == value for key, value in _private_start_source_fields(row).items())
+    expected = _private_start_source_fields(row, root)
+    expected_ref = expected["source_ref"]
+    ref_matches = (ref == expected_ref or (isinstance(ref, dict) and "row_sha256" not in ref
+                                           and ref == {k: v for k, v in expected_ref.items() if k != "row_sha256"}))
+    matching = (ref_matches
+                and all(evt.get(key) == value for key, value in expected.items() if key != "source_ref")
+                and ("origin_message_snapshot" in expected or not evt.get("origin_message_snapshot")))
     carried = presence_root_carrier(evt, task_contract=evt.get("task_contract"))
     return "" if matching and not carried and "task_contract" not in evt else "private_owner_source_invalid"
 

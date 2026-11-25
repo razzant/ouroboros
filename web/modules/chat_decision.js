@@ -42,7 +42,7 @@ function paintStatusText(card, row, recipient) {
 // What one observation of a question carries: its identity (its own Project included: '' for Main's own and a
 // private Presence question, so the head follows the pill's rule), lifecycle, recorded answer (and the answer row's
 // address, which only history names: a narrower live frame keeps it) and wait facts.
-const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'project_id', 'state', 'answered_index', 'comment', 'answer_row_address', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
+const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'project_id', 'state', 'answered_index', 'comment', 'attachments', 'answer_row_address', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
     'secret_outcome', 'secret_save', ...WAIT_FIELDS];
 const lifecycleOf = (row) => Object.fromEntries(LIFECYCLE_FIELDS.filter((field) => Object.hasOwn(row, field))
     .map((field) => [field, row[field]]));
@@ -269,7 +269,7 @@ export function createChatDecision({
     // Display fields a narrower delivery (the census, a lifecycle frame) may lack: an empty value
     // there never blanks what a complete row already carried.
     const MIRROR_FIELDS = ['question', 'options', 'option_details', 'stake', 'project_name', 'assumption', 'recommended_index', 'materials', 'secret_request'];
-    const MIRROR_SIGNATURE = ['quiz_state', ...MIRROR_FIELDS, 'answered_index', 'comment', 'closed_reason', 'question_delivery', 'secret_outcome', 'secret_save', ...WAIT_FIELDS];
+    const MIRROR_SIGNATURE = ['quiz_state', ...MIRROR_FIELDS, 'answered_index', 'comment', 'attachments', 'closed_reason', 'question_delivery', 'secret_outcome', 'secret_save', ...WAIT_FIELDS];
     // The pointer row in the shape of the Project's quiz row, so one normalizer reads both.
     const mirrorQuiz = (row) => ({ ...row, type: 'quiz', role: 'assistant', state: row.quiz_state });
     // An empty recorded comment and no comment are the same fact.
@@ -688,7 +688,8 @@ export function createChatDecision({
                 // and what the owner actually said takes its place.
                 const box = card.querySelector('.chat-quiz-comment-box');
                 if (box) { box.remove(); changed = true; }
-                if (renderOwnerAnswer(card, state === 'answered' ? String(card.dataset.ownerComment || '') : '')) changed = true;
+                if (renderOwnerAnswer(card, state === 'answered' ? String(card.dataset.ownerComment || '') : '',
+                    state === 'answered' ? current.attachments : [])) changed = true;
             }
             const comment = card.querySelector('.chat-quiz-comment');
             const send = card.querySelector('.chat-quiz-send');
@@ -753,11 +754,12 @@ export function createChatDecision({
                 if (paintChosenAnswer(btn, chosen)) changed = true;
             });
             // The owner's answer has no row of its own in the feed (DESIGN "Replies"): its row's address marks the
-            // recorded choice, else the owner's words. A Main copy of a Project's question never carries it.
+            // recorded choice, else the owner's words, else the recorded file outcome block. A Main copy of a Project's question never carries it.
             const address = !mirrored && state === 'answered' ? String(current.answer_row_address || '') : '';
             const answer = card.querySelector('.chat-quiz-answer');
-            const holder = address ? [...buttons].find((btn) => btn.classList.contains('chosen')) || answer : null;
-            [...buttons, answer].forEach((node) => {
+            const files = card.querySelector('.chat-quiz-answer-files');
+            const holder = address ? [...buttons].find((btn) => btn.classList.contains('chosen')) || answer || files : null;
+            [...buttons, answer, files].forEach((node) => {
                 if (node && node !== holder && node.dataset.rowAddress) { delete node.dataset.rowAddress; changed = true; }
             });
             if (holder && holder.dataset.rowAddress !== address) { holder.dataset.rowAddress = address; holder.tabIndex = -1; changed = true; }

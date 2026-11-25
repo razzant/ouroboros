@@ -3,7 +3,7 @@
 // save as they are typed and an emptied field releases them: no separate control
 // clears them (docs/DESIGN.md "Quiz card").
 import { MAX_DECISION_COMMENT } from './api_types.js';
-import { ANSWERABLE_QUIZ_STATES } from './question_presentation.js';
+import { ANSWERABLE_QUIZ_STATES, hasAnswerFiles } from './question_presentation.js';
 import { tr } from './i18n.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { attachChatInputSizing } from './chat_input_sizing.js';
@@ -171,7 +171,8 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
         if (body.state === 'answered') {
             const index = Number.isInteger(body.answered_index) ? body.answered_index : null;
             if ((index !== null && (index < 0 || index >= view.quiz.options.length))
-                || (index === null && !(typeof body.comment === 'string' && body.comment.trim()))) return false;
+                || (index === null && !(typeof body.comment === 'string' && body.comment.trim())
+                    && !hasAnswerFiles(body.attachments))) return false;
             // 503 explicitly describes a durable answer with owed delivery; 409 names
             // the winner. A success response without ok:true is not confirmation.
             if (!(response?.ok && body.ok === true) && response?.status !== 409

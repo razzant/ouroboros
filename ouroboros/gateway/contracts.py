@@ -4,7 +4,7 @@ Keep discriminating ``type`` keys required; optional fields use ``NotRequired``.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from ouroboros.cost_projection import CostPresentation
 from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
@@ -35,7 +35,7 @@ from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsRespon
 from ouroboros.gateway.history_contracts import AgentNoteFields, ChatHistoryResponse, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
-    AttachmentManifestEntry, ChatAttachmentInbound, ChatAttachmentView,
+    AttachmentManifestEntry, ChatAttachmentInbound, ChatAttachmentView, QuizAnswerFile,
 )
 from ouroboros.gateway.contributions import UiContribution, UiContributionsResponse, UiPreferencesResponse
 from ouroboros.gateway.widgets import (
@@ -132,7 +132,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField, AgentNo
     ingress_accepted: NotRequired[bool]  # Canonical inbound row saved; not processing/start proof.
     ingress_dispatched: NotRequired[bool]  # This live host process accepted the row and entered its dispatch.
     ingress_pending: NotRequired[bool]  # This live host process accepted the row and has entered or refused neither yet.
-    attachments: NotRequired[List[ChatAttachmentView]]  # owner message's attachments (same views as history)
+    attachments: NotRequired[List[Union[ChatAttachmentView, QuizAnswerFile]]]  # owner message's attachments (same views as history); a project_question_pointer's: its answer's files
     text_placeholder: NotRequired[bool]  # owner row whose text the host wrote (no words were sent); shown as no caption
     reply_excerpt_disabled: NotRequired[bool]  # a wordless or mixed card display; whole-row Reply still works
     markdown: NotRequired[bool]
@@ -430,6 +430,7 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     ts: str
     answered_index: NotRequired[int]
     comment: NotRequired[str]
+    attachments: NotRequired[List[QuizAnswerFile]]  # replay: the files a Telegram Reply answered with, never a link
     answer_row_address: NotRequired[str]  # replay only, never the live quiz_state frame
     host_facts: NotRequired[str]  # host-written, never the model's: asking task, run start, owner's last message
     materials: NotRequired[List[Dict[str, Any]]]
@@ -461,9 +462,8 @@ class QuizStateOutbound(TypedDict):
     ts: str
     answered_index: NotRequired[int]
     wait_for_answer: NotRequired[bool]  # additive: False once a bounded wait closed (the card stays open)
-    # #471: the owner's recorded free-text answer rides the live frame (absent
-    # when empty) so the open card renders `Owner's answer:` as replay does.
-    comment: NotRequired[str]
+    comment: NotRequired[str]  # #471: the recorded free-text answer, absent when empty, shown as replay shows it
+    attachments: NotRequired[List[QuizAnswerFile]]  # its Telegram Reply's files (chat_uploads.answer_files), likewise
     chat_id: NotRequired[int]
     closed_reason: NotRequired[str]
     closed_at: NotRequired[str]
@@ -1547,7 +1547,7 @@ __all__ = [
     "ChatHistoryResponse",
     "AttachmentManifestEntry",
     "ChatAttachmentInbound",
-    "ChatAttachmentView",
+    "ChatAttachmentView", "QuizAnswerFile",
     "ExecutorRef",
     "TaskCreateRequest", "TaskCreateResponse",
     "TaskListResponse", "TaskCostBreakdown", "TaskDetailResponse", "QuestionRoom",

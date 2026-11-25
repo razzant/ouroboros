@@ -12008,6 +12008,15 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
     line-height: var(--line-body, 1.5);
     color: var(--text-primary);
 }
+/* Host-recorded file outcomes on a settled answer (Telegram Reply files): kept structurally and visually distinct
+   from the owner's own words, in meta ink, one line per file, never a link. */
+.chat-quiz-answer-files {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta, 1.35);
+    color: var(--text-meta);
+}
 .chat-quiz-more {
     align-self: flex-start;
     padding: var(--space-1, 4px) 0;
@@ -12197,19 +12206,22 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
 }
 /* An answer to a card is shown on it (DESIGN "Replies"): its recorded choice, else the owner's words. A choice with
    words beside it is one answer: the card lends its words line the same moment (the :has() stays on the card). */
-:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
-.chat-quiz-card:has(> .chat-quiz-options > .chat-quiz-option.is-quote-target) {
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer, .chat-quiz-answer-files).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
+.chat-quiz-card:has(> .chat-quiz-options > .chat-quiz-option.is-quote-target),
+.chat-quiz-card:has(> .chat-quiz-answer.is-quote-target) {
     --quiz-answer-lit: chat-quote-target;
     --quiz-answer-ring: 0 0 0 3px var(--accent-25);
 }
-.chat-quiz-answer { animation: var(--quiz-answer-lit, none) 1.4s ease-out; }
+.chat-quiz-answer,
+.chat-quiz-answer-files { animation: var(--quiz-answer-lit, none) 1.4s ease-out; }
 /* A row that takes focus only to be returned to (a quote's target, a closed row menu) shows the one keyboard ring. */
-:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer)[tabindex="-1"]:focus { outline: none; }
-:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer, .chat-quiz-answer-files)[tabindex="-1"]:focus { outline: none; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer, .chat-quiz-answer-files)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
-    :is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer).is-quote-target { animation: none; transition: none; box-shadow: 0 0 0 3px var(--accent-25); }
+    :is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item, .chat-quiz-option, .chat-quiz-answer, .chat-quiz-answer-files).is-quote-target { animation: none; transition: none; box-shadow: 0 0 0 3px var(--accent-25); }
     .chat-quiz-option.chosen.is-quote-target { box-shadow: var(--tone-chosen-answer-shadow), 0 0 0 3px var(--accent-25); }
-    .chat-quiz-answer { animation: none; box-shadow: var(--quiz-answer-ring, none); }
+    .chat-quiz-answer,
+    .chat-quiz-answer-files { animation: none; box-shadow: var(--quiz-answer-ring, none); }
 }
 
 /* === The quote panel (docs/DESIGN.md "Replies"): one component (chat_reply_quote.js) inside a bubble and

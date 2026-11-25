@@ -105,6 +105,111 @@ def test_unread_custody_is_a_union_at_both_replica_seams(tmp_path):
     assert sorted(_msg_ids(load_task_result(data, TASK)["unread_mailbox"])) == ["m1", "m2"]
 
 
+def test_owner_mailbox_custody_stays_canonical_across_replica_seams(tmp_path):
+    """Canonical terminal ``owner_mailbox`` capture stays authoritative when a matching
+    same-attempt execution replica arrives late: read evidence and canonical store coverage
+    stay intact, partial or absent canonical captures are not promoted or invented, normal
+    canonical terminal capture still runs, and ``unread_mailbox`` stays a union."""
+    from ouroboros import task_store
+    from ouroboros.post_task_checkpoint import project_replica_task_result_fields
+    from ouroboros.question_answers import _settled_non_write, custody_proves_read
+    from ouroboros.task_status import load_effective_task_result
+
+    # 1. Authoritative canonical complete capture survives a same-attempt completed replica.
+    data = tmp_path / "complete"
+    drive = headless.prepare_task_drive(data, TASK, "empty")
+    write_task_result(data, TASK, "running", child_drive_root=str(drive), task_attempt=1)
+    assert owner_mailbox.write_owner_message(
+        data, "Option A", TASK, msg_id="q1", kind=owner_mailbox.KIND_QUIZ_ANSWER
+    )
+    assert owner_mailbox.acknowledge_task_messages(data, TASK, ["q1"], wake_id="test")
+    q1_row = task_custody.owner_mail_rows(data, TASK)[0][0]
+    assert owner_mailbox.write_owner_message(data, "canonical unread", TASK, msg_id="u_canon")
+    assert owner_mailbox.write_owner_message(drive, "child unread", TASK, msg_id="u_child")
+    canonical = write_task_result(data, TASK, "completed", task_attempt=1, result="canonical answer")
+    assert canonical["owner_mailbox"]["read_complete"] is True
+    assert sorted(_msg_ids(canonical["owner_mailbox"])) == ["q1", "u_canon", "u_child"]
+    assert canonical["owner_mailbox"]["stores"] == ["canonical", "headless"]
+
+    assert owner_mailbox.write_owner_message(drive, "late child unread", TASK, msg_id="u_late")
+    replica = write_task_result(drive, TASK, "completed", task_attempt=1, result="worker answer")
+    assert replica["owner_mailbox"]["stores"] == ["headless"]
+    assert "q1" not in _msg_ids(replica["owner_mailbox"])
+
+    overlay = project_replica_task_result_fields(canonical, replica)
+    assert "owner_mailbox" not in overlay
+    assert sorted(_msg_ids(overlay["unread_mailbox"])) == ["u_canon", "u_child", "u_late"]
+    effective = load_effective_task_result(data, TASK)
+    assert effective["owner_mailbox"] == canonical["owner_mailbox"]
+    assert sorted(_msg_ids(effective["unread_mailbox"])) == ["u_canon", "u_child", "u_late"]
+    copied = headless.copy_child_task_result(data, {"id": TASK, "drive_root": str(drive)})
+    stored = load_task_result(data, TASK)
+    assert copied["owner_mailbox"] == canonical["owner_mailbox"]
+    assert stored["owner_mailbox"] == canonical["owner_mailbox"]
+    assert sorted(_msg_ids(stored["unread_mailbox"])) == ["u_canon", "u_child", "u_late"]
+    assert _settled_non_write(data, TASK, "other_msg", data) is True
+    assert custody_proves_read(data, TASK, q1_row, drives=()) is True
+
+    # 2. A late complete replica cannot promote a partial canonical owner_mailbox capture.
+    partial_root = tmp_path / "partial"
+    partial_drive = headless.prepare_task_drive(partial_root, TASK, "empty")
+    write_task_result(partial_root, TASK, "running", child_drive_root=str(partial_drive), task_attempt=1)
+    torn_mailbox = owner_mailbox._mailbox_path(partial_root, TASK)
+    torn_mailbox.parent.mkdir(parents=True, exist_ok=True)
+    torn_mailbox.write_text(
+        '{"msg_id": "u_whole", "kind": "owner_text", "text": "whole"}\n{"msg_id": "torn", "te',
+        encoding="utf-8",
+    )
+    partial_canonical = write_task_result(partial_root, TASK, "completed", task_attempt=1, result="settled")
+    assert partial_canonical["owner_mailbox"]["read_complete"] is False
+    assert "canonical" not in (partial_canonical["owner_mailbox"].get("stores") or [])
+    partial_replica = write_task_result(partial_drive, TASK, "completed", task_attempt=1, result="clean worker")
+    assert partial_replica["owner_mailbox"]["read_complete"] is True
+
+    assert "owner_mailbox" not in project_replica_task_result_fields(partial_canonical, partial_replica)
+    assert load_effective_task_result(partial_root, TASK)["owner_mailbox"] == partial_canonical["owner_mailbox"]
+    partial_copied = headless.copy_child_task_result(partial_root, {"id": TASK, "drive_root": str(partial_drive)})
+    assert partial_copied["owner_mailbox"] == partial_canonical["owner_mailbox"]
+    assert load_task_result(partial_root, TASK)["owner_mailbox"]["read_complete"] is False
+    assert _settled_non_write(partial_root, TASK, "other_msg", partial_root) is False
+    assert _msg_ids(partial_copied["unread_mailbox"]) == ["u_whole"]
+
+    # 3. A replica cannot invent owner_mailbox when canonical settled without one.
+    absent_root = tmp_path / "absent"
+    absent_drive = headless.prepare_task_drive(absent_root, TASK, "empty")
+    write_task_result(absent_root, TASK, "completed", child_drive_root=str(absent_drive), task_attempt=1, result="legacy")
+    task_store.patch_document(absent_root, TASK, lambda cur: {k: v for k, v in cur.items() if k != "owner_mailbox"})
+    assert "owner_mailbox" not in load_task_result(absent_root, TASK)
+    absent_replica = write_task_result(absent_drive, TASK, "completed", task_attempt=1, result="worker")
+    assert absent_replica["owner_mailbox"]["read_complete"] is True
+    assert "owner_mailbox" not in project_replica_task_result_fields(load_task_result(absent_root, TASK), absent_replica)
+    assert "owner_mailbox" not in load_effective_task_result(absent_root, TASK)
+    absent_copied = headless.copy_child_task_result(absent_root, {"id": TASK, "drive_root": str(absent_drive)})
+    assert "owner_mailbox" not in absent_copied and "owner_mailbox" not in load_task_result(absent_root, TASK)
+
+    # 4. Normal running -> completed copy-back still performs canonical new owner_mailbox capture.
+    fresh_root = tmp_path / "fresh"
+    fresh_drive = headless.prepare_task_drive(fresh_root, TASK, "empty")
+    write_task_result(fresh_root, TASK, "running", child_drive_root=str(fresh_drive), task_attempt=1)
+    assert owner_mailbox.write_owner_message(
+        fresh_root, "root answer", TASK, msg_id="o_root", kind=owner_mailbox.KIND_QUIZ_ANSWER
+    )
+    assert owner_mailbox.acknowledge_task_messages(fresh_root, TASK, ["o_root"], wake_id="test")
+    assert owner_mailbox.write_owner_message(
+        fresh_drive, "drive answer", TASK, msg_id="o_drive", kind=owner_mailbox.KIND_QUIZ_ANSWER
+    )
+    assert owner_mailbox.acknowledge_task_messages(fresh_drive, TASK, ["o_drive"], wake_id="test")
+    assert owner_mailbox.write_owner_message(fresh_drive, "still unread", TASK, msg_id="u_drive")
+    write_task_result(fresh_drive, TASK, "completed", task_attempt=1, result="fresh done")
+    assert "owner_mailbox" not in load_effective_task_result(fresh_root, TASK)
+    fresh_copied = headless.copy_child_task_result(fresh_root, {"id": TASK, "drive_root": str(fresh_drive)})
+    fresh_owner = fresh_copied["owner_mailbox"]
+    assert fresh_owner["read_complete"] is True
+    assert sorted(_msg_ids(fresh_owner)) == ["o_drive", "o_root", "u_drive"]
+    assert fresh_owner["stores"] == ["canonical", "headless"]
+    assert _msg_ids(fresh_copied["unread_mailbox"]) == ["u_drive"]
+
+
 def test_reply_to_a_previously_running_child_is_queued_until_it_checks_its_mailbox(tmp_path):
     import queue as queue_mod
 

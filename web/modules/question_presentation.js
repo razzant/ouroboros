@@ -1,4 +1,4 @@
-import { tr } from './i18n.js';
+import { fmt, tr } from './i18n.js';
 import { MAX_QUIZ_OPTIONS, MAX_DECISION_COMMENT } from './api_types.js';
 import { bindEnterSubmit } from './ui_interactions.js';
 import { secretRequestOf } from './secret_hitl.js';
@@ -224,7 +224,7 @@ export function normalizeQuiz(msg) {
         state: String(src.state || 'open'),
         taskId: String(msg.task_id || ''),
         ts: msg.ts || null,
-        answerFields: Object.fromEntries(['answered_index', 'comment', 'answer_row_address', 'question_delivery', 'secret_outcome', 'secret_save']
+        answerFields: Object.fromEntries(['answered_index', 'comment', 'attachments', 'answer_row_address', 'question_delivery', 'secret_outcome', 'secret_save']
             .filter((key) => Object.hasOwn(src, key))
             .map((key) => [key, src[key]])),
         answeredIndex: Number.isInteger(src.answered_index) ? src.answered_index : null,
@@ -232,6 +232,7 @@ export function normalizeQuiz(msg) {
         // merges them from the projection). With no answeredIndex they
         // ARE the answer, not a remark beside one.
         comment: String(src.comment || ''),
+        attachments: Array.isArray(src.attachments) ? src.attachments : [],  // a Telegram Reply's files, beside them
         // An integration-secret request (showSecretHitl): its protected form replaces the free answer.
         secretRequest: secretRequestOf(src),
         detailsUnavailable: src.option_details === undefined && raw.every((option) => typeof option === 'string'),
@@ -313,35 +314,82 @@ export function paintChosenAnswer(button, chosen) {
 }
 
 
-export function renderOwnerAnswer(card, comment) {
-    // The owner's own words are a SECOND primary line under the question:
-    // with no chosen option they are the entire answer, and beside a
-    // chosen one they qualify it. Its label stands in its own
-    // `.chat-quiz-answer-label` (as a stake's does), so a reader of the
-    // card's words (chat_search_words.js) tells it from what the owner wrote.
-    let line = card.querySelector('.chat-quiz-answer');
-    if (!comment) {
-        if (!line) return false;
-        line.remove();
-        return true;
-    }
-    const label = "Owner's answer:";
-    const text = `${label} ${comment}`;
-    if (line) {
-        if (line.textContent === text) return false;
-        line.textContent = text;
-        labelLead(line, label, 'chat-quiz-answer-label');
-        return true;
-    }
-    // The card's own document: a search candidate draws its card in an inert one.
-    line = (card.ownerDocument || document).createElement('div');
-    line.className = 'chat-quiz-answer';
-    line.textContent = text;
-    labelLead(line, label, 'chat-quiz-answer-label');
+/** Whether a recorded quiz answer carries at least one canonical named file outcome (`attachments`). */
+export const hasAnswerFiles = (files) => Array.isArray(files) && files.some(
+    (file) => file && typeof file === 'object' && typeof file.name === 'string' && file.name.trim().length > 0,
+);
+
+/** A recorded answer's files (`attachments`, a Telegram Reply's), one line each: the name, or the name and why it
+ * never arrived. The host's facts, never a link: the card opens nothing. */
+export function answerFileLines(files) {
+    return (Array.isArray(files) ? files : []).filter((file) => file && typeof file === 'object').map((file) => {
+        const name = String(file.name || 'attachment');
+        const reason = typeof file.unavailable === 'string' ? file.unavailable.trim() : '';
+        if (!reason) return `📎 ${name}`;
+        if (reason === 'too_large') {
+            return `📎 ${fmt('{name}: not received, too large', { name })}`;
+        }
+        if (reason === 'download_failed') {
+            return `📎 ${fmt('{name}: not received, the download failed', { name })}`;
+        }
+        return `📎 ${fmt('{name}: not received, unavailable', { name })}`;
+    });
+}
+
+export function renderOwnerAnswer(card, comment, files = []) {
+    // Owner words and host-recorded file outcomes are separate blocks:
+    // `.chat-quiz-answer` holds ONLY the owner's verbatim words (`Owner's answer: …`,
+    // with its label in `.chat-quiz-answer-label` so chat_search_words.js excludes chrome);
+    // `.chat-quiz-answer-files` holds the host's file outcome lines (received names or
+    // failure reasons, never attributed as the owner's own words and never a download link).
+    const doc = card.ownerDocument || document;
     const assumption = card.querySelector('.chat-quiz-assumption');
-    if (assumption) assumption.before(line);
-    else card.append(line);
-    return true;
+    let changed = false;
+
+    const words = typeof comment === 'string' ? comment : '';
+    let line = card.querySelector('.chat-quiz-answer');
+    if (!words) {
+        if (line) { line.remove(); changed = true; }
+        line = null;
+    } else {
+        const label = "Owner's answer:";
+        const text = `${label} ${words}`;
+        if (line) {
+            if (line.textContent !== text) {
+                line.textContent = text;
+                labelLead(line, label, 'chat-quiz-answer-label');
+                changed = true;
+            }
+        } else {
+            line = doc.createElement('div');
+            line.className = 'chat-quiz-answer';
+            line.textContent = text;
+            labelLead(line, label, 'chat-quiz-answer-label');
+            const existingFiles = card.querySelector('.chat-quiz-answer-files');
+            if (existingFiles) existingFiles.before(line);
+            else if (assumption) assumption.before(line);
+            else card.append(line);
+            changed = true;
+        }
+    }
+
+    const fileText = answerFileLines(files).join('\n');
+    let fileNode = card.querySelector('.chat-quiz-answer-files');
+    if (!fileText) {
+        if (fileNode) { fileNode.remove(); changed = true; }
+    } else if (fileNode) {
+        if (fileNode.textContent !== fileText) { fileNode.textContent = fileText; changed = true; }
+        if (line && line.nextElementSibling !== fileNode) { fileNode.remove(); line.after(fileNode); changed = true; }
+    } else {
+        fileNode = doc.createElement('div');
+        fileNode.className = 'chat-quiz-answer-files';
+        fileNode.textContent = fileText;
+        if (line) line.after(fileNode);
+        else if (assumption) assumption.before(fileNode);
+        else card.append(fileNode);
+        changed = true;
+    }
+    return changed;
 }
 
 const CLOSE_GLYPH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';

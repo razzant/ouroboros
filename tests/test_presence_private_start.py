@@ -717,3 +717,383 @@ def test_both_schemas_and_the_retry_notice_name_the_destination(tmp_path):
     notice = promotion_intent_notice("t1", {"promotion_admission": {"status": "not_started"}, "promotion_intent": {
         "objective": "x", "title": "X", "destination": "owner", "owner_quote": "row:1@t#0"}})
     assert '"destination": "owner"' in notice and '"owner_quote": "row:1@t#0"' in notice
+
+
+def test_a_file_only_private_answer_starts_the_owners_private_work_and_stages_its_file(contact_runtime, monkeypatch):
+    """A private Main quiz answer carrying only a measured file (no option, no caption) resolves by its retained
+    identity/placeholder hash, stages its file on start_task(destination='owner', owner_quote=...), keeps owner words
+    empty everywhere, preserves room/binding constraints, and refuses tampered or no-evidence rows."""
+    import asyncio
+    import copy
+    import pathlib
+
+    from ouroboros.agent_startup_checks import validate_task_authority_sources
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.gateway import task_decision as td
+    from ouroboros.owner_relay import held_owner_messages
+    from ouroboros.owner_words import REPLY_TARGET, task_owner_words
+    from ouroboros.presence_owner_contact import (
+        ContactRequestInvalid,
+        private_answer_row,
+        private_start_fields,
+        private_start_refusal,
+    )
+    from ouroboros.project_dialogue import _entry_source_identities, _text_sha256
+    from ouroboros.projects_registry import create_project, project_binding_for_task
+    from ouroboros.task_results import load_task_result
+
+    r, seen = contact_runtime, {}
+    binding = r.admission.binding_id
+    payload = b"bed,seeds\nnorth,8\n"
+    _path, ref = store_upload(payload, "seed-counts.csv", data_dir=r.root)
+    claim_refs([ref], r.root)
+    project = create_project(r.root, "owner-file-room", name="Owner file room")
+
+    def during(ctx, task, _agent):
+        assert _ask(ctx).startswith("OK:")
+        qid, = quiz_states(r.root, ctx.task_id)
+        flush_owner_events(r.root, ctx.pending_events)
+        r.pump()
+        status, receipt = asyncio.run(td.answer_decision(
+            r.root, {"decision_id": f"quiz:{ctx.task_id}:{qid}", "request_id": "owner-file-only"}, attachments=[ref]))
+        assert status == 200, receipt
+        _drain_incoming_messages([], queue.Queue(), r.root, ctx.task_id, None, set(), owner_ctx=ctx)
+        [handle] = held_owner_messages(ctx)
+        host, emitted = _admitting(r, monkeypatch, ctx)
+        task["metadata"]["chat_attachment_uploads"] = [{"upload": "the-place-sent-this", "name": "external.txt"}]
+        out = ctx._consumer_tools.execute("start_task", {
+            **PRIVATE_START, "destination": "owner", "owner_quote": handle})
+        assert out.startswith("OK: task") and "seed-counts.csv (staged at start)" in out, out
+        out_project = ctx._consumer_tools.execute("start_task", {
+            **PRIVATE_START, "project_id": project["id"], "workspace": "none",
+            "destination": "owner", "owner_quote": handle})
+        assert out_project.startswith("OK: task") and "seed-counts.csv (staged at start)" in out_project, out_project
+        seen.update(ctx=ctx, handle=handle, events=list(emitted), roots=list(host.PENDING), tid=ctx.task_id, qid=qid)
+
+    assert _run(r, during).outcome == "silent"
+    event, project_event = seen["events"]
+    root, project_root = seen["roots"]
+
+    # Exact lookup by retained identity/hash succeeds; host frame is never hashed as owner words.
+    stored = private_answer_row(r.root, event["source_ref"])
+    assert stored and stored["client_message_id"] == f"quiz_answer:{seen['tid']}:{seen['qid']}"
+    assert "row_sha256" in event["source_ref"]
+    assert event["source_text"] == "(file attached)"
+    assert event["source_ref"]["text_sha256"] == _text_sha256("(file attached)")
+    assert _text_sha256(stored["text"]) not in {key[3] for key in _entry_source_identities(stored)}
+    snapshot = event["origin_message_snapshot"]
+    assert snapshot["placeholder_text"] == "(file attached)" and snapshot["projectable"] is False
+    assert snapshot["input"] == {"source": "owner_quiz_answer", "source_task_id": seen["tid"],
+                                 "content": "", "quiz_id": seen["qid"]}
+
+    # Measured synthetic file is staged; the place's decoy attachment never rides along.
+    for started in (root, project_root):
+        assert len(started["attachments"]) == 1
+        [staged] = started["attachments"]
+        assert staged["status"] == "staged" and staged["label"] == "seed-counts.csv"
+        assert pathlib.Path(staged["abs_path"]).read_bytes() == payload
+        assert "external.txt" not in json.dumps(started)
+        assert not (SPEAKER_KEYS | FOCUS_KEYS) & set(started["metadata"])
+        assert started["metadata"]["presence_binding_relation"] == {"binding_id": binding}
+        assert started["metadata"]["work_kind"] == "owner"
+
+        # Empty owner words stay empty across task record, persisted result, corpus, and words reader.
+        assert started["origin_message_text"] == ""
+        persisted = load_task_result(r.root, started["id"])
+        assert persisted["origin_message_text"] == ""
+        for item in started["metadata"]["owner_corpus"]:
+            assert item["content"] == "" and "(file attached)" not in item["content"]
+            assert "[Owner quiz answer]" not in item["content"] and "unavailable" not in item["content"]
+        owner_rows = [row for row in task_owner_words(r.root, started["id"], task=started)[0]
+                      if row["source"] != REPLY_TARGET]
+        assert owner_rows and all(row["text"] == "" for row in owner_rows)
+        assert owner_rows[0]["source"] == "owner_quiz_answer" and owner_rows[0]["attachments"][0]["name"] == "seed-counts.csv"
+
+    # Cross-room Project bind keeps private non-projectability and placeholder flag.
+    binding_row = project_binding_for_task(r.root, project_root["id"])
+    assert binding_row["source_text_placeholder"] is True and binding_row["source_projectable"] is False
+    assert binding_row["source_input"]["source"] == "owner_quiz_answer" and binding_row["source_input"]["content"] == ""
+
+    # Resume startup check passes with empty owner text, and the worker holds the exact quiz_answer row.
+    env = SimpleNamespace(drive_root=r.root, budget_drive_root=r.root)
+    resumed = json.loads(json.dumps({key: value for key, value in root.items() if not key.startswith("_")}))
+    assert "unavailable" not in str(validate_task_authority_sources(env, resumed)), resumed
+    assert resumed["origin_message_text"] == ""
+    worker = _worker_ctx(r, resumed)
+    assert [row["type"] for row in held_owner_messages(worker).values()] == ["quiz_answer"]
+
+    # Admission checks every field of the file-only private start and refuses tampering.
+    assert private_start_refusal(r.root, event) == ""
+    for tamper in (
+        lambda e: e.update(attachment_uploads=[]),
+        lambda e: e.update(source_text="fabricated words"),
+        lambda e: e["origin_message_snapshot"].pop("placeholder_text"),
+        lambda e: e.pop("origin_message_snapshot"),
+    ):
+        changed = copy.deepcopy(event)
+        tamper(changed)
+        assert private_start_refusal(r.root, changed) == "private_owner_source_invalid"
+
+    # Negative control: a quiz_answer row with no option, no words, and no valid file evidence is never a source.
+    empty_row = copy.deepcopy(stored)
+    empty_row["quiz"]["attachments"] = [{"name": "display-only.csv"}]
+    assert _entry_source_identities(empty_row) == set()
+    ctx = seen["ctx"]
+    ctx._held_owner_messages[seen["handle"]] = empty_row
+    with pytest.raises(ContactRequestInvalid, match="no matching saved row"):
+        private_start_fields(ctx, seen["handle"])
+
+
+@pytest.mark.parametrize("caption", ["Inspect the north-bed seed table.", ""], ids=["with-caption", "without-caption"])
+def test_a_private_answer_with_file_opens_first_with_or_without_caption_even_after_an_earlier_private_answer(
+        contact_runtime, monkeypatch, caption):
+    """A private quiz answer carrying a measured file (with or without a caption) stages only its own file,
+    opens first in owner_corpus ahead of an earlier private answer, and keeps provenance across cold resume
+    and Continue without inventing owner words for an empty caption."""
+    import asyncio
+    import copy
+    import pathlib
+
+    from ouroboros.agent_startup_checks import validate_task_authority_sources
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.gateway import task_decision as td
+    from ouroboros.owner_relay import held_owner_messages
+    from ouroboros.owner_words import REPLY_TARGET, task_owner_words
+    from ouroboros.presence_owner_contact import private_answer_row, private_start_refusal
+    from ouroboros.project_dialogue import _text_sha256
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.continuation_admission import admit_continuation
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests.test_owner_continue import NONCE
+
+    r, seen = contact_runtime, {}
+    binding = r.admission.binding_id
+    earlier_payload = b"bed,seeds\nwest,3\n"
+    north_payload = b"bed,seeds\nnorth,9\n"
+    _p1, earlier_ref = store_upload(earlier_payload, "earlier-bed.csv", data_dir=r.root)
+    _p2, north_ref = store_upload(north_payload, "north-bed.csv", data_dir=r.root)
+    claim_refs([earlier_ref, north_ref], r.root)
+
+    def during(ctx, task, _agent):
+        seen_ids = set()
+        assert _ask(ctx, question="First private check?", request_id="earlier-q").startswith("OK:")
+        q1, = quiz_states(r.root, ctx.task_id)
+        flush_owner_events(r.root, ctx.pending_events)
+        r.pump()
+        status, receipt = asyncio.run(td.answer_decision(
+            r.root, {"decision_id": f"quiz:{ctx.task_id}:{q1}", "request_id": "owner-earlier",
+                     "comment": "Earlier private guidance."}, attachments=[earlier_ref]))
+        assert status == 200, receipt
+        _drain_incoming_messages([], queue.Queue(), r.root, ctx.task_id, None, seen_ids, owner_ctx=ctx)
+        [h1] = list(held_owner_messages(ctx))
+
+        assert _ask(ctx, question="Send the north-bed file?", request_id="file-q").startswith("OK:")
+        q2, = [qid for qid in quiz_states(r.root, ctx.task_id) if qid != q1]
+        flush_owner_events(r.root, ctx.pending_events)
+        r.pump()
+        body = {"decision_id": f"quiz:{ctx.task_id}:{q2}", "request_id": "owner-selected",
+                **({"comment": caption} if caption else {})}
+        status, receipt = asyncio.run(td.answer_decision(r.root, body, attachments=[north_ref]))
+        assert status == 200, receipt
+        _drain_incoming_messages([], queue.Queue(), r.root, ctx.task_id, None, seen_ids, owner_ctx=ctx)
+        [h2] = [handle for handle in held_owner_messages(ctx) if handle != h1]
+
+        host, emitted = _admitting(r, monkeypatch, ctx)
+        task["metadata"]["chat_attachment_uploads"] = [{"upload": "the-place-sent-this", "name": "place-decoy.txt"}]
+        out = ctx._consumer_tools.execute("start_task", {
+            **PRIVATE_START, "destination": "owner", "owner_quote": h2})
+        assert out.startswith("OK: task") and "north-bed.csv (staged at start)" in out, out
+        assert "earlier-bed.csv" not in out and "place-decoy.txt" not in out
+        seen.update(event=emitted[0], root=host.PENDING[0], tid=ctx.task_id, q1=q1, q2=q2)
+
+    assert _run(r, during).outcome == "silent"
+    event, root = seen["event"], seen["root"]
+    expected_source_text = caption or "(file attached)"
+
+    assert event["source_text"] == expected_source_text
+    assert "row_sha256" in event["source_ref"]
+    assert event["source_ref"]["text_sha256"] == _text_sha256(expected_source_text)
+    assert private_answer_row(r.root, event["source_ref"])["client_message_id"] == f"quiz_answer:{seen['tid']}:{seen['q2']}"
+    snapshot = event["origin_message_snapshot"]
+    assert snapshot["projectable"] is False and snapshot["attachments"][0]["name"] == "north-bed.csv"
+    assert snapshot["input"] == {"source": "owner_quiz_answer", "source_task_id": seen["tid"],
+                                 "content": caption, "quiz_id": seen["q2"]}
+    if caption:
+        assert "placeholder_text" not in snapshot
+    else:
+        assert snapshot["placeholder_text"] == "(file attached)"
+
+    # Only the selected answer's own file is staged; neither the earlier answer's nor the place's rides along.
+    assert len(root["attachments"]) == 1
+    [staged] = root["attachments"]
+    assert staged["status"] == "staged" and staged["label"] == "north-bed.csv"
+    assert pathlib.Path(staged["abs_path"]).read_bytes() == north_payload
+    assert "place-decoy.txt" not in json.dumps(root)
+
+    # The selected private answer is first in owner_corpus and task_owner_words, never displaced by Q1.
+    first = root["metadata"]["owner_corpus"][0]
+    assert (first["source"], first["content"], first["quiz_id"], first["source_task_id"]) == (
+        "owner_quiz_answer", caption, seen["q2"], seen["tid"])
+    assert first["row_sha256"] == event["source_ref"]["row_sha256"]
+    assert first["attachments"][0]["name"] == "north-bed.csv"
+    assert root["origin_message_text"] == caption
+    assert load_task_result(r.root, root["id"])["origin_message_text"] == caption
+    owner_rows = [row for row in task_owner_words(r.root, root["id"], task=root)[0] if row["source"] != REPLY_TARGET]
+    assert owner_rows[0]["source"] == "owner_quiz_answer" and owner_rows[0]["text"] == caption
+    assert owner_rows[0]["attachments"][0]["name"] == "north-bed.csv"
+
+    assert private_start_refusal(r.root, event) == ""
+    for tamper in (
+        lambda e: e.update(attachment_uploads=[]),
+        lambda e: e.pop("origin_message_snapshot"),
+        lambda e: e.update(source_text="different words"),
+        lambda e: e["source_ref"].update(row_sha256="0" * 64),
+    ):
+        changed = copy.deepcopy(event)
+        tamper(changed)
+        assert private_start_refusal(r.root, changed) == "private_owner_source_invalid"
+
+    # Cold resume and Continue preserve the exact provenance, file, and empty-vs-verbatim caption semantics.
+    env = SimpleNamespace(drive_root=r.root, budget_drive_root=r.root)
+    resumed = json.loads(json.dumps({key: value for key, value in root.items() if not key.startswith("_")}))
+    assert "unavailable" not in str(validate_task_authority_sources(env, resumed)), resumed
+    assert resumed["origin_message_text"] == caption
+
+    _queue, _state, pool = _install_queue(r.root, monkeypatch)
+    write_task_result(r.root, root["id"], "running", chat_id=1, root_task_id=root["id"], delegation_role="root",
+                      origin_message_ref=root["origin_message_ref"], origin_message_text=caption,
+                      metadata=root["metadata"],
+                      billing_group={"billing_group_id": root["id"], "billing_group_limit_usd": 20.0,
+                                     "billing_group_limit_source": "initial_task_admission",
+                                     "billing_group_limit_revision": "admission-1"})
+    write_task_result(r.root, root["id"], "cancelled", result="interrupted",
+                      cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
+    ack = admit_continuation(root["id"], action_nonce=NONCE)
+    assert ack["ok"], ack
+    successor = next(row for row in pool.PENDING if row["id"] == ack["successor_task_id"])
+    smeta = successor["metadata"]
+    assert smeta["presence_binding_relation"] == {"binding_id": binding} and smeta["work_kind"] == "owner"
+    assert smeta["origin_message_ref"] == root["origin_message_ref"] and smeta["origin_message_text"] == caption
+    assert (smeta["owner_corpus"][0]["source"], smeta["owner_corpus"][0]["content"],
+            smeta["owner_corpus"][0]["quiz_id"]) == ("owner_quiz_answer", caption, seen["q2"])
+    assert smeta["owner_corpus"][0]["attachments"][0]["name"] == "north-bed.csv"
+    if caption:
+        assert caption in successor["text"]
+    else:
+        assert "The owner opened this work with a file and wrote no words." in successor["text"]
+        assert "(file attached)" not in smeta["owner_corpus"][0]["content"]
+
+
+def test_restart_with_retained_approved_private_source_and_earlier_answer_puts_selected_row_first_and_accepts_legacy_source_ref(
+        contact_runtime, monkeypatch):
+    """After restart with retained held private answers and only an earlier answer in the caller's directives,
+    start_task puts the verified selected row first (with and without caption), stages only its own file, and
+    recovery accepts a previously retained 4-key source_ref without row_sha256 while still refusing tampering."""
+    import asyncio
+    import copy
+
+    from ouroboros.agent_startup_checks import validate_task_authority_sources
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.gateway import task_decision as td
+    from ouroboros.owner_relay import held_owner_messages
+    from ouroboros.presence_owner_contact import private_start_refusal
+    from ouroboros.tools.control_routing import _start_task
+
+    r, seen = contact_runtime, {}
+    binding = r.admission.binding_id
+    _p1, earlier_ref = store_upload(b"earlier\n", "earlier.csv", data_dir=r.root)
+    _p2, cap_ref = store_upload(b"captioned\n", "selected-cap.csv", data_dir=r.root)
+    _p3, file_ref = store_upload(b"fileonly\n", "selected-file.csv", data_dir=r.root)
+    claim_refs([earlier_ref, cap_ref, file_ref], r.root)
+
+    def during(ctx, _task, _agent):
+        seen_ids = set()
+        handles, qids = [], []
+        for idx, (req_id, comment, ref) in enumerate((
+            ("earlier-q", "Earlier private note.", earlier_ref),
+            ("cap-q", "Use the selected CSV.", cap_ref),
+            ("file-q", "", file_ref),
+        )):
+            assert _ask(ctx, question=f"Private question {idx + 1}?", request_id=req_id).startswith("OK:")
+            qid, = [q for q in quiz_states(r.root, ctx.task_id) if q not in qids]
+            qids.append(qid)
+            flush_owner_events(r.root, ctx.pending_events)
+            r.pump()
+            body = {"decision_id": f"quiz:{ctx.task_id}:{qid}", "request_id": f"ans-{idx}",
+                    **({"comment": comment} if comment else {})}
+            status, receipt = asyncio.run(td.answer_decision(r.root, body, attachments=[ref]))
+            assert status == 200, receipt
+            _drain_incoming_messages([], queue.Queue(), r.root, ctx.task_id, None, seen_ids, owner_ctx=ctx)
+            new_handle, = [h for h in held_owner_messages(ctx) if h not in handles]
+            handles.append(new_handle)
+        seen.update(held=copy.deepcopy(dict(held_owner_messages(ctx))),
+                    earlier_directive=copy.deepcopy(ctx._owner_directives[0]),
+                    asker=ctx.task_id, qids=qids, handles=handles)
+
+    assert _run(r, during).outcome == "silent"
+    monkeypatch.setattr("ouroboros.owner_continue.recorded_continuation",
+                        lambda _root, asker, task: (asker, task) == (seen["asker"], "restarted-presence"))
+    env = SimpleNamespace(drive_root=r.root, budget_drive_root=r.root)
+
+    for handle, qid, expected_caption, expected_file in (
+        (seen["handles"][1], seen["qids"][1], "Use the selected CSV.", "selected-cap.csv"),
+        (seen["handles"][2], seen["qids"][2], "", "selected-file.csv"),
+    ):
+        emitted = []
+        metadata = {
+            "presence_binding_authority": {"binding_id": binding},
+            "root_task_id": "restarted-presence",
+            "delegation_role": "root",
+            "chat_attachment_uploads": [{"upload": "caller-decoy", "name": "caller-decoy.txt"}],
+            "continuation": {"owner_sources": {"held_owner_messages": copy.deepcopy(seen["held"])}},
+        }
+        successor = SimpleNamespace(
+            pending_events=[], event_queue=None, current_chat_id=1, drive_root=r.root, project_id="",
+            budget_drive_root=str(r.root), task_id="restarted-presence", is_direct_chat=False,
+            task_metadata=metadata, task_contract={},
+            _owner_directives=[copy.deepcopy(seen["earlier_directive"])],
+        )
+        with monkeypatch.context() as scoped:
+            scoped.setattr("ouroboros.tools.control_routing._emit_and_wait_for_routing",
+                           lambda _ctx, evt: (emitted.append(copy.deepcopy(evt)) or "live", {"status": "scheduled"}))
+            out = _start_task(successor, "Inspect selected source", title="Selected source",
+                              destination="owner", owner_quote=handle)
+            assert out.startswith("OK: task"), out
+        [evt] = emitted
+        assert (evt["owner_corpus"][0]["source"], evt["owner_corpus"][0]["content"],
+                evt["owner_corpus"][0]["quiz_id"]) == ("owner_quiz_answer", expected_caption, qid)
+        assert evt["owner_corpus"][0]["attachments"][0]["name"] == expected_file
+        assert [spec["label"] for spec in evt["attachment_uploads"]] == [expected_file]
+        assert private_start_refusal(r.root, evt) == ""
+
+        # Previously retained 4-key source_ref (without row_sha256) still verifies on recovery,
+        # while tampering any field or supplying a mismatched row_sha256 is refused.
+        legacy = copy.deepcopy(evt)
+        legacy["source_ref"].pop("row_sha256")
+        assert private_start_refusal(r.root, legacy) == ""
+        for tamper in (
+            lambda e: e.update(source_text="tampered words"),
+            lambda e: e.update(attachment_uploads=[]),
+            lambda e: e["source_ref"].update(row_sha256="0" * 64),
+        ):
+            bad = copy.deepcopy(legacy)
+            tamper(bad)
+            assert private_start_refusal(r.root, bad) == "private_owner_source_invalid"
+
+        resumed_legacy = {
+            "id": f"legacy-{qid}",
+            "origin_message_ref": legacy["source_ref"],
+            "origin_message_text": expected_caption,
+            "metadata": {"origin_message_snapshot": legacy["origin_message_snapshot"]},
+        }
+        assert "unavailable" not in str(validate_task_authority_sources(env, resumed_legacy)), resumed_legacy
+        worker = ToolContext(
+            repo_dir=r.root, drive_root=r.root, budget_drive_root=r.root, task_id=f"legacy-{qid}",
+            current_chat_id=1, task_metadata={
+                "origin_message_ref": legacy["source_ref"],
+                "origin_message_text": expected_caption,
+                "origin_message_snapshot": legacy["origin_message_snapshot"],
+            }, task_contract={}, is_direct_chat=False,
+        )
+        assert [row["client_message_id"] for row in held_owner_messages(worker).values()] == [
+            f"quiz_answer:{seen['asker']}:{qid}"]

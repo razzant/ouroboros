@@ -359,7 +359,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
         # rides beside them; the source-work link in the model's frame and the external request are context.
         _loop()._record_owner_directive(ctx, source=answer_source(answered), content=late_answer_owner_text(answered),
                                       origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"], "ts": answered.get("answered_at")},
-                                      reply_to=answered_card_reply(answered, late["task_id"]))
+                                      reply_to=answered_card_reply(answered, late["task_id"]), attachments=answered.get("attachments"))
         return
     author = metadata.get("objective_author")
     # A task-drafted objective, or the host's Continue work order (its facts are
@@ -411,7 +411,8 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
                 _loop()._record_owner_directive(ctx, source=submitted["source"], content=submitted["content"],
                         reply_to=submitted.get("reply_to"), origin={**{key: door.get(key) for key in ("chat_id", "client_message_id", "ts", "row_sha256")},
                                                                    **{key: submitted.get(key) for key in ("source_task_id", "quiz_id")},
-                                                                   **({"mail_kind": opening_kind} if opening_kind else {})})
+                                                                   **({"mail_kind": opening_kind} if opening_kind else {})},
+                        attachments=submitted.get("attachments"))  # a late answer's Reply files, words or none
                 break
             snapshot = (metadata.get("origin_message_snapshot") or {}) if stamped else {}
             content = message.get("content")

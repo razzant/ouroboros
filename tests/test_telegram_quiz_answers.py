@@ -911,3 +911,520 @@ def test_silent_mode_toggle_says_what_silent_mode_now_does(tmp_path, monkeypatch
             "off": "🔔 Silent mode off: replies arrive with their usual sound.",
         }[expected]
         assert "replace" not in toast
+
+
+# --- A Reply's file answers with its caption (owner's choice, 18 Nov) -------
+
+_SHOT = b"\x89PNG\r\n\x1a\nscreen"
+_NOT_RECORDED = (404, {"ok": False, "reason_code": "request_not_recorded"})
+_REJOIN = {"request_id": "tg:m:42:700", "decision_id": "quiz:task-1:q1", "rejoin": True}
+
+
+def _media_reply(monkeypatch, message, files):
+    """The owner's Reply to the card (message 555) carrying MESSAGE's media; FILES are what downloads return."""
+    import base64
+
+    fetched = []
+
+    async def download_file(self, file_id):
+        fetched.append(file_id)
+        if file_id not in files:
+            raise RuntimeError("download failed")
+        return files[file_id]
+
+    async def download_photo(self, file_id):
+        return base64.b64encode(await download_file(self, file_id)).decode("ascii"), "image/jpeg"
+
+    monkeypatch.setattr(Client, "download_file", download_file, raising=False)
+    monkeypatch.setattr(Client, "download_photo", download_photo, raising=False)
+    return fetched, {"update_id": 30, "message": {"message_id": 700, "chat": {"id": 42, "type": "private"},
+                                                  "from": {"id": 42}, "reply_to_message": {"message_id": 555}, **message}}
+
+
+def _handle(plugin, api, monkeypatch, update, answers):
+    """One owner update through the bridge's message handler; the host answers each POST from ANSWERS in order."""
+    posts = []
+
+    async def fake_post(_api, path, body, method="POST"):
+        posts.append((path, dict(body)))
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(plugin, "_host_post", fake_post)
+    client = Client("token")
+    asyncio.run(plugin._handle_owner_message(api, client, update, 30, plugin._COMMAND_MODE_FULL, "en"))
+    return posts, client
+
+
+def test_a_reply_with_a_photo_and_caption_is_one_answer_carrying_both(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    _fetched, update = _media_reply(monkeypatch, {"caption": "this one", "photo": [{"file_id": "ph1"}]}, {"ph1": _SHOT})
+    shown = [{"name": "photo.jpg", "kind": "image", "size": len(_SHOT)}]
+    posts, client = _handle(plugin, api, monkeypatch, update, [_NOT_RECORDED, (200, {
+        "ok": True, "state": "answered", "comment": "this one", "attachments": shown})])
+
+    (rejoin_path, rejoin), (path, body) = posts
+    assert (rejoin_path, rejoin) == ("/chat/decision", _REJOIN), "first: has this very update already answered?"
+    assert path == "/chat/decision" and body["comment"] == "this one" and body["request_id"] == "tg:m:42:700"
+    parked, = body["attachments"]
+    assert (parked["name"], parked["mime"]) == ("photo.jpg", "image/jpeg")
+    assert not Path(parked["path"]).exists(), "the parked copy is removed once the host answered"
+    assert client.sent == [] and client.edits[0][2].endswith("\nAnswered: this one\n📎 photo.jpg")
+
+
+def test_a_file_alone_answers_the_card_without_words(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    _fetched, update = _media_reply(monkeypatch, {"document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf", "file_size": 7}}, {"doc1": b"%PDF-1."})
+    posts, client = _handle(plugin, api, monkeypatch, update, [_NOT_RECORDED, (200, {
+        "ok": True, "state": "answered", "attachments": [{"name": "report.pdf", "kind": "file", "size": 7}]})])
+
+    body = posts[1][1]
+    assert "comment" not in body and "option_index" not in body, "no words are invented for a file alone"
+    assert [item["name"] for item in body["attachments"]] == ["report.pdf"]
+    assert client.edits[0][2].endswith("\nAnswered: 📎 report.pdf")
+
+
+def test_a_file_too_large_is_never_downloaded_and_answers_with_its_reason(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    big = 50 * 1024 * 1024
+    fetched, update = _media_reply(monkeypatch, {"caption": "watch", "video": {
+        "file_id": "vid1", "file_name": "clip.mp4", "mime_type": "video/mp4", "file_size": big}}, {})
+    fact = {"name": "clip.mp4", "mime": "video/mp4", "unavailable": "too_large", "size": big,
+            "limit_bytes": 10 * 1024 * 1024}
+    posts, client = _handle(plugin, api, monkeypatch, update, [_NOT_RECORDED, (200, {
+        "ok": True, "state": "answered", "comment": "watch", "attachments": [{**fact, "kind": "file"}]})])
+
+    assert fetched == [] and posts[1][1]["comment"] == "watch" and posts[1][1]["attachments"] == [fact]
+    assert client.edits[0][2].endswith("\nAnswered: watch\n📎 clip.mp4: not received, too large")
+
+
+def test_the_same_caption_and_bytes_from_another_request_stay_its_loss(tmp_path, monkeypatch):
+    """A 409 names another request's winner, whatever its words or bytes: the first answer stays and the owner is
+    told once; this Reply's file is never taken for it."""
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    _fetched, update = _media_reply(monkeypatch, {"caption": "this one", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"%PDF-1.4 a"})
+    winner = {"name": "report.pdf", "kind": "file", "sha256": __import__("hashlib").sha256(b"%PDF-1.4 a").hexdigest()}
+    posts, client = _handle(plugin, api, monkeypatch, update, [_NOT_RECORDED, (409, {
+        "ok": False, "error": "quiz_closed", "state": "answered", "comment": "this one", "attachments": [winner]})])
+
+    assert len(posts) == 2
+    assert client.edits[0][2].endswith("\nAnswered: this one\n📎 report.pdf")
+    assert client.sent == [(42, "Not accepted: this question was already answered. Recorded answer: this one\n📎 report.pdf")]
+
+
+@pytest.mark.parametrize("case", ["own", "other", "unconfirmed_read", "nonfinal_read"])
+def test_a_5xx_answer_is_this_replys_own_only_when_the_host_records_this_request(tmp_path, monkeypatch, case):
+    """A 5xx _answer_pending payload may carry a winner from this request or another; only read-back decides,
+    and an unconfirmed or non-final read-back never accepts, reports conflict, or asks to resend."""
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    _fetched, update = _media_reply(monkeypatch, {"caption": "this one", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"%PDF-1.4 a"})
+    recorded = {"ok": True, "state": "answered", "duplicate": True, "comment": "this one",
+                "attachments": [{"name": "report.pdf", "kind": "file"}]}
+    pending = (503, {"ok": False, "state": "answered", "reason_code": "mailbox_write_failed", "comment": "this one",
+                     "attachments": [{"name": "report.pdf", "kind": "file"}]})
+    readback = {
+        "own": (200, recorded),
+        "other": (404, {"ok": False, "reason_code": "request_not_recorded", "state": "answered"}),
+        "unconfirmed_read": (503, {"ok": False, "reason_code": "quiz_answer_unconfirmed"}),
+        "nonfinal_read": _NOT_RECORDED,
+    }[case]
+    posts, client = _handle(plugin, api, monkeypatch, update, [_NOT_RECORDED, pending, readback])
+
+    assert [body for _path, body in posts][2] == _REJOIN, "an unknown outcome is read back by request, not by content"
+    if case == "own":
+        assert client.edits[0][2].endswith("\nAnswered: this one\n📎 report.pdf")
+        assert client.sent == []
+    elif case == "other":
+        assert client.edits[0][2].endswith("\nAnswered: this one\n📎 report.pdf")
+        assert client.sent == [
+            (42, "Not accepted: this question was already answered. Recorded answer: this one\n📎 report.pdf")]
+    else:
+        assert client.edits == []
+        assert client.sent == [(42, "Could not confirm that Ouroboros received that Telegram update.")]
+
+
+def test_a_raised_answer_send_is_read_back_once_and_never_sent_again(tmp_path, monkeypatch):
+    """The answer's send raised after the host may have written it: one exact read of this request decides."""
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    fetched, update = _media_reply(monkeypatch, {"caption": "this one", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"%PDF-1.4 a"})
+    recorded = {"ok": True, "state": "answered", "duplicate": True, "comment": "this one",
+                "attachments": [{"name": "report.pdf", "kind": "file"}]}
+
+    posts, client = _handle(plugin, api, monkeypatch, update, [_NOT_RECORDED, RuntimeError("reset"), (200, recorded)])
+
+    assert [body.get("rejoin", False) for _path, body in posts] == [True, False, True] and fetched == ["doc1"]
+    assert client.sent == [] and client.edits[0][2].endswith("\nAnswered: this one\n📎 report.pdf")
+
+
+def test_a_redelivered_update_rejoins_its_recorded_answer_without_a_new_download(tmp_path, monkeypatch):
+    """The first answer's receipt never came back and its read-back failed too (the bridge stops before confirming
+    the update); Telegram delivers the same update again after its parked copy was removed: the host's record of
+    this request settles the card, and nothing is downloaded, parked or sent again."""
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    fetched, update = _media_reply(monkeypatch, {"caption": "this one", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"%PDF-1.4 a"})
+    with pytest.raises(RuntimeError, match="receipt lost"):
+        _handle(plugin, api, monkeypatch, update, [_NOT_RECORDED, RuntimeError("receipt lost"), RuntimeError("down")])
+    assert fetched == ["doc1"] and not list((tmp_path / "inbox").iterdir())
+    recorded = {"ok": True, "state": "answered", "duplicate": True, "comment": "this one",
+                "attachments": [{"name": "report.pdf", "kind": "file"}]}
+
+    posts, client = _handle(plugin, api, monkeypatch, update, [(200, recorded)])
+
+    assert posts == [("/chat/decision", _REJOIN)] and fetched == ["doc1"], "no second download or answer"
+    assert client.sent == [] and client.edits[0][2].endswith("\nAnswered: this one\n📎 report.pdf")
+
+
+@pytest.mark.parametrize("read", ["unreadable", "bad_2xx", "unreachable"])
+def test_an_unknown_record_never_downloads_the_file(tmp_path, monkeypatch, read):
+    """Only the host's authoritative ``request_not_recorded`` lets the bridge receive the file. An unreadable,
+    invalid-2xx, or unreachable initial lookup downloads nothing, submits nothing, does not defer/strand,
+    reuses ``update_failed`` without asking to resend, and tells the owner once."""
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    fetched, update = _media_reply(monkeypatch, {"caption": "this one", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"%PDF-1.4 a"})
+    answer = {
+        "unreadable": (503, {"ok": False, "reason_code": "quiz_answer_unconfirmed"}),
+        "bad_2xx": (200, {}),
+        "unreachable": RuntimeError("down"),
+    }[read]
+
+    posts, client = _handle(plugin, api, monkeypatch, update, [answer])
+
+    assert fetched == [] and posts == [("/chat/decision", _REJOIN)]
+    assert client.sent == [(42, "Could not confirm that Ouroboros received that Telegram update.")] and client.edits == []
+
+
+@pytest.mark.parametrize("read,notice_timeout", [
+    ("unreadable", False),
+    ("bad_2xx", False),
+    ("unreachable", False),
+    ("unreadable", True),
+])
+def test_unknown_initial_lookup_does_not_strand_subsequent_ordinary_updates(tmp_path, monkeypatch, read, notice_timeout):
+    """A transient/unknown rejoin must not defer the batch or strand ordinary updates behind it."""
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    fetched, quiz_update = _media_reply(monkeypatch, {"caption": "this one", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"%PDF-1.4 a"})
+    ordinary_update = {"update_id": 31, "message": {
+        "message_id": 701, "chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "follow-up",
+    }}
+    posts, injected = [], []
+
+    async def fake_post(_api, path, body, method="POST"):
+        posts.append((path, dict(body)))
+        if read == "unreadable":
+            return 503, {"ok": False, "reason_code": "quiz_answer_unconfirmed"}
+        if read == "bad_2xx":
+            return 200, {}
+        raise RuntimeError("down")
+
+    async def fake_inject(_api, payload):
+        injected.append(payload)
+
+    monkeypatch.setattr(plugin, "_host_post", fake_post)
+    monkeypatch.setattr(plugin, "_inject", fake_inject)
+    binding_mod = sys.modules[plugin.__package__ + ".lib.telegram_poll_binding"]
+    cursor = binding_mod.PollCursor(tmp_path / "poll_offset.json", binding_mod.CLOUD_BASE, "")
+    binding = plugin.binding_for(api)
+    binding.read_now(api)
+    _token, generation = binding.snapshot()
+    if notice_timeout:
+        class _NoticeTimeoutClient(Client):
+            async def send_message(self, chat_id, text, parse_mode="HTML"):
+                await super().send_message(chat_id, text, parse_mode=parse_mode)
+                raise plugin.TelegramTransportError("Telegram API timed out during sendMessage.", unsent=False)
+
+        client = _NoticeTimeoutClient("token")
+    else:
+        client = Client("token")
+
+    deferred, _lang = asyncio.run(binding_mod.handle_poll_batch(
+        api, client, [quiz_update, ordinary_update], cursor, binding, generation, "42", 20,
+        plugin._COMMAND_MODE_FULL, "en", authorize=plugin._authorized_owner, is_panic=plugin._panic_update,
+        on_message=plugin._handle_owner_message, on_callback=plugin._handle_poll_callback,
+    ))
+
+    assert deferred is False and cursor.offset == 32
+    assert fetched == [] and posts == [("/chat/decision", _REJOIN)]
+    assert [row["text"] for row in injected] == ["follow-up"]
+    assert client.sent == [(42, "Could not confirm that Ouroboros received that Telegram update.")]
+    if notice_timeout:
+        assert api.logs == [("warning", "Telegram quiz notice failed (TelegramTransportError).")]
+
+
+def test_a_throttled_first_lookup_is_unconfirmed_and_never_asks_to_answer_again(tmp_path, monkeypatch):
+    """The host's own throttle answers ``429 rate limit exceeded`` before it reads the request
+    (``gateway/host_service.py``), so this first lookup of an already recorded answer settles nothing: the file
+    is never downloaded, nothing is submitted, the card is not edited, one notice says the receipt is
+    unconfirmed without asking to answer again, and the message is not deferred — the ordinary turn behind it
+    goes through."""
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    fetched, quiz_update = _media_reply(monkeypatch, {"caption": "this one", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"%PDF-1.4 a"})
+    ordinary_update = {"update_id": 31, "message": {
+        "message_id": 701, "chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "follow-up",
+    }}
+    posts, injected = [], []
+
+    async def fake_post(_api, path, body, method="POST"):
+        posts.append((path, dict(body)))
+        return 429, {"ok": False, "error": "rate limit exceeded"}
+
+    async def fake_inject(_api, payload):
+        injected.append(payload)
+
+    monkeypatch.setattr(plugin, "_host_post", fake_post)
+    monkeypatch.setattr(plugin, "_inject", fake_inject)
+    binding_mod = sys.modules[plugin.__package__ + ".lib.telegram_poll_binding"]
+    cursor = binding_mod.PollCursor(tmp_path / "poll_offset.json", binding_mod.CLOUD_BASE, "")
+    binding = plugin.binding_for(api)
+    binding.read_now(api)
+    _token, generation = binding.snapshot()
+    client = Client("token")
+
+    deferred, _lang = asyncio.run(binding_mod.handle_poll_batch(
+        api, client, [quiz_update, ordinary_update], cursor, binding, generation, "42", 20,
+        plugin._COMMAND_MODE_FULL, "en", authorize=plugin._authorized_owner, is_panic=plugin._panic_update,
+        on_message=plugin._handle_owner_message, on_callback=plugin._handle_poll_callback,
+    ))
+
+    assert deferred is False and cursor.offset == 32, "the message is not deferred and is not replayed later"
+    assert fetched == [] and posts == [("/chat/decision", _REJOIN)], "no download, nothing submitted"
+    assert [row["text"] for row in injected] == ["follow-up"]
+    assert client.edits == [] and client.sent == [
+        (42, "Could not confirm that Ouroboros received that Telegram update.")]
+    notice = client.sent[0][1]
+    assert "Try again" not in notice and "Send the same answer again" not in notice, "never a resend ask"
+
+
+def test_final_rejoin_state_avoids_download_while_expired_terminal_takes_late_answer(tmp_path, monkeypatch):
+    """404 request_not_recorded with state=answered or state=closed is final before download;
+    state=expired_terminal still downloads and takes the late-answer path."""
+    plugin = _load_plugin()
+
+    # 1. Already answered (no local winner yet): plain notice, no download, card settles.
+    (tmp_path / "ans-plain").mkdir(exist_ok=True)
+    api = _send_card(plugin, tmp_path / "ans-plain", monkeypatch)
+    fetched, update = _media_reply(monkeypatch, {"caption": "mine", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"hi"})
+    posts, client = _handle(plugin, api, monkeypatch, update, [
+        (404, {"ok": False, "reason_code": "request_not_recorded", "state": "answered"}),
+    ])
+    assert fetched == [] and posts == [("/chat/decision", _REJOIN)]
+    assert client.sent == [(42, "This question was already answered.")]
+    assert client.edits[0][2].endswith("\nAnswered.")
+
+    # 2. Already answered (local card already holds winner): names recorded winner, no download.
+    (tmp_path / "ans-known").mkdir(exist_ok=True)
+    api = _send_card(plugin, tmp_path / "ans-known", monkeypatch)
+    asyncio.run(plugin._make_quiz_state(api)({
+        "task_id": "task-1", "quiz_id": "q1", "state": "answered", "comment": "Use duckdb",
+    }))
+    fetched, update = _media_reply(monkeypatch, {"caption": "mine", "document": {
+        "file_id": "doc2", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc2": b"hi"})
+    posts, client = _handle(plugin, api, monkeypatch, update, [
+        (404, {"ok": False, "reason_code": "request_not_recorded", "state": "answered"}),
+    ])
+    assert fetched == [] and posts == [("/chat/decision", _REJOIN)]
+    assert client.sent == [(42, _LOST.format(answer="Use duckdb"))]
+
+    # 3. Explicitly closed (preserves stored closed_reason on card): no download.
+    (tmp_path / "closed").mkdir(exist_ok=True)
+    api = _send_card(plugin, tmp_path / "closed", monkeypatch)
+    asyncio.run(plugin._make_quiz_state(api)({
+        "task_id": "task-1", "quiz_id": "q1", "state": "closed", "closed_reason": "No longer needed.",
+    }))
+    fetched, update = _media_reply(monkeypatch, {"caption": "mine", "document": {
+        "file_id": "doc3", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc3": b"hi"})
+    posts, client = _handle(plugin, api, monkeypatch, update, [
+        (404, {"ok": False, "reason_code": "request_not_recorded", "state": "closed"}),
+    ])
+    assert fetched == [] and posts == [("/chat/decision", _REJOIN)]
+    assert client.sent == [(42, "Question closed.")]
+    assert client.edits[0][2].endswith("\nQuestion closed.\nNo longer needed.")
+
+    # 4. expired_terminal is NOT final: still downloads and takes the late-answer path.
+    (tmp_path / "expired").mkdir(exist_ok=True)
+    api = _send_card(plugin, tmp_path / "expired", monkeypatch)
+    fetched, update = _media_reply(monkeypatch, {"caption": "late file", "document": {
+        "file_id": "doc4", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc4": b"hi"})
+    posts, client = _handle(plugin, api, monkeypatch, update, [
+        (404, {"ok": False, "reason_code": "request_not_recorded", "state": "expired_terminal"}),
+        (200, {"ok": True, "state": "answered", "answered_after_terminal": True,
+               "comment": "late file", "attachments": [{"name": "report.pdf", "kind": "file"}]}),
+    ])
+    assert fetched == ["doc4"] and len(posts) == 2
+    assert client.sent == [] and client.edits[0][2].endswith("\nAnswered: late file\n📎 report.pdf")
+
+
+@pytest.mark.parametrize("final", ["answered", "closed"])
+def test_the_hosts_rejoin_names_another_channels_answer_or_the_closure_without_a_download(tmp_path, monkeypatch, final):
+    """The host's own rejoin read (``task_decision.rejoin_decision``) of a question another channel answered, or the
+    owner closed, carries what this card shows: nothing is downloaded or sent as an answer, one notice names it."""
+    from ouroboros.gateway import task_decision
+    from ouroboros.owner_quiz import record_answered, record_asked, record_closed
+
+    host = tmp_path / "host"
+    host.mkdir()
+    record_asked(host, "task-1", quiz_id="q1", question="Which db?", options=["sqlite", "postgres"],
+                 assumption="sqlite meanwhile")
+    if final == "answered":
+        record_answered(host, "task-1", quiz_id="q1", option_index=1, request_id="web-1", comment="needs a server")
+    else:
+        record_closed(host, "task-1", quiz_id="q1", reason="No longer needed.", actor="owner", request_id="close-1")
+    status, payload = task_decision.rejoin_decision(host, _REJOIN)
+    payload.setdefault("ok", status < 400)  # as the Host Service relays it
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    fetched, update = _media_reply(monkeypatch, {"caption": "mine", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"hi"})
+
+    posts, client = _handle(plugin, api, monkeypatch, update, [(status, payload)])
+
+    assert status == 404 and fetched == [] and posts == [("/chat/decision", _REJOIN)]
+    if final == "answered":
+        assert client.sent == [(42, _LOST.format(answer="2. postgres — needs a server"))]
+        assert "\nAnswered: 2. postgres — needs a server\n" in client.edits[0][2]
+    else:
+        assert client.sent == [(42, "Question closed.")]
+        assert client.edits[0][2].endswith("\nQuestion closed.\nNo longer needed.")
+
+
+def test_album_reply_first_item_answers_and_remaining_items_avoid_download(tmp_path, monkeypatch):
+    """No album aggregation: first item with its caption answers once; remaining items replying to that
+    same card skip download when rejoin sees state=answered and report the conflict once."""
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    fetched, first = _media_reply(monkeypatch, {
+        "media_group_id": "grp1", "caption": "use this", "photo": [{"file_id": "ph1"}],
+    }, {"ph1": _SHOT, "ph2": _SHOT})
+    second = {"update_id": 31, "message": {
+        "message_id": 701, "chat": {"id": 42, "type": "private"}, "from": {"id": 42},
+        "reply_to_message": {"message_id": 555}, "media_group_id": "grp1", "photo": [{"file_id": "ph2"}],
+    }}
+
+    posts1, client1 = _handle(plugin, api, monkeypatch, first, [
+        _NOT_RECORDED,
+        (200, {"ok": True, "state": "answered", "comment": "use this",
+               "attachments": [{"name": "photo.jpg", "kind": "image", "size": len(_SHOT)}]}),
+    ])
+    assert fetched == ["ph1"] and len(posts1) == 2 and client1.sent == []
+
+    posts2, client2 = _handle(plugin, api, monkeypatch, second, [
+        (404, {"ok": False, "reason_code": "request_not_recorded", "state": "answered"}),
+    ])
+    assert fetched == ["ph1"], "second album item must not be downloaded"
+    assert posts2 == [("/chat/decision", {
+        "request_id": "tg:m:42:701", "decision_id": "quiz:task-1:q1", "rejoin": True,
+    })]
+    assert client2.sent == [(42, _LOST.format(answer="use this\n📎 photo.jpg"))]
+
+
+def test_5xx_or_raised_deliver_followed_by_final_rejoin_reports_conflict_or_closed(tmp_path, monkeypatch):
+    """After a 5xx, invalid 2xx, or raised deliver, one read-back settles the real outcome without resending."""
+    plugin = _load_plugin()
+
+    (tmp_path / "c1").mkdir(exist_ok=True)
+    api = _send_card(plugin, tmp_path / "c1", monkeypatch)
+    _fetched, update = _media_reply(monkeypatch, {"document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"hi"})
+    posts, client = _handle(plugin, api, monkeypatch, update, [
+        _NOT_RECORDED,
+        (503, {"ok": False, "reason_code": "quiz_answer_unconfirmed"}),
+        (404, {"ok": False, "reason_code": "request_not_recorded", "state": "answered"}),
+    ])
+    assert len(posts) == 3 and client.sent == [(42, "This question was already answered.")]
+
+    (tmp_path / "c2").mkdir(exist_ok=True)
+    api = _send_card(plugin, tmp_path / "c2", monkeypatch)
+    _fetched, update = _media_reply(monkeypatch, {"document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"hi"})
+    posts, client = _handle(plugin, api, monkeypatch, update, [
+        _NOT_RECORDED,
+        RuntimeError("reset"),
+        (404, {"ok": False, "reason_code": "request_not_recorded", "state": "closed"}),
+    ])
+    assert len(posts) == 3 and client.sent == [(42, "Question closed.")]
+
+    # Malformed/non-JSON 2xx from deliver is NOT accepted blindly: one read-back, no resend.
+    (tmp_path / "c3").mkdir(exist_ok=True)
+    api = _send_card(plugin, tmp_path / "c3", monkeypatch)
+    _fetched, update = _media_reply(monkeypatch, {"document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"hi"})
+    posts, client = _handle(plugin, api, monkeypatch, update, [
+        _NOT_RECORDED,
+        (200, {}),
+        (503, {"ok": False, "reason_code": "quiz_answer_unconfirmed"}),
+    ])
+    assert [body.get("rejoin", False) for _path, body in posts] == [True, False, True]
+    assert client.edits == [] and client.sent == [(42, "Could not confirm that Ouroboros received that Telegram update.")]
+
+    (tmp_path / "c4").mkdir(exist_ok=True)
+    api = _send_card(plugin, tmp_path / "c4", monkeypatch)
+    _fetched, update = _media_reply(monkeypatch, {"caption": "ok", "document": {
+        "file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}}, {"doc1": b"hi"})
+    posts, client = _handle(plugin, api, monkeypatch, update, [
+        _NOT_RECORDED,
+        (200, {"ok": True}),
+        (200, {"ok": True, "state": "answered", "duplicate": True, "comment": "ok",
+               "attachments": [{"name": "report.pdf", "kind": "file"}]}),
+    ])
+    assert [body.get("rejoin", False) for _path, body in posts] == [True, False, True]
+    assert client.sent == [] and client.edits[0][2].endswith("\nAnswered: ok\n📎 report.pdf")
+
+
+def test_settled_card_near_limit_reserves_room_for_file_fact_over_long_caption(tmp_path, monkeypatch):
+    """Near Telegram's 4096 UTF-16 limit, caption gives way so the file/result fact stays visible
+    on its own line, UTF-16 stays valid, and the exact stored caption is preserved."""
+    plugin = _load_plugin()
+    quiz = plugin.telegram_quiz
+    _settings(tmp_path)
+    recording, calls = _recording_client(plugin)
+    monkeypatch.setattr(plugin, "TelegramClient", recording)
+    api = Api(tmp_path)
+    max_body = quiz._TELEGRAM_TEXT_LIMIT - quiz.answered_edit_reserve("en") - len(f"\n{_HINT_EN}")
+    event = {**_EVENT, "question": "q" * (max_body - len("Question: \n1. sqlite\n2. postgres\nContinuing meanwhile: sqlite meanwhile"))}
+    asyncio.run(plugin._make_quiz(api)(event))
+    assert len(calls) == 1
+    card_id = quiz.quiz_for_token(api, "", quiz.mint_token("task-1", "q1"))["message_id"]
+
+    long_caption = "\U0001F600" * 110 + " keep exact caption"
+    big = 50 * 1024 * 1024
+    fact = {"name": "clip.mp4", "mime": "video/mp4", "unavailable": "too_large", "size": big,
+            "limit_bytes": 10 * 1024 * 1024}
+    _fetched, update = _media_reply(monkeypatch, {"caption": long_caption, "video": {
+        "file_id": "vid1", "file_name": "clip.mp4", "mime_type": "video/mp4", "file_size": big}}, {})
+    update["message"]["reply_to_message"]["message_id"] = card_id
+    posts, client = _handle(plugin, api, monkeypatch, update, [
+        _NOT_RECORDED,
+        (200, {"ok": True, "state": "answered", "comment": long_caption,
+               "attachments": [{**fact, "kind": "file"}],
+               "question_delivery": _delivery(reason="awaiting_recipient_read")}),
+    ])
+
+    assert posts[1][0] == "/chat/decision"
+    assert posts[1][1]["comment"] == long_caption
+    edited = client.edits[0][2]
+    assert quiz._u16len(edited) <= quiz._TELEGRAM_TEXT_LIMIT
+    edited.encode("utf-16-le").decode("utf-16-le")  # valid UTF-16 with no broken surrogate pairs
+    assert "\n📎 clip.mp4: not received, too large\n" in edited
+    assert _SAVED in edited
+    stored = quiz.quiz_for_token(api, "", quiz.mint_token("task-1", "q1"))
+    assert stored["comment"] == long_caption

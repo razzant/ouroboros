@@ -632,7 +632,7 @@ def question_task_owned_by(drive_root: Any, task_id: str, actor_task_id: str) ->
 def record_answered(
     drive_root: Any, task_id: str, *,
     quiz_id: str, option_index: Optional[int], request_id: str, comment: str = "",
-    allow_expired: bool = False,
+    allow_expired: bool = False, attachments: Optional[List[Dict[str, Any]]] = None,
     answer_source: str = "web", answer_surface: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Ingress-side answer write — request-id idempotent, first answer wins (``answer_surface``: the Telegram bot and
@@ -641,7 +641,9 @@ def record_answered(
     ``option_index=None`` is the owner's OWN answer: none of the offered
     options was taken, so no ``answered_index`` is written at all (a stored 0
     would read as "chose the first option" on every later replay) and the
-    verbatim ``comment`` carries the answer.
+    verbatim ``comment`` carries the answer. ``attachments``: the measured refs of the
+    file the bundled bridge's Reply carried (``chat_uploads``), stored with this winner only;
+    a file alone is an answer without words.
 
     ``allow_expired`` admits the LATE answer (В17a=A): a structurally expired
     card of a finished task is still answerable, and the accepted block carries
@@ -688,7 +690,7 @@ def record_answered(
             return _KEEP
         options = block.get("options") if isinstance(block.get("options"), list) else []
         if option_index is None:
-            if not str(comment or "").strip():
+            if not str(comment or "").strip() and not attachments:
                 outcome.update({"ok": False, "error": "answer_empty", "state": state})
                 return _KEEP
         elif not isinstance(option_index, int) or not (0 <= option_index < len(options)):
@@ -704,6 +706,7 @@ def record_answered(
             # No index key at all for an own answer — see the docstring.
             **({"answered_index": int(option_index)} if option_index is not None else {}),
             **({"comment": str(comment)} if str(comment or "").strip() else {}),
+            **({"attachments": [dict(ref) for ref in attachments]} if attachments else {}),
         })
         quizzes[str(quiz_id)] = block
         outcome.update({"ok": True, "state": STATE_ANSWERED, "duplicate": False, "block": dict(block)})
@@ -837,7 +840,9 @@ def quiz_answer_frame(
 
     if block.get("reply_to"):
         lines.append(reply_instruction(block["reply_to"]))
-    if option_index is None:
+    if option_index is None and not comment and block.get("attachments"):
+        lines.append("The owner answered with an attachment and no words, without choosing an offered option.")
+    elif option_index is None:
         lines.append(
             "The owner answered in their own words without choosing an offered "
             f"option. Verbatim: {comment}"
@@ -846,6 +851,9 @@ def quiz_answer_frame(
         from ouroboros.answer_facts import option_answer
 
         lines.append(option_answer(block, option_index, comment, asker=asker, reader=reader))
+    from ouroboros.chat_uploads import retained_attachments_note  # the host names the files, never in owner words
+
+    lines += [note] if (note := retained_attachments_note(block.get("attachments"))) else []
     ended_at_terminal = bool(block.get("wait_ended_at")) and (
         block.get("wait_ended_at") == block.get("reconciled_at")
     )
