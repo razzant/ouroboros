@@ -1,0 +1,81 @@
+# Test-branch template only. Never include this file in the product commit.
+name: Targeted sidebar rail QA
+on:
+  push:
+    branches: [qa/sidebar-rail-20261125-v3]
+permissions:
+  contents: read
+jobs:
+  sidebar-rail:
+    runs-on: ubuntu-latest
+    timeout-minutes: 72
+    env:
+      QA_SUBJECT: '150b7d1db60ec524539034cbc7a99796367952d1'
+      OUROBOROS_RUN_UI_SMOKE: '1'
+      OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind the tested product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = "$QA_SUBJECT"
+          test "$(git diff --name-only "$QA_SUBJECT" HEAD)" = '.github/workflows/qa-sidebar-rail.yml'
+          printf 'SIDEBAR_QA_SUBJECT %s\nSIDEBAR_QA_TREE %s\n' "$QA_SUBJECT" "$(git rev-parse "$QA_SUBJECT^{tree}")"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Install official Playwright Chromium and WebKit with the pinned Node
+        timeout-minutes: 42
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/sidebar-rail-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      - name: Browser journeys in the synthetic test profile
+        timeout-minutes: 24
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/sidebar-rail-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          set -euo pipefail
+          check_python="$(command -v python)"
+          xvfb-run -a "$check_python" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/sidebar-rail-raw" -- \
+            "$check_python" -m pytest -q -o addopts= --tb=short --junitxml="$RUNNER_TEMP/sidebar-rail.xml" \
+            tests/test_sidebar_short_window_browser.py \
+            tests/test_ui_shell_legacy_browser.py::test_a_retained_document_gets_the_same_rail_as_a_fresh_one \
+            tests/test_ui_skill_publication.py::test_skills_card_geometry_tracks_card_width_and_keeps_grant_on_card \
+            tests/test_shell_interactions_browser.py::test_preferred_sidebar_width_survives_narrow_docked_boot_no_motion_and_raw_calc_drags \
+            tests/test_shell_interactions_browser.py::test_telegram_paired_side_insets_cap_docked_sidebar_to_actual_app_width \
+            tests/test_shell_interactions_browser.py::test_off_room_call_mark_stays_inside_capped_docked_sidebar_and_leaves_composer_controls_hittable \
+            tests/test_shell_interactions_browser.py::test_off_room_call_mark_keeps_last_project_row_and_menu_reachable_without_permanent_clearance \
+            tests/test_shell_interactions_browser.py::test_phone_drawer_close_leads_dom_and_focus_order_and_yields_to_telegram_fullscreen \
+            tests/test_extensions_routes_browser.py::test_settings_door_revisit_resumes_retained_editor_and_returns_to_calling_row \
+            tests/test_extensions_routes_browser.py::test_settings_door_revisit_via_enter_focuses_active_back_and_targeted_routes_reset_scroll \
+            tests/test_extensions_routes_browser.py::test_resumed_editor_back_order_survives_desktop_narrowing \
+            tests/test_header_question_a_browser.py::test_extensions_pages_and_existing_toolbar_survive_a_narrow_content_column \
+            tests/test_ui_smoke_update_progress.py::test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_panel \
+            tests/test_updates_after_update_browser.py::test_failed_status_read_keeps_last_attempt_and_recovery_check \
+            tests/test_update_description_browser.py::test_the_headline_check_of_a_current_install_describes_what_it_finds \
+            'tests/test_ui_look_browser.py::test_the_stand_discovers_door_places_from_registry_and_backs_out_of_subpages[webkit]'
+          OUROBOROS_UI_BROWSER_ENGINE=webkit xvfb-run -a "$check_python" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/sidebar-rail-raw" -- \
+            "$check_python" -m pytest -q -o addopts= --tb=short --junitxml="$RUNNER_TEMP/sidebar-rail-extensions-webkit.xml" \
+            tests/test_extensions_routes_browser.py::test_settings_door_revisit_resumes_retained_editor_and_returns_to_calling_row \
+            tests/test_extensions_routes_browser.py::test_settings_door_revisit_via_enter_focuses_active_back_and_targeted_routes_reset_scroll \
+            tests/test_extensions_routes_browser.py::test_resumed_editor_back_order_survives_desktop_narrowing
+          "$check_python" -I - "$RUNNER_TEMP/sidebar-rail.xml" "$RUNNER_TEMP/sidebar-rail-extensions-webkit.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          counts = []
+          for source in sys.argv[1:]:
+              cases = ET.parse(source).getroot().findall('.//testcase')
+              bad = [(c.get('classname'), c.get('name')) for c in cases
+                     if any(c.find(k) is not None for k in ('failure', 'error', 'skipped'))]
+              assert cases and not bad, (source, len(cases), bad)
+              counts.append(len(cases))
+          print(f'SIDEBAR_TARGET_ACTIONS_CHECKED {sum(counts)} scenarios, no skips; {counts[1]} WebKit Extensions')
+          PY
