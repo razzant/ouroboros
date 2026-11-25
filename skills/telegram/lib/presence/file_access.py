@@ -353,7 +353,7 @@ def receipt_visible_to(ctx: Any, payload: Dict[str, Any]) -> bool:
 
         caller_binding = presence_caller_binding(ctx)
     except Exception:
-        caller_binding = None
+        return False
     if presence or focus or caller_binding is not None:
         event = presence.get("event") if isinstance(presence.get("event"), dict) else {}
         focus_place = str(presence.get("place_id") or focus.get("place_id") or "").strip()

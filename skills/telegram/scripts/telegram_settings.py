@@ -293,13 +293,13 @@ def merge_settings_unlocked(state_dir: Path, patch: dict[str, Any]) -> dict[str,
 
 def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
     with settings_lock(state_dir):
-        merged = merge_settings_unlocked(state_dir, patch)
         if "TELEGRAM_CHAT_ID" in patch:
+            pairing_path = _settings_path(state_dir).parent / "owner_pairing.json"
             try:
-                (_settings_path(state_dir).parent / "owner_pairing.json").unlink(missing_ok=True)
-            except OSError:
-                pass
-        return merged
+                pairing_path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise TelegramSettingsError("Could not invalidate pending owner pairing challenge.") from exc
+        return merge_settings_unlocked(state_dir, patch)
 
 
 def request_may_change_owner(request: Any) -> bool:

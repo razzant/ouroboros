@@ -475,8 +475,14 @@ class PresenceBotClient:
         verified_fds: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> Any:
         self._check_binding(endpoint)
+        open_task = asyncio.ensure_future(asyncio.to_thread(_AsyncMultipartStream.open, fields, file_specs, verified_fds))
         try:
-            stream = await asyncio.to_thread(_AsyncMultipartStream.open, fields, file_specs, verified_fds)
+            stream = await asyncio.shield(open_task)
+        except asyncio.CancelledError:
+            open_task.add_done_callback(
+                lambda fut: fut.result().close_sync() if not fut.cancelled() and fut.exception() is None else None
+            )
+            raise
         except TelegramRequestNotSent:
             raise
         except OSError as exc:
@@ -595,6 +601,7 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
                 yield part
             for hdr, fd, expected in self._file_parts:
                 yield hdr
+                await asyncio.to_thread(os.lseek, fd, 0, os.SEEK_SET)
                 remaining = expected
                 while remaining > 0:
                     chunk = await asyncio.to_thread(os.read, fd, min(_UPLOAD_STREAM_CHUNK, remaining))
@@ -607,7 +614,7 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
         finally:
             await self.aclose()
 
-    async def aclose(self) -> None:
+    def close_sync(self) -> None:
         if self._closed:
             return
         self._closed = True
@@ -616,6 +623,9 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
                 os.close(fd)
             except OSError:
                 pass
+
+    async def aclose(self) -> None:
+        self.close_sync()
 
 
 def _announced_length(headers: Any) -> Optional[int]:

@@ -90,11 +90,25 @@ def _clear_pairing_unlocked(path: pathlib.Path) -> None:
 
 def clear_owner_pairing(state_dir: Any) -> None:
     root = _resolve_state_dir(state_dir)
+    with settings_lock(root):
+        _clear_pairing_unlocked(_pairing_path(root))
+
+
+def _burn_active_code_if_matches(root: pathlib.Path, candidate: str) -> bool:
+    """Compare and consume ``candidate`` against the active challenge atomically under ``settings_lock``."""
+    if not candidate:
+        return False
     try:
         with settings_lock(root):
-            _clear_pairing_unlocked(_pairing_path(root))
+            path = _pairing_path(root)
+            record = _read_pairing_record(path)
+            active_code = str((record or {}).get("code") or "")
+            if active_code and _const_eq(active_code, candidate):
+                _clear_pairing_unlocked(path)
+                return True
+            return False
     except (TelegramSettingsError, OSError):
-        _clear_pairing_unlocked(_pairing_path(root))
+        return False
 
 
 def issue_owner_pairing_code(state_dir: Any, *, ttl_sec: float = _PAIRING_TTL_SEC, now: Optional[float] = None) -> Dict[str, Any]:
@@ -207,7 +221,18 @@ def is_pairing_command(state_dir: Any, message: Any) -> bool:
     is_private = str(chat.get("type") or "") == "private"
     pair_any = _PAIR_ANY_RE.match(cleaned)
     start_match = _START_ARG_RE.match(cleaned)
+    pairing_file = _pairing_path(root)
     if not pair_any and not start_match:
+        # Also burn an active pairing code pasted bare (without /pair or /start) into a group chat.
+        if not is_private and pairing_file.is_file():
+            record = _read_pairing_record(pairing_file)
+            active_code = str((record or {}).get("code") or "")
+            if active_code:
+                for token in cleaned.split():
+                    stripped = token.strip("`'\"()[]{}<>.,;:!?")
+                    if stripped and _const_eq(active_code, stripped):
+                        _burn_active_code_if_matches(root, stripped)
+                        return True
         return False
     arg = ""
     if pair_any:
@@ -215,11 +240,11 @@ def is_pairing_command(state_dir: Any, message: Any) -> bool:
         arg = parts[1] if len(parts) >= 2 else ""
     elif start_match:
         arg = start_match.group(1)
-    record = _read_pairing_record(_pairing_path(root))
+    record = _read_pairing_record(pairing_file)
     active_code = str((record or {}).get("code") or "")
     if active_code and arg and _const_eq(active_code, arg):
-        # Burn exposed active code (pasted in a group or re-sent while already bound).
-        clear_owner_pairing(root)
+        # Burn exposed active code atomically under settings_lock (never deletes a concurrently re-issued code).
+        _burn_active_code_if_matches(root, arg)
         return True
     if pair_any:
         return True

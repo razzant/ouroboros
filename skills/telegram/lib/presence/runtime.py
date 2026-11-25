@@ -765,9 +765,9 @@ class PresenceRuntime:
                 await self._check_place(lease.payload, thread_id=str(lease.payload.get("topic_id") or ""))
                 verify_task = asyncio.ensure_future(asyncio.to_thread(outbox_files.open_verified, lease.payload, state_dir=self.state_dir, require_for_media=True))
                 try:
-                    fresh_fds = await verify_task
+                    fresh_fds = await asyncio.shield(verify_task)
                 except asyncio.CancelledError:
-                    verify_task.add_done_callback(lambda fut: not fut.cancelled() and not fut.exception() and outbox_files.close_verified(fut.result()))
+                    verify_task.add_done_callback(lambda fut: outbox_files.close_verified(fut.result()) if not fut.cancelled() and fut.exception() is None else None)
                     raise
                 except outbox_files.FrozenFileMissing as exc:
                     raise PlaceHeld(f"Held: {exc}") from exc

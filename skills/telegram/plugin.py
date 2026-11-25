@@ -145,6 +145,7 @@ _POLL_GENERATION_STARTED = time.time()
 
 _SLASH_COMMAND_RE = re.compile(r"^\s*/[A-Za-z]")
 _MAIN_CMD_RE = re.compile(r"^/(?:main|m)(?:@[A-Za-z0-9_]+)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+_MODE_CMD_RE, _LANG_ARG_RE = re.compile(r"^/mode(?:@[A-Za-z0-9_]+)?(?:\s|$)", re.IGNORECASE), re.compile(r"^/language(?:@[A-Za-z0-9_]+)?\s+", re.IGNORECASE)
 
 
 def _presence_runtime(api):
@@ -457,7 +458,8 @@ def _schedule_command_sync(api, client, command_mode: str, lang: str, pinned_cha
         try:
             with contextlib.suppress(TelegramBindingChanged, asyncio.CancelledError): await _sync_bot_commands(api, client, command_mode, lang, pinned_chat)
         finally:
-            if _CMD_SYNC_TASKS.get(state_key) is asyncio.current_task(): _CMD_SYNC_TASKS.pop(state_key, None)
+            with contextlib.suppress(RuntimeError):
+                if _CMD_SYNC_TASKS.get(state_key) is asyncio.current_task(): _CMD_SYNC_TASKS.pop(state_key, None)
     _CMD_SYNC_TASKS[state_key] = asyncio.create_task(_bg())
 
 
@@ -987,7 +989,7 @@ async def _handle_owner_message_inner(
         else:
             await client.send_message(chat_id, header)
         return
-    if not literal_slash and (_is_exact_bot_command(cleaned_text, "/mode") or cleaned_text.startswith("/mode ") or cleaned_text.startswith("/mode@")):
+    if not literal_slash and _MODE_CMD_RE.match(cleaned_text):
         await _handle_mode_command(api, client, chat_id, text, lang)
         return
     if not literal_slash and _is_exact_bot_command(cleaned_text, "/language"):
@@ -1050,7 +1052,7 @@ async def _handle_owner_message_inner(
                                               request_key=update_key(update), lang=lang, post=_host_post)
         return
 
-    if not literal_slash and (cleaned_text.startswith("/language ") or cleaned_text.startswith("/language@")):
+    if not literal_slash and _LANG_ARG_RE.match(cleaned_text):
         requested = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
         if requested:
             async def _reply(message: str) -> None:
@@ -1532,9 +1534,11 @@ def register(api):
     if callable(getattr(api, "on_unload", None)):
         def _unload() -> None:
             binding.close()
-            sync_task = _CMD_SYNC_TASKS.pop(os.path.realpath(api.get_state_dir()), None)
-            if sync_task is not None and not sync_task.done(): sync_task.cancel()
-            presence.stop(wait_sec=2.0)
+            try:
+                t = _CMD_SYNC_TASKS.pop(os.path.realpath(api.get_state_dir()), None)
+                if t is not None and not t.done() and not t.get_loop().is_closed():
+                    with contextlib.suppress(RuntimeError): t.get_loop().call_soon_threadsafe(t.cancel)
+            finally: presence.stop(wait_sec=2.0)
 
         api.on_unload(_unload)  # unload, Off or a revoked grant: no client or worker of this load sends again
     cue = _typing_cue(api)  # Telegram failures stay inside it, so they never spend restart budget
