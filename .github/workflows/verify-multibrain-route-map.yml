@@ -1,0 +1,49 @@
+name: Multibrain route map check
+on:
+  push:
+    branches: ['verify/multibrain-route-map-9a4decfa3732']
+permissions:
+  contents: read
+jobs:
+  route-map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind the verification child, product and baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git show -s --format=%P HEAD)" = 9a4decfa37329bd5c55c1f632c6ca1d27c3c8e51
+          test "$(git diff --name-status 9a4decfa37329bd5c55c1f632c6ca1d27c3c8e51 HEAD)" = "$(printf 'A\t%s' '.github/workflows/verify-multibrain-route-map.yml')"
+          git checkout --quiet --detach 9a4decfa37329bd5c55c1f632c6ca1d27c3c8e51
+          test "$(git rev-parse HEAD^{tree})" = 4cc5d06c2b1007288831531c726e3f8e340ea84a
+          test "$(git show -s --format=%P HEAD)" = 09fca7723dee09b8f413608b4e0c69d3cd459d49
+          test "$(git diff --name-only 09fca7723dee09b8f413608b4e0c69d3cd459d49 HEAD)" = 'docs/architecture/04-server-api-endpoints.md'
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+          profile: test
+      - name: Check the route table and the architecture book budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          py=$(command -v python)
+          mkdir -p "$RUNNER_TEMP/mb-t" "$RUNNER_TEMP/mb-e" "$RUNNER_TEMP/mb-home"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mb-home" "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP/mb-t" --evidence-dir "$RUNNER_TEMP/mb-e" --timeout 180 -- \
+            /usr/bin/env OURO_SIZE_RATCHET_BASE_REF=09fca7723dee09b8f413608b4e0c69d3cd459d49 OURO_BOOK_GROWTH_MODE=block "$py" -m pytest -o addopts= -q --junitxml="$RUNNER_TEMP/route-map.xml" \
+            tests/test_docs_sync.py::test_architecture_endpoint_table_mirrors_route_registries \
+            tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book
+          "$py" -I - "$RUNNER_TEMP/route-map.xml" <<'PY'
+          import sys, xml.etree.ElementTree as E
+          rows = E.parse(sys.argv[1]).findall('.//testcase')
+          expected = {'test_architecture_endpoint_table_mirrors_route_registries', 'test_a_change_does_not_grow_a_reference_book'}
+          assert len(rows) == 2 and {r.get('name') for r in rows} == expected
+          assert all(not any(c.tag in {'failure', 'error', 'skipped'} for c in r) for r in rows)
+          print('Both the route table and byte budget passed on 9a4decfa37329bd5c55c1f632c6ca1d27c3c8e51', sorted(expected))
+          PY
+          test -z "$(git status --porcelain --untracked-files=no)"
