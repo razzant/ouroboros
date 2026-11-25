@@ -7,7 +7,26 @@
  * once a second only while the mark is shown.
  */
 const entries = new Set();
-let mounted = null;  // { root, room, time, timer, observer, watched, env }
+const HEIGHT_VAR = '--call-mark-height';
+let mounted = null;  // { root, room, time, timer, observer, resizeObserver, watched, height, env }
+
+function writeHeight(state, height) {
+    const style = state.env.document?.documentElement?.style;
+    const value = !state.root.hidden && Number.isFinite(height) && height > 0 ? `${Math.ceil(height)}px` : '';
+    if (state.height === value) return;
+    state.height = value;
+    if (!style) return;
+    if (value) style.setProperty(HEIGHT_VAR, value);
+    else style.removeProperty(HEIGHT_VAR);
+}
+
+function measureHeight(state, entry = null) {
+    if (state.root.hidden) { writeHeight(state, 0); return; }
+    const box = entry?.borderBoxSize;
+    const size = Array.isArray(box) ? box[0]?.blockSize : box?.blockSize;
+    const height = Number.isFinite(size) && size > 0 ? size : state.root.getBoundingClientRect?.().height;
+    writeHeight(state, height);
+}
 
 function clock(since, now) {
     if (!since) return '';
@@ -37,7 +56,7 @@ function mount(env, sign) {
     if (sign) root.querySelector('.call-mark-open').prepend(sign());
     doc.body.append(root);
     const state = { root, env, room: root.querySelector('.call-mark-room'), time: root.querySelector('.call-mark-time'),
-        timer: 0, watched: null, observer: null, current: null };
+        timer: 0, watched: null, observer: null, resizeObserver: null, height: '', current: null };
     root.querySelector('.call-mark-open').addEventListener('click', () => state.current?.reveal());
     root.querySelector('.call-mark-end').addEventListener('click', () => state.current?.session.end());
     // Navigation changed what is on screen: the mark follows, and a room shown again resumes its light.
@@ -46,15 +65,24 @@ function mount(env, sign) {
     env.addEventListener?.('ouro:page-shown', resync);
     state.observer = typeof env.MutationObserver === 'function' ? new env.MutationObserver(resync) : null;
     state.observer?.observe(doc.body, { attributes: true, attributeFilter: ['class'] });
+    if (typeof env.ResizeObserver === 'function') {
+        state.resizeObserver = new env.ResizeObserver((list) => {
+            if (mounted === state) measureHeight(state, list[list.length - 1]);
+        });
+        try { state.resizeObserver.observe(root, { box: 'border-box' }); }
+        catch { state.resizeObserver.observe(root); }
+    }
     mounted = state;
     return state;
 }
 
 function unmount() {
     if (!mounted) return;
-    const { root, env, timer, observer, resync } = mounted;
+    const { root, env, timer, observer, resizeObserver, resync } = mounted;
     env.clearInterval(timer);
     observer?.disconnect();
+    resizeObserver?.disconnect();
+    writeHeight(mounted, 0);
     env.removeEventListener?.('ouro:page-shown', resync);
     root.remove();
     mounted = null;
@@ -76,7 +104,7 @@ export function sync(env = globalThis) {
         state.watched = page;
     }
     state.root.hidden = !call;
-    if (!call) { env.clearInterval(state.timer); state.timer = 0; return; }
+    if (!call) { env.clearInterval(state.timer); state.timer = 0; writeHeight(state, 0); return; }
     const paint = () => {
         const room = String(call.label() || '');
         if (state.room.textContent !== room) state.room.textContent = room;
@@ -85,6 +113,7 @@ export function sync(env = globalThis) {
         state.time.hidden = !time;
     };
     paint();
+    measureHeight(state);
     if (!state.timer) state.timer = env.setInterval(() => (markedCall() ? paint() : sync(env)), 1000);
 }
 

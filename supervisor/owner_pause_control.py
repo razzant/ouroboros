@@ -108,8 +108,7 @@ def _late_work(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]], bool, st
     Live descendants also belong to the answered root, even after all its own phases ended;
     so does the delegated work its tree's ended members left (``_ended_tail``).
     """
-    from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight, post_task_synthesis_is_open
-    from ouroboros.review_operation import task_has_live_review_operation
+    from ouroboros.owner_pause import answered_phase_work
     from ouroboros.task_results import load_task_result
 
     try:
@@ -119,16 +118,14 @@ def _late_work(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]], bool, st
     try:
         if refusal := _presence_pause_refusal(q.DRIVE_ROOT, task_id, row):
             return None, False, refusal
-        live_review = bool(row) and task_has_live_review_operation(q.DRIVE_ROOT, task_id)
+        upkeep, live_review = answered_phase_work(q.DRIVE_ROOT, task_id, row)
     except Exception:
         return None, False, ""
-    checkpoint = row.get("root_phase_checkpoint") if isinstance(row.get("root_phase_checkpoint"), dict) else {}
     with q._queue_lock:
         descendants = any(str(task.get("root_task_id") or "") == task_id and task.get("id") != task_id
                           for task in [*q.PENDING, *(m.get("task") or {} for m in q.RUNNING.values())])
     late = descendants or live_review or _ended_tail(q, task_id, row)
-    if late or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id) or post_task_synthesis_is_open(
-            checkpoint.get("post_task_synthesis")):
+    if late or upkeep:
         return {**row, "id": task_id}, late, ""
     return None, False, ""
 
@@ -153,17 +150,13 @@ def _ended_tail(q: Any, task_id: str, row: Dict[str, Any]) -> bool:
 def _late_work_settled(root_drive: Any, root_task_id: str) -> bool:
     """An answered root with no open late phase, synthesis in flight or live review; unknown is False.
     Its own phases only: its tree's custody is the census's (``refresh_owner_pause_tree``)."""
-    from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight, post_task_synthesis_is_open
-    from ouroboros.review_operation import task_has_live_review_operation
+    from ouroboros.owner_pause import answered_phase_work
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
 
     try:
         row = load_task_result(root_drive, root_task_id, strict=True) or {}
-        checkpoint = row.get("root_phase_checkpoint") if isinstance(row.get("root_phase_checkpoint"), dict) else {}
         return bool(row.get("status") in _TRULY_TERMINAL_STATUSES
-                    and not post_task_synthesis_is_open(checkpoint.get("post_task_synthesis"))
-                    and not post_task_synthesis_in_flight(root_drive, root_task_id)
-                    and not task_has_live_review_operation(root_drive, root_task_id))
+                    and not any(answered_phase_work(root_drive, root_task_id, row)))
     except Exception:
         return False
 

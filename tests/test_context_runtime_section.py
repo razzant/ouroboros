@@ -1205,13 +1205,14 @@ def test_a_no_and_the_history_s_import_are_read_in_one_snapshot(tmp_path, monkey
     assert opened == [False]
 
 
-@pytest.mark.parametrize("shape", ["pressed", "written", "no_press", "unknown_exchange", "no_witness"])
-def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i_know_i_have_not_written(
+@pytest.mark.parametrize("shape", ["pressed", "requested", "written", "no_press", "unknown_exchange", "no_witness"])
+def test_setup_carries_the_first_meeting_guidance_only_after_a_press_while_i_know_i_have_not_written(
         tmp_path, shape):
-    """``prompts/FIRST_MEETING.md`` waits for the owner's yes on its text: absent, nothing is carried; present, its
-    words ride the setup facts only while a press of Start is on record (the state's ``first_meeting`` record) and I
-    know I have not written to my human. No press (Colab, headless, a legacy-adopted root) or an exchange that cannot be
-    read carries none, and once I have written they leave. The same press in a state whose initialization record is
+    """``prompts/FIRST_MEETING.md`` rides by file existence: absent, nothing is carried; present, its guidance
+    rides the setup facts only while a press of Start is on record (the state's ``first_meeting`` record) and I
+    know I have not written to my human (whether or not they have written first: a request still carries it). No press
+    (Colab, headless, a legacy-adopted root) or an exchange that cannot be read carries none, and once I have written
+    they leave. The same press in a state whose initialization record is
     missing is unknown: none either (rv2 C5)."""
     from ouroboros import dialogue_store
     from ouroboros.context_first_hour import setup_fact
@@ -1221,6 +1222,8 @@ def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i
     (data / "state").mkdir(parents=True)
     _born(data, **({} if shape == "no_press" else
                    {"first_meeting": {"state": "admitted", "pressed_at": "2026-11-21T10:00:00Z"}}))
+    if shape == "requested":
+        _said(data, ("10:00", "in"))  # my human asked first; I have not answered yet
     if shape == "written":
         _said(data, ("10:00", "out"))
     if shape == "no_witness":
@@ -1228,12 +1231,12 @@ def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i
         assert setup_fact(data)["state"] == "unknown: no initialization record"
     assert "first_meeting" not in setup_fact(data, repo)  # no file: nothing
     (repo / "prompts").mkdir(parents=True)
-    (repo / "prompts" / "FIRST_MEETING.md").write_text("Owner-approved words.\n", encoding="utf-8")
+    (repo / "prompts" / "FIRST_MEETING.md").write_text("First-meeting guidance.\n", encoding="utf-8")
     with pytest.MonkeyPatch.context() as patch:
         if shape == "unknown_exchange":
             patch.setattr(dialogue_store, "owner_exchange", lambda root: (_ for _ in ()).throw(StoreLost("torn page")))
         fact = setup_fact(data, repo)
-    assert fact.get("first_meeting") == ("Owner-approved words." if shape == "pressed" else None)
+    assert fact.get("first_meeting") == ("First-meeting guidance." if shape in ("pressed", "requested") else None)
     assert "first_meeting" not in setup_fact(data)  # a caller that names no repository carries none
 
 

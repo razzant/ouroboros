@@ -1075,12 +1075,16 @@ class BodyRuntime:
         return collect_terminal(self.root, run_id, gateway_factory=self._gateway, stopped=lambda: not self.active,
                                 failures=failures, recapture=recapture, generation=self.runtime_id, background=True)
 
-    def _owing(self, stamp, entry) -> _Held:
-        from ouroboros.delegate_resume import ACTIVE, recovered_writer_changed
+    def _owing(self, stamp, entry, woken=None) -> _Held:
+        from ouroboros.delegate_resume import ACTIVE, recovered_writers_changed
 
         if getattr(entry, "resume_start_state", None) in ACTIVE:
-            # This row just changed (possibly in a worker), or the body restarted.
-            recovered_writer_changed(self.root, entry.root_task_id or entry.task_id)
+            # This row just changed (possibly in a worker), or the body restarted: its tree and each successor holding
+            # it, read with the rest of its listing (``woken``) or at once.
+            if woken is None:
+                recovered_writers_changed(self.root, [entry])
+            else:
+                woken.append(entry)
         return _Held(stamp, entry, not entry.review_owned and not entry.terminal_source
                      and (not entry.settled or bool(entry.terminal_state)),
                      collection_due(entry, generation=self.runtime_id), self.runtime_id)
@@ -1090,24 +1094,29 @@ class BodyRuntime:
         by this body's clock, or at once after this process wrote custody (its own jobs' effects); another process's
         write is seen at the next period, as every tick saw it before. A row is decoded only when its stamp moved, and
         what it owes is judged again only then or in a new generation (a transient collection retries in one): a
-        settled run that keeps its patch costs a tick nothing while it stands."""
+        settled run that keeps its patch costs a tick nothing while it stands. The recovered starts one listing judges
+        again wake their trees and successors in one read."""
         from ouroboros.delegate_feed import _TICK_SEC
+        from ouroboros.delegate_resume import recovered_writers_changed
 
         now, writes, generation = time.monotonic(), current.local_writes(), self.runtime_id
         if self._listed is not None and now - self._listed[0] < _TICK_SEC and self._listed[1:] == (writes, generation):
             return dict(self._held_entries)
-        stamped = current.held_stamped(self.root)
+        stamped, woken = current.held_stamped(self.root), []
         if stamped is None:  # below the stamped schema: every row, every tick, as before
             self._listed = None
-            self._held_entries = {rid: self._owing(None, entry) for rid, entry in current.held_runs(self.root).items()}
-            return dict(self._held_entries)
-        kept, fresh = self._held_entries, {}
-        for rid, (stamp, facts) in stamped.items():
-            old = kept.get(rid) if rid in kept and kept[rid].stamp == stamp else None
-            fresh[rid] = (old if old.generation == generation else self._owing(stamp, old.entry)) if old is not None \
-                else self._owing(stamp, current._decode(facts))
-        self._held_entries, self._listed = fresh, (now, writes, generation)
-        return dict(fresh)
+            self._held_entries = {rid: self._owing(None, entry, woken)
+                                  for rid, entry in current.held_runs(self.root).items()}
+        else:
+            kept, fresh = self._held_entries, {}
+            for rid, (stamp, facts) in stamped.items():
+                old = kept.get(rid) if rid in kept and kept[rid].stamp == stamp else None
+                fresh[rid] = (old if old.generation == generation else self._owing(stamp, old.entry, woken)) \
+                    if old is not None else self._owing(stamp, current._decode(facts), woken)
+            self._held_entries, self._listed = fresh, (now, writes, generation)
+        if woken:
+            recovered_writers_changed(self.root, woken)
+        return dict(self._held_entries)
 
     def tick(self):
         if not self.active:

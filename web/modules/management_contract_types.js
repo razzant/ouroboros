@@ -978,6 +978,7 @@
  * @property {string=} attempt_id
  * @property {boolean=} restart_required
  * @property {boolean=} local_work_recovery
+ * @property {('pending'|'passed')=} pre_restart_smoke - Its check before the restart; absent: unsaid or unreadable.
  */
 
 /**

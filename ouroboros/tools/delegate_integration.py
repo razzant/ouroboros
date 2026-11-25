@@ -275,14 +275,14 @@ def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any], lineag
 
 
 def accepted_refused_start(drive: Any, gateway: Any, invocation_id: str, error: BaseException,
-                           request: Any, selected: Any = None, lineage: Any = None, named: Any = None) -> Optional[ToolResult]:
-    """A start whose POST the engine answered with an error: the run it nonetheless accepted, read and bound
-    once on the start's own gateway (``delegate_accepted.accepted_after_refusal``), answered as started, naming the
-    start's own selection and lineage fact; else ``None`` and the start keeps its pending token, registration and
-    snapshot, its outcome unknown."""
+                           request: Any, selected: Any = None, lineage: Any = None, named: Any = None,
+                           *, read_out: Optional[Dict[str, Any]] = None) -> Optional[ToolResult]:
+    """Read and bind a run accepted behind an error POST once on this gateway, else ``None``."""
     from ouroboros.delegate_accepted import accepted_after_refusal
 
     held, read = accepted_after_refusal(drive, gateway, invocation_id, error)
+    if read_out is not None and isinstance(read, dict):
+        read_out.update(read)
     return None if held is None else _accepted_result(held, read, invocation_id, request, (
         "The engine answered this start with an error, yet it had accepted the start: its run is now in custody "
         "and nothing was sent again. Poll with delegate_wait; the run's own claims are evidence to check."),

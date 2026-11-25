@@ -1152,7 +1152,10 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
             prestart = {"prestart_proof": prestart_returned_unsent(candidate)}
         except Exception:
             prestart = {"prestart_proof_unreadable": True}  # the selection then keeps its hold's result as it is
-        return {"candidate": task, "authority": authority, "blockers": blockers,
+        from supervisor.budget_resume_unstarted import observe_predecessor_starts
+
+        carried = observe_predecessor_starts(q, candidate, predecessor, blockers) if safe and blockers else {}
+        return {"candidate": task, "authority": authority, "blockers": blockers, **carried,
                 "safe": safe, "unsafe_error": error, **({"refusal_basis": basis} if basis else {}), **prestart}
     except Exception:
         log.warning("Held selection observation unavailable for %s", task_id, exc_info=True)
@@ -1204,13 +1207,20 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *
     # writer hold once every check below passed (owner, 1 Nov); its reconciliation, a wait it is already in and a fact
     # no wait settles (an unknown outcome, unreadable custody) keep the refusal.
     writers = list(observation["blockers"] or ()) if continuation.get("predecessor_task_id") else []
-    if writers:
+    carried = writers and not selected_by and observation.get("predecessor_starts")
+    if carried:  # its own choice over its predecessor's proven read-only starts; no fence is closed here
+        from supervisor.budget_resume_unstarted import accept_predecessor_starts
+
+        if refusal := accept_predecessor_starts(task, observation, writers, result_root, fence_id=""):
+            return refusal
+        writers = []
+    elif writers:
         from supervisor.continuation_admission import only_running_writers, writers_unsettled_refusal
 
         if selected_by == "reconciliation" or writer_wait(task) or not only_running_writers(writers):
             return writers_unsettled_refusal(writers)
     from ouroboros.delegate_resume import names_start
-    if names_start():
+    if names_start() and not carried:
         return {"ok": False, "error": "selection_authority_changed"}
     # Use the identity already revalidated with this selection's snapshot.
     # A reciprocal retry is the root actor even though its physical id differs.

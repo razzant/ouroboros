@@ -177,6 +177,29 @@ def root_stopped(root_drive: Any, root_task_id: str) -> bool:
         return False
 
 
+def answered_phase_work(root, task_id, row, *, txn=None):
+    """An answered actor's (upkeep, review), shared by Pause and late-start publication.
+
+    The latter sees the pointers in its write snapshot without probing a controller process.
+    Neither caller reads the actor's row again to see its own pointers.
+    """
+    from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight, post_task_synthesis_is_open
+    from ouroboros.review_operation import task_has_live_review_operation
+    from ouroboros.task_results import load_task_result
+
+    def load(tid):
+        if tid == task_id:
+            return row
+        return (txn.load(tid) if txn is not None else load_task_result(root, tid, strict=True)) or {}
+
+    checkpoint = row.get("root_phase_checkpoint")
+    upkeep = (isinstance(checkpoint, dict) and post_task_synthesis_is_open(checkpoint.get("post_task_synthesis"))
+              or post_task_synthesis_in_flight(root, task_id))
+    review = bool(row) and task_has_live_review_operation(root, task_id, result_loader=load,
+                                                         probe_controller=txn is None)
+    return upkeep, review
+
+
 def paused_gap(root_drive: Any, task_id: str) -> Dict[str, Any]:
     """``{"membership_gaps": ...}`` the task's still-closed Pause last named, as its Resume reads it,
     else ``{}``: the fence's current fact, never the episode's older notice. Never raises."""

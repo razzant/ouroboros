@@ -29,7 +29,7 @@ import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
 import { closeTaskControlMenu, createTaskCloseButton, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
 import {
     OUTCOME_TONES, amberNote, behindWords, clock, openWorkControls, resumeAttemptWords, workCloseOffer, workControls,
-    workMenuActions, workQuestion, workRowView,
+    workMenuActions, workMenuTargetGuard, workMenuTargets, workQuestion, workRowView,
 } from './work_status.js';
 import { showToast } from './toast.js';
 import { errorWords } from './ui_primitives.js';
@@ -78,6 +78,8 @@ export function workCard(work, records) {
     }
     return null;
 }
+
+const menuActionKey = (controls, cancelPending) => JSON.stringify([...workMenuTargets(controls, { cancelPending })]);
 
 /**
  * Mount the status control and its list for one chat instance. The caller passes its own owners by their
@@ -611,7 +613,10 @@ export function createRoomWork({
         // A new episode (or a new attempt of it) never inherits a menu opened for the previous one.
         const episode = `${row.episode}|${row.attempt ?? ''}`;
         if (view.episode !== undefined && view.episode !== episode
-            && view.more?.getAttribute('aria-expanded') === 'true') closeTaskControlMenu();
+            && view.more?.getAttribute('aria-expanded') === 'true') {
+            menuIntent += 1;
+            closeTaskControlMenu();
+        }
         view.episode = episode;
         reconcileActions(view, row);
     }
@@ -682,10 +687,10 @@ export function createRoomWork({
         }
         // The ⋯ is the one door to every other action: the work's own controls, each aimed at its exact target.
         const wantMore = row.canMenu && !row.settled;
-        const actionKey = wantMore ? workMenuActions(row.controls, {
-            cancelPending: Boolean(records.get(row.episode)?.cancelPendingPolicy),
-        }).join(',') : '';
-        // A row may keep its menu door while the actions behind it change (Working → Paused).
+        const actionKey = wantMore ? menuActionKey(row.controls,
+            Boolean(records.get(row.episode)?.cancelPendingPolicy)) : '';
+        // A row may keep its menu door while the actions behind it change (Working → Paused),
+        // or while an action's target changes under the same label (e.g. an earlier root's Pause).
         // Withdraw the old portal immediately, not just its ability to dispatch stale actions.
         if (view.actionKey !== actionKey && view.more?.getAttribute('aria-expanded') === 'true') {
             menuIntent += 1;
@@ -705,7 +710,10 @@ export function createRoomWork({
             view.more = button;
             view.moreSlot.append(button);
         } else if (!wantMore && view.more) {
-            if (view.more.getAttribute('aria-expanded') === 'true') closeTaskControlMenu();
+            if (view.more.getAttribute('aria-expanded') === 'true') {
+                menuIntent += 1;
+                closeTaskControlMenu();
+            }
             keepFocus(view.more, view.main.tabIndex >= 0 ? view.main : null);
             view.more.remove();
             view.more = null;
@@ -717,8 +725,7 @@ export function createRoomWork({
 
     // The work's current controls, only while the list is shown over a live connection and the projection still
     // lists the same episode (and attempt): a press re-checks them before any effect.
-    function currentControls(row) {
-        const work = row ? workOf(row.id) : null;
+    function currentControls(row, work = row ? workOf(row.id) : null) {
         const current = open && !destroyed && !page.hidden && page.isConnected && connected() && hostReady()
             && work && String(work.episode?.task_id || work.work_id) === row.episode
             && (works()?.attempts?.get?.(row.episode) ?? null) === row.attempt;
@@ -744,15 +751,22 @@ export function createRoomWork({
             if (intent !== menuIntent || !anchor.isConnected || !currentControls(row)) return;
             cancelPending = taskCancelPending(stored);
         }
+        const openedWork = workOf(row.id);
+        const opened = currentControls(row, openedWork);
+        if (!opened) return;
+        const stillOffered = workMenuTargetGuard(opened, { cancelPending });
         const canAct = (action) => {
             const current = currentControls(row);
             if (intent !== menuIntent || !anchor.isConnected || !current || taskControlBusy(row.episode)) return false;
-            return workMenuActions(current, {
+            return stillOffered(action, current, {
                 cancelPending: cancelPending || Boolean(records.get(row.episode)?.cancelPendingPolicy),
-            }).includes(action);
+            });
         };
         const stopOne = (target, action) => (loaded(target) ? cancelRunFromCard(loaded(target), action) : requestStop(target, action));
-        openWorkControls(anchor, workOf(row.id), { cancelPending, canAct, stopOne, afterAction: () => refresh() });
+        if (openWorkControls(anchor, openedWork, { cancelPending, canAct, stopOne, afterAction: () => refresh() })) {
+            const view = views.get(row.key);
+            if (view) view.actionKey = menuActionKey(opened, Boolean(records.get(row.episode)?.cancelPendingPolicy));
+        }
     }
 
     // ---- paint

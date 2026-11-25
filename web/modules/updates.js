@@ -4,7 +4,7 @@ import { mountVersionList } from './update_versions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, checkFailureReason, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, updateTarget, applyTitle, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, checkFailureReason, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, updateRestartReadiness, updateTarget, applyTitle, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
@@ -219,13 +219,26 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
                     : { id: 'check', label: 'Check again' },
             };
         }
-        if (txPhase === 'pending_boot_smoke') {
+        // The phase alone proves nothing (update_status.js updateRestartReadiness): the restart is offered once this
+        // attempt's own check before it passed; until then the check is the update's stage, as an ordinary update's is,
+        // and a transaction that does not say keeps the plain active-transaction reading below.
+        const readiness = updateRestartReadiness(data.update_tx);
+        if (readiness === 'ready') {
             return {
                 ...base,
                 state: 'resolving', tone: 'warn',
                 headline: 'An update is waiting for a restart to finish.',
                 hint: 'Restart Ouroboros to run the post-update checks and complete it.',
                 action: { id: 'restart', label: 'Restart now' },
+            };
+        }
+        if (readiness === 'checking') {
+            return {
+                ...base,
+                state: 'resolving', tone: 'neutral',
+                headline: UPDATE_STAGE_LABELS.checking,
+                hint: 'The update finishes with a restart once these checks pass.',
+                action: { id: 'check', label: 'Check again' },
             };
         }
         if (txPhase === 'gate_blocked' || txPhase === 'marker_cleanup_retry') {

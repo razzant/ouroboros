@@ -20,6 +20,7 @@ from tests.candidate_checkout import (
 )
 from ouroboros.test_environment import isolated_environment, owned_process_temp
 from ouroboros.test_evidence import diagnostic_directory, keep_startup_log
+from tests.settings_section_helpers import open_extensions
 from tests.fixtures_mock_llm import MockLLMServer
 from tests.ui_chat_viewport_smoke import (
     _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
@@ -2851,8 +2852,7 @@ def test_ui_smoke_v639_skip_review_button(direct_server_with_data):
             try:
                 page = browser.new_page(viewport={"width": 1280, "height": 900})
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                page.click('[data-nav-page="skills"]')
-                page.wait_for_selector("#page-skills", timeout=30_000)
+                open_extensions(page, timeout=30_000)
                 page.wait_for_selector('.skills-card[data-skill="owntool"]', timeout=30_000)
                 listing = {row["name"]: row for row in page.request.get(f"{url}/api/extensions").json()["skills"]}
                 own = page.locator('.skills-card[data-skill="owntool"]').first

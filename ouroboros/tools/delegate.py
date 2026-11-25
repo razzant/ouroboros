@@ -441,8 +441,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         seconds, seconds_basis = bound.seconds, bound.basis
     drive = custody.custody_root(ctx)
     owned_project_id, project_persistent, readonly_root, registration_resolution = "", False, "", None
-    invocation_id = snapshot_id = baseline_sha = target_root = authority_source = ""
-    binding_fingerprint, held, named = "", None, _named_notes[1]  # the start's named-note receipt, or replayed below
+    invocation_id = snapshot_id = baseline_sha = target_root = authority_source = key = ""
+    binding_fingerprint, held, named, request_body = "", None, _named_notes[1], None
     processing_info: Dict[str, Any] = {}
     resource_ref, directory_options, continuation, documents, inputs = {}, {}, NO_CONTINUATION, NO_DOCUMENTS, NO_INPUTS
     if recovering:  # the owned recorded request is validated before any fingerprint (#1614)
@@ -670,15 +670,11 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         return _held_start(str(exc), invocation_id)
     except BaseException as exc:
         registry_preparation.close()
-        if (start_attempted and isinstance(exc, ClaudexorUnavailable)
-                and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body, inputs.selected,
-                                                   _start_lineage(request_body, invocation_id, authority, inputs, recovering), named)) is not None):
-            return accepted
-        return _settle_failed_start(ctx, gateway, exc, recovering=recovering, start_attempted=start_attempted,
-                                    requested=requested, invocation_id=invocation_id,
-                                    owned_project_id=owned_project_id, project_persistent=project_persistent,
-                                    history_facts=history_facts, registration_resolution=registration_resolution,
-                                    snapshot_id=snapshot_id)
+        return _settle_failed_start(
+            ctx, gateway, exc, recovering=recovering, start_attempted=start_attempted, requested=requested,
+            invocation_id=invocation_id, owned_project_id=owned_project_id, project_persistent=project_persistent,
+            history_facts=history_facts, registration_resolution=registration_resolution, snapshot_id=snapshot_id,
+            request_body=request_body, engine=engine, idempotency_key=key, drive=drive, authority=authority, inputs=inputs, named=named)
     finally:
         gateway.close()
     # A start whose custody row did not land does not wear the plain name: the run
@@ -830,8 +826,11 @@ def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: st
                                   snapshot_id: str = "", history_facts: Optional[dict] = None) -> Dict[str, Any]:
     """Retire a registration this start created but never bound to a run.
 
-    Only a proven unsent start permits retirement. Any answer to an entered POST (a 4xx too), a
-    transport error or a 2xx handle with no run id means the POST's fate is unknown, and
+    Only a proven unsent start permits snapshot or registration retirement here (a sent
+    continuation rejected pre-admission settles separately via
+    ``settle_pre_admission_continuation_rejection``, retaining snapshots and owing any owned
+    registration rather than treating sent as unsent). Any other answer to an entered POST (a 4xx
+    too), a transport error or a 2xx handle with no run id means the POST's fate is unknown, and
     a run may well be live against this very registration. An unverified outcome is never
     grounds for destroying state — the durable row names the id either way, which is what
     the old code lacked. The caller supplies the verdict, so every failing start reaches
@@ -890,19 +889,44 @@ def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: st
 def _settle_failed_start(ctx: ToolContext, gateway: Any, exc: BaseException, *, recovering: bool,
                          start_attempted: bool, requested: bool, invocation_id: str, owned_project_id: str,
                          project_persistent: bool, history_facts: Optional[dict],
-                         registration_resolution: Any, snapshot_id: str) -> ToolResult:
+                         registration_resolution: Any, snapshot_id: str,
+                         accepted_read: Optional[Dict[str, Any]] = None, request_body: Any = None,
+                         engine: Optional[dict] = None, idempotency_key: str = "",
+                         drive: Any = None, authority: Any = None, inputs: Any = None, named: Any = None) -> ToolResult:
     """The settlement every start that fails between its route check and its POST reaches
-    once: a recorded request is closed as unsent before anything retires (a Resume decision
-    keeps it lookup-only and unknown), the orphaned registration retires through the same one
-    path (an unknown outcome keeps it for the custody sweep), the invocation's fate row lands
-    either way (#1241), and a typed failure answers with the refusal a retry can act on;
-    anything else re-raises after cleanup."""
+    once: an entered POST checks for an accepted run first (``accepted_refused_start``); a
+    fresh ordinary continuation rejected pre-admission by a verified producer after same-store
+    ``not_found`` settles durably as a sent pre-admission refusal (never ``START_UNSENT``,
+    retaining snapshots and owing owned registrations); otherwise only a fresh start that never
+    entered its POST is closed as unsent before retirement (a Resume decision keeps it
+    lookup-only and unknown), while any other entered POST stays pending/unknown (#1241).
+    Typed failures answer with the refusal; anything else re-raises after cleanup."""
+    from ouroboros.delegate_continuation import settle_pre_admission_continuation_rejection
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
+    read_info: Dict[str, Any] = dict(accepted_read or {})
+    if start_attempted and isinstance(exc, ClaudexorUnavailable) and drive is not None and inputs is not None:
+        lineage = _start_lineage(request_body, invocation_id, authority, inputs, recovering)
+        kw = {"read_out": read_info} if getattr(exc, "pre_admission_continuation_rejection", None) is not None else {}
+        if (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body,
+                                               inputs.selected, lineage, named, **kw)) is not None:
+            return accepted
     typed = isinstance(exc, (ClaudexorUnavailable, OwnerPauseRefused))
     code = getattr(exc, "code", str(exc)) if typed else f"pre_custody_exit_{type(exc).__name__}"
-    # A request row is not a POST; an entered one stays unknown whatever the engine answered (its accepted
-    # work is read), so only a fresh start that never entered it is definite. Recovery retains its fate.
+    if start_attempted and requested and not recovering and isinstance(exc, ClaudexorUnavailable):
+        meta = getattr(ctx, "task_metadata", None)
+        settled = settle_pre_admission_continuation_rejection(
+            custody.custody_root(ctx), task_id=str(getattr(ctx, "task_id", "") or ""),
+            root_task_id=str(meta.get("root_task_id") or "") if isinstance(meta, dict) else "",
+            invocation_id=invocation_id, gateway=gateway, exc=exc, accepted_read=read_info,
+            request_body=request_body, idempotency_key=idempotency_key, engine=engine,
+            owned_project_id=owned_project_id, project_persistent=project_persistent,
+            registration_resolution=registration_resolution, history_facts=history_facts)
+        if settled is not None:
+            return _fail("delegate_start", code, str(exc), executor="blocked",
+                         reset_at=getattr(exc, "reset_at", ""), **settled)
+    # Past the proven pre-admission continuation branch above, any entered POST stays unknown
+    # (sent != unsent); only a fresh start that never entered its POST is an unsent definite refusal.
     definite = not start_attempted
     if definite and requested:
         definite = close_unsent_start(custody.custody_root(ctx), str(ctx.task_id), invocation_id, code)

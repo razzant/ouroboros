@@ -845,21 +845,175 @@ def _receipt_line(names: frozenset, row: Dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
-__all__ = [
-    "AdoptedSnapshot",
-    "ContinuationStart",
-    "NO_CONTINUATION",
-    "bind_continuation",
-    "continuation_prompt",
-    "continuation_words",
-    "disposition_refusal",
-    "engine_continues",
-    "inherited_access",
-    "line_start_bodies",
-    "replayed_custody",
-    "retry_matches_caller_text",
-    "snapshot_handover",
-    "start_binding",
-    "terminal_continuity",
-    "with_run_binding",
-]
+def _pre_admission_event_key(event: Dict[str, Any]) -> Optional[Tuple[str, ...]]:
+    from ouroboros.gateways.claudexor_observation import PRE_ADMISSION_CONTINUATION_PRODUCERS
+
+    if (event.get("type") != custody.START_FAILED or event.get("definite") is not True
+            or event.get("pre_admission_rejected") is not True or event.get("start_sent") is not True
+            or event.get("reason") != REFUSAL_SUPERSEDED or int(event.get("status_code") or 0) != 409
+            or event.get("run_id")
+            or (str(event.get("engine_version") or ""), str(event.get("engine_build_sha") or ""))
+            not in PRE_ADMISSION_CONTINUATION_PRODUCERS):
+        return None
+    vals = tuple(str(event.get(k) or "") for k in ("invocation_id", "task_id", "continuation_of",
+                 "superseded_by_head", "daemon_store_id", "request_digest", "wire_idempotency_key"))
+    canonical = event.get("predecessor_canonical_run_id", "")
+    bad_canon = "predecessor_canonical_run_id" in event and (
+        not isinstance(canonical, str) or not canonical or canonical != canonical.strip()
+        or canonical in (vals[0], vals[2], vals[3]))
+    return ((*vals, canonical)
+            if not bad_canon and all(vals) and vals[6] == vals[0] and vals[3] not in (vals[2], vals[0]) else None)
+
+
+def _indexed_request_binding(record: Dict[str, Any], req: Dict[str, Any]) -> Dict[str, Any]:
+    from ouroboros.delegate_pending import head_references
+
+    inline = req.get("request")
+    return {"event_id": str(req.get("event_id") or ""), "request_ordinal": record.get("request_ordinal"),
+            "custody_ordinal": req.get("custody_ordinal"), "task_id": str(req.get("task_id") or ""),
+            "request_ref": req.get("request_ref"), "held_heads": head_references(req),
+            "inline_request": inline if isinstance(inline, dict) and inline else None}
+
+
+def _open_pending_request(
+    txn: Any, iid: str, *, check_free: bool = False,
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    from ouroboros import delegate_invocation as inv
+
+    open_row = txn.get_row("custody_open", f"invocation:{iid}")
+    if not isinstance(open_row, dict) or (check_free and (
+            txn.get_row("custody_refused", iid) is not None or inv.bound_runs(txn, iid))):
+        return None
+    record = inv._read(txn, iid)
+    if (not isinstance(record, dict) or record.get("state") != "pending" or record.get("run_id")
+            or record.get("resume_decisions") or open_row.get("resume_decisions")):
+        return None
+    req = record.get("request")
+    return (record, req) if isinstance(req, dict) and req == open_row.get("request") else None
+
+
+def prepare_pre_admission_rejection_binding(
+    drive_root: Any, event: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Off-lock CAS read and canonical digest check bound to the indexed START_REQUESTED row."""
+    from ouroboros import store
+    from ouroboros.delegate_pending import request_body
+    from ouroboros.gateways.claudexor_observation import canonical_request_digest
+
+    key = _pre_admission_event_key(event)
+    if key is None or drive_root is None or store.probe(drive_root)[0] != "present":
+        return None
+    iid, _tid, pred, _head, _store_id, digest, _wire_key, canonical = key
+    with store.open_store(drive_root, write=False) as txn:
+        if (pair := _open_pending_request(txn, iid)) is None:
+            return None
+    body = request_body(drive_root, pair[1])
+    if (not isinstance(body, dict) or body.get("_thread_id") or body.get("_use_thread")
+            or body.get("continueFrom") != pred or canonical_request_digest(body) != digest):
+        return None
+    return {"invocation_id": iid, "continuation_of": pred, "predecessor_canonical_run_id": canonical,
+            "request_digest": digest, "binding": _indexed_request_binding(*pair)}
+
+
+def can_settle_pre_admission_rejection(
+    txn: Any, event: Dict[str, Any], *, verified: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Guard open custody and the verified off-lock binding atomically, without CAS reads or hashing here."""
+    from ouroboros.delegate_accepted import predecessor_alias_custody_valid
+    from ouroboros.execution_domain import is_work_ref, recorded_ref
+
+    key = _pre_admission_event_key(event)
+    if key is None or not isinstance(verified, dict):
+        return False
+    iid, tid, pred, head, store_id, digest, _wire_key, canonical = key
+    if (verified.get("invocation_id") != iid or verified.get("continuation_of") != pred
+            or verified.get("predecessor_canonical_run_id", "") != canonical
+            or verified.get("request_digest") != digest or not isinstance(verified.get("binding"), dict)
+            or (pair := _open_pending_request(txn, iid, check_free=True)) is None):
+        return False
+    record, req = pair
+    binding, req_ref, evt_ref = _indexed_request_binding(record, req), recorded_ref(req), recorded_ref(event)
+    if (binding != verified["binding"] or not (binding["request_ref"] or binding["inline_request"])
+            or str(req.get("invocation_id") or "") != iid or str(req.get("task_id") or "") != tid
+            or str(req.get("root_task_id") or req.get("task_id") or "") != str(event.get("root_task_id") or tid)
+            or str(req.get("continuation_of") or "") != pred
+            or str(req.get("idempotency_key") or "") != str(event.get("idempotency_key") or "")
+            or (req.get("idempotency_key") and str(req["idempotency_key"]) in (head, canonical))
+            or req.get("surface") not in (None, "", "delegate") or (req.get("source") or "delegated_subagent") != "delegated_subagent"
+            or (req.get("category") or "subagent") != "subagent"
+            or any(req.get(k) for k in ("operation_id", "slot_id", *custody.REVIEW_ATTRIBUTION_KEYS))
+            or req.get("thread_id") or str(req.get("execution_mode") or "") == "plan"
+            or req.get("store_identity_unproven") is not True or str(req.get("daemon_store_id") or "")
+            or str(req.get("handshake_store_id") or "") != store_id or is_work_ref(req_ref) != is_work_ref(evt_ref)
+            or (is_work_ref(req_ref) and (req_ref.get("descriptor") != evt_ref.get("descriptor")
+                                          or req_ref.get("store") != store_id or evt_ref.get("store") != store_id))):
+        return False
+    head_row = txn.custody_row(head)
+    return (not (isinstance(head_row, dict) and str(head_row.get("invocation_id") or "") == iid) and (
+        not canonical or predecessor_alias_custody_valid(
+            txn, pred, canonical, store_id=store_id, engine_ref=evt_ref, exclude_invocation_id=iid)))
+
+
+def settle_pre_admission_continuation_rejection(
+    drive_root: Any, *, task_id: str, root_task_id: str, invocation_id: str, gateway: Any, exc: BaseException,
+    accepted_read: Optional[Dict[str, Any]], request_body: Any, idempotency_key: str = "",
+    engine: Optional[Dict[str, Any]] = None, owned_project_id: str = "", project_persistent: bool = False,
+    registration_resolution: Any = None, history_facts: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Durably close open custody for a first ordinary continuation whose ``POST /v2/runs``
+    a verified allowlisted producer rejected pre-admission with 409 ``continuation_superseded``."""
+    from ouroboros.delegate_accepted import prove_job_run_alias
+    from ouroboros.delegate_registration_policy import engine_facts, registration_proof
+    from ouroboros.execution_domain import is_work_ref, recorded_ref, same_engine
+    from ouroboros.gateways import claudexor_observation as obs
+
+    proof = getattr(exc, "pre_admission_continuation_rejection", None)
+    if (not isinstance(proof, obs.PreAdmissionContinuationRejection) or not invocation_id or not task_id
+            or proof.idempotency_key != invocation_id or not proof.verified_on(gateway)
+            or not isinstance(request_body, dict) or request_body.get("_thread_id") or request_body.get("_use_thread")
+            or request_body.get("continueFrom") != proof.requested_predecessor_id
+            or (idempotency_key and str(idempotency_key) in (proof.engine_head, proof.predecessor_run_id))
+            or obs.canonical_request_digest(request_body) != proof.request_digest
+            or not isinstance(accepted_read, dict) or accepted_read.get("lookup") != "not_found"
+            or accepted_read.get("reason") != "accepted_start_not_found" or accepted_read.get("store_id") != proof.store_id):
+        return None
+    pred, reported, proof_ref, start_ref = (
+        proof.requested_predecessor_id, proof.predecessor_run_id, dict(proof.engine_ref), recorded_ref(engine or {}))
+    if (not same_engine(gateway, {"engine_ref": proof_ref}) or is_work_ref(start_ref) != is_work_ref(proof_ref)
+            or (is_work_ref(proof_ref) and start_ref != proof_ref)):
+        return None
+    if not proof.predecessor_matched and (
+            not prove_job_run_alias(drive_root, gateway, pred, reported, store_id=proof.store_id,
+                                    engine_ref=proof_ref, exclude_invocation_id=invocation_id)
+            or not proof.verified_on(gateway)):
+        return None
+    alias_fact = {"predecessor_canonical_run_id": reported} if reported != pred else {}
+    retention = ("persistent_registration" if owned_project_id and project_persistent
+                 else "continuation_head_may_share_registration" if owned_project_id else "")
+    owed = ({**engine_facts(registration_resolution if registration_resolution is not None else gateway),
+             **registration_proof(registration_resolution or {})} if owned_project_id and not project_persistent else None)
+    event = {**(history_facts or {}), "run_id": "", "task_id": task_id, "root_task_id": root_task_id or task_id,
+             "invocation_id": invocation_id, "idempotency_key": str(idempotency_key or ""),
+             "wire_idempotency_key": proof.idempotency_key, "project_id": owned_project_id, "project_retired": False,
+             "reason": REFUSAL_SUPERSEDED, "status_code": 409, "definite": True, "pre_admission_rejected": True,
+             "start_sent": True, "continuation_of": pred, "superseded_by_head": proof.engine_head,
+             "daemon_store_id": proof.store_id, "request_digest": proof.request_digest,
+             "engine_version": proof.engine_version, "engine_build_sha": proof.engine_build_sha, **alias_fact,
+             **({"engine_ref": proof_ref} if proof_ref else {}), **({"project_retention_reason": retention} if retention else {}),
+             **({"registration_owed": owed} if owed is not None else {})}
+    try:
+        with custody.actor_decision_lock(drive_root, task_id):
+            if not custody.emit(drive_root, custody.START_FAILED, event):
+                return None
+    except (custody.ActorDecisionLockUnavailable, OSError, TimeoutError):
+        return None
+    return {"continuation_of": pred, "superseded_by_head": proof.engine_head,
+            "start_rejected_before_admission": True, "project_retired": False, **alias_fact,
+            **({"project_id": owned_project_id, "project_retention_reason": retention} if owned_project_id else {})}
+
+
+__all__ = ["AdoptedSnapshot", "ContinuationStart", "NO_CONTINUATION", "bind_continuation",
+           "can_settle_pre_admission_rejection", "continuation_prompt", "continuation_words", "disposition_refusal",
+           "engine_continues", "inherited_access", "line_start_bodies", "prepare_pre_admission_rejection_binding",
+           "replayed_custody", "retry_matches_caller_text", "settle_pre_admission_continuation_rejection",
+           "snapshot_handover", "start_binding", "terminal_continuity", "with_run_binding"]

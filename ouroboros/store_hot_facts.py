@@ -328,7 +328,8 @@ def tree_requests(txn, tree: str, *also: str, refused: bool = False) -> list:
 def _recovered_start_root(row) -> str:
     """The tree an underived row's body-kept fence addresses, or "" when the row holds none.
     Mirrors the derived-column predicate: the fence must be closed and its active
-    delegated start must name this task as its own tree."""
+    delegated start must name this task as its own tree or as the saved successor
+    holding it (``holder_task_id``)."""
     if not (row and row.get("control_valid") and str(row.get("owner_pause_state") or "")
             in ("requested", "paused")):
         return ""
@@ -337,8 +338,8 @@ def _recovered_start_root(row) -> str:
     except (KeyError, TypeError, ValueError):
         return ""  # the body was read; a fact row that does not parse names no root
     start = fence.get("active_delegated_start") if isinstance(fence, dict) else None
-    return str(start.get("root_task_id") or "") if isinstance(start, dict) and str(
-        start.get("root_task_id") or "") == row["task_id"] else ""
+    return row["task_id"] if isinstance(start, dict) and row["task_id"] in (
+        str(start.get("root_task_id") or ""), str(start.get("holder_task_id") or "")) else ""
 
 
 def recovered_owner_pause_roots(root) -> list[str]:
@@ -351,7 +352,8 @@ def recovered_owner_pause_roots(root) -> list[str]:
         roots = {row[0] for row in txn.conn.execute(
             "SELECT task_id FROM tasks INDEXED BY tasks_owner_pause WHERE owner_pause_state<>'' "
             "AND owner_pause_state IN ('requested','paused') AND CASE WHEN json_valid(owner_pause_facts) THEN "
-            "json_extract(owner_pause_facts, '$.active_delegated_start.root_task_id')=task_id ELSE 0 END")}
+            "task_id IN (json_extract(owner_pause_facts, '$.active_delegated_start.root_task_id'), "
+            "json_extract(owner_pause_facts, '$.active_delegated_start.holder_task_id')) ELSE 0 END")}
         # A supported older writer keeps a closed fence in the task body while its derived columns stay
         # NULL: the indexed underived rows alone pay their body read (the cold_custody_rows pattern).
         underived = [row[0] for row in txn.conn.execute(

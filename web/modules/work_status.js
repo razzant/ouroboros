@@ -833,6 +833,22 @@ const actionTarget = (group, action) => ({ [ACTION_FINALIZE]: group.wrapUp, [ACT
 
 const targetKey = (target) => JSON.stringify(Array.isArray(target) ? [...target].sort() : [target]);
 
+/** The offered actions and their exact targets. Stop compares sets, but still sends in the opened order. */
+export function workMenuTargets(grouped, options) {
+    return new Map(grouped ? workMenuActions(grouped, options)
+        .map(action => [action, targetKey(actionTarget(grouped, action))]) : []);
+}
+
+/** Recheck each opened item against the latest addressed controls; a change withdraws that item only. */
+export function workMenuTargetGuard(grouped, options) {
+    const opened = workMenuTargets(grouped, options);
+    return (action, current, currentOptions = options) => {
+        const next = workMenuTargets(current, currentOptions);
+        for (const [name, target] of opened) if (next.get(name) !== target) opened.delete(name);
+        return opened.has(action);
+    };
+}
+
 // Opening a menu takes no authority from a later attempt or placement. The same target still offered by a new body
 // works without reopening. The shared menu checks this even for Pause, which dispatches outside its onAction hook.
 export function cardControlGuard(record, read, opened = read(record)) {

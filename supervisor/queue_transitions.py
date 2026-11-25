@@ -445,7 +445,7 @@ def resume_budget_paused_task(task_id: str, *, selected_by: str = "", expected_p
     seen: List[Dict[str, str]] = []  # what this Resume's own census found; the Pause's record keeps its own
     outcome = with_resume_decisions(task_id, lambda: _resume_budget_paused_task(
         task_id, selected_by=selected_by, gaps=seen, expected_panic_hold_id=expected_panic_hold_id),
-        child=bool(selected_by))
+        child=bool(selected_by), panic_selection=bool(expected_panic_hold_id))
     gap = {"membership_gaps": gap_fact(seen, gap.get("membership_gaps"))} if seen else gap
     return answered(resume_outcome({**outcome, **gap} if outcome.get("ok") else outcome))
 
