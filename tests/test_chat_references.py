@@ -35,7 +35,7 @@ def test_reply_is_host_resolved_and_replay_uses_the_same_address(tmp_path, monke
 
 
 @pytest.mark.parametrize("late", [False, True])
-def test_web_reply_quotes_a_passage_of_a_saved_agent_note(tmp_path, monkeypatch, late):
+def test_web_reply_quotes_a_passage_of_a_saved_agent_note(tmp_path, monkeypatch, late, healthy_main):
     from ouroboros.chat_references import reply_target
     from ouroboros.context import _fresh_reply_owner, _owner_message_facts
     from ouroboros.dialogue_provenance import program_reply_text, relation_text
