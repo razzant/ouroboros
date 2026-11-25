@@ -43,7 +43,7 @@ class SetupStep(TypedDict):
 
 
 class SetupProviderField(TypedDict):
-    """One credential or endpoint input; ``settingKey`` is the settings key it saves into."""
+    """One credential, endpoint or consent input; ``settingKey`` is the settings key it saves into."""
 
     id: str
     stateKey: str

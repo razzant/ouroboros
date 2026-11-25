@@ -32,6 +32,19 @@ class MockLLMServer:
 
 
 class _Handler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802 - stdlib callback name
+        # Names its program, as llama.cpp's own document does (``server_window.PROGRAM_DOCUMENTS``): a private
+        # compatible server that names none sends only with its connection's consent.
+        if self.path != "/props":
+            self.send_error(404)
+            return
+        data = json.dumps({"default_generation_settings": {"n_ctx": 2_000_000}, "total_slots": 1}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):  # noqa: N802 - stdlib callback name
         if self.path != "/v1/chat/completions":
             self.send_error(404)

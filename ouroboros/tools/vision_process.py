@@ -57,6 +57,7 @@ _CONTEXT = _object({
 _CONTEXT["properties"].update(preferred_mode={"enum": ["", "max", "low", "nano"]}, mode_cause={  # optional: receipts
     "enum": ["", "memory", "request", "route", "window", "after_start"]},  # retained before these facts carry neither
     prefix={"type": ["object", "null"]},  # what the candidate did to its route's cached start (transcript_prefix)
+    requested_load_window={"type": ["integer", "null"], "minimum": 0},
     no_memory_tokens=_NULL_INT)  # Low's missed target at the start: the request with no memory (memory_floor)
 _CAPTURE = _object({
     **{key: _STRING for key in ("attempt_id", "model", "provider", "provider_code", "provider_error_type", "provider_error")},
@@ -76,6 +77,9 @@ _CAPTURE = _object({
     "provider_reported_cost_only": {"type": "boolean"},
 })
 _CAPTURE["properties"].update(prompt_tokens_exact=_NULL_INT, context_window_tokens_exact=_NULL_INT)  # optional on older receipts
+# The wire digest alone identifies the images of older self-describing candidates.
+_CAPTURE["properties"]["candidate_image_digests"] = {
+    "type": ["array", "null"], "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
 _CUSTODY = _object({
     "operation_id": _STRING, "invocation_id": {"type": "string", "minLength": 1},
     "request_ref": _DICT, "request_manifest_ref": _DICT,
@@ -125,6 +129,8 @@ def _restore_capture(raw: dict | None) -> PhysicalAttemptCapture | None:
     if raw is None:
         return None
     values = dict(raw)
+    if values.get("candidate_image_digests") is not None:
+        values["candidate_image_digests"] = tuple(values["candidate_image_digests"])
     if values["physical_context"] is not None:
         values["physical_context"] = PhysicalAttemptContext(**values["physical_context"])
     return PhysicalAttemptCapture(**values)

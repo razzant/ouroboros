@@ -539,6 +539,7 @@ def _bind_forced_route(ctx: _RoundLimitContext) -> bool:
             plan, tools, ctx.messages, model=ctx.active_model, use_local=ctx.active_use_local,
             tool_schemas=list(getattr(ctx, "tool_schemas", None) or []), model_role=role, credential_profile_id=account,
             model_route=_conversation_account(tools_ctx, ctx.messages, role, account), route_is_preference=True,
+            **({"load_window_binding": binding} if (binding := getattr(tools_ctx, "_restored_native_load_window", None)) else {}),
             start_mode=getattr(tools_ctx, "active_context_mode", None), reasoning_effort=ctx.active_effort)
     except Exception:
         log.debug("Forced rail kept the restored plan of another route", exc_info=True)
@@ -966,6 +967,8 @@ def _call_forced_model_once(
                 getattr(owner_ctx, "task_metadata", {}), task_type=str(getattr(ctx, "task_type", "") or "")),
             configured_api_child=is_configured_api_child(owner_ctx),  # a forced call is still that actor's call
         )
+    from ouroboros.loop_transport import emit_route_notice
+    emit_route_notice(ctx.accumulated_usage, getattr(ctx, "emit_progress", None))  # its route's words, as a round's
     # The reply's calls as data for the one completion request this rail may read; none executes and
     # ``tool_call_count`` stays the provider's actual count.
     response_meta["reply_calls"] = [dict(name=str(f.get("name") or ""), arguments=f.get("arguments")) for f in (

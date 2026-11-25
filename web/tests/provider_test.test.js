@@ -1,13 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {
-    builtinTestRequest,
-    providerTestNetworkErrorStatus,
-    providerTestResultIsCurrent,
-    providerTestStatusText,
-    reachesAnotherPair,
-} from '../modules/settings_connections.js';
+import { builtinTestRequest, providerTestResultIsCurrent, reachesAnotherPair } from '../modules/settings_connections.js';
+import { providerTestNetworkErrorStatus, providerTestStatusText, providerTestTone } from '../modules/connection_server_check.js';
 import { PROVIDER_CARDS, providerSettingsCard } from '../modules/settings_provider_cards.js';
 
 // Setup retains the shared provider cards, each with its keys and forms.
@@ -30,6 +25,11 @@ test('provider test status uses only the controlled compact vocabulary', () => {
         'Not ready — Enter its key again to test the new address.');
     assert.equal(providerTestNetworkErrorStatus(refusal(400, { error: 'raw upstream text' })), 'Not ready');
     assert.equal(providerTestNetworkErrorStatus(refusal(502, moved)), 'Not ready');
+    // A test that reached a server which named no program says so beside its outcome, passed or not.
+    const caution = 'Server type not confirmed: Ouroboros cannot tell whether it keeps the whole history.';
+    assert.equal(providerTestStatusText({ ok: true, caution }), `Works. ${caution}`);
+    assert.equal(providerTestStatusText({ ok: false, error: 'Invalid key', caution }), `Not ready — Invalid key. ${caution}`);
+    assert.deepEqual([{ ok: true }, { ok: true, caution }, { ok: false, caution }, { ok: false }].map(providerTestTone), ['ok', 'warn', 'danger', 'danger']);
 });
 
 test('provider test responses apply only to the exact draft generation', () => {

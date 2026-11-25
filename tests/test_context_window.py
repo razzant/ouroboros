@@ -196,7 +196,9 @@ def test_a_request_inside_the_reply_reservation_is_known_as_one(tmp_path, monkey
     core, _snap = _core(True)
     plan = cf.build_context_fit_plan(None, core, {"usage_category": "consciousness"}, preferred_mode="max",
         route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
-            ce.CapabilityEvidence(300_000, "confirmed", source, "probe-route")))
+            ce.CapabilityEvidence(300_000, "confirmed", source, "probe-route", ts=ce.utc_now_iso())))
+    assert plan.window_tokens == 300_000
+    assert plan.window_record.usable == 234_464
     monkeypatch.setattr(context_measurement, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
     anchor = InputAnchor(input_tokens=size, estimate_tokens=size, transcript_tokens=size, round=1) if anchored else None
     fit = cf.measure_main_fit(plan, [], [], profile="owner_max", rendered_mode="max", round_id="r", anchor=anchor).measurement

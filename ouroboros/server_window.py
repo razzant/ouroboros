@@ -8,7 +8,7 @@ A gateway catalog's ``context_length`` keeps its older meaning, ``provider_metad
 Every failure (refused connection, timeout, non-JSON, another model loaded, a missing or zero field) is ``0``,
 "unknown": never a guessed window and never an error the owner sees. Training lengths (llama.cpp ``n_ctx_train``,
 Ollama ``/api/show``, LM Studio ``max_context_length``) are what the model could take, not what is loaded, and
-are never read as the window.
+are not loaded windows. For client-configured Ollama, /api/show instead bounds the next requested load.
 """
 from __future__ import annotations
 
@@ -104,13 +104,17 @@ def _lmstudio_v0(payload: Any, wanted: set) -> int:
     return 0
 
 
-def _ollama_ps(payload: Any, wanted: set) -> int:
+def ollama_load(payload: Any, wanted: set) -> dict:
     """Ollama ``GET /api/ps``: ``context_length`` the scheduler allocated to the loaded model (0 before a load)."""
     items = payload.get("models") if isinstance(payload, dict) else None
     for item in items if isinstance(items, list) else ():
         if isinstance(item, dict) and (_same_model(item.get("name"), wanted) or _same_model(item.get("model"), wanted)):
-            return _positive(item.get("context_length"))
-    return 0
+            return item
+    return {}
+
+
+def _ollama_ps(payload: Any, wanted: set) -> int:
+    return _positive(ollama_load(payload, wanted).get("context_length"))
 
 
 #: Readers at the server root (``base_url`` without its ``/v1``), asked in order when ``/models`` stated no window.
@@ -121,25 +125,73 @@ READERS: Tuple[Tuple[str, str, Callable[[Any, set], int]], ...] = (
 )
 
 
+def _llama_cpp_document(payload: Any) -> bool:
+    """llama.cpp ``GET /props``: its slot settings beside its slot count."""
+    return (isinstance(payload, dict) and _positive(_dig(payload, ("default_generation_settings", "n_ctx"))) > 0
+            and _positive(payload.get("total_slots")) > 0)
+
+
+def _lmstudio_document(payload: Any) -> bool:
+    """LM Studio ``GET /api/v0/models``: every listed model with its load state and maximum context."""
+    items = payload.get("data") if isinstance(payload, dict) else None
+    return isinstance(items, list) and bool(items) and all(
+        isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]
+        and item.get("state") in ("loaded", "not-loaded") and _positive(item.get("max_context_length")) > 0
+        for item in items)
+
+
+#: A program named by its own documented metadata document at the server root: (program, path, its shape). An
+#: error body, a missing path, a version number or a generic ``/v1/models`` listing names no program. The
+#: documents these shapes were read from, with their sources: ``tests/fixtures/server_windows/README.md``.
+PROGRAM_DOCUMENTS: Tuple[Tuple[str, str, Callable[[Any], bool]], ...] = (
+    ("llama.cpp", "/props", _llama_cpp_document),
+    ("LM Studio", "/api/v0/models", _lmstudio_document),
+)
+
+
 def server_root(base_url: str) -> str:
     root = str(base_url or "").strip().rstrip("/")
     return root[:-3] if root.endswith("/v1") else root
 
 
-def private_host(base_url: str) -> bool:
-    """Loopback, private-network or ``.local`` hosts: the servers the root readers are meant for. A public gateway is
-    never asked for another product's paths."""
-    import ipaddress
-    from urllib.parse import urlsplit
+#: Names no public DNS serves (RFC 6762, RFC 8375, ICANN .internal) and the usual router/compose suffixes.
+PRIVATE_SUFFIXES = (".local", ".localhost", ".lan", ".internal", ".home.arpa", ".localdomain")
 
-    host = (urlsplit(str(base_url or "")).hostname or "").lower()
-    if host in {"localhost"} or host.endswith(".local") or host.endswith(".localhost"):
-        return True
+
+def host_address(host: str):
+    """A numeric host as the address a connection to it reaches, ``None`` for a name: parsed, never resolved.
+
+    Every spelling the OS takes for one address is that address: the dotted quad, the ``10.1`` and ``192.168.1``
+    shorthands, a decimal, hex or octal number, and an IPv4-mapped IPv6 address as its IPv4. One reading for whether
+    a host is private (``private_host``) and for the address a hold names (``llm_ollama_guard.address_scope``):
+    a spelling that one of them took for a name would send past the other."""
+    import ipaddress
+    import socket
+
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            return None
+    return getattr(address, "ipv4_mapped", None) or address
+
+
+def private_host(base_url: str) -> bool:
+    """Loopback, private-network, single-label (``ollama``, a compose/LAN name) or private-suffix hosts: the servers the
+    root readers are meant for. A public gateway is never asked for another product's paths. A numeric host is judged
+    by its address in whatever spelling it was written (``host_address``), before any rule about names."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(str(base_url or "").strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
         return False
-    return address.is_loopback or address.is_private or address.is_link_local
+    address = host_address(host)
+    if address is not None:
+        return address.is_loopback or address.is_private or address.is_link_local
+    return host == "localhost" or host.endswith(PRIVATE_SUFFIXES) or bool(host and "." not in host and ":" not in host)
 
 
 def read_root_window(base_url: str, model: str, headers: Optional[Dict[str, str]] = None, *,
@@ -185,7 +237,8 @@ def local_health_window(model: str) -> int:
 
 
 
-def read_metadata_window(model: str, base_url: str, api_key: str, *, provider: str, evidence_root) -> Tuple[int, str]:
+def read_metadata_window(model: str, base_url: str, api_key: str, *, provider: str, evidence_root,
+                         headers: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
     """CW6 (v6.34.0): an OpenAI-compatible server (vLLM, Ollama, LM Studio, TGI, ...)
     commonly publishes the per-model window in GET {base_url}/models (Go: its documented list URL). vLLM's
     ``max_model_len`` and llama.cpp's ``meta.n_ctx`` are the server's own buffer (``server_metadata``), a catalog's
@@ -199,7 +252,9 @@ def read_metadata_window(model: str, base_url: str, api_key: str, *, provider: s
     try:
         import httpx
 
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        headers = dict(headers or {})
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         from ouroboros.net_transport import verify_kwargs
         from ouroboros.opencode_go import compatible_models_url, go_client_headers, go_model_limits, is_go_chat_route
 
@@ -241,3 +296,131 @@ def read_metadata_window(model: str, base_url: str, api_key: str, *, provider: s
         return 0, ""
     except Exception:
         return 0, ""
+
+
+def ollama_server_ready(target: dict, client: Any) -> Optional[bool]:
+    """Fresh recovery evidence; None means a known native address no longer answers as Ollama: another
+    program replaced it, or nothing names it and the next send states the hold."""
+    from ouroboros.llm_ollama_guard import UnidentifiedRouteWithheld
+    from ouroboros.llm_ollama import OllamaProgramChanged, _current_version, _discoverable, _drive, _url
+
+    if not (_discoverable(target) and target.get("resolved_model") and (target.get("api_key") or target.get("keyless"))):
+        return False
+    headers = dict(target.get("default_headers") or {})
+    if target.get("api_key"):
+        headers["Authorization"] = "Bearer " + target["api_key"]
+    from ouroboros.llm_ollama_wire import OllamaRouteUnsettledError
+    def read(method, path, body):
+        if method == "POST":
+            return client.post(_url(target, path), headers=headers, json=body)
+        return client.get(_url(target, path), headers=headers)
+
+    try:
+        if not _drive(_current_version(target), read):
+            return False
+    except (OllamaProgramChanged, UnidentifiedRouteWithheld):
+        return None
+    except OllamaRouteUnsettledError:
+        return False
+    response = read("POST", "/api/show", {"model": target["resolved_model"]})
+    shown = response.json() if response.status_code == 200 else None
+    if not isinstance(shown, dict) or shown.get("remote_model") or shown.get("remote_host"):
+        return False
+    architecture = _dig(shown, ("model_info", "general.architecture"))
+    capabilities = shown.get("capabilities")
+    return bool(isinstance(architecture, str) and architecture.strip()
+                and isinstance(capabilities, list) and "completion" in capabilities)
+
+
+def ollama_window_request(provider, model, base_url, *, api_key, headers, target, allow_fetch=True, force=False, probes=None):
+    """Bound native target and selected load. A cache-only reader never discovers a server."""
+    from ouroboros.llm_ollama import _discoverable, _known, _identity, is_ollama
+    from ouroboros.llm_routing import configured_window
+    from ouroboros.utils import transport_no_proxy
+
+    if not _discoverable(target or dict(provider=provider, base_url=base_url)):
+        return None
+    if target is None:
+        target = _ollama_window_target(provider, model, base_url, api_key=api_key, headers=headers)
+    if not (target.get("api_key") or target.get("keyless")):
+        return None
+    identity = _identity(target)
+    if target.get("bound_load_window") is not None:
+        # Intent captured at task start, usable only if this route later proves native.
+        target["requested_load_window"] = target["bound_load_window"]
+    if allow_fetch:
+        from ouroboros.llm_ollama_guard import UnidentifiedRouteWithheld
+        try:
+            known = is_ollama(target, no_proxy=transport_no_proxy(), before_send=force)
+        except UnidentifiedRouteWithheld:
+            known = False  # a window read asks no generation: what withholds a send leaves it to the server's listing
+    else:
+        known = _known(target, identity) or ("route_notice" not in target and identity in (probes or {}))
+    if known:
+        target["requested_load_window"] = configured_window(target)
+        return target, target["requested_load_window"]
+    target.pop("requested_load_window", None)
+    return None
+
+
+def read_ollama_window(target, requested):
+    """Statement for the next load in explicit mode, or the actual model's loaded buffer in Auto."""
+    import httpx
+    from ouroboros.llm_ollama import OllamaProgramChanged, OllamaRouteUnsettledError, _client_options, _drive, _load_window, _metadata_reader
+    from ouroboros.utils import transport_no_proxy
+
+    try:
+        with httpx.Client(**_client_options(target, transport_no_proxy(), READ_TIMEOUT_SEC)) as client:
+            selected, loaded = _drive(_load_window(target, requested, sizing_only=True), _metadata_reader(client, target))
+            return selected if requested else loaded
+    except OllamaProgramChanged:
+        raise
+    except OllamaRouteUnsettledError as error:
+        if not error.retryable:
+            raise
+        return None  # no observation; an answered but empty /ps is zero
+
+
+def ollama_model_maximum(shown):
+    """Read the maximum for the architecture named in a successful /show."""
+    info = shown.get("model_info") if isinstance(shown, dict) else None
+    if not isinstance(info, dict):
+        return 0
+    if "general.architecture" in info:
+        return _positive(info.get(f"{info['general.architecture']}.context_length"))
+    lengths = {_positive(value) for key, value in info.items() if key.endswith(".context_length")}
+    return lengths.pop() if len(lengths) == 1 else 0
+
+
+def _ollama_window_target(provider, model, base_url, *, api_key=None, headers=None):
+    """Use this route's credentials and custom headers, never another connection's."""
+    from ouroboros.llm_routing import resolve_target
+    from ouroboros.provider_models import parse_model_route
+    target = dict(provider=provider, requested_model=model, resolved_model=parse_model_route(model).model, base_url=base_url)
+    try:
+        resolved = resolve_target(model)
+        if resolved.get('provider') == provider and server_root(resolved.get('base_url')) == server_root(base_url):
+            target = {**resolved, **target}
+    except Exception:
+        pass
+    if api_key is not None:
+        target['api_key'] = api_key
+    if headers is not None:
+        target['default_headers'] = headers
+    return target
+
+
+def bind_native_load(route, bound, settings, role) -> None:
+    """The load a private compatible route's next send asks its runner for: a continuation's own scoped binding
+    (``context_window.native_load_window_binding``) for this scope and role, else what the connection's roles
+    configure now."""
+    target = route.get("_resolved_target")
+    if not target or route["provider"] != "openai-compatible" or not private_host(target.get("base_url")):
+        return
+    from ouroboros.llm_routing import configured_window
+    load, cap = bound.get("load"), bound.get("cap")
+    if (bound.get("scope") and bound["scope"] == route.get("window_observation_fp")
+            and bound.get("role") == role and all(type(v) is int and v >= 0 for v in (load, cap))):
+        target["bound_load_window"], route["bound_role_window"] = load, cap
+    else:
+        target["bound_load_window"] = configured_window(target, settings)
