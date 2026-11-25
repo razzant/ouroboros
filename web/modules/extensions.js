@@ -165,6 +165,10 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
     let placed = null;
     const scrollerOf = (level) => (level?.own ? viewScroller : level?.el) || null;
     const placeOf = (level) => (level.own ? viewPlaces.get(level.path) : pagePlaces.get(level.el)) || 0;
+    const rememberPlace = (level, top) => {
+        if (level.own) viewPlaces.set(level.path, top);
+        else pagePlaces.set(level.el, top);
+    };
 
     /* ---- Levels -------------------------------------------------------------------------------------------------- */
     function open(path, { row = '', under = levels.length, opener = null, quiet = false, remember = true, jump = landedBy } = {}) {
@@ -237,10 +241,15 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
         if (showRail && !railShown) queueMicrotask(() => { if (rowsOnScreen()) views.rowsShown?.(); });
         railShown = showRail;
         // The page that has just come (back) into view stands where it was left; one never opened starts at its top.
-        const box = scrollerOf(level);
-        if (box && level !== placed) box.scrollTop = placeOf(level);
-        if (!level || beside()) rail.scrollTop = railPlace;
-        placed = level;
+        // While hidden, never write scroll onto display:none boxes or mark `placed` (reused on return to restore).
+        if (shown()) {
+            const box = scrollerOf(level);
+            if (box && level !== placed) box.scrollTop = placeOf(level);
+            if (!level || beside()) rail.scrollTop = railPlace;
+            placed = level;
+        } else {
+            placed = null;
+        }
         syncLayers();
         if (!level) queueMicrotask(land);
         if (opened && beside()) revealPastFade(rail, rows().find((each) => each.dataset.extensionsOpen === first) || rail);
@@ -334,26 +343,35 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
     }
 
     /** From outside (app.js `openExtensions`, Settings' door, `ouro:open-skills`): the section is shown, then `path`. */
-    async function openFromOutside(path = '', { row = '', ...options } = {}) {
+    async function openFromOutside(path = '', { row = '', resume = false, ...options } = {}) {
         const target = String(path || '');
         if (target && !extensionsPageOf(target)) return false;
         opening = true;
         try {
+            const resuming = Boolean(resume && !target && levels.length > 0);
             // showPage captures the pressed opener synchronously, before its leave guard awaits (WebKit).
-            return await showPage(PLACE, { ...options, row, key: `${PLACE}:${target}`, enter: () => {
+            return await showPage(PLACE, { ...options, row, resume: resuming, key: `${PLACE}:${target}`, enter: () => {
                 const jump = layers?.returnPage?.();
                 landedBy = jump?.destination === `${PLACE}:${target}` ? jump.id : null;
-                const at = sectionLevels.indexOf(target);
-                // Reused ancestors are part of this landing too. A previously hidden Back for one of them
-                // must not appear above the return when the two-pane section narrows.
-                if (landedBy) {
-                    let keep = at + 1;
-                    if (at < 0 && target && levels[0]?.path === extensionsPageOf(target)) keep = underOf(target);
-                    if (!target && panes()) keep = 1;
-                    for (const level of levels.slice(0, keep)) level.jump = landedBy;
+                if (resuming && levels.length > 0) {
+                    // Retained levels stay above the Settings jump so Back steps editor -> first level ->
+                    // Extensions list -> Settings on one column (keeping Browse/Sources reachable) and
+                    // editor -> first level -> Settings on two panes.
+                    for (const level of levels) level.jump = null;
+                } else {
+                    const at = sectionLevels.indexOf(target);
+                    // Reused ancestors are part of this landing too. A previously hidden Back for one of them
+                    // must not appear above the return when the two-pane section narrows.
+                    if (landedBy) {
+                        let keep = at + 1;
+                        if (at < 0 && target && levels[0]?.path === extensionsPageOf(target)) keep = underOf(target);
+                        if (!target && panes()) keep = 1;
+                        for (const level of levels.slice(0, keep)) level.jump = landedBy;
+                    }
+                    try { go(target, { row, quiet: true }); }
+                    finally { landedBy = null; }
                 }
-                try { go(target, { row, quiet: true }); }
-                finally { landedBy = null; }
+                landedBy = null;
                 paint({ quiet: true });
                 sectionLevels.announce();
                 void readTools();
@@ -382,16 +400,18 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
     };
     rail.addEventListener('click', onRow);
     const onScroll = (event) => {
+        if (!shown()) return;
         const box = event.target;
         if (box === rail) { railPlace = box.scrollTop; return; }
         const level = top();
         if (!level || box !== scrollerOf(level)) return;
-        if (level.own) viewPlaces.set(level.path, box.scrollTop); else pagePlaces.set(level.el, box.scrollTop);
+        rememberPlace(level, box.scrollTop);
     };
     shell.addEventListener('scroll', onScroll, { capture: true, passive: true });
     const onPageShown = (event) => {
         if (event.detail?.page !== PLACE) {
             railShown = false;
+            placed = null;
             syncViews();
             syncLayers();
             return;
@@ -429,15 +449,22 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
     const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
         frame ||= requestAnimationFrame(() => {
             frame = 0;
+            if (!shown()) return;
             const now = panes();
             if (now !== twoBefore) { twoBefore = now; paint({ quiet: true }); }
         });
     }) : null;
     resize?.observe(shell);
     const disposeFade = bindScrollFade(rail);
-    // Leaving Extensions puts every revealed secret of its pages (an MCP server's credentials) away again.
+    // Leaving Extensions captures visible scroll places before hiding/collapsing secrets puts them at 0.
     const offLeave = setBeforePageLeave?.(({ from }) => {
-        if (from === PLACE) resetSecretReveals(page);
+        if (from === PLACE) {
+            const level = top();
+            const box = scrollerOf(level);
+            if (visible(box)) rememberPlace(level, box.scrollTop);
+            if (visible(rail)) railPlace = rail.scrollTop;
+            resetSecretReveals(page);
+        }
         return true;
     });
     const onPageHide = () => resetSecretReveals(page);

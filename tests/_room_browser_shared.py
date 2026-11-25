@@ -14,6 +14,7 @@ from ouroboros import dialogue_store
 from tests import _dialogue as dialogue_test
 from tests._dialogue import advance_room_revision
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES
+from tests.settings_section_helpers import press_nav
 
 
 def _seed_room(data, project_id, name, rows, archives=()):
@@ -104,7 +105,7 @@ def _read_older(page, pid):
 
 
 def _nav(page, name):
-    page.locator(f'[data-nav-page="{name}"]').evaluate("el => el.click()")
+    press_nav(page, name)  # Extensions through Settings' door (owner 24.11)
     page.wait_for_function("name => document.getElementById(`page-${name}`)?.classList.contains('active')", arg=name)
     page.evaluate(_SETTLE_RESTORE_FRAMES)
 
