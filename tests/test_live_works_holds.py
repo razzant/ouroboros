@@ -118,6 +118,46 @@ def test_runs_still_working_under_a_settled_root_are_its_typed_tails(tmp_path):
     assert live_works_present(tmp_path)["other_live_work"] == [row]
 
 
+def test_an_ended_root_under_a_pause_states_its_stops_own_press_once_and_only_where_that_is_proven(tmp_path, monkeypatch):
+    """Beside the listed works, the same stop: the press that made it once where its fence names its author, every
+    other fact as ``unlisted_live_work`` reads it. The fences are what ``owner_pause.next_fence`` writes. The head's
+    rows are copies: where Presence marks one, the dicts the producer returned stay as it returned them."""
+    from ouroboros import peer_roster
+    from ouroboros.live_works import OWN_PRESS
+    from ouroboros.owner_pause import next_fence
+
+    by = {"actor": "ouroboros", "task_id": "m1", "text": "pausing for the update", "at": "2026-11-20T10:00:00Z"}
+    fences = {"t": next_fence("t", {}, "r2", {"by": by}),  # names its author: its entry under requests only repeats the stop
+              "u": next_fence("u", {}, "r2", {})}  # a press that names nobody claims none: nothing proves a repeat
+    for task_id, fence in fences.items():
+        write_task_result(tmp_path, task_id, "failed", title=f"Ended {task_id}", chat_id=1, owner_pause=fence)
+    write_task_result(tmp_path, "v", "failed", title="Ended v", chat_id=1)  # no Pause at all: a row without a stop
+    _snapshot(tmp_path, running=[{"id": f"{task_id}-h", "task": {"id": f"{task_id}-h", "parent_task_id": task_id,
+                                                                  "root_task_id": task_id}} for task_id in ("t", "u", "v")])
+    full = unlisted_live_work(tmp_path, set())
+    t_stop = full[0]["stop"]
+    assert [row["work_id"] for row in full] == ["t", "u", "v"] and "stop" not in full[2]
+    assert t_stop["requests"] == {"r2": {"by": by, "fence_id": t_stop["fence_id"], "generation": 1}}  # recorded twice
+    # t and v are also live place turns: Presence marks their rows in the head, the mark beside the press where there is one.
+    roster, unlisted, produced = peer_roster.independent_roots, peer_roster.unlisted_live_work, []
+
+    def produce(root, listed):  # what the producer returned, as it returned it
+        produced.append(unlisted(root, listed))
+        return produced[-1]
+
+    monkeypatch.setattr(peer_roster, "independent_roots", lambda root: {
+        **roster(root), "presence_turns": [{"task_id": task_id, "row": {}, "state": "running"} for task_id in ("t", "v")]})
+    monkeypatch.setattr(peer_roster, "unlisted_live_work", produce)
+    present = live_works_present(tmp_path)
+    t, u, v = present["other_live_work"]
+    assert present["works"] == [] and (t["work_id"], u["work_id"], v["work_id"]) == ("t", "u", "v")
+    assert t == {**full[0], "kind": "inline_presence", "stop": {**t_stop, "requests": {"r2": OWN_PRESS}}}
+    assert u == full[1] and "by" not in u["stop"]  # whole: its one entry stays as recorded
+    assert v == {**full[2], "kind": "inline_presence"}
+    assert produced == [full]  # the producer's own dicts: unmarked, the press still recorded twice
+    assert unlisted_live_work(tmp_path, set()) == full  # the recorded rows are never rewritten
+
+
 def _paused_root(root, *, fence=None, helpers=()):
     """A listed root parked as the exact pause of the owner's Pause, with its tree's helpers in the queue."""
     write_task_result(root, "t", "scheduled", title="Paused work", chat_id=1, reason_code="budget_paused",

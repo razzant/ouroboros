@@ -48,7 +48,7 @@ def root_present_fields(root, task_id, task, stored, *, settled=False):
 
 # One neutral sentence of understanding, not a rule: what the list holds and that tidying it is ordinary work.
 _HYGIENE_NOTE = ("Every live, waiting, paused or held work in your rooms, with what it waits for, since when and "
-                 "what of it still runs (tails); "
+                 "what of it still runs (tails); focus is the work's own dated line, model-authored; "
                  "other_live_work is work whose own root ended while its helpers or external runs go on, and each "
                  "live place conversation turn (kind inline_presence), busy with its own conversation. Keeping this "
                  "list free of work nobody needs any more is ordinary hygiene: close it, ask the owner, or leave it, "
@@ -75,8 +75,32 @@ def live_place_turns(listed, rows, facts):
     return turns
 
 
+# In a stop's ``requests``, the value of the entry that only repeats that stop (``_stop_shown``).
+OWN_PRESS = "same by, fence_id and generation as this stop"
+
+
+def _stop_shown(stop):
+    """A stop as a head states it: the press that made it, once. ``owner_pause.next_fence`` records that press on the
+    fence and again under ``requests[request_id]``; where the fence declares its author and that entry is exactly the
+    fence's own ``by``, ``fence_id`` and ``generation``, the entry keeps its key and says so (``OWN_PRESS``) instead
+    of repeating them. Anything else stays as recorded: a fence that declares no ``by``, an own entry that differs or
+    is absent, every other press with its author, words and date."""
+    if not isinstance(stop, dict):
+        return stop
+    shown, requests, own = dict(stop), stop.get("requests"), stop.get("request_id")
+    stated = {key: stop.get(key) for key in ("by", "fence_id", "generation")}
+    if (isinstance(requests, dict) and isinstance(own, str) and isinstance(stated["by"], dict) and stated["by"]
+            and None not in stated.values() and requests.get(own) == stated):
+        shown["requests"] = {**requests, own: OWN_PRESS}
+    if isinstance(stop.get("member_stop"), dict):
+        shown["member_stop"] = _stop_shown(stop["member_stop"])
+    return shown
+
+
 def live_works_present(root, *, exclude=""):
-    """Project every host-listed root; stale/missing source observations stay explicit."""
+    """Project every host-listed root; stale/missing source observations stay explicit. A root's dated ``focus``
+    stands once, whole (no second copy of its text and date beside it), and so does the press of its ``stop``,
+    in ``works`` and in ``other_live_work`` alike."""
     from ouroboros.peer_roster import independent_roots
 
     roster = independent_roots(pathlib.Path(root))
@@ -84,20 +108,21 @@ def live_works_present(root, *, exclude=""):
     for row in roster["roots"]:
         if row["task_id"] == exclude:
             continue
-        focus = row.get("focus") or {}
         works.append({"task_id": row["task_id"], "title": row.get("title") or row.get("suggested_name") or "",
             "room": {key: row.get(key) for key in ("chat_id", "project_id", "project_name")},
             "state": row["status"], "started_at": row.get("started_at"),
             "open_questions": row.get("open_questions") or [], "waiting": row.get("waiting") or [],
-            "last_line": focus.get("text", ""), "last_line_at": focus.get("authored_at"),
-            **{key: row[key] for key in ("focus", "project_admission_hold", "recorded_status", "tails", "unavailable", "stop", "release", "refusal")
+            **{key: _stop_shown(row[key]) if key == "stop" else row[key]
+               for key in ("focus", "project_admission_hold", "recorded_status", "tails", "unavailable", "stop", "release", "refusal")
                if key in row}})
     from ouroboros.peer_roster import unlisted_live_work
 
     listed = {row["task_id"] for row in roster["roots"]}
-    other = unlisted_live_work(pathlib.Path(root), listed)
+    # Copies: ``live_place_turns`` marks a row, and the dicts the producer returned stay as it returned them.
+    other = [{**row, "stop": _stop_shown(row["stop"])} if "stop" in row else dict(row)
+             for row in unlisted_live_work(pathlib.Path(root), listed)]
     other += live_place_turns(listed | {exclude}, other, roster.get("presence_turns") or ())
-    return {"works": works, "last_line_source": "model_authored_focus",
+    return {"works": works,
             "incomplete": roster["incomplete"] or any(row.get("unavailable") for row in other),
             **({"other_live_work": other} if other else {}), "note": _HYGIENE_NOTE,
             "queue_snapshot": roster["queue_snapshot"]}
