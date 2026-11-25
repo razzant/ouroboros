@@ -1,0 +1,73 @@
+# QA-only branch. Exercise the exact previously unobserved Chromium cases on the parent and candidate.
+name: Sidebar version QA - matched Chromium bootstrap control
+on:
+  push:
+    branches: [qa/sidebar-version-bootstrap-20261125]
+permissions:
+  contents: read
+jobs:
+  chromium-bootstrap:
+    name: Chromium bootstrap (${{ matrix.edition }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [base, candidate]
+    env:
+      QA_SUBJECT: 'f110f68fe3a667db0a344850abc31883be316b07'
+      QA_EDITION: ${{ matrix.edition }}
+      OUROBOROS_RUN_UI_SMOKE: '1'
+      OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Select exact base or prospective product (without QA files)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = "$QA_SUBJECT"
+          test "$(git diff --name-only "$QA_SUBJECT" HEAD)" = '.github/workflows/qa-sidebar-version.yml'
+          tested="$QA_SUBJECT"
+          if [ "$QA_EDITION" = base ]; then tested="$(git rev-parse "$QA_SUBJECT^")"; fi
+          git checkout --detach "$tested"
+          test "$(git rev-parse HEAD)" = "$tested"
+          test -z "$(git status --porcelain)"
+          printf 'SIDEBAR_BOOTSTRAP_EDITION %s\nSIDEBAR_BOOTSTRAP_SHA %s\nSIDEBAR_BOOTSTRAP_TREE %s\n' "$QA_EDITION" "$tested" "$(git rev-parse 'HEAD^{tree}')"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Install pinned Chromium
+        timeout-minutes: 12
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/sidebar-version-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium
+      - name: Exercise the three recorded node IDs without changing their timeouts
+        timeout-minutes: 6
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/sidebar-version-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+          DEBUG: pw:api
+        run: |
+          set -euo pipefail
+          check_python="$(command -v python)"
+          parent_node='tests/test_sidebar_short_window_browser.py::test_a_column_too_short_for_the_head_and_a_row_scrolls_both_with_the_list'
+          xvfb-run -a "$check_python" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/sidebar-bootstrap-raw" -- \
+            "$check_python" -m pytest -q -o addopts= --tb=short --junitxml="$RUNNER_TEMP/sidebar-bootstrap.xml" \
+            "${parent_node}[chromium-landscape-phone]" "${parent_node}[chromium-short-drawer]" "${parent_node}[chromium-desk]"
+          "$check_python" -I - "$RUNNER_TEMP/sidebar-bootstrap.xml" <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+          cases = ET.parse(sys.argv[1]).getroot().findall('.//testcase')
+          actual = {c.get('name','').rsplit('[',1)[-1] for c in cases}
+          expected = {'chromium-landscape-phone]', 'chromium-short-drawer]', 'chromium-desk]'}
+          bad = [c.get('name') for c in cases if any(c.find(k) is not None for k in ('failure', 'error', 'skipped'))]
+          assert len(cases) == 3 and actual == expected and not bad, (actual, bad)
+          print(f'SIDEBAR_BOOTSTRAP_OK {os.environ["QA_EDITION"]}: 3/3 named Chromium cases, no skips')
+          PY
