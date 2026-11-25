@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-merge attribution: scope the historical probes, admit fresh exports, bisect their answers.
+"""Post-merge attribution: scope the historical probes, admit fresh exports and Node receipts, bisect their answers.
 
 The check (scripts/post_merge_check.py) owns Git execution, worktrees and test execution. This
 module uses supplied readers and runners, and needs only the standard library.
@@ -262,6 +262,17 @@ def fresh_pytest_export(directory, start, read):
         return None  # A reused directory's old export does not describe this invocation.
     session = read(directory)
     return {**session, "runner_exit": code} if session["final"] else None
+
+
+def confirmed_node_exit(code: int, receipt) -> int:
+    """The Node lane's exit as a result of its tests: a 0 or 1 stands only beside the receipt its runner wrote after Node ended.
+
+    The runner of a historical revision may predate the receipt, and its bare 1 is also what a lane that never ran or a
+    launcher that crashed leaves. A 0 or 1 whose receipt is missing, unreadable or names another exit is therefore 2:
+    unknown, never a pass or a failure of the tests. Any other exit is no test result and passes through.
+    """
+    named = isinstance(receipt, dict) and type(receipt.get("exit")) is int and receipt["exit"] == code
+    return code if named or code not in (0, 1) else 2
 
 
 def _answer(value):

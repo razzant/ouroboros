@@ -423,6 +423,9 @@ def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(p
         const selection = document.getSelection();
         return selection.toString().trim().length > 0 && body.contains(selection.anchorNode);
     }""")
+    # Reply to quote follows the selection's selectionchange, an ordinary task that a busy renderer (Chromium on the
+    # Ubuntu runner) runs after a key pressed at once: Esc dismisses the offer once it shows, as a reader's would.
+    expect(page.get_by_role("button", name="Reply to quote")).to_have_count(1)
     page.keyboard.press("Escape")
     expect(page.get_by_role("button", name="Reply to quote")).to_have_count(0)
 

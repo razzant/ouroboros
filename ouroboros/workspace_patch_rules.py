@@ -4,7 +4,9 @@ These are the static rules for workspace patches: env/cache directories, junk
 artifacts, incidental lockfiles and credential-shaped names. The capture supplies
 bounded pnpm ownership evidence. ``headless`` re-exports these rules and the I/O
 checks from ``workspace_patch_capture``. Result-commit snapshots do not filter
-incidental lockfiles.
+incidental lockfiles. This module also owns the exact wording of the exclusion
+reasons, including the two that 7.11's writer spelled differently and the strict
+comparison that lets a saved 7.11 manifest match a fresh capture of the same copy.
 """
 
 from __future__ import annotations
@@ -62,6 +64,19 @@ _LOCKFILE_MANIFESTS = {
 # A delegated copy's NEW files under its named evidence folder: retained beside the
 # capture by their owner (``subagent_integration_delegated.run_named_evidence``).
 NAMED_EVIDENCE_EXCLUSION = "named evidence, see the host's retention record"
+# 7.11's writer stamped exclude rules version 3 and spelled two exclusion reasons
+# differently from the current writer (version 4). A saved 7.11 manifest is compared
+# against a fresh capture of the SAME copy, so these two renames are the only
+# tolerated difference: the paths, their order, the number of rows and every other
+# field stay strict, and any other reason (or any other rules transition) refuses.
+# A later rules version adds its own confirmed renames here; it does not inherit this one.
+_LEGACY_EXCLUDE_RULES_VERSION = 3
+_LEGACY_EXCLUSION_REASON_RENAMES = {
+    (_LEGACY_EXCLUDE_RULES_VERSION, 4): {
+        "named evidence, retained separately by its host": NAMED_EVIDENCE_EXCLUSION,
+        "incidental lockfile without sibling manifest change": _INCIDENTAL_LOCKFILE_REASON,
+    },
+}
 _SENSITIVE_EXAMPLE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 _SENSITIVE_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 _SENSITIVE_FILENAMES = {
@@ -182,6 +197,58 @@ def _sensitive_untracked_reason(rel: str) -> str:
     return ""
 
 
+# Capture-time facts only: an archive names its scratch bytes (the members are read
+# instead) and diffstat is --stat display text.
+_LEGACY_UNBOUND = frozenset({"created_at", "diffstat", "file_outputs", "diagnostics"})
+
+
+def _legacy_exclusion_rows_match(fresh: Any, saved: Any, renames: dict) -> bool:
+    """Whether two ``untracked_excluded`` lists differ only by the confirmed reason renames."""
+    if not isinstance(fresh, list) or not isinstance(saved, list) or len(fresh) != len(saved):
+        return False
+    for new_row, old_row in zip(fresh, saved):
+        if new_row == old_row:
+            continue
+        if not isinstance(new_row, dict) or not isinstance(old_row, dict):
+            return False
+        if ({key: value for key, value in new_row.items() if key != "reason"}
+                != {key: value for key, value in old_row.items() if key != "reason"}):
+            return False
+        old_reason, new_reason = old_row.get("reason"), new_row.get("reason")
+        # Only a confirmed rename of a string reason is tolerated: an unknown, missing or
+        # non-string saved label is an ordinary mismatch, never an exception.
+        if not isinstance(old_reason, str) or old_reason not in renames:
+            return False
+        if renames[old_reason] != new_reason:
+            return False
+    return True
+
+
+def legacy_manifest_mismatch(fresh: dict, saved: dict) -> bool:
+    """Whether a fresh capture of the same copy differs from a saved legacy manifest.
+
+    Every key is compared strictly, except inside the one confirmed rules transition
+    (7.11's version 3 → the current 4): its stamped version and the two exclusion reasons
+    it spelled differently are tolerated. Any other pair stays strict even when its rows
+    coincide, and the exclusion rows stay strict in length, order, paths and every other field.
+    """
+    saved_version, fresh_version = saved.get("exclude_rules_version"), fresh.get("exclude_rules_version")
+    transition = ((saved_version, fresh_version)
+                  if type(saved_version) is int and type(fresh_version) is int else None)
+    confirmed = transition in _LEGACY_EXCLUSION_REASON_RENAMES  # by the pair, never the saved version alone
+    renames = _LEGACY_EXCLUSION_REASON_RENAMES[transition] if confirmed else {}
+    for key in (fresh.keys() | saved.keys()) - _LEGACY_UNBOUND:
+        if key == "exclude_rules_version" and confirmed:
+            continue
+        if key == "untracked_excluded" and confirmed:
+            if not _legacy_exclusion_rows_match(fresh.get(key), saved.get(key), renames):
+                return True
+            continue
+        if fresh.get(key) != saved.get(key):
+            return True
+    return False
+
+
 __all__ = [
     "NAMED_EVIDENCE_EXCLUSION",
     "_ANY_SEGMENT_EXCLUDE_DIRS",
@@ -195,6 +262,7 @@ __all__ = [
     "_TOP_LEVEL_EXCLUDE_DIRS",
     "_incidental_lockfile_excludes",
     "_lockfile_manifest_for",
+    "legacy_manifest_mismatch",
     "_patch_exclude_reason",
     "_sensitive_untracked_reason",
 ]

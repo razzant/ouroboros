@@ -206,3 +206,104 @@ def test_a_staging_failure_reverses_and_restores_only_the_entries_it_changed(tmp
         assert _git(target, "show", ":staged.txt").stdout == "staged\nby the run\n"
     finally:
         custody._CUSTODY.clear()
+
+
+def _typed_apply(ctx, rid):
+    """The registered tool boundary, which builds the typed result a direct helper call would also build."""
+    from ouroboros.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    return registry.execute_result("integrate_delegated_patch", {"run_id": rid, "reason": "apply"})
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_a_large_ignored_output_keeps_a_bounded_typed_transfer_and_its_receipt(tmp_path, monkeypatch, recorded):
+    """Hundreds of long-named new files the target's ignore rules exclude are delivered unstaged. Whether or not
+    the disposition row lands after the transfer, the typed result is published: the operation's own count (not
+    the declared list's), the names a receipt shows within the meta bound, a root of any supported length, and the
+    verdict keeping every name."""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.subagent_worktrees import provision_execution_snapshot
+    from ouroboros.tools import subagent_integration_delegated as delegated
+    from ouroboros.tools.tool_result import _MAX_META_BYTES, ToolResult
+    from tests.test_delegated_run_isolation import _nanny_ctx, _seed_target
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    target = _seed_target(tmp_path)
+    (target / ".gitignore").write_text("dist/\n", encoding="utf-8", newline="\n")
+    _git(target, "add", "--", ".gitignore")
+    _git(target, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "rules", "--", ".gitignore")
+    ctx = _nanny_ctx(tmp_path, target, monkeypatch)
+    handle = provision_execution_snapshot(target_root=target, task_id=ctx.task_id, snapshot_id="snapX")
+    custody._CUSTODY.clear()
+    execution = Path(handle.path)
+    (execution / "dist").mkdir()
+    names = [f"dist/{n:03d}-" + "ignored-build-output-" * 6 + "é.txt" for n in range(300)]  # >60 KiB of names
+    for name in names:
+        (execution / name).write_text("run output\n", encoding="utf-8", newline="\n")
+    _git(execution, "add", "-f", "--", "dist")
+    (execution / "tracked.txt").write_text("one\ntwo\nrun edit\n", encoding="utf-8", newline="\n")
+    entry = _isolated_entry(ctx, target, handle)
+    emit, declared = custody.emit, delegated.declared_capture_paths
+    try:
+        assert _capture_terminal_patch(ctx, entry)["status"] == "ready_with_changes"
+        with monkeypatch.context() as store:  # a declared list that disagrees with the operation's own path set
+            store.setattr(delegated, "declared_capture_paths", lambda manifest: [*declared(manifest), "declared-only.txt"])
+            if not recorded:
+                store.setattr(custody, "emit", lambda root, event, row, **kw: event != custody.PATCH_DISPOSED
+                              and emit(root, event, row, **kw))
+            result = _typed_apply(ctx, entry.run_id)
+        meta = dict(result.meta)
+        assert (result.status, meta["target_files_changed"], meta["disposition_recorded"]) == (
+            ("ok", True, True) if recorded else ("blocked", True, False)), result.text
+        assert (meta["files_changed"], meta["unindexed_count"]) == (301, 300) and "(301 file(s), 1 staged)" in result.text
+        assert Path(meta["target_root"]).resolve() == target.resolve() and "target_root_omitted" not in meta
+        assert meta["unindexed"] == names[:len(meta["unindexed"])] and 0 < len(meta["unindexed"]) <= 20
+        assert len(json.dumps(meta, ensure_ascii=True, separators=(",", ":"))) <= _MAX_META_BYTES
+        assert "300 new file(s) stay unstaged" in result.text and "(+280 more)" in result.text, result.text
+        assert all((target / name).is_file() for name in names) and _git(target, "ls-files", "--", "dist").stdout == ""
+        assert _git(target, "show", ":tracked.txt").stdout == "one\ntwo\nrun edit\n"
+        verdict = json.loads((task_artifact_dir_path(ctx.drive_root, ctx.task_id)
+                              / f"subagent_patch_verdict_run_{entry.run_id}.json").read_text(encoding="utf-8"))
+        assert verdict["unindexed"] == names  # the durable record keeps the whole list
+        typed = delegated._typed_transfer(delegated._transfer_facts("/" + "папка-🙂" * 3000, names, names * 40))
+        assert "target_root" not in typed and typed["target_root_omitted"] is True and typed["unindexed_count"] == 12000
+        ToolResult("ok", "OK", "", {**typed, "disposition_recorded": True, "native_capture_effect": "unknown",
+                                    "verdict_file_recorded": True})  # the worst case still fits the meta bound
+    finally:
+        custody._CUSTODY.clear()
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_an_unreversed_staging_failure_says_what_is_known_and_what_was_recorded(tmp_path, monkeypatch, recorded):
+    """Staging failed and the undo could not finish: the result names the paths the apply reached, says which
+    still carry the run's changes is unknown, and reports the disposition exactly as it landed."""
+    from ouroboros.tools import subagent_integration_delegated as delegated
+
+    target, ctx, handle = _CaptureFixture()._provisioned(tmp_path, monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    (Path(handle.path) / "tracked.txt").write_text("one\ntwo\nrun edit\n", encoding="utf-8", newline="\n")
+    (Path(handle.path) / "newfile.py").write_text("print('hi')\n", encoding="utf-8", newline="\n")
+    entry = _isolated_entry(ctx, target, handle)
+    emit = custody.emit
+    try:
+        assert _capture_terminal_patch(ctx, entry)["status"] == "ready_with_changes"
+        with monkeypatch.context() as broken:
+            broken.setattr(delegated, "stage_applied", lambda *a, **kw: ("index write failed", []))
+            broken.setattr(delegated, "undo_applied", lambda *a, **kw: (False, "rollback incomplete"))
+            if not recorded:
+                broken.setattr(custody, "emit", lambda root, event, row, **kw: event != custody.PATCH_DISPOSED
+                               and emit(root, event, row, **kw))
+            result = _typed_apply(ctx, entry.run_id)
+        text, meta = result.text, dict(result.meta)
+        assert (result.status, result.code) == ("blocked", "INTEGRATION_BLOCKED"), text
+        assert "INTEGRATE_APPLIED_UNSTAGED" in text and "over 2 path(s)" in text and "is not known" in text, text
+        assert (meta["target_files_changed"], meta["files_attempted"], meta["files_changed"], meta["disposition_recorded"]
+                ) == (True, 2, None, recorded) and "unindexed" not in meta  # an attempt; what remains is unknown
+        assert ("The run is recorded as applied" in text) == recorded, text
+        assert ("could NOT be recorded" in text) == (not recorded), text
+        again = _integrate_delegated_patch(ctx, entry.run_id, "apply", "")
+        assert ("INTEGRATE_DELEGATED_ALREADY_DISPOSED" if recorded else "INTEGRATE_DELEGATED_APPLY_AMBIGUOUS") in again, again
+    finally:
+        custody._CUSTODY.clear()

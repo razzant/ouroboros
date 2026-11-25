@@ -17,7 +17,7 @@ gates are FAILED with no retry: each finding of the release's lint gate (`ruff c
 owner decision 2A, 2026-10-22) and each red test of its size check (`pytest -m size_ratchet`,
 measured against the check's base; the window's book-growth mode comes from the `growth` step).
 First-parent bisection needs comparable evidence for blame, not for RED. Historical probes omit
-the protected path if not comparable and take only fresh, coherent Python exports. Routing comments
+the protected path if not comparable and take only fresh, coherent Python exports and Node results their runner confirms. Routing comments
 on culprit PRs at new or expanded filings, even if filing fails. It narrows or closes per-leg
 `post-merge-red` issues as IDs clear and files returning reds anew. No block, revert or schedule; GitHub uses only
 the job's GITHUB_TOKEN. The script imports only stdlib-based code (`base` runs on the bare `window`
@@ -54,7 +54,7 @@ from scripts.post_merge_routing import (  # noqa: E402
     BRANCH, LINT_PREFIX, NODE_LANE, SIZE_PREFIX, SYSTEMS, GitHub, _reason, route,
 )
 from scripts.post_merge_bisect import (  # noqa: E402
-    MAX_PROBES, PROTECTED, bisect, comparable, fresh_pytest_export, grep_names, node_blocker, probe_files, protected_projection,
+    MAX_PROBES, PROTECTED, bisect, comparable, confirmed_node_exit, fresh_pytest_export, grep_names, node_blocker, probe_files, protected_projection,
 )
 from scripts.post_merge_window import (  # noqa: E402
     carried_records, choose_window, gap_text, listed_runs, merge_records, prior_window, read_handoff, records,
@@ -399,9 +399,13 @@ def run_pytest(args, directory: Path, *, cwd: Path | None = None, env: dict | No
 
 
 def run_node_lane(cwd: Path | None = None) -> int:
+    """The revision's own runner answers in a directory of its own; its exit 0 or 1 counts only beside the node.json it wrote."""
     cwd = Path(cwd or REPO_ROOT)
     try:
-        return subprocess.call([sys.executable, str(cwd / "scripts" / "run_tests.py"), "--node"], cwd=str(cwd))
+        with tempfile.TemporaryDirectory(prefix="post-merge-node-", ignore_cleanup_errors=True) as evidence:
+            code = subprocess.call([sys.executable, str(cwd / "scripts" / "run_tests.py"), "--node",
+                                    "--evidence-dir", evidence], cwd=str(cwd))
+            return confirmed_node_exit(code, _read_json(Path(evidence) / "node.json"))
     except OSError:
         return 127
 
@@ -1089,7 +1093,7 @@ class Prober:
             answers.update({nodeid: {"failed": "fail", "passed": "pass", "absent": "pass"}.get(value, "error")
                             for nodeid, value in found.items()})
             if node:
-                answers[NODE_LANE] = {0: "pass", 1: "fail"}.get(self.node(tree), "error")
+                answers[NODE_LANE] = {0: "pass", 1: "fail"}.get(self.node(tree), ("error", "its runner left no confirmed Node test result"))
             answers.update({nodeid: ("error", why) for nodeid, why in excluded.items()})
             record["answers"] = {nodeid: answer[0] if isinstance(answer, tuple) else answer
                                  for nodeid, answer in answers.items()}

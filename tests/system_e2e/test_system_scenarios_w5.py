@@ -200,8 +200,8 @@ def _decide_after_inspection(apply, then: dict, seen: dict):
 
     ``integrate_delegated_patch(decision="apply")`` applies only a capture that was ready
     before the call. One the call had to prepare itself comes back unapplied for inspection
-    (``INTEGRATE_DELEGATED_INSPECT_CAPTURE``, #1969; architecture 06 "Under the snapshot
-    lock, changes first captured this call ... return unapplied for inspection"). That
+    (``INTEGRATE_DELEGATED_INSPECT_CAPTURE``, #1969; architecture 06 "Snapshots, capture and
+    disposition": changes are shown before apply). That
     happens whenever the terminal wake reaches the model before the maintenance child has
     captured the patch, which on a fast runner is a plain race (#3854). After that refusal
     this step reads the ``manifest_read`` it names and applies again, once: the same

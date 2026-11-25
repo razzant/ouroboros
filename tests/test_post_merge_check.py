@@ -1021,6 +1021,106 @@ def test_a_red_node_lane_is_retried_as_one_target(tmp_path):
             assert record["failed"][0]["retry"] == "unknown"
 
 
+@pytest.mark.parametrize("code, receipt, expected", [
+    (0, '{"exit": 0}', 0), (1, '{"exit": 1}', 1),  # a confirmed pass; a confirmed failure of the tests
+    (1, None, 2), (0, None, 2),  # a runner that predates the receipt: its bare exit is unknown, pass or fail
+    (1, '{"exit":', 2),  # a torn record
+    (1, '{"exit": 0}', 2), (0, '{"exit": 1}', 2),  # a record that contradicts the exit
+    (1, '{"exit": true}', 2), (1, '{"exit": "1"}', 2),  # an exit that is no integer (True == 1)
+    (2, None, 2), (2, '{"exit": 1}', 2),  # the launcher's own failure, whatever a record says
+    (127, None, 127), (-9, '{"exit": 1}', -9), (130, None, 130),  # any other exit passes through
+])
+def test_node_retry_and_historical_probe_read_matching_terminal_result(tmp_path, monkeypatch, code, receipt, expected):
+    seen = []
+
+    def invoke(command, *, cwd):
+        assert command[1:4] == [str(tmp_path / "scripts" / "run_tests.py"), "--node", "--evidence-dir"]
+        assert cwd == str(tmp_path)
+        output = Path(command[-1]) / "node.json"
+        assert not output.exists()  # a directory of this call's own: no earlier result can stand in
+        seen.append(Path(command[-1]))
+        if receipt is not None:
+            output.write_text(receipt, encoding="utf-8")
+        return code
+
+    monkeypatch.setattr(pmc.subprocess, "call", invoke)
+    assert pmc.run_node_lane(tmp_path) == expected
+    assert not seen[0].exists()
+
+
+_RECORDS = ("import json, pathlib, sys; "
+            "pathlib.Path(sys.argv[sys.argv.index('--evidence-dir') + 1], 'node.json').write_text(json.dumps({'exit': %d})); "
+            "sys.exit(%d)")
+
+
+@pytest.mark.parametrize("runner, expected", [
+    ("import sys; sys.exit(1)", 2), ("import sys; sys.exit(0)", 2),  # a runner that predates the receipt
+    (_RECORDS % (1, 1), 1), (_RECORDS % (0, 0), 0),  # one whose record names its own exit
+    (_RECORDS % (0, 1), 2),  # one that crashed after recording another
+], ids=["bare 1", "bare 0", "records 1", "records 0", "records another"])
+def test_a_real_runner_process_answers_through_its_receipt(tmp_path, runner, expected):
+    """The claim lives at the process boundary: the child's exit status and the file it wrote reach the check."""
+    script = tmp_path / "scripts" / "run_tests.py"
+    script.parent.mkdir()
+    script.write_text(runner + "\n", encoding="utf-8")
+    assert pmc.run_node_lane(tmp_path) == expected
+
+
+@pytest.mark.parametrize("code, receipt, verdict, retry", [
+    (0, '{"exit": 0}', "flaky", "passed"),  # the red did not repeat: flaky, not handed over
+    (1, '{"exit": 1}', "failed", "failed"),  # the tests failed again
+    (1, None, "failed", "unknown"),  # a bare 1 is no repeat of the red: it stays RED, unconfirmed
+])
+def test_the_node_retry_of_the_head_trusts_only_its_runners_record(tmp_path, monkeypatch, code, receipt, verdict, retry):
+    _selection(tmp_path, node="failure")
+
+    def invoke(command, *, cwd):
+        assert command[1] == str(pmc.REPO_ROOT / "scripts" / "run_tests.py") and cwd == str(pmc.REPO_ROOT)
+        if receipt is not None:
+            (Path(command[-1]) / "node.json").write_text(receipt, encoding="utf-8")
+        return code
+
+    monkeypatch.setattr(pmc.subprocess, "call", invoke)
+    record = pmc.classify(tmp_path, run=lambda *a: pytest.fail("no pytest red to retry"))
+    assert [(row["id"], row["retry"]) for row in record[verdict]] == [(pmc.NODE_LANE, retry)]
+    assert record["complete"] is (retry != "unknown")
+    assert any("Node retry did not run to completion" in problem for problem in record["problems"]) is (retry == "unknown")
+
+
+@pytest.mark.parametrize("runner, verdict", [
+    ("writes its receipt", "culprit"),  # its runner recorded the red it saw: the first bad revision
+    ("predates the receipt", "unattributed"),  # its bare 1 may be a lane that never ran: unknown, so no blame
+])
+def test_a_historical_runners_bare_one_is_unknown_never_a_failure(tmp_path, monkeypatch, runner, verdict):
+    base, middle = "b" * 40, "c" * 40
+    prober = _tree_prober(tmp_path, monkeypatch, {sha: {PROTECTED: "a" * 40} for sha in (base, middle, HEAD)})
+    prober.node = pmc.run_node_lane
+    runners = {base[:12]: (0, '{"exit": 0}'), middle[:12]: (1, '{"exit": 1}' if runner == "writes its receipt" else None)}
+
+    def invoke(command, *, cwd):  # each revision's own runner, found by the name of its worktree
+        code, receipt = runners[Path(cwd).name[-12:]]
+        if receipt is not None:
+            (Path(command[-1]) / "node.json").write_text(receipt, encoding="utf-8")
+        return code
+
+    monkeypatch.setattr(pmc.subprocess, "call", invoke)
+    [result] = pmc.bisect([base, middle, HEAD], [pmc.NODE_LANE], prober)
+    assert result["verdict"] == verdict
+    if verdict == "culprit":
+        assert (result["culprit"], result["last_good"]) == (middle, base)
+    else:
+        assert middle[:12] in result["why"] and "no confirmed Node test result" in result["why"]
+
+
+def test_the_receipt_the_runner_writes_is_the_one_the_check_reads(run_tests, tmp_path, monkeypatch):
+    for lane, name in (((0, "/lane/node"), "passed"), ((1, "/lane/node"), "failed"), ((1, ""), "not run"), ((0, ""), "no tests")):
+        monkeypatch.setattr(run_tests, "_node_lane", lambda lane=lane: lane)
+        evidence = tmp_path / name
+        code = run_tests.main(["--node", "--evidence-dir", str(evidence)])
+        known = bool(lane[1])  # a Node that ran: its test result; none ran: the exit stands alone, so it is unknown
+        assert pmc.confirmed_node_exit(code, pmc._read_json(evidence / "node.json")) == (lane[0] if known else 2), name
+
+
 @pytest.mark.parametrize("sibling_red", [False, True])
 def test_a_retry_pytest_refuses_runs_the_nodes_the_tree_defines(tmp_path, sibling_red):
     red = "tests/t.py::test_p[redacted-value]"
