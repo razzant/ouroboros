@@ -168,8 +168,12 @@ def test_a_new_document_shows_saved_text_before_history_and_reconciles(shell_ui,
             assert 'Obsolete preview row' not in other.locator('#chat-messages').inner_text()
             assert other.locator('#chat-messages .chat-bubble button').count() > 0
             assert 'Canonical formatted' not in other.evaluate(SAVED, PREVIEW_FAMILY), 'a page around a task is no newest window'
-            # ↓ from a navigation's chain reads the present as a `latest` page: that window refreshes the saved text.
-            other.route('**/api/chat/history', lambda route: route.fulfill(json=history(['Latest after the reference'])))
+            # ↓ from a navigation's chain reads the present as a `latest` page: that window refreshes the saved text. The
+            # present is Main's read without a cursor or an anchor; its reasons (CLIENT_CONTRACT §5) ride the query.
+            def present(url):
+                parts = urlsplit(url)
+                return parts.path.endswith('/api/chat/history') and not {'cursor', 'around', 'chat_id'} & parse_qs(parts.query).keys()
+            other.route(present, lambda route: route.fulfill(json=history(['Latest after the reference'])))
             other.evaluate("document.getElementById('chat-scroll-bottom').click()")
             other.wait_for_function(saved_has('Latest after the reference'))
             return

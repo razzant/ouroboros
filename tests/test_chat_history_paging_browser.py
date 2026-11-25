@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -242,8 +243,13 @@ def test_delivered_attempt_survives_older_pages_and_reload(direct_server_with_da
         browser = pw.chromium.launch()
         try:
             page = browser.new_page(viewport={"width": width, "height": 844})
-            # Limit newest-page reads. The gateway encodes its quotas into the real next cursor.
-            page.route("**/api/chat/history", lambda route: route.continue_(url=route.request.url + "?n_human=2"))
+            # Limit newest-page reads (Main's, without a cursor or an anchor; their reasons ride the query). The gateway
+            # encodes its quotas into the real next cursor.
+            def newest(url):
+                parts = urlsplit(url)
+                return parts.path.endswith("/api/chat/history") and not {"cursor", "around", "chat_id"} & parse_qs(parts.query).keys()
+            page.route(newest, lambda route: route.continue_(
+                url=route.request.url + ("&" if "?" in route.request.url else "?") + "n_human=2"))
             page.add_init_script(f"({_OBSERVE_STATE_READS})()")
             _open(page, url)
             phase = page.locator(f'{MAIN} .chat-live-card[data-task-id="{task}"] > [data-live-summary-button] [data-live-phase]')
