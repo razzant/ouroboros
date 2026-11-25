@@ -6350,6 +6350,9 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
 .logs-filters[hidden] { display: none; }
 .logs-kinds { flex: 1; }
 .logs-clear-list { flex: none; color: var(--text-secondary); }
+/* Both actions keep their capsule widths; only the filter rail yields and scrolls. Feedback is outside this band. */
+.logs-local-report { flex: none; white-space: nowrap; }
+.logs-local-report[hidden] { display: none; }
 /* A two-pane stack window holds the rail in the header's one row: the strip lends its chips' shadow room outside it, so
    the row keeps the controls' height. */
 html[data-layout="stack"] #page-dashboard .logs-kinds { margin-block: calc(-1 * var(--space-2)) calc(-1 * var(--space-5)); }
@@ -6366,6 +6369,7 @@ html[data-layout="stack"] #page-dashboard .logs-kinds { margin-block: calc(-1 * 
     html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1; padding: var(--space-2) var(--page-header-padding-x);
         margin: 0 calc(-1 * var(--page-header-padding-x)); max-width: none; scroll-padding-inline: var(--page-header-padding-x); }
     html[data-layout="stack"] #page-dashboard .logs-clear-list { grid-area: 1 / 3; }
+    html[data-layout="stack"] #page-dashboard .logs-local-report { grid-area: 3 / 1 / auto / -1; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
 }
@@ -7487,9 +7491,6 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     min-height: 0;
     overflow: hidden;
 }
-
-.widgets-context-tools, .widgets-context-report:not([hidden]) { margin-block-start: var(--space-4); }
-.widgets-context-report iframe { display: block; width: 100%; height: clamp(20rem, 78vh, 60rem); border: 0; }
 
 .skills-scroll,
 .widgets-scroll {
@@ -12032,6 +12033,7 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
     min-inline-size: 0;
 }
 .chat-secret-fields,
+.chat-secret-outcome,
 .chat-secret-readers,
 .secret-request-readers {
     margin: 0;
@@ -12041,8 +12043,10 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
     flex-direction: column;
     gap: 2px;
 }
+.chat-secret-outcome:empty,
 .chat-secret-readers:empty,
 .secret-request-readers:empty,
+.secret-request-allow-note:empty,
 .secret-request-readers-title:empty { display: none; }
 .secret-request-readers-title { margin: 0 0 calc(-1 * var(--space-2, 8px)); }
 .chat-secret-field {
@@ -12068,12 +12072,17 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
     overflow-wrap: anywhere;
 }
 .chat-secret-status,
+.chat-secret-outcome-line,
+.secret-request-allow-note,
 .secret-request-late,
 .secret-request-warning,
 .secret-request-error {
     margin: 0;
     overflow-wrap: anywhere;
 }
+/* "Save and allow <skill>": one line; a long name ellipsizes inside the capsule, the full words stay its name. */
+.secret-request-allow { min-inline-size: 0; max-inline-size: 100%; }
+.secret-request-allow-label { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-secret-actions {
     display: flex;
     flex-wrap: wrap;
@@ -12095,7 +12104,8 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
     flex-direction: column;
     gap: var(--space-3, 12px);
 }
-.secret-request-intro {
+.secret-request-intro,
+.secret-request-allow-note {
     margin: 0;
     color: var(--text-meta);
     font-size: var(--type-meta);

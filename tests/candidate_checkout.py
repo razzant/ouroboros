@@ -36,7 +36,7 @@ import sys
 import tempfile
 import urllib.request
 
-from ouroboros.test_environment import retain_tree, retention_markers
+from ouroboros.test_environment import bundled_git_paths, retain_tree, retention_markers
 from ouroboros.utils import file_identity
 
 
@@ -156,7 +156,8 @@ def assert_served_candidate(url, checkout, data_dir, pid, candidate):
 
 def _git(repo: Path, *args: str, data=None) -> bytes:
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    # The app's own POSIX Git keeps its helpers (the --no-local clone starts git-upload-pack) and templates.
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, **bundled_git_paths(env))
     # File-backed input removes the observed parent/Git mutual pipe-write wait.
     # Keep temporary bytes outside either observed checkout, including on Windows.
     with tempfile.TemporaryFile() if data is not None else nullcontext() as stdin:

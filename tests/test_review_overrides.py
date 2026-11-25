@@ -192,6 +192,7 @@ def test_a_commit_lands_over_a_decision_only_from_its_call_or_the_attempt_it_con
         note_override_landing(ctx, sha)
         assert sha[:12] in landed_line(ctx.repo_dir, install, base=base, target=sha, running=False)
         assert "landed" not in read_json_dict(ctx.drive_root / COUNTER_REL), "the task drive keeps no landing"
+        assert "count" not in (read_json_dict(install / COUNTER_REL) or {}), "the count stays on the drive that decided"
 
 
 def test_an_open_wave_counts_nothing_yet_and_a_collected_outcome_counts_once(tmp_path, monkeypatch):
@@ -821,3 +822,78 @@ def test_a_page_load_shows_a_works_field_from_the_history_endpoint(tmp_path, fin
     assert painted["finished"] == [finished, finished], "the works' cards are in their real phase"
     carried = {(m["task_id"], m["review_overrides"]["count"]) for m in messages if "review_overrides" in m}
     assert carried == {("gate-work", 1)}, "only the work with a decision carries its fact, on its history row"
+
+
+@pytest.mark.parametrize("drive_state", ["retired", "custody_locked", "present"])
+def test_foreign_attempt_stamp_honors_custody_lock_and_never_recreates_retired_drive(tmp_path, monkeypatch, drive_state):
+    """Trigger 3 (#2901): stamping a Continue predecessor's attempt row honors ``task_custody_lock`` + existence check
+    (never under a nested successor review-state lock), never recreates a retired predecessor drive, and never loses
+    the deciding successor's own count, event, counter or ``continued`` decision."""
+    import contextlib
+    import shutil
+
+    from ouroboros import review_ledger as rl, task_custody
+    from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, update_state
+
+    ctx = _make_ctx(tmp_path)
+    canonical = tmp_path / "canonical"
+    pred, succ = "synthetic-pred-p", "synthetic-succ-s"
+    pred_root = canonical / "state" / "headless_tasks" / pred / "data"
+    succ_root = canonical / "state" / "headless_tasks" / succ / "data"
+    for path in (canonical, pred_root, succ_root):
+        path.mkdir(parents=True, exist_ok=True)
+    seed_result(canonical, pred, {"status": "completed", "root_task_id": pred})
+    seed_result(canonical, succ, {"status": "running", "root_task_id": pred})
+    ctx.task_id, ctx.drive_root, ctx.budget_drive_root = succ, succ_root, canonical
+    ctx.task_metadata = {"root_task_id": pred}
+    repo_key = make_repo_key(ctx.repo_dir)
+    record_id = "rl-pred-fail"
+    rl.write_record(canonical, {
+        "record_id": record_id, "surface": "commit_gate", "state": "settled", "task_id": pred, "root_task_id": pred,
+        "ts": "2026-11-20T10:00:00+00:00", "subject": {"root": str(ctx.repo_dir)},
+        "verdict": {"aggregate": "FAIL", "reason": "critical_findings", "per_row": {"s1": "FAIL"}},
+        "rows": [{"seat_id": "s1", "operation_id": "op-1", "status": "responded"}],
+    })
+    source = CommitAttemptRecord(
+        ts="2026-11-20T10:00:00+00:00", commit_message="pred attempt", status="reviewed", phase="review_only",
+        repo_key=repo_key, tool_name="commit_reviewed", task_id=pred, root_task_id=pred, attempt=1, paid=True,
+        review_record_id=record_id, review_override_reason="review_late_result_pending",
+    )
+    update_state(pred_root, lambda state: state.record_attempt(source))
+    ctx._author_commit_source = source
+    ctx._author_commit_source_root = pred_root
+
+    lock_calls = []
+    real_lock = task_custody.task_custody_lock
+
+    @contextlib.contextmanager
+    def observed_lock(root, task_id, *, timeout_sec=5.0):
+        lock_calls.append((root.resolve(strict=False), task_id))
+        assert not (succ_root / "locks" / "advisory_review.lock").exists(), "never under S's review-state lock"
+        if drive_state == "custody_locked":
+            yield False
+            return
+        with real_lock(root, task_id, timeout_sec=timeout_sec) as locked:
+            yield locked
+
+    monkeypatch.setattr(task_custody, "task_custody_lock", observed_lock)
+    if drive_state == "retired":
+        shutil.rmtree(pred_root)
+
+    decision = {"disposition": "accepted", "rationale": WHY}
+    note_author_continuation(ctx, decision)
+
+    assert lock_calls == [(canonical.resolve(strict=False), pred)]
+    fact = _fact(canonical, pred)
+    assert fact["count"] == 1 and fact["latest"]["reason"] == "critical_findings"
+    assert fact["continued"]["count"] == 1 and fact["continued"]["latest"]["disposition"] == "accepted"
+    assert len(_events(ctx)) == 1 and _events(ctx)[0]["block_reason"] == "critical_findings"
+    assert read_json_dict(succ_root / COUNTER_REL)["count"] == 1
+    if drive_state == "retired":
+        assert not pred_root.exists(), "retired predecessor directory must never be recreated"
+    elif drive_state == "custody_locked":
+        kept = load_state(pred_root).attempts[-1]
+        assert kept.review_override_reason == "review_late_result_pending", "skipped while custody lock held"
+    else:
+        kept = load_state(pred_root).attempts[-1]
+        assert kept.review_override_reason == "critical_findings", "stamped when predecessor drive is live and unlocked"

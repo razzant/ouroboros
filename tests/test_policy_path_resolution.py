@@ -21,6 +21,15 @@ def candidate_paths() -> set[str]:
 
 
 def test_protected_runtime_paths_and_prefixes_resolve(candidate_paths: set[str]):
+    from ouroboros.runtime_mode_policy import protected_path_category
+
+    assert (
+        protected_path_category("ouroboros/git_selection.py")
+        == protected_path_category("ouroboros/launcher_bootstrap.py")
+        == "release-invariant"
+    )
+    assert protected_path_category("ouroboros/git_selection_notes.py") == ""
+
     missing = sorted(
         path
         for path in PROTECTED_RUNTIME_PATHS

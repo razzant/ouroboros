@@ -82,7 +82,12 @@ NOT_STARTED_TEXT = ("⚠️ OWNER_PAUSE_NOT_STARTED: NOT STARTED — a Pause of 
 
 
 class OwnerPauseRefused(Exception):
-    """Pause authority refused fence installation or a new launch."""
+    """Pause authority refused fence installation or a new launch. ``held``: the owner's positively read, closed
+    Pause fence held this launch and nothing was submitted; an unreadable fence or another refusal is not held."""
+
+    def __init__(self, *args: Any, held: bool = False) -> None:
+        super().__init__(*args)
+        self.held = bool(held)
 
 
 class LaunchBusy(OwnerPauseRefused):
@@ -872,8 +877,8 @@ def _validate_launch(source: Any, root_resume=None):
                 and grant.get("grant_id") == root_resume.get("grant_id")
                 and grant.get("authority") == "explicit_resume"
                 and not grant.get("revoked_at") and not grant.get("consumed_at"))
-        if not allowed:
-            raise OwnerPauseRefused(str(fence.get("reason") or "owner_pause"))
+        if not allowed:  # only a positively read Pause holds; an unreadable fence stays a plain refusal
+            raise OwnerPauseRefused(str(fence.get("reason") or "owner_pause"), held=fence_closed(fence))
     from ouroboros.budget_pause import STATE_PAUSING, STATE_PAUSED, STATE_RESUME_GRANTED
 
     if root_drive and task_id:

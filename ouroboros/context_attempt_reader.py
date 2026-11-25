@@ -30,6 +30,7 @@ _PAGE_GAP_FACTS = ("task_id", "attempt_id", "ledger_state", "provider_body", "tr
                    "assembly_source_map", "prepared_inventory", "late_contributions")
 _FACT_CHARS = 200  # a failure's fact is a type or code: a longer one is free text, never carried
 _CMD_PLAIN = re.compile(r"[A-Za-z0-9_.:\\/+-]+")  # what cmd.exe and the Windows argument parser pass on unquoted
+_FILE_WORD = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")  # what may name the reader's sample file (the page's `word`)
 _FIT_WORDS = ("preferred_mode", "rendered_mode", "mode_cause", "measurement_basis")
 _FIT_COUNTS = ("target_total_tokens", "capacity_total_tokens", "response_reserve_tokens", "no_memory_tokens")
 _FIT_FLAGS = ("context_target_miss", "automatic_pass_used", "window_witness_bound")
@@ -263,12 +264,16 @@ def _shell_word(value: str, placeholder: str, windows: bool) -> str:
 
 
 def _retry_command(args: argparse.Namespace, allowance: int) -> str:
-    """The reader's command without ``--report`` that writes the request to a file, for the shell of this system."""
+    """The reader's command without ``--report`` that writes the request to a file, for the shell of this system.
+    The redirection repeats the page's safe sample (context-report.html ``elsewhere``): a fresh file of the
+    attempt's own plain name in a private directory, never a generic file in the working directory."""
     windows = os.name == "nt"
     words = [(str(args.data_root), "DATA"), (args.task_id, "TASK_ID"), ("--attempt", ""), (args.attempt, "ATTEMPT_ID"),
              ("--max-bytes", ""), (str(allowance), "")]
+    name = (args.attempt if _FILE_WORD.fullmatch(args.attempt) else "ATTEMPT_ID") + "-request.json"
     return ("python -m ouroboros.context_attempt_reader --data-root "
-            + " ".join(_shell_word(value, placeholder, windows) for value, placeholder in words) + " > request.json")
+            + " ".join(_shell_word(value, placeholder, windows) for value, placeholder in words)
+            + f' > "/path/to/private-directory/{name}"')
 
 
 def _gap_words(facts: dict, args: argparse.Namespace) -> str:

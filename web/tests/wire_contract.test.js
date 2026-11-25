@@ -317,11 +317,10 @@ test('live structured delivery frames keep additive grouping and size fields', (
     assert.match(bus, /"type": "document",[\s\S]*?"size_bytes": size_bytes,[\s\S]*?"task_id": str\(task_id or ""\)/);
     assert.match(bus, /"type": "links",[\s\S]*?"actions": validated,[\s\S]*?"task_id": str\(task_id or ""\)/);
     assert.match(bus, /"type": "quiz",[\s\S]*?"quiz_id": qid,[\s\S]*?"task_id": str\(task_id or ""\)/);
-    // Replay: the quiz row joins the non-terminal delivery family (chat_media.js's table, drawn by chat.js
-    // BEFORE the finishLiveCard/plainUntypedFinal block).
+    // Replay: the quiz row joins the non-terminal delivery family (chat_media.js's table; the test above pins that
+    // chat.js draws it before final handling).
     const chat = moduleFile('chat.js');
     assert.match(moduleFile('chat_media.js'), /quiz: appendQuizMessage,/);
-    assert.ok(chat.indexOf('if (appendDelivery(msg)) continue;') < chat.indexOf('if (taskId && replayConcludesTask(msg))'));
     // The card gets the SAME sanitizing markdown pipeline as assistant bubbles.
     assert.match(chat, /mountMarkdown: mountChatMarkdown/);
     assert.match(chat, /enhanceMarkdown: enhanceMountedMarkdown/);

@@ -268,9 +268,9 @@ _PRE_DISPATCH_REFUSALS = _WINDOW_REFUSALS | {
 
 
 def _worker_exception_operation_state(exc: BaseException, retry_state: Dict[str, Any]) -> str:
-    """Project a worker exception onto custody: one ordered table, the first fact
-    that holds names the state. A live delegated session whose OBSERVATION failed
-    stays in flight (#1547); a pending invocation or lost custody never retries."""
+    """Project a worker exception onto custody: one ordered table, the first fact that holds names the state.
+    A live delegated session whose OBSERVATION failed stays in flight (#1547); a pending invocation or lost custody
+    never retries, but a selected continuation a read Pause held (``held_before_send``) stays in flight for its key."""
     from ouroboros.review_execution import ReviewPollUnavailable, ReviewRouteUnavailable
 
     code = str(getattr(exc, "code", "") or "")
@@ -283,6 +283,7 @@ def _worker_exception_operation_state(exc: BaseException, retry_state: Dict[str,
         (capture in _POSITIVE_CAPTURE_STATES, "settled"),
         (isinstance(exc, ReviewPollUnavailable), "in_flight"),
         (started, "settled"),
+        (route_refusal and pending and getattr(exc, "held_before_send", False), "in_flight"),
         (route_refusal and (code == "review_custody_lost" or pending), "custody_lost"),
         ((route_refusal and code in _PRE_DISPATCH_REFUSALS) or code in _WINDOW_REFUSALS, "not_dispatched"),
     )
@@ -655,16 +656,16 @@ REVIEW_STOP_WORDS = {"stopped": "this work was stopped",  # by the owner, an age
 
 def review_stop_cause(usage_ctx: Any) -> str:
     """What durably stops this work's review now: ``stopped`` (a cancel of the task or its retry root, whoever
-    recorded it), ``stop_unreadable`` (the cancel state could not be read, never a licence to go on) or ``""``."""
+    recorded it), ``stop_unreadable`` (unreadable, never a licence to go on) or ``""``, read on the canonical root."""
     if usage_ctx is not None:
         task_id = str(getattr(usage_ctx, "task_id", "") or "")
         drive_root = getattr(usage_ctx, "drive_root", None)
         if task_id and drive_root:
             try:
-                from ouroboros.cancel_intents import (
-                    _validated_retry_root_cancel_key,
-                    cancel_pending,
-                )
+                from ouroboros.cancel_intents import _validated_retry_root_cancel_key, cancel_pending
+                from ouroboros.tool_access_paths import canonical_data_root
+
+                drive_root = canonical_data_root(usage_ctx)  # cancellations live there, not on a child's drive
 
                 if cancel_pending(drive_root, task_id, strict=True):
                     return "stopped"

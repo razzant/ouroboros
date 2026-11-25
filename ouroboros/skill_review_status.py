@@ -194,14 +194,16 @@ _ACCEPTANCE_SUMMARIES = {
 def skill_review_gate(
     status: str, *, stale: bool = False,
     findings: Any = None, author_disposition: Any = None, current_hash: str = "",
-    acceptance: Any = None,
+    acceptance: Any = None, ordinary_only: bool = False,
 ) -> Dict[str, Any]:
     """Structured, agent-facing explanation of whether a review is executable.
 
     An author acceptance binds changed bytes; Cyber retains judgment even
     without a prior verdict. Stale describes reviewer evidence, not author intent.
     Author fields are optional and appear only with a valid author disposition;
-    callers without one retain the frozen gate key set.
+    callers without one retain the frozen gate key set. ``ordinary_only=True``
+    evaluates the ordinary rules without Cyber Pro authority. Otherwise the
+    gate follows the current runtime's authority; callers cannot supply it.
 
     ``acceptance`` adds the local bases that need no critic PASS for the current
     bytes (trusted source, owner Skip, owner edit, and Ouroboros's own check only
@@ -244,7 +246,7 @@ def skill_review_gate(
                          and reference.get("status") in {"completed", "succeeded", "failed", "interrupted", "cancelled", "timeout"}
                          and reference.get("review_status") in {"pending", "failed", "interrupted", "cancelled", "timeout"})
     raw_status = normalize_skill_review_status(status)
-    cyber = cyber_authority()
+    cyber = not ordinary_only and cyber_authority()
     accepted = acceptance_in_force(acceptance, current_hash, cyber=cyber)
     fresh_preflight_failure = bool(findings is not None and not stale and preflight_failed(findings))
     strict_review = bool(isinstance(acceptance, dict) and acceptance.get("strict_review"))

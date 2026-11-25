@@ -59,12 +59,17 @@ def _more(part: Any, latest: Dict[str, Any]) -> Dict[str, Any]:
 def _keep_on_attempt(ctx: Any, reason: str, row: Any = None) -> None:
     """The reason on a durable review attempt, this call's or ``row``, the record a later continuation's validated
     reference resolves to (``commit_gate.resolve_commit_review_reference``), a Continue successor's or a restarted
-    worker's alike. A wave still open never overwrites a reason the attempt already keeps (a failed free check)."""
-    from ouroboros.review_state import make_repo_key, update_state
+    worker's alike. A wave still open never overwrites a reason the attempt already keeps (a failed free check).
+    A foreign predecessor's child drive is stamped only under its custody lock while its review state still exists,
+    so a best-effort stamp never recreates a retired drive."""
+    from ouroboros.review_state import ReviewStateMutation, make_repo_key, update_state
+    from ouroboros.review_state_custody import existing_attempt_write
+    from ouroboros.tool_access import canonical_data_root
     from ouroboros.tools.commit_gate import _current_review_tool_name
 
+    own_task = str(getattr(ctx, "task_id", "") or "")
     if row is None:
-        key = {"repo_key": make_repo_key(pathlib.Path(ctx.repo_dir)), "task_id": str(getattr(ctx, "task_id", "") or ""),
+        key = {"repo_key": make_repo_key(pathlib.Path(ctx.repo_dir)), "task_id": own_task,
                "tool_name": _current_review_tool_name(ctx), "attempt": getattr(ctx, "_current_review_attempt_number", None)}
     else:
         key = {name: getattr(row, name, None) for name in ("repo_key", "task_id", "tool_name", "attempt")}
@@ -72,13 +77,26 @@ def _keep_on_attempt(ctx: Any, reason: str, row: Any = None) -> None:
         return  # no reviewed attempt yet: only a commit of this call goes over it
     record = str(getattr(row, "review_record_id", "") or "")  # a rebuilt source's number may name another wave now
 
-    def stamp(state: Any) -> None:
+    def stamp(state: Any) -> Any:
         found = state.latest_attempt_for(**key)
         if found is not None and not (reason == _OPEN and found.review_override_reason) and (
-                not record or found.review_record_id == record):
+                not record or found.review_record_id == record) and found.review_override_reason != reason:
             found.review_override_reason = reason
+            return ReviewStateMutation(None, changed=True)
+        return ReviewStateMutation(None, changed=False)
 
-    update_state(pathlib.Path(ctx.drive_root), stamp)
+    # A reference's row lives where its owner kept it (a Continue predecessor's own drive), not on the deciding fork.
+    own_root = pathlib.Path(ctx.drive_root)
+    owned = row is not None and row is getattr(ctx, "_author_commit_source", None)
+    target = pathlib.Path((owned and getattr(ctx, "_author_commit_source_root", None)) or own_root)
+    row_task = str(key.get("task_id") or "")
+    foreign = target.resolve(strict=False) != own_root.resolve(strict=False) or (bool(row_task) and bool(own_task) and row_task != own_task)
+    if not foreign:
+        update_state(target, stamp)
+        return
+    with existing_attempt_write(canonical_data_root(ctx), target) as gap:
+        if not gap:
+            update_state(target, stamp)
 
 
 def _keep_on_work(ctx: Any, change: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
@@ -164,7 +182,7 @@ def _count(ctx: Any, reason: str, message: str, record_id: str = "") -> None:
         return {**current, "count": int(current.get("count") or 0) + 1, "recent": recent[-10:]}
 
     try:
-        update_json_locked(ctx.drive_root / COUNTER_REL, bump)
+        update_json_locked(ctx.drive_root / COUNTER_REL, bump)  # the count and `recent` stay on the drive that decided; only `landed` is the install's
     except Exception:
         log.warning("Failed to persist advisory override visibility", exc_info=True)
 

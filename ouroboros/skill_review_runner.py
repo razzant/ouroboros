@@ -1322,33 +1322,48 @@ def run_skill_review_lifecycle_blocking(
             )
             constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
             deps_ready = deps_status in {"installed", "not_required"}
-            just_auto_enabled = bool(
-                executable_review and getattr(outcome, "auto_flow", False)
-                and deps_ready and current is not None
-                and current.content_hash == outcome.content_hash and current.review.gate_for(current.content_hash)["executable_review"]
-                and grant_status_for_skill(drive_root, current).get("usable")
-                and (constraint is None or (constraint.allow_enable and not constraint.has_selected_skill))
-                and not (skill_state_dir(drive_root, skill_name) / "enabled.json").exists()
-            )
-            if just_auto_enabled:
-                save_enabled(drive_root, skill_name, True, actor="review_auto_enable")
-            elif deps_ready:  # a failure just recorded is not re-run by turn-on in the same job
-                from ouroboros.skill_lifecycle_actions import reconcile_turn_on_when_ready
 
-                turn_on = reconcile_turn_on_when_ready(drive_root, skill_name, repo_path=repo_path,
-                                                       reason="review finished")
-                setattr(outcome, "turn_on_when_ready", turn_on["action"])
-            else:
-                setattr(outcome, "turn_on_when_ready", "not_ready")
-            progress.set("Reloading extension…")
-            reconcile = _reconcile_extension_payload(
-                ctx,
-                skill_name,
-                drive_root=drive_root,
-                repo_path=repo_path,
-                binding=binding,
-                revert_enabled_on_error=just_auto_enabled,
-            )
+            def ordinary_setup() -> Dict[str, Any]:
+                just_auto_enabled = bool(
+                    executable_review and getattr(outcome, "auto_flow", False)
+                    and deps_ready and current is not None
+                    and current.content_hash == outcome.content_hash and current.review.gate_for(current.content_hash)["executable_review"]
+                    and grant_status_for_skill(drive_root, current).get("usable")
+                    and (constraint is None or (constraint.allow_enable and not constraint.has_selected_skill))
+                    and not (skill_state_dir(drive_root, skill_name) / "enabled.json").exists()
+                )
+                if just_auto_enabled:
+                    save_enabled(drive_root, skill_name, True, actor="review_auto_enable")
+                elif deps_ready:  # a failure just recorded is not re-run by turn-on in the same job
+                    from ouroboros.skill_lifecycle_actions import reconcile_turn_on_when_ready
+
+                    turn_on = reconcile_turn_on_when_ready(drive_root, skill_name, repo_path=repo_path,
+                                                           reason="review finished")
+                    setattr(outcome, "turn_on_when_ready", turn_on["action"])
+                else:
+                    setattr(outcome, "turn_on_when_ready", "not_ready")
+                progress.set("Reloading extension…")
+                return _reconcile_extension_payload(
+                    ctx,
+                    skill_name,
+                    drive_root=drive_root,
+                    repo_path=repo_path,
+                    binding=binding,
+                    revert_enabled_on_error=just_auto_enabled,
+                )
+
+            from ouroboros.skill_install_record import update_backup_path
+            from ouroboros.skill_lifecycle_actions import grant_consent_on_admission
+
+            # The owner's allow that waited for exactly these files (the secret form) first, once, so the one setup
+            # after it sees its grant; never for an update whose dependencies failed: its settlement rolls it back.
+            reconcile = (grant_consent_on_admission(
+                drive_root, skill_name, repo_path=repo_path, progress=progress.set, deps_result=(deps_status, deps_error),
+                expected_skill=current, normal_setup=ordinary_setup)
+                if executable_review and current is not None
+                and (deps_ready or not update_backup_path(drive_root, skill_name).exists()) else None)
+            if reconcile is None:
+                reconcile = ordinary_setup()
             for key, value in reconcile.items():
                 setattr(outcome, f"extension_{key}", value)
             # On after this review (turned on above, by turn-on-when-ready, or on before) without a passed review of

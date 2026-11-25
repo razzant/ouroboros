@@ -25,7 +25,7 @@ from ouroboros import owner_quiz
 from ouroboros import secret_requests as sr
 from ouroboros.task_results import write_task_result
 from tests.test_secret_hitl import TASK, _write_skill
-from tests.test_subscription_setup_browser import capture
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, capture
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
@@ -117,10 +117,14 @@ def _open(page, backend):
         url = route.request.url
         response = backend.client.get(url[url.index("/api/chat/history"):])
         seen.append(response.text)
-        route.fulfill(status=response.status_code, content_type="application/json", body=response.text)
+        # The served page proves its data profile; the real history endpoint here has no served UI to stamp it.
+        body = {**response.json(), "profile_scope": PREVIEW_SCOPE} if response.status_code == 200 else response.json()
+        route.fulfill(status=response.status_code, content_type="application/json", body=json.dumps(body))
 
     def socket_route(ws):
         sockets.append(ws)
+        # A scoped page admits a socket's frames only after its profile proof, as the serving core sends it first.
+        ws.send(json.dumps({"type": "connection_profile", "profile_scope": PREVIEW_SCOPE}))
         ws.send(json.dumps({"type": "heartbeat"}))
 
     page.route("**/api/state", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
@@ -182,8 +186,9 @@ def test_secret_form_first_fill_and_replace_screens(engine_ui, backend, viewport
     dialog.locator(".secret-request-key").filter(has_text="not set").wait_for()
     assert dialog.evaluate("node => getComputedStyle(node).backgroundColor").startswith("rgb(")
     readers = dialog.locator(".secret-request-reader").all_inner_texts()
-    assert readers == ["fakeplug · enabled · its grant does not cover FAKEPLUG_TOKEN; use Grant access in Skills",
-                       "mailer · disabled · its grant does not cover FAKEPLUG_TOKEN; use Grant access in Skills"]
+    assert dialog.locator(".secret-request-readers-title").inner_text() == "Skills that request this setting:"
+    assert readers == ["fakeplug · enabled · asks for FAKEPLUG_TOKEN · not allowed yet",
+                       "mailer · disabled · asks for FAKEPLUG_TOKEN · not allowed yet"]
     ok = dialog.locator(".secret-request-ok")
     assert ok.inner_text() == "Save" and ok.is_disabled()
     dialog.locator("input.secret-request-input").fill(CANARY)
@@ -215,7 +220,8 @@ def test_secret_form_first_fill_and_replace_screens(engine_ui, backend, viewport
     dialog.locator(".secret-request-key").filter(has_text="a value is set (hidden)").wait_for()
     assert dialog.locator(".secret-request-ok").inner_text() == "Replace"
     warning = dialog.locator(".secret-request-warning").inner_text()
-    assert warning.startswith("Replace overwrites the saved value. Enabled skills that read it (fakeplug)")
+    assert warning == ("Replace overwrites the saved value; it cannot be restored from here. "
+                       "Other skills’ permissions stay the same.")
     dialog.locator("input.secret-request-input").fill(CANARY_B)
     capture(page, f"secret-form-replace-{tag}")
     dialog.locator(".secret-request-close").click()
@@ -495,3 +501,125 @@ def test_another_window_settles_an_open_form(engine_ui, backend):
     assert _settings(backend)["FAKEPLUG_TOKEN"] == CANARY
     _no_canary(second, backend, seen_second + seen_first, console, CANARY, CANARY_B)
     second.close()
+
+
+def _skill_state(backend, *, admitted):
+    """Nothing chosen for fakeplug's switch; its files reviewed clean, or not reviewed yet."""
+    from ouroboros.skill_loader import SkillReviewState, find_skill, save_review_state, skill_state_dir_path
+
+    (skill_state_dir_path(backend.data, "fakeplug") / "enabled.json").unlink()
+    if admitted:
+        skill = find_skill(backend.data, "fakeplug")
+        save_review_state(backend.data, "fakeplug", SkillReviewState(status="clean", content_hash=skill.content_hash))
+
+
+def _allow_form(ui, page, backend):
+    push, seen, _held, _forward, console = _load(ui, page, backend)
+    quiz_id, frame = backend.ask()
+    push(frame)
+    card = page.locator(f'.chat-quiz-card[data-quiz-id="{quiz_id}"]')
+    card.locator(".chat-secret-open").click()
+    dialog = page.locator(".secret-request-dialog")
+    dialog.locator(".secret-request-key").filter(has_text="not set").wait_for()
+    allow = dialog.locator(".secret-request-allow")
+    allow.wait_for(state="visible")
+    return push, seen, console, card, dialog, allow
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1148, "height": 808}, {"width": 390, "height": 844}])
+def test_save_and_allow_screens(engine_ui, backend, viewport):
+    """The explicit allow beside Save: what the press changes, said before it; the save, the access and the switch
+    said apart after it. Enter and Save keep the plain save; no other reader of the key gains anything."""
+    from ouroboros.skill_grant_follow import allow_installation
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill, load_enabled
+
+    ui = engine_ui
+    page = ui["page"]
+    page.set_viewport_size(viewport)
+    _skill_state(backend, admitted=True)
+    push, seen, console, card, dialog, allow = _allow_form(ui, page, backend)
+    tag = f"{viewport['width']}x{viewport['height']}"
+    assert allow.inner_text() == "Save, allow and turn on fakeplug"
+    assert dialog.locator(".secret-request-ok").inner_text() == "Save"
+    note = dialog.locator(".secret-request-allow-note").inner_text()
+    skill = find_skill(backend.data, "fakeplug")
+    assert "FAKEPLUG_TOKEN" in note
+    assert allow_installation(backend.data, skill) in note
+    assert skill.content_hash[:12] in note
+    assert allow.is_disabled()
+    dialog.locator("input.secret-request-input").fill(CANARY)
+    assert allow.is_enabled()
+    for selector in (".ui-modal-actions", ".secret-request-allow", ".secret-request-ok"):
+        region = dialog.locator(selector).bounding_box()
+        assert region["x"] >= 0 and region["x"] + region["width"] <= viewport["width"] + 0.5, selector
+        assert region["y"] >= 0 and region["y"] + region["height"] <= viewport["height"], selector
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    capture(page, f"secret-allow-form-{tag}")
+    since = len(backend.frames)
+    allow.click()
+    dialog.wait_for(state="detached")
+    _push_states(backend, push, since)
+    card.locator(".chat-secret-outcome-line").filter(has_text="fakeplug was on").wait_for()
+    assert card.locator(".chat-secret-status").inner_text() == "Saved to Settings: botToken."
+    assert card.locator(".chat-secret-outcome-line").filter(has_text="Granted FAKEPLUG_TOKEN to fakeplug").count() == 1
+    # The readers as the grant left them: the allowed skill beside the one that was not.
+    assert card.locator(".chat-secret-reader").filter(has_text="fakeplug · was on").filter(
+        has_text="was allowed to read it").count() == 1
+    assert card.locator(".chat-secret-reader").filter(has_text="mailer · was off").filter(
+        has_text="was not allowed").count() == 1
+    capture(page, f"secret-allow-saved-{tag}")
+    assert grant_status_for_skill(backend.data, find_skill(backend.data, "fakeplug"))["granted_keys"] == ["FAKEPLUG_TOKEN"]
+    assert grant_status_for_skill(backend.data, find_skill(backend.data, "mailer"))["granted_keys"] == []
+    assert load_enabled(backend.data, "fakeplug") is True and _settings(backend)["FAKEPLUG_TOKEN"] == CANARY
+    _no_canary(page, backend, seen, console, CANARY)
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1148, "height": 808}, {"width": 390, "height": 844}])
+def test_save_and_allow_for_files_not_reviewed_waits_for_their_review(engine_ui, backend, viewport):
+    """The press waits for exactly these files, the ordinary review grants it once, and the settled result (with the
+    readers as they were then) is what a reload reads back from history: no form actions come back."""
+    from types import SimpleNamespace
+
+    from ouroboros.skill_grant_follow import consent_of
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill, load_enabled
+    from tests.test_secret_hitl import _review_clean
+
+    ui = engine_ui
+    page = ui["page"]
+    page.set_viewport_size(viewport)
+    theme = "dark" if viewport["width"] == 390 else "light"
+    page.emulate_media(color_scheme=theme)
+    tag = f"{viewport['width']}x{viewport['height']}-{theme}"
+    _skill_state(backend, admitted=False)
+    push, seen, console, card, dialog, allow = _allow_form(ui, page, backend)
+    assert "explicitly accepted" in dialog.locator(".secret-request-allow-note").inner_text()
+    dialog.locator("input.secret-request-input").fill(CANARY)
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    capture(page, f"secret-allow-waits-form-{tag}")
+    since = len(backend.frames)
+    allow.click()
+    dialog.wait_for(state="detached")
+    _push_states(backend, push, since)
+    awaiting = card.locator(".chat-secret-outcome-line").filter(has_text="these exact files")
+    awaiting.wait_for()
+    assert grant_status_for_skill(backend.data, find_skill(backend.data, "fakeplug"))["granted_keys"] == []
+    assert not load_enabled(backend.data, "fakeplug")
+    assert consent_of(backend.data, "fakeplug")["keys"] == ["FAKEPLUG_TOKEN"]
+    capture(page, f"secret-allow-waits-saved-{tag}")
+
+    since = len(backend.frames)
+    _review_clean(SimpleNamespace(root=backend.data))  # the ordinary exact-file review lifecycle, synthetic verdict
+    _push_states(backend, push, since)
+    granted = card.locator(".chat-secret-outcome-line").filter(has_text="Granted FAKEPLUG_TOKEN to fakeplug")
+    granted.wait_for()
+    awaiting.wait_for(state="detached")
+    assert card.locator(".chat-secret-reader").filter(has_text="mailer · was off").filter(
+        has_text="was not allowed").count() == 1
+    assert load_enabled(backend.data, "fakeplug") and not consent_of(backend.data, "fakeplug")
+    capture(page, f"secret-allow-fulfilled-{tag}")
+    page.reload()
+    granted.wait_for()  # the real chat-history read, not this test's frames
+    assert card.locator(".chat-secret-actions").count() == 0
+    assert card.locator(".chat-secret-reader").filter(has_text="fakeplug · was on").filter(
+        has_text="was allowed").count() == 1
+    _no_canary(page, backend, seen, console, CANARY)

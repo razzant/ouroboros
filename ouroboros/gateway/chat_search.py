@@ -55,6 +55,7 @@ from ouroboros.gateway.history_paging import (
     _CHRONOLOGICAL,
     _PROBE_ROWS,
     HistoryCursorError,
+    QUESTION_EVIDENCE_KINDS,
     _row_key,
     encode_cursor,
     history_source,
@@ -77,7 +78,7 @@ _CURSOR_CHARS = 1024
 _PROJECT_ROWS = frozenset({"project_started", "project_handoff", "project_completion_summary"})
 # Stored chat rows that are no message of the conversation: evidence for cards (an answer or closure
 # of a question, a task's terminal summary, a skill review's row) and the routing options' grounding.
-_NOT_MESSAGES = frozenset({"routing_options", "quiz_answer", "quiz_closed", "task_summary", "skill_review"})
+_NOT_MESSAGES = frozenset({"routing_options", *QUESTION_EVIDENCE_KINDS, "task_summary", "skill_review"})
 
 
 def _words(text: Any) -> str:

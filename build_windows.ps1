@@ -56,6 +56,12 @@ if (-not (Test-Path "ripgrep-standalone\rg.exe")) {
     }
 }
 
+# The pinned MinGit the app runs only where the computer has no working Git; always re-verified and proven here.
+Write-Host "--- Verifying and staging the pinned Git ---"
+Invoke-NativeChecked "Git runtime staging" {
+    & "python-standalone\python.exe" scripts/download_git_standalone.py
+}
+
 Write-Host "--- Verifying bundled Betterleaks runtime ---"
 Invoke-NativeChecked "Betterleaks runtime installation" {
     & "python-standalone\python.exe" -m ouroboros.betterleaks_runtime install `
@@ -129,6 +135,9 @@ Invoke-NativeChecked "Managed repo bundle build" {
 Write-Host "--- Running PyInstaller ---"
 Invoke-NativeChecked "PyInstaller build" {
     & $BuildPython -m PyInstaller Ouroboros.spec --clean --noconfirm
+}
+Invoke-NativeChecked "Collected Git proof" {
+    & "python-standalone\python.exe" scripts/download_git_standalone.py --check dist\Ouroboros\_internal\git-standalone
 }
 
 Write-Host "--- Installing packaged CLI wrappers ---"

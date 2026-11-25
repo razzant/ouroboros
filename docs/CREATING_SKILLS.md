@@ -938,8 +938,10 @@ never enters a tool result, the chat, history, logs or an event. The form stays 
 later save is recorded in the chat and resumes no work. A request saves only while the skill still maps its fields
 to the same keys.
 
-Saving is not a connection and grants nothing. The outcome names what each skill that reads the key can read now:
-a newly saved key needs the owner's grant in Skills. Replacing a key while a skill that reads it is enabled is
+A plain Save is not a connection and grants nothing. The result records each requesting skill's grant coverage and
+switch at the time. `Save and allow <skill>` binds the named keys to the displayed files and installation alone (a
+reinstall reads none), not other readers. Unadmitted files wait for a passing review or explicit acceptance of the
+exact files; the press does not approve them. Turn-on is separate and never overrides Off. Replacing a key while a skill that reads it is enabled is
 allowed; the skill may read the new value on its next call, while code that copied the value at start (a poller,
 a companion's environment) keeps the old one until it restarts. A skill can apply saves itself with PluginAPI 2.4:
 `get_settings_state(keys)` tells `ok` values and missing keys from an `unknown` (unreadable) document, and

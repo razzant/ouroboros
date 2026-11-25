@@ -1041,7 +1041,7 @@
     "id": "test_sync_history_merges_offline_bootstrap_user_rows",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect });"
+    "value": "if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect, requestedAt: data.requestedAt });"
   },
   {
     "id": "test_cancel_run_confirm_and_cascade",

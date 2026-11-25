@@ -1868,10 +1868,15 @@ Settings as <KEY>` in meta ink) and two actions, `Enter secret…` (primary) and
 shared modal: title `<plugin>: secret needed`, the sentence `The value is saved to Settings. It is not sent in this
 conversation.`, then per field Settings' own secret row (masked `.ui-control.secret-input` labelled by its id,
 `Show`/`Hide` of the typed draft only, never a saved value) with `Saved in Settings as <KEY> · not set` or `· a
-value is set (hidden)` (`· could not be read` after a failed read), then readers with their On/Off state and keys
-their grants lack, not inferred readiness, and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
-the enabled readers: they may use the new value at their next call, some keep the old one until disabled and
-re-enabled. Extensions › Skills shows an enabled skill's unset (or unreadable) declared secret as one
+value is set (hidden)` (`· could not be read` after a failed read), then `Skills that request this setting:`, each
+with its On/Off state, what it asks for and, apart, what its grant allows it to read (never inferred readiness), and
+`Close` / `Save`. A set key makes the action `Replace` with one warning sentence: other skills' permissions stay the
+same, and those already allowed to read it (named) may get the new value. When the status names the asking skill, its
+known installation, and keys its grant neither covers nor already awaits, a neutral capsule `Save and allow <skill>`
+stands before `Save` (`Save, allow and turn on <skill>` while nothing was chosen for its switch, `Replace …` for a set
+key; a long name ellipsizes). `Save` keeps primary and Enter. The note names skill, keys, installation and file
+fingerprint. Unadmitted bytes await passing review or explicit acceptance; the press never approves files.
+Other grants and Off stand. Extensions › Skills shows an enabled skill's unset (or unreadable) declared secret as one
 neutral tray with `Open Accounts and keys`; an unset one also lists it under Needs you. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
 refused, the form re-renders as Replace or Save and keeps the draft and focus. Close, Escape and a click outside hide
 the form, but wait for a save in flight, whose reply settles it (both Close buttons and `Enter secret…` are
@@ -1883,9 +1888,11 @@ outcome (no reply, an unconfirmed attempt, a value written but not verified or r
 `Check status`, which never says nothing was saved: an unconfirmed earlier attempt allows saving again as a new
 request, no recorded save allows resending the same request (it cannot save twice), a recorded result settles the
 card. The form belongs to the request: a re-rendered card keeps it, another
-window's save or cancel closes it with a toast, and moves focus to the question only if the form held it. Success closes the form; the card says `Saved to Settings:
-<fields>. Access and enablement are unchanged.` (or `Replaced in Settings: …`) with the readers' lines, or
-`Which skills read this key could not be read.` when the host could not read them.
+window's save or cancel closes it with a toast, and moves focus to the question only if the form held it. Success
+closes the form; the settled card separates the saved fields from grant and switch results. The reader lines are
+historical snapshots, not current grants or readiness. Allow may be working, waiting on the displayed files, granted,
+refused or unknown; an older frame cannot restore waiting or replace the result's readers. Refusal and unknown take
+the warn tone.
 Values live only in the form's controls, never a draft, storage, toast or card; every close empties them.
 A chat transport shows such a request as the host's note on where to enter it, without buttons or a reply prompt.
 
@@ -2812,12 +2819,14 @@ cards keep their edges rather than taking the shared fade.
   installation; when two windows arrange at once the last change wins. A
   size that failed to save stays on screen and says so under the list until
   a later change saves it; nothing retries on its own.
-- **Beautiful Context.** One neutral button stands after the cards and the board's save note and
-  opens its frame in place below itself; the frame follows the card palette. On a supported Windows
-  shell, **Open recent requests** opens a separate local window: choose a familiar conversation, see
-  the newest readable request in the offered list and optionally compare with the next readable
-  earlier entry. Missing copies are named and remain selectable. The browser's
-  local file import and example remain available; source versions and exact positions stay folded.
+- **Beautiful Context.** Absent from Widgets by default; installing and enabling the optional
+  **Beautiful Context** bundled skill shows it as an ordinary widget card for local report import
+  and comparison (disabling the skill removes the card). On a supported Windows shell,
+  **Open recent requests** lives in Dashboard › Logs and opens a separate local window: choose a
+  familiar conversation, see the newest readable request in the offered list and optionally
+  compare with the next readable earlier entry. Missing copies are named and remain selectable.
+  Local file import and the example remain available; source versions and exact positions stay
+  folded.
 
 ### Storage
 

@@ -91,7 +91,8 @@ def read_install_record(drive_root: pathlib.Path, name: str) -> Optional[Dict[st
     return data
 
 
-def _landing(record: Dict[str, Any]) -> tuple:
+def landing_of(record: Dict[str, Any]) -> tuple:
+    """Which landing a record describes: its source, release and installation time (Keep and edits keep it)."""
     source, release = record.get("source") or {}, record.get("release") or {}
     return (source.get("kind"), source.get("id"), release.get("digest"), record.get("installed_at"))
 
@@ -118,7 +119,7 @@ def write_install_record(drive_root: pathlib.Path, name: str, record: Dict[str, 
     payload.setdefault("base_digest", str(release.get("digest") or ""))
     payload.setdefault("installed_at", utc_now_iso())
     payload["updated_at"] = utc_now_iso()
-    if _landing(read_install_record(drive_root, name) or {}) != _landing(payload):
+    if landing_of(read_install_record(drive_root, name) or {}) != landing_of(payload):
         from ouroboros.skill_grant_follow import end_receipt
 
         end_receipt(drive_root, name)
@@ -168,6 +169,7 @@ def retain_update_snapshot(snapshot: Any, record: Dict[str, Any]) -> None:
             "state_provenance": snapshot.state_provenance,
             "lifecycle_state": {key: base64.b64encode(value).decode("ascii") if value is not None else None
                                 for key, value in snapshot.lifecycle_state.items()},
+            "prior_form_installation": snapshot.prior_form_installation,
             "payload_restored": False, "restore_started": False}
     atomic_write_json(update_backup_path(snapshot.drive_root, snapshot.skill_name), data)
     record["pending_update"] = pending
@@ -206,6 +208,7 @@ def read_update_snapshot(drive_root: pathlib.Path, name: str) -> tuple[Any, Dict
         state_provenance=data.get("state_provenance"),
         lifecycle_state=lifecycle,
         payload_restored=bool(data.get("payload_restored")),
+        prior_form_installation=str(data.get("prior_form_installation") or ""),
     )
     return snapshot, data
 
@@ -231,20 +234,33 @@ def restore_update_snapshot(drive_root: pathlib.Path, name: str, reason: str) ->
         log.error("Update restore for %s was interrupted; kept evidence at %s; payload will not be replaced again",
                   name, update_backup_path(drive_root, name))
         return False
+    restored_at = data.get("restored_at") if data.get("restore_started") and snapshot.payload_restored else ""
     data.update(restore_started=True, rejection_reason=data.get("rejection_reason") or reason)
     path = update_backup_path(drive_root, name)
-    atomic_write_json(path, data)
+    if not restored_at:
+        atomic_write_json(path, data)
     try:
-        restore_payload_state(snapshot, restore_state_provenance=True)
+        if not restored_at:
+            restore_payload_state(snapshot, restore_state_provenance=True)
+            restored_at = utc_now_iso()
+            data.update(payload_restored=snapshot.payload_restored, restored_at=restored_at)
+            atomic_write_json(path, data)
         pending = data["pending_update"]
-        update_install_record(drive_root, name, pending_update=None, update_rejected={
-            "version": pending["version"], "digest": pending["digest"],
-            "reason": data["rejection_reason"], "at": utc_now_iso(),
-        })
+        rejected = {"version": pending["version"], "digest": pending["digest"],
+                    "reason": data["rejection_reason"], "at": restored_at}
+        record = read_install_record(drive_root, name)
+        if record is not None and ("pending_update" in record or record.get("update_rejected") != rejected):
+            update_install_record(drive_root, name, pending_update=None, update_rejected=rejected)
     except Exception:
         data["payload_restored"] = snapshot.payload_restored
         atomic_write_json(path, data)
         log.exception("Update restore failed for %s; kept payload and state evidence at %s", name, path)
+        return False
+    # The restore rewrote the record before ``write_install_record`` could compare landings: the rejected landing's
+    # receipt and a consent waiting for its files end here, said as a rollback (``skill_grant_follow``).
+    from ouroboros.skill_grant_follow import end_receipt
+
+    if not end_receipt(drive_root, name, reason="update_rolled_back", restored_payload=snapshot.target_dir):
         return False
     path.unlink()
     return True
@@ -288,13 +304,17 @@ def settle_pending_update(drive_root: pathlib.Path, name: str, *, expected_diges
             record.get("pending_update") != pending or release.get("digest") != pending["digest"]):
         discard_update_snapshot(drive_root, name)
         return {"status": "superseded"}
-    loaded = find_skill(drive_root, name, repo_path=get_skills_repo_path())
+    repo_path = get_skills_repo_path()
+    loaded = find_skill(drive_root, name, repo_path=repo_path)
     current = not interrupted_landing and loaded is not None and release.get("digest") == pending["digest"]
     if not landing_failed and not data.get("restore_started") and current and not loaded.load_error \
             and loaded.review.gate_for(loaded.content_hash)["executable_review"]:
         update_install_record(drive_root, name, pending_update=None, update_rejected=None)
         keep_previous_payload(snapshot.backup_dir, name)
         update_backup_path(drive_root, name).unlink()
+        from ouroboros.skill_lifecycle_actions import grant_consent_on_admission
+
+        grant_consent_on_admission(drive_root, name, repo_path=repo_path, expected_skill=loaded)  # an allow pressed while it settled: these files landed now
         return {"status": "accepted"}
     job = read_json_dict(review_job_state_path(drive_root, name)) or {}
     if not force and not interrupted_landing and not data.get("restore_started") and job.get("status") == "running" \
@@ -417,6 +437,6 @@ def convert_legacy_records(drive_root: pathlib.Path, rows: Optional[List[Dict[st
 
 __all__ = [
     "INSTALL_BASES", "INSTALL_RECORD_FILENAME", "LEGACY_HUB_SOURCE_ID", "clear_install_record",
-    "convert_legacy_records", "install_record_path", "legacy_hub_record", "read_install_record",
+    "convert_legacy_records", "install_record_path", "landing_of", "legacy_hub_record", "read_install_record",
     "update_install_record", "write_install_record",
 ]

@@ -997,10 +997,12 @@ def test_a_frozen_default_row_dispatches_on_the_lane_it_was_resolved_on(tmp_path
 
 
 def test_run_identities_never_reach_tests_or_preflight():
+    from ouroboros.git_selection import SELECTED_GIT_ENV
     from ouroboros.test_environment import scrub_environment
     from tests.conftest import _NEVER_INHERITED, _isolated_child_env
 
-    selections = {REVIEW_RUN_CAP_ENV: "4", ATTACH_HOME_ENV: "/host/claudexor"}
+    # The host's chosen Git too: a test's own selection decides from its own facts.
+    selections = {REVIEW_RUN_CAP_ENV: "4", ATTACH_HOME_ENV: "/host/claudexor", SELECTED_GIT_ENV: "/host/git"}
     assert set(selections) <= set(_NEVER_INHERITED)  # conftest's literals name the leaf's identities
     assert not set(selections) & set(scrub_environment(selections))
     assert not set(selections) & set(_isolated_child_env(selections))

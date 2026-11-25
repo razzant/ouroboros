@@ -110,6 +110,8 @@ class PayloadRollbackSnapshot:
     state_provenance: Optional[Dict[str, Any]] = None
     lifecycle_state: Dict[str, Optional[bytes]] = field(default_factory=dict)
     payload_restored: bool = False
+    # The installation the secret form's own keys in that ``grants.json`` were granted for (``skill_grant_follow``).
+    prior_form_installation: str = ""
 
 
 # Only state that install/review/dependency reconciliation may replace. Owner
@@ -171,6 +173,11 @@ def snapshot_payload_state(
     drive_root = pathlib.Path(drive_root)
     target_dir = pathlib.Path(target_dir)
     lifecycle_state = snapshot_lifecycle_state(drive_root, skill_name)
+    prior_form_installation = ""
+    if b'"form"' in (lifecycle_state.get("grants.json") or b""):
+        from ouroboros.skill_grant_follow import installation_token
+
+        prior_form_installation = installation_token(drive_root, skill_name, target_dir)
     backup_dir: Optional[pathlib.Path] = None
     if target_dir.exists():
         rollback_root = target_dir.parent / ".rollback"
@@ -190,6 +197,7 @@ def snapshot_payload_state(
         backup_dir=backup_dir,
         state_provenance=read_provenance(drive_root, skill_name) if include_state_provenance else None,
         lifecycle_state=lifecycle_state,
+        prior_form_installation=prior_form_installation,
     )
 
 
@@ -260,6 +268,11 @@ def restore_payload_state(snapshot: PayloadRollbackSnapshot, *, restore_state_pr
             delete_provenance(snapshot.drive_root, snapshot.skill_name)
         else:
             write_provenance(snapshot.drive_root, snapshot.skill_name, snapshot.state_provenance)
+    if snapshot.prior_form_installation:  # the restored copy is a new folder: the restored form grant follows it
+        from ouroboros.skill_grant_follow import rebind_restored_form_grant
+
+        rebind_restored_form_grant(snapshot.drive_root, snapshot.skill_name, target_dir,
+                                   snapshot.prior_form_installation)
 
 
 def discard_payload_snapshot(snapshot: PayloadRollbackSnapshot) -> None:

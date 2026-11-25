@@ -269,6 +269,10 @@ def advance_repair_expected_hash(
 
     accepted = record_owner_edit(pathlib.Path(drive_root), payload_dir, expected_digest=observed,
                                  task_id=str(task_id), attribution=attribution)
+    if accepted:  # these files are admitted now: an allow waiting for the earlier ones can never be granted
+        from ouroboros.skill_grant_follow import end_superseded_consent
+
+        end_superseded_consent(drive_root, skill_name, observed)
     if accepted and local_edit.installation is not None:
         from ouroboros.skill_grant_follow import extend_verified_edit, installation_of
 

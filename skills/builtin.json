@@ -24,6 +24,8 @@
     {"name": "grok_realtime", "category": ["media"], "recommended": true, "default_on": true,
      "title": "Grok voice", "pitch": "Grok as the voice for calls", "needs": "Needs an xAI API key", "mark": "xAI key"},
     {"name": "openai_realtime", "category": ["media"], "recommended": true, "default_on": true,
-     "title": "OpenAI voice", "pitch": "OpenAI as the voice for calls", "needs": "Needs an OpenAI API key", "mark": "OpenAI key"}
+     "title": "OpenAI voice", "pitch": "OpenAI as the voice for calls", "needs": "Needs an OpenAI API key", "mark": "OpenAI key"},
+    {"name": "beautiful_context", "category": ["diagnostics"],
+     "title": "Beautiful Context", "pitch": "Inspect and compare local model request reports"}
   ]
 }

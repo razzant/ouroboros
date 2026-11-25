@@ -17,20 +17,22 @@ A widget written for Ouroboros only works in your interface if your host keeps e
 - **Classic sources:** `GET /api/extensions/{skill}/module/{entry}` answers captured JavaScript text, without caching and with any-origin CORS; network authentication still applies. `409` means no live bundle, `404` no captured file. ESM uses the lease below.
 - **Change signals:**
   - `revision` is the skill's live content hash. A card whose `revision` changed while it runs is stopped (§6) and starts again only as a new card would (§7, §9). `generation` names the live publication: an `entry_type: "module"` card's file lease is bound to it, so in board, Costs and chat mounts its change stops such a card the same way, even with unchanged bytes. Classic cards ignore it.
-  - An `extension_lifecycle` WebSocket frame means "read `GET /api/widgets` again". A card that left the list is stopped.
+  - An `extension_lifecycle` WebSocket frame, or the end of a skill lifecycle job (its `chat` row with `system_type: "skill_lifecycle"` and `lifecycle.phase` `completed`, `failed` or `cancelled`; a catalog install that turns a skill on sends no `extension_lifecycle`), means "read `GET /api/widgets` again". A card that left the list is stopped. The end-of-job signal is the Widgets view's alone: it is not extended to a Costs placement (§7).
 - **The owner's launch choice:** `GET /api/ui/preferences` returns `widget_start_mode`, keyed `"<skill>:<tab_id>"`. It overrides the card's own `start`, except beside `unreadable: true` (saved preferences the core could not read). `POST /api/ui/preferences` with `{widget_start_mode}` saves it.
 
 For a classic entry, fetch the script with the owner's session, from the page. The builtin host gives up after 25 seconds and shows a retryable error.
 
 ## 2. Building the frame
 
-Create one `<iframe>` per running card with exactly these attributes:
+Create one `<iframe>` per running card. The three permission attributes are exactly these:
 
 | Attribute | Value |
 |---|---|
 | `sandbox` | `allow-scripts allow-pointer-lock allow-downloads` |
 | `allow` | `autoplay; fullscreen; clipboard-write` |
 | `allowfullscreen` | present |
+
+Give the frame its accessible name as well: `title` is the card's `title` (the words the card's head shows), falling back to `tab_id`, then the skill name.
 
 Never add `allow-same-origin`: the frame stays an opaque origin with no direct access to the page's cookies, storage or DOM. Cookie attachment to asset requests is browser-dependent; use the host fetch bridge, not a promise that passive requests are always anonymous. Never add top navigation, popups, forms or modals.
 

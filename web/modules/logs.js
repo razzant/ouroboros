@@ -20,6 +20,7 @@ import { markView, statusMarkHtml } from './status_mark.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { revealStripChoice } from './page_header.js';
 import { createLogRaw, LOG_RAW_HTML } from './logs_raw.js';
+import { bindLocalContextReport } from './context_report_host.js';
 
 /** Dashboard › Logs (docs/ARCHITECTURE.md §3 "Dashboard"). The panel's entries are data first: every live frame and
  * backfilled row updates its entry (task grouping, ×N collapse, the sticky Errors filter, the settled headline) whether
@@ -90,15 +91,16 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
     const narrowed = () => KINDS.some((key) => state.activeFilters[key]);
     const shows = (category) => !narrowed() || Boolean(state.activeFilters[category]);
 
-    // The list is one plain scroller. Its filter rail and Clear belong to the section's header; moving the nodes
-    // keeps their handlers and counts. The history line and empty line belong to the card.
+    // The list is one plain scroller. Its filter rail, a supported Windows shell's local requests action
+    // (context_report_host.js) and Clear belong to the section's header; moving the nodes keeps their handlers and
+    // counts. The history line and empty line belong to the card.
     const page = document.createElement('div');
     page.id = 'page-logs';
     page.className = 'dashboard-body settings-logs-panel scroll-fade-y';
     page.innerHTML = `
         <div class="logs-filters"><div class="logs-kinds app-tab-strip scroll-fade-x" id="log-filters" role="group" aria-label="Show" data-scroll-x>${
             Object.entries({ '': 'All', ...LOG_CATEGORIES }).map(([key, label]) => `<button type="button" class="filter-chip skills-category" data-log-kind="${key}">${label}<span class="skills-category-count"></span></button>`).join('')
-        }</div><button type="button" class="btn btn-default logs-clear-list" id="btn-clear-logs">Clear</button></div>
+        }</div><div class="logs-local-report" data-local-context-report hidden></div><button type="button" class="btn btn-default logs-clear-list" id="btn-clear-logs">Clear</button></div>
         <section class="ui-card logs-card">
             <div class="ui-status logs-history-status" role="status"></div>
             <p class="logs-empty" data-log-empty hidden></p>
@@ -110,6 +112,7 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
 
     const filtersDiv = page.querySelector('#log-filters');
     bindScrollFade(filtersDiv, { axis: 'x' });  // a phone's one scrolling line fades where chips hide
+    const { dispose: disposeLocalReport, retry: retryLocalReport } = bindLocalContextReport(page.querySelector('[data-local-context-report]'));
     const logEntries = page.querySelector('#log-entries');
     const historyStatus = page.querySelector('.logs-history-status');
     const emptyLine = page.querySelector('[data-log-empty]');
@@ -609,6 +612,7 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
             if (backfillAbort) { backfillAbort.abort(); backfillAbort = null; backfillRevision += 1; backfillOwed = true; }
             return;
         }
+        retryLocalReport();  // a failed shell read is asked again at a real showing: no timer, no other subscription
         if (backfillOwed) void backfillRecentLogs();
         paint();
         // A page shown again starts at scrollTop 0 in WebKit (chat.js): the reader's place is set now.
@@ -800,6 +804,9 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
     // listens to both events the same way): the panel catches up and the reader's
     // place is set again, the newest entry or the one being read.
     window.addEventListener('ouro:page-shown', show);
+    window.addEventListener('pagehide', (event) => {
+        if (!event?.persisted) disposeLocalReport();
+    });
     document.addEventListener('visibilitychange', show);
     setControls?.('logs', page.querySelector('.logs-filters'));
     show();

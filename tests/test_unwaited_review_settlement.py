@@ -964,3 +964,138 @@ def test_storages_checkout_pass_repairs_an_old_writers_finished_row_by_its_exact
     assert not any(seats[slot].get("pending_invocation_id") for slot in ("s1", "s2"))
     if running:
         assert seats["a1"]["operation_state"] == "in_flight" and seats["a1"]["pending_invocation_id"] == "inv-a1"
+
+
+def _mixed_commit_world(tmp_path, monkeypatch):
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.review_waiting import acknowledge_delivery, received_whole
+    from ouroboros.task_results import write_task_result
+    from ouroboros.working_checkpoint import flush_content_acks
+    from tests.test_review_waiting import _receipt
+
+    world = _commit_world(tmp_path, monkeypatch, adviser=True)
+    rl.settle_from_collected(world.data, world.record_id, [
+        {**_raw("s1", "m1", parts=("change", "coupling")), "operation_id": "op-s1"}, {**_raw("s2", "m2"), "operation_id": "op-s2"}])
+    rl.revise_record(world.data, world.record_id, lambda cur: {**cur, "state": "settled", "review_wave_id": "round-1"})
+    rl.note_author_decision(world.data, world.record_id, {"disposition": "accepted", "rationale": "counted pass"})
+    world.ack = lambda rows: (acknowledge_delivery(world.ctx, _receipt(world.ctx, rl.load_record(world.data, world.record_id), rows)),
+                              flush_content_acks(world.ctx))
+    world.end_task = lambda: write_task_result(world.data, TASK, "completed", chat_id=1)
+    world.mark = lambda mark_id: ChronicleStore(world.data).get(mark_id)
+    world.whole = lambda rec: received_whole(rec, rec, task_id=TASK)
+    return world
+
+
+def test_mixed_left_wave_reuses_same_record_and_duty_across_custody_recollection_and_late_mark(tmp_path, monkeypatch):
+    from ouroboros.late_review_marks import replay_owed_late_reviews
+    from ouroboros.owner_mailbox import acknowledge_transcript_entry, drain_owner_entries
+    from ouroboros.owner_wait import park_for_left_review
+    from ouroboros.tools.commit_gate import resolve_commit_review_reference
+
+    world = _mixed_commit_world(tmp_path, monkeypatch)
+    monkeypatch.setattr(review_pause, "notify_when_settled", lambda rows, cb, settled_keys=(): cb(
+        sum(str(r.get("attempt_key") or "") not in set(settled_keys) for r in rows if r.get("attempt_key"))) or True)
+    running_a1 = {**world.attempt.triad_raw_results[-1], "surface": "multi_model_review", "parts": ["change"]}
+    monkeypatch.setattr(review_pause, "_left_seats", lambda _rec: (_saved(world), [_seat("s1"), _seat("s2"), running_a1], ""))
+    world.ctx._review_detached_operations = [{"retry_key": "round-1", "slot_id": "s2", "operation_id": "op-s2",
+                                              "attempt_key": "k-s2", "reason": review_pause.ADDRESSED_EVENT}]
+    world.ctx._review_settled_attempts = {"k-s2": object()}
+    wait1 = review_pause.watch_left_review(world.ctx, surface="commit", retry_key="round-1", attempt=1, record_id=world.record_id, reissue="commit_reviewed")
+    [early] = drain_owner_entries(world.data, TASK, set(), 1)
+    assert wait1["msg_id"] == early["msg_id"] and early["msg_id"].endswith(":custody")
+    assert early["text"].startswith("[Review custody]") and early["review_feedback"]["settled"] is False
+    assert early["review_feedback"]["record_id"] == world.record_id and acknowledge_transcript_entry(world.data, TASK, early, attempt_key=1)
+    assert not park_for_left_review(SimpleNamespace(_ctx=world.ctx), SimpleNamespace(owner_msg_seen={early["msg_id"]}), "ack", None)
+    assert (_saved(world).status, _saved(world).phase, _saved(world).late_result_pending) == ("reviewed", "review_only", True)
+    assert resolve_commit_review_reference(world.ctx, _reference(_saved(world))).attempt == 1
+    [duty_id] = list(_owed_rows(world.data))
+    world.ack(rl.load_record(world.data, world.record_id)["rows"][:2])
+    assert review_pause.ended_left_review({**_owed_rows(world.data)[duty_id]["left_review"], "left": "unwaited"}) == "waiting"
+
+    monkeypatch.setattr(review_pause, "_left_seats", lambda _rec: (_saved(world), [_seat("s1"), _seat("s2"), _seat("a1", text=FAIL_TEXT)], ""))
+    wait2 = review_pause.watch_left_review(world.ctx, surface="commit", retry_key="round-1", attempt=1, record_id=world.record_id, reissue="commit_reviewed")
+    assert wait2["duty_id"] == duty_id and list(_owed_rows(world.data)) == [duty_id]
+    [final] = drain_owner_entries(world.data, TASK, set(), 1)
+    assert wait2["msg_id"] == final["msg_id"] == early["msg_id"].removesuffix(":custody")
+    assert final["text"].startswith("[Review settled]") and final["review_feedback"] == {**final["review_feedback"], "record_id": world.record_id, "settled": True}
+    assert acknowledge_transcript_entry(world.data, TASK, final, attempt_key=1)
+    review_pause.watch_left_review(world.ctx, surface="commit", retry_key="round-1", attempt=1, record_id=world.record_id, reissue="commit_reviewed")
+    assert drain_owner_entries(world.data, TASK, set(), 1) == []
+    settled = rl.load_record(world.data, world.record_id)
+    assert not rl.open_additional_seats(settled) and not world.whole(settled) and len(settled["verdict"]["additional_findings"]) == 1
+    assert settled["verdict"]["aggregate"] == "PASS" and settled["author_decision"]["disposition"] == "accepted"
+    duty = _owed_rows(world.data)[duty_id]["left_review"]
+    world.ack(settled["rows"])
+    assert review_pause.ended_left_review({**duty, "left": "unwaited"}) == "collected"
+    world.end_task()
+    assert replay_owed_late_reviews(world.data)["settled"] == 1 and _owed_rows(world.data) == {}
+    assert (world.mark(duty_id)["review"]["outcome"]["verdict"], world.mark(duty_id)["review"]["outcome"]["additional"], world.mark(duty_id)["review"]["outcome"]["unheard"]) == ("PASS", 1, 0)
+    assert review_pause.ended_left_review(duty) == "unchanged" and replay_owed_late_reviews(world.data)["settled"] == 0
+
+
+@pytest.mark.parametrize("operation_state", ["custody_lost", "settled"])
+def test_left_notice_distinguishes_lost_custody_from_a_saved_terminal_error(tmp_path, monkeypatch, operation_state):
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    world = _mixed_commit_world(tmp_path, monkeypatch)
+    adviser = _seat("a1", operation_state=operation_state, status="error", raw_text="", error="synthetic review error")
+    monkeypatch.setattr(review_pause, "_left_seats", lambda _rec: (_saved(world), [_seat("s1"), _seat("s2"), adviser], ""))
+    monkeypatch.setattr(review_pause, "notify_when_settled", lambda _rows, cb, settled_keys=(): cb(1) or True)
+    world.ctx._review_detached_operations = [{"retry_key": "round-1", "attempt_key": "missing-local-key",
+                                              "reason": review_pause.ADDRESSED_EVENT}]
+    wait = review_pause.watch_left_review(world.ctx, surface="commit", retry_key="round-1", attempt=1,
+                                          record_id=world.record_id, reissue="commit_reviewed")
+    stored = rl.load_record(world.data, world.record_id)
+    assert stored["state"] == "settled" and stored["verdict"]["aggregate"] == "PASS"
+    assert next(row for row in stored["rows"] if row["seat_id"] == "a1")["operation_state"] == operation_state
+    [notice] = drain_owner_entries(world.data, TASK, set(), 1)
+    lost = operation_state == "custody_lost"
+    assert notice["msg_id"].endswith(":custody") is lost and wait["done"] and wait["noticed"]
+    assert notice["review_feedback"]["settled"] is not lost
+    assert notice["review_feedback"]["unknown_seats"] == wait["unknown_seats"] == int(lost)
+
+
+@pytest.mark.parametrize("history", ["stale", "reopened_stripped", "compacted", "compacted_complete", "missing"])
+def test_stale_compacted_or_missing_mixed_attempt_distinctions(tmp_path, monkeypatch, history):
+    from ouroboros.review_operation import controller_identity
+    from ouroboros.review_state import update_state
+
+    world = _mixed_commit_world(tmp_path, monkeypatch)
+    world.ack(rl.load_record(world.data, world.record_id)["rows"][:2])
+    assert review_pause.owe_unwaited_review(world.ctx, surface="commit", retry_key="round-1", record_id=world.record_id, attempt=1)
+    world.end_task()
+    (duty_id, row), = _owed_rows(world.data).items()
+    if history == "stale":
+        monkeypatch.setattr(review_pause, "_left_seats", lambda _rec: (_saved(world), [_seat("s1"), _seat("s2"), _seat("a1", operation_id="op-stale", text=FAIL_TEXT)], ""))
+        assert review_pause.settle_left_review(world.data, row) == "waiting" and world.mark(duty_id) is None
+        return
+    if history == "reopened_stripped":
+        update_state(world.data, lambda st: setattr(st.attempts[-1], "raw_stripped", True))
+        row["controller"] = {**controller_identity(), "session": ""}
+        assert _saved(world).raw_stripped and review_pause._left_seats(row["left_review"])[2] == ""
+        assert review_pause.settle_left_review(world.data, row) == "waiting" and world.mark(duty_id) is None
+        return
+    if history in {"compacted", "compacted_complete"}:
+        if history == "compacted_complete":
+            rl.settle_from_collected(world.data, world.record_id, [
+                {**_raw("a1", "m3", answers={"change": _answer("change", "FAIL", [CRITICAL])}), "operation_id": "op-a1", "review_wave_id": "round-1"}])
+        update_state(world.data, lambda st: (setattr(st.attempts[-1], "raw_stripped", True), setattr(st.attempts[-1], "triad_raw_results", []), setattr(st.attempts[-1], "scope_raw_result", {})))
+        monkeypatch.setattr("ouroboros.review_operation.collect_recorded_review_actor", lambda *_a, **_kw: pytest.fail("compacted row recovered"))
+        probe = dict(row["left_review"])
+        assert review_pause._settled_aggregate(probe) == ("PASS" if history == "compacted_complete" else "")
+        row["controller"] = {**controller_identity(), "session": ""}
+        if history == "compacted":
+            with monkeypatch.context() as live:
+                live.setattr("ouroboros.review_state_custody.wave_has_live_review_operation", lambda *_a, **_kw: True)
+                assert review_pause.settle_left_review(world.data, row) == "waiting"
+    else:
+        update_state(world.data, lambda st: st.attempts.clear())
+        row["controller"] = {**controller_identity(), "birth": "earlier", "session": "before-exec"}
+    assert review_pause.settle_left_review(world.data, row) == "saved"
+    after = rl.load_record(world.data, world.record_id)
+    assert rl.open_additional_seats(after) is (history != "compacted_complete") and after["author_decision"]["disposition"] == "accepted"
+    mark = world.mark(duty_id)
+    assert (mark["review"]["outcome"]["verdict"], mark["review"]["outcome"]["unheard"]) == ("PASS", 0 if history == "compacted_complete" else 1)
+    assert ("compacted and keeps no seat roster" if "compacted" in history else "not in the review state") in mark["text"]
+    assert "per-seat attempt details are unavailable" in mark["text"] and "saved ledger outcome is retained" in mark["text"]
+    assert "its record could not be read" not in mark["text"] and "every seat's outcome stays unknown" not in mark["text"]

@@ -1,8 +1,9 @@
 """Dashboard -> Storage -> Temporary space: the owner's free-space action (B).
 
 A pure *preview* lists what the app's own retirers would remove now, in two groups: G1, the work
-folders of finished tasks (direct and helper drives whose row is terminal and whose task the
-supervisor's liveness probe proves not live), and G2, working copies of finished work (plain
+folders of finished tasks (direct and helper drives whose row is terminal, whose task the
+supervisor's liveness probe proves not live and that no Continue's selection still borrows,
+``source_loan_probe``), and G2, working copies of finished work (plain
 worktrees with the same proof and their unique work proven saved (``copy_capture_proof``), delegated snapshots by the custody GC's own proof
 (``subagent_worktrees.snapshot_released``: task proven over, custody closed and readable), own-body
 candidates whose owner is terminal with no live lineage process). The preview changes nothing:
@@ -760,6 +761,7 @@ class FreeSpace:
         from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, drive_candidates
         from ouroboros.private_copy_read import _copy_owner, read_records
         from ouroboros.retention import age_cutoff, get_gc_retention_days
+        from ouroboros.review_state_custody import source_loan_probe
         from ouroboros.session_scratch import PRODUCER_RETAINED, retention_hold, scratch_records
         from ouroboros.subagent_worktrees import (
             _record_file, _record_name, _records_dir, _resolve_root, _task_proven_over, snapshot_released,
@@ -779,6 +781,7 @@ class FreeSpace:
 
         if GROUP_WORK_FOLDERS in self._offered:
             group = new_group(GROUP_WORK_FOLDERS)
+            lent = source_loan_probe(root)  # the retirer's loan gate: the loans are read once for every folder below
             for layout, base in (("headless", root / HEADLESS_TASKS_DIR), ("direct", root / TASK_DRIVES_DIR)):
                 if not base.is_dir():
                     continue
@@ -791,6 +794,7 @@ class FreeSpace:
                     alive = live(task_id) if fact and status in FINAL_STATUSES else False
                     cause = "task_result_unreadable" if not fact else "task_not_terminal" if status not in FINAL_STATUSES else (
                         "liveness_unknown" if alive is None else "task_live" if alive else "")
+                    cause = cause or lent(base / task_id / "data" if layout == "headless" else base / task_id)
                     _sorted_into(root, group, "unreadable" if not fact else "in_use" if cause else "offer", item, cause)
             groups.append(group)
         read = read_records(root)  # one passive read per copy: no import, no event row; unreadable ones are named

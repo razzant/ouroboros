@@ -8,7 +8,6 @@ import {
 } from './widget_job.js';
 import { getPath } from './widget_chart.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
-import { bindContextReport } from './context_report_host.js';
 import { boardFrameGeometry, mountModuleWidget, mountRouteIframeWidget, setFrameHeight } from './widget_module.js';
 import { SHELL_ICONS } from './page_icons.js';
 import {
@@ -69,10 +68,6 @@ function pageTemplate() {
                 <div id="widgets-list-error" class="skills-load-error" hidden><span data-widget-list-error></span> <button type="button" class="btn btn-default btn-sm" data-widget-list-retry>Retry</button></div>
                 <div id="widgets-list" class="widgets-list"></div>
                 <div class="widgets-arrange-status ui-status" data-tone="neutral" data-widget-arrange-status role="status" aria-live="polite"></div>
-                <div class="widgets-context-tools">
-                    <button type="button" class="btn btn-default" data-context-report aria-expanded="false" aria-controls="widgets-context-report">Beautiful Context</button>
-                    <section id="widgets-context-report" class="ui-card widgets-context-report" data-context-report-mount hidden></section>
-                </div>
             </div>
         </section>
     `;
@@ -911,8 +906,6 @@ export function initWidgets(ctx = {}) {
     const page = document.createElement('div');
     page.innerHTML = pageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
-    const closeReport = bindContextReport(document.querySelector('[data-context-report]'),
-        document.querySelector('[data-context-report-mount]'));
     const list = document.getElementById('widgets-list');
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
@@ -931,15 +924,17 @@ export function initWidgets(ctx = {}) {
     let activeSync = 0;
     let listDirty = false;
     let uiPreferences = { widget_order: [], widget_size: {}, widget_start_mode: {}, nested_subagents_expanded: false };
+    let stopLifecycleFacts = null;
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
         ctx.ws.on('message', (msg) => {
             widgetMessageHandlers.forEach((handler) => handler(msg));
         });
-        // List reconcile triggers besides page entry: a skill lifecycle change, and
-        // every (re)connect — events may have been missed while offline, or the
-        // server restarted with the same SHA (no SPA reload then). No polling.
-        ctx.ws.on('extension_lifecycle', reconcileWidgetList);
+        // List reconcile triggers besides page entry: a skill lifecycle change as the page's one store hears it
+        // (contributions.js: `extension_lifecycle`, and the end of any lifecycle job, whoever started it: a Browse
+        // install that turns a skill on sends no `extension_lifecycle`), and every (re)connect — events may have been
+        // missed while offline, or the server restarted with the same SHA (no SPA reload then). No polling.
+        stopLifecycleFacts = contributions?.onLifecycle?.(reconcileWidgetList);
         ctx.ws.on('open', reconcileWidgetList);
     }
 
@@ -1395,12 +1390,12 @@ export function initWidgets(ctx = {}) {
         });
     });
     window.addEventListener('pagehide', (event) => {
-        closeReport();
         listRequests.abortAll();
         if (event.persisted) return;
         cardMenus.destroy();
         widths.dispose();
         stopContributionFacts?.();
+        stopLifecycleFacts?.();
         for (const tab of lastTabs || []) if (!isBoardFrame(tab)) disposeWidgetByKey(widgetKey(tab));
         bodiesObserver.disconnect();
         BODY_SIZED.forEach((type) => list.removeEventListener(type, refitBodies, true));
@@ -1423,7 +1418,6 @@ export function initWidgets(ctx = {}) {
         if (event.detail?.page === 'widgets') {
             render();
         } else {
-            closeReport();
             // A card carried or an edge dragged when the owner left goes back: the release saves nothing.
             cardMenus.close();
             cancelWidgetCardCarry(list);

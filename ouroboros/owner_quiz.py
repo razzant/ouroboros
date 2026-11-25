@@ -279,11 +279,7 @@ def mark_published(drive_root: Any, task_id: str, quiz_id: str) -> None:
     _mutate_projection(drive_root, task_id, mutate)
 
 
-class _Keep:
-    pass
-
-
-_KEEP = _Keep()
+_KEEP = object()
 
 
 def _mutate_projection(
@@ -317,11 +313,13 @@ def _mutate_projection(
             view.update(quizzes)
             return None
         if len(quizzes) > _QUIZ_CAP:
+            from ouroboros.secret_requests import keep_allow_card  # D09 -> D14 stays lazy (domains.toml)
+
             wait = current.get("owner_wait") or {}
             paired_wait = str(wait.get("quiz_id") or "") if wait.get("state") == "waiting" else ""
             discharged = sorted(
                 (key for key, block in quizzes.items()
-                 if key != paired_wait and not quiz_needs_retention(block)),
+                 if key != paired_wait and not (quiz_needs_retention(block) or keep_allow_card(block))),
                 key=lambda key: str(quizzes[key].get("asked_at") or ""),
             )
             for key in discharged[:max(0, len(quizzes) - _QUIZ_CAP)]:

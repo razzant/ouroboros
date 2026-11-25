@@ -214,6 +214,8 @@ RELEASE_INVARIANT_PATHS = frozenset({
     "build_windows.ps1",
     "scripts/build_repo_bundle.py",
     "ouroboros/launcher_bootstrap.py",
+    # Selects the executable used by protected startup and Update paths.
+    "ouroboros/git_selection.py",
     "ouroboros/repo_remotes.py",
     # The v7 G1 split moved the remote/managed-update/checkout-reset/rescue
     # bodies out of the protected git_ops facade without moving any of the
