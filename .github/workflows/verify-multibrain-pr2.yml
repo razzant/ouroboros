@@ -1,0 +1,120 @@
+name: Multibrain PR2 focused Ubuntu qualification
+on:
+  push:
+    branches: ['verify/multibrain-pr2-*']
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      PRODUCT_SHA: 226408de9f244694b535c200295c7d893935bf0c
+      PRODUCT_TREE: eb5c46499db117054845748bdaf6557944e41fd5
+      WORKFLOW_PATH: .github/workflows/verify-multibrain-pr2.yml
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the one-file verification child to the product
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCT_SHA" =~ ^[0-9a-f]{40}$ && "$PRODUCT_TREE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P HEAD)" = "$PRODUCT_SHA"
+          test "$(git diff --no-renames --name-status "$PRODUCT_SHA" HEAD --)" = "$(printf 'A\t%s' "$WORKFLOW_PATH")"
+          git checkout --detach --quiet "$PRODUCT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
+          test -z "$(git status --porcelain)"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+          profile: test
+      - name: Set an explicit runner-owned browser path
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/mb-browsers" >> "$GITHUB_ENV"
+      - name: Install the stock WebKit test browser before isolating the test processes
+        run: python -I -S scripts/ci_browser_install.py --pinned-node webkit
+      - name: Run exact ordinary cases on loopback only
+        id: focused
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
+          d=$(mktemp -d /tmp/mbq-XXXXXX)
+          out="$RUNNER_TEMP/mb-verdict"
+          mkdir -p "$d/home" "$d/t" "$d/e" "$out"
+          py=$(command -v python)
+          node="$PWD/node-standalone/bin/node"
+          test -x "$node"
+          test -d "$PLAYWRIGHT_BROWSERS_PATH"
+          cases=(
+            tests/test_config_extraction.py::test_settings_extraction_owner_inventory_is_exact
+            tests/test_gateway_abi3_removals.py::TestAliasProducerFanOutSweep::test_every_alias_key_emission_is_an_allowlisted_internal_plane
+            tests/test_host_message_voice.py::test_all_runtime_chat_producers_declare_authorship
+            tests/test_routing_refusal_causes.py::test_producer_literals_are_all_covered_or_exempt
+            'tests/test_peer_intro_browser.py::test_an_invitation_used_by_the_other_side_turns_to_the_code_check_and_connects[390-webkit]'
+            'tests/test_card_gallery_browser.py::test_a_letter_card_keeps_two_same_word_replies_and_reads_the_long_one_whole[webkit]'
+            'tests/test_card_gallery_browser.py::test_the_chat_places_distinct_letter_parts_and_evicts_their_saved_page[webkit]'
+            'tests/test_project_unread_opening_race_browser.py::test_a_new_offpage_reply_replaces_the_openings_frozen_target[webkit-named-during]'
+          )
+          rc=0
+          sudo --non-interactive unshare --net -- /bin/bash -c '
+            set -euo pipefail
+            ip link set lo up
+            uid=$1 gid=$2 cleanpath=$3 d=$4 browsers=$5 py=$6 node=$7
+            shift 7
+            exec /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+              /usr/bin/env -i PATH="$cleanpath" HOME="$d/home" PLAYWRIGHT_BROWSERS_PATH="$browsers" \
+                "$py" -I -S scripts/safe_test.py --temp-parent "$d/t" --evidence-dir "$d/e" --timeout 800 -- \
+                /usr/bin/env OUROBOROS_RUN_UI_SMOKE=1 PLAYWRIGHT_BROWSERS_PATH="$browsers" PLAYWRIGHT_NODEJS_PATH="$node" \
+                  "$py" -m pytest -o addopts= -q --junitxml="$d/junit.xml" "$@"
+          ' _ "$(id -u)" "$(id -g)" "$PWD/node-standalone/bin:$PATH" "$d" "$PLAYWRIGHT_BROWSERS_PATH" "$py" "$node" "${cases[@]}" >"$d/console" 2>&1 || rc=$?
+          "$py" -I - "$rc" "$d" "$out" "${cases[@]}" <<'PY'
+          import json, os, subprocess, sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          rc, root, out, *declared = sys.argv[1:]
+          expected = set()
+          for case in declared:
+              path, *parts = case.split('::')
+              cls = path.removesuffix('.py').replace('/', '.')
+              if len(parts) == 2:
+                  cls += '.' + parts[0]
+              expected.add((cls, parts[-1]))
+          try:
+              rows = list(ET.parse(Path(root) / 'junit.xml').iter('testcase'))
+          except (OSError, ET.ParseError):
+              rows = []
+          observed = {}
+          for row in rows:
+              identity = (row.get('classname'), row.get('name'))
+              if identity in expected:
+                  state = next((x.tag for x in row if x.tag in {'failure', 'error', 'skipped'}), 'passed')
+                  observed[identity] = state if identity not in observed else 'duplicate'
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          clean = not subprocess.check_output(['git', 'status', '--porcelain'])
+          cases = {f'{cls}::{name}': observed.get((cls, name), 'not_observed') for cls, name in sorted(expected)}
+          ok = (rc == '0' and len(rows) == len(expected) == 8 and set(cases.values()) == {'passed'} and clean
+                and head == os.environ['PRODUCT_SHA'] and tree == os.environ['PRODUCT_TREE'])
+          result = dict(passed=ok, product=head, tree=tree, tracked_and_visible_worktree_clean=clean,
+                        workflow=os.environ['GITHUB_SHA'], run=os.environ['GITHUB_RUN_ID'],
+                        attempt=os.environ['GITHUB_RUN_ATTEMPT'], exit=int(rc), observed=len(rows), cases=cases)
+          text = json.dumps(result, indent=2) + '\n'
+          (Path(out) / 'verdict.json').write_text(text, encoding='utf-8')
+          print(text, end='')
+          sys.exit(0 if ok else 1)
+          PY
+      - name: Retain only the bounded result (no invitation, raw log, or image)
+        if: ${{ !cancelled() && (steps.focused.outcome == 'success' || steps.focused.outcome == 'failure') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mb-pr2-verdict-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mb-verdict/verdict.json
+          if-no-files-found: error
+          retention-days: 7
