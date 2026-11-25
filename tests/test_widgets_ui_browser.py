@@ -7,6 +7,7 @@ import re
 import textwrap
 import time
 import urllib.parse
+from collections.abc import Callable
 
 import pytest
 
@@ -1054,7 +1055,8 @@ def _painted(inner: dict, outer: dict, theme: str) -> dict:
     ink = _under([inner["ink"]], background)
     light, dark = sorted((_luminance(ink), _luminance(background)), reverse=True)
     return {"ink": tuple(round(each) for each in ink), "background": tuple(round(each) for each in background),
-            "ink_lighter": _luminance(ink) > _luminance(background), "contrast": round((light + 0.05) / (dark + 0.05), 2),
+            "ink_lighter": _luminance(ink) > _luminance(background), "contrast": (light + 0.05) / (dark + 0.05),
+            "opaque_document": any(layer[3] == 1 for layer in inner["layers"][-2:]),  # body or html, not the embedder
             "shadow": inner["shadow"], "frame_scheme": inner["scheme"]}
 
 
@@ -1334,34 +1336,45 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     return {part: _painted(frame.locator(node).evaluate(_LAYERS), outside, theme)
                             for part, node in (("headline", "#headline"), ("button", "label[for='report-file']"))}
 
-                def readable(theme: str, label: str) -> None:
-                    def right(seen: dict) -> bool:
-                        return seen["button"]["shadow"] != "none" and all(
-                            each["ink_lighter"] == (theme == "dark") and each["contrast"] >= 4.5 for each in seen.values())
-
-                    def witness(seen: dict) -> str:
+                def readable(theme: str, label: str, control_scheme: Callable[[], str] | None) -> str:
+                    def sample() -> tuple[str, dict, dict]:
+                        expected = control_scheme() if control_scheme is not None else theme
                         host = report.evaluate("""iframe => ({choice: document.documentElement.dataset.themeChoice,
                             theme: document.documentElement.dataset.theme,
                             topPrefersLight: matchMedia('(prefers-color-scheme: light)').matches,
                             embeddingScheme: getComputedStyle(iframe).colorScheme})""")
-                        return f"{label}: expected readable {theme}; host={host}, report={seen}"
+                        return expected, host, painted(expected)
+
+                    def right(expected: str, host: dict, seen: dict) -> bool:
+                        dark = expected == "dark"
+                        return (host["embeddingScheme"] == host["theme"] == theme
+                                and seen["button"]["shadow"] != "none" and all(
+                                    each["frame_scheme"][1] == dark and each["ink_lighter"] == dark
+                                    and each["opaque_document"] and each["contrast"] >= 4.5 for each in seen.values()))
 
                     deadline = time.monotonic() + 8
-                    while not right(seen := painted(theme)):
-                        assert time.monotonic() < deadline, witness(seen)
+                    while True:
+                        current = sample()
+                        if right(*current):
+                            # Neither an early control reading nor a first readable paint establishes a settled scheme.
+                            page.wait_for_timeout(300)
+                            settled = sample()
+                            if current[0] == settled[0] and right(*settled):
+                                return settled[0]
+                            current = settled
+                        expected, host, seen = current
+                        assert time.monotonic() < deadline, (
+                            f"{label}: expected iframe scheme {theme} and readable {expected}; host={host}, report={seen}")
                         page.wait_for_timeout(100)
-                    # A first readable paint is not enough if styles then settle to the other scheme.
-                    page.wait_for_timeout(300)
-                    assert right(seen := painted(theme)), witness(seen)
 
                 appearance = page.locator("html")
 
-                def check_theme(label: str, theme: str) -> None:
+                def check_theme(label: str, theme: str, *, control_scheme: Callable[[], str] | None = None) -> None:
                     expect(appearance).to_have_attribute("data-theme", theme)
-                    readable(theme, label)
+                    settled = readable(theme, label, control_scheme)
                     assert first in facts.text_content() and stored_body.text_content() == stored and rows.count() == 4
                     expect(frame.locator("#report-result")).to_be_visible()
-                    shoot(label)
+                    shoot(f"{label}-device-{settled}" if settled != theme else label)
 
                 frame.locator("h1").scroll_into_view_if_needed()  # the pictures below show the report from its top
                 check_theme("2-default-dark", "dark")
@@ -1371,11 +1384,32 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 ambient = "light" if page.evaluate("() => matchMedia('(prefers-color-scheme: light)').matches") else "dark"
                 expect(appearance).to_have_attribute("data-theme", ambient)  # Still System before either manual choice.
                 opposite = "dark" if ambient == "light" else "light"
+                # An independent opaque-origin frame, without the report or its styles. Change its embedder's CSS
+                # directly so a broken theme hookup in the product cannot select the fallback for us.
+                page.evaluate("""scheme => {
+                    const probe = document.createElement('iframe');
+                    probe.id = 'context-theme-probe';
+                    probe.setAttribute('sandbox', 'allow-scripts');
+                    probe.srcdoc = '<!doctype html><meta name="color-scheme" content="light dark"><body id="probe"></body>';
+                    Object.assign(probe.style, {position: 'fixed', left: '-10px', width: '1px', height: '1px', colorScheme: scheme});
+                    document.body.append(probe);
+                }""", ambient)
+                probe = page.locator("#context-theme-probe")
+                probe_body = page.frame_locator("#context-theme-probe").locator("#probe")
+                scheme_of = "() => matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'"
+                assert probe_body.evaluate(scheme_of) == ambient
                 for label, theme in (("4-manual-opposite", opposite), ("5-manual-return", ambient)):
                     # Same setter as Appearance, without leaving Widgets and replacing the open frame.
                     page.evaluate("(choice) => window.ouroTheme.set(choice)", theme)
                     expect(appearance).to_have_attribute("data-theme-choice", theme)
-                    check_theme(f"{label}-{theme}", theme)
+                    shot = f"{label}-{theme}"
+                    if theme == opposite:
+                        assert probe.evaluate("(node, scheme) => { node.style.colorScheme = scheme; "
+                                              "return getComputedStyle(node).colorScheme; }", theme) == theme
+                        check_theme(shot, theme, control_scheme=lambda: probe_body.evaluate(scheme_of))
+                    else:
+                        check_theme(shot, theme)
+                probe.evaluate("node => node.remove()")
                 page.evaluate("() => window.ouroTheme.set('system')")
                 page.emulate_media(color_scheme="dark")
                 expect(page.locator("html")).to_have_attribute("data-theme", "dark")
