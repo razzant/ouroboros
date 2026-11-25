@@ -446,5 +446,5 @@ def idempotency_fingerprint(payload: Dict[str, Any]) -> str:
         "files": files,
         "album_captions": album_caps,
     }
-    raw = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    raw = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "replace")
     return hashlib.sha256(raw).hexdigest()

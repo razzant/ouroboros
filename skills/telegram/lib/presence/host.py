@@ -260,7 +260,7 @@ class UrllibPresenceHostTransport:
         request_headers = {**headers, "Accept": "application/json", "Accept-Encoding": "identity"}
         content = None
         if payload is not None:
-            content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            content = json.dumps(payload, ensure_ascii=False).encode("utf-8", "replace")
             request_headers["Content-Type"] = "application/json"
 
         async def _execute() -> bytes:

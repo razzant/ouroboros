@@ -281,7 +281,10 @@ class PresenceBotClient:
             if parse_mode != "HTML" or exc.error_code != 400:
                 raise
             if before_send is not None:
-                await before_send()
+                try:
+                    await before_send()
+                except (OSError, ValueError) as before_exc:
+                    raise TelegramRequestNotSent("sendMessage", str(before_exc)) from None
             payload.pop("parse_mode", None)
             payload["text"] = _telegram_html_to_plain(text)
             result = await self._post_json("sendMessage", payload)
@@ -462,10 +465,16 @@ class PresenceBotClient:
     async def _post_json(self, endpoint: str, payload: Dict[str, Any], *, timeout: float = 35.0) -> Any:
         self._check_binding(endpoint)
         url = f"{self._api_server}/bot{self._token}/{endpoint}"
+        raw_payload = json.dumps(payload, ensure_ascii=False)
+        try:
+            raw_payload.encode("utf-8")
+            send_payload = payload
+        except UnicodeEncodeError:
+            send_payload = json.loads(raw_payload.encode("utf-8", "replace").decode("utf-8"))
         try:
             async with self._new_async_client(endpoint, timeout) as client:
                 self._check_binding(endpoint)
-                response = await client.post(url, json=payload)
+                response = await client.post(url, json=send_payload)
         except TelegramRequestNotSent:
             raise
         except _UNSENT_ERRORS as exc:
@@ -577,8 +586,8 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
             safe_key = str(key).replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
             part = (
                 b"--" + b_bytes + b"\r\n"
-                + f'Content-Disposition: form-data; name="{safe_key}"\r\n\r\n'.encode("utf-8")
-                + str(value).encode("utf-8")
+                + f'Content-Disposition: form-data; name="{safe_key}"\r\n\r\n'.encode("utf-8", "replace")
+                + str(value).encode("utf-8", "replace")
                 + b"\r\n"
             )
             field_parts.append(part)
@@ -612,8 +621,8 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
                     safe_field = str(field_name).replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
                     hdr = (
                         b"--" + b_bytes + b"\r\n"
-                        + f'Content-Disposition: form-data; name="{safe_field}"; filename="{safe_name}"\r\n'.encode("utf-8")
-                        + f"Content-Type: {mime}\r\n\r\n".encode("utf-8")
+                        + f'Content-Disposition: form-data; name="{safe_field}"; filename="{safe_name}"\r\n'.encode("utf-8", "replace")
+                        + f"Content-Type: {mime}\r\n\r\n".encode("utf-8", "replace")
                     )
                     file_parts.append((hdr, fd, size))
                 except BaseException:

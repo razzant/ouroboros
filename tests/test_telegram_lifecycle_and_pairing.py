@@ -761,3 +761,213 @@ def test_async_client_emfile_and_html_fallback_before_send_oserror_stay_retryabl
                 before_send=fail_before,
             )
         )
+
+    # 3) send_text_chunk HTML-400 fallback before_send() OSError also translates to TelegramRequestNotSent
+    monkeypatch.setattr(
+        cl2,
+        "_post_json",
+        lambda *a, **k: (_ for _ in ()).throw(transport.TelegramApiError("sendMessage", "Bad Request: can't parse entities", 400)),
+    )
+
+    async def fail_before_os():
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    with pytest.raises(transport.TelegramRequestNotSent):
+        asyncio.run(cl2.send_text_chunk("-1001", "<b>hi</b>", parse_mode="HTML", before_send=fail_before_os))
+
+
+def test_pairing_settings_replace_eio_recovery_max_attempts_durability_and_universal_carriers(tmp_path, monkeypatch):
+    plugin = _load_plugin("tg_lc_r21p")
+    from tg_lc_r21p.lib import telegram_owner_auth as oa, telegram_poll_binding as pb, telegram_presence_bridge as bridge
+    from tg_lc_r21p.scripts import telegram_settings as ts
+
+    # 1) Transient EIO on settings.json os.replace during valid private /pair recovers on exact-chat replay, refuses stranger
+    s1 = tmp_path / "settings_eio"
+    api1 = _StubApi(s1)
+    code1 = oa.issue_owner_pairing_code(s1)["code"]
+    cursor1 = pb.PollCursor(s1 / "cursor.json", "https://api.telegram.org", "123456")
+    sent1: list[tuple[int, str]] = []
+    cl1 = types.SimpleNamespace(
+        bot_id="123456", api_base_origin="https://api.telegram.org",
+        send_message=lambda cid, txt, **k: asyncio.sleep(0, result=sent1.append((cid, txt)) or 1),
+    )
+    u_pair = {"update_id": 12, "message": {"chat": {"id": 18, "type": "private"}, "from": {"id": 18}, "message_id": 120, "date": 1700000000, "text": f"/pair {code1}"}}
+    real_replace = os.replace
+    failed_once = {"done": False}
+
+    def fail_settings_replace(src, dst):
+        if pathlib.Path(dst).name == "settings.json" and not failed_once["done"]:
+            failed_once["done"] = True
+            raise OSError(errno.EIO, "transient settings replace error")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_settings_replace)
+    with pytest.raises(ts.TelegramSettingsError):
+        asyncio.run(
+            pb.handle_poll_batch(
+                api1, cl1, [u_pair], cursor1, types.SimpleNamespace(current=lambda _g: True), 1, "", 10, "strict", "en",
+                is_panic=lambda _u: False, authorize=plugin._authorized_owner,
+                on_callback=lambda *a, **k: asyncio.sleep(0, result="en"),
+                on_message=plugin._handle_owner_message_inner,
+                on_non_owner=lambda a, c, u, p: bridge.handle_non_owner_update(a, c, u, p, runtime_getter=lambda _a: None),
+            )
+        )
+    assert cursor1.offset == 0 and ts.load_settings(s1).get("TELEGRAM_CHAT_ID", "") == ""
+    assert oa.redeem_owner_pairing_code(s1, 99, f"/pair {code1}") is False
+    asyncio.run(
+        pb.handle_poll_batch(
+            api1, cl1, [u_pair], cursor1, types.SimpleNamespace(current=lambda _g: True), 1, "", 10, "strict", "en",
+            is_panic=lambda _u: False, authorize=plugin._authorized_owner,
+            on_callback=lambda *a, **k: asyncio.sleep(0, result="en"),
+            on_message=plugin._handle_owner_message_inner,
+            on_non_owner=lambda a, c, u, p: bridge.handle_non_owner_update(a, c, u, p, runtime_getter=lambda _a: None),
+        )
+    )
+    assert ts.load_settings(s1).get("TELEGRAM_CHAT_ID") == "18" and cursor1.offset == 13
+
+    # 2) 5th bad attempt persists terminal failed_attempts on disk even if unlink fails
+    s2 = tmp_path / "max_attempts_eio"
+    code2 = oa.issue_owner_pairing_code(s2)["code"]
+    for _ in range(4):
+        assert oa.redeem_owner_pairing_code(s2, 18, "/pair WRONG") is False
+    real_unlink = pathlib.Path.unlink
+    monkeypatch.setattr(
+        pathlib.Path, "unlink",
+        lambda self, *a, **k: (_ for _ in ()).throw(PermissionError("denied")) if self.name == "owner_pairing.json" else real_unlink(self, *a, **k),
+    )
+    assert oa.redeem_owner_pairing_code(s2, 18, "/pair WRONG") is False
+    assert json.loads((s2 / "owner_pairing.json").read_text(encoding="utf-8"))["failed_attempts"] == 5
+    oa._BURNED_HASHES.clear()
+    oa._BURNED_ORDER.clear()
+    assert oa.redeem_owner_pairing_code(s2, 18, f"/pair {code2}") is False
+    monkeypatch.setattr(pathlib.Path, "unlink", real_unlink)
+
+    # 3) Double-encoded link_preview_options.url, poll.question, and document.file_name burn active codes in groups
+    s3 = tmp_path / "carriers"
+    for carrier_fn in (
+        lambda c: {"chat": {"id": -1001, "type": "supergroup"}, "text": "preview", "link_preview_options": {"url": f"https://t.me/bot?start=%25{ord(c[0]):02X}{c[1:]}"}},
+        lambda c: {"chat": {"id": -1001, "type": "supergroup"}, "poll": {"question": f"code {c}", "options": [{"text": "yes"}]}},
+        lambda c: {"chat": {"id": -1001, "type": "supergroup"}, "document": {"file_name": f"{c}.pdf"}},
+    ):
+        c = oa.issue_owner_pairing_code(s3)["code"]
+        assert oa.is_pairing_command(s3, carrier_fn(c)) is True
+        assert not (s3 / "owner_pairing.json").exists()
+        assert oa.redeem_owner_pairing_code(s3, 99, f"/pair {c}") is False
+
+
+def test_lone_surrogates_end_to_end_poll_sightings_custody_host_fifo_and_outbox(tmp_path, monkeypatch):
+    _load_plugin("tg_lc_r21s")
+    from tg_lc_r21s.lib import telegram_poll_binding as pb, telegram_presence_bridge as bridge
+    from tg_lc_r21s.lib.presence import custody, file_access, host, outbox_worker, runtime as rt_mod, transport
+
+    state = tmp_path / "sur_e2e"
+    api = _StubApi(state)
+    store = custody.CustodyStore(state / "presence.sqlite3")
+    submitted_bodies: list[bytes] = []
+
+    class _FakeResp:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def aiter_bytes(self):
+            yield b'{"status":"completed","outcome":"silent","turn_ref":"t-1"}'
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, *, headers=None, content=None):
+            if content is not None:
+                submitted_bodies.append(content)
+            return _FakeResp()
+
+    monkeypatch.setattr(host.httpx, "AsyncClient", _FakeClient)
+    host_client = host.PresenceHostClient(
+        state_dir=state,
+        token_provider=lambda: "tok",
+        host_base="http://127.0.0.1:8765",
+        transport=host.UrllibPresenceHostTransport(),
+    )
+    host_client.delivery_reporting_status = "unsupported"
+    host_client._identity_discovered_at = time.monotonic()
+    monkeypatch.setattr(host, "load_binding_id", lambda _s: "b-1")
+    monkeypatch.setattr(host_client, "bind_place", None)
+    rt = rt_mod.PresenceRuntime(api=api, state_dir=state, submitter=host_client)
+    rt.store = store
+    rt._bot_id = "123456"
+    rt._bot_username = "mybot"
+    cursor = pb.PollCursor(state / "cursor.json", "https://api.telegram.org", "123456")
+    cl = types.SimpleNamespace(bot_id="123456", api_base_origin="https://api.telegram.org")
+    updates = [
+        {"update_id": 10, "message": {"chat": {"id": -1001, "type": "supergroup", "title": "Team \ud800"}, "from": {"id": 5, "first_name": "A\ud800"}, "message_id": 10, "date": 1700000000, "media_group_id": "mg-\ud800", "text": "hi \ud800 there"}},
+        {"update_id": 11, "message": {"chat": {"id": -1001, "type": "supergroup", "title": "Team"}, "from": {"id": 5, "first_name": "A"}, "message_id": 11, "date": 1700000001, "text": "clean follow-up"}},
+        {"update_id": 12, "message": {"chat": {"id": 42, "type": "private", "first_name": "Bob\ud800"}, "from": {"id": 42, "first_name": "Bob\ud800"}, "message_id": 12, "date": 1700000002, "text": "dm \ud83d"}},
+    ]
+    try:
+        asyncio.run(
+            pb.handle_poll_batch(
+                api, cl, updates, cursor, types.SimpleNamespace(current=lambda _g: True), 1, "18", 10, "strict", "en",
+                is_panic=lambda _u: False, authorize=lambda *a, **k: asyncio.sleep(0, result=None),
+                on_callback=lambda *a, **k: asyncio.sleep(0, result="en"),
+                on_message=lambda *a, **k: asyncio.sleep(0),
+                on_non_owner=lambda a, c, u, p: bridge.handle_non_owner_update(a, c, u, p, runtime_getter=lambda _a: rt),
+            )
+        )
+        assert cursor.offset == 13
+        with store._connect() as conn:
+            inbox_rows = conn.execute("SELECT payload_json FROM inbox ORDER BY update_id").fetchall()
+            group_rows = conn.execute("SELECT chat_id, title FROM telegram_groups").fetchall()
+        assert len(inbox_rows) == 3 and len(group_rows) == 2
+        for (raw_json,) in inbox_rows:
+            json.dumps(json.loads(raw_json), ensure_ascii=False).encode("utf-8")
+
+        # Also verify legacy DB row with escaped \ud800 submits cleanly through UrllibPresenceHostTransport without deadlocking FIFO
+        with store._connect() as conn:
+            cur = conn.execute(
+                "UPDATE inbox SET payload_json = replace(payload_json, ?, ?) WHERE update_id = 10",
+                ("hi ? there", "hi \\ud800 there"),
+            )
+            assert cur.rowcount == 1
+            conn.commit()
+            assert "\\ud800" in conn.execute("SELECT payload_json FROM inbox WHERE update_id = 10").fetchone()[0]
+        for i in range(3):
+            assert asyncio.run(rt.process_one_inbox()) is True, f"iter={i} err={rt._last_error!r} bodies={len(submitted_bodies)}"
+        assert len(submitted_bodies) == 3
+        decoded = [json.loads(b.decode("utf-8")) for b in submitted_bodies]
+        assert any("clean follow-up" in str(d) for d in decoded)
+
+        # Outbox own_message_row, idempotency_fingerprint, and transport._post_json all handle lone surrogates cleanly
+        row = outbox_worker.own_message_row("123456", "-1001", "", {"message_id": 99, "text": "sent \ud800", "media_group_id": "mg-\ud800"}, "")
+        assert row is not None and "\ud800" not in row[8] and "\ud800" not in row[9]
+        assert len(file_access.idempotency_fingerprint({"kind": "message", "text": "x \ud800"})) == 64
+        sent_json: list[dict] = []
+
+        class _CaptureClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, _url, *, json=None, **k):
+                sent_json.append(json)
+                return types.SimpleNamespace(status_code=200, json=lambda: {"ok": True, "result": {"message_id": 1}}, text="")
+
+        tr_cl = transport.PresenceBotClient("123456:TOK_A")
+        monkeypatch.setattr(tr_cl, "_new_async_client", lambda *_a, **_k: _CaptureClient())
+        asyncio.run(tr_cl._post_json("sendMessage", {"chat_id": "-1001", "text": "out \ud800"}))
+        assert sent_json == [{"chat_id": "-1001", "text": "out ?"}]
+    finally:
+        store.close()

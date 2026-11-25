@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional
 
 from . import discovery
-from .events import ALBUM_POSITION_KEY, TelegramEvent
+from .events import ALBUM_POSITION_KEY, TelegramEvent, utf8_safe
 from .formatting import prepare_text
 
 
@@ -478,7 +478,7 @@ def remember_event(conn: sqlite3.Connection, event: TelegramEvent) -> None:
     actor = event.actor
     name = " ".join(part for part in (str(actor.get("first_name") or ""), str(actor.get("last_name") or "")) if part)
     mid = int(event.message["message_id"])
-    mg = str(event.message.get("media_group_id") or "")
+    mg = utf8_safe(str(event.message.get("media_group_id") or ""))
     origin_known = 0
     if mg:
         earlier = int(conn.execute(ALBUM_EARLIER, (event.account_id, event.conversation_id, mg, mid)).fetchone()[0])
@@ -498,17 +498,17 @@ def remember_event(conn: sqlite3.Connection, event: TelegramEvent) -> None:
             event.thread_id,
             chat_forum(event.conversation.get("chat_type"), event.conversation.get("is_forum"), event.thread_id),
             str(actor.get("platform_actor_id") or ""),
-            _utf8_safe(name or str((actor.get("sender_chat") or {}).get("title") or "")),
+            utf8_safe(name or str((actor.get("sender_chat") or {}).get("title") or "")),
             0,
-            _utf8_safe(event.text),
-            mg,
+            utf8_safe(event.text),
+            utf8_safe(mg),
             origin_known,
         ),
     )
 
 
 def with_album_position(conn: sqlite3.Connection, event: TelegramEvent) -> TelegramEvent:
-    group = str(event.message.get("media_group_id") or "")
+    group = utf8_safe(str(event.message.get("media_group_id") or ""))
     if not group:
         return event
     earlier = conn.execute(
@@ -626,21 +626,8 @@ def reply_payload(event: Dict[str, Any], text: str, reply_to: Any = None) -> Dic
     return payload
 
 
-def _utf8_safe(text: str) -> str:
-    try:
-        text.encode("utf-8")
-        return text
-    except UnicodeEncodeError:
-        return text.encode("utf-8", "replace").decode("utf-8")
-
-
 def compact_json(value: Any) -> str:
-    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    try:
-        raw.encode("utf-8")
-        return raw
-    except UnicodeEncodeError:
-        return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return utf8_safe(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
 def iso_timestamp(value: Any) -> str:

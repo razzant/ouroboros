@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Sequence, Tuple
 
 from .custody import CALL_STARTED, CustodyStore, OutboxLease, chat_forum, recorded_calls
 from .delivery import delivery_report, names_message, reaction_receipt
+from .events import utf8_safe
 from .formatting import prepare_caption, prepare_text
 from .host import PlaceBindingRevoked
 from .transport import (
@@ -139,8 +140,8 @@ def own_message_row(
         account_id,
         "",
         1,
-        str(result.get("text") or result.get("caption") or words),
-        str(result.get("media_group_id") or ""),
+        utf8_safe(str(result.get("text") or result.get("caption") or words)),
+        utf8_safe(str(result.get("media_group_id") or "")),
         int(bool(album_origin_known)),
     )
 

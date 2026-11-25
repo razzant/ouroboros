@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, ContextManager, Dict, List, Optional, Sequence, Tuple
 
-from .events import _integer
+from .events import _integer, utf8_safe
 
 
 _ACCOUNT = re.compile(r"[1-9][0-9]*")
@@ -130,13 +130,13 @@ def record_sightings(
     if not sightings:
         return
     if sighting_key:
-        cur = conn.execute("INSERT OR IGNORE INTO seen_sightings(sighting_key) VALUES (?)", (sighting_key,))
+        cur = conn.execute("INSERT OR IGNORE INTO seen_sightings(sighting_key) VALUES (?)", (utf8_safe(sighting_key),))
         if cur.rowcount == 0:
             return
     for item in sightings:
         order_key = _next_order_key(conn, item.event_date)
         conn.execute(_RECORD, (
-            item.account_id, item.chat_id, item.chat_type, item.title or "",
+            item.account_id, item.chat_id, item.chat_type, utf8_safe(item.title or ""),
             order_key if item.title is not None else -1, item.membership, order_key,
         ))
 

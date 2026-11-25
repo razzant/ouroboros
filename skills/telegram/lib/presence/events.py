@@ -686,6 +686,15 @@ def _reply_context(reply: Dict[str, Any]) -> Dict[str, Any]:
     return snapshot
 
 
+def utf8_safe(text: str) -> str:
+    """Replace lone UTF-16 surrogates so strings encode cleanly as strict UTF-8."""
+    try:
+        text.encode("utf-8")
+        return text
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def _integer(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return None
