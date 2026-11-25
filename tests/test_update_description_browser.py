@@ -349,12 +349,21 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 shot(page, "04-apply-large")
                 details.locator("summary").click()
                 rows = details.locator(".confirm-dialog-detail-row")
-                # Two rows lead them for this range: its own landed rows were not read, and 7 of its 17 commits carry a receipt.
-                assert rows.count() == 2 + len(large["qualification"]["commits"]) + 1 + len(large["qualification"]["github"]["runs"]) + 1
-                assert rows.nth(0).inner_text().replace("\n", " ").startswith("Made on this computer Not read for this range")
-                assert "7 of the 17 commits listed here carry one" in rows.nth(1).inner_text()
+                # The pinned range leads the evidence, even when the versions are shown in the title.
+                qualification = large["qualification"]
+                assert rows.locator("dt").all_text_contents() == [
+                    "Commits", "Made on this computer", "Review receipts",
+                    *(commit["sha"][:8] for commit in qualification["commits"]),
+                    "GitHub checks",
+                    *(f"{run['sha'][:8]} post-merge" for run in qualification["github"]["runs"]),
+                    "No matching run observed",
+                ]
+                key = large["key"]
+                assert rows.first.locator("dd").inner_text() == f"{key['base_sha'][:8]} → {key['target_sha'][:8]}"
+                assert rows.nth(1).locator("dd").inner_text().startswith("Not read for this range")
+                assert "7 of the 17 commits listed here carry one" in rows.nth(2).locator("dd").inner_text()
                 assert "Merge pull request #2384" in details.inner_text() and "No matching run observed" in details.inner_text()
-                rows.nth(3).scroll_into_view_if_needed()
+                details.get_by_text(qualification["commits"][1]["sha"][:8], exact=True).scroll_into_view_if_needed()
                 shot(page, "05-apply-large-details")
                 # Keyboard: the prose region takes focus and scrolls; Escape cancels without applying.
                 region.focus()

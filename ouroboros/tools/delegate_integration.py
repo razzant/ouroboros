@@ -819,20 +819,18 @@ def _declared_capture_gap(entry: _RunCustody, cap_dir: pathlib.Path, raw: bytes,
     return "", ""
 
 
-# Capture-time facts only: archives name scratch bytes (members are read instead); diffstat is --stat display text.
-_LEGACY_UNBOUND = frozenset({"created_at", "diffstat", "file_outputs", "diagnostics"})
-
-
 def _legacy_recapture_gap(drive: Any, entry: _RunCustody, record: Dict[str, Any], cap_dir: pathlib.Path,
                           manifest: Dict[str, Any]) -> tuple[str, str]:
     """Why saved older-copy bytes are not this run's own result (``""`` when they are): record and hand-over bind the
     present copy to the run's own ended generation (``copy_generation_hold``), retained file results hold the bytes
     they name, and that copy, captured again the same way into scratch, yields the same manifest (every decision input:
     patch bytes, root, base, file results with modes and preimages, exclusions; ``baseline_entries``, ``capture_kind``,
-    never emitted by the older writer, stay absent; 7.11's rules label 3 passes too). Nothing is written over them."""
+    never emitted by the older writer, stay absent; 7.11's rules label 3 and its two renamed exclusion reasons pass
+    too). Nothing is written over them."""
     import tempfile
     from ouroboros.delegate_continuation import copy_generation_hold
     from ouroboros.workspace_file_outputs import file_output_changes, verify_retained_outputs
+    from ouroboros.workspace_patch_rules import legacy_manifest_mismatch
 
     if hold := copy_generation_hold(drive, entry, record):
         return f"an older copy's capture is published only from this run's own prepared result or copy, and {hold}", ""
@@ -844,8 +842,7 @@ def _legacy_recapture_gap(drive: Any, entry: _RunCustody, record: Dict[str, Any]
         return f"its saved file results do not verify ({exc})", ""
     except Exception as exc:  # noqa: BLE001 - an unreadable copy or file proves nothing either way
         return f"its files or copy could not be read again ({type(exc).__name__})", "transient"
-    if any(again.get(key) != manifest.get(key) for key in (again.keys() | manifest.keys()) - _LEGACY_UNBOUND
-           if key != "exclude_rules_version" or type(manifest.get(key)) is not int or manifest[key] != 3):
+    if legacy_manifest_mismatch(again, manifest):
         return "its copy, captured again, does not yield these bytes", ""
     return "", ""
 

@@ -179,7 +179,7 @@ def captured_result(tmp_path, monkeypatch, kind):
     entry = durable_run(ctx, execution_root=handle.path, snapshot_id=handle.snapshot_id,
                         baseline_sha=handle.baseline_sha, authority_source=authority,
                         resource_ref=resource_ref, access="workspace_write")
-    (Path(handle.path) / changed_path).write_text(body, encoding="utf-8")
+    (Path(handle.path) / changed_path).write_text(body, encoding="utf-8", newline="\n")  # LF: the tests compare bytes
     block = capture_terminal_patch_for_drive(data, entry)
     assert block["status"] == "ready_with_changes", block
     if kind == "payload":
@@ -391,7 +391,7 @@ def test_git_effect_survives_a_failed_refresh_after_its_unwritten_disposition(tm
     assert receipt["reason"] == "apply" and run(drive, rid).patch_disposed == "applied"
 
 
-def legacy_result(tmp_path, monkeypatch):
+def legacy_result(tmp_path, monkeypatch, exclusions=()):
     """A copy recorded before result commits, with a copied file input, whose capture row did not land."""
     from ouroboros.subagent_worktrees import _update_record, provision_execution_snapshot
     from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
@@ -414,6 +414,13 @@ def legacy_result(tmp_path, monkeypatch):
                         authority_source="external_workspace_root", resource_ref={}, access="workspace_write")
     (copy_root / "tracked.txt").write_text("one\ntwo\nCHILD-EDIT\n", encoding="utf-8")
     (copy_root / "input.dat").write_bytes(b"input after\n")
+    for kind in exclusions:  # inert files the current writer excludes by policy
+        if kind == "evidence":
+            evidence = copy_root / ".review-evidence"
+            evidence.mkdir(parents=True, exist_ok=True)
+            (evidence / "probe-evidence.txt").write_bytes(b"inert evidence\n")
+        elif kind == "lockfile":
+            (copy_root / "package-lock.json").write_bytes(b'{"name": "demo", "lockfileVersion": 3}\n')
     emit = custody.emit
     with monkeypatch.context() as unavailable:  # the capture saves its files; its receipt row does not land
         unavailable.setattr(custody, "emit", lambda root, event, row, **kw:
@@ -426,11 +433,27 @@ def legacy_result(tmp_path, monkeypatch):
     return ctx, entry, target, copy_root, Path(first["manifest_artifact"]).parent
 
 
-_RULES_REFUSED = ("rules_unknown", "rules_missing", "rules_711_exclusion_changed", "rules_711_copy_changed")
+_RULES_REFUSED = ("rules_unknown", "rules_missing", "rules_711_exclusion_changed", "rules_711_copy_changed",
+                  "rules_711_path_drift_apply", "rules_711_path_drift_reject")
+# 7.11's writer (rules version 3) spelled these two exclusion reasons differently.
+_RULES_711_RENAMES = {
+    "named evidence, see the host's retention record": "named evidence, retained separately by its host",
+    "incidental lockfile: no matching changed manifest found": "incidental lockfile without sibling manifest change",
+}
+_LEGACY_RENAME_CASES = {
+    "rules_711_evidence_apply": ("evidence",),
+    "rules_711_evidence_reject": ("evidence",),
+    "rules_711_lockfile_apply": ("lockfile",),
+    "rules_711_lockfile_reject": ("lockfile",),
+    "rules_711_path_drift_apply": ("evidence", "lockfile"),
+    "rules_711_path_drift_reject": ("evidence", "lockfile"),
+}
 
 
 @pytest.mark.parametrize("case", ["apply", "reject", "copy_changed", "copy_gone", "member_mismatch",
                                   "diffstat_only_apply", "diffstat_only_reject", "rules_711_apply", "rules_711_reject",
+                                  "rules_711_evidence_apply", "rules_711_evidence_reject",
+                                  "rules_711_lockfile_apply", "rules_711_lockfile_reject",
                                   *_RULES_REFUSED])
 def test_saved_legacy_capture_is_decided_only_on_its_own_copy_captured_again(tmp_path, monkeypatch, case):
     import shutil
@@ -438,7 +461,8 @@ def test_saved_legacy_capture_is_decided_only_on_its_own_copy_captured_again(tmp
     from ouroboros.delegate_custody_current import run
     from tests.test_delegated_run_isolation import _git
 
-    ctx, entry, target, copy_root, cap_dir = legacy_result(tmp_path, monkeypatch)
+    ctx, entry, target, copy_root, cap_dir = legacy_result(
+        tmp_path, monkeypatch, exclusions=_LEGACY_RENAME_CASES.get(case, ()))
     drive, rid = custody.custody_root(ctx), entry.run_id
     restyled: list[str] = []
     if case.startswith("diffstat_only"):  # only --stat text re-renders; the patch bytes come from another command
@@ -462,7 +486,15 @@ def test_saved_legacy_capture_is_decided_only_on_its_own_copy_captured_again(tmp
         if case == "rules_711_exclusion_changed":  # the label matches 7.11's, but not what was held out
             manifest["untracked_excluded"] = [*manifest["untracked_excluded"], {"path": "out.log", "reason": "log file"}]
             manifest["counts"]["untracked_excluded"] += 1
+        if case in _LEGACY_RENAME_CASES:  # 7.11's writer spelled these two reasons differently
+            manifest["untracked_excluded"] = [
+                {**row, "reason": _RULES_711_RENAMES.get(row.get("reason"), row.get("reason"))}
+                for row in manifest["untracked_excluded"]]
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    if case.startswith("rules_711_path_drift"):
+        # the same number of excluded rows, but a different path: the refusal is about the path
+        evidence = copy_root / ".review-evidence"
+        (evidence / "probe-evidence.txt").rename(evidence / "probe-evidence-2.txt")
     if case in ("copy_changed", "rules_711_copy_changed"):  # the copy no longer holds what the saved bytes name
         (copy_root / "tracked.txt").write_text("one\ntwo\nANOTHER EDIT\n", encoding="utf-8")
     elif case == "copy_gone":
@@ -493,6 +525,9 @@ def test_saved_legacy_capture_is_decided_only_on_its_own_copy_captured_again(tmp
     elif case.endswith("reject"):
         assert first.status == "ok" and "Rejected" in first.text, first.text
         assert run(drive, rid).patch_disposed == "rejected" and current == before
+        if case in _LEGACY_RENAME_CASES:  # the proven legacy capture is recorded once, as on apply
+            receipt, = receipts()
+            assert receipt["manifest_sha256"] == hashlib.sha256(saved["workspace_patch.json"]).hexdigest()
     else:
         assert "INTEGRATE_DELEGATED_INSPECT_CAPTURE" in first.text and current == before, first.text
         receipt, = receipts()
@@ -505,6 +540,42 @@ def test_saved_legacy_capture_is_decided_only_on_its_own_copy_captured_again(tmp
     if case.startswith("diffstat_only"):  # the stat-only drift was real, and it was not a reason to refuse
         assert restyled and restyled[-1] != json.loads(saved["workspace_patch.json"])["diffstat"]
     assert {name: (cap_dir / name).read_bytes() for name in saved} == saved  # advertised bytes are never replaced
+
+
+def test_legacy_exclusion_rows_tolerate_only_a_confirmed_rename_of_a_string_reason():
+    """A saved exclusion label is tolerated only as one of the confirmed strings: a non-string one is
+    an ordinary mismatch (never an exception), and an unknown one is not a rename either."""
+    from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION, legacy_manifest_mismatch
+
+    current = {"path": ".review-evidence/x", "reason": NAMED_EVIDENCE_EXCLUSION}
+    fresh = {"exclude_rules_version": 4, "untracked_excluded": [current]}
+    renamed = {**current, "reason": _RULES_711_RENAMES[NAMED_EVIDENCE_EXCLUSION]}
+    assert legacy_manifest_mismatch(fresh, {"exclude_rules_version": 3, "untracked_excluded": [renamed]}) is False
+    for label in (None, 7, [renamed["reason"]], {renamed["reason"]: True}):
+        saved = {"exclude_rules_version": 3, "untracked_excluded": [{**renamed, "reason": label}]}
+        assert legacy_manifest_mismatch(fresh, saved) is True, label
+    assert legacy_manifest_mismatch(  # a confirmed old label is tolerated only with exactly its new spelling
+        {"exclude_rules_version": 4, "untracked_excluded": [{**current, "reason": "named evidence"}]},
+        {"exclude_rules_version": 3, "untracked_excluded": [renamed]}) is True
+    assert legacy_manifest_mismatch(  # an unknown string label is no rename either, even with no reason at all
+        {"exclude_rules_version": 4, "untracked_excluded": [{"path": "out.log"}]},
+        {"exclude_rules_version": 3, "untracked_excluded": [{"path": "out.log", "reason": "log file"}]}) is True
+
+
+def test_legacy_manifest_mismatch_tolerates_only_the_confirmed_rules_transition():
+    """The stamped version is tolerated only inside the confirmed 3 → 4 pair: another pair stays a
+    mismatch even with the very same rows, and even with the rows that pair would have tolerated."""
+    from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION, legacy_manifest_mismatch
+
+    current = {"path": ".review-evidence/x", "reason": NAMED_EVIDENCE_EXCLUSION}
+    renamed = {**current, "reason": _RULES_711_RENAMES[NAMED_EVIDENCE_EXCLUSION]}
+    assert legacy_manifest_mismatch({"exclude_rules_version": 4, "untracked_excluded": [current]},
+                                    {"exclude_rules_version": 3, "untracked_excluded": [renamed]}) is False
+    for (saved_version, fresh_version), saved_rows in (((3, 5), [current]), ((3, 5), [renamed]),
+                                                       ((2, 4), [renamed])):
+        assert legacy_manifest_mismatch({"exclude_rules_version": fresh_version, "untracked_excluded": [current]},
+                                        {"exclude_rules_version": saved_version,
+                                         "untracked_excluded": saved_rows}) is True, (saved_version, fresh_version)
 
 
 def test_staged_postimage_reads_the_head_basis_and_only_the_touched_index_entries(tmp_path, monkeypatch):
