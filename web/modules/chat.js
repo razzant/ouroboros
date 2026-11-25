@@ -2852,11 +2852,11 @@ export function createChatInstance({
             withStableViewport(() => releaseHistoryIds(ids));
         },
         // Rows stored since the newest read join its window (and the saved preview).
-        applyArrivals: (messages, { window, fromReconnect, requestedAt }) => {
+        applyArrivals: (messages, { window, fromReconnect, requestedAt, repairs }) => {
             if (foreignProfile()) return;
             preview.append(messages);
             for (const id of messages.flatMap(historyRowIds)) recentHistoryIds.add(id);
-            applyHistoryMessages(messages, { fromReconnect, requestedAt });
+            applyHistoryMessages([...repairs, ...messages], { fromReconnect, requestedAt });
             readReceipt.arrived(window);
         },
         readNewest: syncHistory, newestInFlight: () => historySyncPromise,

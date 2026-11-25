@@ -590,13 +590,14 @@ export const apiClient = {
      * `requestedAt` (Date.now() as it was asked for) dates the rows: a question's delivery a live frame stated since
      * is newer than they are (chat_decision observe). `tags` say why the read is made (`reason`, `mode`, `decision`,
      * `detail`): the server counts them, nothing more. */
-    chatHistory: async ({ chatId = 1, cursor = null, around = null, signal, tags = null } = {}) => {
+    chatHistory: async ({ chatId = 1, cursor = null, around = null, repair = '', signal, tags = null } = {}) => {
         const requestedAt = Date.now();
         const scope = documentScope(globalThis.document);
         const params = new URLSearchParams();
         if (chatId !== 1) params.set('chat_id', String(chatId));
         if (cursor) params.set('cursor', cursor);
         if (around) params.set('around', around);  // `task:<id>` or canonical `row:…`
+        if (repair) params.set('repair', repair);  // the `repairs` its caller applies (CLIENT_CONTRACT "Reading history")
         for (const name of ['reason', 'mode', 'decision', 'detail']) if (tags?.[name]) params.set(name, tags[name]);
         const query = params.toString();
         const data = await fetchJson(`/api/chat/history${query ? `?${query}` : ''}`, { cache: 'no-store', signal });

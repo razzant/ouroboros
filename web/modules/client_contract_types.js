@@ -721,6 +721,8 @@
  * @property {?string} next_cursor
  * @property {?string=} page_cursor
  * @property {string=} after_cursor  // the newest page and every `after` read: the rows stored since
+ * @property {ChatHistoryMessage[]=} repairs  // an `after` read asked `repair=settled`: the rows the window holds of a
+ *     task it shows that settled, as the newest page shows them now
  * @property {ChatHistoryWindow} window
  * @property {ChatHistoryCoverage=} coverage
  * @property {ChatHistoryAnchor=} anchor  // an `around` read only

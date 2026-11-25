@@ -443,7 +443,8 @@ export function createRoomProfileLifecycle({
     async function fetchHistory(cursor, options = {}) {
         const recentVersion = cursor == null ? nextRecentVersion() : 0, sent = { socket: servingSocket(), epoch };
         try {
-            return { ...await readHistory({ chatId, cursor, ...options }), recentVersion };
+            // The room's window applies `repairs`: a task it shows that settled is read with what arrived (chat_history.js).
+            return { ...await readHistory({ chatId, cursor, repair: 'settled', ...options }), recentVersion };
         } catch (error) {
             if (error && typeof error === 'object') asked.set(error, sent);
             if (!isDestroyed() && !isLeaving() && !options.signal?.aborted) getPreview().refused(error);

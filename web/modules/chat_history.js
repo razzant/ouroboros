@@ -358,17 +358,20 @@ export function createChatHistoryPager({
                 const gap = data?.window?.truncated_by?.some?.(cause => /^(chat|progress)_/.test(String(cause))
                     && String(cause) !== 'progress_incomplete_live_line');
                 // The first fact the answer lacks to account for what was stored since; it names the newest read sent instead.
-                const rejected = !Array.isArray(data?.messages) ? 'bad_messages'
+                const rejected = !Array.isArray(data?.messages) || !Array.isArray(data.repairs ?? []) ? 'bad_messages'
                     : typeof data.after_cursor !== 'string' || !data.after_cursor ? 'no_continuation'
                         : gap ? 'stream_gap' : data.window?.latest_message === null ? 'latest_unknown' : '';
                 if (rejected) {
                     throw Object.assign(new TypeError('History arrivals do not account for everything stored since the last read'), { rejected });
                 }
                 admitted = true;
+                // `repairs`: the rows the window holds of a task it shows that settled, as the newest page shows them now.
+                applyArrivals(data.messages, { window: data.window ?? null, fromReconnect: ask.fromReconnect,
+                    requestedAt: data.requestedAt, repairs: data.repairs ?? [] });
+                // The arrivals go on from this answer only once it is drawn: one that failed to apply reads the newest page.
                 after = data.after_cursor;
                 arrived += rowCount(data.messages);
                 landedArrivals += 1;
-                applyArrivals(data.messages, { window: data.window ?? null, fromReconnect: ask.fromReconnect, requestedAt: data.requestedAt });
                 registryReadableAgain();
                 return alive() ? { status: 'applied', messageCount: rowCount(data.messages) } : { status: 'disposed' };
             })

@@ -795,3 +795,56 @@ test('walking into an older page does not mark its existing words as new activit
     assert.ok(s.reads.includes('older'));
     assert.equal(globalThis.document.byId.get('chat-scroll-bottom').getAttribute('aria-label'), 'Scroll to latest message');
 });
+
+test('a settled task\'s rows sent again come with what arrived: drawn together, only the arrivals counted', async () => {
+    const answer = { ...arrivedRows(['chat:3'], 'after:3'), repairs: [{ history_id: 'progress:1' }] };
+    const p = arrivalsPager({ fetch: async () => answer });
+    p.pager.acceptRecent(newestPage());
+    assert.equal(await p.pager.read({ reason: 'settled' }), true);
+    assert.deepEqual(p.arrivals.map(({ ids, repairs }) => [ids, repairs.map((row) => row.history_id)]), [[['chat:3'], ['progress:1']]]);
+    assert.deepEqual([p.calls, p.newest], [['after:1'], []], 'one read of arrivals, no newest page');
+    const plain = arrivalsPager({ fetch: async () => arrivedRows([], 'after:2') });
+    plain.pager.acceptRecent(newestPage());
+    await plain.pager.read();
+    assert.deepEqual(plain.arrivals[0].repairs, [], 'an answer with none draws none');
+    const bad = arrivalsPager({ fetch: async () => ({ ...arrivedRows([], 'after:2'), repairs: {} }) });
+    bad.pager.acceptRecent(newestPage());
+    await bad.pager.read({ reason: 'settled' });
+    assert.deepEqual(bad.newest, [{ fromReconnect: false, reason: 'settled', decision: 'after_rejected', detail: 'bad_messages' }]);
+});
+
+test('arrivals go on from an answer only once it is drawn', async () => {
+    let fail = true;
+    const p = arrivalsPager({ fetch: async (cursor) => arrivedRows(['chat:2'], cursor === 'after:1' ? 'after:2' : 'after:3'),
+        apply: () => { if (fail) throw new Error('a renderer failed'); } });
+    p.pager.acceptRecent(newestPage());
+    await p.pager.read({ reason: 'settled' });
+    assert.deepEqual(p.newest.map(({ decision }) => decision), ['after_rejected'], 'the newest page answers for it');
+    fail = false;
+    await p.pager.read({ reason: 'settled' });
+    // The newest read (mocked) brought no page: the answer that failed to draw names no cursor to go on from.
+    assert.deepEqual([p.calls, p.newest.map(({ decision }) => decision)], [['after:1'], ['after_rejected', 'no_cursor']]);
+});
+
+test('a settled task\'s rows sent again with what arrived settle its card without the newest page', async (t) => {
+    const s = historyServer();
+    s.say(1);
+    s.work(2, 'task-7');
+    const repairs = [];
+    const r = openRoom(t, { ...s, fetchHistory: async (url) => {
+        const response = await s.fetchHistory(url);
+        if (!String(url).includes('cursor=after') || !repairs.length) return response;
+        const data = await response.json();
+        return { ok: true, status: 200, json: async () => ({ ...data, repairs: repairs.splice(0) }) };
+    } });
+    await r.instance.refreshHistory({ revision: 1 });
+    const card = () => r.messages.children.find((node) => node.classList?.contains('chat-live-card'));
+    assert.ok(card() && card().dataset.finished !== '1', 'the task is shown running');
+    repairs.push({ ...s.rows[1], task_terminal_status: 'completed', outcome_axes: { execution: 'ok' } });
+    s.say(3);
+    assert.equal((await r.instance.refreshHistory({ revision: 3 })).read, true);
+    await quiet();
+    assert.deepEqual(s.reads, ['newest', 'after'], 'what arrived and the settled rows, in one read');
+    assert.equal(card().dataset.finished, '1');
+    assert.deepEqual(s.tags.slice(1), [{ reason: 'read_receipt', mode: 'after' }], 'no newest page answered for it');
+});
