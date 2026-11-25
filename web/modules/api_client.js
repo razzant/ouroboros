@@ -588,14 +588,16 @@ export const apiClient = {
     /** Read a recent window, replay a room-bound page, or read around a task or exact row address.
      * Independently of socket readiness, a scoped document consumes only a match from the serving generation.
      * `requestedAt` (Date.now() as it was asked for) dates the rows: a question's delivery a live frame stated since
-     * is newer than they are (chat_decision observe). */
-    chatHistory: async ({ chatId = 1, cursor = null, around = null, signal } = {}) => {
+     * is newer than they are (chat_decision observe). `tags` say why the read is made (`reason`, `mode`, `decision`,
+     * `detail`): the server counts them, nothing more. */
+    chatHistory: async ({ chatId = 1, cursor = null, around = null, signal, tags = null } = {}) => {
         const requestedAt = Date.now();
         const scope = documentScope(globalThis.document);
         const params = new URLSearchParams();
         if (chatId !== 1) params.set('chat_id', String(chatId));
         if (cursor) params.set('cursor', cursor);
         if (around) params.set('around', around);  // `task:<id>` or canonical `row:…`
+        for (const name of ['reason', 'mode', 'decision', 'detail']) if (tags?.[name]) params.set(name, tags[name]);
         const query = params.toString();
         const data = await fetchJson(`/api/chat/history${query ? `?${query}` : ''}`, { cache: 'no-store', signal });
         const servingScope = provenScope(data?.profile_scope);

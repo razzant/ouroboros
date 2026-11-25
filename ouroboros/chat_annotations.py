@@ -38,12 +38,17 @@ _RETAINED_AGENT_RECEIPTS = 64
 _COMPACT_AT_BYTES = 800_000
 
 
-def _annotation_index(path: pathlib.Path, *, by_token=False) -> dict:
+def _annotation_index(path: pathlib.Path, *, by_token=False, message_ids=None) -> dict:
+    """``message_ids``: a question about named messages reads only theirs (none named, nothing read). Each message
+    resolves alone (``dialogue_store.annotation_sources``), so a named message's answer is the whole journal's."""
+    if message_ids is not None and not message_ids:
+        return {}
     latest = {}
     for row in iter_jsonl_objects(path):
         message_id = str(row.get("client_message_id") or "")
         room = row.get("source_chat_id")
-        if message_id and row.get("type") == "chat_annotation" and (room is None or type(room) is int):
+        if message_id and row.get("type") == "chat_annotation" and (room is None or type(room) is int) and (
+                message_ids is None or message_id in message_ids):
             key = (room, message_id)
             if by_token:
                 key += (str(row.get("routing_token") or ""),)
@@ -131,9 +136,7 @@ def _placed_annotations(root, *, by_token=False, message_ids=None, weak_readers=
     from ouroboros.dialogue_store import annotation_sources
     from ouroboros.store import StoreError
 
-    index = _annotation_index(pathlib.Path(root) / "logs" / _ANNOTATIONS_NAME, by_token=by_token)
-    if message_ids is not None:
-        index = {key: row for key, row in index.items() if key[1] in message_ids}
+    index = _annotation_index(pathlib.Path(root) / "logs" / _ANNOTATIONS_NAME, by_token=by_token, message_ids=message_ids)
     weak = {key[1] for key in index if key[-1] == ""}  # omitted keys only: a stated-unplaced key is ``None``
     weak.update(weak_readers)
     try:
@@ -176,6 +179,16 @@ def addressed_chat_annotations(root, *, by_token=False, message_ids=None):
     return {key: row for key, row in placed.items() if key[2]}
 
 
+def page_receipts(root, message_ids) -> dict:
+    """The receipts a history page's named owner messages can wear (``addressed_chat_annotations``, nothing else of
+    the journal); a journal that cannot be read answers none, so a page never fails on its receipts."""
+    try:
+        return addressed_chat_annotations(root, message_ids=message_ids)
+    except Exception:
+        log.debug("Routing receipts unreadable for a history page", exc_info=True)
+        return {}
+
+
 def placed_token_receipts(root, message_ids, token):
     """One act's saved facts per source, including a legacy fact that remains unplaced."""
     placed, _ = _placed_annotations(root, by_token=True, message_ids=message_ids)
@@ -196,8 +209,8 @@ def latest_picker_annotation(root, message_id, token):
     return None, next(iter(latest.values())) if len(latest) == 1 else {}
 
 
-def _compatible_annotations(path, *, by_token=False, scoped=False):
-    index = _annotation_index(path, by_token=by_token)
+def _compatible_annotations(path, *, by_token=False, scoped=False, message_ids=None):
+    index = _annotation_index(path, by_token=by_token, message_ids=message_ids)
     if scoped or len(index) != len({key[1:-1] for key in index}):
         index = _resolve_annotation_rooms(path.parent.parent, index)
     latest, rooms, addresses = {}, {}, {}
@@ -230,13 +243,15 @@ def chat_annotation_receipt(drive_root: Any, client_message_id: str, routing_tok
     receipt: the waiter that minted the token polls for its own outcome, and the
     UI projection stays latest-per-message (``latest_chat_annotations``).
     ``source_chat_id``: the reader knows the message's room too (one act quoting
-    two rooms' messages), so it reads that room's row and no other."""
+    two rooms' messages), so it reads that room's row and no other. Every branch
+    resolves only its one message, never the journal's other id-only receipts."""
     path = pathlib.Path(drive_root) / "logs" / _ANNOTATIONS_NAME
     message, token = str(client_message_id or ""), str(routing_token or "")
     if source_row_address is not None:
         return dict(placed_token_receipts(drive_root, {message}, token).get((source_chat_id, message, source_row_address)) or {})
-    row = (scoped_chat_annotations(drive_root, by_token=True).get((int(source_chat_id), message, token))
-           if source_chat_id is not None else _compatible_annotations(path, by_token=True).get((message, token)))
+    scoped = source_chat_id is not None
+    row = _compatible_annotations(path, by_token=True, scoped=scoped, message_ids={message}).get(
+        (int(source_chat_id), message, token) if scoped else (message, token))
     return dict(row) if row else {}
 
 
@@ -376,9 +391,10 @@ def append_chat_annotation(
             if source_row_address:
                 latest = addressed_chat_annotations(drive_root, message_ids={message_id}).get(
                     (source_chat_id, message_id, source_row_address))
-            else:
-                latest = (scoped_chat_annotations(drive_root).get((source_chat_id, message_id))
-                          if source_chat_id is not None else latest_chat_annotations(drive_root).get(message_id))
+            else:  # the compare resolves this one message, as the addressed branch does
+                scoped = source_chat_id is not None
+                latest = _compatible_annotations(path, scoped=scoped, message_ids={message_id}).get(
+                    (source_chat_id, message_id) if scoped else message_id)
             if latest is None:
                 return False
             if require_latest_status is not None and latest.get("status", "") not in require_latest_status:

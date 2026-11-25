@@ -346,7 +346,8 @@ class ChatHistoryResponse(TypedDict, total=False):
     regardless of timestamp and recur across pages. An error answer (400 history_cursor_invalid or
     history_around_invalid, 409 history_view_changed or history_delta_reset, 503 history_source_unavailable
     or migrating) keeps this shape with no rows, ``has_more`` true and the cursor that was sent as ``next_cursor``;
-    a 503 history_source_unavailable may name the store's cause in ``detail``. ``project_registry`` is Main's
+    a 503 history_source_unavailable may name the store's cause in ``detail``, and a 409 history_delta_reset names
+    there why it refused (``history_paging.DELTA_RESET_DETAILS``), with ``stream`` when one stream did. ``project_registry`` is Main's
     alone: ``"unavailable"`` on its refusal while the registry cannot tell its rows from a Project's (its read-only
     archive is ``GET /api/chat/archive``), ``"restored"`` on a successful newest page after the registry came back
     from its saved copy; an absent field says neither. A newest read's 503 other than Main's refusal names
@@ -364,7 +365,8 @@ class ChatHistoryResponse(TypedDict, total=False):
     error: str
     anchor: ChatHistoryAnchor  # an ``around`` read only
     reason_code: str
-    detail: str  # a 503 history_source_unavailable: the store's cause, when it has one
+    detail: str  # a 503 history_source_unavailable: the store's cause, when it has one; a 409 history_delta_reset: why
+    stream: Literal["chat", "progress"]  # a 409 history_delta_reset met in one stream: that stream
     project_registry: Literal["unavailable", "restored"]  # Main only: its refusal, or the list back from its copy
     ordinary_room: int  # a newest read's 503: the room read, still one of this profile's ordinary rooms
     profile_scope: str  # the serving generation's frozen data-profile scope, on a successful page or beside

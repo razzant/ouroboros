@@ -1,28 +1,36 @@
-// This browser's saved room text (chat_preview.js): what enters the bounded record, what a warm opening paints, and
-// how the painted copy gives way to the canonical read without taking a passage the owner holds selected. The chat
-// instance's admission paths (newest read, ↓'s latest page, arrivals, stale and failed reads) are in
-// chat_history_integration.test.js and chat_history_arrivals.test.js; real engines in tests/test_phone_chat_reopen_browser.py.
+// This browser's saved room text (chat_preview.js): what enters a room's bounded entry, what a warm opening paints,
+// how the rooms share one total, which erasers take it, and how the painted copy gives way to the canonical read
+// without taking a passage the owner holds selected. The chat instance's admission paths (newest read, ↓'s latest page,
+// arrivals, stale and failed reads, the socket's late proof) are in chat_history_integration.test.js and
+// chat_history_arrivals.test.js; real engines in tests/test_phone_chat_reopen_browser.py.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { createChatPreview, clearChatPreviews, forgetProjectPreviews, previewsRefused, PREVIEW_KEY } from '../modules/chat_preview.js';
+import vm from 'node:vm';
+import { createChatPreview, clearChatPreviews, forgetProjectPreviews, forgetUnlistedProjectPreviews, previewsRefused,
+    previewEntryKey, PREVIEW_FAMILY, PREVIEW_KEY } from '../modules/chat_preview.js';
 import { senderLabel } from '../modules/chat_activity.js';
-import { installDom, restoreDom, PREVIEW_SCOPE } from './chat_dom_fixture.js';
+import { installDom, memoryStorage, restoreDom, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 
 // A second proven data profile: its rooms are not this one's, though the installation is the same.
 const OTHER_PROFILE = '1234567890abcdef';
+// DESIGN "History edges": a room's share of entry text (all v2's one record held) and every room's total, keys counted.
+const ROOM_CHARS = 200000, TOTAL_CHARS = 1000000;
 
 function fixture(t) {
     const { prior, mount } = installDom();
     t.after(() => restoreDom(prior));
-    const values = new Map();
-    const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)),
-        removeItem: key => values.delete(key) };
+    const storage = memoryStorage(), { values } = storage;
     const make = ({ room = [1, ''], scope = PREVIEW_SCOPE, kept = () => null } = {}) => createChatPreview({ feed: mount, room, scope,
         label: senderLabel, storage: () => storage, mutate: fn => fn(), kept });
-    const record = () => JSON.parse(values.get(PREVIEW_KEY));
+    // A room's stored entry text, and it parsed: when the room was read and its rows.
+    const raw = (room = [1, ''], scope = PREVIEW_SCOPE) => values.get(previewEntryKey(scope, room));
+    const entry = (room, scope) => (raw(room, scope) === undefined ? undefined : JSON.parse(raw(room, scope)));
+    const rows = (room, scope) => entry(room, scope)?.rows;
+    const family = () => [...values.keys()].filter(key => key.startsWith(PREVIEW_FAMILY));
+    const size = () => family().reduce((sum, key) => sum + key.length + values.get(key).length, 0);
     const painted = () => mount.children.find(node => node.dataset.savedPreview === 'true');
-    return { mount, values, storage, make, record, painted };
+    return { mount, values, storage, make, raw, entry, rows, family, size, painted };
 }
 const row = (id, text, extra = {}) => ({ role: 'assistant', text, history_id: id, ...extra });
 
@@ -31,7 +39,7 @@ test('a new room instance paints only the saved words under their speakers: no c
     first.save([row('chat:1', 'An exact saved answer', { task_id: 'ended-work', cancelable: true,
         review_projection: { findings: ['not saved'] }, api_key: 'not saved', attachments: [{ name: 'file.pdf' }] })]);
     first.destroy();
-    assert.doesNotMatch(f.values.get(PREVIEW_KEY), /ended-work|cancelable|api_key|findings|file\.pdf/);
+    assert.doesNotMatch(f.raw(), /ended-work|cancelable|api_key|findings|file\.pdf/);
     const fresh = f.make();
     assert.equal(fresh.show(), true);
     assert.equal(fresh.show(), false, 'painted once');
@@ -55,7 +63,7 @@ test('speakers are frozen as the canonical bubble names them; words and names st
         row('chat:4', 'A reviewed skill', { role: 'system', system_type: 'skill_review' }),
         row('chat:5', '<b>not markup</b>'),
     ]);
-    assert.doesNotMatch(f.values.get(PREVIEW_KEY), /another-window-private|sender_session_id|initiator|source/);
+    assert.doesNotMatch(f.raw(), /another-window-private|sender_session_id|initiator|source/);
     preview.destroy();
     const fresh = f.make();
     fresh.show();
@@ -98,13 +106,12 @@ test('the document proves its data profile: its own rooms paint, another profile
     assert.equal(other.show(), false, 'another profile is not this room');
     other.save([row('chat:2', 'Its own words')]);
     other.destroy();
-    const rows = key => JSON.parse(f.values.get(PREVIEW_KEY)).rooms
-        .find(entry => entry.key === key)?.rows.map(item => item.text);
-    assert.deepEqual(rows(JSON.stringify([PREVIEW_SCOPE, [1, '']])), ['Profile words'], 'each profile keeps its own');
-    assert.deepEqual(rows(JSON.stringify([OTHER_PROFILE, [1, '']])), ['Its own words']);
+    const texts = scope => f.rows([1, ''], scope).map(item => item.text);
+    assert.deepEqual(texts(PREVIEW_SCOPE), ['Profile words'], 'each profile keeps its own');
+    assert.deepEqual(texts(OTHER_PROFILE), ['Its own words']);
     // An installation scope, an older document and a malformed value are no profile proof: the room keeps to its
-    // canonical history and the record gains nothing from it.
-    const saved = f.values.get(PREVIEW_KEY);
+    // canonical history and the store gains nothing from it.
+    const saved = JSON.stringify([...f.values]);
     for (const scope of [null, 'not-a-digest']) {
         doc.querySelector = meta(scope);
         const cold = open();
@@ -113,39 +120,42 @@ test('the document proves its data profile: its own rooms paint, another profile
         cold.append([row('chat:4', 'Never appended')]);
         cold.destroy();
     }
-    assert.equal(f.values.get(PREVIEW_KEY), saved, 'no proof writes nothing');
+    assert.equal(JSON.stringify([...f.values]), saved, 'no proof writes nothing');
     assert.doesNotMatch(saved, /Never saved|Never appended/);
 });
 
-test('only conversation rows with identity enter; refusals and unreadable streams keep the record; an empty read paints nothing', t => {
+test('only conversation rows with identity enter; refusals and unreadable streams keep the entry; an empty read paints nothing', t => {
     const f = fixture(t), preview = f.make();
     preview.save([row('chat:1', 'Kept answer'), row('progress:2', 'narration', { is_progress: true }),
         row('chat:3', 'card row', { system_type: 'task_summary' }), row('', 'no identity'), row('chat:4', ''),
         { ...row('chat:5', 'a quiz'), system_type: 'quiz' }]);
-    assert.deepEqual(f.record().rooms[0].rows.map(item => item.text), ['Kept answer']);
-    const saved = f.values.get(PREVIEW_KEY);
+    assert.deepEqual(f.rows().map(item => item.text), ['Kept answer']);
+    const saved = f.raw();
     preview.save([row('chat:9', 'wrong')], { reason_code: 'history_source_unavailable' });
     preview.save([], { window: { complete: false, truncated_by: ['chat_source_unavailable'] } });
-    assert.equal(f.values.get(PREVIEW_KEY), saved);
+    assert.equal(f.raw(), saved);
     preview.save([row('chat:9', 'bounded')], { window: { complete: false, truncated_by: ['quota'] } });
-    assert.deepEqual(f.record().rooms[0].rows.map(item => item.text), ['bounded'], 'an incomplete window is still a window');
+    assert.deepEqual(f.rows().map(item => item.text), ['bounded'], 'an incomplete window is still a window');
     preview.save([], { window: { complete: true } });
-    assert.deepEqual(f.record().rooms[0].rows, [], 'read empty: the room keeps an empty record');
+    assert.deepEqual(f.rows(), [], 'read empty: the room keeps an empty entry');
     assert.equal(f.make().show(), false);
 });
 
-test('arrivals merge by identity in place; a room without a record keeps no fragment', t => {
+test('arrivals merge by identity in place; a room without an entry keeps no fragment', t => {
     const f = fixture(t), preview = f.make();
     preview.append([row('chat:1', 'Arrived before any newest read')]);
-    assert.equal(f.values.get(PREVIEW_KEY), undefined);
+    assert.deepEqual(f.family(), []);
     preview.save([]);
     preview.append([row('chat:1', 'Arrived since opening')]);
     preview.append([row('chat:1', 'Arrived since opening')]);
     preview.append([row('chat:1', 'Edited in place'), row('chat:2', 'Next', { role: 'user', sender_label: 'Mira', source: 'telegram' }),
         row('progress:3', 'narration', { is_progress: true })]);
-    const rows = f.record().rooms[0].rows;
-    assert.deepEqual(rows.map(item => [item.id, item.text, item.speaker]),
+    assert.deepEqual(f.rows().map(item => [item.id, item.text, item.speaker]),
         [['chat:1', 'Edited in place', 'Ouroboros'], ['chat:2', 'Next', 'Mira']]);
+    // The entry gave way to rooms read since: what arrives next waits for the room's next newest window.
+    f.values.delete(previewEntryKey(PREVIEW_SCOPE, [1, '']));
+    preview.append([row('chat:3', 'Arrived after it gave way')]);
+    assert.equal(f.raw(), undefined, 'no fragment stands for the room');
 });
 
 test('each row goes where the feed puts its bubble: by time, a delayed arrival at its time, a missing time last', t => {
@@ -154,7 +164,7 @@ test('each row goes where the feed puts its bubble: by time, a delayed arrival a
     // stamped with the moment it is drawn (chat.js addMessage), after everything before it.
     const f = fixture(t), preview = f.make();
     const at = minute => `2026-11-03T12:${String(minute).padStart(2, '0')}:00Z`;
-    const ids = () => f.record().rooms[0].rows.map(item => item.id);
+    const ids = () => f.rows().map(item => item.id);
     preview.save([row('chat:1', 'A', { ts: at(0) }), row('chat:2', 'B', { role: 'user', ts: at(2) }),
         row('chat:3', 'C, delivered late', { ts: at(1) }), row('chat:4', 'D, B\'s minute', { ts: at(2) }),
         row('chat:5', 'E, untimed')]);
@@ -178,7 +188,7 @@ test('equal times follow stream position exactly as the feed compares it, before
     // insertTimelineNode breaks a tie with compareHistoryPosition over the bubble's dataset strings: the source compares
     // as text, so after a log rotation `chat:rotation-10` sorts before `chat:rotation-9`, whatever order they came in.
     const f = fixture(t), preview = f.make();
-    const T = '2026-11-03T12:00:00Z', ids = () => f.record().rooms[0].rows.map(item => item.id);
+    const T = '2026-11-03T12:00:00Z', ids = () => f.rows().map(item => item.id);
     const at = (source, offset) => ({ ts: T, history_position: { source, offset } });
     preview.save([row('chat:a', 'Older log, later offset', at('chat:rotation-9', 500)),
         row('chat:b', 'Newer log, same millisecond', at('chat:rotation-10', 0)),
@@ -206,31 +216,96 @@ test('the feed\'s own tie rule orders the preview: imported from chat_history_re
     assert.doesNotMatch(source, /localeCompare/, 'no second copy of the stream comparison');
 });
 
-test('a Project the registry says is going away takes its saved text with it; every other room keeps its own', t => {
+test('a Project the registry says is going away takes its saved text in the profile that said so; every other room keeps its own', t => {
+    // Astra 2: two data profiles of this origin can hold the same Project id; one profile's word takes its own room's.
     const f = fixture(t);
     f.make({ room: [1, ''] }).save([row('chat:1', 'Main words')]);
     f.make({ room: [100, 'gate-0'] }).save([row('chat:1', 'Words of the deleted Project')]);
     f.make({ room: [100, 'gate-0'], scope: OTHER_PROFILE }).save([row('chat:1', 'Its words in another profile')]);
     f.make({ room: [101, 'gate-1'] }).save([row('chat:1', 'Another Project keeps these')]);
-    const others = f.record().rooms.filter(room => JSON.parse(room.key)[1][1] !== 'gate-0');
-    forgetProjectPreviews(['gate-0'], f.storage);
-    assert.deepEqual(f.record().rooms, others, 'the others keep their rows, order and bounds byte for byte');
-    assert.doesNotMatch(f.values.get(PREVIEW_KEY), /deleted Project|another profile/);
+    const gone = previewEntryKey(PREVIEW_SCOPE, [100, 'gate-0']);
+    const others = [...f.values].filter(([key]) => key !== gone);
+    forgetProjectPreviews(['gate-0'], PREVIEW_SCOPE, f.storage);
+    assert.deepEqual([...f.values], others, 'the others keep their entries byte for byte, the same id in another profile too');
+    assert.doesNotMatch(JSON.stringify([...f.values]), /deleted Project/);
     assert.equal(f.make({ room: [100, 'gate-0'] }).show(), false);
+    assert.equal(f.make({ room: [100, 'gate-0'], scope: OTHER_PROFILE }).show(), true);
     assert.equal(f.make({ room: [101, 'gate-1'] }).show(), true);
-    // Nothing to forget writes nothing; storage refused or a record unread changes nothing and throws nothing.
-    const before = f.values.get(PREVIEW_KEY);
+    // A word for no proven profile takes nothing; nothing to forget writes nothing; storage refused throws nothing.
+    const before = [...f.values];
     const writes = [];
-    forgetProjectPreviews(['unknown', ''], { ...f.storage, setItem: (...args) => writes.push(args) });
-    forgetProjectPreviews([], { getItem() { throw new Error('not even read'); } });
-    assert.deepEqual([writes, f.values.get(PREVIEW_KEY)], [[], before]);
-    assert.doesNotThrow(() => forgetProjectPreviews(['gate-1'], { getItem() { throw new Error('denied'); } }));
-    f.values.set(PREVIEW_KEY, '{');
-    assert.doesNotThrow(() => forgetProjectPreviews(['gate-1'], f.storage));
-    assert.equal(f.values.get(PREVIEW_KEY), '{');
+    const watching = { ...f.storage, setItem: (...args) => writes.push(args), removeItem: (...args) => writes.push(args) };
+    for (const scope of ['', 'installation', undefined]) forgetProjectPreviews(['gate-0'], scope, watching);
+    forgetProjectPreviews(['unknown', ''], OTHER_PROFILE, watching);
+    forgetProjectPreviews([], PREVIEW_SCOPE, { getItem() { throw new Error('not even read'); } });
+    assert.deepEqual([writes, [...f.values]], [[], before]);
+    assert.doesNotThrow(() => forgetProjectPreviews(['gate-1'], PREVIEW_SCOPE, { getItem() { throw new Error('denied'); } }));
 });
 
-test('a refusal anywhere in this document takes the record and every painted copy, selection or not; nothing else does', t => {
+test('a list that says it is complete under its profile takes that profile\'s rooms of the Projects it omits, saved before it was asked', t => {
+    // Astra 1, 2 (owner 2A «копии надо стирать … при удалении проекта»): only an answer that says it is complete
+    // (`complete: true`) and names its data profile (`profile_scope`) proves a Project gone, for that profile. Main,
+    // another profile's rooms and a room saved after the list was asked (a Project created since) stay.
+    const f = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    f.make({ room: [1, ''] }).save([row('chat:1', 'Main words')]);
+    f.make({ room: [100, 'gone'] }).save([row('chat:1', 'Words of a Project deleted elsewhere')]);
+    f.make({ room: [101, 'going'] }).save([row('chat:1', 'Words of a Project being deleted')]);
+    f.make({ room: [102, 'kept'] }).save([row('chat:1', 'A listed Project keeps these')]);
+    f.make({ room: [100, 'gone'], scope: OTHER_PROFILE }).save([row('chat:1', 'Another profile keeps its own')]);
+    t.mock.timers.tick(1000);
+    const asked = Date.now();
+    t.mock.timers.tick(1000);
+    f.make({ room: [103, 'new'] }).save([row('chat:1', 'A Project created after the list was asked')]);
+    const keys = () => f.family().map(key => key.slice(PREVIEW_KEY.length + 1));
+    const listed = [{ id: 'kept', lifecycle: 'active' }, { id: 'going', lifecycle: 'deleting' }];
+    const all = keys();
+    // No proof of absence: an incomplete snapshot that still lists its healthy neighbour, an older core's answer (neither
+    // word), a complete one naming no profile or no proven one, one with no list, none at all.
+    for (const answer of [{ projects: listed, complete: false, profile_scope: PREVIEW_SCOPE }, { projects: listed },
+        { projects: listed, complete: true }, { projects: listed, complete: true, profile_scope: 'installation' },
+        { projects: listed, complete: 'true', profile_scope: PREVIEW_SCOPE }, { complete: true, profile_scope: PREVIEW_SCOPE },
+        undefined]) {
+        forgetUnlistedProjectPreviews(answer, asked, f.storage);
+        assert.deepEqual(keys(), all, `${JSON.stringify(answer)} takes nothing`);
+    }
+    // Another profile's complete list takes its own room alone; this profile's, the two of its Projects it omits.
+    forgetUnlistedProjectPreviews({ projects: [], complete: true, profile_scope: OTHER_PROFILE }, asked, f.storage);
+    assert.deepEqual(all.filter(key => !keys().includes(key)), [JSON.stringify([OTHER_PROFILE, [100, 'gone']])]);
+    forgetUnlistedProjectPreviews({ projects: listed, complete: true, profile_scope: PREVIEW_SCOPE }, asked, f.storage);
+    assert.deepEqual(keys(), ['', JSON.stringify([PREVIEW_SCOPE, [1, '']]), JSON.stringify([PREVIEW_SCOPE, [102, 'kept']]),
+        JSON.stringify([PREVIEW_SCOPE, [103, 'new']])]);
+    assert.doesNotThrow(() => forgetUnlistedProjectPreviews({ projects: [], complete: true, profile_scope: PREVIEW_SCOPE }, 1,
+        { getItem() { throw new Error('denied'); } }));
+});
+
+test('v2 rooms moved into entries were saved before any list was asked: a complete list still takes the ones it omits', t => {
+    // Astra 7: when a list's answer is the first reader of the family, the v2 record moves then; its rooms keep their
+    // order below any time this page could have asked, so that answer, or any asked after, takes the Projects it omits.
+    const f = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 2000 });
+    const words = text => [{ id: 'chat:1', role: 'user', text, speaker: 'You' }];
+    const v2 = () => f.values.set(PREVIEW_KEY, JSON.stringify({ v: 2, rooms: [
+        { key: JSON.stringify([PREVIEW_SCOPE, [100, 'gone']]), rows: words('Words of a Project deleted since') },
+        { key: JSON.stringify([PREVIEW_SCOPE, [102, 'kept']]), rows: words('A listed Project keeps these') },
+        { key: JSON.stringify([PREVIEW_SCOPE, [1, '']]), rows: words('Main words') }] }));
+    const list = { projects: [{ id: 'kept', lifecycle: 'active' }], complete: true, profile_scope: PREVIEW_SCOPE };
+    const projects = () => f.family().filter(key => key !== PREVIEW_KEY)
+        .map(key => JSON.parse(key.slice(PREVIEW_KEY.length + 1))[1][1]);
+    v2();
+    const asked = Date.now();
+    t.mock.timers.tick(100);
+    forgetUnlistedProjectPreviews(list, asked, f.storage);  // its answer moves the record at 2100
+    assert.deepEqual(projects(), ['kept', ''], 'asked before the record moved');
+    clearChatPreviews(f.storage);
+    v2();
+    assert.equal(f.make({ room: [1, ''] }).show(), true, 'moved by a show');
+    t.mock.timers.tick(100);
+    forgetUnlistedProjectPreviews(list, Date.now(), f.storage);
+    assert.deepEqual(projects(), ['kept', ''], 'asked after the record moved');
+});
+
+test('a refusal anywhere in this document takes every entry and every painted copy, selection or not; nothing else does', t => {
     const f = fixture(t), w = selectionWorld(f);
     f.make({ room: [1, ''] }).save([row('chat:1', 'Main words')]);
     f.make({ room: [2, ''] }).save([row('chat:2', 'Project words')]);
@@ -244,10 +319,10 @@ test('a refusal anywhere in this document takes the record and every painted cop
     assert.equal(copies(), 1, 'the held copy stays, labelled');
     for (const status of [500, 503, 404, undefined]) assert.equal(previewsRefused({ status }, f.storage), false);
     assert.equal(copies(), 1, 'a failed read is no statement about the session');
-    assert.ok(f.values.get(PREVIEW_KEY));
+    assert.equal(f.family().length, 3, 'the record and both rooms\' entries');
     assert.equal(previewsRefused({ status: 401 }, f.storage), true);
     assert.equal(copies(), 0, 'every room\'s copy goes, the held one too');
-    assert.equal(f.values.get(PREVIEW_KEY), undefined);
+    assert.deepEqual(f.family(), []);
     // A room's own refused read does the same for its neighbours; a destroyed preview is left alone.
     f.make({ room: [1, ''] }).save([row('chat:1', 'Again')]);
     const again = f.make({ room: [1, ''] }), gone = f.make({ room: [1, ''] });
@@ -256,16 +331,20 @@ test('a refusal anywhere in this document takes the record and every painted cop
     const other = f.make({ room: [2, ''] });
     other.refused({ status: 403 });
     assert.equal(copies(), 0);
-    assert.equal(f.values.get(PREVIEW_KEY), undefined);
+    assert.deepEqual(f.family(), []);
 });
 
 test('storage refusal, corrupt data and unsupported versions open cold and leave the room working', t => {
-    const f = fixture(t);
-    for (const raw of ['{', '{"v":3,"rooms":[]}', `{"v":2,"rooms":[],"pad":"${'x'.repeat(200000)}"}`,
-        `{"v":1,"rooms":[{"key":${JSON.stringify(JSON.stringify([PREVIEW_SCOPE, [1, '']]))},"rows":[{"id":"chat:1","role":"user","text":"x"}]}]}`,
-        `{"v":2,"rooms":[{"key":${JSON.stringify(JSON.stringify([PREVIEW_SCOPE, [1, '']]))},"rows":[{"id":"chat:1","role":"intruder","text":"x","speaker":"y"}]}]}`]) {
-        f.values.set(PREVIEW_KEY, raw);
-        assert.equal(f.make().show(), false, raw.slice(0, 40));
+    const f = fixture(t), entry = previewEntryKey(PREVIEW_SCOPE, [1, '']);
+    const room = (rows) => JSON.stringify(JSON.stringify([PREVIEW_SCOPE, [1, '']])) + `,"rows":${JSON.stringify(rows)}`;
+    for (const [record, text] of [['{', undefined], ['{"v":4}', '{"read":1,"rows":[]}'], [`{"v":2,"rooms":[],"pad":"${'x'.repeat(200000)}"}`, undefined],
+        [`{"v":1,"rooms":[{"key":${room([{ id: 'chat:1', role: 'user', text: 'x', speaker: 'You' }])}}]}`, undefined],
+        [`{"v":2,"rooms":[{"key":${room([{ id: 'chat:1', role: 'intruder', text: 'x', speaker: 'y' }])}}]}`, undefined],
+        ['{"v":3}', '{'], ['{"v":3}', `{"read":1,"rows":[{"id":"chat:1","role":"user","text":"${'x'.repeat(ROOM_CHARS)}","speaker":"You"}]}`],
+        ['{"v":3}', '{"read":1,"rows":[{"id":"chat:1","role":"intruder","text":"x","speaker":"y"}]}']]) {
+        f.values.set(PREVIEW_KEY, record);
+        if (text !== undefined) f.values.set(entry, text);
+        assert.equal(f.make().show(), false, `${record.slice(0, 40)} ${String(text).slice(0, 40)}`);
     }
     const denied = createChatPreview({ feed: f.mount, room: [1, ''], scope: PREVIEW_SCOPE, label: senderLabel,
         mutate: fn => fn(), storage: () => { throw new Error('denied'); } });
@@ -273,26 +352,394 @@ test('storage refusal, corrupt data and unsupported versions open cold and leave
     assert.doesNotThrow(() => denied.save([row('chat:1', 'x')]));
     assert.doesNotThrow(() => denied.failed({ status: 401 }));
     assert.doesNotThrow(() => clearChatPreviews({ removeItem() { throw new Error('denied'); } }));
+    // A store that takes no writes (a full origin, a refused private window) keeps no older text for a newer read.
+    const g = fixture(t);
+    g.make().save([row('chat:1', 'Read before the store filled')]);
+    const full = { ...g.storage, setItem() { throw Object.assign(new Error('full'), { name: 'QuotaExceededError' }); } };
+    createChatPreview({ feed: g.mount, room: [1, ''], scope: PREVIEW_SCOPE, label: senderLabel, mutate: fn => fn(),
+        storage: () => full }).save([row('chat:2', 'Read once it was full')]);
+    assert.equal(g.raw(), undefined, 'the room opens cold rather than with its older words');
 });
 
-test('the record stays under 200,000 characters and 8 rooms, keeps this room first and never cuts a person\'s text', t => {
-    const f = fixture(t), text = 'long exact passage '.repeat(1000);
-    for (let i = 0; i < 12; i += 1) {
-        f.make({ room: [i + 1, ''] }).save(Array.from({ length: 100 }, (_, j) => row(`chat:${j}`, text, { role: 'user' })));
-        const raw = f.values.get(PREVIEW_KEY), saved = JSON.parse(raw);
-        assert.ok(raw.length <= 200000, `${raw.length} characters`);
-        assert.equal(saved.rooms[0].key, JSON.stringify([PREVIEW_SCOPE, [i + 1, '']]), 'the room just read is kept first');
-        assert.ok(saved.rooms.every(room => room.rows.length <= 80 && room.rows.every(item => item.text === text)));
-        assert.equal(saved.rooms[0].rows.at(-1).id, 'chat:99', 'its newest rows stay');
+test('more than eight rooms keep their words; past the total the rooms saved least recently give way first', t => {
+    const f = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    const read = (room, rows) => { f.make({ room }).save(rows); t.mock.timers.tick(1000); };
+    // Twelve small rooms all keep their words (the one v2 record kept eight).
+    for (let i = 1; i <= 12; i += 1) read([i, ''], [row('chat:1', `room ${i}`)]);
+    for (let i = 1; i <= 12; i += 1) assert.equal(f.make({ room: [i, ''] }).show(), true, `room ${i}`);
+    // Rooms that fill their own share (five 19,000-character rows each, about 95,000): every write stays in the total,
+    // and the rooms that stand are the ones saved most recently.
+    const text = 'long exact passage '.repeat(1000), order = [], sizes = new Map();
+    const big = Array.from({ length: 5 }, (_, j) => row(`chat:${j}`, text, { role: 'user' }));
+    for (let i = 1; i <= 12; i += 1) {
+        read([i, 'p'], big);
+        const key = previewEntryKey(PREVIEW_SCOPE, [i, 'p']);
+        order.push(key);
+        sizes.set(key, key.length + f.values.get(key).length);
+        assert.ok(f.size() <= TOTAL_CHARS, `${f.size()} characters after room ${i}`);
     }
-    // Small rooms: the eight read most recently, newest first; a room read again moves to the front.
-    const g = fixture(t);
-    for (let i = 1; i <= 10; i += 1) g.make({ room: [i, ''] }).save([row('chat:1', `room ${i}`)]);
-    assert.deepEqual(g.record().rooms.map(room => JSON.parse(room.key)[1][0]), [10, 9, 8, 7, 6, 5, 4, 3]);
-    g.make({ room: [5, ''] }).save([row('chat:1', 'room 5 again')]);
-    assert.deepEqual(g.record().rooms.map(room => JSON.parse(room.key)[1][0]), [5, 10, 9, 8, 7, 6, 4, 3]);
-    clearChatPreviews(g.storage);
-    assert.equal(g.make().show(), false);
+    const standing = order.filter(key => f.values.has(key)), gone = order.filter(key => !f.values.has(key));
+    assert.ok(standing.length > 8 && gone.length > 0, `${standing.length} big rooms stand, ${gone.length} gave way`);
+    assert.deepEqual(order.slice(-standing.length), standing, 'the rooms saved most recently stand');
+    assert.equal(f.family().some(key => key.endsWith(',""]]')), false, 'every small room, saved before them, gave way first');
+    // Only as much gives way as the total needs: the last room that went would not have fit beside them.
+    assert.ok(f.size() + sizes.get(gone.at(-1)) > TOTAL_CHARS);
+    // A room read (and so saved) again moves to the front: the next room to give way is the one saved least recently after it.
+    const [oldest, second] = standing;
+    read(JSON.parse(oldest.slice(PREVIEW_KEY.length + 1))[1], big);
+    read([13, 'p'], big);
+    assert.equal(f.values.has(oldest), true, 'read again, it stands');
+    assert.equal(f.values.has(second), false, 'the one saved least recently since gave way');
+    assert.ok(f.size() <= TOTAL_CHARS);
+});
+
+// Ten rooms of five 19,000-character rows each (about 95,000 characters with its key): together just under the total.
+const BIG = Array.from({ length: 5 }, (_, j) => row(`chat:${j}`, 'long exact passage '.repeat(1000), { role: 'user' }));
+function tenRooms(f, t) {
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    const read = (room) => { f.make({ room }).save(BIG); t.mock.timers.tick(1000); };
+    for (let i = 1; i <= 10; i += 1) read([i, 'p']);
+    assert.ok(f.size() <= TOTAL_CHARS && f.family().length === 11, 'all ten stand');
+    return read;
+}
+const entryOf = room => previewEntryKey(PREVIEW_SCOPE, room);
+
+// Every write and removal `act` makes in the fixture's store.
+function writesOf(f, act) {
+    const writes = [], { setItem, removeItem } = f.storage;
+    f.storage.setItem = (key, value) => { writes.push(['set', key]); setItem(key, value); };
+    f.storage.removeItem = (key) => { writes.push(['remove', key]); removeItem(key); };
+    try { act(); } finally { Object.assign(f.storage, { setItem, removeItem }); }
+    return writes;
+}
+
+test('the order is when a room\'s copy was saved: a show or a read with nothing new writes nothing', t => {
+    // Chair, review wave 2 (astra 5): each newest read saves its room, and that save is its place in the order; a show
+    // or an arrivals read that brought no conversation row moves nothing and writes nothing.
+    const f = fixture(t), read = tenRooms(f, t);
+    const before = f.rows([2, 'p']);
+    assert.deepEqual(writesOf(f, () => assert.equal(f.make({ room: [1, 'p'] }).show(), true, 'the room saved least recently')),
+        [], 'a show writes nothing');
+    t.mock.timers.tick(1000);
+    assert.deepEqual(writesOf(f, () => f.make({ room: [2, 'p'] }).append([row('progress:9', 'narration only',
+        { is_progress: true })])), [], 'nothing new writes nothing');
+    t.mock.timers.tick(1000);
+    read([11, 'p']);
+    assert.deepEqual([1, 2, 3, 4].map(i => f.values.has(entryOf([i, 'p']))), [false, true, true, true],
+        'the room saved least recently gave way, and only it, shown or not');
+    assert.deepEqual(f.rows([2, 'p']), before, 'a room read with nothing new keeps its rows');
+    assert.ok(f.size() <= TOTAL_CHARS);
+    // A room without an entry notes nothing: it keeps no fragment.
+    f.make({ room: [12, 'p'] }).append([]);
+    assert.equal(f.values.has(entryOf([12, 'p'])), false);
+});
+
+test('a show and what follows it never undo another tab\'s erasure, nor put older words over its newer save', t => {
+    // Astra 5: a write of this room between its read and what follows would bring back an entry another tab removed
+    // since (its word that the Project is gone) or put this tab's older words over that tab's newer save.
+    for (const [other, left] of [['removes the entry', undefined], ['saves newer words', ['Newer words of another tab']]]) {
+        const f = fixture(t), key = entryOf([2, 'p']);
+        f.make({ room: [2, 'p'] }).save([row('chat:1', 'Read by this tab')]);
+        const act = () => (left ? f.make({ room: [2, 'p'] }).save([row('chat:2', left[0])]) : f.values.delete(key));
+        // The other tab acts once, between this tab's read of the entry and the first write this tab makes to it.
+        let acted = false;
+        const { setItem } = f.storage;
+        f.storage.setItem = (name, value) => { if (name === key && !acted) { acted = true; act(); } setItem(name, value); };
+        const room = f.make({ room: [2, 'p'] });
+        assert.equal(room.show(), true, `${other}: painted from this tab's read`);
+        if (!acted) { acted = true; act(); }
+        room.append([]);
+        room.append([row('progress:3', 'narration only', { is_progress: true })]);
+        room.retire();
+        room.destroy();
+        f.storage.setItem = setItem;
+        assert.deepEqual(f.rows([2, 'p'])?.map(item => item.text), left, `another tab ${other}: that stands`);
+    }
+});
+
+test('a room\'s own entry is written before any other gives way: a refusal other than a full origin takes no other room\'s', t => {
+    // Grok 1: a write that does not land takes this room's older text (it never stands for a newer read) and nothing
+    // else; only an origin too full to take it makes others give way (the next tests).
+    const f = fixture(t), read = tenRooms(f, t);
+    const target = entryOf([11, 'p']);  // an eleventh room: its text does not fit beside the ten
+    const others = () => [...f.values].filter(([key]) => key !== target);
+    const storing = setItem => createChatPreview({ feed: f.mount, room: [11, 'p'], scope: PREVIEW_SCOPE, label: senderLabel,
+        mutate: fn => fn(), storage: () => ({ get length() { return f.storage.length; }, key: f.storage.key,
+            getItem: f.storage.getItem, removeItem: f.storage.removeItem, setItem }) });
+    const refusing = name => (key, value) => {
+        if (key === target) throw Object.assign(new Error('refused'), { name });
+        f.storage.setItem(key, value);
+    };
+    const kept = others();
+    storing(refusing('SecurityError')).save(BIG);
+    assert.deepEqual(others(), kept, 'a refusal that is not a full origin takes no other room\'s entry');
+    assert.equal(f.values.has(target), false);
+    read([11, 'p']);  // written: the room saved least recently gave way for it
+    assert.equal(f.values.has(entryOf([1, 'p'])), false);
+    storing(refusing('SecurityError')).save([]);
+    assert.equal(f.values.has(target), false, 'a write that did not land leaves no older text for the newer read');
+    assert.ok(f.size() <= TOTAL_CHARS);
+});
+
+// A browser's Storage that holds `capacity` characters of keys and values in all and refuses a write past it with
+// QuotaExceededError, a replacement counted by what it replaces (an origin's quota, counted in characters).
+function cappedStorage(capacity) {
+    const storage = memoryStorage(), { values, setItem } = storage;
+    storage.capacity = capacity;
+    storage.setItem = (key, value) => {
+        let used = key.length + String(value).length;
+        for (const [name, text] of values) if (name !== key) used += name.length + text.length;
+        if (used > storage.capacity) throw Object.assign(new Error('full'), { name: 'QuotaExceededError' });
+        setItem(key, value);
+    };
+    return storage;
+}
+// Characters a store holds, keys and values.
+const used = storage => [...storage.values].reduce((sum, [key, text]) => sum + key.length + text.length, 0);
+
+test('an origin too full for a write: the others give way one at a time, saved least recently first, until it lands', t => {
+    // Astra 6 and w3 6: the write is asked again after each room that gives way, so only as many go as it needs, however
+    // much room the origin already had: a room grown by one character on a full origin takes one room's place, a new
+    // room with a longer key two, and a new room one character past the room already free one. Each origin here holds
+    // what it stores and the room it is said to have free.
+    const { mount } = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    const keys = storage => [...storage.values.keys()].filter(key => key !== PREVIEW_KEY);
+    const preview = (storage, room) => createChatPreview({ feed: mount, room, scope: PREVIEW_SCOPE, label: senderLabel,
+        mutate: fn => fn(), storage: () => storage });
+    const saving = (storage, room, rows) => { preview(storage, room).save(rows); t.mock.timers.tick(1000); };
+    const filled = (rooms) => {
+        const storage = cappedStorage(Infinity);
+        for (const [room, rows] of rooms) saving(storage, room, rows);
+        const capped = cappedStorage(used(storage));
+        for (const [key, text] of storage.values) capped.values.set(key, text);
+        return capped;
+    };
+    // Nine rooms of 10,000 characters, then one of 100,000 saved last; that one grows by a character.
+    const small = Array.from({ length: 9 }, (_, i) => [[i + 1, 'p'], [row('chat:1', 'x'.repeat(10000))]]);
+    const grown = filled([...small, [[10, 'p'], [row('chat:1', 'y'.repeat(100000))]]]);
+    saving(grown, [10, 'p'], [row('chat:1', 'y'.repeat(100001))]);
+    assert.equal(JSON.parse(grown.values.get(entryOf([10, 'p']))).rows[0].text.length, 100001, 'written');
+    assert.deepEqual(keys(grown), [...small.slice(1).map(([room]) => entryOf(room)), entryOf([10, 'p'])],
+        'one room gave way for one character: the one saved least recently');
+    // Two rooms of equal text; a new room with the same text under a longer key needs both their places.
+    const words = [row('chat:1', 'z'.repeat(1000))], longer = [3, 'a Project id longer than the others'];
+    const first = filled([[[1, 'a'], words], [[2, 'b'], words]]);
+    saving(first, longer, words);
+    assert.deepEqual(keys(first), [entryOf(longer)], 'both gave way and the new room is saved');
+    assert.deepEqual(JSON.parse(first.values.get(entryOf(longer))).rows.map(item => item.text), [words[0].text]);
+    // Astra w3 6: ten rooms of about 1,000 characters, and the origin has room free for all but one character of a new
+    // room's key and text (8,000 characters): the room saved least recently gives way, and only it.
+    const ten = Array.from({ length: 10 }, (_, i) => [[i + 1, 'q'], [row('chat:1', 'v'.repeat(1000))]]);
+    const partial = filled(ten), wide = [row('chat:1', 'u'.repeat(8000))], probe = cappedStorage(Infinity);
+    preview(probe, [11, 'q']).save(wide);  // what that room takes, saved now
+    partial.capacity += entryOf([11, 'q']).length + probe.values.get(entryOf([11, 'q'])).length - 1;
+    saving(partial, [11, 'q'], wide);
+    assert.deepEqual(keys(partial), [...ten.slice(1).map(([room]) => entryOf(room)), entryOf([11, 'q'])],
+        'one character past the room already free: one room gave way, the one saved least recently');
+    // A write that adds nothing to a full origin lands where it stands.
+    const same = filled([[[1, 'a'], words], [[2, 'b'], words]]);
+    saving(same, [2, 'b'], [row('chat:1', 'y'.repeat(1000))]);
+    assert.deepEqual(keys(same), [entryOf([1, 'a']), entryOf([2, 'b'])], 'nothing gave way');
+    assert.equal(JSON.parse(same.values.get(entryOf([2, 'b']))).rows[0].text, 'y'.repeat(1000));
+    // Fable w2 1, astra w3 1: a write that cannot land even once every other room gave way (in a real origin the
+    // shell's own keys hold the rest). What gave way stays gone (a cache), nothing is written back, and the room's own
+    // older text goes: no older text stands for its newer read.
+    const three = filled([[[1, 'a'], words], [[2, 'b'], words], [[3, 'c'], words]]), asked = [], { setItem } = three;
+    three.setItem = (key, value) => { asked.push(key); setItem(key, value); };
+    saving(three, [3, 'c'], [row('chat:1', 'w'.repeat(5000))]);
+    assert.deepEqual(keys(three), [], 'every other room gave way, and the room keeps no older text');
+    assert.deepEqual([...new Set(asked)], [entryOf([3, 'c'])], 'no room that gave way was written back');
+});
+
+test('a full origin\'s write never writes back a room that gave way: another tab\'s erasure or newer save meanwhile stands', t => {
+    // Astra w3 1: while a room that gave way is absent, another tab may take it (its Project was deleted: the record
+    // stays, so words written back would paint again) or save newer words under it; then this write fails all the same.
+    const { mount } = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    const gone = [9, 'gone'], preview = (storage, room) => createChatPreview({ feed: mount, room, scope: PREVIEW_SCOPE,
+        label: senderLabel, mutate: fn => fn(), storage: () => storage });
+    for (const [other, act, left] of [
+        ['erases its Project', storage => forgetProjectPreviews(['gone'], PREVIEW_SCOPE, storage), undefined],
+        ['saves newer words', storage => preview(storage, gone).save([row('chat:2', 'n'.repeat(1000))]), 'n'.repeat(1000)]]) {
+        const storage = cappedStorage(Infinity);
+        preview(storage, gone).save([row('chat:1', 'o'.repeat(1000))]);
+        t.mock.timers.tick(1000);
+        storage.capacity = used(storage);  // full: and a new room larger than the one that gives way
+        // The other tab acts once, right after this tab's write made the room give way.
+        const { removeItem } = storage;
+        storage.removeItem = (key) => {
+            removeItem(key);
+            if (key === entryOf(gone)) { storage.removeItem = removeItem; act(storage); }
+        };
+        preview(storage, [10, 'p']).save([row('chat:1', 'x'.repeat(5000))]);
+        storage.removeItem = removeItem;
+        assert.equal(storage.values.has(entryOf([10, 'p'])), false, `another tab ${other}: this write did not land`);
+        const kept = storage.values.get(entryOf(gone));
+        assert.deepEqual(kept && JSON.parse(kept).rows.map(item => item.text), left && [left], `another tab ${other}: that stands`);
+        assert.equal(preview(storage, gone).show(), Boolean(left),
+            `another tab ${other}: a later opening paints ${left ? 'its words' : 'nothing'}, never the older words`);
+    }
+});
+
+test('a write that lands counts the others only then: another tab\'s erasure meanwhile stands, a room it took makes none give way', t => {
+    // Astra w4 2: others counted before the write lands act on what another tab changed meanwhile. A Project it erased
+    // while they were read would stand again under the write, and a room it removed just before the write would still
+    // count toward the total, so a room that fits would give way with it. Only a full origin surveys them first.
+    const { mount } = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    const preview = (storage, room) => createChatPreview({ feed: mount, room, scope: PREVIEW_SCOPE, label: senderLabel,
+        mutate: fn => fn(), storage: () => storage });
+    const saving = (storage, room, rows) => { preview(storage, room).save(rows); t.mock.timers.tick(1000); };
+    const texts = (storage, room) => {
+        const kept = storage.values.get(entryOf(room));
+        return kept && JSON.parse(kept).rows.map(item => item.text);
+    };
+    // A newer read of Project two is saved; the other tab acts once, while this write reads Project one's entry.
+    for (const [other, act, left] of [['does nothing', null, ['Read again']],
+        ['erases Project two meanwhile', storage => forgetProjectPreviews(['two'], PREVIEW_SCOPE, storage), undefined]]) {
+        const storage = memoryStorage(), { getItem } = storage;
+        saving(storage, [1, 'one'], [row('chat:1', 'Project one')]);
+        saving(storage, [2, 'two'], [row('chat:1', 'Read before')]);
+        let reads = 0;
+        storage.getItem = (key) => { if (key === entryOf([1, 'one']) && !reads++) act?.(storage); return getItem(key); };
+        saving(storage, [2, 'two'], [row('chat:2', 'Read again')]);
+        storage.getItem = getItem;
+        assert.equal(reads, 1, `another tab ${other}: the write read Project one's entry`);
+        assert.deepEqual(texts(storage, [2, 'two']), left, `another tab ${other}: that stands`);
+        assert.equal(preview(storage, [2, 'two']).show(), Boolean(left),
+            `another tab ${other}: a later opening paints ${left ? 'the newer read' : 'nothing'}`);
+        assert.deepEqual(texts(storage, [1, 'one']), ['Project one'], `another tab ${other}: the room read keeps its words`);
+    }
+    // Nine rooms of about 95,000 characters, and a tenth saving 150,000: past the total only while the ninth stands.
+    // Alone, the room saved least recently gives way; with Project p9 taken just before the write lands, none does.
+    const wide = [row('chat:1', 'w'.repeat(150000))], tenth = [10, 'p10'], ninth = [9, 'p9'];
+    for (const [other, act, gone] of [['does nothing', null, 1],
+        ['erases Project p9 just before the write', storage => forgetProjectPreviews(['p9'], PREVIEW_SCOPE, storage), 9]]) {
+        const storage = memoryStorage(), { setItem } = storage, probe = memoryStorage();
+        for (let i = 1; i <= 9; i += 1) saving(storage, [i, `p${i}`], BIG);
+        preview(probe, tenth).save(wide);  // what the tenth takes, saved now
+        const need = entryOf(tenth).length + probe.values.get(entryOf(tenth)).length;
+        const nine = entryOf(ninth).length + storage.values.get(entryOf(ninth)).length;
+        assert.ok(used(storage) + need > TOTAL_CHARS && used(storage) - nine + need <= TOTAL_CHARS,
+            'past the total only while the ninth room stands');
+        let puts = 0;
+        storage.setItem = (key, value) => { if (key === entryOf(tenth) && !puts++) act?.(storage); setItem(key, value); };
+        saving(storage, tenth, wide);
+        storage.setItem = setItem;
+        assert.equal(puts, 1, `another tab ${other}: the write landed at once`);
+        const standing = Array.from({ length: 10 }, (_, i) => i + 1).filter(i => storage.values.has(entryOf([i, `p${i}`])));
+        assert.deepEqual(standing, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].filter(i => i !== gone),
+            `another tab ${other}: only room ${gone} is gone`);
+        assert.ok(used(storage) <= TOTAL_CHARS, `${used(storage)} characters`);
+    }
+});
+
+test('a room over its own share keeps its newest whole rows; a person\'s text is never cut', t => {
+    const f = fixture(t), text = 'long exact passage '.repeat(1000);
+    f.make().save(Array.from({ length: 100 }, (_, j) => row(`chat:${j}`, text, { role: 'user' })));
+    const kept = f.rows();
+    assert.ok(f.raw().length <= ROOM_CHARS, `${f.raw().length} characters`);
+    assert.ok(kept.length >= 9 && kept.every(item => item.text === text), `${kept.length} whole rows`);
+    assert.deepEqual(kept.map(item => item.id), Array.from({ length: kept.length }, (_, j) => `chat:${100 - kept.length + j}`),
+        'its newest rows, in order');
+    // One row longer than the share is not cut to fit: the room keeps none of it.
+    f.make().save([row('chat:200', 'x'.repeat(ROOM_CHARS))]);
+    assert.deepEqual(f.rows(), []);
+});
+
+test('no room keeps less than v2 did: the longest answer its one record could hold paints, moved or read anew', t => {
+    // Astra 4: v2 let a room alone fill its one 200,000-character record, its key and frame counted. That answer, moved
+    // into its entry or read again, is kept whole and paints.
+    const f = fixture(t), key = JSON.stringify([PREVIEW_SCOPE, [1, '']]);
+    const shell = JSON.stringify({ v: 2, rooms: [{ key, rows: [{ id: 'chat:1', role: 'assistant', text: '', speaker: 'Ouroboros' }] }] });
+    const answer = 'x'.repeat(ROOM_CHARS - shell.length);
+    f.values.set(PREVIEW_KEY, shell.replace('"text":""', `"text":"${answer}"`));
+    assert.equal(f.values.get(PREVIEW_KEY).length, ROOM_CHARS, 'a record v2 could write');
+    const moved = f.make();
+    assert.equal(moved.show(), true, 'moved into its entry, it paints');
+    assert.equal(f.painted().children[1].children[1].textContent, answer, 'whole');
+    moved.destroy();
+    f.make().save([row('chat:2', answer)]);
+    assert.deepEqual(f.rows().map(item => item.text), [answer], 'read anew, it is kept whole');
+});
+
+test('the one v2 record moves into entries once, the order it kept by time read', t => {
+    const f = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 5_000_000 });
+    const saved = text => [{ id: 'chat:1', role: 'user', text, speaker: 'You' }];
+    f.values.set(PREVIEW_KEY, JSON.stringify({ v: 2, rooms: [
+        { key: JSON.stringify([PREVIEW_SCOPE, [2, 'p']]), rows: saved('Read last') },
+        { key: JSON.stringify([PREVIEW_SCOPE, [1, '']]), rows: saved('Read first') },
+        { key: JSON.stringify([OTHER_PROFILE, [1, '']]), rows: [...saved('Another profile'), { id: 'chat:2', role: 'intruder' }] }] }));
+    f.values.set('ouroboros.theme', 'dark');
+    assert.equal(f.make({ room: [2, 'p'] }).show(), true);
+    assert.equal(f.values.get(PREVIEW_KEY), '{"v":3}', 'the record names the form of entries');
+    assert.deepEqual([f.rows([2, 'p']), f.rows([1, '']), f.rows([1, ''], OTHER_PROFILE)].map(rows => rows.map(item => item.text)),
+        [['Read last'], ['Read first'], ['Another profile']]);
+    assert.ok(f.entry([2, 'p']).read > f.entry([1, '']).read && f.entry([1, '']).read > f.entry([1, ''], OTHER_PROFILE).read);
+    assert.equal(f.values.get('ouroboros.theme'), 'dark');
+    // Once: later opens find the form in place and move nothing again (a show writes nothing).
+    const moved = [...f.values];
+    assert.equal(f.make({ room: [1, ''] }).show(), true);
+    assert.deepEqual([...f.values], moved);
+});
+
+test('entries standing without the record are erased before any is read: an older version\'s eraser took the record', t => {
+    // Every earlier sign-out page, sign-in clear and refusal removes PREVIEW_KEY alone.
+    const f = fixture(t);
+    f.make({ room: [1, ''] }).save([row('chat:1', 'Main words')]);
+    f.make({ room: [2, 'p'] }).save([row('chat:1', 'Project words')]);
+    f.values.set('ouroboros.theme', 'dark');
+    f.values.delete(PREVIEW_KEY);
+    assert.equal(f.make({ room: [2, 'p'] }).show(), false);
+    assert.deepEqual([...f.values], [['ouroboros.theme', 'dark']], 'their words are gone, not hidden');
+});
+
+// The script the core's sign-in page runs on every sign-out (server_auth.py `_END_OF_SESSION_SCRIPT`, plain literals).
+async function signInPageScript() {
+    const source = await readFile(new URL('../../ouroboros/server_auth.py', import.meta.url), 'utf8');
+    const literal = /^_END_OF_SESSION_SCRIPT = \(((?:\s*'[^'\\]*')+)\)/m.exec(source);
+    assert.ok(literal, 'server_auth.py states the script as adjacent plain literals');
+    return [...literal[1].matchAll(/'([^'\\]*)'/g)].map(match => match[1]).join('');
+}
+
+test('every eraser takes the record and every room\'s entry, and nothing else the browser keeps', async t => {
+    const script = await signInPageScript();
+    const erasers = {
+        'the sign-in clear': f => clearChatPreviews(f.storage),
+        'a refused read outside the room': f => previewsRefused({ status: 401 }, f.storage),
+        'a room\'s refused page': f => f.make({ room: [9, ''] }).refused({ status: 403 }),
+        'a room\'s refused newest read': f => f.make({ room: [9, ''] }).failed({ status: 401 }),
+        'the sign-in page every sign-out reaches': f => vm.runInNewContext(script, { localStorage: f.storage }),
+    };
+    for (const [name, erase] of Object.entries(erasers)) {
+        const f = fixture(t);
+        f.values.set('ouroboros.theme', 'light');
+        f.values.set('ouro_chat_draft:1', 'A draft');
+        for (const [room, scope] of [[[1, ''], PREVIEW_SCOPE], [[2, 'p'], PREVIEW_SCOPE], [[1, ''], OTHER_PROFILE]]) {
+            f.make({ room, scope }).save([row('chat:1', 'Private words')]);
+        }
+        f.values.set(previewEntryKey(PREVIEW_SCOPE, [3, 'listed nowhere']), '{"read":1,"rows":[]}');
+        erase(f);
+        assert.deepEqual([...f.values], [['ouroboros.theme', 'light'], ['ouro_chat_draft:1', 'A draft']], name);
+    }
+});
+
+test('a canonical replay ends the opening: a later show paints nothing', t => {
+    const f = fixture(t);
+    f.make().save([row('chat:1', 'Saved words')]);
+    const preview = f.make();
+    assert.equal(preview.shown(), false);
+    preview.retire();  // the room's first canonical replay, before any copy was shown
+    assert.equal(preview.show(), false);
+    assert.equal(f.painted(), undefined);
+    const shown = f.make();
+    assert.equal(shown.show(), true);
+    assert.equal(shown.shown(), true, 'a painted copy stands');
+    shown.retire();
+    assert.equal(shown.shown(), false);
 });
 
 // A document whose selection the test sets: `select(node)` holds a range over that node, `select()` releases it, and
@@ -345,20 +792,20 @@ test('a selected passage keeps the retired preview, labelled, until released; th
     assert.equal(w.heard.size, 0, 'destroy releases its selection listener');
 });
 
-test('a refused session discards the record and the painted copy at once, selection or not; other failures only label it', t => {
+test('a refused session discards every entry and the painted copy at once, selection or not; other failures only label it', t => {
     const f = fixture(t), w = selectionWorld(f);
     f.make().save([row('chat:1', 'Private words')]);
     const preview = f.make();
     preview.show();
     preview.failed({ status: 503 });
     assert.equal(f.painted().children[0].textContent, 'Saved text preview · not current');
-    assert.ok(f.values.get(PREVIEW_KEY), 'a transient failure erases nothing');
+    assert.ok(f.raw(), 'a transient failure erases nothing');
     w.select(f.painted().children[1].children[1]);
     preview.retire();
     assert.ok(f.painted(), 'held by its selection');
     preview.failed({ status: 401 });
     assert.equal(f.painted(), undefined);
-    assert.equal(f.values.get(PREVIEW_KEY), undefined);
+    assert.deepEqual(f.family(), []);
     w.changed();
     assert.equal(f.painted(), undefined, 'nothing comes back');
     const other = f.make();
@@ -366,7 +813,7 @@ test('a refused session discards the record and the painted copy at once, select
     other.show();
     other.failed({ status: 403 });
     assert.equal(f.painted(), undefined);
-    assert.equal(f.values.get(PREVIEW_KEY), undefined);
+    assert.deepEqual(f.family(), []);
 });
 
 test('any read the room makes, refused, discards a held copy at once; a page that merely failed changes nothing here', t => {
@@ -377,13 +824,13 @@ test('any read the room makes, refused, discards a held copy at once; a page tha
     preview.show();
     w.select(f.painted().children[1].children[1]);
     preview.retire();
-    const note = f.painted().children[0].textContent, saved = f.values.get(PREVIEW_KEY);
+    const note = f.painted().children[0].textContent, saved = JSON.stringify([...f.values]);
     for (const status of [500, 503, 404, undefined]) preview.refused({ status });
     assert.equal(f.painted().children[0].textContent, note, 'a failed page is no statement about the saved text');
-    assert.equal(f.values.get(PREVIEW_KEY), saved);
+    assert.equal(JSON.stringify([...f.values]), saved);
     preview.refused({ status: 403 });
     assert.equal(f.painted(), undefined, 'selection or not');
-    assert.equal(f.values.get(PREVIEW_KEY), undefined);
+    assert.deepEqual(f.family(), []);
 });
 
 test('destroy removes the painted copy; later calls are inert', t => {
@@ -391,13 +838,13 @@ test('destroy removes the painted copy; later calls are inert', t => {
     f.make().save([row('chat:1', 'Words')]);
     const preview = f.make();
     preview.show();
-    const saved = f.values.get(PREVIEW_KEY);
+    const saved = JSON.stringify([...f.values]);
     preview.destroy();
     assert.equal(f.painted(), undefined);
     assert.equal(preview.show(), false);
     preview.save([row('chat:9', 'late')]);
     preview.append([row('chat:9', 'late')]);
-    assert.equal(f.values.get(PREVIEW_KEY), saved);
+    assert.equal(JSON.stringify([...f.values]), saved);
 });
 
 test('known limit: card structure is not rebuilt; a completion mirror and a child final stay flat text rows', t => {
@@ -409,11 +856,11 @@ test('known limit: card structure is not rebuilt; a completion mirror and a chil
             completion_answer: 'Done: PR #7 merged.', project_id: 'launch', task_id: 'final-task' }),
         row('chat:2', 'The child found the cause.', { delegation_role: 'subagent', task_id: 'child-1', parent_task_id: 'root-1' }),
     ]);
-    const rows = f.record().rooms[0].rows.map(({ at, ...words }) => words);  // `at`: the moment an untimed row is drawn
+    const rows = f.rows().map(({ at, ...words }) => words);  // `at`: the moment an untimed row is drawn
     assert.deepEqual(rows, [
         { id: 'chat:1', role: 'system', text: 'Launch › Ship · Completed', speaker: 'System' },
         { id: 'chat:2', role: 'assistant', text: 'The child found the cause.', speaker: 'Ouroboros' }]);
-    assert.doesNotMatch(f.values.get(PREVIEW_KEY), /completion_answer|Done: PR|parent_task_id|child-1/);
+    assert.doesNotMatch(f.raw(), /completion_answer|Done: PR|parent_task_id|child-1/);
 });
 
 test('a host notice is saved as the line its bubble draws, never only its stored phrase (RV4 23)', t => {
@@ -421,6 +868,6 @@ test('a host notice is saved as the line its bubble draws, never only its stored
     const line = 'The total budget is spent, so this turn did not start. Raise Total budget in Dashboard → Costs.';
     preview.save([row('chat:1', 'The total budget is spent, so this turn did not start.', { role: 'system',
         system_type: 'task_not_started', notice: { code: 'budget_exhausted', step: 'raise_total_budget', line } })]);
-    assert.equal(f.record().rooms[0].rows[0].text, line);
+    assert.equal(f.rows()[0].text, line);
     preview.destroy();
 });

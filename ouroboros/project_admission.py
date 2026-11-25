@@ -182,14 +182,16 @@ def reserved_project_for_chat(drive_root: Any, chat_id: int, *, rows: Optional[l
 
 
 def display_registry_snapshot(drive_root: Any, *, require_readable: bool = False, sidebar: bool = False,
-                              require_known_absence: bool = False) -> dict:
+                              require_known_absence: bool = False, prove_absence: bool = False) -> dict:
     """Identity/history projection, never execution authority or a repair writer.
 
     Healthy rows survive an invalid neighbor. Retain identifiable chat reservations
     even when their routing fields are invalid; never turn invalid lifecycle active.
     The sidebar selects active and deleting rooms and carries ``sidebar_complete``
     for this read; tombstones are exclusions, not gaps. ``require_readable`` rejects a
-    missing file with a commit witness. ``require_known_absence`` requires first-use evidence.
+    missing file with a commit witness. ``require_known_absence`` requires first-use evidence;
+    ``prove_absence`` asks that evidence of the sidebar's completeness alone: the same rows, and
+    a missing file complete only on first use (a lost or unconfirmed registry proves no absence).
     """
     from ouroboros.projects_registry import PROJECT_ACTIVE, PROJECT_DELETING, PROJECT_TOMBSTONED, _registry_witness_path
 
@@ -231,6 +233,11 @@ def display_registry_snapshot(drive_root: Any, *, require_readable: bool = False
         if tombstones:
             raise ValueError("Project registry contains unreadable sidebar rows")
         raise ValueError("Project registry contains no readable room")
+    if prove_absence and complete and not present:
+        try:
+            complete = could_be_first_registry(drive_root)
+        except OSError:  # a history still importing or a trace that cannot be examined: first use is unconfirmed
+            complete = False
     return {**data, "projects": rows, **({"sidebar_complete": complete} if sidebar else {})}
 
 

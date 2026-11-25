@@ -306,9 +306,13 @@ def _appearance_meta(served_ui: ServedUI | None, request: Request) -> str:
 
 
 # Every sign-out (GET or POST /auth/logout) and every ended or refused session reaches the builtin form before the
-# interface can run again: it takes this browser's saved conversation text (web/modules/chat_preview.js PREVIEW_KEY)
-# and nothing else the browser keeps. A selected interface's own sign-in page owns its storage.
-_END_OF_SESSION_SCRIPT = 'try{localStorage.removeItem("ouroboros.chat-preview.v1")}catch(e){}'
+# interface can run again: it takes this browser's saved conversation text, every key of web/modules/chat_preview.js
+# PREVIEW_FAMILY (its record PREVIEW_KEY first, as that module's own eraser does), and nothing else the browser keeps.
+# A selected interface's own sign-in page owns its storage.
+_END_OF_SESSION_SCRIPT = ('try{var s=localStorage,k=[],i;s.removeItem("ouroboros.chat-preview.v1");'
+                          'for(i=s.length;i--;)k.push(s.key(i));'
+                          'for(i=k.length;i--;)if(String(k[i]).indexOf("ouroboros.chat-preview.")===0)s.removeItem(k[i])}'
+                          'catch(e){}')
 
 
 def _login_page(next_url: str, error: str = "", web_dir: pathlib.Path | None = None, head: str = "") -> str:

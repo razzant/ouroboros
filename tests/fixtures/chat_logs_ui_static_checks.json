@@ -201,7 +201,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "        if (!wasFinished && blockVisible(record)) scheduleHistorySync();"
+    "value": "        if (!wasFinished && blockVisible(record)) scheduleHistorySync('settled');"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",

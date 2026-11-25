@@ -941,6 +941,7 @@ def test_real_pages_name_their_coverage_cuts_by_row_key(tmp_path):
     with pytest.raises(HistoryCursorError) as reset:
         _read(root, 20, arrived["after_cursor"])
     assert reset.value.reason == "history_delta_reset"
+    assert reset.value.fields == {"detail": "historical_import", "stream": "chat"}
 
 
 @pytest.mark.parametrize("own_day", ["2026-10-25", "2026-10-23"], ids=["own-newest", "own-older"])

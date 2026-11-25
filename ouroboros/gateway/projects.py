@@ -14,7 +14,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from ouroboros.gateway._helpers import json_exception, request_drive_root, request_repo_dir, run_sync_to_completion
+from ouroboros.gateway._helpers import (
+    json_exception, request_drive_root, request_profile_scope, request_repo_dir, run_sync_to_completion,
+)
 from ouroboros.project_admission import ProjectAdmissionError, project_admission_basis
 
 log = logging.getLogger(__name__)
@@ -161,19 +163,29 @@ async def api_projects_list(request: Request) -> JSONResponse:
 
         drive_root = request_drive_root(request)
         query = request.query_params
+        scope = request_profile_scope(request)  # the data profile every answer read, as history names it (#3294)
+        named = {"profile_scope": scope} if scope else {}
         if "chat_id" in query:
             projects = await run_in_threadpool(projects_summary, drive_root, chat_id=query["chat_id"], by_message=True)
-            return JSONResponse({"projects": projects})
+            return JSONResponse({"projects": projects, **named})
         if "id" in query:
             if not explicit_project_id_ok(query["id"]):
-                return JSONResponse({"projects": []})
+                return JSONResponse({"projects": [], **named})
             projects = await run_in_threadpool(projects_summary, drive_root, project_id=query["id"], by_message=True)
-            return JSONResponse({"projects": projects})
-        # The plain list stays capped; `all=1` names the complete list (every active and deleting Project).
-        projects = await run_in_threadpool(
-            lambda: projects_summary(drive_root, by_message=True, limit=None if query.get("all") == "1" else 200,
-                                     sidebar_rows=list_sidebar_projects(drive_root, require_readable=True)))
-        return JSONResponse({"projects": projects})
+            return JSONResponse({"projects": projects, **named})
+        # The plain list stays capped; `all=1` names the complete list (every active and deleting Project) and whether
+        # the registry read behind its rows covered every row: a row it could not read is missing, never absent, and a
+        # missing registry proves no Project absent unless the root never had one (a client erases saved words by it).
+        every = query.get("all") == "1"
+
+        def listed():
+            rows, complete = list_sidebar_projects(drive_root, require_readable=True, with_coverage=True,
+                                                   prove_absence=every)
+            limit = None if every else 200
+            return projects_summary(drive_root, by_message=True, limit=limit, sidebar_rows=rows), complete
+
+        projects, complete = await run_in_threadpool(listed)
+        return JSONResponse({"projects": projects, **({"complete": complete} if every else {}), **named})
     except Exception as exc:
         return json_exception(exc)
 

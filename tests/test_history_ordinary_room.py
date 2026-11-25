@@ -23,6 +23,7 @@ from ouroboros.contracts.chat_id_policy import project_chat_id
 from ouroboros.gateway import history
 from ouroboros.gateway import ws as gateway_ws
 from ouroboros.gateway.history_contracts import ChatHistoryResponse
+from ouroboros.gateway.history_paging import HistoryCursorError, failed_read_facts
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.store import StoreError
 from tests._room_archive_world import TS, lost_registry, project_row, write_registry
@@ -68,6 +69,19 @@ def test_an_active_project_rooms_unreadable_newest_read_names_that_room(root, mo
     status, body = _newest_read(root, chat_id=alpha)
     assert status == 503 and body["reason_code"] == "history_source_unavailable"
     assert body["ordinary_room"] == alpha and body["profile_scope"] == SCOPE
+
+
+def test_a_newest_read_refused_as_a_cursor_error_still_names_its_room(root):
+    """An empty ``around`` is no place: its 400 names Main under the profile, as a newest read's answer always did. A
+    refusal's own cause (``HistoryCursorError.fields``) rides beside those facts, never instead of them; a cursor
+    read names its cause and no room."""
+    status, body = _newest_read(root, around="")
+    assert status == 400 and body["reason_code"] == "history_around_invalid"
+    assert body["ordinary_room"] == 1 and body["profile_scope"] == SCOPE
+    refused = HistoryCursorError("history_delta_reset", detail="notes_changed", stream="chat")
+    assert failed_read_facts(refused, root, 1, True, SCOPE) == {
+        "detail": "notes_changed", "stream": "chat", "ordinary_room": 1, "profile_scope": SCOPE}
+    assert failed_read_facts(refused, root, 1, False, SCOPE) == {"detail": "notes_changed", "stream": "chat"}
 
 
 def test_a_room_the_core_stops_counting_is_named_no_more(root, monkeypatch):

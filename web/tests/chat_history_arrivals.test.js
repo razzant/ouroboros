@@ -10,16 +10,18 @@ import { REVIEW_DETAIL_READS, REVIEW_DETAIL_SLOT_MS, createReviewHydrator } from
 import { createChatHistoryPager } from '../modules/chat_history.js';
 import { ElementStub, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 import { quiet, room, until } from './project_read_state_fixture.js';
-import { PREVIEW_KEY } from '../modules/chat_preview.js';
+import { previewEntryKey } from '../modules/chat_preview.js';
 
 const ts = (n) => new Date(Date.UTC(2026, 9, 16, 12, 0, 0, n * 1000)).toISOString();
 
 // The room's rows in arrival order, read the way history_paging serves them: the
 // newest page holds the last `window` rows and names the newest message; an
 // `after:<k>` cursor returns the rows stored since that read; `older:<k>` the
-// page below. Every read answers with what was stored when it began.
+// page below. Every read answers with what was stored when it began, under the
+// profile scope the document proves; `tags` keeps why each read was made, and a
+// refusal `<code>:<detail>` names its cause as the server does.
 function historyServer({ window = 1000 } = {}) {
-    const rows = [], reads = [], cursors = [], refusals = [], gates = new Map();
+    const rows = [], reads = [], cursors = [], refusals = [], gates = new Map(), tags = [];
     let latest;  // the newest message the newest page names: computed, null (unknown) or set
     const say = (n, extra = {}) => rows.push({ role: 'assistant', text: `answer ${n}`, ts: ts(n),
         history_id: `chat:${n}`, history_position: { source: 'chat', offset: n }, ...extra });
@@ -40,15 +42,17 @@ function historyServer({ window = 1000 } = {}) {
     };
     const answer = (data) => ({ ok: true, status: 200, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...data }) });
     async function fetchHistory(url) {
-        const cursor = new URL(String(url), 'http://local').searchParams.get('cursor');
+        const params = new URL(String(url), 'http://local').searchParams, cursor = params.get('cursor');
         const kind = !cursor ? 'newest' : cursor.split(':')[0];
         reads.push(kind); cursors.push(cursor);
+        tags.push(Object.fromEntries(['reason', 'mode', 'decision', 'detail'].filter((name) => params.has(name))
+            .map((name) => [name, params.get(name)])));
         const stored = rows.length;
         const gate = gates.get(kind) || gates.get('');
         if (gate) await gate;
-        const refusal = kind === 'after' && refusals.shift();
+        const [refusal, detail] = (kind === 'after' && refusals.shift() || '').split(':');
         if (refusal) return { ok: false, status: 409, json: async () => ({ messages: [], error: refusal, reason_code: refusal,
-            has_more: true, next_cursor: cursor, window: { complete: false, truncated_by: [refusal] } }) };
+            ...(detail ? { detail } : {}), has_more: true, next_cursor: cursor, window: { complete: false, truncated_by: [refusal] } }) };
         if (kind === 'after') {
             const from = Number(cursor.split(':')[1]), newest = namedSince(from, stored);
             return answer({ messages: rows.slice(from, stored), has_more: false, next_cursor: null,
@@ -63,7 +67,7 @@ function historyServer({ window = 1000 } = {}) {
                 ...(newest !== undefined ? { latest_message: newest } : {}) } });
     }
     return {
-        rows, reads, cursors, refusals, say, work, fetchHistory,
+        rows, reads, cursors, refusals, tags, say, work, fetchHistory,
         // Reads begun from now on (of `kind` only, when given) wait until the returned release.
         hold(kind = '') {
             let release;
@@ -75,16 +79,16 @@ function historyServer({ window = 1000 } = {}) {
 }
 
 // The pager's own contract, with chat's reads mocked.
-function arrivalsPager({ fetch, canArrive = () => true, inFlight = () => null } = {}) {
-    const calls = [], arrivals = [], newest = [], applied = [];
+function arrivalsPager({ fetch, canArrive = () => true, inFlight = () => null, arrivalGate, apply = () => {} } = {}) {
+    const calls = [], arrivals = [], newest = [], applied = [], tags = [];
     const pager = createChatHistoryPager({
-        fetchPage: (cursor) => { calls.push(cursor); return fetch(cursor); },
+        fetchPage: (cursor, options = {}) => { calls.push(cursor); tags.push(options.tags); return fetch(cursor); },
         applyPage: (messages, descriptor) => applied.push(descriptor), releasePage: () => {},
-        applyArrivals: (messages, descriptor) => arrivals.push({ ids: messages.map((row) => row.history_id), ...descriptor }),
+        applyArrivals: (messages, descriptor) => { apply(); arrivals.push({ ids: messages.map((row) => row.history_id), ...descriptor }); },
         readNewest: (options) => { newest.push(options); return Promise.resolve(true); },
-        canArrive, newestInFlight: inFlight,
+        canArrive, arrivalGate, newestInFlight: inFlight,
     });
-    return { pager, calls, arrivals, newest, applied };
+    return { pager, calls, arrivals, newest, applied, tags };
 }
 const newestPage = (after = 'after:1', ids = ['chat:1']) => ({ messages: ids.map((id) => ({ history_id: id })), has_more: false,
     next_cursor: null, page_cursor: `page:${after}`, after_cursor: after, window: {} });
@@ -115,7 +119,7 @@ test('the pager reads what arrived from the newest read\'s cursor, and leaves th
     const answers = { 'after:1': arrivedRows(['chat:2'], 'after:2'), 'after:2': arrivedRows([], 'after:2') };
     const p = arrivalsPager({ fetch: async (cursor) => answers[cursor] });
     const first = p.pager.read({ fromReconnect: true });
-    assert.deepEqual(p.newest, [{ fromReconnect: true }], 'no cursor yet: chat\'s newest read, begun within the call');
+    assert.deepEqual(p.newest, [{ fromReconnect: true, decision: 'no_cursor' }], 'no cursor yet: chat\'s newest read, begun within the call');
     await first;
     p.pager.acceptRecent(newestPage());
     assert.equal(await p.pager.read(), true);
@@ -183,6 +187,7 @@ test('an arrivals answer older than a newest read that landed meanwhile is dropp
     release();
     assert.equal(await reading, true);
     assert.deepEqual(p.calls, ['after:1', 'after:5'], 'read again from the newer cursor');
+    assert.deepEqual(p.tags.map((tags) => tags.decision), [undefined, 'base_superseded'], 'the read again says why');
     assert.deepEqual(p.arrivals.map((arrival) => arrival.ids), [['chat:6']], 'the older answer never rolls the window back');
     // The other order: arrivals land first, the newer page after them; reads go on from the page.
     p.pager.acceptRecent(newestPage('after:9', ['chat:9']));
@@ -234,6 +239,48 @@ test('a window that took in a whole default page of arrivals reads the newest pa
     assert.deepEqual([p.calls.length, p.newest.length], [1, 1], 'past 210 rows the window re-anchors on the newest page');
 });
 
+test('the newest read a window sends instead of arrivals names the gate or the leg it answers for, and adds no read', async () => {
+    const ok = arrivedRows(['chat:2'], 'after:2');
+    const failure = (fields) => Object.assign(new Error('history read failed'), fields);
+    for (const [answer, decision, detail] of [
+        [failure({ status: 409, body: { reason_code: 'history_delta_reset', detail: 'task_settled' } }), 'after_refused', 'task_settled'],
+        [failure({ status: 409, body: { reason_code: 'history_view_changed' } }), 'after_refused', 'view_changed'],
+        [failure({ status: 409, body: { reason_code: 'history_delta_reset' } }), 'after_refused', 'delta_reset'],  // an older server
+        [failure({ status: 503, body: { reason_code: 'migrating' } }), 'after_failed', 'http_503'],
+        [new TypeError('Failed to fetch'), 'after_failed', 'network'],
+        [failure({ foreignProfile: true }), 'after_rejected', 'profile_mismatch'],
+        [{ ...ok, messages: null }, 'after_rejected', 'bad_messages'],
+        [{ ...ok, after_cursor: '' }, 'after_rejected', 'no_continuation'],
+        [{ ...ok, window: { truncated_by: ['chat_malformed_jsonl'] } }, 'after_rejected', 'stream_gap'],
+        [{ ...ok, window: { latest_message: null } }, 'after_rejected', 'latest_unknown'],
+    ]) {
+        const p = arrivalsPager({ fetch: async () => { if (answer instanceof Error) throw answer; return answer; } });
+        p.pager.acceptRecent(newestPage());
+        await p.pager.read({ reason: 'settled' });
+        assert.deepEqual([p.calls, p.tags], [['after:1'], [{ reason: 'settled', mode: 'after' }]], 'one read of arrivals, as before');
+        assert.deepEqual(p.newest, [{ fromReconnect: false, reason: 'settled', decision, detail }], `${decision}: ${detail}`);
+    }
+    // A 200 the window took but could not draw: its newest page draws what the arrivals could not.
+    const broken = arrivalsPager({ fetch: async () => ok, apply: () => { throw new Error('a renderer failed'); } });
+    broken.pager.acceptRecent(newestPage());
+    await broken.pager.read({ reason: 'read_receipt' });
+    assert.deepEqual(broken.newest, [{ fromReconnect: false, reason: 'read_receipt', decision: 'after_rejected', detail: 'apply_failed' }]);
+    // Gates are named in the order they are weighed; a declined window reads no arrivals.
+    const gated = arrivalsPager({ fetch: async () => assert.fail('no read of arrivals'), canArrive: () => false,
+        arrivalGate: () => 'live_card_bound' });
+    gated.pager.acceptRecent(newestPage());
+    await gated.pager.read({ reason: 'settled' });
+    await gated.pager.read({ whole: true, reason: 'reconnect' });
+    await gated.pager.read({ whole: true, reason: 'read_receipt', decision: 'latest_unknown' });
+    assert.deepEqual(gated.newest.map(({ reason, decision }) => [reason, decision]),
+        [['settled', 'live_card_bound'], ['reconnect', 'explicit_whole'], ['read_receipt', 'latest_unknown']]);
+    const full = arrivalsPager({ fetch: async () => arrivedRows(Array.from({ length: 211 }, (_, index) => `chat:${index + 2}`), 'after:212') });
+    full.pager.acceptRecent(newestPage());
+    await full.pager.read();
+    await full.pager.read({ reason: 'settled' });
+    assert.deepEqual([full.calls.length, full.newest], [1, [{ fromReconnect: false, reason: 'settled', decision: 'window_overflow' }]]);
+});
+
 test('a shifted window starts the new chain with the read in hand, never by reading it again', () => {
     const p = arrivalsPager({ fetch: async () => assert.fail('no second read') });
     p.pager.acceptRecent(newestPage('after:1', ['chat:1']));
@@ -276,6 +323,25 @@ test('an open room takes ten new messages with one newest-page read, then only w
     assert.deepEqual(s.cursors.slice(1, 4), ['after:1', 'after:3', 'after:5'], 'each read starts where the previous one ended');
     for (let n = 1; n <= 11; n += 1) assert.equal(bubbles(r, `answer ${n}`).length, 1, `answer ${n} is one node`);
     assert.ok(r.shown().includes('chat:11'));
+});
+
+test('a room names its opening read, a return on the same connection and a return across a close it heard', async (t) => {
+    const s = historyServer();
+    s.say(1);
+    const r = openRoom(t, s);
+    await until(() => s.reads.length === 1);
+    await quiet();
+    assert.deepEqual(s.tags, [{ reason: 'open', mode: 'newest' }]);
+    for (const closed of [false, true]) {
+        r.instance.leave();
+        if (closed) r.emit('close');  // heard away: the return crosses an outage
+        r.instance.stay();
+        r.emit('open', { previouslyConnected: true, resumed: true });
+        await until(() => s.reads.length === (closed ? 3 : 2));
+        await quiet();
+        assert.deepEqual(s.tags.at(-1), { reason: closed ? 'reconnect' : 'resume', mode: 'newest', decision: 'explicit_whole' });
+    }
+    assert.deepEqual(s.reads, ['newest', 'newest', 'newest'], 'one read for each return, as before');
 });
 
 test('a new message read below the fold is not read until the reader reaches it', async (t) => {
@@ -343,6 +409,18 @@ test('a card finish takes one read of what arrived', async (t) => {
     await new Promise((resolve) => setTimeout(resolve, 800));
     await quiet();
     assert.deepEqual(s.reads, ['newest', 'after'], 'one read of the rows stored since, not the window');
+    assert.deepEqual(s.tags[1], { reason: 'settled', mode: 'after' }, 'the settled card names its read');
+    // A settled task the window shows refuses the next read of arrivals: the newest page that answers says why.
+    s.refusals.push('history_delta_reset:task_settled');
+    s.work(4, 'task-8', { task_terminal_status: 'completed', outcome_axes: { execution: 'ok' } });
+    r.emit('chat', { chat_id: 2, role: 'assistant', is_progress: true, task_id: 'task-8', content: 'step 4', ts: ts(4),
+        task_terminal_status: 'completed', outcome_axes: { execution: 'ok' } });
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    await until(() => s.reads.length === 4);
+    await quiet();
+    assert.deepEqual(s.reads, ['newest', 'after', 'after', 'newest'], 'a refusal adds its one newest read, as before');
+    assert.deepEqual(s.tags.slice(2), [{ reason: 'settled', mode: 'after' },
+        { reason: 'settled', mode: 'newest', decision: 'after_refused', detail: 'task_settled' }]);
 });
 
 test('a reconnect of a hydrated room reads its newest page: frames sent while it was away are lost', async (t) => {
@@ -357,6 +435,7 @@ test('a reconnect of a hydrated room reads its newest page: frames sent while it
     await until(() => r.shown().includes('chat:2'));
     await quiet();
     assert.deepEqual(s.reads, ['newest', 'newest']);
+    assert.deepEqual(s.tags[1], { reason: 'reconnect', mode: 'newest', decision: 'explicit_whole' });
     s.say(3);
     assert.equal((await r.instance.refreshHistory({ revision: 3 })).read, true);
     assert.deepEqual(s.reads.slice(2), ['after'], 'arrivals go on from the page the reconnect read');
@@ -369,9 +448,11 @@ for (const refusal of ['history_delta_reset', 'history_view_changed']) {
         const r = openRoom(t, s);
         await r.instance.refreshHistory({ revision: 1 });
         s.say(2);
-        s.refusals.push(refusal);
+        s.refusals.push(refusal === 'history_delta_reset' ? `${refusal}:notes_changed` : refusal);
         assert.equal((await r.instance.refreshHistory({ revision: 2 })).read, true);
         assert.deepEqual(s.reads, ['newest', 'after', 'newest']);
+        assert.deepEqual(s.tags.slice(1), [{ reason: 'read_receipt', mode: 'after' }, { reason: 'read_receipt', mode: 'newest',
+            decision: 'after_refused', detail: refusal === 'history_delta_reset' ? 'notes_changed' : 'view_changed' }]);
         s.say(3);
         assert.equal((await r.instance.refreshHistory({ revision: 3 })).read, true);
         assert.deepEqual(s.reads.slice(3), ['after'], 'the newest page names where arrivals go on');
@@ -479,6 +560,9 @@ test('arrivals that land while ↓ reads the present are read again on the page 
     await quiet();
     assert.deepEqual(s.reads, ['newest', 'older', 'older', 'older', 'newest', 'after', 'after'],
         '↓\'s page began before them: arrivals are read once more from its cursor');
+    const navigate = { reason: 'navigate', mode: 'older' };
+    assert.deepEqual(s.tags.slice(1), [navigate, navigate, navigate, { reason: 'navigate', mode: 'newest' },
+        { reason: 'read_receipt', mode: 'after' }, { reason: 'navigate', mode: 'after', decision: 'base_superseded' }]);
     assert.equal(s.cursors.at(-1), 'after:15');
     assert.deepEqual(['chat:16', 'chat:17'].map((id) => r.shown().includes(id)), [true, true]);
 });
@@ -633,25 +717,25 @@ test('a room replaying sixty review owners reads their details two at a time; cl
     assert.equal(detail.started.length, 12, 'the closed room started none of its queued reads');
 });
 
-test('the saved preview takes the newest page, then merges what arrived by identity; a room without a record keeps no fragment', async (t) => {
+test('the saved preview takes the newest page, then merges what arrived by identity; a room without an entry keeps no fragment', async (t) => {
     const s = historyServer();
     s.say(1);
     const r = openRoom(t, s);
     await r.instance.refreshHistory({ revision: 1 });
-    const saved = () => (JSON.parse(localStorage.getItem(PREVIEW_KEY) || '{"rooms":[]}').rooms
-        .find((entry) => entry.key === JSON.stringify([PREVIEW_SCOPE, [2, 'room']]))?.rows || []).map((row) => row.text);
+    const entry = previewEntryKey(PREVIEW_SCOPE, [2, 'room']);
+    const saved = () => (JSON.parse(localStorage.getItem(entry) || '{"rows":[]}').rows).map((row) => row.text);
     assert.deepEqual(saved(), ['answer 1']);
     s.work(2);
     s.say(3);
     await r.instance.refreshHistory({ revision: 2 });
     assert.deepEqual(s.reads, ['newest', 'after']);
     assert.deepEqual(saved(), ['answer 1', 'answer 3'], 'what arrived joins in order; narration never does');
-    // The record gave way to rooms read since: what arrives next waits for the room's next newest page.
-    localStorage.removeItem(PREVIEW_KEY);
+    // The entry gave way to rooms read since: what arrives next waits for the room's next newest page.
+    localStorage.removeItem(entry);
     s.say(4);
     await r.instance.refreshHistory({ revision: 3 });
     assert.deepEqual(s.reads, ['newest', 'after', 'after']);
-    assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'no fragment stands for the room');
+    assert.equal(localStorage.getItem(entry), null, 'no fragment stands for the room');
 });
 
 for (const mode of ['after', 'newest']) for (const following of [false, true]) for (const confirmed of [false, true]) {

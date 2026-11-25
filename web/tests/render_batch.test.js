@@ -214,7 +214,7 @@ test('sticky single-flight never swallows the post-completion resync', () => {
         chatSource.indexOf('function scheduleHistorySync('),
         chatSource.indexOf('function applyLiveCardState('),
     );
-    assert.match(fn, /run: \(\) => historyPager\.read\(\)/);
+    assert.match(fn, /run: tags => historyPager\.read\(\{ \.\.\.tags \}\)/);  // with the reason its first asker gave
     assert.doesNotMatch(fn, /awaitInitialHydration/);
     // The reconnect branch of the open handler reads the newest page whole (frames sent while away are lost),
     // through the pager. chat_history_integration.test.js exercises queued reconnects and the actual re-fetch.
@@ -382,8 +382,23 @@ test('while a full rebuild is armed, later completions cannot push the resync ou
     assert.notEqual(timers.pending[0], second);
 });
 
+test('the resync is read for the first reason a pending run serves, however many coalesce into it', () => {
+    const timers = makeFakeTimers();
+    const runs = [];
+    const scheduler = createHistoryResyncScheduler({
+        isReplayActive: () => false, run: (tags) => runs.push(tags), setTimer: timers.setTimer, clearTimer: timers.clearTimer,
+    });
+    scheduler.schedule(false, { reason: 'settled' });
+    scheduler.schedule(false, { reason: 'bound_recheck' });  // debounced into the same run
+    scheduler.schedule(true, { reason: 'retry', detail: 'migrating' });  // an armed deadline keeps it too
+    timers.fire();
+    scheduler.schedule(true, { reason: 'bound_recheck' });
+    timers.fire();
+    assert.deepEqual(runs, [{ reason: 'settled' }, { reason: 'bound_recheck' }], 'one read per run, named once');
+});
+
 test('chat.js hands the armed flag to the scheduler', () => {
-    assert.match(chatSource, /historyResyncScheduler\.schedule\(liveCardBound\.isArmed\(\)\);/);
+    assert.match(chatSource, /historyResyncScheduler\.schedule\(liveCardBound\.isArmed\(\), \{ reason \}\);/);
 });
 
 test('chat.js wires the replay flag around the replay and keeps live callsites intact', () => {
@@ -402,7 +417,7 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // review lifecycle keeps its own trigger. The replay decision stays ONLY
     // behind the scheduler's gate, so sharing cleanup cannot mute either path.
     assert.equal((chatSource.match(/settleLiveCard\(record, wasFinished\);/g) || []).length, 2);
-    assert.match(chatSource, /if \(!wasFinished && blockVisible\(record\)\) scheduleHistorySync\(\);/);
+    assert.match(chatSource, /if \(!wasFinished && blockVisible\(record\)\) scheduleHistorySync\('settled'\);/);
     // The third occurrence is the scheduler re-arming when a run settles with the bound
     // still armed, which is how a run that only JOINED an older in-flight fetch (and
     // spent its timer on a window fetched before the arm) keeps the deadline alive.
@@ -411,10 +426,10 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // The fourth is a live terminal receipt landing on a card that already settled (an
     // evolution cleanup a later campaign Stop ran): the card's stored line changed after
     // its terminal, and a row replayed from history never asks.
-    assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 4);
+    assert.equal((chatSource.match(/scheduleHistorySync\('(settled|bound_recheck)'\);/g) || []).length, 4);
     assert.match(
         chatSource,
-        /if \(!destroyed && !leaving && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
+        /if \(!destroyed && !leaving && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\('bound_recheck'\);/,
     );
     assert.doesNotMatch(chatSource, /_historyReplayActive[^\n]*scheduleHistorySync/);
 });
