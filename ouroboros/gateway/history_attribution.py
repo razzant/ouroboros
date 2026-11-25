@@ -5,7 +5,8 @@ A client names on a read the action that began it (``reason``), its cursor's kin
 fallback leg that chose it (``decision``) and what the earlier leg met (``detail``) (CLIENT_CONTRACT "Reading
 history"). Telemetry only: nothing selects a page, authorizes or checks a cursor by these tags, the answer is the
 same with or without them, and a read writes nothing (DEVELOPMENT "Passive GET"). A window counts its reads per
-value of each tag (one outside its closed set is ``invalid``, an absent reason or cursor kind ``unspecified``), per
+value of each tag (one outside its closed set is ``invalid``, an absent reason or cursor kind ``unspecified``; a
+cursor's kind is the one the selection decoded, ``history_paging.DECODED_CURSOR``, where it decoded one), per
 status and per refusal the server gave (``code``, ``refusal``, ``stream``), with the answers' bytes and their
 milliseconds in the endpoint (total, longest, and a fixed histogram for its median and tail); never a room, a tag
 as sent, a cursor, text, address or token. Not counted: a HEAD, and a request answered before the route (an
@@ -20,7 +21,7 @@ import re
 import threading
 import time
 
-from ouroboros.gateway.history_paging import DELTA_RESET_DETAILS
+from ouroboros.gateway.history_paging import DECODED_CURSOR, DELTA_RESET_DETAILS
 
 log = logging.getLogger(__name__)
 
@@ -47,13 +48,14 @@ def _tag(value, allowed) -> str:
     return "unspecified" if not value else value if value in allowed else "invalid"
 
 
-def _fields(params, response) -> dict:
+def _fields(params, response, kind=None) -> dict:
     """One read's counted words: its tags as values of their sets, its status and the refusal the server named."""
     around, cursor = params.get("around"), params.get("cursor")
     fields = {"reason": _tag(params.get("reason"), REASONS),
-              # The newest page and a page around one place are the request's own; a cursor is opaque here.
+              # The newest page and a page around one place are the request's own; a cursor's kind is the one the
+              # selection decoded (``kind``), the client's word only where it decoded none.
               "mode": ("invalid" if cursor else "around") if around is not None
-              else _tag(params.get("mode"), _CURSOR_KINDS) if cursor else "newest"}
+              else (kind or _tag(params.get("mode"), _CURSOR_KINDS)) if cursor else "newest"}
     for name, allowed in (("decision", DECISIONS), ("detail", DETAILS)):
         if value := params.get(name):  # where no gate or fallback chose the read, the client names none
             fields[name] = value if value in allowed or (name == "detail" and _HTTP_STATUS.fullmatch(value)) \
@@ -98,15 +100,17 @@ def recorded(endpoint):
     """The history route's ``endpoint`` with each GET it serves counted; counting never fails or delays the read."""
     @functools.wraps(endpoint)
     async def read(request):
-        started, response = time.perf_counter(), None
+        started, response, decoded = time.perf_counter(), None, {}
+        token = DECODED_CURSOR.set(decoded)  # the read's thread shares this mapping (``asyncio.to_thread`` context)
         try:
             response = await endpoint(request)
             return response
         finally:
+            DECODED_CURSOR.reset(token)
             if getattr(request, "method", "GET") == "GET":  # a HEAD's answer carries no page
                 try:
-                    _count(_fields(request.query_params, response), len(response.body) if response is not None else 0,
-                           round((time.perf_counter() - started) * 1000))
+                    _count(_fields(request.query_params, response, decoded.get("kind")),
+                           len(response.body) if response is not None else 0, round((time.perf_counter() - started) * 1000))
                 except Exception:
                     log.debug("A history read was not counted", exc_info=True)
     return read

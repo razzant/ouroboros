@@ -56,17 +56,21 @@ def test_a_read_is_counted_with_its_tags_and_answers_the_same_without_them(tmp_p
         {"after_refused": 1}, {"task_settled": 1}, {"200": 2})  # a read no gate chose names no decision
     assert "room" not in section and drain() == {}, "no room is counted; a drained window starts empty"
 
-    # A cursor is opaque to the count: its client names its kind; an `around` read and the newest page are the
-    # request's own. Values outside their sets are `invalid`, never kept as sent; an HTTP status is a detail.
+    # A cursor's kind is the one the server decoded, whatever its client said or left out; an `around` read and the
+    # newest page are the request's own. Values outside their sets are `invalid`, never kept as sent; an HTTP status
+    # is a detail.
     after = json.loads(bare.body)["after_cursor"]
+    older = json.loads(_read(read, chat_id="1", n_human="1").body)["next_cursor"]
+    drain()
     _read(read, chat_id="1", cursor=after, reason="<b>open</b>", mode="sideways", decision="x" * 300, detail="http_503")
     _read(read, chat_id="1", cursor=after)
+    _read(read, chat_id="1", cursor=older, mode="after")
     _read(read, chat_id="1", around="task:nothing-here", mode="older")
     section = drain()
-    assert section["reason"] == {"invalid": 1, "unspecified": 2} and section["decision"] == {"invalid": 1}
-    assert section["mode"] == {"invalid": 1, "unspecified": 1, "around": 1} and section["detail"] == {"http_503": 1}
+    assert section["reason"] == {"invalid": 1, "unspecified": 3} and section["decision"] == {"invalid": 1}
+    assert section["mode"] == {"after": 2, "older": 1, "around": 1} and section["detail"] == {"http_503": 1}
     kept = json.dumps(section)
-    assert "<b>" not in kept and "sideways" not in kept and after not in kept
+    assert "<b>" not in kept and "sideways" not in kept and after not in kept and older not in kept
 
     # A refusal is counted with the server's code, cause and stream; the client's earlier leg with its own detail.
     monkeypatch.setattr(history_paging, "_DELTA_CEILING_BYTES", 8)
@@ -77,9 +81,10 @@ def test_a_read_is_counted_with_its_tags_and_answers_the_same_without_them(tmp_p
     assert {key: section.get(key) for key in ("mode", "status", "code", "refusal", "stream")} == {
         "mode": {"after": 1}, "status": {"409": 1}, "code": {"history_delta_reset": 1},
         "refusal": {"delta_byte_limit": 1}, "stream": {"chat": 1}}
-    _read(read, chat_id="1", cursor="not-a-cursor", mode="older")
+    _read(read, chat_id="1", cursor="not-a-cursor", mode="after")
     section = drain()
     assert (section["status"], section["code"], "refusal" in section) == ({"400": 1}, {"history_cursor_invalid": 1}, False)
+    assert section["mode"] == {"after": 1}, "no kind decoded: the client's word"
     assert "not-a-cursor" not in json.dumps(section)
     assert history_paging.DELTA_RESET_DETAILS <= DETAILS  # a client may echo every refusal the server names
     assert not [record for record in caplog.records if record.name == LOGGER], "a read writes nothing, not even a line"

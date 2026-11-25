@@ -21,6 +21,7 @@ never "no older history".
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import json
 import logging
@@ -146,6 +147,11 @@ def room_member_predicate(row_matches_thread, stored_chat_id):
 DELTA_RESET_DETAILS = frozenset({
     "notes_changed", "task_settled", "task_missing", "task_versions_unavailable", "stream_rewound",
     "delta_byte_limit", "replay_gap", "historical_import", "lifecycle_ended", "cursor_size"})
+
+
+# The kind of the cursor a request's selection decoded, for the route's read count (``history_attribution``): a
+# per-request mapping the route sets around the read; nothing selects, authorizes or answers by it.
+DECODED_CURSOR: contextvars.ContextVar = contextvars.ContextVar("history_decoded_cursor", default=None)
 
 
 class HistoryCursorError(ValueError):
@@ -566,6 +572,8 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
         return _select_around(data_dir, thread_id, view, parse_around(around), quotas, predicates, lens, notes, warm,
                               room_member_predicate(*thread_filter), row_target)
     continuation = decode_cursor(cursor, thread_id, view) if cursor else None
+    if continuation and (decoded := DECODED_CURSOR.get()) is not None:
+        decoded["kind"] = continuation["kind"]
     if continuation and continuation["kind"] == "after":
         changed = "notes_changed" if continuation["notes"] != notes else _settled_since(data_dir, continuation["tasks"])
         if changed:
