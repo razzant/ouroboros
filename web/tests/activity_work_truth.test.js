@@ -77,11 +77,12 @@ test('a late row takes its state and line from the work; rows that are not parke
 
 test('a work the server marks with an unbound start arms its Stop trigger with the truthful confirmation (#3428)', () => {
     const ended = { ...work('unknown', 'none', unconfirmed('inv-1'), STOP), because: [], outcome: 'completed',
-        name: 'Delivered report', work_id: 'series', episode: { task_id: 'root-1', live: false } };
+        name: 'Delivered report', episode: { task_id: 'root-1-c', live: false } };
     assert.doesNotMatch(liveActivityRowHtml(null, 0, slot, false, ended), /data-unbound-start/,
         'without the server fact the ordinary bound-run confirmation stays');
     const row = liveActivityRowHtml(null, 0, slot, false, { ...ended, unbound_start: true });
-    assert.match(row, /data-act="task-control"[^>]* data-unbound-start="1"/);
+    assert.match(row, /data-act="task-control" data-id="root-1-c"[^>]*data-tail-work="root-1" data-unbound-start="1"/);
+    assert.match(row, /data-task-control-direct="1">Stop now<\/button>/, 'one projected Stop opens confirmation directly');
 });
 
 test('an incomplete work projection never proves the Activity list empty (#3428)', async (t) => {
@@ -112,4 +113,71 @@ test('an incomplete work projection never proves the Activity list empty (#3428)
     await activity.refresh();
     assert.match(queue().textContent, /Queue empty; live turns unknown/);
     activity.destroy();
+});
+
+test('Activity rechecks each work control against accepted state before queue repaint', async (t) => {
+    const { setup } = await import('./dashboard_dom_fixture.js');
+    const { closeTaskControlMenu } = await import('../modules/task_control_menu.js');
+    const previousObserver = globalThis.IntersectionObserver;
+    let activity;
+    t.after(() => { closeTaskControlMenu(); activity?.destroy(); globalThis.IntersectionObserver = previousObserver; });
+    const { mount, routes, calls, ws, document, window } = setup(t);
+    const create = document.createElement;
+    const rect = () => ({ top: 40, left: 40, right: 160, bottom: 70, width: 120, height: 30 });
+    document.createElement = (tag) => Object.assign(create(tag), { getBoundingClientRect: rect, style: { setProperty() {} } });
+    Object.assign(window, { innerWidth: 1024, innerHeight: 768, clearTimeout: globalThis.clearTimeout });
+    globalThis.IntersectionObserver = class { observe() {} takeRecords() { return []; } disconnect() {} };
+
+    const response = (data) => ({ ok: true, status: 200, json: async () => data });
+    const queueUrl = '/api/tasks?queue_only=1';
+    const queue = response({ queue: { running: [], pending: [] } });
+    const stops = ['prior-two', 'prior-one'].map((target) => ({ action: 'stop', target, scope: 'cascade' }));
+    const state = (pauseTarget, position) => response({ supervisor_ready: true, works_complete: true,
+        bg_consciousness_enabled: false, bg_consciousness_state: { position },
+        active_chat_activities: [], active_chat_activities_complete: true,
+        works: [{ ...work('working', 'none', running, [{ action: 'pause', target: pauseTarget, scope: 'cascade' }, ...stops]),
+            name: 'Report follow-up', work_id: 'report-work', outcome: 'completed', because: [],
+            episode: { task_id: 'report-latest', live: false } }],
+    });
+    routes.set(queueUrl, queue);
+    routes.set('/api/schedules', response({ tasks: [] }));
+    routes.set('/api/services/kept', response({ services: [], complete: true }));
+    routes.set('/api/tasks/report-latest', response({ status: 'completed' }));
+    for (const { target } of stops) routes.set(`/api/tasks/${target}/cancel`, response({ ok: true }));
+    activity = initActivity({ mount, ws });
+    const anchor = () => mount.querySelector('[data-tail-work="report-work"]');
+    const menu = () => document.body.querySelector('.task-control-menu');
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    const pressDuringRefresh = async (action, expected) => {
+        routes.set('/api/state', state('prior-one', 'Initial state'));
+        await activity.refresh();
+        const button = anchor();
+        button.getBoundingClientRect = rect;
+        await mount.fire('click', { target: button });
+        const portal = menu();
+        const item = portal?.querySelectorAll('[role="menuitem"]').find((row) => row.dataset.taskControl === action);
+        assert.ok(item, `${action} is offered in the original menu`);
+
+        let releaseRows;
+        routes.set(queueUrl, new Promise((resolve) => { releaseRows = resolve; }));
+        routes.set('/api/state', state('prior-two', 'Updated state'));
+        const repaint = activity.refresh();
+        try {
+            await settle();
+            assert.match(mount.querySelector('[data-activity-section="background"]').textContent, /Updated state/);
+            assert.equal(anchor(), button, 'the queue row has not been repainted yet');
+            assert.equal(menu(), portal, 'the original menu is still on screen');
+            routes.set(queueUrl, queue); // release future reads, leaving this refresh blocked
+            const since = calls.length;
+            await item.fire('click', { stopPropagation() {} });
+            await settle();
+            assert.deepEqual(calls.slice(since).filter((url) => /\/(pause|cancel|resume)$/.test(url)), expected);
+        } finally {
+            releaseRows(queue);
+            await repaint;
+        }
+    };
+    await pressDuringRefresh('pause', []);
+    await pressDuringRefresh('stop_now', ['/api/tasks/prior-two/cancel', '/api/tasks/prior-one/cancel']);
 });

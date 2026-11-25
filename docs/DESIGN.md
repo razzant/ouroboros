@@ -1598,15 +1598,18 @@ named by the question's first words (`Question` when its row carries none, as Ma
 controls the server lists for its work, each at its exact task, on the shared
 task controls: Stop ends the whole work (every episode still running, the newest
 first), `Stop earlier attempt` only what earlier attempts left running, and
-Pause, Resume, Hurry and Wrap up act on the current episode. Known refusals hide controls.
+Resume, Hurry and Wrap up act on the current episode. Pause ordinarily acts on
+the current episode too; when the current episode holds no work of its own and
+one unique earlier root is proven pausable without an ordinary hold or Stop
+barring it, Pause acts on that earlier root so confirmed remaining work stays
+pausable at its own target. Known refusals hide controls.
 An author-stop Continue offer reads saved facts; its press checks money and explains a refusal
-(owner 04.11, explicit unfinished work under unchanged limits). A Continue waiting for its earlier attempt says
-what it waits for, offers no Resume and starts by itself once that work
-settles. A paused or saved Continue offers Resume; when all of its earlier
-attempt's remaining work is observed running or queued, Resume returns it to
-that wait (owner 1.11, «Один Resume возвращает в существующее ожидание»), while
-work whose outcome nobody knows still refuses it, and a newer
-Pause, Stop, Panic or the owner's Restart replaces the wait with its own stop. A
+(owner 04.11, explicit unfinished work under unchanged limits). A waiting Continue names its wait and starts
+when earlier work settles. Running work offers no Resume there. If only recorded unknown starts remain,
+Resume asks the server to check; only its fresh offer asks for the owner's choice. A paused or saved
+Continue resumes into its wait if all earlier work is running or queued (owner 1.11,
+«Один Resume возвращает в существующее ожидание»); other unknowns refuse. A newer Pause,
+Stop, Panic or the owner's Restart replaces the wait. A
 refused Resume stays as dated history beside the stop it answered about, never
 the reason, a control or the owner's turn: the line ends `Resume refused at
 17:49` (`Resume by Ouroboros refused…` for its own), the card's and row's

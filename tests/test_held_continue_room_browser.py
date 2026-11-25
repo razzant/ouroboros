@@ -73,6 +73,72 @@ def test_held_continue_with_three_helpers_is_one_working_row_with_stop_earlier_a
     assert transport.decision_posts() == []
 
 
+def test_a_continue_waiting_over_one_unconfirmed_start_offers_its_card_a_resume_whose_choice_asks_first(room_ui):
+    """No helper runs: the Continue waits only over one start of its earlier attempt that has no recorded run. Its
+    real card in the Project room carries the work's own Resume. The door answers the press with the choice; Cancel
+    sends nothing more, the next press asks again, and Resume anyway sends the id with the owner's reason."""
+    import copy
+
+    from playwright.sync_api import expect
+
+    owners, raw, stored, _held = copy.deepcopy(CASES["held_continue"])
+    owners = [row for row in owners if not row.get("parent_task_id")]
+    start = {"root_task_id": "p", "task_id": "p", "invocation_id": "lost", "choice_id": "delegate_start:p/p/lost"}
+    unconfirmed = {"kind": "delegated_run", "task_id": "p", "run_id": "", "invocation_id": "lost",
+                   "state": "stop_unknown", "stop_outcome": "pending_invocation_unbound", "ordinary_start": start}
+    choice = "delegate_start:p/p/lost/c///hold"
+    raw["c"]["_budget_pause_hold"] = {"reason": "continuation_writer_unsettled", "predecessor_task_id": "p",
+                                      "root_task_id": "c", "blockers": [unconfirmed]}
+    history = {1: rw.reading(4), 42: [*rw.reading(6, 0, "Project"),
+                                       rw.progress("c", "Waiting for the earlier attempt's start.", 30)]}
+    page = room_ui["page"]
+    transport = rw.Transport(page, history=history, projects=[rw.PROJECT], activities=owners)
+    transport.raw, transport.results, transport.fences = raw, stored, FENCES
+    sent = []
+
+    def resume(route):  # the door's answers: the choice to a plain press, success once the id comes back
+        body = route.request.post_data_json or {}
+        sent.append(body)
+        if body.get("accept_unknown"):
+            route.fulfill(json={"ok": True, "task_id": "c", "state": "resumed"})
+        else:
+            route.fulfill(status=409, json={"ok": False, "error": "predecessor_writers_unsettled",
+                                            "blockers": [{**unconfirmed, "choice_id": choice, "read_only": True}],
+                                            "acceptable_unknown": [choice]})
+
+    page.route("**/api/tasks/c/resume", resume)
+    page = rw.open_app(room_ui, transport, viewport={"width": 1100, "height": 722})
+    rw.open_project(page, rw.PROJECT)
+    transport.refresh()
+    rw.trigger(page, "project").click()
+    shade = rw.wait_facts(page, "project", lambda f: len(f["rows"]) == 1 and f["rows"][0]["resume"], "its row with Resume")
+    assert shade["rows"][0]["word"] == "Waiting", shade
+    card = page.locator("#project-panel .chat-live-card[data-task-id='c']")
+    door = card.locator("[data-resume-run]")
+    expect(door).to_be_enabled()
+    dialog = page.locator(".confirm-dialog")
+
+    door.click()  # the press: the door answers with the choice, and only now is the owner asked
+    dialog.wait_for(state="visible")
+    assert dialog.locator("#confirm-dialog-title").inner_text() == "Resume without this result?"
+    assert "The earlier request was read-only" in dialog.locator(".ui-modal-body p").inner_text()
+    rw.capture(page, "held-continue-resume-choice")
+    dialog.locator("[data-confirm-cancel]").click()
+    dialog.wait_for(state="detached")
+    assert sent == [{}], "Cancel sends nothing beyond the press that asked"
+    expect(door).to_be_enabled()
+
+    door.click()  # the same press asks again
+    dialog.wait_for(state="visible")
+    dialog.locator("[data-confirm-ok]").click()
+    deadline = time.monotonic() + 5
+    while len(sent) < 3 and time.monotonic() < deadline:
+        page.wait_for_timeout(20)
+    assert sent == [{}, {}, {"accept_unknown": [choice],
+                              "reason": "The owner accepted that the listed start may still be working or spending money."}], sent
+    expect(page.locator("#toast-stack .toast")).to_contain_text("Resuming: the task returns to the queue.")
+
+
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_activity_offers_the_held_work_its_own_stop_targets(engine, tmp_path):
     """Dashboard → Activity reads the same work: Stop ends the Continue and its earlier attempt, each at its own

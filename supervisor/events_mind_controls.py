@@ -2,7 +2,7 @@
 
 import json
 
-from ouroboros.control_actor import accepting_unknown, mind_control
+from ouroboros.control_actor import accepting_unknown, list_row, mind_control
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 
@@ -32,7 +32,8 @@ def _apply(evt: dict) -> dict:
     named = evt.get("accept_unknown") if action == "resume_task" and isinstance(evt.get("accept_unknown"), list) else ()
     if evt.get("list_call") and (stopped := _sender_stopped(actor)):
         return stopped  # one row of a list call whose sender was stopped meanwhile: nothing is done for it
-    with mind_control(actor, reason), accepting_unknown(named, reason):
+    listed = str(evt.get("list_call") or "") or ("general" if evt.get("general") else "")
+    with mind_control(actor, reason), accepting_unknown(named, reason), list_row(listed):
         if action == "resume_task" and evt.get("general") and (kept := _kept_pause(task_id)):
             from ouroboros.work_stop import resume_outcome
 
