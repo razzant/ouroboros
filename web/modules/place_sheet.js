@@ -473,7 +473,8 @@ const DONE_WORDS = {
  *  are the opener's (Circles); another opener's sheet reads them, and later circle writes, from the places list. */
 export function openPlaceSheet(place, { returnFocus = document.activeElement, onClose = null, update = updatePlace,
     disconnect = disconnectPlace, readStatus = readPlaceConnector, readModels = (init) => fetchJson('/api/model-catalog', init),
-    readRooms = readPlaceRooms, readList = readPlaces, openRoomChatId = null, circles = null, connectorStatus = null } = {}) {
+    readRooms = readPlaceRooms, readList = readPlaces, openRoomChatId = null, openRoom: namedRoom = null, circles = null,
+    connectorStatus = null } = {}) {
     let current = place;
     const ui = { drafts: {}, status: {}, busy: false, adding: false, confirmDisconnect: false, moreOpen: false,
         serviceLabel: place.serviceLabel || place.provider, roomIndex: { rooms: null }, circles, allRooms: false, connectorStatus };
@@ -512,7 +513,9 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         history?.close(); history = null; selected = null;
         reader.hidden = true; editor.hidden = false;
         paint(); body.scrollTop = editorScroll;
-        editor.querySelector(`[data-place-room="${id}"]`)?.focus({ preventScroll: true });
+        (editor.querySelector(`[data-place-room="${id}"]`)
+            || editor.querySelector('button:not([hidden]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+            ?.focus({ preventScroll: true });
     }
 
     function openRoom(room) {
@@ -531,10 +534,14 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
             const value = await readRooms(place.id, { signal: roomController.signal });
             if (sheet.closed || version !== roomGeneration) return;
             ui.roomIndex = value;
-            // A Dashboard door names the conversation; it opens once the index knows that room.
-            const wanted = openRoomChatId; openRoomChatId = null;
+            // A Dashboard door names the conversation; it opens once the index knows that room. A work's door names
+            // its room by the work's own record (`openRoom`): the index finds rooms by arrivals, which a letter is not,
+            // so that room opens as named, and the index below still says only what it found.
+            const wanted = openRoomChatId, named = namedRoom; openRoomChatId = null; namedRoom = null;
             const room = wanted ? (value.rooms || []).find((item) => item.room_chat_id === wanted) : null;
-            if (room) { openRoom(room); if (history) return; }
+            const listed = named ? (value.rooms || []).find((item) => item.room_chat_id === named.room_chat_id) : null;
+            const chosen = room || (named && Number.isSafeInteger(named.room_chat_id) ? { ...(listed || {}), ...named } : null);
+            if (chosen) { openRoom(chosen); if (history) return; }
         } catch (error) {
             if (sheet.closed || version !== roomGeneration) return;
             ui.roomIndex = { error: failureText(error) };

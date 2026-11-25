@@ -21,7 +21,7 @@ const LEDGE_DROP = 8;
 // Everything that moves here rides the one sheet curve, the emerging cards of a fanned stack included (owner question
 // 5, B: no overshoot anywhere).
 const SHEET_CURVE = 'cubic-bezier(0.32, 0.72, 0, 1)';  // --ease-sheet's own value, should the stylesheet not answer
-const ARROW = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"'
+export const ARROW = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"'
     + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8h11"></path>'
     + '<path d="M9.5 4.5 13.5 8l-4 3.5"></path></svg>';
 

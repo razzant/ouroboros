@@ -97,6 +97,7 @@ _PROGRESS_META_FIELDS = (
     "outcome_axes",
     "reason_code",
     "delegated_runs_unreconciled",  # the current custody debt, an explicit [] included (a stamped code is not live debt)
+    "peer_letter_card",  # a letter's card in the room of the work that wrote it (place_projection.letter_card_fact)
     "review_projection",
     "worker_saturation_warning",
     "model_execution",
@@ -351,6 +352,7 @@ def _annotate_terminal_task_truth(
         # conversation. A user's row keeps its authorship and physical identity.
         represented, tool_counts = {}, {}
         latest_progress_by_task, summaries, plain_finals = {}, {}, {}
+        letter_only_tasks = set()  # tasks whose only progress rows in this page are letter cards (never carriers)
         for message in combined:
             task_id = str(message.get("task_id") or "")
             if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
@@ -374,6 +376,9 @@ def _annotate_terminal_task_truth(
             if summary:
                 ending_rows.setdefault(task_id, []).append(message)
                 latest = summaries
+            elif progress and message.get("peer_letter_card"):  # a letter's card: its own row, never the task's carrier
+                letter_only_tasks.add(task_id)
+                continue
             elif progress:
                 latest = latest_progress_by_task
             elif message.get("role") == "assistant" and not message.get("system_type") and not message.get("msg_type"):
@@ -403,7 +408,8 @@ def _annotate_terminal_task_truth(
             # do. A parent anchored by its child's row is always carried (zero tools included): never a bare shell (A5).
             incomplete = (coverage.get("gaps") or max(known_calls, coverage.get("matched", 0)) > coverage.get("shown", 0))
             if task_id not in carriers and (evidence.get("observations") or evidence.get("legacy", {}).get("calls")
-                                            or incomplete or (evidence_anchors or {}).get(task_id)):
+                                            or incomplete or (evidence_anchors or {}).get(task_id)
+                                            or task_id in letter_only_tasks):
                 carrier = {"task_id": task_id, "ts": represented[task_id], "role": "system",
                            "system_type": "task_evidence", "text": "", "is_progress": False, "narration": False}
                 # This new row presents the current result; it is not a stamp on a physical history row.
@@ -423,6 +429,11 @@ def _annotate_terminal_task_truth(
                         count = (known_calls or None) if current is None else result.get("tool_calls")
                         if type(count) is int and count >= 0:
                             carrier["tool_calls"] = count
+        # On letter-only pages, use the evidence carrier for the task's own replay facts (cost, review, receipt).
+        for task_id in letter_only_tasks:
+            carrier = carriers.get(task_id)
+            if carrier is not None and task_id not in latest_progress_by_task:
+                latest_progress_by_task[task_id] = carrier
         terminal_status_by_task: Dict[str, str] = {}
         terminal_truth_by_task: Dict[str, Dict[str, Any]] = {}
         terminal_receipt_by_task: Dict[str, Dict[str, Any]] = {}
@@ -517,9 +528,9 @@ def _annotate_terminal_task_truth(
                              exact_row)
         for message in combined:
             task_id = str(message.get("task_id") or "")
-            if not task_id or message.get("system_type") in (
+            if not task_id or message.get("peer_letter_card") or message.get("system_type") in (
                     "subagent_admission_notice", "project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
-                continue
+                continue  # a letter's card carries only its own facts (place_projection), no task replay stamp
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
                 message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;
                     cache.get(task_id), fallback=message.get("project_name") or "Task")  # nameless: its Project

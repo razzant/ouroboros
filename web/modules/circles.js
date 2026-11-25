@@ -24,6 +24,8 @@ import { modelSuggestions, openPlaceSheet, statusLine } from './place_sheet.js';
 import { catalogPrograms } from './model_program.js';
 import { openConnectPlace, ownerWordsFieldHtml } from './place_connect.js';
 import { openConfirmDialog } from './confirm_dialog.js';
+import { circlePlaces, createOwnOuroboroses, ownFocusKey, wroteRoom } from './own_ouroboroses.js';
+import { openCodeCheck, openIntroduction } from './peer_intro.js';
 
 const SEP = ' · ';
 const UNASSIGNED = 'none';
@@ -53,7 +55,7 @@ export function placeRowHtml(place, { title = '', source = '' } = {}) {
     // of a stored word it does not do now; the stored choice stays the sheet's. A place no cause keeps quiet, not
     // Paused, with no kind checked says that setting beside its state, promising neither a wake nor silence: the kinds
     // themselves stay in the sheet's "What calls it here".
-    const unchecked = !place.quiet && place.state !== 'paused' && noKindChecked(place);
+    const unchecked = place.connector !== 'ouroboros' && !place.quiet && place.state !== 'paused' && noKindChecked(place);
     const state = place.quiet ? tr(place.quiet.word, place.quiet.word)
         : unchecked ? `${word}${SEP}${tr('places.unchecked', 'no wake kinds checked')}` : word;
     const when = lastEventText(place);
@@ -73,7 +75,7 @@ export function placeRowHtml(place, { title = '', source = '' } = {}) {
     const label = fmt(where ? 'Open {place} ({where}): {facts}' : 'Open {place}: {facts}', { place: name, where,
         facts: [state, readiness, fmt('last event {when}', { when }), own ? fmt('model {model}', { model: placeModelWord(own) }) : '']
             .filter(Boolean).join('; ') });
-    return `<li><button type="button" class="place-row" data-place-open="${escapeHtml(place.id)}" data-state="${escapeHtml(place.state || '')}" aria-label="${escapeHtml(label)}">
+    return `<li><button type="button" class="place-row"${place.connector === 'ouroboros' ? ' data-i18n-skip' : ''} data-place-open="${escapeHtml(place.id)}" data-state="${escapeHtml(place.state || '')}" aria-label="${escapeHtml(label)}">
         <span class="place-row-main"><span class="place-glyph" aria-hidden="true">${skillIconHtml(place.icon, 18)}</span><span class="consciousness-place-name" data-i18n-authored>${escapeHtml(name)}</span><span class="place-row-source">${where
             ? `<span data-i18n-authored>${escapeHtml(where)}</span>${SEP}` : ''}${escapeHtml(when)}</span><span class="consciousness-place-facts">${facts}</span></span>
         ${description ? `<span class="place-row-meta" data-i18n-authored>${escapeHtml(description)}</span>` : ''}
@@ -241,6 +243,20 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     document.getElementById('content').appendChild(page);
     const disposeBar = bindPageHeader(page.querySelector('.app-page-header'));
     const body = page.querySelector('[data-circles-body]');
+    // The owner's own Ouroboroses: a block of their own above the circles (own_ouroboroses.js); their places are its.
+    // Its conversation opens where every place's does, in the place sheet, at its room when it has one: the one its
+    // arrivals list, else the one the host names as where this side wrote first (`peerRoom`; a message sent is no arrival).
+    const introduced = (placeId) => { own.reveal(placeId); void refresh(); };
+    const own = createOwnOuroboroses(body, { places: () => view?.places || [], paint, refresh,
+        openIntro: ({ returnFocus, again }) => openIntroduction({ returnFocus, name: again?.label || '', onChanged: introduced }),
+        openCodeCheck: (place, options) => openCodeCheck(place, { ...options, onChanged: introduced }),
+        openConversation: (place, options) => openSheet(place, { ...options, circles: view?.circles || null,
+            openRoomChatId: place.rooms?.[0]?.chatId ?? null,
+            openRoom: wroteRoom(place) ? { room_chat_id: wroteRoom(place).roomChatId } : null }),
+        // The work a letter started here opens in the room its acceptance record names (its arrival index may list
+        // none: a letter is no arrival), read as that work's own rows.
+        openWork: (place, options) => openSheet(place, { ...options, circles: view?.circles || null,
+            openRoom: { room_chat_id: place.peerWork.roomChatId, work: { ...place.peerWork } } }) });
     // One circle open at a time; the first one opens on the first visit.
     const ui = { open: '', opened: false, editing: '', drafts: {}, creating: false, status: {}, busy: false, models: null, modelsFailed: false };
     let view = null, readError = '', generation = 0, behind = false;
@@ -262,9 +278,9 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         if (view) {
             const { groups, unassigned } = groupPlaces(view.circles, view.places);
             const answered = statuses();
-            directory = `<section class="ui-card circles-directory" aria-label="${escapeHtml(tr('circles.title', 'Circles'))}">`
+            directory = own.html(view.places) + `<section class="ui-card circles-directory" aria-label="${escapeHtml(tr('circles.title', 'Circles'))}">`
                 + groups.map(({ circle, places }) => circleFoldHtml(circle, places, ui, answered)).join('')
-                + unassignedFoldHtml(unassigned, ui, answered, { alone: !groups.length }) + '</section>';
+                + unassignedFoldHtml(circlePlaces(unassigned), ui, answered, { alone: !groups.length }) + '</section>';
         }
         return `<p class="ui-status consciousness-read-status" role="status"${top?.tone ? ` data-tone="${escapeHtml(top.tone)}"` : ''}>${escapeHtml(top?.text || '')}</p>${moved}`
             + (ui.creating ? newCircleCardHtml(ui) : '') + directory;
@@ -281,10 +297,10 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         disposeChoosers = bindModelChoosers(body);
         for (const fold of body.querySelectorAll('.circle-fold')) if (fold.hasAttribute('open')) paintedOpen.add(fold);
         body.scrollTop = scroll;
-        if (!key) return;
-        const node = body.querySelector(key);
+        const node = key ? body.querySelector(key) : null;
         node?.focus({ preventScroll: true });
         if (selection && node?.setSelectionRange) node.setSelectionRange(...selection);
+        own.painted();  // the block's results, and focus where its finished sheet or write sends it
     }
 
     // Settings broadcasts every catalog read, a failed one too: that one leaves the suggestions as they are.
@@ -561,6 +577,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             generation += 1;
             destroyed = true;
             disposeChoosers();
+            own.dispose();
             statusReads.clear();  // a late status answer finds no read of this page
             offLifecycle();
             disposeBar();
@@ -586,5 +603,5 @@ function focusKeyOf(node) {
     const row = node.closest?.('[data-place-open]');
     if (row) return `[data-place-open="${CSS.escape(row.dataset.placeOpen)}"]`;
     const head = node.closest?.('.circle-fold > summary');
-    return head ? `[data-circle="${CSS.escape(head.parentElement.dataset.circle)}"] > summary` : '';
+    return head ? `[data-circle="${CSS.escape(head.parentElement.dataset.circle)}"] > summary` : ownFocusKey(node);
 }

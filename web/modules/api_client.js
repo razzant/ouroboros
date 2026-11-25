@@ -330,6 +330,19 @@ export function taskWrapUpDocumentUrl(taskId, wrapUp) {
     return url && `${url}?wrap_up=${encodeURIComponent(wrapUp.request_id)}`;
 }
 
+/**
+ * Address of the whole words of one part of a letter the task wrote, read on demand from that side's own records
+ * where its card carries none (`peer_letter_card` `text: null` beside `text_chars`, `answer: null` beside
+ * `answer_chars`): `{letter_id}.{part}.txt?letter={letter_id}` on the task-file route, `part` 'letter' or 'answer';
+ * '' for anything the route would refuse. Read it with `apiFetch`: 200 is the exact text, a refusal is JSON.
+ */
+export function taskLetterWordsUrl(taskId, letterId, part) {
+    if (!['letter', 'answer'].includes(part) || typeof letterId !== 'string'
+        || !/^(?!\.{1,2}$)[A-Za-z0-9_.-]{1,64}$/.test(letterId)) return '';
+    const url = taskArtifactDownloadUrl(taskId, `${letterId}.${part}.txt`);
+    return url && `${url}?letter=${encodeURIComponent(letterId)}`;
+}
+
 /** URL for one published immutable source handle (a delegated run's journal range included). */
 export function taskSourceDownloadUrl(taskId, ref) {
     const path = typeof ref?.path === 'string' ? ref.path : '';

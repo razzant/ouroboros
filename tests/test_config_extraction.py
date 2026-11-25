@@ -35,6 +35,9 @@ _ADDED_OWNERS = {
     "owner_rules_section": safety_config,
     # A managed deployment's organization rules ride the same section under their own provenance.
     "organization_rules_section": safety_config,
+    # Which coverage setting a call meets: work a linked Ouroboros's letter began meets my
+    # own life's (safety.py, peer_replies.py, peer_letters.py), everything else follows work_kind.
+    "coverage_kind": safety_config,
     "_owner_rules": safety_config,
     "WORKER_READY_CEILING_SEC": runtime_limits,
     # A spawned direct-Restart successor's bounded wait for its exiting parent's data-root admission.

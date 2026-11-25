@@ -171,6 +171,53 @@ class AgentNoteFields(TypedDict, total=False):
     late_report_id: str  # the letter's display id, not the host return reference
 
 
+class PeerLetterPart(TypedDict, total=False):
+    """A question about a letter, or this side's answer to it, on the letter's card (``place_projection._said``): its
+    words whole within the letter protocol's bound (``chars`` only past it, ``text`` then null); a question whose words
+    the receiver holds now has ``held`` and no words, and ``delivery_state`` ``reserved`` when an answer to it is
+    reserved there, its delivery not proven. An ``answered`` part exists only after its delivery was confirmed."""
+
+    question_id: Required[str]
+    text: Required[Optional[str]]
+    held: str
+    delivery_state: Literal["reserved"]
+    chars: int
+
+
+class PeerLetterCardFact(TypedDict, total=False):
+    """``peer_letter_card`` (``place_projection.letter_card_fact``): one letter's card on a progress row of the work that
+    wrote it, the same fact live and on replay; its parts are keyed ``(task_id, letter_id, part, question_id)`` with
+    ``part`` letter, question, answered or answer. Words of the letter or of a given answer past what the card carries
+    are null beside their length (``text_chars``, ``answer_chars``) and read whole at ``GET
+    /api/tasks/{task_id}/artifacts/{letter_id}.letter.txt`` or ``.answer.txt`` ``?letter={letter_id}``; ``error_chars``
+    marks a failure reason cut to its first part; ``stop`` a Stop not confirmed (a confirmed one is ``cancelled``)."""
+
+    letter_id: Required[str]
+    place_id: Required[str]
+    to: Required[str]
+    to_seed: Required[str]
+    text: Required[Optional[str]]
+    title: Required[str]
+    ceiling_usd: Required[Optional[float]]
+    spent_usd: Required[Optional[float]]
+    spent_final: Required[bool]
+    state: Required[Literal["accepted_running", "needs_input", "waiting_owner", "done", "failed", "cancelled",
+                            "refused", "not_sent", "unconfirmed", "unknown"]]
+    text_chars: int
+    phase: str
+    refusal_code: str
+    error: str
+    error_chars: int
+    at: str
+    question: PeerLetterPart
+    answered: PeerLetterPart
+    stop: Literal["requested", "refused", "unverified"]
+    reply: Literal["given", "none", "held", "unknown"]
+    held: str
+    answer: Optional[str]
+    answer_chars: int
+
+
 class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     """One ``GET /api/chat/history`` row. Every row has the six required keys; a stored row also
     has ``history_id`` and ``history_position``. Live frames call ``text`` ``content``.
@@ -245,6 +292,7 @@ class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     outcome_axes: Dict[str, Any]
     _result_text_present: bool
     delegated_runs_unreconciled: List[str]
+    peer_letter_card: PeerLetterCardFact  # a letter's card, a progress row of its own (never the task's carrier)
     review_projection: Dict[str, Any]
     wake_summary: str
     suggested_name: str

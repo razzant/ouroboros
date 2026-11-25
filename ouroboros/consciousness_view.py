@@ -124,7 +124,9 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         status, detail = "sleeping", f"Sleeping until {_clock_of(wake_at)}{_zone_of(wake_at)}."
     return {**{key: value for key, value in snapshot.items() if key != "detail_note"},
             "enabled": requested_enabled, "status": status, "detail": detail, **({"detail_note": note} if note else {}),
-            "position": position_words(requested_enabled, snapshot.get("places_brief")), "gloss": SWITCH_GLOSS}
+            "position": position_words(requested_enabled, snapshot.get("places_brief")),
+            "position_short": position_words(requested_enabled, snapshot.get("places_brief"), short=True),
+            "gloss": SWITCH_GLOSS}
 
 
 # ---- The switch's words (owner 15.11, decision 5A; SPEC §2.14). One switch, named Consciousness and glossed as what
@@ -141,13 +143,39 @@ _NAMED = 3  # places named before «and N more»; the dialog's details list ever
 
 
 ON_WITHOUT_PLACES = "Also on its own"  # an install with no place says nothing of places (SPEC §2.17)
+# Off, while a linked Ouroboros of my human's may start work here: whole on the Dashboard, short in a one-line row.
+# Off still lets its requests for work start; its other words wake nothing while Off, so its place is heard like any
+# other.
+LINKED_OFF_WORDS = ("Only when you write to it or your Ouroboroses ask for work", "Only when asked")
+UNKNOWN_OFF_WORDS = "Background wakes are off"
+UNKNOWN_ASSIGNMENTS = "Whether your Ouroboroses can start work here could not be read."
+LINKED_OFF_LINE = "Requests from your Ouroboroses still start work."  # its full line where Off is explained
 
 
-def position_words(enabled: Any, places=None) -> str:
+def letters_start_work(places) -> bool | None:
+    """A place view of a linked Ouroboros whose letters start work here now, as the state snapshot stamps it on
+    ``places_brief`` (``place_projection.starts_work_here``)."""
+    from ouroboros.place_projection import any_assignment_permission
+
+    if not isinstance(places, list):
+        return None
+    return any_assignment_permission(place.get("letters_start_work") for place in places
+                                     if isinstance(place, dict) and (place.get("connector") == "ouroboros"
+                                                                    or "letters_start_work" in place))
+
+
+def position_words(enabled: Any, places=None, *, short: bool = False) -> str:
     """The switch's position by meaning; ``""`` while the stored control is unknown (never Off). ``places`` is the
-    install's place read (``None``: not read): on, an install that holds no place at all is not told of places."""
+    install's place read (``None``: not read): on, an install that holds no place at all is not told of places; off,
+    one whose linked Ouroboros may start work here names it (``short``: the one-line row's words)."""
     if not isinstance(enabled, bool):
         return ""
+    if not enabled:
+        letters = letters_start_work(places)
+        if letters is True:
+            return LINKED_OFF_WORDS[1 if short else 0]
+        if letters is None:
+            return UNKNOWN_OFF_WORDS
     return ON_WITHOUT_PLACES if enabled and isinstance(places, list) and not places else POSITION_WORDS[enabled]
 
 
@@ -210,9 +238,13 @@ def heard_sentence(places) -> str:
     if places is None:
         return "Its places are heard, not answered."
     hearing = [fact for fact in map(_place_fact, places) if fact["state"] != "paused"]
-    if not hearing:
-        return "Nothing wakes it between your messages."
-    return f"{_count(len(hearing), 'place')} {'is' if len(hearing) == 1 else 'are'} heard, not answered."
+    said = f"{_count(len(hearing), 'place')} {'is' if len(hearing) == 1 else 'are'} heard, not answered." if hearing else ""
+    letters = letters_start_work(places)
+    if letters is True:
+        return f"{LINKED_OFF_LINE} {said}".strip()
+    if letters is None:
+        return f"{UNKNOWN_ASSIGNMENTS} {said}".strip()
+    return said or "Nothing wakes it between your messages."
 
 
 def _running_line(running) -> str:
@@ -230,17 +262,20 @@ def _running_line(running) -> str:
 
 
 def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str = "", daily_usd=None,
-                   running=None) -> dict:
+                   running=None, letters: bool | None = False) -> dict:
     """What turning the switch ``to`` ("on" | "off") changes, said before it happens, from this install's facts:
     ``places`` (stored places or view rows; ``None`` unread), ``people`` (``recent_people``; ``None`` unread),
     ``circles`` (place id → its circle's name), ``autonomy`` and ``daily_usd`` (turning on), ``running`` (turning off:
     the state line's live wake and own tasks). ``{"to", "lines", "places"}``: one sentence a line and every place the
     turn concerns with its people, for the dialog's details (``None`` when the places could not be read: the app still
-    asks, with these lines). A fact absent says nothing."""
+    asks, with these lines). ``letters``: a linked Ouroboros's letters start work here, Off or not. A fact absent says
+    nothing."""
     if to == "off":
         hearing = None if places is None else _ranked([p for p in places if _place_fact(p)["state"] != "paused"],
                                                       people, circles)
-        lines = ["Ouroboros will act only when you write to it."]
+        lines = ["Ouroboros will act only when you write to it or your Ouroboroses ask for work." if letters is True
+                 else ("Background wakes will stop. " + UNKNOWN_ASSIGNMENTS if letters is None
+                       else "Ouroboros will act only when you write to it.")]
         if hearing is None:
             lines.append("Its places will be heard, not answered; which ones could not be read.")
         elif hearing:
@@ -275,6 +310,7 @@ def read_switch_preview(drive_root, to: str, running=None) -> dict:
     is the caller's state line. A read that fails says less, never a guess: no place list says «its places», no people
     count says nothing."""
     from ouroboros.place_arrivals import recent_people
+    from ouroboros.place_projection import letters_can_start_work
     from ouroboros.places import place_records
     from ouroboros.runtime_limits import get_consciousness_autonomy, get_consciousness_daily_usd
 
@@ -294,7 +330,8 @@ def read_switch_preview(drive_root, to: str, running=None) -> dict:
         except Exception:
             log.warning("Recent people unreadable for the switch preview", exc_info=True)
     return switch_preview(to, places, people=people, circles=circles, autonomy=get_consciousness_autonomy(),
-                          daily_usd=get_consciousness_daily_usd(), running=running)
+                          daily_usd=get_consciousness_daily_usd(), running=running,
+                          letters=letters_can_start_work(drive_root, records=records) if places is not None else None)
 
 
 def on_sentence(at: str, places, autonomy: str = "", daily_usd: Any = None, allowance: str = "") -> str:
@@ -559,10 +596,13 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
     return result
 
 
-def off_sentence(places) -> str:
+def off_sentence(places, *, letters: bool | None = False) -> str:
     """The switch's first words as it turns consciousness off (owner 09.11, variant A; words 15.11, 5A). ``places`` is
-    one read of the place store, None when it could not be read; a Paused place does not hear either."""
-    said = "Consciousness off: Ouroboros acts only when you write to it."
+    one read of the place store, None when it could not be read; a Paused place does not hear either. ``letters``: a
+    linked Ouroboros's letters still start work here."""
+    said = ("Consciousness off: Ouroboros acts only when you write to it or your Ouroboroses ask for work." if letters is True
+            else ("Consciousness off. " + UNKNOWN_ASSIGNMENTS if letters is None
+                  else "Consciousness off: Ouroboros acts only when you write to it."))
     if places is None:
         return said + " Its places are heard, not answered."
     hearing = [fact for fact in map(_place_fact, places) if fact["state"] != "paused"]

@@ -23,7 +23,9 @@ mid-production makes the next probe differ: one more production, never a stale b
 ``dialogue`` one aggregate over the dialogue store's rooms (unread/activity facts, Main's revision);
 ``bindings`` ``projects_registry.bindings_revision`` (bindings and registry files: the census names Projects too);
 ``files``    the identities of ``state.json`` (and its last-good copy), ``settings.json`` and the
-             evolution campaign; ``checkout`` the runtime checkout's identity;
+             evolution campaign; ``places`` those of the place store and the link registry, which the
+             consciousness state line reads (a linked Ouroboros that may start work names the switch's Off);
+             ``checkout`` the runtime checkout's identity;
 ``live``     the in-memory census inputs no revision covers: the direct turns (``_direct_turns_source``,
              the one seam for their source), the post-task owners still running, the budget limit;
 ``presence`` the live Presence authors' witnesses (``conversation_lease.live_presence_roots``): who holds one,
@@ -219,6 +221,14 @@ def _service_files() -> Tuple[Any, ...]:
             _evolution_campaign_path())
 
 
+def _place_files(drive_root: str) -> Tuple[Any, ...]:
+    """The place store and the link registry of ``drive_root`` (``places.places_path``, ``peer_links.registry_path``)."""
+    from ouroboros.peer_links import registry_path
+    from ouroboros.places import places_path
+
+    return places_path(drive_root), registry_path(drive_root)
+
+
 def _direct_turns_source() -> Tuple[list, bool]:
     """The direct turns the census starts from, with whether the read was complete: the one seam for their
     source (today the process registry; the conversation lane's RUNNING rows replace it)."""
@@ -275,6 +285,7 @@ def probe(drive_root: str, roots=frozenset(), *, direct: Optional[Tuple[list, bo
         ("dialogue", _dialogue_revision(str(drive_root))),
         ("bindings", _bindings_revision(str(drive_root))),
         ("files", _file_stamps(_service_files())),
+        ("places", _file_stamps(_place_files(str(drive_root)))),
         ("checkout", _git_checkout_identity(REPO_DIR)),
         ("live", json.dumps(direct_rows, sort_keys=True, default=str), complete, _post_task_owners(str(drive_root)),
          TOTAL_BUDGET_LIMIT),

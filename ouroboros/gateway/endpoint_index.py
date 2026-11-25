@@ -66,6 +66,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/peer-links/invite",
     "POST /api/peer-links/accept",
     "POST /api/peer-links/introduce",
+    "GET /api/peer-links/{link_id}",
     "POST /api/peer-links/{link_id}/confirm",
     "POST /api/peer-links/{link_id}/revoke",
     "POST /api/skills/{skill}/publish-preflight",
@@ -393,6 +394,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/peer-links/introduce": Shape("200:json 400,401,403,503:json", headers="X-Ouroboros-Invite!",
                                             note="the accepting side's call {link_id, install_id, url, key_sha256, "
                                                  "label?, may_start?, protocol?} under the one-time invitation token"),
+    "GET /api/peer-links/{link_id}": Shape("200,403,503:json", note="owner only: link null or {link_id, place_id, peer_label, peer_install_id, code, code_check, revoked_at}"),
     "POST /api/peer-links/{link_id}/confirm": Shape("200:json 400,401,503:json",
                                                     note="owner door: the six digits match here; the link's place starts"),
     "POST /api/peer-links/{link_id}/revoke": Shape("200:json 400,401,503:json",
@@ -416,8 +418,10 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/tasks": Shape("200:TaskListResponse 503:ErrorResponse", query="status limit queue_only"),
     "GET /api/tasks/{task_id}": Shape("200:TaskDetailResponse 400,404,503:ErrorResponse"),
     "GET /api/tasks/{task_id}/artifacts/{name}": Shape(
-        "200,206:file 400,404,409,410,500,503:ErrorResponse", query="relpath archive source", headers="Range",
-        note="Range supported; x-ouroboros-artifact-sha256 when the bytes are verified"),
+        "200,206:file 400,404,409,410,500,503:ErrorResponse", query="relpath archive source letter", headers="Range",
+        note="Range supported; x-ouroboros-artifact-sha256 when the bytes are verified; ?letter=<letter id> with "
+             "{letter_id}.letter.txt or .answer.txt: the whole words of that letter of this task as text, read on "
+             "demand from this side's records (409 reply_not_given: never a reply not given to this sender)"),
     "GET /api/tasks/{task_id}/events": Shape(
         "200:sse/TaskEvent 400,404:sse", query="cursor wait",
         note="resume with ?cursor=<last event id>; a 400/404 stream carries one error event"),

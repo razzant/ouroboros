@@ -91,6 +91,13 @@ def shell_html(page: str = "index.html") -> str:
             '<script type="module" src="/gallery/stand.js"></script>\n</body>\n</html>\n')
 
 
+class RawText:
+    """A stand answer whose body is exact text, not JSON (a letter's whole words as the task-file route serves them)."""
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+
 class Corpus:
     """The recorded answers the stand gives, looked up by the open scene.
 
@@ -141,6 +148,12 @@ class Corpus:
             if family == "login" and re.fullmatch(r"/api/claudexor/login/[^/]+", path):
                 return 200, self._at(entry.get("responses") or [], step)
             if family in ("task_card", "share"):  # a task's room: its history, the census and the task's detail
+                words = re.fullmatch(r"/api/tasks/([^/]+)/artifacts/([^/]+)\.(letter|answer)\.txt", path)
+                if words:
+                    whole = (entry.get("letter_words") or {}).get(words.group(2))
+                    if whole is None:
+                        return 409, {"reason_code": "reply_not_given"}
+                    return 200, RawText(whole.encode("utf-8"))
                 read = {"/api/chat/history": "history", "/api/state": "state",
                         f"/api/tasks/{entry.get('task_id')}": "detail"}.get(path)
                 if read:
@@ -201,6 +214,8 @@ class GalleryServer:
                     status, body = stand.corpus.answer(self.command, path, scene, step)
                     stand.requests.append({"method": self.command, "path": path, "scene": scene, "step": step,
                                            "status": status})
+                    if isinstance(body, RawText):
+                        return self._send(status, body.data, "text/plain; charset=utf-8")
                     return self._send(status, json.dumps(body).encode(), "application/json")
                 if self.command not in ("GET", "HEAD"):
                     return self._send(405, b"", "text/plain")

@@ -6,6 +6,7 @@
 import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson, withinRequestLifetime } from './api_client.js';
 import { tr } from './i18n.js';
 import { errorWords } from './ui_primitives.js';
+import { peerPlaceFacts } from './peer_links_api.js';
 
 /** A read or write that never reached Ouroboros in owner words (errorWords); a server's answer keeps its own words. */
 export const failureText = (error) => (error instanceof TypeError && error.response === undefined
@@ -126,6 +127,9 @@ export function normalizePlace(raw) {
             placedBy: text(place.circle.placed_by), placedAt: text(place.circle.placed_at) } : null,
         description: object(place.description) && text(place.description.text) ? { text: text(place.description.text),
             author: text(place.description.author), at: text(place.description.at) } : null,
+        // Another Ouroboros of the owner's: its two stored facts, what is in effect now and its link
+        // (peer_links_api.js); none elsewhere.
+        ...peerPlaceFacts(place),
     };
 }
 
@@ -212,6 +216,8 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         detail: text(bg.detail),
         // The switch's position by meaning and its gloss, in the host's words (consciousness_view.position_words).
         position: text(bg.position),
+        // The same position in a one-line row's words (a linked Ouroboros makes the whole longer); absent: the whole.
+        positionShort: text(bg.position_short),
         gloss: text(bg.gloss),
         // What follows from that state, said beneath it (a held wake's allowance: what Resume does, what ends it).
         detailNote: text(bg.detail_note),

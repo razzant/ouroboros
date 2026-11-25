@@ -771,6 +771,9 @@ def retained_terminal_result(ctx, run_id, *, complete_only=True, retry_money=Fal
     full = retained_payload(root, entry, require_complete=complete_only)
     if (full is None or full.get("run_id") != run_id or full.get("state") != entry.terminal_state):
         return None
+    if entry.output_complete and entry.task_id == str(getattr(ctx, "task_id", "") or ""):
+        from ouroboros.place_projection import observe_letter_run  # a letter's complete end, before any preview bounds
+        observe_letter_run(ctx, entry, payload=full)  # it, is also its card in its own work's room (no-op otherwise)
     discard_retry = directory_discard_owed(entry) and (entry.patch_captured or ready_result_owed(entry))
     if retry_money and (not entry.settled or ready_result_owed(entry) or discard_retry):
         from ouroboros.delegate_capture_attempt import GENERATION

@@ -605,3 +605,49 @@ test('a current refused read takes the saved conversation text; a failed one, or
     pending.resolve(); await tick(); await tick();
     assert.equal(values.has(PREVIEW_KEY), true, 'a read the closed sheet abandoned decides nothing');
 });
+
+test('a room opened for a work a letter started reads that work\'s own rows; any other room stays its speech only', async (t) => {
+    // The receiving side of a linked Ouroboros: the work's room holds its answer and summary, which carry no place facts
+    // (they are the work's, not the place's speech). Opened from that work's record, they read under one line naming it.
+    const f = fixture(t);
+    const answer = { history_id: 'chat:a', role: 'assistant', text: 'It failed on a space in %TEMP%.', task_id: 'letter-1' };
+    const summary = { history_id: 'chat:s', role: 'system', text: 'Done. Root task letter-1.', task_id: 'letter-1' };
+    const other = { history_id: 'chat:o', role: 'assistant', text: 'Another work\'s answer.', task_id: 'letter-2' };
+    const progress = { history_id: 'progress:p', role: 'assistant', text: 'still working', task_id: 'letter-1', is_progress: true };
+    const host = f.doc.createElement('div'); f.doc.body.append(host);
+    const work = { taskId: 'letter-1', title: 'Installer test', from: 'Mac', status: 'completed' };
+    const reader = mountPlaceHistory(host, place, { ...room, work }, { onBack: () => reader.close(),
+        readHistory: async () => page([answer, summary, other, progress]) });
+    await tick();
+    const rows = [...host.querySelectorAll('.place-convo-row')];
+    assert.deepEqual(rows.map((node) => node.querySelector('.place-convo-text').textContent), [answer.text, summary.text]);
+    assert.deepEqual(rows.map((node) => node.querySelector('.place-convo-who').textContent), ['Ouroboros', 'System']);
+    const line = host.querySelector('[data-history-work]');
+    assert.equal(line.hidden, false);
+    assert.equal(line.textContent, 'Work from Mac: Installer test');
+    reader.close();
+    const plain = f.doc.createElement('div'); f.doc.body.append(plain);
+    const ordinary = mountPlaceHistory(plain, place, room, { onBack: () => ordinary.close(),
+        readHistory: async () => page([answer, summary, row('m', 'An ordinary message.')]) });
+    await tick();
+    assert.deepEqual([...plain.querySelectorAll('.place-convo-text')].map((node) => node.textContent), ['An ordinary message.'],
+        'without a named work a room reads its speech only, as before');
+    assert.equal(plain.querySelector('[data-history-work]').hidden, true);
+    ordinary.close();
+});
+
+test('a work\'s door opens its room as its record names it, though the arrival index lists none; Back finds that index as it is', async (t) => {
+    const f = fixture(t);
+    const answer = { history_id: 'chat:a', role: 'assistant', text: 'It failed on a space in %TEMP%.', task_id: 'letter-1' };
+    f.reply(() => page([answer]));
+    const work = { taskId: 'letter-1', title: 'Installer test', from: 'Mac', status: 'completed' };
+    const sheet = openPlaceSheet(place, { readRooms: async () => index([]), openRoom: { room_chat_id: 3381, work } });
+    t.after(() => sheet.close());
+    await tick(); await tick();
+    assert.equal(f.q('[data-history-work]').textContent, 'Work from Mac: Installer test');
+    assert.equal(f.q('.place-convo-text').textContent, answer.text);
+    assert.ok(f.requests.some(({ url }) => url.includes('chat_id=3381')), 'the history of the room the record names');
+    f.q('[data-history-back]').click(); await tick();
+    assert.match(f.doc.body.textContent, /No saved conversation found in this index\./, 'the index still says only what it found');
+    assert.equal(f.q('[data-place-room="3381"]'), null, 'no room is added to the index for it');
+});

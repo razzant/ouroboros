@@ -805,6 +805,7 @@ class BackgroundConsciousness:
         # What Off leaves and what it ends, in the same row (owner 09.11, variant A). The stops are already on their
         # way: the place count is one read that never holds or fails them; what it ends is named from memory.
         from ouroboros.consciousness_view import off_sentence, stopping_words
+        from ouroboros.place_projection import letters_can_start_work
         try:
             from ouroboros.places import load_places
             places = load_places(self._drive_root)
@@ -813,7 +814,8 @@ class BackgroundConsciousness:
             places = None
         ending = stopping_words(wakes, wake=wake, rows={**live_task_rows(wakes), **turns}, authors=set(authors),
                                 places=places) if wakes else ""
-        return " ".join(part for part in (off_sentence(places), ending) if part) + saved + kept
+        said = off_sentence(places, letters=letters_can_start_work(self._drive_root))
+        return " ".join(part for part in (said, ending) if part) + saved + kept
 
     @staticmethod
     def _stop_live_wake(task_id: str) -> None:
@@ -859,6 +861,7 @@ class BackgroundConsciousness:
         # Held: its own wake waits in the pool (paused, held or not yet dispatched), not running.
         held = bool(wake) and wake in queued_wakes(held_only=True)
         from ouroboros.consciousness_view import held_wake_cause
+        from ouroboros.place_projection import starts_work_here
         return {**dict(zip(SNAPSHOT_KEYS, values)), **context, "appointment_at": _iso(self._appointment_at),
                 "live_wake_held": held,
                 # What holds it, proven from its records; the current window's own verdict stays beside it.
@@ -869,7 +872,10 @@ class BackgroundConsciousness:
                 "allowance_open_rows": window.get("accounting_open_rows"),
                 "allowance_room_after": str(window.get("room_after") or ""),
                 "model_route": model_route(),
-                "places_brief": [{key: place.get(key) for key in ("place_id", "label", "state", "unanswered")}
+                # A linked Ouroboros's row says whether its letters start work here: the switch's words name it.
+                "places_brief": [{**{key: place.get(key) for key in ("place_id", "label", "state", "unanswered")},
+                                  **({"connector": "ouroboros", "letters_start_work": starts_work_here(place)}
+                                     if place.get("connector") == "ouroboros" else {})}
                                  for place in places] if places is not None else None}
 
     def details_snapshot(self, requested_enabled: bool | None) -> Dict[str, Any]:

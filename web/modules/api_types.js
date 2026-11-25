@@ -402,8 +402,7 @@
  *   ownership seam); never a subagent frame or an ephemeral decision turn.
  * @property {?number=} accounted_upper_bound_usd
  *   C2: an accounted upper bound, not a settled receipt; null when unknown (ABI-3 removed the `cost_usd` alias).
- * @property {?number=} accounted_upper_bound_usd_with_children
- *   C2: subtree upper bound (formerly aliased `cost_usd_with_children`); null when unknown.
+ * @property {?number=} accounted_upper_bound_usd_with_children Subtree upper bound (formerly `cost_usd_with_children`); null when unknown.
  * @property {"available"|"unavailable"=} cost_accounting_status
  * @property {string=} cost_accounting_error
  * @property {boolean=} cost_final
@@ -439,6 +438,7 @@
  * @property {Object=} finalization_recovery An adopted answer's custody (cause, answer, delivery_id), read by the status fold.
  * @property {string=} terminal_origin Who authored the terminal text: model_final or a host origin.
  * @property {string[]=} delegated_runs_unreconciled The row's current custody debt beside its cause (#1583).
+ * @property {import('./client_contract_types.js').PeerLetterCardFact=} peer_letter_card A letter's card on the progress line of the work that wrote it.
  * @property {Object=} review_status
  * @property {Object=} review_projection
  *   Ledger additions: gaps[] ({record_id, review_gap}) names unavailable records; review_records_omitted is 0|"1+"|"unknown" (archive uncertainty alone

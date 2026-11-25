@@ -16,6 +16,7 @@ import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
 import { syncCostBreakdown } from './cost_breakdown_presentation.js';
 import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
 import { createTextBubbles } from './chat_text_bubble.js';
+import { endLetters, letterRow } from './peer_letter_card.js';
 import { noticeLine } from './host_notice_text.js';
 import { createCatchUp } from './room_retire.js';
 import { createChatPreview, createRoomProfileLifecycle } from './chat_preview.js';
@@ -1677,6 +1678,7 @@ export function createChatInstance({
     // Author controls end; paid-review waits retain their own lifetime.
     function settleLiveCard(record, wasFinished) {
         record.root.dataset.finished = '1';
+        endLetters(messagesDiv, record.groupId);  // its open letters are read no more (peer_letter_card.js)
         if (record.toolFold) {
             upsertToolFoldRow(record, noteToolHostMetrics(record, {}), '', '');
             renderLiveCardTimeline(record);
@@ -2023,7 +2025,7 @@ export function createChatInstance({
         const meta = Object.fromEntries([
             'clientMessageId', 'senderLabel', 'senderSessionId', 'source', 'initiator',
             'systemType', 'taskId', 'projectId', 'projectName', 'taskName', 'handoffId',
-            'originId', 'completionLimitation', 'deliveryId',
+            'originId', 'completionLimitation', 'deliveryId', 'letterPartKey',
         ].map(key => [key, opts[key] || '']));
         const { clientMessageId } = meta;
         const ts = timestamp || new Date().toISOString();
@@ -2204,7 +2206,7 @@ export function createChatInstance({
                     // Placement precedes progress; later rows may create the card.
                     if (placedCardRow(msg)) continue;
                     const taskId = msg.task_id || '';
-                    if (!taskId) continue;
+                    if (!taskId || msg.peer_letter_card) continue;
                     if (msg.is_progress) {
                         if (msg.suggested_name) applySuggestedName(taskId, msg.suggested_name);
                         updateLiveCardFromProgressMessage(msg, { grantCancelAuthority: msg.project_mirror !== true });
@@ -2268,6 +2270,7 @@ export function createChatInstance({
                     if (fromReconnect && msg.role === 'user' && localOwnerRow(msg) && msg.client_message_id) {
                         pendingSubmissions.delete(String(msg.client_message_id));
                     }
+                    if (letterRow(msg, messagesDiv, addMessage)) continue;
                     if (msg.is_progress) {
                         // Progress-only/failed tasks still anchor at their first event.
                         insertCardIfNeeded(taskId);
@@ -2789,6 +2792,7 @@ export function createChatInstance({
             pendingHistoryEvictions.delete(id);
             for (const node of nodes) {
                 const wrapper = node.closest('.chat-bubble');
+                if (node.dataset.letterPart) seenMessageKeys.delete(node.dataset.messageKey);
                 releaseMessageNode(node);
                 if (wrapper && wrapper !== node && !wrapper.querySelector('.chat-gallery-item, .chat-file-item, .chat-quiz-card')) {
                     releaseMessageNode(wrapper);
@@ -3184,6 +3188,7 @@ export function createChatInstance({
                 return settled(Boolean(portals.row(msg, msg.content, { taskId: explicitTaskId })));
             }
             learnSubagentLineage(msg);
+            if (letterRow(msg, messagesDiv, addMessage)) return settled(true);
             if (msg.is_progress) {
                 showTaskIncidentToast(msg);
                 if (SUBAGENT_LIFECYCLE_EVENTS.has(String(msg.subagent_event || '').toLowerCase())) reread();  // members

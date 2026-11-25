@@ -44,7 +44,8 @@ async def api_places(request):
     place_id = str(request.path_params.get("place_id") or "")
     try:
         if request.method == "GET":
-            return JSONResponse(await asyncio.to_thread(places_view, root))
+            # The owner's list read: it alone names each linked place's work (places_view owner_reading).
+            return JSONResponse(await asyncio.to_thread(places_view, root, owner_reading=True))
         if request.method == "DELETE":
             raw = await request.body()
             body = await request.json() if raw else {}

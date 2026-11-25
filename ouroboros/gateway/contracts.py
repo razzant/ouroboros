@@ -32,7 +32,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
 )
 from ouroboros.gateway.work_contracts import ProcessingTiers, TaskCancelRequest, WorkLeadFields, WorkStateFields  # noqa: F401
 from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
-from ouroboros.gateway.history_contracts import AgentNoteFields, ChatHistoryResponse, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
+from ouroboros.gateway.history_contracts import AgentNoteFields, ChatHistoryResponse, PeerLetterCardFact, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
     AttachmentManifestEntry, ChatAttachmentInbound, ChatAttachmentView, QuizAnswerFile,
@@ -289,6 +289,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField, AgentNo
     finalization_recovery: NotRequired[Dict[str, Any]]  # an adopted answer's custody (cause, answer, delivery_id), read by the status fold
     terminal_origin: NotRequired[str]  # who authored the terminal text: model_final or a host origin
     delegated_runs_unreconciled: NotRequired[List[str]]  # the row's current custody debt beside its cause (#1583)
+    peer_letter_card: NotRequired[PeerLetterCardFact]  # a letter's card on the progress line of the work that wrote it
     review_status: NotRequired[Dict[str, Any]]
     # panels retain subject/goal/revision/wave; actors separate requested/observed models,
     # dict failure_details and current source selectors. gaps name failed records;

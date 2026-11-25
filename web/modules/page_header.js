@@ -232,19 +232,26 @@ export function bindHeaderControlPlacement({ headerActions, budgetPill = null, s
 // written inline, and no hover title carries a sentence the owner needs. Buttons
 // keep the data-effort-* hooks the controls layer binds on. `modifier` is a bare
 // boolean data-attribute (e.g. 'data-place-state') scripts find the group by.
-export function renderSegmentedField({ target, options = [], modifier = '' } = {}) {
+// A caller that knows the choice marks it here (`chosen`; else its reader marks it
+// after the paint, as place_sheet.js does), names the group (`label`) and holds every
+// option while a write is in flight (`busy`: disabled, the group aria-busy).
+export function renderSegmentedField({ target, options = [], modifier = '', chosen, label = '', busy = false } = {}) {
     const tgt = String(target || '').trim();
     if (!tgt) {
         throw new Error('renderSegmentedField requires target');
     }
+    const marked = chosen !== undefined && chosen !== null;
     const buttons = options.map((opt) => {
         const value = String(opt.value ?? '');
-        return `<button type="button" class="ui-segment" data-effort-value="${escapeHtml(value)}">${escapeHtml(opt.label ?? value)}</button>`;
+        const on = marked && value === String(chosen);
+        const state = (marked ? ` aria-pressed="${on}"` : '') + (busy ? ' disabled' : '');
+        return `<button type="button" class="ui-segment${on ? ' active' : ''}" data-effort-value="${escapeHtml(value)}"${state}>${escapeHtml(opt.label ?? value)}</button>`;
     }).join('');
     const mod = String(modifier || '').trim();
     const modAttr = mod ? ` ${mod}` : '';
+    const named = (label ? ` role="group" aria-label="${escapeHtml(label)}"` : '') + (busy ? ' aria-busy="true"' : '');
     return `
-        <div class="ui-segment-group" data-effort-group${modAttr} data-effort-target="${escapeHtml(tgt)}">
+        <div class="ui-segment-group" data-effort-group${modAttr} data-effort-target="${escapeHtml(tgt)}"${named}>
             ${buttons}
         </div>
     `;

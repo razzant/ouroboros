@@ -161,6 +161,8 @@
  * @property {{messages: boolean|null, assignments: boolean|null, reason: string}=} peer_effective What is in effect now beside them (null: the link registry could not be read).
  * @property {string=} peer_facts The host's line stating both.
  * @property {Object|null=} link Its link: id, six-digit code and its check, times; never a key.
+ * @property {{task_id: string, title: string, status: string, from: string, room_chat_id: number|null}|{unknown: true}|null=} peer_work The owner's list read only: its letters' work whose record changed last, from its acceptance record.
+ * @property {{room_chat_id: number, wrote_at: string}|{unknown: true}|null=} peer_room The owner's list read only: while its arrivals list no room, the room this side wrote to it in.
  */
 
 /**

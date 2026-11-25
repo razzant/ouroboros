@@ -1059,6 +1059,17 @@ def _code_check(row: Mapping[str, Any]) -> str:
     return "confirmed" if row.get("code_confirmed_at") else "pending"
 
 
+def introduction_view(root: Any, link_id: str) -> dict | None:
+    """Read only the local code-check state; do not materialize the place store."""
+    row = read_registry(root)["links"].get(link_id)
+    if row is None:
+        return None
+    if not isinstance(row, dict) or not isinstance(row.get("place_id"), str) or not row["place_id"]:
+        raise PeerLinkError("peer_links_unreadable", "The local link record cannot be read now.", 503)
+    return {"link_id": link_id, "place_id": row["place_id"], "code_check": _code_check(row),
+            **{key: row.get(key) or "" for key in ("peer_label", "peer_install_id", "code", "revoked_at")}}
+
+
 def link_view(root: Any, link_id: str) -> dict:
     """A link as my human's screens show it: never a secret or a hash of one."""
     row = read_registry(root)["links"].get(link_id)
