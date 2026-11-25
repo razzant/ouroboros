@@ -32,7 +32,11 @@ def _read(root, cursor=None, *, repair=True, chat=1, recorded=False):
 
 
 def _cursor(token):
-    return json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+    import zlib
+
+    packed = token.startswith("z")  # a cursor naming held rows travels deflated
+    raw = base64.urlsafe_b64decode(token[packed:] + "=" * (-len(token[packed:]) % 4))
+    return json.loads(zlib.decompress(raw) if packed else raw)
 
 
 def _task(root, task_id, status, index, **facts):
@@ -160,21 +164,19 @@ def test_a_held_row_that_cannot_be_read_refuses(tmp_path, monkeypatch):
     assert (status, refused["detail"], refused["stream"]) == (409, "replay_gap", "chat")
 
 
-def test_a_window_too_large_to_name_its_rows_plainly_packs_them_else_reads_on_without_them(tmp_path, monkeypatch):
+def test_held_rows_travel_packed_and_a_window_too_large_even_so_reads_on_without_them(tmp_path, monkeypatch):
     for index in range(40):
         ds.append(tmp_path, "progress", {"ts": TS.format(1), "chat_id": 1, "task_id": "asker", "content": f"step {index}"})
     _asking(tmp_path)
     _, plain = _read(tmp_path, repair=False)
-    _, held = _read(tmp_path)
-    assert len(held["after_cursor"]) > len(plain["after_cursor"]) and held["after_cursor"].startswith("e")
-    monkeypatch.setattr(history_paging, "_CURSOR_CHARS", len(held["after_cursor"]) - 1)  # plainly too long: packed
     status, page = _read(tmp_path)
-    packed = history_paging.decode_cursor(page["after_cursor"], 1, _cursor(plain["after_cursor"])["view"])
-    assert status == 200 and page["after_cursor"].startswith("z") and len(packed["held"]["asker"][1]) == 41
+    assert status == 200 and page["after_cursor"].startswith("z") and plain["after_cursor"].startswith("e")
+    assert len(_cursor(page["after_cursor"])["held"]["asker"][1]) == 41
     _task(tmp_path, "asker", "completed", 0)
     status, repaired = _read(tmp_path, page["after_cursor"])
     assert status == 200 and len(repaired["repairs"]) == 2 + 41
     _task(tmp_path, "asker", "running", 0)
+    monkeypatch.setattr(history_paging, "_CURSOR_CHARS", len(plain["after_cursor"]) + 4)
     encode = history_paging.encode_cursor  # rows that do not fit even packed: none held, the arrivals go on
     monkeypatch.setattr(history_paging, "encode_cursor", lambda value, packed=False: "z" * 10_000 if packed else encode(value))
     status, page = _read(tmp_path)
@@ -250,14 +252,13 @@ def test_held_rows_leave_out_tasks_the_page_shows_through_another_or_without_a_r
                 _row("plain", 3, role="user"),  # an owner's row: never held
                 _row("stripped", 4),  # a child's row shown without its lineage
                 _row("receipt", 5, historical_terminal={"status": "completed"}),
-                _row("pinned", 6, system_type="project_started"),
+                _row("pinned", 6, system_type="project_started"), _row("waits", 13, system_type="task_model_wait"),
                 _row("reviewer", 8, presentation_owner_task_id="owner"), _row("owner", 9),
                 _row("grouped", 10, review_group={"attempts": [{"task_id": "attempt"}]}), _row("attempt", 11),
                 {"task_id": "carried_only", "role": "system", "system_type": "task_evidence"}]
-    shown = {"plain", "stripped", "receipt", "pinned", "reviewer", "owner", "grouped", "attempt", "carried_only"}
+    shown = {"plain", "stripped", "receipt", "pinned", "waits", "reviewer", "owner", "grouped", "attempt", "carried_only"}
     # The answer the page drew no row of is still evidence its question's row was projected with.
-    assert history_paging._held_rows(page, messages, shown, _Reads()) == {
-        "plain": [[1, 12], [7]], "receipt": [[5], []], "pinned": [[6], []]}
+    assert history_paging._held_rows(page, messages, shown, _Reads()) == {"plain": [[1, 12], [7]], "pinned": [[6], []]}
     place = {**page, "lens": {"chat": history_paging.RoomLens((("chat_id", 9),))}}
     assert history_paging._held_rows(place, messages, shown, _Reads()) is None  # a place room holds none
 
@@ -282,3 +283,145 @@ def test_a_question_answered_on_the_page_keeps_its_answer_when_its_task_settles(
     again = {row["history_id"] for row in repaired["repairs"]}
     assert [row for row in newest["messages"] if row.get("history_id") in again] == repaired["repairs"]
     assert next(row for row in repaired["repairs"] if row.get("msg_type") == "quiz")["quiz"] == question["quiz"]
+
+
+def _as_newest_shows(root, read):
+    """Every stored row ``read`` carries (sent again or arrived) is exactly the row a fresh newest page shows."""
+    _status, newest = _read(root)
+    shown = {row.get("history_id"): row for row in newest["messages"] if row.get("history_id")}
+    for row in [*read.get("repairs", ()), *read["messages"]]:
+        if row.get("history_id"):
+            assert shown.get(row["history_id"]) == row, row["history_id"]
+
+
+def test_rows_sent_again_keep_their_stored_order_before_what_arrived(tmp_path):
+    first, second = {**QUESTION, "state": "answered", "answered_index": 0}, {**QUESTION, "state": "answered", "answered_index": 1}
+    _task(tmp_path, "asker", "running", 0, owner_quiz={"q1": first})
+    answer = {"chat_id": 1, "task_id": "asker", "direction": "system", "type": "quiz_answer", "source": "owner_quiz_answer"}
+    ds.append(tmp_path, "chat", {"ts": TS.format(0), "chat_id": 1, "task_id": "asker", "type": "quiz", "direction": "out",
+                                 "text": "Which?", "quiz": {**QUESTION, "state": "open"}})
+    ds.append(tmp_path, "chat", {**answer, "ts": TS.format(1), "text": "a", "quiz": first})
+    _, page = _read(tmp_path)
+    ds.append(tmp_path, "chat", {**answer, "ts": TS.format(1), "text": "b", "quiz": second})  # a later answer, same time
+    _task(tmp_path, "asker", "completed", 0, owner_quiz={"q1": second})
+    status, read = _read(tmp_path, page["after_cursor"])
+    assert status == 200 and read["repairs"]
+    _as_newest_shows(tmp_path, read)
+
+
+def test_words_revised_in_place_send_a_settling_window_to_its_newest_page(tmp_path):
+    _asking(tmp_path)
+    ds.append(tmp_path, "chat", {"ts": TS.format(1), "chat_id": 1, "direction": "out", "text": "draft caption"})
+    _, page = _read(tmp_path)
+    caption = next(row for row in page["messages"] if row.get("text") == "draft caption")
+    ds.revise_text(tmp_path, "chat", caption["history_position"]["offset"], "corrected caption")
+    status, quiet = _read(tmp_path, page["after_cursor"])
+    assert status == 200 and "held" not in _cursor(quiet["after_cursor"])  # nothing to refuse yet; nothing held
+    _task(tmp_path, "asker", "completed", 0)
+    status, refused = _read(tmp_path, quiet["after_cursor"])
+    assert (status, refused["detail"]) == (409, "task_settled")
+    _, fresh = _read(tmp_path)  # the newest page names the revision it saw: settlements are answered again
+    _task(tmp_path, "asker", "completed", 0, title="changed after it settled")
+    status, repaired = _read(tmp_path, fresh["after_cursor"])
+    assert status == 200 and repaired["repairs"]
+
+
+def test_a_child_and_its_parent_are_never_held(tmp_path):
+    _task(tmp_path, "parent", "running", 0)
+    _task(tmp_path, "child", "running", 1, parent_task_id="parent", root_task_id="parent")
+    ds.append(tmp_path, "progress", {"ts": TS.format(0), "chat_id": 1, "task_id": "parent", "content": "plan"})
+    ds.append(tmp_path, "chat", {"ts": TS.format(1), "chat_id": 1, "task_id": "child", "parent_task_id": "parent",
+                                 "root_task_id": "parent", "delegation_role": "subagent", "direction": "out",
+                                 "text": "child answer"})
+    _asking(tmp_path, 2)
+    _, page = _read(tmp_path)
+    assert {"parent", "child"} <= set(_cursor(page["after_cursor"])["tasks"])
+    assert set(_cursor(page["after_cursor"])["held"]) == {"asker"}  # the newest page places children: only it
+    _task(tmp_path, "child", "completed", 1, parent_task_id="parent", root_task_id="parent")
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert (status, refused["detail"]) == (409, "task_settled")
+
+
+def test_a_repair_whose_projection_failed_part_way_refuses(tmp_path, monkeypatch):
+    import ouroboros.tool_call_log as tool_call_log
+
+    _asking(tmp_path)
+    _, page = _read(tmp_path)
+    _task(tmp_path, "asker", "completed", 0)
+    original, fail = tool_call_log.replay_evidence_for_tasks, {"on": True}
+
+    def evidence(*args, **kwargs):
+        if fail["on"]:
+            raise OSError("evidence unreadable")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(tool_call_log, "replay_evidence_for_tasks", evidence)
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert (status, refused["detail"]) == (409, "task_settled")
+    fail["on"] = False
+    status, repaired = _read(tmp_path, page["after_cursor"])
+    assert status == 200 and repaired["repairs"]
+
+
+def test_a_task_that_turns_into_a_retry_while_it_settles_refuses(tmp_path):
+    _asking(tmp_path)
+    _, page = _read(tmp_path)
+    _task(tmp_path, "retry", "running", 1)
+    _task(tmp_path, "asker", "failed", 0, retry_task_id="retry")  # its row now shows its successor's truth
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert (status, refused["detail"]) == (409, "task_settled")
+
+
+def test_a_window_that_stops_holding_keeps_the_versions_its_rows_showed(tmp_path, monkeypatch):
+    import supervisor.message_ingress as ingress
+
+    _asking(tmp_path)
+    _, page = _read(tmp_path)
+    seen = _cursor(page["after_cursor"])["tasks"]["asker"]
+    monkeypatch.setattr(ingress, "delivery_facts", lambda row, chat: {"ingress_pending": True})
+    ds.append(tmp_path, "chat", {"ts": TS.format(3), "direction": "in", "chat_id": 1, "text": "do it",
+                                 "client_message_id": "c1", "ingress_accepted": True})
+    _task(tmp_path, "asker", "running", 0, title="later")
+    ds.append(tmp_path, "progress", {"ts": TS.format(4), "chat_id": 1, "task_id": "asker", "content": "more"})
+    status, going = _read(tmp_path, page["after_cursor"])
+    cursor = _cursor(going["after_cursor"])
+    assert status == 200 and "held" not in cursor and cursor["tasks"]["asker"] == seen
+    _task(tmp_path, "asker", "completed", 0)
+    status, refused = _read(tmp_path, going["after_cursor"])
+    assert (status, refused["detail"]) == (409, "task_settled")  # still owed: the window's old rows never saw it
+
+
+def test_a_settled_tasks_carrier_comes_with_its_rows_not_as_an_arrival(tmp_path, monkeypatch):
+    import ouroboros.tool_call_log as tool_call_log
+
+    _task(tmp_path, "talker", "running", 0)
+    ds.append(tmp_path, "chat", {"ts": TS.format(0), "chat_id": 1, "task_id": "talker", "direction": "out", "text": "hi"})
+    original = tool_call_log.replay_evidence_for_tasks
+    monkeypatch.setattr(tool_call_log, "replay_evidence_for_tasks", lambda root, tasks: {
+        **original(root, tasks), **({"talker": {"observations": [{"tool": "x"}], "coverage": {"shown": 1, "matched": 1}}}
+                                   if "talker" in tasks else {})})
+    _, page = _read(tmp_path)
+    assert any(row.get("system_type") == "task_evidence" for row in page["messages"])
+    _task(tmp_path, "talker", "completed", 0)
+    status, read = _read(tmp_path, page["after_cursor"])
+    assert status == 200 and read["messages"] == []
+    assert {row.get("system_type") or "speech" for row in read["repairs"]} == {"task_evidence", "speech"}
+
+
+def test_a_routing_receipt_without_a_row_address_holds_nothing():
+    page = {"lens": {"chat": history_paging.RoomLens((("appearance", "room:1"),))}, "after": False,
+            "selections": {"chat": ([], 0, set()), "progress": ([], 0, set())}}
+    owner = {"role": "user", "task_id": "", "client_message_id": "c1"}
+    plain = [_row("plain", 1)]
+    weak = [*plain, {**owner, "chat_annotation": {"status": "delivered"}}]
+    placed = [*plain, {**owner, "chat_annotation": {"status": "delivered", "source_row_address": "row:2@t#x"}}]
+    assert history_paging._held_rows(page, weak, {"plain"}, _Reads()) is None
+    assert history_paging._held_rows(page, placed, {"plain"}, _Reads()) == {"plain": [[1], []]}
+
+
+def test_a_broken_packed_cursor_is_invalid_and_none_is_issued_past_its_inflate_bound(tmp_path, monkeypatch):
+    _asking(tmp_path)
+    assert _read(tmp_path, "zAAAA")[0] == 400  # not deflate data: 400, never a server error
+    _, plain = _read(tmp_path, repair=False)
+    monkeypatch.setattr(history_paging, "_UNPACKED_CURSOR_BYTES", 64)  # it could not read back what it packed
+    status, page = _read(tmp_path)
+    assert status == 200 and page["after_cursor"] == plain["after_cursor"]

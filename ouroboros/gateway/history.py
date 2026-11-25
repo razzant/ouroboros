@@ -609,6 +609,8 @@ def _annotate_terminal_task_truth(
         raise
     except Exception as exc:
         log.debug("Failed to annotate terminal task status in history: %s", exc)
+        if _READS in (result_cache or {}):  # rows sent again for a settled task must not miss their ending
+            result_cache[_READS].projection_failed = True
 
 
 def _stream_truncation_cause(filtered_rows: int, quota: int, reached_start: bool) -> Optional[str]:
