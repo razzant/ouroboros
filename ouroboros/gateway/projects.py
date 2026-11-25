@@ -174,11 +174,13 @@ async def api_projects_list(request: Request) -> JSONResponse:
             projects = await run_in_threadpool(projects_summary, drive_root, project_id=query["id"], by_message=True)
             return JSONResponse({"projects": projects, **named})
         # The plain list stays capped; `all=1` names the complete list (every active and deleting Project) and whether
-        # the registry read behind its rows covered every row: a row it could not read is missing, never absent.
+        # the registry read behind its rows covered every row: a row it could not read is missing, never absent, and a
+        # missing registry proves no Project absent unless the root never had one (a client erases saved words by it).
         every = query.get("all") == "1"
 
         def listed():
-            rows, complete = list_sidebar_projects(drive_root, require_readable=True, with_coverage=True)
+            rows, complete = list_sidebar_projects(drive_root, require_readable=True, with_coverage=True,
+                                                   prove_absence=every)
             limit = None if every else 200
             return projects_summary(drive_root, by_message=True, limit=limit, sidebar_rows=rows), complete
 

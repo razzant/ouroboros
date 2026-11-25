@@ -344,6 +344,47 @@ def test_the_complete_list_says_whether_its_one_registry_read_covered_every_row(
         assert "complete" not in client.get("/api/projects").json(), "the capped list proves no absence"
 
 
+def test_a_missing_registry_proves_no_project_absent_unless_the_root_never_had_one(pin_client):
+    """A client erases every saved Project copy a ``complete`` list leaves out, so a missing registry file answers
+    ``complete: true`` only where the registry's own first-use determination says this root never had one: a registry
+    lost while its task bindings survive, or one whose first use a history still importing leaves unconfirmed, lists
+    the same empty rows with ``complete: false``. A fresh root, a registry read whole and one with a skipped row answer
+    as before; the proof is no second registry read; the sidebar's display convention (the tool's list) is unchanged."""
+    from unittest.mock import patch
+
+    from ouroboros import project_admission
+
+    client, root = pin_client
+    assert client.get("/api/projects?all=1").json() == {"projects": [], "complete": True}  # first use: none ever
+    chat = root / "logs/chat.jsonl"  # an older body's history the store has not imported yet
+    chat.parent.mkdir(exist_ok=True)
+    chat.write_text(json.dumps({"ts": "2026-09-12T00:00:00Z", "chat_id": 1, "direction": "in", "text": "hi"}) + "\n",
+                    encoding="utf-8")
+    assert client.get("/api/projects?all=1").json() == {"projects": [], "complete": False}, "first use unconfirmed"
+    chat.unlink()
+    assert client.get("/api/projects?all=1").json() == {"projects": [], "complete": True}
+    project = registry.create_project(root, "alpha", origin="owner_ui")
+    registry.bind_task_to_project(root, "task-alpha", project["id"], origin={"absent": "system"})
+    path = root / "state/projects.json"
+    whole = client.get("/api/projects?all=1").json()
+    assert [row["id"] for row in whole["projects"]] == ["alpha"] and whole["complete"] is True
+    intact = path.read_text(encoding="utf-8")
+    data = json.loads(intact)
+    path.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
+    skipped = client.get("/api/projects?all=1").json()
+    assert [row["id"] for row in skipped["projects"]] == ["alpha"] and skipped["complete"] is False
+    path.write_text(intact, encoding="utf-8")
+    for name in ("projects.json", "projects.json.committed", "projects.json.lock"):  # lost with its witness
+        (root / "state" / name).unlink(missing_ok=True)
+    assert (root / "state/project_task_bindings.json").is_file(), "the bindings outlive the registry"
+    with patch.object(project_admission, "_registry_snapshot", wraps=project_admission._registry_snapshot) as read:
+        lost = client.get("/api/projects?all=1")
+    read.assert_called_once()
+    assert lost.status_code == 200 and lost.json() == {"projects": [], "complete": False}, "a lost registry"
+    assert client.get("/api/projects").json() == {"projects": []}  # the rows every client receives, as before
+    assert registry.list_sidebar_projects(root, require_readable=True, with_coverage=True) == ([], True)
+
+
 def test_every_list_answer_names_the_serving_profile_and_none_without_one(pin_client):
     """Each branch answers with the serving generation's frozen data-profile scope, as history does (#3294), so a
     client erases saved words only of the profile that answered; an app that applied none names none."""
