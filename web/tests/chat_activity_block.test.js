@@ -412,8 +412,8 @@ test('a tool-only direct turn offers Stop from its stamped tool frame, without a
         assert.ok(f.card(), 'the tool row mints the block');
         assert.ok(f.card().querySelector('[data-cancel-run]'), 'the host marker on the work frame offers Stop');
         assert.ok(f.card().querySelector('[data-turn-into-project]'), 'a tool row is work: conversion is offered');
-        f.census(direct());
-        assert.ok(f.card().querySelector('[data-cancel-run]'));
+        f.census(direct(), undefined, []);
+        assert.ok(f.card().querySelector('[data-cancel-run]'), 'without a work projection, the census vouches for the stamped turn');
         f.log({ ...final, type: 'task_done', status: 'completed', _is_direct_chat: true });
         assert.equal(f.card()?.querySelector('[data-cancel-run]') ?? null, null, 'no Stop on a finished turn');
     } finally { f.close(); }
@@ -922,9 +922,8 @@ test('a terminal that states the total alone keeps an addressing-only turn block
 
 // V1: Stop stays reachable while a turn runs. A replayed progress row with the
 // host-attested marker is "Activity unconfirmed" until a live source vouches
-// for the root; the census that lists it restores Stop — on the managed card
-// and on the direct block alike — and the same reading is the block's own
-// Stop term, so a block never stands on a Stop it hides.
+// for the root. A current work projection restores Stop through its explicit
+// grant, on the managed card and on the direct block alike.
 test('Stop stays reachable on a census-vouched root, managed card and direct block alike', async () => {
     const progress = { task_id: 'live-root', role: 'assistant', is_progress: true, text: 'Working on the big thing',
         content: 'Working on the big thing', cancelable: true, ts: TS, chat_id: 1 };
@@ -935,12 +934,23 @@ test('Stop stays reachable on a census-vouched root, managed card and direct blo
             assert.ok(f.card('live-root'), 'the narration is content');
             assert.equal(f.card('live-root').querySelector('[data-cancel-run]'), null, 'unconfirmed until a live source answers');
             assert.match(f.meta('live-root'), /Activity unconfirmed/);
-            f.census([{ activity_id: 'live-root', chat_id: 1, kind, phase: kind === 'managed_task' ? 'working' : 'thinking' }]);
+            const active = { activity_id: 'live-root', chat_id: 1, kind, phase: kind === 'managed_task' ? 'working' : 'thinking' };
+            f.census([active], undefined, [work(active, { controls: [{ action: 'stop', target: 'live-root', scope: 'cascade' }] })]);
             const stop = f.card('live-root').querySelector('[data-cancel-run]');
             assert.ok(stop, `the census restores Stop on a ${kind} root`);
             assert.equal(stop.textContent, 'Stop…');
             assert.ok(f.card('live-root').querySelector('[data-turn-into-project]'), `narration is work on a ${kind} root`);
             assert.doesNotMatch(f.meta('live-root'), /unconfirmed|unavailable/);
+            if (kind === 'managed_task') {
+                const expired = { ...active, phase: 'budget_paused', deadline_expired: true, cancelable: false };
+                f.census([expired], room('paused'), [work(expired, {
+                    activity: 'paused', episode: { task_id: 'live-root', live: false },
+                    because: [{ code: 'deadline_expired', text: 'Deadline expired' }],
+                    controls: [{ action: 'close', target: 'live-root', scope: 'cascade', close_expired: 'a'.repeat(64) }],
+                })]);
+                assert.ok(f.card('live-root').querySelector('[data-close-expired-run]'));
+                assert.equal(f.card('live-root').querySelector('[data-cancel-run]'), null, 'the earlier marker cannot override a current Close-only offer');
+            }
         } finally { f.close(); }
     }
 });
