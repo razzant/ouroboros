@@ -160,15 +160,38 @@ def test_a_held_row_that_cannot_be_read_refuses(tmp_path, monkeypatch):
     assert (status, refused["detail"], refused["stream"]) == (409, "replay_gap", "chat")
 
 
-def test_a_window_too_large_to_name_its_rows_reads_on_without_them(tmp_path, monkeypatch):
+def test_a_window_too_large_to_name_its_rows_plainly_packs_them_else_reads_on_without_them(tmp_path, monkeypatch):
+    for index in range(40):
+        ds.append(tmp_path, "progress", {"ts": TS.format(1), "chat_id": 1, "task_id": "asker", "content": f"step {index}"})
     _asking(tmp_path)
     _, plain = _read(tmp_path, repair=False)
-    monkeypatch.setattr(history_paging, "_CURSOR_CHARS", len(plain["after_cursor"]) + 4)
+    _, held = _read(tmp_path)
+    assert len(held["after_cursor"]) > len(plain["after_cursor"]) and held["after_cursor"].startswith("e")
+    monkeypatch.setattr(history_paging, "_CURSOR_CHARS", len(held["after_cursor"]) - 1)  # plainly too long: packed
+    status, page = _read(tmp_path)
+    packed = history_paging.decode_cursor(page["after_cursor"], 1, _cursor(plain["after_cursor"])["view"])
+    assert status == 200 and page["after_cursor"].startswith("z") and len(packed["held"]["asker"][1]) == 41
+    _task(tmp_path, "asker", "completed", 0)
+    status, repaired = _read(tmp_path, page["after_cursor"])
+    assert status == 200 and len(repaired["repairs"]) == 2 + 41
+    _task(tmp_path, "asker", "running", 0)
+    encode = history_paging.encode_cursor  # rows that do not fit even packed: none held, the arrivals go on
+    monkeypatch.setattr(history_paging, "encode_cursor", lambda value, packed=False: "z" * 10_000 if packed else encode(value))
     status, page = _read(tmp_path)
     assert status == 200 and "held" not in _cursor(page["after_cursor"])
     _task(tmp_path, "asker", "completed", 0)
     status, refused = _read(tmp_path, page["after_cursor"])
     assert (status, refused["detail"]) == (409, "task_settled")
+
+
+def test_a_packed_cursor_that_inflates_past_its_bound_is_invalid(tmp_path, monkeypatch):
+    import zlib
+
+    _asking(tmp_path)
+    _, page = _read(tmp_path)
+    monkeypatch.setattr(history_paging, "_UNPACKED_CURSOR_BYTES", 64)
+    token = "z" + base64.urlsafe_b64encode(zlib.compress(json.dumps(_cursor(page["after_cursor"])).encode())).decode()
+    assert _read(tmp_path, token.rstrip("="))[0] == 400
 
 
 def test_a_held_task_keeps_the_version_its_rows_were_projected_at(tmp_path):

@@ -27,6 +27,7 @@ import itertools
 import json
 import logging
 import pathlib
+import zlib
 from contextlib import nullcontext
 from typing import Any, Dict, NamedTuple, Tuple
 
@@ -70,6 +71,8 @@ _CHRONOLOGICAL = ":reading-order"
 # Bound on an opaque cursor's length (a query parameter): an ``after`` cursor carries the versions
 # of the tasks its window shows, and a window too large to name them reads its newest page instead.
 _CURSOR_CHARS = 8192
+# Bound on a packed cursor's JSON once inflated: a cursor that fits the query bound never needs more.
+_UNPACKED_CURSOR_BYTES = 256 * 1024
 # A projection that failed part-way: the rows after the failing one are missing
 # from the response, so neither its coverage nor its newest arrival is known.
 PROJECTION_FAILED = "projection_failed"
@@ -211,8 +214,12 @@ def room_view_fingerprint(thread_id, project_ids, source_refs, bindings):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def encode_cursor(value):
-    return base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
+def encode_cursor(value, packed=False):
+    """An opaque cursor: its JSON in URL-safe base64; ``packed`` (``z`` and the deflated JSON) only for an ``after``
+    cursor naming a window's held rows (``_held_rows``) that would not fit plainly, so every other stays as it was."""
+    text = json.dumps(value, separators=(",", ":")).encode()
+    return ("z" + base64.urlsafe_b64encode(zlib.compress(text, 9)).decode() if packed
+            else base64.urlsafe_b64encode(text).decode()).rstrip("=")
 
 
 def _row_key(key) -> bool:
@@ -227,7 +234,13 @@ def decode_cursor(value, thread_id, view):
     try:
         if not isinstance(value, str) or len(value) > _CURSOR_CHARS:
             raise ValueError
-        decoded = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+        packed = value.startswith("z")  # a plain cursor is base64 of ``{"``: it starts with ``e``
+        decoded = base64.b64decode(value[packed:] + "=" * (-len(value[packed:]) % 4), altchars=b"-_", validate=True)
+        if packed:
+            inflate = zlib.decompressobj()
+            decoded = inflate.decompress(decoded, _UNPACKED_CURSOR_BYTES)
+            if not inflate.eof or inflate.unconsumed_tail:
+                raise ValueError
         cursor = json.loads(decoded)
         if not isinstance(cursor, dict) or cursor.get("v") != 1 or cursor.get("kind") not in {"older", "page", "after"}:
             raise ValueError
@@ -865,8 +878,10 @@ def history_page_tokens(page, messages=(), reads=None):
     arrivals = {**state, "kind": "after", "before": dict(page["upper"]), "quiet": False, "notes": page["notes"],
                 "tasks": tasks, "newest": page.get("newest", ""), "lifecycle": lifecycle}
     after_cursor = encode_cursor({**arrivals, "held": held} if held is not None else arrivals)
-    if held is not None and len(after_cursor) > _CURSOR_CHARS:  # rows too many to name: no repairs in this window
-        after_cursor = encode_cursor(arrivals)
+    if held is not None and len(after_cursor) > _CURSOR_CHARS:  # the held rows packed, else none in this window
+        after_cursor = encode_cursor({**arrivals, "held": held}, packed=True)
+        if len(after_cursor) > _CURSOR_CHARS:
+            after_cursor = encode_cursor(arrivals)
     after_cursor = after_cursor if len(after_cursor) <= _CURSOR_CHARS else None
     if page.get("after"):  # a read of what arrived after the window's last read: it never pages older
         if after_cursor is None:
