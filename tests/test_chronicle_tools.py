@@ -22,6 +22,7 @@ import pytest
 
 from ouroboros import chat_chain, dialogue_store, memory_view as mv
 from ouroboros.chronicle_store import ChronicleStore
+from ouroboros.memory_fold_receipt import CLOSE
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.chronicle import (
     _chronicle_write, _memory_mark, _memory_read, check_quotes, host_stamp, page_covers,
@@ -34,8 +35,6 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 LIMIT = tool_result_limit("memory_read")
 LEGACY = {"kind": "legacy_helper", "writer": "old_consolidator", "attribution": "retelling by Light, not lived"}
 LIGHT = {"kind": "helper", "route": "configured-light"}
-MEASURE = ("My story's drawn size is not re-measured by a write: memory_read(story=true) measures it whole, each "
-           "record's tokens and the pages no part or account holds yet.")
 
 
 def ctx_for(root: pathlib.Path, task_id: str = "root0001", **fields) -> ToolContext:
@@ -165,9 +164,9 @@ def test_task_page_takes_task_rows_and_bound_owner_words_and_leaves_an_interleav
     # The interleaved task's page passes: its rows were never sealed by the first page.
     second = write(ctx, kind="page", text="I drafted the release note.", covers={"task_ids": ["taskB001"]})
     assert second["ok"] and second["rows"] == 2  # promote annotation binds the owner's words
-    # A page's receipt names what it wrote and where my story's whole drawn size is measured; it re-reads no story.
-    assert second["effect"] == ("this page: 27 characters. " + MEASURE + " This task's view is not refreshed; the "
-                                "next start re-measures its Max room.")
+    # A page's receipt: what it covers by room and the works among its rows, its own words beside its rows' own words.
+    assert second["effect"] == "\n".join(["this page covers rows by room: 1 (2); 0 notes; 1 work among its rows",
+                                          "the page's own words: 8 tokens; its 2 rows' own words: 12 tokens", CLOSE])
     sealed = ChronicleStore(tmp_path).sealed_row_refs("1")
     assert sha(unbound) not in sealed and sha(ask_a) in sealed and sha(ask_b) in sealed
     # A range over rows the task pages hold is refused with their ids, never their text.
@@ -402,20 +401,25 @@ def test_part_correction_and_decision_go_through_the_store_rules(tmp_path):
     part = write(ctx, kind="part", text="I lived 30.07-25.09 like this.", member_ids=["legacy-b00-r5"],
                  expected_sequence=head)
     assert part["ok"] and part["room_id"] == "5"
-    # The receipt measures what the fold did and names what it did not: this view and the Max room stay as they were.
-    assert part["effect"] == ("folded 1 record: 11 -> 30 characters. " + MEASURE + " Originals remain readable by "
-                              "address. This task's view is not refreshed; the next start re-measures its Max room "
-                              "and rewrites the cached story from the first changed retelling.")
+    # The receipt names what the part folds, by room, and its own words beside its member's.
+    assert part["effect"] == "\n".join(["this part folds 1 record by room: 5 (1)",
+                                        "the part's own words: 8 tokens; its 1 member's own words: 4 tokens",
+                                        CLOSE])
     refused = json.loads(_chronicle_write(ctx, kind="part", text="again", member_ids=["legacy-b00-r5"],
                                           expected_sequence=part["room_head"]))
     assert refused["reason"] == "already_folded" and "effect" not in refused
     account = write(ctx, kind="account", text="Across rooms.", sources=[part["node_id"]], room_id="5")
-    assert account["effect"].startswith("wrote an account over 1 record: 30 -> 13 characters.")
-    assert "It tells nothing in their place until a selection shows it." in account["effect"]
+    assert account["effect"].startswith("wrote an account over 1 record by room: 5 (1); it tells nothing in their "
+                                        "place until a selection shows it\n")
     shown = write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="the account says it")
-    assert shown["effect"].startswith("the account now tells 1 record: 30 -> 13 characters. " + MEASURE)
+    assert shown["effect"] == "\n".join([f"account {account['node_id']}: no selection before this one; this one "
+                                         "has it shown; it tells 2 records by room: 5 (2); this selection names 1 of "
+                                         "them directly", "the account's own words: 4 tokens; its 1 source's own words: "
+                                         "8 tokens", CLOSE])
     hidden = write(ctx, kind="selection", target_id=account["node_id"], replaces=[], shown=False, reason="back")
-    assert hidden["effect"].startswith("withdrawal saved: other selections and folds still determine what appears.")
+    assert hidden["effect"] == "\n".join([f"account {account['node_id']}: the one before had it shown; "
+                                          "this one has it not shown; it tells 0 records by room: none; this selection "
+                                          "names 0 of them directly", CLOSE])
     first = write(ctx, kind="correction", target_id="legacy-b01-r5", text="It was 26.09, not 25.09.")
     assert first["ok"] and first["revision"] == first["node_id"]
     again = json.loads(_chronicle_write(ctx, kind="correction", target_id="legacy-b01-r5", text="second"))
@@ -1203,7 +1207,9 @@ def test_delegated_tools_cannot_withdraw_an_integrators_page(tmp_path, role):
     before = store.log_path.read_bytes()
     refused = write(delegated, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")
     assert refused["reason"] == "not_integrator" and store.log_path.read_bytes() == before
-    assert write(root, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")["ok"]
+    rejected = write(root, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")
+    assert rejected["ok"] and rejected["effect"].startswith(f"withdrawn: the page {page['node_id']} by ")
+    assert "(it was final) is withdrawn; the 1 row and 0 notes it sealed are released\n" in rejected["effect"]
 
 
 def test_writer_receipts_read_no_whole_story_and_survive_a_migrating_store(tmp_path, monkeypatch):
@@ -1230,7 +1236,7 @@ def test_writer_receipts_read_no_whole_story_and_survive_a_migrating_store(tmp_p
     shown = write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="tells it")
     assert shown["ok"] and shown["shown"] is True
     assert captures == []  # no writer captured the whole story around its write
-    assert all("memory_read(story=true)" in result["effect"] for result in (part, shown))
+    assert all(result["effect"].endswith(CLOSE) for result in (part, shown))
 
 
 @pytest.mark.parametrize("choice, comment", [(0, ""), (0, "  after the frost  "), (None, "  my own answer  ")])
@@ -1283,3 +1289,128 @@ def test_form_quotes_and_marks_stay_inside_one_submitted_field(tmp_path):
         mark = json.loads(_memory_mark(ctx_for(tmp_path), text="Record the dates", address=addr(row), quote=words))
         assert mark["ok"] is accepted
     assert "moonrise\nsunset" not in quote_words(row)
+
+
+# --- a fold's receipt: the committed record and the store only (memory_fold_receipt) ---------------------------------
+
+def _room_rows(root: pathlib.Path) -> list:
+    return chat(root, [{"chat_id": 1, "direction": "in", "ts": ts(1), "text": "Please look at the cache misses.",
+                        "client_message_id": "c1"},
+                       {"chat_id": 1, "direction": "out", "ts": ts(2), "text": "The misses come from the facts row."}])
+
+
+def test_a_pages_receipt_counts_the_distinct_works_of_its_rows_not_their_task_ids(tmp_path):
+    rows = chat(tmp_path, [
+        {"chat_id": 1, "direction": "in", "ts": ts(1), "text": "Please check the build", "client_message_id": "m1"},
+        {"chat_id": 1, "direction": "system", "ts": ts(3), "type": "task_summary", "task_id": "kidA0001",
+         "root_task_id": "taskA001", "summary_kind": "host_task_facts", "status": "done", "text": "Child done."},
+        {"chat_id": 1, "direction": "system", "ts": ts(4), "type": "task_summary", "task_id": "kidA0002",
+         "root_task_id": "taskA001", "summary_kind": "host_task_facts", "status": "done", "text": "Child done too."},
+        {"chat_id": 1, "direction": "system", "ts": ts(5), "type": "task_summary", "task_id": "taskA001",
+         "summary_kind": "host_task_facts", "status": "failed", "text": "Host facts for taskA001."}])
+    reply = write(ctx_for(tmp_path), kind="page", text="I found the build red.",
+                  covers={"from": addr(rows[0]), "to": addr(rows[-1])})
+    assert reply["effect"].split("\n")[:2] == ["this page covers rows by room: 1 (4); 0 notes; 1 work among its rows",
+                                                "the page's own words: 6 tokens; its 4 rows' own words: 22 tokens"]
+    assert not re.search(r"view|drew|itemized|capture", reply["effect"].replace(CLOSE, ""))  # no claim about the view
+
+
+def test_a_notes_only_page_prints_no_rows_figure_and_no_receipt_promises_a_figure_a_roomy_start_lacks(tmp_path):
+    note = write(ctx_for(tmp_path), kind="note", text="Keep the cache marker after the facts row.")["node_id"]
+    effect = write(ctx_for(tmp_path), kind="page", text="Noted.", covers={"note_ids": [note]})["effect"]
+    assert effect.split("\n")[:2] == ["this page covers rows by room: none; 1 note; 0 works among its rows",
+                                       "the page's own words: 2 tokens"]
+    # A roomy Max, Low, Nano or an unknown window prices no telling: the closing clause names its condition.
+    assert "a start whose gate prices a shortest telling shows it in its facts" in CLOSE
+    assert "the next integrating start's facts show" not in CLOSE and "this task's view is unchanged by it" in CLOSE
+
+
+def test_decisions_name_the_signer_the_status_the_store_checked_and_what_their_record_released(tmp_path):
+    rows = _room_rows(tmp_path)
+    store = ChronicleStore(tmp_path)
+    store.ensure_activated(wait=True)
+    ctx = ctx_for(tmp_path)
+    draft = store.publish_page(room_id="1", text="Light's telling.", author=LIGHT,
+                               covers={"rows": [sha(rows[0])], "stream_span": [0, 0]}).record["id"]
+    accepted = write(ctx, kind="decision", target_id=draft, accepted=True, reason="mine now")["effect"]
+    assert accepted.split("\n")[0] == f"accepted: the page {draft} by Light (it was draft) is accepted"
+    withdrawn = write(ctx, kind="decision", target_id=draft, accepted=False, reason="back")["effect"]
+    assert withdrawn.split("\n")[0] == (f"withdrawn: the page {draft} by Light (it was accepted) is withdrawn; the 1 "
+                                         "row and 0 notes it sealed are released")
+    candidate = store.publish_page(room_id="1", text="A candidate.", author=LIGHT, metadata={"candidate": True},
+                                   covers={"rows": [sha(rows[1])], "stream_span": [1, 1]}).record["id"]
+    assert write(ctx, kind="decision", target_id=candidate, accepted=False, reason="no")["effect"].split("\n")[0] == (
+        f"rejected: the page {candidate} by Light (it was candidate) is rejected; as a candidate it sealed none of its 1 row")
+
+
+def test_a_parts_withdrawal_and_a_helpers_rejected_draft_part_name_the_members_they_release(tmp_path):
+    rows = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(n), "text": f"Matter {n}.", "client_message_id": f"c{n}"}
+                           for n in range(1, 5)])
+    ctx = ctx_for(tmp_path)
+    pages = [write(ctx, kind="page", text=f"Matter {n} done.", covers={"from": addr(r), "to": addr(r)})["node_id"]
+             for n, r in enumerate(rows)]
+    store = ChronicleStore(tmp_path)
+    mine = write(ctx, kind="part", text="Two matters.", member_ids=pages[:2], expected_sequence=store.room_head("1"))
+    assert mine["effect"].split("\n")[:2] == ["this part folds 2 records by room: 1 (2)",
+                                               "the part's own words: 4 tokens; its 2 members' own words: 8 tokens"]
+    out = write(ctx, kind="decision", target_id=mine["node_id"], accepted=False, reason="unfold")["effect"]
+    assert out.split("\n")[0] == (f"withdrawn: the part {mine['node_id']} by root, task root0001 (it was final) is "
+                                   "withdrawn; its 2 members are released")
+    light = store.publish_part(room_id="1", text="Light folds two.", member_ids=pages[2:], author=LIGHT,
+                               expected_sequence=store.room_head("1")).record["id"]
+    out = write(ctx, kind="decision", target_id=light, accepted=False, reason="mine differ")["effect"]
+    assert out.split("\n")[0] == (f"rejected: the part {light} by Light (it was draft) is rejected; its 2 members are "
+                                   "released")
+
+
+def test_a_member_whose_lookup_fails_prints_size_not_read_never_zero(tmp_path, monkeypatch):
+    rows = _room_rows(tmp_path)
+    ctx = ctx_for(tmp_path)
+    pages = [write(ctx, kind="page", text="Source words here.", covers={"from": addr(r), "to": addr(r)})["node_id"]
+             for r in rows]
+    real = ChronicleStore.get
+    monkeypatch.setattr(ChronicleStore, "get", lambda self, ident: None if ident == pages[0] else real(self, ident))
+    effect = write(ctx, kind="account", text="About both.", sources=pages)["effect"]
+    assert effect.split("\n")[1] == "the account's own words: 4 tokens; its 2 sources' own words: 5 tokens, 1 size not read"
+    monkeypatch.setattr(ChronicleStore, "get", lambda self, ident: None if ident in pages else real(self, ident))
+    effect = write(ctx, kind="account", text="Again.", sources=pages)["effect"]
+    assert effect.split("\n")[1].endswith("its 2 sources' own words: size not read")
+
+
+def test_member_reads_look_records_up_by_id_and_never_capture_the_whole_index(tmp_path, monkeypatch):
+    from ouroboros import chronicle_store
+
+    ctx = ctx_for(tmp_path)
+    pages = [write(ctx, kind="page", text="Source words here.", covers={"from": addr(r), "to": addr(r)})["node_id"]
+             for r in _room_rows(tmp_path)]
+    captures, real = [], chronicle_store.capture
+    monkeypatch.setattr(chronicle_store, "capture", lambda *a, **k: (captures.append(1), real(*a, **k))[1])
+    part = write(ctx, kind="part", text="Both.", member_ids=pages, expected_sequence=ChronicleStore(tmp_path).room_head("1"))
+    account = write(ctx, kind="account", text="Both again.", sources=pages)
+    assert "its 2 members' own words: " in part["effect"] and "its 2 sources' own words: " in account["effect"]
+    assert captures == []
+
+
+@pytest.mark.parametrize("kind", ["page", "part", "account", "decision"])
+def test_a_receipt_read_that_fails_after_the_commit_answers_saved_with_the_record(tmp_path, monkeypatch, kind):
+    from ouroboros import memory_fold_receipt as fr
+
+    rows = _room_rows(tmp_path)
+    ctx = ctx_for(tmp_path)
+    page = write(ctx, kind="page", text="A page.", covers={"from": addr(rows[0]), "to": addr(rows[0])})["node_id"]
+    head = ChronicleStore(tmp_path).room_head("1")
+    if kind == "page":
+        monkeypatch.setattr(fr, "_own_size", lambda *_a, **_k: (_ for _ in ()).throw(OSError("unreadable")))
+    elif kind == "part":  # the members' reads by id, after the part is saved
+        monkeypatch.setattr(fr, "_read", lambda *_a: (_ for _ in ()).throw(OSError("index unreadable")))
+    else:
+        monkeypatch.setattr(ChronicleStore, "get", lambda *_a: (_ for _ in ()).throw(OSError("index unreadable")))
+    args = {"page": dict(text="Next.", covers={"from": addr(rows[1]), "to": addr(rows[1])}),
+            "part": dict(text="One.", member_ids=[page], room_id="1", expected_sequence=head),
+            "account": dict(text="About it.", sources=[page]),
+            "decision": dict(target_id=page, accepted=False, reason="back")}[kind]
+    reply = write(ctx, kind=kind, **args)
+    assert reply["ok"] and reply["effect"] == "\n".join([f"saved: {kind} {reply['node_id']}; the rest of this receipt "
+                                                          "could not be read back (OSError)", CLOSE])
+    monkeypatch.undo()
+    assert ChronicleStore(tmp_path).get(reply["node_id"])["kind"] == kind

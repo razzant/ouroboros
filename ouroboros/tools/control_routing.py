@@ -913,8 +913,8 @@ def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: st
         if author is None:
             return f" No page: a {role} drafts no project's last page."
         newest = chat_chain.format_address(max(entries, key=lambda entry: entry[2])[0])
-        result, covers, _facts, _stamp = publish_covered_page(root, _activated(root), author, room, note, {"to": newest},
-                                                              closes_project=str(project["id"]), closure_delivery=notice)
+        result, covers, _facts, _stamp, _rows = publish_covered_page(
+            root, _activated(root), author, room, note, {"to": newest}, closes_project=str(project["id"]), closure_delivery=notice)
     except _NotActivated:
         return " No page: my memory is not active yet; the closure stands."
     except Exception as exc:  # a store refusal path or an unreadable room never undoes the closure

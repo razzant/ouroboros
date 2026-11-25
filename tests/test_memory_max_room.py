@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import math
+import re
 
 from types import SimpleNamespace
 
@@ -482,3 +483,109 @@ def test_an_unknown_window_whose_read_failed_is_read_anew_not_from_its_record(mo
         route = resolver if ask == "direct" else cf.RouteQuestion(task, resolver)
         plan = cf.build_context_fit_plan(None, _core(), task, preferred_mode="max", route_resolver=route)
         assert plan.start == ("max", "unmeasured") and asked == [False, again], (status, read)
+
+
+_VERDICTS = re.compile(r"\b(too|should|must|consider|warning|critical|huge|tiny|enough|healthy|bad|good|over budget|"
+                       r"needs folding|fold more)\b", re.IGNORECASE)
+
+
+def test_the_gate_s_shortest_telling_by_kind_sums_to_its_figure_and_rides_the_facts_row_alone(monkeypatch):
+    """What keeps the books out, by kind: the gate's telling split over the drawn parts sums to the figure the gate
+    priced; the facts row (the changing tail) names it, the floor note in the room block stays as it was, and the
+    start's Max room fact keeps its fields (no new field rides the event)."""
+    from ouroboros.context_view_facts import telling_parts
+
+    core = _core()
+    held = _fact(_start(core, 2_000_000, monkeypatch))
+    plan = _start(core, _crowded_window(held), monkeypatch)
+    fact = _fact(plan)
+    parts = telling_parts(mv.snapshot_from_json(core.memory_view_json), fact["telling"])
+    assert sum(tokens for _kind, tokens in parts) == fact["telling"] and all(tokens > 0 for _kind, tokens in parts)
+    assert {"pages whole", "the floor note"} <= {kind for kind, _tokens in parts}  # named as drawn, no assumed reason
+    assert "telling_parts" not in fact and "telling_parts" not in held
+    kinds = ", ".join(f"{kind} {tokens:,}" for kind, tokens in parts)
+    line = memory_facts(plan, "low")
+    assert f"; mine: my memory at the gate's level {fact['telling']:,} ({kinds}); what the request " in line
+    assert f"; mine: my memory at the gate's level {held['story'] + held['room']:,}; what" in memory_facts(
+        _start(core, 2_000_000, monkeypatch), "max")  # a held Max priced no telling: nothing itemized
+    shown = plan.low_projection.system_content_json
+    assert f"my memory at the gate's level {fact['telling']:,}; what the request" in shown and kinds not in shown
+    assert not _VERDICTS.search(line.split(" | ")[0])
+    inactive = dataclasses.replace(mv.snapshot_from_json(core.memory_view_json), store_status={"state": "importing"})
+    assert telling_parts(inactive, fact["telling"]) == []  # an inactive memory prints no composition
+
+
+def test_the_telling_by_kind_names_each_drawn_part_once_as_the_renderer_drew_it():
+    """Against the renderer's own composition: every part of both blocks lands in exactly one kind (each block's kinds
+    sum to its characters, nothing clamped), my human's immune and governing words in this room are named as theirs,
+    a wordless reaction is no one's words, and a work's line and a task's gist line are each counted once."""
+    from ouroboros.memory_form_facts import memory_composition
+    from ouroboros.context_view_facts import kind_chars
+
+    room = syn.work_room()
+    room["lane1"] = [*room["lane1"], {**syn.spoken(90, "human", 0), "kind": "place_fact", "owner_side": False},
+                     {**syn.spoken(91, "human", 300), "owner_side": False}]  # a row whose speaker is not recorded as mine
+    snap = syn.snapshot(room_facts=room, story=syn.told_story(), mark_count=2,
+                        conversations=[syn.conversation(i, words=3, owner=i == 1) for i in range(2)])
+    level = mf.telling_level(snap)
+    blocks = memory_composition(snap, level)["blocks"]
+    story, room_kinds = kind_chars(snap)
+    assert sum(story.values()) == blocks["story"]["json_chars"] == mv.story_chars(snap, level)
+    assert sum(room_kinds.values()) == blocks["room"]["json_chars"]
+
+    def drawn(kind, test=lambda _row: True):
+        return sum(row["json_chars"] for row in blocks["room"]["parts"] if row["kind"] == kind and test(row))
+    owner = drawn("room_row", lambda row: any(src.get("owner_side") for src in row["sources"]))
+    immune = [row for row in syn.work_room()["lane1"] if row.get("immune")]
+    assert immune and owner >= len(immune[0]["line"])  # an immune row of my human is drawn whole and named as theirs
+    assert room_kinds["my human's words in this room"] >= owner  # plus the blank line each joins with, never another kind
+    assert room_kinds["reactions in this room"] >= drawn("room_row", lambda row: all(
+        src.get("kind") == "place_fact" for src in row["sources"])) > 0
+    assert room_kinds.get("finished works standing as lines", 0) >= drawn("work")
+    assert room_kinds.get("task gist lines", 0) >= drawn("task_gist")  # counted once: the kinds sum to the block
+    assert not any("other rows" in kind for kind in room_kinds) and room_kinds["my replies"] > 0
+    assert room_kinds["words here not recorded as mine or my human's"] > 0 and not any("people" in kind for kind in room_kinds)
+
+
+def test_the_composition_rides_the_facts_row_drawn_once_per_core_and_never_the_prefix(monkeypatch):
+    """The composition is part of the integrating focus's memory facts, a host row of the changing tail: drawn once
+    per captured core, the projection's system content byte-identical; a failed draw drops the composition alone."""
+    import ouroboros.context_view_facts as facts
+
+    core = _core()
+    plan = _start(core, _crowded_window(_fact(_start(core, 2_000_000, monkeypatch))), monkeypatch)
+    before = plan.low_projection.system_content_json
+    built = []
+    real = facts.kind_chars
+    monkeypatch.setattr(facts, "kind_chars", lambda *a, **k: (built.append(1), real(*a, **k))[1])
+    line = memory_facts(plan, "low")
+    assert "my memory at the gate's level " in line and "pages whole " in line and " | " not in line
+    assert memory_facts(plan, "low") == line and built == [1]  # once per core
+    assert plan.low_projection.system_content_json == before and "pages whole " not in before
+    failed = []
+    monkeypatch.setattr(facts, "kind_chars", lambda *a, **k: (failed.append(1), (_ for _ in ()).throw(KeyError("draw"))))
+    other = _start(_core(), _crowded_window(_fact(_start(core, 2_000_000, monkeypatch))), monkeypatch)
+    bare = memory_facts(other, "low")  # another core keeps nothing of the first; its failed draw drops only the kinds
+    assert bare.startswith("Max room in this captured build: ") and "pages whole " not in bare
+    assert memory_facts(other, "low") == bare and failed == [1]  # the failure is remembered for its core
+
+
+def test_two_windows_over_one_core_draw_its_telling_once_and_each_splits_its_own_figure(monkeypatch):
+    """The view's own characters by kind are kept on the captured core: two starts and a real rebind over one core draw
+    the telling level once (``view_compositions``), while each line splits its own projection's telling figure."""
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    core = _core()
+    held = _fact(_start(core, 2_000_000, monkeypatch))
+    wide, narrow = _crowded_window(held), _crowded_window(held) - 3_000
+    with measured_sections():
+        plans = [_start(core, window, monkeypatch) for window in (wide, narrow)]
+        plans.append(plans[0].reproject_for_route(window_tokens=narrow - 1_000, known_window=True, ratio=1.0,
+                                                  output_reserve=plans[0].output_reserve_tokens, tool_schemas=None))
+        lines = [memory_facts(plan, plan.initial_mode) for plan in plans]
+        work = section_spans()["work"]
+    assert work.get("view_compositions") == 1 and not work.get("view_compositions_again")
+    for line, plan in zip(lines, plans):
+        telling = _fact(plan)["telling"]
+        kinds = line.split(f"my memory at the gate's level {telling:,} (")[1].split(")")[0]
+        assert sum(int(n.replace(",", "")) for n in re.findall(r" (\d[\d,]*)(?=, [a-z]|$)", kinds)) == telling

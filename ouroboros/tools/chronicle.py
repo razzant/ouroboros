@@ -71,6 +71,7 @@ from ouroboros.dialogue_provenance import (memory_row_header, quote_parts, quote
                                           row_author, stamp_summary, wordless_reaction)
 from ouroboros.knowledge import focus_signature
 from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
+from ouroboros import memory_fold_receipt as receipts
 from ouroboros.memory_view_account import (quote_line, selection_facts, source_change_lines, told_by, told_map,
                                          told_records)
 from ouroboros.store import StoreError
@@ -425,8 +426,8 @@ def check_quotes(root: Any, quotes: Any) -> Tuple[bool, Optional[int]]:
 def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, Any], room: str, text: str,
                          covers_arg: Dict[str, Any], *, quotes: Iterable[Any] = (), expected_sequence: Optional[int] = None,
                          closes_project: str = "", closure_delivery: str = "", lead_rule: Optional[int] = None,
-                         ) -> Tuple[PublishResult, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-    """Expand a page's covers (``_expand``) and publish it: ``(result, covers, coverage facts, host stamp)``, as
+                         ) -> Tuple[PublishResult, Dict[str, Any], Dict[str, Any], Dict[str, Any], List[Any]]:
+    """Expand a page's covers (``_expand``) and publish it: ``(result, covers, coverage facts, host stamp, the rows read)``, as
     ``chronicle_write(kind='page')`` and ``close_project`` (its closing note, ``closes_project``: the notice it posts
     after the page, ``closure_delivery``, is linked below it) write one. An unresolved bound raises
     ``chat_chain.RowAddressError``; covers that name nothing open raise ``ValueError``."""
@@ -452,14 +453,7 @@ def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, An
                                           **({"closes_project": closes_project, "closure_delivery": closure_delivery}
                                              if closes_project else {})},
                                 quote_resolver=resolver, expected_sequence=expected_sequence)
-    return result, covers, facts, stamp
-
-
-# A writer saves one record and names what it changed; it re-reads no whole story around the write (a capture is a
-# read of all history, and a store the importer holds would fail a choice already saved). The whole drawn measure is
-# its reader's, on demand; a selection's full before/after view is memory_read(proposed_selection=...) before it.
-_STORY_MEASURE = ("My story's drawn size is not re-measured by a write: memory_read(story=true) measures it whole, each "
-                  "record's tokens and the pages no part or account holds yet.")
+    return result, covers, facts, stamp, rows
 
 
 def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -468,7 +462,7 @@ def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
     if not isinstance(covers_arg, dict) or not covers_arg:
         return _arg_error(ctx, "No page was written: supply covers. " + _page_covers_hint(room))
     try:
-        result, covers, facts, stamp = publish_covered_page(root, store, author, room, a["text"],
+        result, covers, facts, stamp, rows = publish_covered_page(root, store, author, room, a["text"],
                                                             covers_arg, quotes=a["quotes"] or (),
                                                             expected_sequence=a["expected_sequence"],
                                                             **chronicle_lead_metadata())
@@ -482,9 +476,8 @@ def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
                       rooms=sorted(covers["rooms"]) if covers.get("rooms") else None,
                       first=chat_chain.format_address(covers["first"]) if covers["first"] else None,
                       last=chat_chain.format_address(covers["last"]) if covers["last"] else None,
-                      stamp=dict(sorted(statuses.items())),
-                      effect=f"this page: {len(a['text'] or ''):,} characters. {_STORY_MEASURE} This task's view is "
-                      "not refreshed; the next start re-measures its Max room.")
+                      stamp=dict(sorted(statuses.items())), effect=receipts.fold_receipt(
+                          result.record, lambda: receipts.page_lines(result.record, rows)))
 
 
 def _own_or_legacy(record: Optional[Dict[str, Any]], author: Dict[str, Any]) -> bool:
@@ -497,18 +490,6 @@ def _own_or_legacy(record: Optional[Dict[str, Any]], author: Dict[str, Any]) -> 
     signer = record.get("author") if isinstance(record.get("author"), dict) else {}
     return signer.get("kind") == "helper" and isinstance(signer.get("focus"), dict) and (
         str(signer.get("task_id") or "") == str(author.get("task_id") or ""))
-
-
-def _fold_effect(store: ChronicleStore, action: str, ids: Iterable[Any], text: str,
-                 drawn: str = "") -> str:
-    """What a fold did, measured (the records' own words before, the new text after, then ``drawn``: where my story's
-    drawn size is measured, ``_STORY_MEASURE``); never a claim about Max."""
-    ids = [str(ident) for ident in ids]
-    before = sum(len(str((store.get(ident) or {}).get("text") or "")) for ident in ids)
-    return (f"{action} {len(ids)} record{'' if len(ids) == 1 else 's'}: {before:,} -> {len(text or ''):,} characters. "
-            + (drawn + " " if drawn else "") + "Originals remain readable by address. This task's view is not "
-            "refreshed; the next start re-measures its Max room and rewrites the cached story from the first changed "
-            "retelling.")
 
 
 def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -529,8 +510,8 @@ def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
     result = store.publish_part(room_id=room, text=a["text"], member_ids=[str(m) for m in members], author=author,
                                 expected_sequence=a["expected_sequence"], quotes=a["quotes"] or (), quote_resolver=resolver,
                                 metadata=chronicle_lead_metadata())
-    return _published(ctx, result, effect=_fold_effect(store, "folded", members, a["text"], _STORY_MEASURE)
-                      if result.ok else None)
+    return _published(ctx, result, effect=receipts.fold_receipt(
+        result.record, lambda: receipts.part_lines(store, result.record)) if result.ok else None)
 
 
 def _write_note(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -550,7 +531,9 @@ def _write_correction(ctx: Any, root: Path, store: ChronicleStore, author: Dict[
 def _write_decision(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     if not a["target_id"] or not isinstance(a["accepted"], bool):
         return _arg_error(ctx, "a decision needs target_id (a page or part), accepted true/false and a reason")
-    return _published(ctx, store.decide(str(a["target_id"]), a["accepted"], author, str(a["reason"] or "")))
+    result = store.decide(str(a["target_id"]), a["accepted"], author, str(a["reason"] or ""))
+    return _published(ctx, result, effect=receipts.fold_receipt(
+        result.record, lambda: receipts.decision_lines(store, result.record)) if result.ok else None)
 
 
 def _write_account(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -559,10 +542,8 @@ def _write_account(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str
         return _arg_error(ctx, "an account needs sources: the records it is based on, each {id, revision?} or an id")
     result = store.publish_account(room_id=_room(ctx, root, a["room_id"]), text=a["text"], sources=sources, author=author,
                                    quotes=a["quotes"] or (), quote_resolver=_quote_resolver(root, row_lineage(root)))
-    ids = [src.get("id") if isinstance(src, dict) else src for src in sources]
-    return _published(ctx, result, sources=len(sources) if result.ok else None, effect=_fold_effect(
-        store, "wrote an account over", ids, a["text"]) + " It tells nothing in their place until a selection shows it."
-        if result.ok else None)
+    return _published(ctx, result, sources=len(sources) if result.ok else None, effect=receipts.fold_receipt(
+        result.record, lambda: receipts.account_lines(store, result.record)) if result.ok else None)
 
 
 def _write_selection(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -575,31 +556,33 @@ def _write_selection(ctx: Any, root: Path, store: ChronicleStore, author: Dict[s
     shown = True if a["shown"] is None else a["shown"]
     result = store.select_account(str(a["target_id"]), replaces=[str(r) for r in replaces], author=author,
                                   reason=str(a["reason"] or ""), shown=shown)
-    drawn = _STORY_MEASURE
-    effect = (_fold_effect(store, "the account now tells", replaces,
-                           str((store.get(str(a["target_id"])) or {}).get("text") or ""), drawn)
-              if shown else f"withdrawal saved: other selections and folds still determine what appears. {drawn} This "
-              "task's view is not refreshed; the next start re-measures its Max room.")
-    return _published(ctx, result, replaces=len(replaces) if result.ok else None, shown=shown if result.ok else None,
-                      effect=effect if result.ok else None,
-                      receipt=_selection_receipt(root, store, result.record) if result.ok else None)
+    if not result.ok:
+        return _published(ctx, result)
+    effect, receipt = receipts.selection_receipt(store, result.record,
+                                                 lambda: _selection_receipt(root, store, result.record))
+    return _published(ctx, result, replaces=len(replaces), shown=shown, receipt=receipt, effect=effect)
 
 
-def _selection_receipt(root: Path, store: ChronicleStore, selection: Dict[str, Any]) -> str:
-    """After the write, counted from one capture (``selection_facts``): what the account tells then, their rooms,
-    how many a version its sources cite holds, and the exact readers; never their words, never a claim about
-    display or about what this write displaced."""
+def _selection_receipt(root: Path, store: ChronicleStore, selection: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """After the write, one typed readback from one capture: ``state`` acting (its ``facts``, ``selection_facts``),
+    superseded (the ``acting`` selection) or failed (the ``error``); and the receipt rendered from it: what the account
+    tells then, their rooms, how many a version its sources cite holds, and the exact readers; never their words,
+    never a claim about display or about what this write displaced."""
     account = selection["target_id"]
     try:
         with capture(root, tail="none"):
             current = store.interpret([store.get(account)], sources=False)[0].get("selection") or {}
-            if current.get("id") != selection["id"]:
-                return ("Selection saved; another selection is now acting, so its displacement is not attributed to "
-                        f"this write. Read the current choices with memory_read(node_id='{account}').")
-            facts = selection_facts(store, account)
+            back = ({"state": "acting", "facts": selection_facts(store, account)} if current.get("id") == selection["id"]
+                    else {"state": "superseded", "acting": current.get("id")})
     except (OSError, TimeoutError, ValueError, StoreError) as exc:
-        return (f"Selection saved; its post-write composition could not be read ({type(exc).__name__}). "
-                f"Do not repeat the write; memory_read(node_id='{account}') reads its recorded choices.")
+        back = {"state": "failed", "error": type(exc).__name__}
+    if back["state"] == "superseded":
+        return ("Selection saved; another selection is now acting, so its displacement is not attributed to this "
+                f"write. Read the current choices with memory_read(node_id='{account}')."), back
+    if back["state"] == "failed":
+        return (f"Selection saved; its post-write composition could not be read ({back['error']}). Do not repeat the "
+                f"write; memory_read(node_id='{account}') reads its recorded choices."), back
+    facts = back["facts"]
     now, named, changes = facts["tells"], len(facts["named"]), facts["uncited_changes"]
     where = ", ".join(f"{room} ({n})" for room, n in sorted(Counter(facts["rooms"].values()).items())) or "none"
     readers = ", ".join(f"memory_read(room_id='{room}')" for room in sorted({*facts["rooms"].values()}))
@@ -612,7 +595,7 @@ def _selection_receipt(root: Path, store: ChronicleStore, selection: Dict[str, A
             f"{changes} signed change{'' if changes == 1 else 's'} to those beside it"
             + (f"; the account itself is told in my story by account {facts['teller']}" if facts["teller"] else "")
             + (f". Each record with its words and teller: {readers}" if readers else "")
-            + f"; composition, source versions and selections: memory_read(node_id='{account}')")
+            + f"; composition, source versions and selections: memory_read(node_id='{account}')"), back
 
 
 _WRITERS = {"page": _write_page, "part": _write_part, "note": _write_note,

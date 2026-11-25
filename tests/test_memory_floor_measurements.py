@@ -10,6 +10,7 @@ from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros.section_floor import HostSection
 from ouroboros.context_timing import measured_sections, section_spans
+from ouroboros.context_view_facts import memory_facts
 from tests import _memory_scale_fixture as scale, _memory_view_synthetic as syn
 
 
@@ -708,6 +709,10 @@ def test_a_view_fit_is_drawn_only_when_read():
     assert (story, room) == (mv.render_story(snapshot), mv.render_room(snapshot)) and fit.facts == {}
 
 
+def _fact_of(plan):
+    return plan.projection(plan.initial_mode).memory_facts.get("max_room") or {}
+
+
 def test_a_start_builds_a_story_or_room_text_only_as_a_counted_piece_or_render(tmp_path, monkeypatch):
     """Counted at the builders themselves: a start builds a story or room text once per piece key to price it, keeping
     its length (``view_pieces``), and whole for what it delivers (``view_renders``), never elsewhere. One text built
@@ -722,15 +727,24 @@ def test_a_start_builds_a_story_or_room_text_only_as_a_counted_piece_or_render(t
 
         monkeypatch.setattr(mv, name, building)
 
-    def counted():  # the story and room pieces the window counted, and its whole renders
+    def counted():  # the story and room pieces the window counted, its whole renders, and each composition's two
         work, seen = context_timing._WORK.get()
-        return sum(verb == "view_pieces" and key[1][0] in ("story", "room") for verb, key in seen) + work["view_renders"]
+        return (sum(verb == "view_pieces" and key[1][0] in ("story", "room") for verb, key in seen) + work["view_renders"]
+                + 2 * work.get("view_compositions", 0))
 
     snapshot = scale.snapshot()
     mv._parsed_view.cache_clear()  # a fresh process's parse: no piece priced by an earlier test of this worker
     with measured_sections():
-        scale.build(tmp_path, monkeypatch, snap=snapshot)
+        plan = scale.build(tmp_path, monkeypatch, snap=snapshot)
         assert section_spans()["work"]["view_renders"] == 2 and len(built) == counted() > 2
+        # The first facts row draws the gate's telling once as a counted composition; a real rebind over the same
+        # captured core and a second row draw nothing again.
+        assert _fact_of(plan).get("telling") and memory_facts(plan, plan.initial_mode)
+        rebound = plan.reproject_for_route(window_tokens=plan.window_tokens - 2_000, known_window=True, ratio=1.0,
+                                           output_reserve=plan.output_reserve_tokens, tool_schemas=None)
+        assert memory_facts(rebound, rebound.initial_mode) and memory_facts(plan, plan.initial_mode)
+        work = section_spans()["work"]
+        assert work["view_compositions"] == 1 and not work.get("view_compositions_again") and len(built) == counted()
         mv._story_text(snapshot, {})  # a text built outside a piece and a render
         assert len(built) == counted() + 1
 
