@@ -1466,7 +1466,7 @@ from ouroboros.gateway.client_contracts import (  # noqa: E402,F401
 )
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (
-    "conversation_finished", "chat", "command",
+    "conversation_finished", "connection_profile", "chat", "command",
     "panic_accepted",  # immediate acceptance only, not proof of process exit
     "photo", "video", "document", "links",
     "quiz", "quiz_state",

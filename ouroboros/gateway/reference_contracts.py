@@ -43,9 +43,7 @@ class ConnectionProfileOutbound(TypedDict):
     """Issued once per socket at accept, before registration, when the serving connection proves a
     data profile (server_web.data_profile_scope; gateway/ws.py sends it directly — never per frame,
     poll or command). The browser adopts it before the generic emit and compares it with the profile
-    its document proves (#3294). A direct accept-time issuance, not a broadcast envelope, so it is
-    deliberately not in WS_MESSAGE_TYPES: publishing it in the frozen WS index belongs to the
-    endpoint-index owner."""
+    its document proves (#3294). A direct accept-time issuance, not a broadcast envelope."""
 
     type: Literal["connection_profile"]
     profile_scope: str

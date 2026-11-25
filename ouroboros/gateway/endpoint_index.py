@@ -697,6 +697,7 @@ WS_SHAPES: dict[str, tuple[str, str]] = {
     "chat": ("ChatInbound", "ChatOutbound"),
     "command": ("CommandInbound", ""),
     "conversation_finished": ("", "ConversationFinishedOutbound"),
+    "connection_profile": ("", "ConnectionProfileOutbound"),
     "panic_accepted": ("", "PanicAcceptedOutbound"),
     "photo": ("", "PhotoOutbound"),
     "video": ("", "VideoOutbound"),
