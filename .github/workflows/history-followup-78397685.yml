@@ -1,0 +1,206 @@
+name: Main history — focused follow-up
+'on':
+  push:
+    branches: [qa/history-followup-78397685]
+permissions: {contents: read}
+env:
+  PRODUCT: '1479dd189e046dfb9e7c9ef7b9a15737e6cdb91b'
+  OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: '1'
+  OUROBOROS_PREFLIGHT_REQUIRE_NODE: '1'
+jobs:
+  observe:
+    name: ${{ matrix.suite }} on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        suite: [python, node]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run: {shell: bash}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind overlay, then switch to product
+        id: bind
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = razzant/ouroboros
+          test "$GITHUB_REF" = refs/heads/qa/history-followup-78397685
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P HEAD)" = "$PRODUCT"
+          test "$(git diff --name-status --no-renames "$PRODUCT" HEAD --)" = $'A\t.github/workflows/history-followup-78397685.yml'
+          git checkout --detach "$PRODUCT"
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          test -z "$(git status --porcelain)"
+          printf 'Product %s; tree %s; QA overlay %s\n' "$PRODUCT" "$(git rev-parse 'HEAD^{tree}')" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Put Windows scratch on the work disk
+        if: runner.os == 'Windows'
+        run: printf 'TEMP=%s\nTMP=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with: {interpreter: shipped, install-project: 'false'}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '22'}
+      - name: Verify the toolchain
+        run: |
+          python -I - <<'PY'
+          import platform, re, shutil, sqlite3, subprocess, sys
+          from pathlib import Path
+          pin = re.search(r'^PY_VERSION="([\d.]+)"', Path('scripts/download_python_standalone.sh').read_text(encoding='utf-8'), re.M)
+          if sys.prefix == sys.base_prefix or not pin or platform.python_version() != pin[1]:
+              raise SystemExit(f'Expected the shipped Python {pin and pin[1]} in a dependency-only venv; got {sys.version}')
+          node = shutil.which('node')
+          version = subprocess.check_output([node, '--version'], text=True).strip() if node else ''
+          if not version.startswith('v22.'):
+              raise SystemExit(f'Expected Node 22, got {version!r}')
+          print(f'{sys.platform}: Python {platform.python_version()}, SQLite {sqlite3.sqlite_version}, Node {version}', flush=True)
+          PY
+      - name: Run the pytest cases (one safe_test)
+        if: ${{ matrix.suite == 'python' }}
+        run: |
+          python -I - <<'PY'
+          import json, os, re, subprocess, sys
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+          PY_CASES = json.loads(r'''["tests/test_boot_readiness.py::test_an_owner_message_is_accepted_durably_while_recovery_still_runs_and_a_task_start_still_waits","tests/test_call_open_ingress.py::test_call_open_rendering_never_attributes_host_text_to_the_owner[False-history]","tests/test_chat_attachments.py::test_a_failed_web_write_keeps_its_uploads_and_one_retry_hands_a_proven_undispatched_row_over","tests/test_chat_attachments.py::test_a_placeholder_is_marked_only_when_the_host_wrote_it","tests/test_chat_attachments.py::test_every_attachment_is_recorded_echoed_and_replayed_past_the_text_tail","tests/test_chat_attachments.py::test_live_echoes_carry_the_rows_placeholder_mark","tests/test_chat_attachments.py::test_replay_shows_an_upload_deleted_or_rewritten_since_as_unavailable","tests/test_chat_attachments.py::test_transport_inline_photo_is_parked_once_and_still_reaches_vision","tests/test_chat_attachments.py::test_web_acceptance_records_refs_and_echo_equals_history","tests/test_chat_history_lineage_anchor.py::test_a_folded_review_represents_the_task_it_is_shown_under","tests/test_chat_history_lineage_anchor.py::test_a_grandchild_is_kept_with_the_swarm_it_belongs_to","tests/test_chat_history_lineage_anchor.py::test_a_media_delivery_row_does_not_represent_its_parent","tests/test_chat_history_quotas.py::test_default_quotas_keep_recent_history","tests/test_chat_history_quotas.py::test_history_projects_terminal_review_truth_only_on_existing_summary","tests/test_chat_history_quotas.py::test_legacy_limit_governs_human_quota_when_n_human_absent","tests/test_chat_history_quotas.py::test_legacy_skill_refs_fold_only_with_safe_root_and_skill","tests/test_chat_history_quotas.py::test_panel_chat_zero_stays_hidden_and_request_zero_still_means_main","tests/test_chat_history_quotas.py::test_progress_flood_does_not_evict_human_messages","tests/test_chat_history_quotas.py::test_skill_review_group_dedupes_only_nonempty_job_ids_latest_wins","tests/test_chat_history_quotas.py::test_stale_child_final_keeps_lineage_while_child_active","tests/test_chat_history_quotas.py::test_task_bound_skill_review_owners_use_the_progress_window","tests/test_chat_history_quotas.py::test_task_bound_skill_review_refs_fold_before_human_quota","tests/test_chat_history_quotas.py::test_window_metadata_complete_when_everything_fits","tests/test_chat_history_quotas.py::test_window_metadata_reports_quota_truncation","tests/test_chat_history_quotas.py::test_window_metadata_reports_quota_when_slice_cuts_only_system_rows","tests/test_chat_history_source_recovery.py::test_cursor_bound_unavailable_store_keeps_the_exact_retry[next_cursor]","tests/test_chat_history_source_recovery.py::test_cursor_bound_unavailable_store_keeps_the_exact_retry[page_cursor]","tests/test_chat_search.py::test_the_import_frontier_is_older_history_not_yet_searched_never_no_match","tests/test_client_surface.py::test_chat_history_does_not_emit_client_surface","tests/test_dialogue_addressed_readers.py::test_routing_recent_text_rows_report_only_missing_parts_of_the_window","tests/test_dialogue_threads_once.py::test_every_reader_of_a_thread_expands_it_or_never_hands_it_on","tests/test_direct_model_wait_activity.py::test_warm_owner_pause_registry_and_fence_reach_the_rendered_card[direct_chat]","tests/test_direct_model_wait_activity.py::test_warm_owner_pause_registry_and_fence_reach_the_rendered_card[managed_task]","tests/test_extensions_api.py::test_ws_endpoint_dispatches_first_message_after_lazy_load","tests/test_extensions_api.py::test_ws_endpoint_reconciles_and_unloads_not_live_extension","tests/test_extensions_api.py::test_ws_endpoint_surfaces_extension_load_error","tests/test_gateway_history.py::test_chat_history_marks_malformed_rows_incomplete","tests/test_gateway_history.py::test_chat_history_replays_delivered_document_row","tests/test_gateway_history.py::test_chat_history_replays_durable_photo_and_keeps_legacy_row_as_text","tests/test_gateway_history.py::test_chat_history_replays_links_with_task_grouping_fields","tests/test_gateway_history.py::test_chat_history_replays_task_summary_finality_without_task_result","tests/test_gateway_history.py::test_chat_history_replays_typed_direct_error_terminal_status","tests/test_gateway_history.py::test_chat_history_task_summary_row_passes_flat_cost_fields_through","tests/test_gateway_history.py::test_completion_gist_is_short_on_cards_room_rows_and_live_frames[\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u043a\\u0430 \\u0437\\u0430\\u0432\\u0435\\u0440\\u0448\\u0435\\u043d\\u0430.\\n\\n42 \\u0441\\u0442\\u0440\\u043e\\u043a\\u0438 \\u0432 /tmp/result.csv. \\u0421\\u043b\\u0435\\u0434\\u0443\\u044e\\u0449\\u0438\\u0439 \\u0448\\u0430\\u0433 \\u0437\\u0430 \\u0432\\u043b\\u0430\\u0434\\u0435\\u043b\\u044c\\u0446\\u0435\\u043c.]","tests/test_gateway_history.py::test_completion_gist_is_short_on_cards_room_rows_and_live_frames[\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u043a\\u0430 \\u0437\\u0430\\u0432\\u0435\\u0440\\u0448\\u0435\\u043d\\u0430.]","tests/test_gateway_history.py::test_completion_gist_is_short_on_cards_room_rows_and_live_frames[]","tests/test_gateway_recall.py::test_the_door_starts_no_model_turn_dispatches_nothing_and_writes_no_row","tests/test_history_addressed.py::test_the_import_frontier_is_disclosed_and_never_read_past","tests/test_history_after_freshness.py::test_rows_that_show_no_task_facts_do_not_tie_the_window_to_their_task","tests/test_history_around.py::test_an_unfound_task_is_still_importing_never_absent_until_the_archive_is_in","tests/test_history_physical_coverage.py::test_a_frozen_segment_that_changed_before_its_import_is_a_disclosed_gap_never_other_rows","tests/test_history_reply_navigation.py::test_missing_question_only_depends_on_gaps_before_its_answer[pending-after_answer]","tests/test_history_tool_carriers.py::test_a_main_rooted_tasks_own_main_notice_still_carries_its_tools","tests/test_history_tool_carriers.py::test_a_notice_naming_a_child_anchors_no_parent","tests/test_history_tool_carriers.py::test_an_empty_ts_census_anchor_with_zero_tools_gets_no_carrier","tests/test_history_tool_carriers.py::test_answered_root_with_open_late_work_is_not_readdressed_at_the_page_end[completed]","tests/test_history_tool_carriers.py::test_answered_root_with_open_late_work_is_not_readdressed_at_the_page_end[failed]","tests/test_history_tool_carriers.py::test_current_root_narration_outside_page_keeps_evidence_without_fake_cursor","tests/test_history_tool_carriers.py::test_empty_known_missing_replay_is_carried_as_incomplete[summary]","tests/test_history_tool_carriers.py::test_empty_reader_gap_still_has_an_inert_carrier","tests/test_history_tool_carriers.py::test_known_unfinished_speech_does_not_claim_completion","tests/test_history_tool_carriers.py::test_one_history_request_lists_the_archive_directory_once","tests/test_history_tool_carriers.py::test_rotated_out_calls_reach_the_card_as_host_totals_on_reload_and_reconnect","tests/test_history_tool_carriers.py::test_unreadable_archive_directory_reports_the_same_gap_on_every_carrier","tests/test_history_tool_carriers.py::test_unrelated_archive_bound_does_not_invent_tool_work[0]","tests/test_history_tool_carriers.py::test_unrelated_archive_bound_does_not_invent_tool_work[12]","tests/test_history_tool_carriers.py::test_unrelated_archive_bound_does_not_invent_tool_work[3]","tests/test_ingress_undispatched_boundary.py::test_a_changed_message_under_an_owed_id_is_refused_and_the_obligation_waits","tests/test_ingress_undispatched_boundary.py::test_a_landed_row_whose_handoff_was_lost_is_dispatched_once_by_the_first_retry","tests/test_ingress_undispatched_boundary.py::test_a_web_dispatch_that_was_entered_then_raised_is_unknown","tests/test_ingress_undispatched_boundary.py::test_deferred_dispatch_echo_does_not_claim_future_call","tests/test_ingress_undispatched_boundary.py::test_history_during_append_does_not_claim_dispatch","tests/test_ingress_undispatched_boundary.py::test_only_the_process_that_took_a_dispatch_says_it_was_entered","tests/test_installation_stop.py::test_restart_flag_names_exist_only_in_the_boot_compatibility_reader","tests/test_legacy_advisory_refusal_reading.py::test_stamp_sources_keep_raw_objective_while_compact_history_interprets_it[change0-Done with warnings]","tests/test_legacy_advisory_refusal_reading.py::test_stamp_sources_keep_raw_objective_while_compact_history_interprets_it[change1-Failed]","tests/test_legacy_advisory_refusal_reading.py::test_stamp_sources_keep_raw_objective_while_compact_history_interprets_it[change2-Failed]","tests/test_legacy_advisory_refusal_reading.py::test_task_detail_and_history_read_it_the_same_way_and_the_published_main_row_keeps_its_words","tests/test_main_durable_edges.py::test_native_project_nonclean_final_history_reaches_actual_consumer_once","tests/test_memory_capture_reads.py::test_main_view_reads_its_open_rows_a_page_at_a_time_and_reads_as_before","tests/test_message_bus.py::test_project_completion_summary_keeps_event_time_label_live_and_on_reload","tests/test_message_bus.py::test_saved_web_ingress_replays_from_canonical_history","tests/test_message_bus.py::test_terminal_incident_persists_and_replays_as_system_without_raw_salvage","tests/test_native_terminal_history.py::test_legacy_transient_history_does_not_invent_execution_facts[chat]","tests/test_owner_input_saved.py::test_owner_send_confirmation_journeys","tests/test_owner_stop_terminal_command.py::test_history_task_detail_and_terminal_row_say_the_same_word","tests/test_panic_scope_census.py::test_launcher_completion_and_known_only_startup_keep_their_admission_and_exit_order","tests/test_place_memory.py::test_gateway_keeps_full_place_id_and_its_terminal_summary","tests/test_presence_delivery.py::test_http_records_exact_facts_with_nonterminal_history_type[delivered-out]","tests/test_presence_delivery.py::test_http_records_exact_facts_with_nonterminal_history_type[failed-system]","tests/test_presence_delivery.py::test_http_records_exact_facts_with_nonterminal_history_type[uncertain-system]","tests/test_presence_history.py::test_a_time_ordered_page_costs_its_own_rows_newest_and_deep[distinct-times]","tests/test_presence_history.py::test_a_time_ordered_page_costs_its_own_rows_newest_and_deep[one-shared-time]","tests/test_presence_history.py::test_main_keeps_its_own_newest_page_after_a_bulk_import_into_a_place_room","tests/test_presence_send_receipts.py::test_room_label_cache_keeps_source_failure_and_ambiguous_names_unknown","tests/test_process_custody.py::test_every_process_kind_names_who_stops_it_at_each_door","tests/test_project_child_words_placement.py::test_a_routing_notice_for_a_child_stands_alone_and_the_childs_words_stay_in_its_card","tests/test_project_completion_mirror.py::test_a_row_without_the_key_replays_without_it","tests/test_project_completion_mirror.py::test_the_roots_closing_sentence_rides_its_row_live_durable_and_replayed[Empty tables now export as a header-only CSV.\\n\\n42 rows at /tmp/export.csv. The owner checks next.]","tests/test_project_completion_mirror.py::test_the_roots_closing_sentence_rides_its_row_live_durable_and_replayed[Empty tables now export as a header-only CSV.]","tests/test_project_plain_rows.py::test_history_normalizes_old_project_rows_on_read_without_rewriting_log","tests/test_project_work_card_payload.py::test_legacy_work_name_uses_cached_structured_result_and_preserves_recorded_name[fields0-Current \\u203a title]","tests/test_project_work_card_payload.py::test_legacy_work_name_uses_cached_structured_result_and_preserves_recorded_name[fields1-Suggested \\u203a title]","tests/test_project_work_card_payload.py::test_legacy_work_name_uses_cached_structured_result_and_preserves_recorded_name[fields2-Project]","tests/test_quiz_history_evidence.py::test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue","tests/test_quiz_history_evidence.py::test_competing_answers_preserve_only_the_recorded_winner[False]","tests/test_quiz_history_evidence.py::test_competing_answers_preserve_only_the_recorded_winner[True]","tests/test_quiz_history_evidence.py::test_history_recovers_evicted_answer_without_an_extra_bubble","tests/test_review_overrides.py::test_a_page_load_shows_a_works_field_from_the_history_endpoint[finished]","tests/test_review_overrides.py::test_a_page_load_shows_a_works_field_from_the_history_endpoint[running]","tests/test_room_appearance_recovery.py::test_an_archive_this_body_imports_itself_needs_no_second_pass","tests/test_room_appearance_recovery.py::test_an_archive_this_body_planned_but_another_body_imported_is_a_gap_until_exactly_those_rows_are_derived","tests/test_store_activation.py::test_the_task_reading_gets_answer_503_migrating_instead_of_importing","tests/test_store_migrating.py::test_migrating_client_consumers","tests/test_subagents_mode_messages.py::test_unannotated_legacy_history_is_readable_and_has_no_inferred_label","tests/test_truthful_card_presentation.py::test_settled_early_speech_keeps_canonical_warning_axes","tests/test_ui_fixture_lifecycle.py::test_a_real_signal_timeout_in_the_fixtures_readiness_wait_keeps_its_log_past_the_release[interrupt-2]","tests/test_ui_fixture_lifecycle.py::test_a_real_signal_timeout_in_the_fixtures_readiness_wait_keeps_its_log_past_the_release[signal-timeout-1]","tests/test_ui_fixture_lifecycle.py::test_cases_boot_from_the_owners_one_copy_with_their_own_roots_and_overlay","tests/test_ui_fixture_lifecycle.py::test_owner_restart_wait_keeps_the_servers_log_past_its_case","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_preserves_reap_diagnostic_when_parent_survives[clean]","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_preserves_reap_diagnostic_when_parent_survives[raised-error]","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_preserves_reap_diagnostic_when_parent_survives[returned-error]","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_reaps_after_readiness_failure[health]","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_reaps_after_readiness_failure[supervisor]","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_reaps_descendants_after_parent_exit_or_normal_stop[alive]","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_reaps_descendants_after_parent_exit_or_normal_stop[exited]","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_restart_retires_one_container_before_spawning_another","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_surfaces_reap_failure_and_still_closes[restart-raised-error]","tests/test_ui_fixture_lifecycle.py::test_ui_fixture_surfaces_reap_failure_and_still_closes[teardown-returned-error]","tests/test_history_ordinary_room.py::test_mains_unreadable_newest_read_names_main_under_the_profile","tests/test_history_ordinary_room.py::test_an_active_project_rooms_unreadable_newest_read_names_that_room","tests/test_history_ordinary_room.py::test_a_room_the_core_stops_counting_is_named_no_more","tests/test_gateway_client_contract.py::test_every_client_envelope_has_a_field_identical_browser_twin","tests/test_history_ordinary_room.py::test_a_send_again_stands_only_on_this_rooms_word_under_this_connections_own_profile[1-0123456789abcdef-]","tests/test_history_ordinary_room.py::test_a_send_again_stands_only_on_this_rooms_word_under_this_connections_own_profile[1--0123456789abcdef]","tests/test_history_ordinary_room.py::test_a_send_again_stands_only_on_this_rooms_word_under_this_connections_own_profile[2-0123456789abcdef-0123456789abcdef]","tests/test_history_ordinary_room.py::test_the_acceptance_asks_the_rooms_word_again_before_a_send_again_is_saved"]''')
+          if not isinstance(PY_CASES, list) or not PY_CASES or len(set(PY_CASES)) != len(PY_CASES):
+              raise SystemExit('Expected a non-empty JSON array of distinct pytest node ids')
+          want = {}
+          for node_id in PY_CASES:
+              m = isinstance(node_id, str) and re.fullmatch(
+                  r'(tests/(?:[\w-]+/)*test_[\w-]+)\.py((?:::[A-Za-z_]\w*)*)::(test_\w+)(\[[ -~]*\])?', node_id, re.A)
+              if not m:
+                  raise SystemExit(f'Expected one exact pytest case, got {node_id!r}')
+              module, classes, name, params = m.groups()
+              dotted = '.'.join([module.replace('/', '.'), *filter(None, classes.split('::'))])
+              want[(dotted, name + (params or ''))] = node_id
+
+          work = Path(os.environ['RUNNER_TEMP']) / 'observe'
+          work.mkdir(parents=True, exist_ok=True)
+          report, listing = work / 'pytest.xml', work / 'pytest-ids.txt'
+          report.unlink(missing_ok=True)
+          listing.write_bytes(('\n'.join(PY_CASES) + '\n').encode('ascii'))
+          py = sys.executable
+          print(f'pytest: {len(PY_CASES)} exact cases, read from @{listing}', flush=True)
+          code = subprocess.run([py, '-I', '-S', 'scripts/safe_test.py', '--timeout', '2400', '--',
+                                 py, '-B', '-m', 'pytest', '-o', 'addopts=', '-v', '--tb=short', '--timeout=300',
+                                 f'--junitxml={report}', f'@{listing}']).returncode
+          code = code if code >= 0 else 128 - code
+          RANK = {'error': 0, 'failed': 1, 'xfailed': 2, 'skipped': 3, 'passed': 4}
+          seen, problems = {}, []
+          try:
+              for el in ET.parse(report).getroot().iter('testcase'):
+                  key, outcome, why = (el.get('classname', ''), el.get('name', '')), 'passed', ''
+                  for child in el:
+                      label = {'failure': 'failed', 'error': 'error', 'skipped': 'skipped'}.get(child.tag)
+                      if label == 'skipped' and child.get('type') == 'pytest.xfail':
+                          label = 'xfailed'
+                      if label and RANK[label] < RANK[outcome]:
+                          outcome = label
+                          why = ' '.join((child.get('message') or '').split())[:120] if label in ('xfailed', 'skipped') else ''
+                  if key not in seen or RANK[outcome] < RANK[seen[key][0]]:
+                      seen[key] = (outcome, why)
+          except (OSError, ET.ParseError) as exc:
+              problems.append(f'no readable JUnit report ({type(exc).__name__})')
+          total = dict.fromkeys(RANK, 0)
+          for key in sorted(seen):
+              outcome, why = seen[key]
+              total[outcome] += 1
+              print(f'PYTEST {outcome:<7} {key[0]}::{key[1]}' + (f'  # {why}' if why else ''))
+          absent = [want[key] for key in sorted(want) if key not in seen]
+          extra = [f'{cls}::{name}' for cls, name in sorted(seen) if (cls, name) not in want]
+          for node_id in absent:
+              print(f'PYTEST absent  {node_id}')
+          for name in extra:
+              print(f'PYTEST extra   {name}')
+          tally = ', '.join(f'{k} {v}' for k, v in total.items())
+          line = f'pytest {sys.platform}: selected {len(PY_CASES)}, reported {len(seen)} ({tally}); absent {len(absent)}, extra {len(extra)}; exit {code}'
+          print(line, flush=True)
+          if absent:
+              problems.append(f'{len(absent)} intended cases are absent from the report')
+          if total['failed'] or total['error']:
+              problems.append('the report holds failed or error cases')
+          if not total['passed']:
+              problems.append('no intended case passed')
+          if total['skipped'] or total['xfailed']:
+              print(f"::warning title=pytest skips::{total['skipped']} skipped and {total['xfailed']} xfailed intended cases did not pass on {sys.platform}; they prove nothing there")
+          for problem in problems:
+              print(f'::error title=pytest observation::{problem}')
+          flagged = [f'{o:<7} {k[0]}::{k[1]}' for k, (o, _) in sorted(seen.items()) if o != 'passed'] + [f'absent  {n}' for n in absent]
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              out.write(f'### pytest on {sys.platform}\n{line}\n')
+              if problems or flagged:
+                  out.write('```\n' + '\n'.join([*problems, *flagged][:80]) + '\n```\n')
+          raise SystemExit(code or (1 if problems else 0))
+          PY
+      - name: Run the Node files (one safe_test)
+        if: ${{ matrix.suite == 'node' }}
+        run: |
+          python -I - <<'PY'
+          import json, os, re, shutil, subprocess, sys
+          from pathlib import Path
+
+          sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+          JS_FILES = json.loads(r'''["web/tests/chat_addressing_card.test.js","web/tests/chat_card_row_placement.test.js","web/tests/chat_composer_enter.test.js","web/tests/chat_headline_reconciliation.test.js","web/tests/chat_history_arrivals.test.js","web/tests/chat_history_continuity.test.js","web/tests/chat_history_loading.test.js","web/tests/chat_history_perf.test.js","web/tests/chat_instance_dom.test.js","web/tests/chat_plain_system_rows.test.js","web/tests/chat_reply_send.test.js","web/tests/child_report_label.test.js","web/tests/composer.test.js","web/tests/consciousness_chat_replay.test.js","web/tests/consciousness_label.test.js","web/tests/continue_requester.test.js","web/tests/history_retention.test.js","web/tests/host_message_voice.test.js","web/tests/host_notice_presentation.test.js","web/tests/host_notice_text.test.js","web/tests/main_durable_edges.test.js","web/tests/older_ending_live_card.test.js","web/tests/owner_input_saved.test.js","web/tests/owner_stop_card.test.js","web/tests/progress_narration_voice.test.js","web/tests/project_read_state.test.js","web/tests/project_read_state_race.test.js","web/tests/quiet_run_cards.test.js","web/tests/reason_detail.test.js","web/tests/render_batch.test.js","web/tests/review_gate_card.test.js","web/tests/room_away_custody.test.js","web/tests/room_away_full_output.test.js","web/tests/root_full_text.test.js","web/tests/subagent_queued_observation.test.js","web/tests/swarm_presentation.test.js","web/tests/task_card_recovery.test.js","web/tests/task_origin.test.js","web/tests/task_pause_notice_i18n.test.js","web/tests/task_presentation.test.js","web/tests/verification_check_row.test.js"]''')
+          if (not isinstance(JS_FILES, list) or not JS_FILES or len(set(JS_FILES)) != len(JS_FILES)
+                  or not all(isinstance(f, str) and re.fullmatch(r'web/tests/[\w.-]+\.test\.js', f, re.A) for f in JS_FILES)):
+              raise SystemExit('Expected a non-empty JSON array of distinct literal web/tests/*.test.js paths')
+          present = [f for f in JS_FILES if Path(f).is_file()]
+          problems = [f'missing file {f}' for f in JS_FILES if f not in present]
+          work = Path(os.environ['RUNNER_TEMP']) / 'observe'
+          work.mkdir(parents=True, exist_ok=True)
+          tap = work / 'node.tap'
+          tap.unlink(missing_ok=True)
+          code = 1
+          if present:
+              print(f'node: {len(present)} of {len(JS_FILES)} files, two at a time', flush=True)
+              code = subprocess.run([sys.executable, '-I', '-S', 'scripts/safe_test.py', '--timeout', '1200', '--',
+                                     shutil.which('node'), '--test', '--test-timeout=300000', '--test-concurrency=2',
+                                     '--test-reporter=tap', '--test-reporter-destination=stdout',
+                                     '--test-reporter=tap', f'--test-reporter-destination={tap}', *present]).returncode
+              code = code if code >= 0 else 128 - code
+          text = tap.read_text(encoding='utf-8', errors='replace') if tap.is_file() else ''
+          count = {}
+          if not text:
+              problems.append('no TAP report was written')
+          for key in ('tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo') if text else ():
+              found = re.findall(rf'^# {key} (\d+)[ \t]*$', text, re.M)
+              if len(found) == 1:
+                  count[key] = int(found[0])
+              else:
+                  problems.append(f'TAP summary "# {key}" found {len(found)} times')
+          flagged = []
+          for indent, status, rest in re.findall(r'^( *)(ok|not ok) \d+ - (.*)$', text, re.M):
+              flag = 'SKIP' if ' # SKIP' in rest else 'TODO' if ' # TODO' in rest else 'FAIL' if status == 'not ok' else ''
+              if flag:
+                  flagged.append(f'NODE {flag} depth {len(indent) // 4}: {rest}')
+          if flagged:
+              print('\n'.join(flagged))
+          tally = ', '.join(f'{k} {v}' for k, v in count.items())
+          line = f'node {sys.platform}: {tally}; files {len(present)} of {len(JS_FILES)}; exit {code}'
+          print(line, flush=True)
+          if count.get('fail') or count.get('cancelled'):
+              problems.append('TAP reports failed or cancelled tests')
+          if text and not count.get('pass'):
+              problems.append('no intended Node test passed')
+          if count.get('skipped') or count.get('todo'):
+              print(f"::warning title=node skips::{count.get('skipped', 0)} skipped and {count.get('todo', 0)} todo tests did not pass on {sys.platform}; they prove nothing there")
+          for problem in problems:
+              print(f'::error title=node observation::{problem}')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              out.write(f'### Node on {sys.platform}\n{line}\n')
+              if problems or flagged:
+                  out.write('```\n' + '\n'.join([*problems, *flagged][:80]) + '\n```\n')
+          raise SystemExit(code or (1 if problems else 0))
+          PY
+      - name: Recheck product identity
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          git diff --exit-code HEAD --
