@@ -66,6 +66,8 @@ class _Race:
         self.room = opening._Room(browser, server["url"], project_id, hold=5,
                                   init=(opening._read_receipts(LATEST),))
         self.recent, self.arrivals, self.history, self.returning = [], [], [], []
+        # The room's newest reads its reconnect named (`reason=reconnect`), and how many newest reads were asked.
+        self.reconnects, self.asked = [], 0
         self.hold_return = False
 
         def recent_route(route):
@@ -85,12 +87,19 @@ class _Race:
                                  "ids": [row.get("history_id") for row in body.get("messages", [])]})
             if kind is None:
                 self.recent.append(body)
+                if query.get("reason") == ["reconnect"]:
+                    self.reconnects.append(body)
             elif kind == "after":
                 self.arrivals.append(body)
+
+        def asked(request):
+            if self.newest_of_room(request.url):
+                self.asked += 1
 
         # Only this room's newest read is held: Main's newest read carries a query too (its tags), as a page or a
         # read around a place carries its selector.
         self.room.page.route(self.newest_of_room, recent_route)
+        self.room.page.on("request", asked)
         self.room.page.on("response", record)
 
     def newest_of_room(self, url):
@@ -123,14 +132,19 @@ class _Race:
             assert _wait_for(room.page, lambda: named() is not None, attempts=150), self.history
             self.fresh = named()
         else:
-            sockets = room.page.evaluate("() => window.__testSockets.length")
+            sockets, asked_before = room.page.evaluate("() => window.__testSockets.length"), self.asked
             room.page.evaluate(_RECONNECT)
             # The socket reopens on its own, and only then the room reads its newest page whole: on a loaded host
             # both take their time, the server's search of the long room above all, so each is waited for itself.
             room.page.wait_for_function("n => window.__testSockets.length > n && window.__testSockets.at(-1).readyState === 1",
                                         arg=sockets, timeout=60_000)
-            assert _wait_for(room.page, lambda: len(self.recent) > before, attempts=600), self.history
-            self.fresh = self.recent[-1]
+            # The reconnect's own read names it (`reason=reconnect`). A receipt read the owed catch-up sends
+            # (`reason=read_receipt&decision=catch_up_owed`) can come before it, so the fresh read is that one, and
+            # the room's later count starts once every newest read asked so far has answered.
+            reconnects = len(self.reconnects)
+            assert _wait_for(room.page, lambda: len(self.reconnects) > reconnects and len(self.recent) - before
+                             >= self.asked - asked_before, attempts=600), self.history
+            self.fresh = self.reconnects[-1]
         latest = self.fresh["window"]["latest_message"]
         if kind == "searched":
             assert latest is None and isinstance(self.fresh["window"].get("latest_before"), int), self.fresh["window"]
