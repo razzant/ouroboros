@@ -368,11 +368,13 @@ def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
     decided Default, so a continuation or a retry never reads a later room tier.
     """
     from ouroboros.composer_cognition import project_model_choice, project_processing_choice, read_room
+    from ouroboros.extension_late_result import restricted_return
     from ouroboros.settings_integrity import _actor_scope, SettingsIntegrityError
 
     given = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     canonical_root, actor = _actor_scope(task, drive_root)
-    if (str(task.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
+    if (restricted_return(task)
+            or str(task.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
             or str(given.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
             or actor.get("parent_task_id") or actor.get("autonomous")
             or str(task.get("delegation_role") or given.get("delegation_role") or "").lower() == "subagent"
@@ -463,12 +465,20 @@ def _dispatch_source(metadata: Mapping) -> str:
     return "configured_row" if kind == "api_model" else "task_argument"
 
 
-def bind_task_route(ctx: Any, task_metadata: Mapping, *, presence: bool) -> None:
+def bind_task_route(ctx: Any, task_metadata: Mapping, *, presence: bool, admission_author: Any = None) -> None:
     """At dispatch, the model a task carries binds its route: a configured row, a Presence turn, a lane child,
     a nanny of a parent that chose its own route, owner work its admitted lead. A nanny of a
     following parent and a role-named task carry none and open on that role's current binding instead
     (``open_route``). Idempotent: an amended resolution rebinds."""
     ctx.task_model_override = ctx.task_use_local_override = ctx.task_route_source = None
+    if report_ref := (admission_author or {}).get("late_report_ref"):
+        ctx._late_report_ref = report_ref
+        ctx._late_result_route = dict(task_metadata.get("_late_result_route") or {})
+    if route := getattr(ctx, "_late_result_route", None):
+        ctx.task_model_override, ctx.task_use_local_override = route["model"], route["use_local"]
+        ctx.task_route_source = "task_argument"
+        ctx.exact_model_route = True
+        return
     delegated = str(task_metadata.get("delegation_role") or "").lower() == "subagent"
     cognitive, kind = _cognition(task_metadata)
     if not delegated:

@@ -171,10 +171,13 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         payload = await request.json()
         if not isinstance(payload, dict) or set(payload) - {
             "binding_id", "event", "staged_files", "delivery_reporting_version", "continuation_version",
+            "attention_version",
         }:
             return _presence_error("invalid presence payload", 400, "presence_payload_invalid", "rejected")
         reporting_version = delivery_reporting_version(payload.get("delivery_reporting_version", 0))
         continuing = continuation_version(payload.get("continuation_version", 0))
+        from ouroboros.place_intake import attention_version
+        attending = attention_version(payload.get("attention_version", 0))  # negotiation, never event identity
         event_payload = payload.get("event")
         # Check the wire and resolve its origin without writing a legacy place.
         binding_id = str(payload.get("binding_id") or "")
@@ -196,14 +199,14 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             declared = await host._bounded_host_read(ctx, functools.partial(
                 connector_fact_labels, ctx.data_dir, admission, event))
         except (PresenceEventInvalid, WakeImportPending):
-            # A resend equal to a settled arrival's retained input keeps its saved answer after its connector retires a
-            # signal that arrival carried; any other event meets the publication check (``settled_resend``).
+            # A resend matching a settled arrival's retained input keeps its saved answer (with negotiated attention)
+            # after retiring a signal; other events meet ``settled_resend``'s publication check.
             settled = await host._bounded_host_read(ctx, functools.partial(
                 settled_resend, ctx.data_dir, turn_id, event, identity, continuing))
             if settled is None:
                 raise
             return JSONResponse(await host._bounded_host_read(ctx, functools.partial(
-                turn_response, settled, continuing, ctx.data_dir)))
+                turn_response, settled, continuing, ctx.data_dir, attending)))
         admission = replace(admission, fact_labels=declared)
         from ouroboros.presence_runner import capture_presence_event
         # Hearing precedes allowance, wake and capacity; cached custody remains the replay authority.
@@ -280,7 +283,7 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             # Versions 1 and 2 take a continuing author's initial envelope; v0 waits for its terminal.
             result = await asyncio.wrap_future(execution.initial if continuing else execution.result)
         return JSONResponse(await host._bounded_host_read(ctx, functools.partial(
-            turn_response, result, continuing, ctx.data_dir)))
+            turn_response, result, continuing, ctx.data_dir, attending)))
     except json.JSONDecodeError:
         return _presence_error("invalid json", 400, "presence_payload_invalid", "rejected")
     except PresenceEventInvalid as exc:
@@ -359,7 +362,7 @@ async def _api_presence_history(request: Request) -> JSONResponse:
 
 
 def _presence_work_view(
-    ctx: host.HostServiceContext, skill_name: str, work_ref: str, binding_id: str,
+    ctx: host.HostServiceContext, skill_name: str, work_ref: str, binding_id: str, attention: int = 0,
 ) -> tuple[int, Dict[str, Any]]:
     from ouroboros.task_results import load_task_result
 
@@ -377,9 +380,11 @@ def _presence_work_view(
             (binding_id and binding_id not in {str(presence.get("binding_id") or ""), str(presence.get("place_id") or "")})):
         return 404, {"ok": False, "error": "presence work reference not found",
                      "code": "presence_work_not_found", "disposition": "rejected"}
+    from ouroboros.place_intake import attention_view
     from ouroboros.presence_recovery import retained_work_view
 
-    return retained_work_view(stored, work_ref, ctx.data_dir)
+    status, body = retained_work_view(stored, work_ref, ctx.data_dir)  # a negotiated read adds what the row proves
+    return status, ({**body, "attention": attention_view(None, stored)} if attention else body)
 
 
 async def _api_presence_work(request: Request) -> JSONResponse:
@@ -410,7 +415,12 @@ async def _api_presence_work(request: Request) -> JSONResponse:
             body = await asyncio.to_thread(record_transport_queue, ctx.data_dir, work_ref, binding_id,
                                             payload["transport_queue"])
             return JSONResponse(body)
-        status, body = await asyncio.to_thread(_presence_work_view, ctx, skill_name, work_ref, binding_id)
+        from ouroboros.place_intake import attention_version
+        try:
+            attending = attention_version(int(request.query_params.get("attention_version") or 0))
+        except ValueError as exc:
+            return _presence_error(str(exc), 400, "presence_payload_invalid", "rejected")
+        status, body = await asyncio.to_thread(_presence_work_view, ctx, skill_name, work_ref, binding_id, attending)
     except (ValueError, json.JSONDecodeError) as exc:
         if getattr(exc, "code", ""):
             return _presence_exception(exc, 404)

@@ -1267,6 +1267,57 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     assert tool_ctx.memory_view_facts is kept and trace[VIEW_TRACE_KEY] == kept
 
 
+def test_a_fold_that_only_shortens_the_program_data_row_still_narrows_the_view(tmp_path, monkeypatch):
+    """A request holds memory twice: the system text and the one program data row after the assignment. A view whose
+    data row is shorter narrows it though its system text reads the same (the plan counts it so: ``narrowed``); the
+    same view again narrows nothing. The shorter row is the chosen opening form of one harmless note, its author kept."""
+    from ouroboros import capability_evidence as ce, context_fit as cf, loop, memory_view as mv
+    from ouroboros.chat_chain import row_address
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, PROGRAM_HISTORY_KIND
+    from ouroboros.dialogue_provenance import recorded_author, row_author
+    from ouroboros.loop_round_limits import _coarsen_memory_view
+    from ouroboros.memory_floor import select_view
+    from ouroboros.memory_inventory import row_meta
+    from tests import _memory_view_synthetic as syn
+
+    words = " ".join(["The shelf holds four books."] * 20)  # one harmless note, longer than its opening
+    row = {"chat_id": 1, "direction": "in", "role": "system", "ts": "2026-01-02T09:00:00+00:00",
+           "system_type": "agent_note_received", "text": "Program message received.",
+           "declared_author": recorded_author("Example librarian"), "agent_note_text": words}
+    addr = row_address(row)
+    note = mv._spoken((addr, row_meta(row), 1), row_author(row), {addr["row_sha256"]: row})
+    owner = {**syn.spoken(2, "human", 55), "owner_side": True}
+    core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", json.dumps("How many books?"), False,
+                          memory_view_json=mv.snapshot_json(syn.snapshot(room_facts=syn.room(lane1=[note, owner]))))
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    monkeypatch.setattr(ce, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    shown = cf.build_context_fit_plan(None, core, {"id": "library"}, preferred_mode="max", tool_schemas=[],
+        route_resolver=lambda *_a, **_kw: ({"provider": "fixture", "model": "fixture"},
+            SimpleNamespace(route_fp="", status="confirmed", stale=False, window_tokens=500_000)))
+    whole_data = shown.max_projection.room_data
+    opened_data = select_view(shown, "max", [f"F7p:{note['address']}"]).max_projection.room_data
+    assert shown.initial_mode == "max" and words in whole_data and words not in opened_data
+    assert "Example librarian" in opened_data and len(opened_data) < len(whole_data)
+    ctx = _refusal_ctx(tmp_path, shown)
+    fit = cf.measure_main_fit(shown, ctx.messages, [], profile="owner_max", rendered_mode="max", round_id="e:round:1")
+    # A real step also rewrites the floor's receipt, so today the system text moves with the data; the guard must not rest on it.
+    monkeypatch.setattr(type(shown), "reproject_for_route", lambda self, **_kw: dataclasses.replace(
+        self, max_projection=dataclasses.replace(self.max_projection, room_data=opened_data)))
+
+    def data_rows():
+        return [item["content"] for item in ctx.messages if item.get(HOST_CONTEXT_KIND_KEY) == PROGRAM_HISTORY_KIND]
+
+    priced = cf.estimate_context_prompt_tokens(ctx.messages, [])
+    assert data_rows() == [whole_data]
+    assert _coarsen_memory_view(ctx, fit) is True
+    assert data_rows() == [opened_data] and ctx.messages[0] == shown.max_projection.system_message()
+    assert ctx.context_fit_plan.projection("max").room_data == opened_data
+    assert cf.estimate_context_prompt_tokens(ctx.messages, []) < priced
+    assert _coarsen_memory_view(ctx, fit) is False  # the same view again narrows nothing
+
+
 def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
     """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
     window's send ceiling by (20,000 past the stated number less the reply floor), memory alone narrows and Max

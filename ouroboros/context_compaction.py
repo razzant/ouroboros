@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequen
 from ouroboros.context_budget import (
     HOST_CONTEXT_KIND_KEY,
     HOST_TEXT_SHA_KEY,
+    PROGRAM_HISTORY_KIND,
     ContextReclaimReceipt,
     ContextReclaimRequest,
     ReclaimStatus,
@@ -385,7 +386,7 @@ def _is_dialogue_prose_row(message: Any) -> bool:
     """A completed single prose row: the assistant's own reply or a host prose row. Never a
     row with tool protocol, native or non-text blocks, or host-typed keys. ``role=user`` is
     not authorship: owner words are excluded by callers through typed provenance."""
-    if not isinstance(message, Mapping):
+    if not isinstance(message, Mapping) or message.get(HOST_CONTEXT_KIND_KEY) == PROGRAM_HISTORY_KIND:
         return False
     role = str(message.get("role") or "")
     allowed = _ASSISTANT_PROSE_KEYS if role == "assistant" else _PLAIN_ROW_KEYS if role == "user" else frozenset()

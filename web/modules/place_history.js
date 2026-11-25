@@ -56,14 +56,19 @@ export function nonTextFacts(row) {
         && typeof item.description === 'string' && item.description.trim());
 }
 
+/** A heard arrival's words, one per reason a heard settlement records (`place_intake.HEARD_REASONS`). */
+export const HEARD_WORDS = { paused: 'Heard while Paused', off: 'Heard while consciousness was off',
+    no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection',
+    own_account: 'Heard; written by the account it sends as', change_actor_unknown: 'Heard as background; who made this change is unknown',
+    conversation_work: 'Passed to work in this conversation', silent: 'Heard while Silent; no call opened',
+    advises: 'Heard while consciousness advises; no call opened', heard: 'Heard' };
+
 export function historyFactWords(row) {
     const facts = row.place_history || {};
     const attention = facts.attention;
-    const heard = { paused: 'Heard while Paused', off: 'Heard while consciousness was off',
-        no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection',
-        own_account: 'Heard; written by the account it sends as', change_actor_unknown: 'Heard as background; who made this change is unknown' };
-    return [attention?.decision === 'focus_started' ? 'Focus started' : attention?.decision === 'heard'
-        ? (attention.reason === 'conversation_work' ? `Passed to work ${attention.recipient || 'in this conversation'}` : heard[attention.reason] || 'Heard') : '',
+    return [facts.actor_origin === 'machine' ? tr('places.history.actor_program', 'Program') : '',
+        attention?.decision === 'focus_started' ? 'Focus started' : attention?.decision === 'heard'
+        ? (attention.reason === 'conversation_work' && attention.recipient ? `Passed to work ${attention.recipient}` : HEARD_WORDS[attention.reason] || 'Heard') : '',
     { authored: 'Delivery not confirmed', accepted: 'Accepted by service; delivery not confirmed',
         delivered: 'Delivered', failed: 'Delivery failed', uncertain: 'Delivery outcome unknown' }[facts.delivery_state] || ''].filter(Boolean);
 }

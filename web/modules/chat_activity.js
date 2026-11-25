@@ -1251,7 +1251,7 @@ export function unconfirmedForegroundCardIds(cards, activeIds) {
 // provisional until dispatch is confirmed or the ended host's delivery becomes unknown.
 export function markIngressSaved(root, row, bubble = ownerMessageBubble(root, row, 1)) {
     const cmid = String(row?.client_message_id || ''), state = row?.ingress_pending === true ? 'pending' : '';
-    if (row?.role !== 'user' || row.ingress_accepted !== true || !cmid) return false;
+    if (row?.role !== 'user' || row.declared_author || row.ingress_accepted !== true || !cmid) return false;
     const prior = bubble?.querySelector('[data-ingress-saved]');
     const level = prior?.dataset.ingressSaved;  // `Input saved` and a kept send's delivery doubt are final: only a running host's own fact (dispatched, pending) ends that doubt
     const ended = level === 'unconfirmed' && (row.ingress_dispatched === true || state === 'pending');

@@ -367,6 +367,7 @@ D20 = "Presence"
 "ouroboros/extension_registry_state.py" = "D14"
 "ouroboros/extension_surface_names.py" = "D14"
 "ouroboros/extension_process_runner.py" = "D14"
+"ouroboros/extension_late_result.py" = "D14"
 "ouroboros/extension_route_stream.py" = "D14"
 "ouroboros/extension_reconcile_queue.py" = "D14"
 "ouroboros/extension_ui_validation.py" = "D14"
@@ -385,6 +386,7 @@ D20 = "Presence"
 "ouroboros/gateway/contracts.py" = "D11"
 "ouroboros/gateway/management_contracts.py" = "D11"
 "ouroboros/gateway/control.py" = "D11"
+"ouroboros/gateway/agent_note.py" = "D11"  # the command door's agent-note variant: a program's words, never the owner's
 "ouroboros/gateway/update_progress.py" = "D11"
 "ouroboros/gateway/cost_breakdown.py" = "D11"
 "ouroboros/gateway/cost_period.py" = "D11"
@@ -401,6 +403,7 @@ D20 = "Presence"
 "ouroboros/gateway/history_chronology.py" = "D11"
 "ouroboros/gateway/history_contracts.py" = "D11"
 "ouroboros/gateway/host_service.py" = "D11"
+"ouroboros/gateway/host_late_result.py" = "D11"
 "ouroboros/gateway/host_notify.py" = "D11"
 "ouroboros/gateway/logs.py" = "D11"
 "ouroboros/gateway/marketplace.py" = "D11"
@@ -1477,6 +1480,7 @@ lazy_only = [
   "D12->D05",
   "D12->D06",
   "D12->D10",
+  "D12->D14",
   "D12->D15",
   "D12->D16",
   "D12->D17",

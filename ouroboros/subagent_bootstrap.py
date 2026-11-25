@@ -164,7 +164,7 @@ def bootstrap_before_context(ctx: Any, task: Mapping[str, Any], dispatch: Any) -
     """
 
     configured = isinstance(task.get("configured_subagent"), dict)
-    ctx.exact_model_route = configured
+    ctx.exact_model_route = configured or bool(getattr(ctx, "_late_report_ref", ""))
     if not configured or dispatch is None:
         return _adopt_recovery_handoff(ctx, task)
     snapshot = task.get("configured_subagent") if isinstance(task.get("configured_subagent"), dict) else {}

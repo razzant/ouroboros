@@ -13,7 +13,8 @@ from starlette.responses import JSONResponse
 from starlette.background import BackgroundTask
 
 from ouroboros import deployment_policy as _deployment_policy, get_version
-from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or, request_repo_dir, run_sync_to_completion
+from ouroboros.gateway._helpers import (boot_precondition, json_error, json_exception, request_drive_root,
+                                        request_json_or, request_repo_dir, run_sync_to_completion)
 from ouroboros.gateway.ws import broadcast_ws_sync
 from ouroboros.gateway import update_progress
 from ouroboros.server_control import request_owner_restart, restart_consumer_is_live
@@ -177,6 +178,12 @@ async def api_reset(request: Request) -> JSONResponse:
 async def api_command(request: Request) -> JSONResponse:
     try:
         body = await request.json()
+        # A real emergency stop outranks the note door: a body carrying an actual `/panic` command is handled as
+        # the command whatever else it names, while a note's own words (a `/panic` inside `text`) stay literal data.
+        if (isinstance(body, dict) and "author" in body
+                and not str(body.get("cmd", "")).strip().lower().startswith("/panic")):  # an agent's note: literal text, never a command (§15)
+            from ouroboros.gateway.agent_note import api_agent_note
+            return await api_agent_note(request, body)
         cmd = body.get("cmd", "")
         if str(cmd).strip().lower().startswith("/panic"):
             from ouroboros.panic_source import source_evidence
@@ -186,6 +193,8 @@ async def api_command(request: Request) -> JSONResponse:
 
         if not isinstance(body.get("reply_to", ""), str):
             return json_error("reply_to must be an address string", 400, accepted=False)
+        if "cmd" not in body:  # neither a command nor a note (the author branch above took a note); an explicitly present empty cmd stays the old 200 no-op
+            return json_error("cmd is required (an agent's note sends text and author)", 400, accepted=False)
         if cmd:
             from supervisor.message_bus import get_bridge, log_chat
 
@@ -200,15 +209,8 @@ async def api_command(request: Request) -> JSONResponse:
                                  startup_owner_command=getattr(request.app.state, "startup_owner_command", None)):
                     return JSONResponse({"status": "ok"})
                 return json_error("Panic emergency owner is unavailable.", 503)
-            if "if_boot" in body:
-                from ouroboros.server_liveness import BOOT
-
-                expected = body["if_boot"]
-                if not isinstance(expected, str) or not expected:
-                    return json_error("if_boot must be a non-empty boot.since string", 400, accepted=False)
-                if expected != BOOT.snapshot(jobs=False)["since"]:
-                    return json_error("Ouroboros restarted before this command arrived.", 409,
-                                      accepted=False, reason_code="boot_changed")
+            if (refused := boot_precondition(body)) is not None:
+                return refused
             from supervisor.message_ingress import ui_control_fact
 
             try:  # the producer that composed this command from a control names it; typed text never does

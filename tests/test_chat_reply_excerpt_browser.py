@@ -79,6 +79,30 @@ def test_live_and_reloaded_selection_keep_the_host_recorded_speaker(project_chat
         page.get_by_role("button", name="Cancel reply").click()
 
 
+def test_selection_of_a_saved_agent_note_keeps_its_program_author(project_chat):
+    page = project_chat["page"]
+    sentence, label = "The north trail is open.", "Trail Notebook"
+    author = f'agent "{label}" (declared, not verified)'
+    source = row(1, f"🌿 {sentence} Meet by the oak.", role="user", source="web", system_type="agent_note_received",
+                 sender_label=author, reply_author_label=author,
+                 declared_author={"kind": "agent", "label": label, "basis": "self_declared"})
+    project_chat["rows"][:] = [source]
+    page.reload()
+    message = bubble(page, source)
+    assert message.locator(".sender").inner_text() == author
+    body = message.locator(".message[data-reply-body]")
+    body.scroll_into_view_if_needed()
+    body.evaluate("""(node, sentence) => {
+        const words = node.firstChild, start = words.data.indexOf(sentence), range = document.createRange();
+        range.setStart(words, start); range.setEnd(words, start + sentence.length);
+        getSelection().removeAllRanges(); getSelection().addRange(range);
+    }""", sentence)
+    page.get_by_role("button", name="Reply to quote", exact=True).click()
+    staged = page.evaluate("JSON.parse(sessionStorage.getItem('ouro_chat_reply'))")
+    assert staged["address"] == source["row_address"] and staged["author_label"] == author
+    assert staged["excerpt"] == {"text": sentence, "start_utf16": 3}
+
+
 def test_selected_list_code_and_backward_link_drag(project_chat):
     page = project_chat["page"]
     items = row(1, "- first\n- second\n\n```\na\n  b\n```")

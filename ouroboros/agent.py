@@ -59,7 +59,7 @@ from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
 from ouroboros.contracts.task_contract import attach_task_contract
 from ouroboros.outcomes import infra_failed_axes
-from ouroboros import body_candidate, mcp_task_session, route_choice, subagent_bootstrap, subagent_runtime
+from ouroboros import body_candidate, extension_late_result, mcp_task_session, route_choice, subagent_bootstrap, subagent_runtime
 from ouroboros.subagents import (
     SubagentDispatch,
     effort_result_fields,
@@ -150,7 +150,7 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),
             trace_refs=loop_outcome.get("trace_refs") or collect_trace_refs(usage, llm_trace),  # the one stored copy: the saved ``loop_outcome`` carries none
-            **effort_result_fields(task), **terminal_result_fields(usage, title=task.get("title"), metadata=task.get("metadata"), task_contract=task.get("task_contract")),
+            **effort_result_fields(task), **({"admission_author": task["admission_author"]} if task.get("admission_author") else {}), **terminal_result_fields(usage, title=task.get("title"), metadata=task.get("metadata"), task_contract=task.get("task_contract")),
         )
     except Exception:
         log.debug("Failed to persist task exception projection", exc_info=True)
@@ -580,6 +580,7 @@ class OuroborosAgent:
                 # message by value, never by content lookup.
                 origin_message_ref=task.get("origin_message_ref"),
                 origin_message_text=task.get("origin_message_text"),
+                **({"admission_author": task["admission_author"]} if task.get("admission_author") else {}),
                 result="Task is running.",
             )
             if canonical.resolve() != self.env.drive_root.resolve() and running.get("status") == STATUS_RUNNING:
@@ -684,8 +685,10 @@ class OuroborosAgent:
         freeze_tool_profile(task)
         _record_executor_resolution(drive_logs, task, dispatch)
         sanitized_task = sanitize_task_for_event(task, drive_logs)
-        if self._persist_running_record(task):  # its source stored first (DEVELOPMENT 03): the event counts the lists
+        if persisted := self._persist_running_record(task):  # its source stored first (DEVELOPMENT 03): the event counts the lists
             sanitized_task = count_routing_lists(sanitized_task)
+        if late_refusal := extension_late_result.claim_running_return_execution(self.env.drive_root, task, persisted=persisted):
+            return None, [], {"authority_source_unavailable": late_refusal}
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task,
                      # #1578: the task's own ids at top level beside its (content) task body.
                      "task_id": str(task.get("id") or ""),
@@ -822,7 +825,7 @@ class OuroborosAgent:
             ctx.end_acceptance_fence = self._end_acceptance_fence
         # The model a task carries binds its route; a role-named task (a consciousness wake) and a
         # nanny of a following parent carry none and follow that role's current slot (route_choice).
-        route_choice.bind_task_route(ctx, task_metadata, presence=bool(task.get("_presence_turn")))
+        route_choice.bind_task_route(ctx, task_metadata, presence=bool(task.get("_presence_turn")), admission_author=task.get("admission_author"))
         if bool(task.get("_presence_turn")):
             ctx.inline_max_rounds = carried_inline_round_cap(task_metadata)
         self.tools.set_context(ctx)

@@ -26,6 +26,7 @@ from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
 from ouroboros.chat_uploads import attachment_views
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_a2a_chat_id
+from ouroboros.dialogue_provenance import agent_note_text, declared_author
 from ouroboros.project_registry_recovery import recovery_notice
 from ouroboros.room_archive import registry_reservations
 from ouroboros.gateway._helpers import coerce_int
@@ -142,6 +143,18 @@ _SKILL_REVIEW_INT_FIELDS = ("review_round", "snapshot_attempt")
 _SKILL_REVIEW_BOOL_FIELDS = ("snapshot_revised",)
 
 
+def _skill_review_fields(row: Dict[str, Any], *, present_only: bool = False) -> Dict[str, Any]:
+    from ouroboros.review_execution_projection import normalize_review_executions
+
+    keep = (lambda key: key in row) if present_only else (lambda _key: True)
+    return {
+        **{key: str(row.get(key, "") or "") for key in _SKILL_REVIEW_STRING_FIELDS if keep(key)},
+        **{key: coerce_int(row.get(key), 0) for key in _SKILL_REVIEW_INT_FIELDS if keep(key)},
+        **{key: bool(row.get(key)) for key in _SKILL_REVIEW_BOOL_FIELDS if keep(key)},
+        "executions": normalize_review_executions(row.get("executions")),
+    }
+
+
 def _stored_chat_id(value: Any, default: int = 1) -> int:
     """Coerce a stored route while preserving explicit panel chat zero."""
     return coerce_int(value, int(default))
@@ -209,6 +222,11 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
     origin_rows = project_origin_rows(data_dir, thread_id, gaps=gaps)
     emitted_origins = {m.get("origin_id") for m in human_tail if m.get("origin_id")}
     synthesized: list = []
+    def _omission_row(text: str, ts: str = "", **extra: Any) -> Dict[str, Any]:
+        return {"text": text, **extra, "role": "system", "ts": ts, "is_progress": False,
+                "system_type": "origin_omission", "markdown": False, "source": "",
+                "sender_label": "", "sender_session_id": "", "client_message_id": "", "task_id": ""}
+
     for index, row in enumerate(origin_rows):
         ref = row.get("ref") or {}
         cmid = str(ref.get("client_message_id") or "")
@@ -246,18 +264,10 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
             if omitted:
                 text, said = phrase("origin_omission", "{n} more archived Project start message(s) are not shown here; their "
                                     "full copies are kept.", details="state/project_task_bindings.json (source_text)", n=omitted)
-                synthesized.append({  # where they are kept is its notice's detail (DESIGN principle 7)
-                    "text": text, **notice_view({"text": text, **said}),
-                    "role": "system", "ts": str(ref.get("ts") or ""),
-                    "is_progress": False, "system_type": "origin_omission",
-                    "markdown": False, "source": "", "sender_label": "",
-                    "sender_session_id": "", "client_message_id": "",
-                    "task_id": "",
-                })
+                # Where they are kept is its notice's detail (DESIGN principle 7).
+                synthesized.append(_omission_row(text, str(ref.get("ts") or ""), **notice_view({"text": text, **said})))
             break
-    synthesized.extend({"text": gap, "role": "system", "ts": "", "is_progress": False,
-                        "system_type": "origin_omission", "markdown": False, "source": "", "sender_label": "",
-                        "sender_session_id": "", "client_message_id": "", "task_id": ""} for gap in sorted(gaps))
+    synthesized.extend(_omission_row(gap) for gap in sorted(gaps))
     return synthesized
 
 
@@ -770,9 +780,18 @@ def _collect_chat_rows(
                 "task_id": str(entry.get("task_id", "")),
                 **identity(entry),
             }
-            if role == "user" and entry.get("subagents_mode") == "swarm":
+            author = declared_author(entry)
+            if role == "user" and not author and entry.get("subagents_mode") == "swarm":
                 rec["subagents_mode"] = "swarm"
-            if role == "user" and entry.get("ingress_accepted") is True:
+            if author:  # an agent's note: program data (literal body + author), never the stored receipt fact
+                rec["role"] = "user"
+                rec["text"] = agent_note_text(entry)
+                rec["declared_author"] = author
+                if entry.get("kind") == "room_echo":
+                    rec["kind"] = "room_echo"
+                if entry.get("late_report_id"):
+                    rec["late_report_id"] = entry["late_report_id"]
+            if rec["role"] == "user" and entry.get("ingress_accepted") is True:
                 rec["ingress_accepted"] = True
                 # Proven undispatched, entered, or this live process's and pending; an ended process's: nothing.
                 rec.update(delivery_facts(entry, entry_chat))
@@ -795,7 +814,8 @@ def _collect_chat_rows(
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
             rec.update(frame_project(chat_path.parent.parent, entry))
-            annotation = _user_annotation(role, rec["client_message_id"], chat_annotations, entry_chat, rec.get("row_address", ""))
+            annotation = None if author else _user_annotation(
+                role, rec["client_message_id"], chat_annotations, entry_chat, rec.get("row_address", ""))
             if origin := getattr(row_matches_thread, "origin_identity", lambda entry: "")(entry):
                 rec["origin_id"] = origin
             if annotation is not None:
@@ -805,15 +825,7 @@ def _collect_chat_rows(
             # card can lazily fetch the full rendered review. Rows without a
             # job_id (legacy full-text rows) keep today's behavior.
             if rec["system_type"] == "skill_review":
-                for key in _SKILL_REVIEW_STRING_FIELDS:
-                    rec[key] = str(entry.get(key, "") or "")
-                for key in _SKILL_REVIEW_INT_FIELDS:
-                    rec[key] = coerce_int(entry.get(key), 0)
-                for key in _SKILL_REVIEW_BOOL_FIELDS:
-                    rec[key] = bool(entry.get(key))
-                from ouroboros.review_execution_projection import normalize_review_executions
-
-                rec["executions"] = normalize_review_executions(entry.get("executions"))
+                rec.update(_skill_review_fields(entry))
             if entry.get("type") == "routing_options":
                 # LLM-context grounding row (#198, decision 4=A): the web
                 # surface renders the richer picker card from the annotation,
@@ -969,8 +981,6 @@ def _fold_task_bound_skill_reviews(combined: list[Dict[str, Any]]) -> list[Dict[
     replays Skill history and never claims an authoritative total beyond the
     references present in this Chat window.
     """
-    from ouroboros.review_execution_projection import normalize_review_executions
-
     groups: Dict[tuple[str, str, str], list[tuple[int, Dict[str, Any]]]] = {}
     for index, row in enumerate(combined):
         if row.get("is_progress") or str(row.get("system_type") or "") != "skill_review":
@@ -1015,23 +1025,12 @@ def _fold_task_bound_skill_reviews(combined: list[Dict[str, Any]]) -> list[Dict[
                 # terminal text is therefore the only useful attempt body.
                 "text": str(row.get("text") or ""),
                 "superseded": position < len(surviving_rows) - 1,
-                "executions": normalize_review_executions(row.get("executions")),
                 **_history_identity(row),
+                **_skill_review_fields(row, present_only=True),
+                "skill": skill,
+                "group_id": group_id,
+                "presentation_owner_task_id": owner,
             }
-            for key in _SKILL_REVIEW_STRING_FIELDS:
-                if key in row:
-                    attempt[key] = str(row.get(key) or "")
-            for key in _SKILL_REVIEW_INT_FIELDS:
-                if key in row:
-                    attempt[key] = coerce_int(row.get(key), 0)
-            for key in _SKILL_REVIEW_BOOL_FIELDS:
-                if key in row:
-                    attempt[key] = bool(row.get(key))
-            attempt.update(
-                skill=skill,
-                group_id=group_id,
-                presentation_owner_task_id=owner,
-            )
             attempts.append(attempt)
         latest_index, latest_source = surviving_rows[-1]
         latest = dict(latest_source)

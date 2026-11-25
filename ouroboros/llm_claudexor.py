@@ -35,7 +35,8 @@ from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope
 from ouroboros.observability import persist_call, update_call_manifest_metadata
 from ouroboros.context_timing import host_step, mark, span_since, timed
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
-from ouroboros.transport_custody import ProcessingNotStarted, ProviderNotDispatched, is_processing_refusal
+from ouroboros.transport_custody import (ProcessingNotStarted, ProviderNotDispatched, is_processing_refusal,
+                                         single_physical_send_active)
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
 from ouroboros.usage_accounting import (
@@ -888,8 +889,15 @@ def _accounted_request(invocation: _ModelInvocation):
     if not invocation.payload.get("retryOfOperationId"):
         invocation.payload = stamp_clock_note(invocation.payload)
     # The engine relays to the vendor: its loopback address is not where the model runs (a not-started receipt is a remote-hop fact).
-    request = replace(timed("candidate.measure", _attempt_request, invocation.target, invocation.payload), route_is_loopback=False,
-                      force_unknown_reservation=True, max_completion_tokens=invocation.output_reserve)
+    from ouroboros.physical_attempt_context import with_dispatch_account
+
+    account = invocation.payload.get("account") or {}
+    request = timed("candidate.measure", _attempt_request, invocation.target, invocation.payload)
+    pin = account.get("profileId") if account.get("mode") == "pin" else ""
+    witness = f"pin:{pin}" if pin else "auto"
+    request = replace(request, route_is_loopback=False,
+                      force_unknown_reservation=True, max_completion_tokens=invocation.output_reserve,
+                      physical_context=with_dispatch_account(request.physical_context, witness))
     before, handed = _candidate_before_dispatch(invocation.payload, request, prepare=invocation.prepare), mark()
 
     def reserved(reservation):  # the ledger reserved this attempt between the hand-over and this call
@@ -1019,6 +1027,8 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
             error.presence_all_operations_not_started = all_operations_not_started
             if invocation.response_ref:
                 invocation.acknowledge()
+            if single_physical_send_active():
+                raise
             updated = capability.refused(invocation, error)
             if updated is not None:
                 retry_preparation, payload = None, updated
@@ -1032,7 +1042,7 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
             payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
-            if _ends_on_content_denial(error, capability):
+            if _ends_on_content_denial(error, capability) or single_physical_send_active():
                 raise
             if is_processing_refusal(error):
                 repair = None if capability.ends_chain(error) else _processing_repair(
@@ -1187,7 +1197,7 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
             payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
-            if _ends_on_content_denial(error, capability):
+            if _ends_on_content_denial(error, capability) or single_physical_send_active():
                 raise
             if is_processing_refusal(error):
                 repair = None if capability.ends_chain(error) else _processing_repair(

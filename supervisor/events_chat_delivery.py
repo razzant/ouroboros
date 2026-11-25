@@ -561,10 +561,12 @@ def _send_message(evt: Dict[str, Any], ctx: Any) -> Any:
             meta.get("root_task_id") or evt.get("root_task_id"),
         )
         system_type = str(evt.get("system_type") or "")
+        from ouroboros.agent_task_pipeline import LOCAL_FINAL_ADDRESS
         from ouroboros.project_dialogue import ROOM_FIXED_ROW_TYPES
 
         # Project lifecycle rows and a root's Main notice pin Main; others keep lineage routing.
         chat_id = int(evt["chat_id"]) if system_type in ROOM_FIXED_ROW_TYPES else bound_chat or int(evt["chat_id"])
+        local_only = not is_progress and (evt.get("address") or pending.get("address")) == LOCAL_FINAL_ADDRESS
         if delivery_id:
             progress_meta = dict(progress_meta or {})
             progress_meta["delivery_id"] = delivery_id
@@ -581,6 +583,7 @@ def _send_message(evt: Dict[str, Any], ctx: Any) -> Any:
                 # S3 (Q4): a typed system receipt keeps its role/type end to end.
                 role=str(evt.get("role") or ""),
                 system_type=system_type,
+                **({"local_only": True} if local_only else {}),
                 **({"require_write": True} if delivery_id else {}),
                 **({"replay_delivery_id": delivery_id}
                    if delivery_id and evt.get("_delivery_replay") and not publication_token else {}),

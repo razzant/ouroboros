@@ -600,15 +600,15 @@ def forwarded_message(message: Any) -> bool:
 def owner_author(accounts: Mapping[str, Iterable[OwnerAccount]], place_id: str, actor: Any, account_id: str,
                  conversation_id: str = "", message: Any = None) -> bool:
     """A place message as my human's own words now: its actor is an account its place's connector account confirms
-    (``accounts``, one ``place_owner_accounts`` snapshot), the connector does not report it unauthenticated, and it is
-    not a message I posted as an account (its provider identity among ``accounts.sent``; never compared by its words,
-    so my human repeating my words is still my human). Provenance of the words, never whom they are for; who sent a
-    forward, never whose words it carries (``forwarded_message``)."""
+    (``accounts``, one ``place_owner_accounts`` snapshot), reported neither unauthenticated nor a program (``origin:
+    "machine"``, a fact that only lowers authority), and not a message I posted as an account (its provider identity
+    among ``accounts.sent``, never compared by its words: my human repeating my words is still my human). Provenance
+    of the words, never whom they are for; who sent a forward, never whose words it carries (``forwarded_message``)."""
     from ouroboros.own_sends import message_identity
 
     actor = actor if isinstance(actor, Mapping) else {}
     actor_id = str(actor.get("platform_actor_id") or actor.get("id") or "").strip()
-    return (actor.get("authenticated") is not False
+    return (actor.get("authenticated") is not False and actor.get("origin") != "machine"
             and owner_account_matches(accounts.get(place_id, ()), actor_id, str(account_id or ""))
             and message_identity(conversation_id, message) not in getattr(accounts, "sent", frozenset()))
 

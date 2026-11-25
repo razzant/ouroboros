@@ -57,6 +57,7 @@ class ChatReplyReference(TypedDict, total=False):
     quote_role: Literal["user"]  # ink of the owner's recorded card answer on its System row
     author_label: str
     kind: str
+    program_source: Literal["agent_note", "late_result", "place_machine"]  # recorded source kind, not permission
     excerpt: ReplyExcerpt
     attachment_failures: list[dict[str, Any]]  # pathless facts from the exact source row
     snippet: str

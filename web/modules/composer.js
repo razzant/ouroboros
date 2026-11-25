@@ -260,8 +260,8 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         if (inputHistorySeededFromServer) return;
         const serverTexts = [];
         for (const msg of messages) {
-            if (msg.role !== 'user') continue;
-            let text = (msg.text || '').trim();
+            if (msg.role !== 'user' || msg.declared_author) continue; // the host's program signature outranks the skin
+            const text = (msg.text || '').trim();
             if (text) serverTexts.push(text);
         }
         const deduped = [...new Set([...serverTexts, ...inputHistory].reverse())].reverse();

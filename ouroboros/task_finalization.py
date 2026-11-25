@@ -380,6 +380,8 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
         fields["terminal_salvage_path"] = path
     if usage.get("wake_silent") is True:
         fields["wake_silent"] = True
+    if usage.get("presence_explicit_silence") is True:
+        fields["presence_explicit_silence"] = True  # a conscious accepted silence with no delivered answer
     if usage.get("wake_summary"):
         fields["wake_summary"] = str(usage["wake_summary"])  # a self-started run's name, never over a title
         if summary_names_run(metadata, task_contract) and not str(title or prior.get("title") or "").strip():

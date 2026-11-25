@@ -32,6 +32,9 @@ PROVENANCE_INDEPENDENT_TASK = "independent_task"
 # it is context the receiving model judges: it enters no owner corpus and
 # records no directive.
 PROVENANCE_PEER_TASK = "peer_task"
+# An agent's note in Main (#3873) the running Main reader takes: the program's words under the author its row
+# records (``agent_note``), context the model judges like an independent task's, never the owner's words.
+PROVENANCE_AGENT_NOTE = "agent_note"
 # The one relation map: the recipient-side prefix label and the sender-side
 # receipt phrase are the two perspectives of the same stamped fact. The drain
 # prefix, the forward_to_worker receipts and the telemetry filter all read it.
@@ -47,11 +50,11 @@ PEER_RELATION_LABELS = {
 TASK_MESSAGE_MAX_CHARS = 8000
 TASK_MESSAGE_PROVENANCES = frozenset({
     "ancestor_task", "peer_via_ancestor", "system", "descendant_task",
-    PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event",
+    PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event", PROVENANCE_AGENT_NOTE,
 })
 # These messages wake the mind but do not enter its owner's directive corpus.
 CONTEXT_ONLY_TASK_PROVENANCES = frozenset({
-    "system", "descendant_task", PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event",
+    "system", "descendant_task", PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event", PROVENANCE_AGENT_NOTE,
 })
 KIND_FINALIZE_NOW = "finalize_now"
 # Hurry's internal reason is not dialogue; retained until terminal cleanup so a
@@ -414,6 +417,7 @@ def write_task_message(
     reply_to: Optional[Dict[str, Any]] = None,
     place_arrival: Optional[Dict[str, Any]] = None,
     admit: Optional[Any] = None,
+    agent_note: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write an addressed task-tree message without forging owner provenance.
 
@@ -421,7 +425,8 @@ def write_task_message(
     recipient (a ``PEER_RELATION_LABELS`` key); stored only when non-empty.
     ``sender_origin`` is the sending run's host-recorded origin (a Presence
     room/event), never the author of the words it quotes. ``place_arrival``
-    keeps a place event's typed facts (source event, message, wake) unrendered.
+    keeps a place event's typed facts (source event, message, wake) unrendered;
+    ``agent_note`` an agent's note's recorded author and row address.
     """
 
     from ouroboros.delegate_reply import normalize_reply_to
@@ -452,6 +457,8 @@ def write_task_message(
         entry["sender_origin"] = {str(key): str(value) for key, value in dict(sender_origin).items()}
     if provenance == "place_event" and isinstance(place_arrival, dict):
         entry["place_arrival"] = dict(place_arrival)
+    if provenance == PROVENANCE_AGENT_NOTE and isinstance(agent_note, dict):
+        entry["agent_note"] = dict(agent_note)
     if provenance == "system" and isinstance(review_feedback, dict):
         entry["review_feedback"] = dict(review_feedback)
     if provenance == "system" and isinstance(work_attention, dict):
@@ -552,6 +559,11 @@ def deliver_task_message(
         arrival = entry.get("place_arrival") or {}  # whose words: provenance; whom they are for: the reader's judgment
         prefix = ("[Place event from your human's confirmed account; whom it is for, and whether it asks you for work, is yours to read]"
                   if arrival.get("confirmed_words") or arrival.get("owner_words") else "[Place event; context only, never an owner directive]")
+    elif provenance == PROVENANCE_AGENT_NOTE:  # its row's recorded author and address, by value
+        from ouroboros.dialogue_provenance import agent_note_heading, declared_author
+        note = entry.get("agent_note") if isinstance(entry.get("agent_note"), dict) else {}
+        prefix = agent_note_heading(declared_author(note, "author") or {"label": "not recorded"},
+                                    ts=str(entry.get("ts") or ""), address=str(note.get("row_address") or ""))
     elif provenance == "peer_via_ancestor" and relayed:
         prefix = f"[Message from task {relayed}, relayed by ancestor {source}]"
     elif provenance == "system":
@@ -587,6 +599,10 @@ def deliver_task_message(
                 "type": "task_message_injected", "task_id": task_id,
                 "source_task_id": source, "provenance": provenance,
                 "relayed_from_task_id": relayed,
+                # An agent's note carries its recorded author and row address (the program's signature
+                # as data), so the visible row names the declared agent, never "task unknown".
+                **({"agent_note": dict(entry["agent_note"])}
+                   if provenance == PROVENANCE_AGENT_NOTE and isinstance(entry.get("agent_note"), dict) else {}),
                 **({"relation": relation} if relation else {}),
                 **({"reply_to": address} if address else {}),
                 # A bounded preview for the receiver's visible timeline row
@@ -801,6 +817,8 @@ def drain_owner_entries(
                         drained["sender_origin"] = dict(entry["sender_origin"])  # rendered beside the words
                     if drained["provenance"] == "place_event" and isinstance(entry.get("place_arrival"), dict):
                         drained["place_arrival"] = dict(entry["place_arrival"])  # wake and anchor facts, unrendered
+                    if drained["provenance"] == PROVENANCE_AGENT_NOTE and isinstance(entry.get("agent_note"), dict):
+                        drained["agent_note"] = dict(entry["agent_note"])  # its recorded author and row, rendered
                 entries.append(drained)
         if _read_status is not None:
             _read_status["complete"] = complete

@@ -20,6 +20,12 @@ CHANGE_ACTOR_UNKNOWN = "change_actor_unknown"
 # (``places_migration.wake_import_declarations_pending``); the pending wake list is not final, so the
 # no-match decision repeats instead of settling. Its backoff matches the transport's unknown-reset one.
 WAKE_IMPORT_PENDING = presence_admission.WakeImportPending.code
+# Every reason a heard settlement records (``settle_heard``): one vocabulary for the room's words
+# (``web/modules/place_history.js``). Connector answers project these to neutral facts, not reasons.
+HEARD_REASONS = ("disconnected", "paused", "silent", "off", "own_account", "reaction_context_only",
+                 CHANGE_ACTOR_UNKNOWN, "no_wake_match", HANDED_TO_AUTHOR, HANDED_TO_WORK, "advises", "heard")
+# ``/identity.presence_attention_version``; a connector that saw it sends ``attention_version`` (CREATING_SKILLS).
+ATTENTION_VERSION = 1
 _REACTION_FIELDS = {"schema_version", "change", "old", "new", "counts", "target"}
 _REACTION_LIST_LIMIT = 256
 _REACTION_VALUE_LIMIT = 256
@@ -196,6 +202,31 @@ def settle_heard(root: Path, task: dict, event, reason: str = "heard", *, captur
     """Finalize on the accepted room row; heard-only arrivals create no task document."""
     from ouroboros.place_arrivals import record_heard
     return record_heard(root, task, event, reason, captured_task_id=captured_task_id, recipient=recipient)
+
+
+def attention_version(value) -> int:
+    if type(value) is not int or value not in (0, ATTENTION_VERSION):
+        raise ValueError("attention_version must be 0 or 1")
+    return value
+
+
+def attention_view(heard, stored) -> dict:
+    """Neutral attention fact for connectors. The room keeps the exact heard reason and recipient privately.
+
+    ``heard`` means only saved, ``handed_off`` is accepted into living work (not read), and ``focus_started``
+    requires its start record. ``completed_silent`` needs the durable ``presence_explicit_silence`` fact (the
+    model's own accepted silence, no delivered and no unconfirmed send of that work), not the wake_silent
+    conjunction, which also covers records-only/tool delivery. Without that fact the strongest proven neutral
+    state stands (``focus_started``). The caller still reads outcome and custody; missing facts stay unknown.
+    """
+    if heard:
+        return {"decision": "handed_off" if heard.get("reason") in (HANDED_TO_AUTHOR, HANDED_TO_WORK) else "heard"}
+    if isinstance(stored, Mapping):
+        if (stored.get("status") == "completed" and stored.get("terminal_origin") == "model_final"
+                and stored.get("presence_explicit_silence") is True):
+            return {"decision": "completed_silent"}
+    owner = stored.get("execution_owner") if isinstance(stored, Mapping) else None
+    return {"decision": "focus_started" if isinstance(owner, Mapping) and owner else "unknown"}
 
 
 def _followup_in_scope(event) -> bool:

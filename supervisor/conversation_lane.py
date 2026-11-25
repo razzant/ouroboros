@@ -374,21 +374,22 @@ def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str
 
 
 def resumes_on_lane(task: Any) -> bool:
-    """A queued row this lane carries again: my human's own Main or room turn, returned by a stop door, a Resume
+    """A queued row this lane carries again: an owner or agent-note room turn, returned by a stop door, a Resume
     or its own sleep (owner choice of 9 November 2026: the conversation path survives every permitted return).
 
     The facts the host stamped, as ``conversation_lease.owner_conversation_key`` reads them for Main: the direct
-    origin with the owner door's ingress (``dialogue_provenance.run_origin``: a wake or the auto-resume has none),
+    origin with the owner door's ingress or the host's admission author (neither a wake nor an auto-resume),
     this lane as its recorded carrier, any executor but a live call's. A Presence turn, a turn the mind sent to the
     pool (``detached_at``) and pooled work keep their project slot."""
-    from ouroboros.dialogue_provenance import is_presence_task, run_origin
+    from ouroboros.dialogue_provenance import admission_note, is_presence_task, run_origin
     from ouroboros.task_carrier import EXECUTOR_INLINE_CALL, carrier_executor, execution_kind, execution_owner
 
     if not isinstance(task, dict):
         return False
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     return bool(execution_kind(task) == "direct" and execution_owner(task).get("lane") == LANE_CONVERSATION
-                and carrier_executor(task) != EXECUTOR_INLINE_CALL and run_origin(task)["owner_ingress"]
+                and carrier_executor(task) != EXECUTOR_INLINE_CALL
+                and (run_origin(task)["owner_ingress"] or admission_note(task))
                 and not is_presence_task(task) and not (task.get("detached_at") or metadata.get("detached_at")))
 
 
@@ -396,13 +397,13 @@ def saved_carrier(task: Dict[str, Any], drive_root: Any) -> Dict[str, Any]:
     """The carrier record a saved queued row lacks, from the same task's own result; else ``{}``. Never raises.
 
     A release before #2870 saved PENDING rows without ``_execution_owner``: my human's returned turn waiting in the
-    queue then came back pooled. Only the row's own facts qualify it (direct, the owner door's ingress, never
-    Presence or detached), and only a positive record restores it: this task's conversation-lane direct carrier,
+    queue then came back pooled. Only the row's own facts qualify it (direct, the owner door's ingress or its own
+    admitted agent note, never Presence or detached), and only a positive record restores it: this task's conversation-lane direct carrier,
     undetached and not terminal, for the attempt the row carries (its saved work's or seed's, else its own; a first
     direct launch records 0 for 1, unmarked). No label or source is read as a carrier."""
     import pathlib
 
-    from ouroboros.dialogue_provenance import is_presence_task, run_origin
+    from ouroboros.dialogue_provenance import admission_note, is_presence_task, run_origin
     from ouroboros.task_carrier import EXECUTORS
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, load_task_result
     from supervisor.task_admission import SEED_RETURN
@@ -410,7 +411,8 @@ def saved_carrier(task: Dict[str, Any], drive_root: Any) -> Dict[str, Any]:
     task_id = str(task.get("id") or "")
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     if ("_execution_owner" in task or task.get("_is_direct_chat") is not True or not task_id or is_presence_task(task)
-            or task.get("detached_at") or metadata.get("detached_at") or not run_origin(task)["owner_ingress"]):
+            or task.get("detached_at") or metadata.get("detached_at")
+            or not (run_origin(task)["owner_ingress"] or admission_note(task))):
         return {}
     source = next((v for v in (task.get("_working_recovery"), task.get(SEED_RETURN)) if isinstance(v, dict)), None)
     saved = task.get("_attempt") if source is None else source.get("from_attempt")

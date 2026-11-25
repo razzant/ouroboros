@@ -310,7 +310,11 @@ def _repeats(rows: List[Entry]) -> Dict[str, Dict[str, Any]]:
     row and reader; edited words and wordless rows are none. No similarity, prefix or length."""
     first: Dict[Tuple[str, str, str], Dict[str, Any]] = {}  # (words, speaker or "" for any, facts) -> earliest copy
     found: Dict[str, Dict[str, Any]] = {}
+    from ouroboros.dialogue_provenance import non_owner_author
+
     for address, meta, _pos in rows:
+        if non_owner_author(meta):  # the neutral receipt's text is not the letter's identity or words
+            continue  # repeated appearances of one letter are already covered by _once
         digest = meta.get("text_sha256") if int(meta.get("text_chars") or 0) else ""
         if digest:
             speaker, facts = recorded_speaker(meta), str(meta.get("message_facts_sha256") or "")

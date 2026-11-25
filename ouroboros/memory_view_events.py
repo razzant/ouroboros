@@ -13,7 +13,7 @@ from ouroboros import chat_chain, dialogue_store
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
 from ouroboros.consciousness_authority import FOCUS_ROUTE_FIELDS, FOCUS_TRANSPORT_KEY, is_own_clock_wake
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
-from ouroboros.dialogue_provenance import RoomLabelResolver, _derives, recorded_person, recorded_speaker
+from ouroboros.dialogue_provenance import RoomLabelResolver, _derives, program_source, recorded_person, recorded_speaker
 from ouroboros.store import StoreError
 
 WAKE = "wake"  # the name every wake my own clock starts has, beside Main's room; it stays with the wake, never a helper
@@ -74,8 +74,10 @@ def finish_capture(event, texts):
             continue
         entry, author = pair
         row = texts.get(entry[0]["row_sha256"], {})
-        text = str(row.get("text") or "").strip()
-        label = ("author not recorded" if author.get("unattributed") else author.get("label", "author not recorded"))
+        program = bool(program_source(row or entry[1]))
+        text = "" if program else str(row.get("text") or "").strip()
+        label = ("program message; read by address" if program else "author not recorded" if author.get("unattributed")
+                 else author.get("label", "author not recorded"))
         if author.get("via") == "own_account":
             label += " (account not confirmed as my human's)"
         event[name] = {"address": chat_chain.format_address(entry[0]), "pos": entry[2],
@@ -86,7 +88,7 @@ def finish_capture(event, texts):
 def _sample(sample, *, opening=False):
     if sample is None:
         return "author not recorded"
-    return f"[{sample['address']}; {sample['author']}]" + (f" «{sample['opening']}»" if opening else "")
+    return f"[{sample['address']}; {sample['author']}]" + (f" «{sample['opening']}»" if opening and sample["opening"] else "")
 
 
 def _unknown(event):

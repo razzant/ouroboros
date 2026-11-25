@@ -1176,7 +1176,10 @@ holding the owner's `notify_owner` grant speaks the same way in its own name: a
 per work and destination: when Ouroboros's identical re-issue goes ahead over a flag whose
 final reading marked the act as one the owner would stop, a `safety_notice` System row
 signed `Safety Supervisor · not Ouroboros's words` names the call, the flag's reason and
-quote, the work and the owner's brakes, and claims no delivery.
+quote, the work and the owner's brakes, and claims no delivery. An external program's note
+signs its own name the same way: its row shows the program's literal words under
+`agent "<label>" (declared, not verified)` — an author the host recorded but never verified,
+never the owner's or Ouroboros's name (`agent_note_received`).
 
 Formatting is asymmetric: assistant text always uses the sanitized chat markdown
 renderer regardless of `markdown`; ordinary System text is escaped unless

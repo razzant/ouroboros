@@ -679,6 +679,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
                                   **({"start": sources["start"]} if sources.get("start") else {}),
                                   **({"wake": sources["wake"]} if sources.get("wake") else {}),
                                   **({"api": sources["api"]} if sources.get("api") else {}),
+                                  **({"note": sources["note"]} if sources.get("note") else {}),
                                   "later": sources.get("later") or [],
                                   **({"confirmed_place": sources["confirmed_place"]} if sources.get("confirmed_place") else {}),
                                   "held_owner_messages": sources.get("held_owner_messages") or {},
@@ -805,6 +806,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_
         continuation_room, declared_inputs, execution_carry, owner_sources, recorded_task_type, successor_id, valid_nonce,
     )
     from ouroboros.task_results import STATUS_SCHEDULED, load_task_result, validate_task_id, write_task_result
+    from ouroboros.extension_late_result import restricted_return
 
     from supervisor import queue as q
     predecessor = validate_task_id(predecessor_task_id)
@@ -829,7 +831,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_
                    if claim.get("state") == "bound" else {})}
     if claim and recorded_task_type(result) == "deep_self_review":  # an older bound claim never creates one now
         return {"ok": False, "error": "deep_review_restart_required", "cause": "deep_self_review"}
-    verdict = continuation_eligibility(result, predecessor) if not claim else {
+    verdict = continuation_eligibility(result, predecessor) if not claim or restricted_return(result) else {
         "eligible": True, "cause": str((claim.get("binding") or {}).get("cause") or ""), "refusal": ""}
     if not verdict["eligible"]:
         return {"ok": False, "error": verdict["refusal"], "cause": verdict["cause"]}

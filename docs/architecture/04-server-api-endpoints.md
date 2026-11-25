@@ -237,6 +237,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/history` | |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/work/{work_ref}` | |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/work/{work_ref}` | retains transport queue observations |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/late_result` | return through an admitted call reference (§12) |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/ui/ws-message` | |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/sign-in/accounts` | the calling skill's accounts per declared service (§13) |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/sign-in/token` | the calling skill's own access token (§13) |

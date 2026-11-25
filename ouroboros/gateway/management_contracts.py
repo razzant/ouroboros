@@ -1337,7 +1337,8 @@ class UpdateStatusResponse(TypedDict, total=False):
 
 class CommandRequest(TypedDict):
     """``POST /api/command``: a slash command (``/restart``, ``/panic``, ``/review``, ``/evolve``,
-    ``/bg``, ``/status``) or any other text, which becomes an owner message in Main. ``visible_text``
+    ``/bg``, ``/status``) or any other text, which becomes an owner message in Main (a program that is not the
+    owner sends ``AgentNoteRequest`` instead; a body with neither is a 400). ``visible_text``
     adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped.
     ``ui_control`` (``{name, owner_text?}``) says a host-drawn control composed ``cmd``: no owner
     message is written for it, only ``owner_text`` (words typed into the control) is theirs; malformed: 400."""
@@ -1351,6 +1352,35 @@ class CommandRequest(TypedDict):
     visible_task_id: NotRequired[str]
     task_constraint: NotRequired[Dict[str, Any]]
     ui_control: NotRequired[Dict[str, Any]]
+
+
+class AgentNoteAuthor(TypedDict):
+    """The author an agent's note declares: exactly these two keys (a basis or identity field is refused)."""
+
+    kind: Literal["agent"]
+    label: str  # 1-120 characters after control and line-break characters become spaces; shown as declared
+
+
+class AgentNoteRequest(TypedDict):
+    """An agent's literal note for Main (#3873), not owner input. Other keys are a 400 before any note effect.
+    The real Panic command takes its emergency path before note handling; it is not part of this request shape."""
+
+    text: str
+    author: AgentNoteAuthor
+    reply_to: NotRequired[str]  # a citation, as a command's: never steering
+    reply_excerpt: NotRequired[ReplyExcerpt]
+    if_boot: NotRequired[str]
+
+
+class AgentNoteResponse(TypedDict):
+    """A note's receipt: the author the host recorded (``basis`` is the host's), the saved row and ``delivery``:
+    ``queued`` once the row is saved and handed to the queue. An answer without these fields is an older host's."""
+
+    status: Literal["ok"]
+    accepted: Literal[True]
+    author: Dict[str, Any]  # history's ``DeclaredAuthor``
+    row_address: str
+    delivery: Literal["queued"]
 
 
 class CommandResponse(TypedDict, total=False):
@@ -1537,7 +1567,8 @@ __all__ = [
     "McpRefreshRequest", "McpRefreshResponse", "McpSignInRequest", "McpSignInResponse", "McpTestRequest",
     "McpTestResponse",
     "UpdateProgress", "UpdateLetter", "UpdateTransactionState", "UpdateStatusResponse",
-    "CommandRequest", "CommandResponse", "CommandRefusal", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
+    "CommandRequest", "AgentNoteAuthor", "AgentNoteRequest", "AgentNoteResponse", "CommandResponse", "CommandRefusal",
+    "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
     "ResetRequest", "ResetResponse", "CostBreakdownResponse", "CostAccountingUnavailable", "CostBreakdownUnavailableResponse",
     "CostProjectDaysResponse", "ProjectDayCost", "ProjectDaysView", "ProjectDaysUnavailable",
 ]

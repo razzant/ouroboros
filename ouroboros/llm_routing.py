@@ -26,7 +26,9 @@ from ouroboros.transport_custody import (  # noqa: F401 -- the names this module
     apply_processing_preference, attempt_pricing_fields, carries_add_on_charge, processing_transport_modes,
     provider_reported_cost_only, routing_admits_any_endpoint, sealed_provider_routing, submitted_processing_mode,
 )
-from ouroboros.provider_connections import connection_rows, connection_values
+from ouroboros.provider_connections import (
+    connection_dispatch_account, connection_rows, connection_values, settings_snapshot,
+)
 from ouroboros.provider_models import (
     CONNECTIONS_KEY,
     DEEPSEEK_BASE_URL,
@@ -122,6 +124,9 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
     same per-kind branch (``provider_connections.connection_values``, which refuses
     an unknown, disabled or mismatched connection). ``settings`` is a request-local
     mapping; without it the runtime view is read. Building a target builds no client.
+    A runtime read of one saved document, with no override, also names the saved
+    connection it read when the settings writer's record names that document
+    (``dispatch_account``: ``provider_connections.connection_dispatch_account``).
     """
     explicit_settings = settings is not None
     snapshot = {}
@@ -146,6 +151,9 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
             "base_url": "http://127.0.0.1", "supports_openrouter_extensions": False,
             "supports_generation_cost": False, "connection": "",
         }
+    # Only the runtime view of a saved document names a connection; a mapping or an override may hold any key.
+    overridden = explicit_settings or api_key_override is not None or openrouter_base_url != OPENROUTER_BASE_URL
+    witnessed = None if overridden else settings_snapshot()
     get = connection_values(route, configured, connection_rows(configured(CONNECTIONS_KEY, None)))
     if provider == "anthropic":
         resolved_model = normalize_anthropic_model_id(resolved_model)
@@ -166,6 +174,9 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
         snapshot["OPENAI_BASE_URL"] = copy.deepcopy(read("OPENAI_BASE_URL", ""))
     target["capability_route"] = {"provider": provider, "model": model,
         "base_url": capability_base_url(model, snapshot), "dispatch_base_url": target["base_url"]}
+    if witnessed is not None and settings_snapshot() == witnessed:  # every read above was of that one document
+        if account := connection_dispatch_account(route, witnessed):
+            target["dispatch_account"] = account
     return target
 
 

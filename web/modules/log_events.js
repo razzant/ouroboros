@@ -13,7 +13,8 @@ import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
 import { checkFailureView, redCheckPhrase, toolStepDiagnostic } from './verification_presentation.js';
-import { hostRowDisplayText, hostTaskMessage, noticeBody, noticeLine, toolErrorDisplayText } from './host_notice_text.js';
+import { hostRowDisplayText, noticeBody, noticeLine, taskMessagePresentation, toolErrorDisplayText } from './host_notice_text.js';
+export { agentNoteSignature } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
 import { workerShaLogView, workerShaRelation } from './worker_sha_presentation.js';
@@ -742,12 +743,8 @@ export function summarizeLogEvent(evt) {
     }
 
     if (t === 'task_message_injected') {
-        // A message from another task landed in THIS task's transcript (its
-        // timeline groups on task_id). The sender is named by value; the
-        // provenance says how it was framed (ancestor / relayed peer /
-        // independent task / system / escalation).
-        const source = evt.source_task_id ? String(evt.source_task_id) : 'another task';
-        return view('info', hostTaskMessage(evt) ? 'System message' : `Message from task ${source}`, {
+        // Group by the receiving task; the meta field keeps the delivery's exact framing.
+        return view('info', taskMessagePresentation(evt).headline, {
             body: shortText(evt.text_preview, 200),
             meta: [evt.provenance ? `provenance ${evt.provenance}` : ''],
         });
@@ -1224,17 +1221,16 @@ function summarizeChatLiveEventView(evt, known) {
     }
 
     if (t === 'task_message_injected') {
-        // A message from another task landed in this task's transcript: a
-        // visible row in the receiver's block (owner 5=A), named by value.
-        const source = evt.source_task_id ? String(evt.source_task_id) : tr('task.progress.another_task', 'another task');
+        // A visible row in the receiver's block (owner 5=A).
+        const { headline, senderKey } = taskMessagePresentation(evt, { localized: true });
         const preview = String(evt.text_preview || '');
         return chatView({
             phase: 'info',
-            headline: hostTaskMessage(evt) ? tr('task.progress.system_message', 'System message') : fmt('Message from task {source}', { source }),
+            headline,
             body: shortText(preview, 200),
             fullBody: preview,
             visible: true,
-            dedupeKey: key(source, evt.ts || ''),
+            dedupeKey: key(senderKey, evt.ts || ''),
         });
     }
 

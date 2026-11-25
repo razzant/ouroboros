@@ -48,8 +48,11 @@ import logging
 import pathlib
 from typing import Any, Dict, List, Mapping, Tuple
 
-from ouroboros.answer_facts import (OWNER_CARD_INPUT, OWNER_PRESS, answered_card, answered_card_reply,
-                                    answered_card_source, carded as carded, is_answered_card, qualify_reconstructed_card_reference)
+from ouroboros.answer_facts import (
+    OWNER_CARD_INPUT, OWNER_PRESS, answered_card, answered_card_reply, answered_card_source,
+    carded as carded, is_answered_card, qualify_reconstructed_card_reference,
+    same_form_citation as _same_form_citation,
+)
 from ouroboros.chat_references import _same_selection as _same_selection, reply_target as reply_target, selected_reply_target
 from ouroboros.chat_uploads import retained_attachments_note as attachments_line
 
@@ -319,6 +322,11 @@ def objective_author_line(origin: Mapping[str, Any] | None) -> str:
                 "the press is theirs, these words are not")
     if kind:
         return f"its author is recorded by the host as kind={kind}"
+    from ouroboros.dialogue_provenance import AGENT_AUTHOR
+    if origin.get("actor_kind") == AGENT_AUTHOR and origin.get("task_type") != "presence":
+        # A turn an agent's note opened: the host recorded its declared author (admission_author),
+        # never my human's words and never "not recorded".
+        return f"a note from {origin.get('text_author') or 'a declared agent'}; not my human's words"
     if origin.get("initiator") == "consciousness":
         return "started by my consciousness"
     if origin.get("owner_ingress"):
@@ -333,10 +341,13 @@ def objective_author_line(origin: Mapping[str, Any] | None) -> str:
 
 
 def objective_author_text(ctx: Any) -> str:
-    """``objective_author_line`` over this run's own typed origin (its task type and metadata)."""
+    """``objective_author_line`` over this run's own typed origin: its task type, metadata and the
+    host-only admission author of a turn an agent's note opened (``ctx._admission_author``)."""
     from ouroboros.dialogue_provenance import run_origin
 
-    return objective_author_line(run_origin({"type": getattr(ctx, "current_task_type", None), "metadata": dict(_ctx_metadata(ctx))}))
+    return objective_author_line(run_origin({"type": getattr(ctx, "current_task_type", None),
+                                             "metadata": dict(_ctx_metadata(ctx)),
+                                             "admission_author": getattr(ctx, "_admission_author", None)}))
 
 
 def scheduled_text_items(metadata: Any, contract: Any) -> List[Dict[str, Any]]:
@@ -415,6 +426,7 @@ def _words_rows(item: Mapping[str, Any], *, carrier: str, task_id: str, content:
     of the act (``answer_facts.press_record``), under its typed identity (``row_ref``) and its time (``_item_time``),
     then the message they reply to, under that message's own author. A card field that was empty is never carried."""
     from ouroboros.answer_facts import press_record
+    from ouroboros.dialogue_provenance import PROGRAM_REPLY_SOURCES
     from ouroboros.review_evidence_sections import _owner_content_projection
 
     words = _owner_content_projection(item.get("content") if content is None else content)
@@ -425,6 +437,8 @@ def _words_rows(item: Mapping[str, Any], *, carrier: str, task_id: str, content:
                  ref=ref or row_ref(item), attachments=item.get("attachments") if attachments is None else attachments,
                  row_sha256=item.get("row_sha256"), mail_kind=item.get("mail_kind"))]
     target = _mapping(item.get("reply_to"))
+    if target.get("program_source") in PROGRAM_REPLY_SOURCES:
+        target = {"address": target.get("address"), "author": "Program message"}  # its exact source is a separate data row
     if item["source"] in (OWNER_CARD_INPUT, OWNER_PRESS) or is_answered_card(target) or target.get("card_id"):
         rows[0]["answer_input"] = {**({"shown": shown} if item["source"] == OWNER_PRESS else {}),
                                    "reply_address": target.get("address", ""),
@@ -864,27 +878,6 @@ def _same_corpus_source(left: Mapping[str, Any], right: Mapping[str, Any]) -> bo
     return bool(_corpus_keys(left) & _corpus_keys(right))
 
 
-def _same_form_citation(prior: Mapping, row: Mapping) -> bool:
-    """Attach a field citation only to its own identified submission, with the same recorded field boundaries."""
-    from ouroboros.answer_facts import word_spans
-    from ouroboros.chronicle_quotes import quote_in
-
-    target = _mapping(prior.get("reply_to"))
-    cited_target = _mapping(row.get("reply_to"))
-    if (row.get("source") != "owner_mailbox" or not target.get("card_id")
-            or target["card_id"] != cited_target.get("card_id")
-            or prior.get("source_task_id") != row.get("source_task_id")
-            or target.get("submitted_values") != cited_target.get("submitted_values")):
-        return False
-    if not (prior.get("msg_id") or prior.get("client_message_id")):
-        return False  # equal words without a delivery identity do not establish a submission
-    if any(prior.get(key) and row.get(key) and str(prior[key]) != str(row[key])
-           for key in ("msg_id", "client_message_id", "chat_id")):
-        return False
-    return isinstance(row["cited"], str) and isinstance(prior.get("content"), str) and quote_in(
-        row["cited"], word_spans(prior["content"], target))
-
-
 def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
     """Merge carried rows without collapsing same client ids from different rooms."""
     merged: List[Dict[str, Any]] = []
@@ -1284,16 +1277,16 @@ def owner_place_accounts(drive_root: Any) -> Mapping[str, Any]:
 
 
 def owner_row(row: Mapping[str, Any] | None, drive_root: Any = None, *, accounts: Any = None) -> bool:
-    """The owner-source cut: inbound, non-empty, not a system or skill-repair injection, and a place row only
-    from an account its place confirms as my human's now (``places.owner_confirmed_row`` over ``accounts``, the
-    operation's one snapshot, else one read of ``drive_root``'s; unreadable: not) whose words are not another
-    author's (``places.forwarded_message``: the account is still theirs, the words are not)."""
-    if not (row and row.get("direction") == "in" and str(row.get("text") or "").strip()
-            and not (row.get("system_type") or row.get("source") == "skill_repair")):
-        return False
-    from ouroboros.dialogue_provenance import row_provenance
+    """The owner-source cut: inbound, non-empty, not a system or skill-repair injection, never an agent's note
+    (``dialogue_provenance.non_owner_author``), and a place row only from an account its place confirms as my human's
+    now (``places.owner_confirmed_row`` over ``accounts``, the operation's one snapshot, else one read of ``drive_root``'s;
+    unreadable: not) whose words are not another author's (``forwarded_message``: the account stays theirs, not the words)."""
+    from ouroboros.dialogue_provenance import non_owner_author, row_provenance
     from ouroboros.places import forwarded_message, owner_confirmed_row  # D17->D20 is lazy-only
 
+    if not (row and row.get("direction") == "in" and str(row.get("text") or "").strip() and not non_owner_author(row)
+            and not (row.get("system_type") or row.get("source") == "skill_repair")):
+        return False
     if row_provenance(row) != "place":
         return True
     if forwarded_message(_mapping(row.get("transport")).get("message")):

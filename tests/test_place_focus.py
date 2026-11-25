@@ -623,7 +623,7 @@ def test_focus_names_the_speakers_pages_by_exact_key_never_authority(focus):
         task = _build_task(replace(admitted, allowance={"status": "available", "remaining_usd": 2}), replace(
             event, actor={"platform_actor_id": "person", "display_name": "Pat Quill", **actor}), drive_root=root, staged_files=())
         rendered = frame_focus_content(task, "hello")
-        line = next(line for line in rendered.splitlines() if line.startswith("- the person (host facts): "))
+        line = next(line for line in rendered.splitlines() if line.startswith("- the sender (host facts): "))
         return task["metadata"]["focus"]["actor"], rendered, line, task
 
     def page(topic, *keys):
@@ -634,7 +634,7 @@ def test_focus_names_the_speakers_pages_by_exact_key_never_authority(focus):
     for authentication in ({}, {"authenticated": False}):
         actor, rendered, line, task = admit(**authentication)
         assert actor["key"] == key and not {"page", "pages", "archived_pages", "matched_by"} & actor.keys()
-        assert line == "- the person (host facts): " + json.dumps(actor, ensure_ascii=False) + (
+        assert line == "- the sender (host facts): " + json.dumps(actor, ensure_ascii=False) + (
             "; authenticated: no" if authentication else "")
         assert focus_frame_sources(task["metadata"], rendered) is not None
     page("people/pat", {"provider": "mail", "namespace": "", "id": "pat@example.org"}, key)

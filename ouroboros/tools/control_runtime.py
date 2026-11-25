@@ -1076,8 +1076,8 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  fold_read: bool = False) -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
     without a Presence binding) may choose silence and may leave a gist for its human.
-    A task that answers its own retained place conversation (its reply carrier: a promoted or
-    scheduled place root) may choose silence too; inherited binding authority alone names no speaker."""
+    A task that answers its place conversation or a program's note may choose silence too;
+    inherited binding authority alone names no speaker."""
     request, error = completion_request(ctx, {
         "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
         "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
@@ -1130,10 +1130,10 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
     # the fold it would stand for goes with it.
     ignored = ([*(["summary"] if summary else []), *(["fold_read"] if fold_read else [])]
                if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]) else [])
-    if silent and not self_started and not carrier_now(ctx, metadata):  # a retained legacy binding resolves too
+    if silent and not (self_started or carrier_now(ctx, metadata) or getattr(ctx, "_admission_author", None)):
         return None, ("silent is available only on a self-started run: "
                       "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
-                      "silent also on a task answering its own place conversation")
+                      "silent also on a task answering its own place conversation or a program's note")
     if silent and answer is None and not selector:
         answer = ""  # silence needs no words; complete bytes given anyway stay an internal result
     return checked_completion_request(ctx, {

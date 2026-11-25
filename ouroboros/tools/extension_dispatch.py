@@ -299,6 +299,13 @@ def _extension_completion(result: str, safety_msg: str, *, handoff: Optional[Dic
         # Only the supported local call ended; independent effects keep custody.
         handoff["local_extension_returned"] = True
     if latch is None:
+        from ouroboros.extension_late_result import call_ref, inline_result_fact
+
+        # Only a joined, participating invocation has a result to classify. Parse its
+        # literal producer body, not the composed presentation, which may carry a Safety note.
+        if joined and (ref := call_ref(ctx)):
+            if fact := inline_result_fact(ref, _extension_body(base), result):
+                return _replace_tool_result(base, meta_updates={"inline_late_result": fact})
         return base
     note = _refusal_note(latch, "the report above is the extension's own account of what ran")
     return ToolResult(status=base.status if reported_failure else "blocked",
@@ -428,8 +435,11 @@ def _dispatch_extension_tool_result(
     disclosure gate, calling-convention resolution) is never stamped."""
     digest = _generation_digest_for(ext_tool)
     content_hash = str(ext_tool.get("content_hash") or "")
-    result = _with_extension_report(ctx, ext_tool, _dispatch_extension_tool_untagged(
-        ctx, name, ext_tool, args, **({"handoff": handoff} if handoff is not None else {})))
+    from ouroboros.extension_late_result import with_call_ref
+
+    with with_call_ref(ctx):
+        result = _with_extension_report(ctx, ext_tool, _dispatch_extension_tool_untagged(
+            ctx, name, ext_tool, args, **({"handoff": handoff} if handoff is not None else {})))
     if (
         not isinstance(result, ToolResult)
         or not result.meta.get("physical_dispatch")
@@ -504,6 +514,7 @@ def _dispatch_extension_tool_untagged(
         return _extension_result(*safety_refusal(_ext_safety_msg), _ext_safety_msg)
 
     from ouroboros.owner_pause import admit_tool_dispatch, run_tool_handler, submit_async_operation, OwnerPauseRefused
+    from ouroboros.extension_late_result import bind_call_ref
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     from ouroboros.model_wait import ModelWaitInterrupted
     from ouroboros.usage_accounting import UsageAccountingError
@@ -523,6 +534,7 @@ def _dispatch_extension_tool_untagged(
             return _extension_result("error", "EXTENSION_ERROR", text)
         try:
             admit_tool_dispatch(ctx)
+            bind_call_ref(ctx, name, ext_tool, call_args)
             result_str = dispatch_extension_tool_subprocess(ext_tool, ctx, call_args)
         except controls:
             raise
@@ -575,6 +587,11 @@ def _dispatch_extension_tool_untagged(
         text = f"⚠️ TOOL_ERROR ({name}): extension tool failed: {failure_words(skill_name, exc)}"
         return _extension_result("error", "EXTENSION_ERROR", text)
     try:
+        from ouroboros.extension_late_result import eligible
+
+        if _wants and eligible(name, ext_tool, call_args):
+            admit_tool_dispatch(ctx)
+            bind_call_ref(ctx, name, ext_tool, call_args)
         result = run_tool_handler(ctx, handler, *((ctx,) if _wants else ()), **call_args)
     except controls:
         raise

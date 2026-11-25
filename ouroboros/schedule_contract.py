@@ -29,6 +29,7 @@ RESERVED_TEMPLATE_FIELDS = frozenset({
     # nor ``start_task``'s recorded absence of one.
     "origin_message_ref", "origin_message_snapshot",
     "origin_suppressed", "origin_message_absent",
+    "admission_author", "declared_author",
     "billing_group", "continuation", "followup_relation", "followup_origin",
     "followup_hold", "followup_released", "followup_wait",
     "continuation_of", "origin_task_id", "origin_root_task_id",

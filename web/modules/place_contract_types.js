@@ -236,6 +236,7 @@
  * @property {'message'|'notice'|'delivery'} kind
  * @property {('authored'|'accepted'|'delivered'|'failed'|'uncertain')=} delivery_state
  * @property {PlaceHistoryAttention=} attention
+ * @property {'machine'=} actor_origin  // an incoming program as recorded by the connector; absent carries no origin claim
  * @property {boolean=} owner_confirmed  // current stored account confirmation
  * @property {Array<string>=} facts
  * @property {PlaceIdentityAccount=} sends_as

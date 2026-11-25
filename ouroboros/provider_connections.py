@@ -9,20 +9,30 @@ way to switch a built-in connection off is a secret-free override row
 rotates connections: an unknown, disabled or mismatched one is refused before
 dispatch (``llm_attempt.ConnectionUnavailable``), never served by another key.
 The Settings projections and the save-time shape check sit beside that reader.
+
+Revision. Which saved connection an attempt dispatched on is a fact a later turn can compare (a late answer's
+letter: ``extension_late_result``): ``connection_dispatch_account``, a random revision the settings writer
+recorded for that very document in ``state/connection_revisions.json`` (``record_connection_revisions``); never
+derived from a credential or the file, and unknown without such a record.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import re
+import uuid
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from ouroboros.provider_models import (
     BUILTIN_CONNECTION, CONNECTIONS_KEY, DIRECT_PROVIDER_DEFAULTS, MODEL_SETTING_KEYS, OPENAI_RESPONSES_DIRECT_DEFAULTS,
-    PROVIDER_KINDS, RouteParts, choice_error, compatible_endpoint, compatible_endpoint_configured, connection_id,
-    openai_api_surface, parse_model_route,
+    PROVIDER_CREDENTIAL_GROUPS, PROVIDER_KINDS, RouteParts, choice_error, compatible_endpoint,
+    compatible_endpoint_configured, connection_id, openai_api_surface, parse_model_route,
 )
 from ouroboros.settings_integrity import runtime_setting
 
+log = logging.getLogger(__name__)
 Reader = Callable[..., Any]  # read(flat_setting_key, default) -> the raw saved value
 _ROW_META = ("kind", "name", "label", "enabled")
 _SURFACE_KEY = PROVIDER_KINDS["openai"].flat_key("api_surface")
@@ -323,3 +333,127 @@ def _json_object(text: str) -> Any:
         return json.loads(text)
     except ValueError:
         return None
+
+
+# --- the saved connection an attempt dispatched on -----------------------------------------------------------------
+# A provider name proves no connection and a credential may not become an identity (no digest of one is kept). The
+# fact is the settings writer's own record: under its lock, once its bytes landed, it names that document and gives
+# each connection the document saves a random revision. A connection keeps its revision through a write that leaves
+# its saved fields as they were in the document the record named, so a restart or another process reads the same one;
+# any change gives a new one. A document the record does not name (an edit outside this writer, a writer that keeps no
+# record, one saved before the first recorded save) names no connection: unknown stays unknown. An endpoint Ouroboros
+# supplies (a kind's official address, a shipped default) is no saved field.
+
+_REVISION = re.compile(r"[0-9a-f]{32}")
+_REVISION_RECORD_VERSION = 1
+_RECORD: tuple = ()  # (the record file's identity, its parsed record)
+
+
+def settings_snapshot() -> tuple | None:
+    """The saved settings document's file identity (path, inode, modification time, size): what tells the document a
+    record names from any later one, never a revision itself. A replacement or an edit in place moves it, a restart or
+    another process reads it unchanged; None without a document. No device number: a volume's may differ across boots
+    and containers while the file stays the same."""
+    from ouroboros import config
+
+    try:
+        found = config.SETTINGS_PATH.stat()
+    except OSError:
+        return None
+    return str(config.SETTINGS_PATH), found.st_ino, found.st_mtime_ns, found.st_size
+
+
+def _revisions_path() -> Path:
+    from ouroboros import config
+
+    return config.DATA_DIR / "state" / "connection_revisions.json"
+
+
+def _revision_record() -> dict:
+    """The writer's record, reread only when its file changed; {} when absent or of another shape."""
+    global _RECORD
+    path = _revisions_path()
+    try:
+        found = path.stat()
+    except OSError:
+        return {}
+    identity = (str(path), found.st_ino, found.st_mtime_ns, found.st_size)
+    held = _RECORD
+    if held and held[0] == identity:
+        return held[1]
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not (isinstance(record, dict) and record.get("version") == _REVISION_RECORD_VERSION
+            and isinstance(record.get("document"), list) and isinstance(record.get("revisions"), dict)):
+        record = {}
+    _RECORD = (identity, record)
+    return record
+
+
+def _saved_fields(document: Mapping[str, Any], route: RouteParts) -> Any:
+    """What ``document`` itself saves for one connection, compared in memory and never kept: a named connection's row,
+    a built-in one's non-blank flat settings with its override row; None when it saves none of its own."""
+    rows = connection_rows(document.get(CONNECTIONS_KEY))
+    if route.connection:
+        return find_row(rows, route.kind, route.connection)
+    saved = {key: document[key] for key in PROVIDER_CREDENTIAL_GROUPS[route.kind]
+             if document.get(key) not in (None, "")}
+    return (saved, find_row(rows, route.kind, BUILTIN_CONNECTION)) if saved else None
+
+
+def connection_dispatch_account(route: RouteParts, snapshot: tuple) -> str:
+    """``api:<connection>#<revision>``: the saved connection a live resolve of ``route`` read, when every read fell
+    between two equal ``settings_snapshot`` readings (the caller's check) and the settings writer's record names that
+    very document with a revision for this connection. '' otherwise: no record, a record of another document, a
+    malformed one or one without this connection, no saved document read (none, or unreadable), or an operator's
+    variable that could stand in for one of the connection's settings. Nothing then proves which credential the call
+    read, and its letter stays readable by its id."""
+    from ouroboros.route_choice import route_settings_view
+    from ouroboros.settings_integrity import skill_environ
+
+    view = route_settings_view()
+    if not (view and view[0]):
+        return ""
+    environ = skill_environ()
+    keys = (CONNECTIONS_KEY, *(() if route.connection else PROVIDER_CREDENTIAL_GROUPS.get(route.kind, ())))
+    if any(str(environ.get(key) or "").strip() for key in keys):
+        return ""
+    name = connection_id(route.kind, route.connection)
+    record = _revision_record()
+    revision = record["revisions"].get(name) if record.get("document") == list(snapshot) else None
+    return f"api:{name}#{revision}" if isinstance(revision, str) and _REVISION.fullmatch(revision) else ""
+
+
+def record_connection_revisions(read: tuple | None, before: Mapping[str, Any], written: Mapping[str, Any]) -> None:
+    """The settings writer, under its lock once its bytes ``written`` landed: name this document and give each
+    connection it saves a revision. A connection keeps the one it had only when the replaced document (``before``,
+    read at snapshot ``read``) is the one the record named and that connection's saved fields are unchanged; every
+    other connection, all of them after an unnamed document or a read that may straddle another write (``read``
+    None), takes a new random one. Never raises: a record left naming an older document names nothing in this one."""
+    from ouroboros import config
+    from ouroboros.utils import atomic_write_json
+
+    try:
+        snapshot = settings_snapshot()
+        payload = config.serialize_settings(dict(written)).encode("utf-8")
+        if snapshot is None or config.SETTINGS_PATH.read_bytes() != payload or settings_snapshot() != snapshot:
+            return  # another write already replaced these bytes
+        prior = _revision_record() if read is not None else {}
+        earlier = prior["revisions"] if read is not None and prior.get("document") == list(read) else {}
+        old, new = config.coerce_settings_raw(before), config.coerce_settings_raw(written)
+        revisions = {}
+        for route in connection_routes(connection_rows(new.get(CONNECTIONS_KEY))):
+            fields = _saved_fields(new, route)
+            if fields is None:
+                continue
+            name = connection_id(route.kind, route.connection)
+            kept = earlier.get(name) if _saved_fields(old, route) == fields else None
+            revisions[name] = kept if isinstance(kept, str) and _REVISION.fullmatch(kept) else uuid.uuid4().hex
+        path = _revisions_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, {"version": _REVISION_RECORD_VERSION, "document": list(snapshot),
+                                 "revisions": revisions})
+    except Exception:
+        log.warning("Settings saved; the record of their connection revisions was not updated", exc_info=True)

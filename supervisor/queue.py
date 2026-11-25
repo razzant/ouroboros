@@ -561,7 +561,7 @@ def ensure_control_task_result(task_id: str) -> Dict[str, Any]:
             "type", "chat_id", "metadata", "task_contract", "root_task_id", "parent_task_id",
             "delegation_role", "project_id", "workspace_root", "workspace_mode", "memory_mode",
             "drive_root", "child_drive_root", "budget_drive_root", "queued_at", "admitted_dispatch", "_admission_owner_token",
-            "origin_message_text", "origin_message_ref", "objective", "title", "suggested_name",
+            "origin_message_text", "origin_message_ref", "admission_author", "objective", "title", "suggested_name",
             "original_task_id", "timeout_retry_from", "deadline_at", "execution_timeout_sec", "root_cost_ceiling_usd",
             "billing_group", "task_constraint", "objective_author", "owner_corpus", "task_group_id", "task_group",
             "reasoning_effort",
