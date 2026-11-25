@@ -826,6 +826,25 @@ test('arrivals go on from an answer only once it is drawn', async () => {
     assert.deepEqual([p.calls, p.newest.map(({ decision }) => decision)], [['after:1'], ['after_rejected', 'no_cursor']]);
 });
 
+test('a reconnect whose catch-up a newer newest read already paid reads nothing more', async (t) => {
+    // An unread room's receipt asks right after the socket opened: its newest read, begun after the open, is the
+    // reconnect's read too. Only a read the reconnect interrupted would leave it owed.
+    const s = historyServer();
+    s.say(1);
+    const r = openRoom(t, s);
+    await r.instance.refreshHistory({ revision: 1 });
+    s.say(2);
+    r.reconnect();
+    assert.equal((await r.instance.refreshHistory({ revision: 2 })).read, true);
+    await until(() => r.shown().includes('chat:2'));
+    await quiet();
+    assert.deepEqual(s.reads, ['newest', 'newest'], 'one newest read, not two');
+    assert.deepEqual(s.tags[1], { reason: 'read_receipt', mode: 'newest', decision: 'catch_up_owed' });
+    s.say(3);
+    assert.equal((await r.instance.refreshHistory({ revision: 3 })).read, true);
+    assert.deepEqual(s.reads.slice(2), ['after'], 'arrivals go on from the page that paid the catch-up');
+});
+
 test('a settled task\'s rows sent again with what arrived settle its card without the newest page', async (t) => {
     const s = historyServer();
     s.say(1);

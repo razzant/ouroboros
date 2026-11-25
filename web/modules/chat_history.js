@@ -410,13 +410,15 @@ export function createChatHistoryPager({
     // arrived since the newest read, else the newest page (`whole`, no cursor yet, a
     // window grown full, one `canArrive` declines, a refusal or a failure). When
     // arrivals cannot answer, chat's newest read starts within this very call. `reason`
-    // and `decision` (a `whole` read's, else the arrivals read's) say why, with `detail`.
-    function read({ fromReconnect = false, whole = false, current = () => true, reason = '', decision = '', detail = '' } = {}) {
+    // and `decision` (a `whole` read's, else the arrivals read's) say why, with `detail`. `owed()` false: a read begun
+    // after this one was asked (the newest read in flight it waited for) already did its work, so it reads nothing.
+    function read({ fromReconnect = false, whole = false, current = () => true, owed = () => true, reason = '', decision = '', detail = '' } = {}) {
         const started = visit;
         // A superseded reconnect leaves its queued read to the current catch-up.
         if (!alive() || !current()) return Promise.resolve(false);
+        if (!owed()) return Promise.resolve(true);
         const inFlight = newestInFlight();
-        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole, current, reason, decision, detail }));
+        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole, current, owed, reason, decision, detail }));
         if (whole || !canArrive() || !(arrival || arrivable())) {
             // The first gate that chose the newest page, in the order they are weighed.
             const gate = whole ? decision || 'explicit_whole' : !canArrive() ? arrivalGate() : unarrivable().decision;

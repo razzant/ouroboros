@@ -2367,6 +2367,7 @@ export function createChatInstance({
         if (foreignProfile()) return false;  // the socket serves another profile: read nothing into this window (#3294)
         if (historySyncPromise) return historySyncPromise;
         historySyncPromise = (async () => {
+            fromReconnect ||= catchUp.owed;  // the read that pays a return's or reconnect's catch-up reconciles as one
             const startedVisit = visit;
             const abort = historyReadAbort = new AbortController();
             const armedAtStart = liveCardBound.begin();
@@ -3337,7 +3338,8 @@ export function createChatInstance({
             // a read newer than any it interrupted.
             .then(() => (destroyed || openedVisit !== visit ? false
                 : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
-                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read })
+                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read,
+                    owed: () => catchUp.owed })
                     : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
         if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen);
