@@ -12296,12 +12296,20 @@ button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent
 }
 .chat-quote-lead,
 .chat-quote-when { flex: none; color: var(--text-meta); }
+/* A quoted row in another room: its room's name (a long one shortens before the time does) and, at the head's end, ↗. */
+.chat-quote-room { min-width: 0; overflow: hidden; color: var(--text-meta); text-overflow: ellipsis; }
+.chat-quote-away { flex: none; margin-inline-start: auto; padding-inline-start: var(--space-2); color: var(--text-meta); }
 .chat-quote-author {
     min-width: 0;
     overflow: hidden;
     color: var(--quote-ink);
     font-weight: 600;
     text-overflow: ellipsis;
+}
+/* A derived cross-room question quote shortens a long destination name before squeezing the speaker. */
+.chat-quote[data-derived-question="1"][data-away="1"] .chat-quote-author {
+    flex: 0 0 auto;
+    max-width: min(100%, max(45%, 7em));
 }
 .chat-quote-text {
     display: block;

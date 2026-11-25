@@ -51,6 +51,7 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShow
             && !node.classList.contains('typing-bubble') && node.dataset.ephemeral !== '1'),
         emit: (message) => handlers.get('chat')({ chat_id: 2, ...message }),
         emitLog: (data) => handlers.get('log')({ chat_id: 2, data }),
+        emitQuizState: (message) => handlers.get('quiz_state')(message),
         reconnect: (flags = {}) => handlers.get('open')({ previouslyConnected: true, ...flags }),
         disconnect: () => handlers.get('close')(),
         respond: next => { response = next; },
@@ -2436,4 +2437,158 @@ test('the addressed work answers with a visible relay_reply under the owner repl
     await f.refresh(page([workCardHistory, localWorkReply, workAnswer]));
     assert.equal(answerOf(), answer, 'replay keeps the one answer node');
     assert.equal(f.messages.querySelectorAll('.chat-bubble.assistant').length, count, 'no second answer');
+});
+
+test('authoritative history reconciles only derived_question quotes on mounted bubbles while preserving explicit Reply, focus and reading place', async t => {
+    const f = fixture(t, page([]));
+    const derived = (extra = {}) => ({
+        address: 'row:1@q#1', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+        snippet: 'Which report format?', room_label: 'Main', ts: TS, derived_question: true, ...extra,
+    });
+    const quoteOf = (bubble) => bubble.children.find(child => child.classList.contains('chat-quote')) || null;
+
+    // 1. Live shared frame arrives without reply_to (e.g. also_rooms broadcast): bubble mounts with no quote.
+    f.emit({
+        role: 'user', content: 'Yes, PDF', ts: TS, row_address: 'row:2@a#1',
+        client_message_id: 'cm-late-1', also_rooms: [1],
+    });
+    const mounted = f.bubbles().find(node => node.dataset.clientMessageId === 'cm-late-1');
+    assert.ok(mounted);
+    assert.equal(quoteOf(mounted), null);
+
+    // Also mount an explicit owner Reply bubble and an extra older bubble so we can verify reading position stability.
+    const explicitRow = row('chat:49', 'Explicit reply text', {
+        role: 'user', row_address: 'row:2@a#0',
+        reply_to: { address: 'row:2@q#0', role: 'assistant', snippet: 'Owner explicit target', ts: TS },
+    });
+    const lateRow = (extra = {}) => row('chat:50', 'Yes, PDF', {
+        role: 'user', row_address: 'row:2@a#1', client_message_id: 'cm-late-1', ...extra,
+    });
+
+    // 2. Authoritative history refresh adds the derived_question quote onto the same mounted bubble.
+    await f.refresh(page([explicitRow, lateRow({ reply_to: derived() })]));
+    assert.equal(f.bubbles().filter(node => node.dataset.clientMessageId === 'cm-late-1').length, 1);
+    const firstQuote = quoteOf(mounted);
+    assert.ok(firstQuote);
+    assert.equal(firstQuote.dataset.derivedQuestion, '1');
+    assert.match(firstQuote.querySelector('.chat-quote-room').textContent, /Main/);
+    const explicitBubble = f.bubbles().find(node => node.dataset.historyId === 'chat:49');
+    const explicitQuote = quoteOf(explicitBubble);
+    assert.ok(explicitQuote);
+    assert.equal(explicitQuote.dataset.derivedQuestion, undefined);
+
+    // 3. Duplicate live frame without reply_to must NOT remove the derived question quote.
+    f.emit({
+        role: 'user', content: 'Yes, PDF', ts: TS, row_address: 'row:2@a#1',
+        client_message_id: 'cm-late-1', also_rooms: [1],
+    });
+    assert.equal(quoteOf(mounted), firstQuote);
+
+    // 4. Unchanged history refresh keeps the exact same quote DOM node and focus on its button.
+    const firstBtn = firstQuote.querySelector('.chat-quote-main');
+    firstBtn.focus();
+    assert.equal(globalThis.document.activeElement, firstBtn);
+    await f.refresh(page([explicitRow, lateRow({ reply_to: derived() })]));
+    assert.equal(quoteOf(mounted), firstQuote);
+    assert.equal(globalThis.document.activeElement, firstBtn);
+
+    // 5. History refresh with changed room_label updates the derived quote in place and keeps focus + reading place.
+    f.messages.scrollTop = 120;
+    for (const handler of f.messages.listeners.get('wheel')) handler({ type: 'wheel', deltaY: -40 });
+    for (const handler of f.messages.listeners.get('scroll')) handler({});
+    const savedScroll = f.messages.scrollTop;
+    await f.refresh(page([explicitRow, lateRow({ reply_to: derived({ room_label: 'Project Alpha' }) })]));
+    const secondQuote = quoteOf(mounted);
+    assert.notEqual(secondQuote, firstQuote);
+    assert.match(secondQuote.querySelector('.chat-quote-room').textContent, /Project Alpha/);
+    assert.equal(globalThis.document.activeElement, secondQuote.querySelector('.chat-quote-main'));
+    assert.equal(f.messages.scrollTop, savedScroll, 'reading place stays steady while derived quote updates');
+
+    // 6. Authoritative history refresh without reply_to removes only the derived quote (moving focus to bubble),
+    //    and leaves the explicit owner Reply untouched even when its row carries no reply_to.
+    await f.refresh(page([
+        row('chat:49', 'Explicit reply text', { role: 'user', row_address: 'row:2@a#0' }),
+        lateRow(),
+    ]));
+    assert.equal(quoteOf(mounted), null);
+    assert.equal(globalThis.document.activeElement, mounted);
+    assert.equal(quoteOf(explicitBubble), explicitQuote, 'explicit Reply is never removed by history reconciliation');
+    assert.equal(f.messages.scrollTop, savedScroll, 'reading place stays steady when derived quote disappears');
+});
+
+test('retained origin_projected bubble reconciles its derived_question quote across refresh and canonical adoption', async t => {
+    const f = fixture(t, page([]));
+    const derived = (roomLabel) => ({
+        address: 'row:1@q#7', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+        snippet: 'Continue with migration?', room_label: roomLabel, ts: TS, derived_question: true,
+    });
+    const quoteOf = (bubble) => bubble.children.find(child => child.classList.contains('chat-quote')) || null;
+
+    // Retained origin_projected copy arrives without a history_id and with a derived question quote.
+    await f.refresh(page([{
+        role: 'user', text: 'Go ahead', ts: TS, origin_projected: true, origin_id: 'origin-late-7',
+        row_address: 'row:2@a#7', reply_to: derived('Main'),
+    }]));
+    const bubble = f.bubbles().find(node => node.dataset.originId === 'origin-late-7');
+    assert.ok(bubble);
+    assert.match(quoteOf(bubble).querySelector('.chat-quote-room').textContent, /Main/);
+
+    // Subsequent history read updates the origin_projected copy's derived quote in place.
+    await f.refresh(page([{
+        role: 'user', text: 'Go ahead', ts: TS, origin_projected: true, origin_id: 'origin-late-7',
+        row_address: 'row:2@a#7', reply_to: derived('HQ'),
+    }]));
+    assert.match(quoteOf(bubble).querySelector('.chat-quote-room').textContent, /HQ/);
+
+    // Canonical history row adopts the retained copy and removes the stale derived quote when source is gone.
+    await f.refresh(page([row('chat:70', 'Go ahead', {
+        role: 'user', origin_id: 'origin-late-7', row_address: 'row:2@a#7',
+    })]));
+    assert.equal(bubble.dataset.historyId, 'chat:70');
+    assert.equal(bubble.dataset.originProjected, undefined);
+    assert.equal(quoteOf(bubble), null);
+});
+
+test('an open question\'s owed delivery follows the order of a live frame and the history read that names it', async t => {
+    const owed = { kind: 'answer', state: 'owed' };
+    const quiz = (extra) => ({ quiz_id: 'q-60', state: 'answered', answered_index: 0, ...extra });
+    // As the server sends them: the question's row and its saved answer replayed beside the page, each with the
+    // question's current delivery, or none.
+    const rows = (extra = {}) => page([
+        row('chat:60', 'Merge now?', { msg_type: 'quiz', task_id: 'root-q', quiz: { ...quiz(extra), options: [{ label: 'Yes' }, { label: 'No' }] } }),
+        { role: 'system', text: '', is_progress: false, system_type: 'quiz_answer', task_id: 'root-q', ts: TS, quiz: quiz(extra) },
+    ]);
+    const f = fixture(t, rows({ question_delivery: owed }));
+    await f.refresh();
+    const card = f.messages.children.flatMap((node) => node.children || [])
+        .find((node) => node.classList?.contains('chat-quiz-card') && node.dataset.quizId === 'q-60');
+    const status = () => card.querySelector('.chat-quiz-status-text').textContent;
+    const liveOwed = () => f.emitQuizState({ type: 'quiz_state', quiz_id: 'q-60', task_id: 'root-q', state: 'answered',
+        answered_index: 0, question_delivery: owed });
+    const pending = 'Answer recorded · delivery pending';
+    assert.equal(status(), pending);
+    // A history read is no live frame: its replayed answer stated the owed delivery as of its own read, and a later
+    // read whose record names none drops it (the answer row's address proves recording, never receipt).
+    await f.refresh(rows());
+    assert.equal(status(), 'You answered');
+    // 1. A live frame states the debt again; a read asked for after it finds none: that older fact goes too.
+    liveOwed();
+    assert.equal(status(), pending);
+    const stated = Date.now();
+    while (Date.now() <= stated) await new Promise((resolve) => setTimeout(resolve, 1));
+    await f.refresh(rows());
+    assert.equal(status(), 'You answered');
+    // 2. A read already asked for when the live frame came answers later without it: the newer fact stays.
+    let answer;
+    const late = new Promise((resolve) => { answer = resolve; });
+    const asked = f.calls.length;
+    const reading = f.refresh(late);
+    await settle(() => f.calls.length > asked);
+    liveOwed();
+    assert.equal(status(), pending);
+    answer(rows());
+    await reading;
+    assert.equal(status(), pending, 'the late snapshot clears no delivery stated after its read began');
+    assert.equal(f.messages.children.flatMap((node) => node.children || [])
+        .filter((node) => node.classList?.contains('chat-quiz-card')).length, 1, 'one open card throughout');
 });

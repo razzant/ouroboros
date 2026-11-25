@@ -2081,7 +2081,16 @@ New gestures or navigation cancel the read. Only the quoted stream loads: its si
 unloaded down that chain until `Scroll to latest message`. Reading an old source reads no newer
 messages. Ouroboros quotes its addressee unless directly above, ignoring its own card.
 The answer to a new work replies to the selected row. A saved question answer lands on its recorded
-choice when present, otherwise on the answer line.
+choice when present, otherwise on the answer line. An owner answer shown as its own bubble with no
+Reply of its own (a late answer delivered once the asking work ended, or a Project’s bound opening
+from a saved question answer) shows its question’s first line above it by its recorded link, never a
+guess. Built on display without rewriting history, it appears on older saved answers too whenever the
+question is available; otherwise no quote appears and the answer stays readable. It is no explicit
+Reply. Pressing it opens the original question card in its recorded state, and from another room Back
+returns to the answer. Unlike Ouroboros’s quote of its addressee it stays when the question’s card
+stands directly above: that card may be only a Project question’s Main copy, and the press opens the
+original, which changes the visible page and where the question stands. Only this quote names the
+question’s other room in its head, with ↗.
 
 A relay is a note one work leaves another (`tell_task`), drawn so a reader sees at once
 that it is not a reply and which room wrote to which (`chat_relay_deck.js`):

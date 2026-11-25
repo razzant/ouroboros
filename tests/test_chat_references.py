@@ -1061,6 +1061,35 @@ def test_a_reply_to_a_system_row_names_system_on_every_surface_never_you(tmp_pat
         tmp_path, format_address(row_address(own)))["role"] == "user"
 
 
+def test_both_local_frames_of_a_late_answer_quote_its_question_as_its_history_row_does(tmp_path, monkeypatch):
+    """A late answer the bundled bridge relayed reaches the local UI twice: the delivery's echo
+    (``task_decision.deliver_as_owner_message``) and the named source's frame at dequeue (``message_ingress``). Both
+    carry the rooms and the quote of the question it answers that its history row shows; nothing is stored."""
+    from ouroboros.chat_references import TELEGRAM_SOURCE
+    from ouroboros.gateway.task_decision import deliver_as_owner_message
+    from ouroboros.project_registry_recovery import initialize_new_root
+
+    initialize_new_root(tmp_path)  # an ordinary first-use root: a bare folder has no registry, so history reads as migrating
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    asked = message_bus.log_chat("out", 1, 0, "## Ridge or creek?\nThe ridge is shorter.", ts="2026-10-01T00:00:00Z",
+                                 task_id="trail-work", record_type="quiz", quiz={"quiz_id": "trail", "state": "open"})
+    block = {"quiz_id": "trail", "state": "answered", "answered_after_terminal": True, "options": ["Ridge"], "comment": "creek"}
+    late = {"task_id": "trail-work", "quiz_id": "trail", "answer_snapshot": {"task_id": "trail-work", "quiz": block}}
+    name = "quiz_late_answer:trail-work:trail"
+    assert deliver_as_owner_message(tmp_path, 1, "creek", name, source=TELEGRAM_SOURCE,
+                                    task_metadata={"late_answer": late}) == (True, "")
+    accepted = dialogue_test.chat_rows(tmp_path)[-1]
+    message_bus.record_inbound_message(bridge, bridge._inbox.get_nowait(), chat_id=1, user_id=1, client_message_id=name,
+                                       text="creek", ts=accepted["ts"])
+    echo, frame = echoes
+    [history] = [r for r in _history(tmp_path) if r.get("client_message_id") == name]
+    quote = {**reference_from_row(asked, tmp_path), "snippet": "Ridge or creek?", "derived_question": True}
+    assert echo["reply_to"] == frame["reply_to"] == history["reply_to"] == quote
+    assert "also_rooms" not in echo and "also_rooms" not in frame
+    assert "reply_to" not in accepted, "the quote is shown, never written into the row"
+
+
 @pytest.mark.parametrize("comment", ["", "  Follow the creek at dawn.  "])
 def test_late_quiz_bubble_is_selectable_only_when_it_contains_entered_words(tmp_path, monkeypatch, comment, healthy_main):
     from ouroboros.chat_references import ReplyExcerptNotAuthored, ingress_reply
