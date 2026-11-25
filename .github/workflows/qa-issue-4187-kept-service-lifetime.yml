@@ -1,0 +1,192 @@
+# .github/workflows/qa-issue-4187-kept-service-lifetime.yml (any file name works)
+# QA only: lives on its qa/issue-4187-* branch, never merged. The pushed commit must be PRODUCT_SHA plus this one added file.
+# Node lists were written against candidate c0303b2292efd2a53c83129aa2c23bd058c85177.
+name: QA 4187 kept-service lifetime (branch only)
+
+on:
+  push:
+    branches: ['qa/issue-4187-*']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PRODUCT_SHA: 'b41464ed6758245235ce7ea6f3d8564341d2834a'
+  FIRST_BASE: 'fb37f453f45095421049a45d19c201cf27a78e0d'
+  QA_CHECK: |
+    import os, sys, xml.etree.ElementTree as ET
+    xml, *nodes = sys.argv[1:]
+    def ident(node):
+        path, bracket, ids = node.partition('[')
+        head, *rest = path.split('::')
+        return '.'.join([head.removesuffix('.py').replace('/', '.'), *rest[:-1]]), rest[-1] + bracket + ids
+    want = sorted(map(ident, nodes))
+    got, bad = [], []
+    for case in ET.parse(xml).getroot().iter('testcase'):
+        key = (case.get('classname'), case.get('name'))
+        got.append(key)
+        if {child.tag for child in case} & {'failure', 'error', 'skipped'}:
+            bad.append(key)
+    got.sort()
+    passed = [key for key in got if key not in bad]
+    problems = [f'::error::{why}: {c}::{n}' for why, keys in (
+        ('not passed', bad), ('missing', [k for k in want if k not in got]), ('unexpected', [k for k in got if k not in want])
+    ) for c, n in keys]
+    if len(got) != len(want):
+        problems.append(f'::error::{len(got)} reports for {len(want)} expected tests')
+    lines = [f'{len(passed)} passed by name:'] + [f'  {c}::{n}' for c, n in passed]
+    print(*lines, *problems, sep=chr(10))
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+            out.write(chr(10).join(['```', *lines, *problems, '```', '']))
+    sys.exit(1 if problems else 0)
+  QA_RUN: |
+    qa_run() {
+      local name=$1 py xml rc=0
+      shift
+      py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+      xml="$RUNNER_TEMP/qa/$name.xml"
+      "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" --timeout 900 -- "$py" -m pytest -rfEs --timeout=300 --junitxml="$xml" "$@" || rc=$?
+      "$py" -I "$RUNNER_TEMP/qa_check.py" "$xml" "$@" || rc=$?
+      return "$rc"
+    }
+
+jobs:
+  qa:
+    name: qa · ${{ matrix.os }}
+    if: github.event_name == 'push' && github.repository == 'razzant/ouroboros' && startsWith(github.ref, 'refs/heads/qa/issue-4187-')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pin the product commit and choose the size base
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [[ "$PRODUCT_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "PRODUCT_SHA must be a full commit SHA (placeholder left in?)"
+          wf="${GITHUB_WORKFLOW_REF%%@*}"; wf="${wf#"$GITHUB_REPOSITORY"/}"
+          [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] || fail "the checkout is not the pushed commit"
+          set -- $(git rev-list --parents -n 1 HEAD)
+          { [ "$#" -eq 2 ] && [ "$2" = "$PRODUCT_SHA" ]; } || fail "the QA commit must have the product commit as its only parent"
+          [ "$(git diff --name-status --no-renames HEAD^ HEAD)" = "$(printf 'A\t%s' "$wf")" ] || fail "the QA commit must add only $wf"
+          git checkout -q --detach "$PRODUCT_SHA"
+          set -- $(git rev-list --parents -n 1 HEAD)
+          [ "$1" = "$PRODUCT_SHA" ] || fail "the product commit is not checked out"
+          if [ "$#" -ge 3 ]; then base="$2"   # prospective merge: its first parent is the target tip
+          else base="$FIRST_BASE"; git merge-base --is-ancestor "$base" HEAD || fail "$base is not an ancestor of the product"
+          fi
+          git cat-file -e "$base^{commit}" || fail "size base $base is not in this clone"
+          echo "QA_BASE=$base" >> "$GITHUB_ENV"
+          echo "product $PRODUCT_SHA, size base $base" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the name check and the run helper
+        run: |
+          mkdir -p "$RUNNER_TEMP/qa"
+          printf '%s\n' "$QA_CHECK" > "$RUNNER_TEMP/qa_check.py"
+          printf '%s\n' "$QA_RUN" > "$RUNNER_TEMP/qa_run.sh"
+
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+
+      - id: proof
+        name: Interpreter and source origin
+        run: |
+          cd "$RUNNER_TEMP" && python -I - <<'PY'
+          import importlib.util, os, sys
+          real = lambda p: os.path.normcase(os.path.realpath(p))
+          ws, exe = real(os.environ['GITHUB_WORKSPACE']), os.environ['OUROBOROS_CI_INTERPRETER']
+          shipped = real(os.path.dirname(exe) if os.name == 'nt' else os.path.dirname(os.path.dirname(exe)))
+          inside = lambda p: p.startswith(ws + os.sep)
+          origins = [real(importlib.util.find_spec(m).origin) for m in ('ouroboros', 'supervisor')]
+          facts = {'venv inside the checkout': sys.prefix != sys.base_prefix and inside(real(sys.prefix)),
+                   'its base is the shipped interpreter': real(sys.base_prefix) == shipped,
+                   'ouroboros and supervisor load from the checkout': all(map(inside, origins))}
+          print('python', sys.version.split()[0], facts)
+          sys.exit(0 if all(facts.values()) else 'not the shipped interpreter, or sources outside this checkout')
+          PY
+
+      - id: http
+        name: POSIX · the two real HTTP lifetime nodes (Restart and Panic)
+        if: ${{ !cancelled() && steps.proof.outcome == 'success' && runner.os != 'Windows' }}
+        timeout-minutes: 20
+        run: |
+          . "$RUNNER_TEMP/qa_run.sh"
+          t=tests/test_process_custody.py::test_forked_kept_service_lifetime_across_worker_exit
+          qa_run http "$t[restart]" "$t[panic]"
+
+      - id: inert
+        name: POSIX · inert and positive checks
+        if: ${{ !cancelled() && steps.proof.outcome == 'success' && runner.os != 'Windows' }}
+        timeout-minutes: 20
+        run: |
+          . "$RUNNER_TEMP/qa_run.sh"
+          L=tests/test_launch_custody_selection.py:: W=tests/test_worker_demand.py:: S=tests/test_server_control_panic_daemon.py::
+          gap="${L}test_a_store_gap_never_empties_what_reads_and_is_named_beside_it"
+          panic="${L}test_panic_ends_the_unheld_kept_host_launch_and_its_owed_member_through_the_exit_stop"
+          qa_run inert \
+            "${L}test_the_kept_spare_proves_leaders_keeps_mains_retention_rule_and_names_every_gap" \
+            "${L}test_an_unreadable_kept_executor_record_is_a_gap_and_a_forgotten_one_is_not" \
+            "$gap[set unreadable]" "$gap[ledger line torn]" "$gap[pending copy damaged]" \
+            "$panic[readable]" "$panic[document unreadable]" \
+            "${W}test_idle_retirement_decides_its_spare_once_before_the_first_signal" \
+            "${W}test_an_ordinary_idle_exit_retires_in_one_reaper_pass_and_is_journaled" \
+            "${S}test_panic_stop_requests_and_settles_owned_claudexor_daemon" \
+            "${S}test_indexed_stop_never_holds_panic_exit[stalled]" "${S}test_indexed_stop_never_holds_panic_exit[raises]" \
+            tests/test_process_custody.py::test_spawn_sites_are_custodied_or_allowlisted
+
+      - id: win
+        name: Windows · supported checks only (no native retirement proof)
+        if: ${{ !cancelled() && steps.proof.outcome == 'success' && runner.os == 'Windows' }}
+        timeout-minutes: 20
+        run: |
+          . "$RUNNER_TEMP/qa_run.sh"
+          qa_run win \
+            tests/test_process_custody.py::test_live_kept_service_pids_reports_only_live_session_services \
+            tests/test_worker_demand.py::test_idle_retirement_decides_its_spare_once_before_the_first_signal \
+            tests/test_process_custody.py::test_spawn_sites_are_custodied_or_allowlisted
+
+      - id: size
+        name: Size lane · the three files that carry it, against the merge base
+        if: ${{ !cancelled() && steps.proof.outcome == 'success' && runner.os == 'Linux' }}
+        timeout-minutes: 20
+        run: |
+          S=tests/test_smoke.py:: B=tests/test_reference_book_budgets.py::
+          xml="$RUNNER_TEMP/qa/size.xml"; rc=0
+          # Without this, a push to a branch other than ouroboros skips the two book-growth tests (test_reference_book_budgets.py:40).
+          env -u GITHUB_EVENT_NAME OURO_SIZE_RATCHET_BASE_REF="$QA_BASE" python -m pytest -m size_ratchet -rfEs --junitxml="$xml" \
+            tests/test_smoke.py tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py || rc=$?
+          python -I "$RUNNER_TEMP/qa_check.py" "$xml" "${S}test_no_oversized_modules" "${S}test_size_ratchet_manifest_matches_live_tree" \
+            "${S}test_size_ratchet_transition_against_explicit_base" "${S}test_no_extremely_oversized_functions" \
+            "${B}test_a_change_does_not_grow_a_reference_book" "${B}test_a_change_does_not_grow_bible_or_the_prompts" \
+            tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact || rc=$?
+          exit "$rc"
+
+      - name: Every check this leg owes ran green
+        if: ${{ !cancelled() }}
+        env:
+          O_HTTP: ${{ steps.http.outcome }}
+          O_INERT: ${{ steps.inert.outcome }}
+          O_SIZE: ${{ steps.size.outcome }}
+          O_WIN: ${{ steps.win.outcome }}
+        run: |
+          case "$RUNNER_OS" in
+            Linux) owed="O_HTTP O_INERT O_SIZE" ;;
+            macOS) owed="O_HTTP O_INERT" ;;
+            Windows) owed="O_WIN" ;;
+            *) echo "::error::unexpected runner $RUNNER_OS"; exit 1 ;;
+          esac
+          for v in $owed; do
+            [ "${!v}" = success ] || { echo "::error::$v finished as '${!v}'"; exit 1; }
+          done
