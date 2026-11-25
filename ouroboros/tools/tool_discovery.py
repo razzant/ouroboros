@@ -31,6 +31,7 @@ from ouroboros.tool_policy import (
     fit_tool_schemas_to_limit,
     format_capability_omissions as _format_omissions,
     initial_tool_schemas,
+    routine_capability_omissions,
     tool_namespace,
     usable_selectors,
 )
@@ -130,7 +131,7 @@ def list_available_tools(
     the current permitted catalog; MCP rows come from the published listing.
     """
     schemas = registry.schemas()
-    omissions = registry.capability_omissions()
+    omissions = routine_capability_omissions(registry.capability_omissions())
     callable_rows = {row["name"]: row for row in registry.callable_rows() or []}
     selected = str(namespace or "").strip()
     complete = {schema["function"]["name"]: " ".join(str(schema["function"].get("description") or "").split())

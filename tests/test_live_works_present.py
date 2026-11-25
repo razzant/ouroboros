@@ -1,4 +1,5 @@
 """A new head sees the roster's dated focus, questions and holds outside its prefix."""
+import json
 from types import SimpleNamespace
 
 from ouroboros.live_works import live_works_present
@@ -33,6 +34,23 @@ def _fixture(root):
     return project, focus
 
 
+def _runtime(rows):
+    """The Runtime context object as the model reads it: the JSON its section carries, not the text around it."""
+    marker = "## Runtime context\n\n"
+    for row in rows:
+        content = row["content"]
+        for text in [content] if isinstance(content, str) else [block.get("text") or "" for block in content]:
+            if marker in text:
+                return json.JSONDecoder().raw_decode(text.split(marker, 1)[1])[0]
+    raise AssertionError("the head carries no Runtime context section")
+
+
+def _present(wire):
+    """The live-works present as the head's own non-system messages carry it, with its works by id."""
+    present = _runtime([row for row in wire if row["role"] != "system"])["live_works_present"]
+    return present, {work["task_id"]: work for work in present["works"]}
+
+
 def test_present_uses_roster_focus_questions_holds_and_exact_bound_room(tmp_path):
     from ouroboros.peer_roster import independent_roots, render_roster_note
     project, focus = _fixture(tmp_path)
@@ -43,20 +61,21 @@ def test_present_uses_roster_focus_questions_holds_and_exact_bound_room(tmp_path
     moved = works["moved"]
     assert moved["title"] == "A moved work" and moved["state"] == "running"
     assert moved["room"] == {"chat_id": project["chat_id"], "project_id": "room", "project_name": "Room"}
-    assert moved["last_line"] == focus["text"] and moved["last_line_at"] == focus["authored_at"]
+    # The dated focus stands once, whole: no second copy of its text and date beside it.
+    assert moved["focus"] == focus and not {"last_line", "last_line_at"} & set(moved)
     assert moved["started_at"] == "2026-10-16T11:00:00Z"
     assert moved["open_questions"] == [{"quiz_id": "q1", "state": "open", "question": "Which version?", "options": ["A", "B"]}]
     assert moved["waiting"][0]["kind"] == "owner"
     sleep = works["sleeper"]
     assert sleep["state"] == "pending" and sleep["waiting"][0]["kind"] == "sleep"
     assert sleep["project_admission_hold"]["reason"] == "project_dispatch_unconfirmed"
-    assert sleep["open_questions"] == [] and sleep["last_line"] == ""
+    assert sleep["open_questions"] == [] and "focus" not in sleep
     note = render_roster_note(independent_roots(tmp_path))
     assert "Which version?" in note and "project_dispatch_unconfirmed" in note
     assert "Different web narration" not in note
     write_task_result(tmp_path, "moved", "completed")
     settled = next(row for row in live_works_present(tmp_path)["works"] if row["task_id"] == "moved")
-    assert settled["recorded_status"] == "completed" and settled["last_line"] == ""
+    assert settled["recorded_status"] == "completed" and "focus" not in settled
     assert settled["open_questions"] == [] and settled["waiting"] == []
 
 
@@ -73,7 +92,9 @@ def test_the_new_head_reads_the_present_at_capture_outside_the_cache_prefix(tmp_
     from ouroboros.llm_messages import split_leading_system_prefix
     from tests.test_cache_optimization import _make_env_and_memory
     env, memory = _make_env_and_memory(tmp_path)
-    _fixture(env.drive_root)
+    _, focus = _fixture(env.drive_root)
+    # Another work carries the focus's words as its title: a legitimate coincidence that outlives both builds.
+    write_task_result(env.drive_root, "sleeper", "running", title=focus["text"])
     ctx = SimpleNamespace(DRIVE_ROOT=env.drive_root, RUNNING={}, PENDING=[])
     monkeypatch.setattr(routing, "_active_direct_roots", lambda ctx: [])
     # The subagent roster is process-wide state another test may change between the two builds; this test is about
@@ -87,15 +108,24 @@ def test_the_new_head_reads_the_present_at_capture_outside_the_cache_prefix(tmp_
     wire, moved = split_leading_system_prefix(messages)
     assert moved > 0
     prefix = [row for row in wire if row["role"] == "system"]
-    tail = str([row for row in wire if row["role"] != "system"])
-    assert "Verifying the authoring path" in tail and "Which version?" in tail
+    # The objects themselves, parsed from the head: the work `moved` stands with its whole dated focus and its open
+    # question, and the web card's `last_line` is a field of neither its row nor the present. Where else the same
+    # words or a `last_line` stand is another object's fact.
+    present, works = _present(wire)
+    assert works["moved"]["focus"] == focus and works["moved"]["open_questions"] == [
+        {"quiz_id": "q1", "state": "open", "question": "Which version?", "options": ["A", "B"]}]
+    assert not {"last_line", "last_line_at"} & set(works["moved"]) and "last_line_source" not in present
+    assert works["sleeper"]["title"] == focus["text"]
     assert "live_works_present" not in str(prefix)
     write_task_result(env.drive_root, "moved", "completed")
     newer, _ = context.build_llm_messages(env=env, memory=memory, task=task)
     fresh, _ = split_leading_system_prefix(newer)
     assert [row for row in fresh if row["role"] == "system"] == prefix
-    # Queued heads refresh the older metadata snapshot at context construction.
-    assert "Verifying the authoring path" not in str([row for row in fresh if row["role"] != "system"])
+    # Queued heads refresh the older metadata snapshot at context construction: the same work, now settled.
+    present, works = _present(fresh)
+    assert works["moved"].get("recorded_status") == "completed" and "focus" not in works["moved"]
+    assert works["moved"]["open_questions"] == [] and not {"last_line", "last_line_at"} & set(works["moved"])
+    assert "last_line_source" not in present and works["sleeper"]["title"] == focus["text"]
 
 
 def test_new_head_discloses_prepared_and_uncertain_intents_without_replaying(tmp_path):
@@ -161,3 +191,35 @@ def test_roster_discloses_both_unreadable_task_and_project_enrichment(tmp_path, 
     assert roster["incomplete"] is True
     assert all(row["unavailable"] == {"task_result": "StoreBusy", "project": "StoreBusy"}
                for row in roster["roots"])
+
+
+def test_a_stop_states_its_own_press_once_and_only_where_that_is_proven(tmp_path):
+    """Data as ``owner_pause.next_fence`` records it: the creating press on the fence and again under
+    ``requests[request_id]``. The repeated entry keeps its key and points at the stop; every other shape stays whole."""
+    from ouroboros.live_works import OWN_PRESS, _stop_shown
+
+    by = {"actor": "ouroboros", "task_id": "m1", "text": "pausing for the update", "at": "2026-11-20T10:00:00Z"}
+    other = {"by": {"actor": "owner", "text": "", "at": "2026-11-20T10:05:00Z"}, "fence_id": "f2", "generation": 2}
+    earlier = {"fence_id": "f1", "generation": 1}  # an earlier generation's press, recorded without an author
+    fence = {"by": by, "fence_id": "f2", "request_id": "r2", "state": "paused", "requested_at": by["at"],
+             "generation": 2, "requests": {"r1": earlier, "r2": {"by": by, "fence_id": "f2", "generation": 2}, "r3": other}}
+    shown = _stop_shown(fence)
+    assert shown["requests"] == {"r1": earlier, "r2": OWN_PRESS, "r3": other}  # every key, every other press
+    assert {key: value for key, value in shown.items() if key != "requests"} == {
+        key: value for key, value in fence.items() if key != "requests"}
+    assert _stop_shown({"scope": "installation", "member_stop": fence})["member_stop"] == shown
+    # Not proven, so whole: the own key absent; an own entry that differs; a fence that declares no author, where
+    # nothing may read as one; a later press that filled the author of a fence whose creating press named nobody.
+    absent = {**fence, "requests": {"r1": earlier, "r3": other}}
+    differs = {**fence, "requests": {**fence["requests"], "r2": {**fence["requests"]["r2"], "generation": 1}}}
+    nobody = {key: value for key, value in fence.items() if key != "by"}
+    nobody["requests"] = {"r1": earlier, "r2": {"fence_id": "f2", "generation": 2}}
+    filled = {**nobody, "by": other["by"], "requests": {**nobody["requests"], "r3": other}}
+    for stop in (absent, differs, nobody, filled, {}, None):
+        assert _stop_shown(stop) == stop
+    # Through the roster: the head's record of a paused root carries that one stop.
+    write_task_result(tmp_path, "t", "running", title="Paused", chat_id=1, owner_pause=fence)
+    write_queue_document(tmp_path / "state/queue_snapshot.json", {"ts": utc_now_iso(), "pending": [], "running": [
+        {"id": "t", "attempt": 1, "task": {"id": "t", "chat_id": 1}}]})
+    [work] = live_works_present(tmp_path)["works"]
+    assert work["stop"]["by"] == by and work["stop"]["requests"] == shown["requests"]

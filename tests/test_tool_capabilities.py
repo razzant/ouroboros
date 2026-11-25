@@ -91,6 +91,9 @@ def test_top_level_workspace_focus_has_tool_and_schema_parity(tmp_path, monkeypa
 
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
     monkeypatch.setattr(search, "_available_web_search_backends", lambda: ["ddgs"])
+    import ouroboros.peer_links as peer_links
+
+    monkeypatch.setattr(peer_links, "has_outgoing_link", lambda root: True)  # a confirmed link, as the gates above
     system_repo = tmp_path / "system"
     project = tmp_path / "project"
     external = tmp_path / "external"

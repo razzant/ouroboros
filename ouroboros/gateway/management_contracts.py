@@ -1278,7 +1278,8 @@ class UpdateLetter(TypedDict):
 
 class UpdateTransactionState(TypedDict, total=False):
     """An update in progress: ``{active: false}``, or active with its phase, assisted task and the
-    ``attempt_id`` a retained attempt's ``tx_attempt_id`` binds to."""
+    ``attempt_id`` a retained attempt's ``tx_attempt_id`` binds to. ``pre_restart_smoke`` is its own
+    check before the restart, omitted when the transaction does not say or this version cannot read it."""
 
     active: Required[bool]
     phase: str
@@ -1286,6 +1287,7 @@ class UpdateTransactionState(TypedDict, total=False):
     attempt_id: str
     restart_required: bool
     local_work_recovery: bool
+    pre_restart_smoke: Literal["pending", "passed"]
 
 
 class UpdateStatusResponse(TypedDict, total=False):

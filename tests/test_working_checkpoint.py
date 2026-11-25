@@ -109,6 +109,71 @@ def test_a_failed_pre_effect_write_holds_visibly_and_only_the_task_controls_end_
     assert stopped.value.control_reason == "cancelled", "Stop ends the hold; no tool of the batch ran"
 
 
+def test_a_disappeared_saved_root_holds_the_cut_batch_until_write_or_control(tmp_path, monkeypatch):
+    from ouroboros.loop_output_exhaustion import intermediate_reply
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    finish = {"finish_reason_present": True, "finish_reason": "length"}
+    reply = {"role": "assistant", "content": "Saving a note.", "tool_calls": [
+        {"id": "fixture-call", "function": {"name": "note_fixture", "arguments": "{}"}}]}
+    real_write = wc._write
+    for outcome in ("restored", "cancelled", "deadline"):
+        root = tmp_path / outcome
+        root.mkdir()
+        moved = tmp_path / f"{outcome}-away"
+        ctx, limit = _loop_ctx(root)
+        ctx._round_response_facts = finish
+        limit.messages = [{"role": "user", "content": "Save a note."}]
+        limit.llm_trace = {"reasoning_notes": []}
+        assert wc.save_round(limit, "ready")
+        controls, updates = [], []
+
+        def fail_then_disappear(ctx, limit, boundary):
+            if not controls:
+                root.rename(moved)
+                raise OSError("fixture write failed as the root disappeared")
+            return real_write(ctx, limit, boundary)
+
+        def control(_ctx):
+            assert not updates and not root.exists()
+            controls.append(True)
+            if len(controls) == 2:
+                if outcome != "restored":
+                    return outcome
+                moved.rename(root)
+            return ""
+
+        def progress(_text, **_meta):
+            updates.append(wc.read_working(root, ctx.task_id, 1)[1])
+
+        with monkeypatch.context() as held:
+            held.setattr(wc, "_write", fail_then_disappear)
+            held.setattr(budget_pause, "_HOLD_POLL_SEC", 0)
+            held.setattr(budget_pause, "_publish_hold", lambda *_: None)
+            held.setattr(budget_pause, "_hold_control_reason", control)
+            if outcome == "restored":
+                assert intermediate_reply(limit, reply, progress)
+                [state] = updates
+                assert state["working"]["boundary"] == "post_batch"
+                assert state["working"]["pending_tool_call_ids"] == []
+                assert state["messages"][-1]["content"].startswith("[HOST NOTICE] NOT STARTED:")
+            else:
+                with pytest.raises(ModelWaitInterrupted) as stopped:
+                    intermediate_reply(limit, reply, progress)
+                assert stopped.value.control_reason == outcome and not updates
+                assert wc.read_working(moved, ctx.task_id, 1)[1]["working"]["boundary"] == "ready"
+        assert len(controls) == 2
+
+    # A named task that never had a durable directory does not inherit this hold.
+    root = tmp_path / "never-provisioned"
+    ctx, limit = _loop_ctx(root)
+    ctx._round_response_facts = finish
+    limit.llm_trace = {"reasoning_notes": []}
+    emitted = []
+    assert intermediate_reply(limit, reply, lambda text, **_meta: emitted.append(text))
+    assert emitted == ["Saving a note."] and not root.exists()
+
+
 def test_content_mail_is_acknowledged_only_after_the_ready_state_that_holds_it(tmp_path):
     from ouroboros.loop_round_limits import _drain_incoming_messages
     from ouroboros.owner_mailbox import drain_owner_entries, write_owner_message

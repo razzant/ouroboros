@@ -1384,7 +1384,10 @@ def test_identity_says_the_host_holds_sign_ins_and_the_token_route_keeps_the_tok
     _seed_token(tmp_path, permissions=["inject_chat"])
     client = TestClient(create_host_service_app(tmp_path, bridge_getter=FakeBridge))
     headers = {"X-Skill-Token": "token"}
-    assert client.get("/identity", headers=headers).json()["sign_in_version"] == 1
+    identity = client.get("/identity", headers=headers).json()
+    assert identity["sign_in_version"] == 1
+    revision = identity["sign_in_handover_version"]
+    assert type(revision) is int and revision == 2
     assert client.post("/sign-in/token", headers=headers, json={"service": "google"}).status_code == 404  # undeclared
     save_enabled(tmp_path, "test_skill", False)
     assert client.post("/sign-in/token", headers=headers, json={"service": "google"}).status_code == 403

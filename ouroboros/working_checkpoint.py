@@ -12,7 +12,7 @@ boundary instead of the whole line of thought:
 - ``pre_effect`` — the accepted assistant message and its tool batch, before
   the first tool: a write failure HOLDS the batch visibly (typed, interruptible
   by the task's own Stop/Panic/deadline); no unrecorded effect starts;
-- ``post_batch`` — the completed batch and its results;
+- ``post_batch`` — a completed batch's results, or a spent continuing no-tool round (``budget_tail="no_tool"``);
 - ``candidate`` — a no-tool answer published as the delivery candidate, before
   its review or delivery;
 - ``resumed`` — an exact Resume's restored continuation and its budget tail,
@@ -110,28 +110,27 @@ def _root(ctx: Any) -> pathlib.Path:
 
 
 def _signature(limit_ctx: Any) -> tuple:
-    messages = limit_ctx.messages or []
-    last = messages[-1] if messages else None
-    tail = hashlib.sha256(repr(last).encode("utf-8", "replace")).hexdigest() if last is not None else ""
-    ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
-    candidate = getattr(ctx, "_delivery_candidate", None)
-    return (int(getattr(ctx, "task_attempt", 1) or 1), int(limit_ctx.round_idx), id(messages), len(messages),
-            tail, len(limit_ctx.owner_msg_seen or ()), getattr(candidate, "revision", None))
+    from ouroboros.loop_output_exhaustion import RECORD_KEYS
+    messages, ctx = limit_ctx.messages or [], getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
+    tail = hashlib.sha256(repr(messages[-1]).encode("utf-8", "replace")).hexdigest() if messages and messages[-1] is not None else ""
+    usage = getattr(limit_ctx, "accumulated_usage", None)
+    recovery = json.dumps([usage.get(key) for key in RECORD_KEYS], sort_keys=True, default=repr) if isinstance(usage, dict) else ""
+    return (int(getattr(ctx, "task_attempt", 1) or 1), int(limit_ctx.round_idx), id(messages), len(messages), tail,
+            len(limit_ctx.owner_msg_seen or ()), getattr(getattr(ctx, "_delivery_candidate", None), "revision", None), recovery)
 
 
 def save_round(limit_ctx: Any, boundary: str) -> bool:
-    """Replace this attempt's working checkpoint with the loop's state NOW.
-
-    Returns False when an unchanged ``ready`` state was skipped. Raises on a
-    write failure; the caller decides whether that holds (``pre_effect``) or is
-    retried at the next boundary.
-    """
+    """Replace this attempt's checkpoint; return False for an unchanged ``ready``
+    state or no durable root. Write failures propagate to the caller."""
     if boundary not in BOUNDARIES:
         raise ValueError(f"unknown working checkpoint boundary: {boundary!r}")
     ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
-    if ctx is None or not str(getattr(ctx, "task_id", "") or "") or not (
-            getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)) or not _root(ctx).is_dir():
-        return False  # no durable task root: nothing here could be recovered from it
+    if not getattr(ctx, "task_id", None) or not (getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)):
+        return False
+    if not (root := _root(ctx)).is_dir():
+        if getattr(ctx, "_working_checkpoint_seq", 0):
+            raise FileNotFoundError(f"Working checkpoint root unavailable: {root}")
+        return False  # no durable root was available and this attempt has never saved
     if boundary == "ready" and getattr(ctx, "_working_checkpoint_signature", None) == _signature(limit_ctx):
         return False
     _write(ctx, limit_ctx, boundary)
@@ -308,13 +307,14 @@ def save_or_log(limit_ctx: Any, boundary: str) -> bool:
         return False
 
 
-def save_before_effects(limit_ctx: Any) -> None:
-    """The pre-effect boundary: no tool of this batch starts until its state is saved."""
+def save_before_effects(limit_ctx: Any, boundary: str = "pre_effect") -> None:
+    """A gating boundary: what follows it (a tool of this batch; a cut batch's update and next request after its
+    ``post_batch``) waits on the typed hold until its state is saved. A task with no durable root saves nothing."""
     from ouroboros.budget_pause import _hold_until
 
     ctx = limit_ctx.tools._ctx
     _hold_until(ctx, limit_ctx.accumulated_usage, HOLD_UNWRITABLE,
-                lambda: save_round(limit_ctx, "pre_effect"), rail="working_checkpoint")
+                lambda: save_round(limit_ctx, boundary), rail="working_checkpoint")
 
 
 @contextlib.contextmanager
@@ -760,7 +760,7 @@ def complete_pause_from_working(root: Any, task_id: str, row: Dict[str, Any], at
         # Legacy sources with no original clock cannot deduct old exclusions
         # from a fresh start. Keep the source and Resume's row on the same clock.
         model_state = {**model_state, "quota_clock": {}, "budget_paused_sec": 0.0}
-    source = {**state, "started_at": started, "model_wait": model_state,
+    source = {**state, "round_idx": point["round_idx"], "started_at": started, "model_wait": model_state,
               "pause_id": row.get("pause_id"), "reason": reason, "rail": row.get("rail"),
               "scope": row.get("scope"), "resume_point": point, "external_runs": external, "local_producers": local}
     ref = store_actor_source_bytes(pathlib.Path(root), str(task_id), category="context_checkpoints",
@@ -987,13 +987,13 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
         + (f" Live-only objects ({', '.join(opaque)}) could not be saved with it." if opaque else "") + question
         + f"\nDelegated runs of this task:{run_lines}\nAn unknown or merely requested stop is not proof of "
         "termination: never start a second writer over such a run; the host never continues one by itself.")})
-    # A batch rejoins its tool tail; ready state repeats its logical round.
-    # A saved candidate rejoins finalization before another author call.
-    # A Resume handover rejoins its pause's tail, under the last-fit permission
-    # that Resume already spent (its receipt rides a same-ID usage).
+    # A batch rejoins its tool tail; a no-tool post_batch advances to the next
+    # round's no-tool tail; ready state repeats its logical round. A candidate
+    # rejoins finalization; a Resume handover rejoins its pause's tail under the
+    # last-fit permission Resume already spent (riding a same-ID usage).
     resumed = boundary == RESUMED
     if resumed:
         ctx._budget_resume_last_fit_relaxed = bool((usage.get("budget_pause_resume") or {}).get("last_fit_relaxed"))
+    tail = (state.get("working") or {}).get("budget_tail")
     return (ctx.active_model, ctx.active_effort, ctx.active_use_local, mode, int(state["round_idx"]), plan,
-            boundary in {"pre_effect", "post_batch"}
-            or resumed and (state.get("working") or {}).get("budget_tail") == "tool")
+            boundary == "pre_effect" or (boundary == "post_batch" and tail != "no_tool") or (resumed and tail == "tool"))

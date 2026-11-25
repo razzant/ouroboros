@@ -277,26 +277,111 @@ def test_a_claim_committed_but_never_projected_is_held_after_the_next_boot(insta
     assert _rows(install, commits=True) == rows, "that same publication finished: no row added"
 
 
-@pytest.mark.parametrize("old_note", ["kept", "deleted"])
-def test_an_owner_reset_that_left_the_old_history_inherits_nothing_from_the_earlier_initialization(install, old_note):
-    from supervisor.state_initialization import mark_pending
+def _assert_capture(row, *, writer, revision=seed.SEED_REVISION, initialization_id=None):
+    assert not knowledge_versions.is_claim_commit(row) and row.get("publication") == "source_capture"
+    assert row["writer"] == writer and row["new_sha256"] == revision
+    if initialization_id is not None:
+        assert row["focus"] == {"role": "host"}
+        assert row["writer_input_ref"]["kind"] == "factory_text"
+        assert row["writer_input_ref"]["initialization_id"] == initialization_id
 
-    first = install.state.init_state().values["initialization_id"]
-    install.clock().start()
-    if old_note == "deleted":
+
+def _assert_claim_commit(row, *, writer, revision=seed.SEED_REVISION, claims=("wake",)):
+    assert knowledge_versions.is_claim_commit(row)
+    assert row["writer"] == writer and row["new_sha256"] == revision
+    assert row["active_claims"] == list(claims)
+
+
+def _assert_publication_pair(rows, *, writer, prior=(), revision=seed.SEED_REVISION,
+                             initialization_id=None, claims=("wake",)):
+    assert len(rows) == len(prior) + 2 and rows[2:] == list(prior)
+    _assert_claim_commit(rows[0], writer=writer, revision=revision, claims=claims)
+    _assert_capture(rows[1], writer=writer, revision=revision, initialization_id=initialization_id)
+
+
+def _publish_authored_seed(install):
+    """On a fresh profile, publish ``SEED_NOTE``'s exact bytes and ``claims: [wake]`` as an ordinary author."""
+    minted = install.state.init_state()
+    assert minted.quality == "current" and minted.values[seed.STATE_KEY] == seed.ELIGIBLE
+    init_id = minted.values["initialization_id"]
+    assert init_id
+    authored = knowledge.write_knowledge_note(install.address, seed.SEED_NOTE, "overwrite", writer="turn")
+    assert authored.ok and authored.current.revision == seed.SEED_REVISION
+    assert authored.current.raw == seed.SEED_NOTE.encode("utf-8")
+    assert _held_by_wake(install) == [install.address]
+    prior_rows = _rows(install, commits=True)
+    _assert_publication_pair(prior_rows, writer="turn")
+    return init_id, prior_rows
+
+
+def _assert_wake_holds(install, *, revision=seed.SEED_REVISION, text="choosing nothing is a choice.", absent=()):
+    wake = _held(_plan(install.world, task=WAKE_TURN))
+    assert "### My own time" in wake and "Global note: memory/knowledge/my-own-time.md" in wake
+    assert "Matched claims: 'wake'" in wake and f"Revision: {revision}" in wake
+    assert text in wake and all(snippet not in wake for snippet in absent)
+
+
+def _assert_seed_absent_to_readers(install):
+    with pytest.raises(FileNotFoundError):
+        knowledge.read_knowledge_note(install.address)
+    assert not _held(_plan(install.world, task=WAKE_TURN))
+    index = knowledge.knowledge_index_view(install.address)
+    assert "my-own-time" not in index
+    return index
+
+
+@pytest.mark.parametrize("prior_note", ["kept", "deleted"])
+def test_a_first_start_respects_an_authored_note_or_seeds_once_after_prior_deletion(install, prior_note):
+    """On a fresh synthetic profile where an ordinary author published ``SEED_NOTE``'s exact bytes and
+    ``claims: [wake]`` before the first Start:
+    * ``kept``: the standing note is neither overwritten nor claimed by ``host_seed`` (``collision``), and remains
+      held for wakes; under that recorded ``collision`` settlement, a later owner deletion stands across repeated
+      Start and boot for both the note and wake readers.
+    * ``deleted``: after deleting the ordinary note before Start (with its real history in the journal), the first
+      Start publishes exactly one ``host_seed`` seed for this initialization, held by wakes; under that recorded
+      ``written`` settlement, a later deletion stands across repeated Start and boot for both readers (independent
+      lost-outcome recovery after a published ``host_seed`` is tested separately)."""
+    init_id, prior_rows = _publish_authored_seed(install)
+    if prior_note == "deleted":
         install.address.path.unlink()
-    raw = install.address.path.read_bytes() if old_note == "kept" else None
-    mark_pending(install.root, origin="owner_reset")  # the Reset's witness; its memory wipe did not happen here
-    second = install.state.init_state().values
-    assert second["initialization_id"] != first and second[seed.STATE_KEY] == seed.ELIGIBLE
+        assert not _held_by_wake(install)
+
     _plain(install.clock().start())
-    if old_note == "kept":  # the earlier initialization's note is a note that stood here: left as it is
-        assert _settled(install)[-1] == ("collision", "") and install.stored() == seed.COLLISION
-        assert install.address.path.read_bytes() == raw
-    else:  # its history alone proves nothing for this initialization: a seed of its own
-        assert install.stored() == seed.WRITTEN and install.address.path.exists()
-        newest = _rows(install)[0]
-        assert newest["writer_input_ref"]["initialization_id"] == second["initialization_id"]
+    assert install.on() is True
+
+    if prior_note == "kept":
+        assert _settled(install) == [("collision", "")] and install.stored() == seed.COLLISION
+        assert install.address.path.read_bytes() == seed.SEED_NOTE.encode("utf-8")
+        assert _rows(install, commits=True) == prior_rows
+        assert _held_by_wake(install) == [install.address]
+        _assert_wake_holds(install)
+
+        # Recorded collision settlement: repeated Start and boot see state=collision and do not re-settle or resurrect.
+        install.address.path.unlink()
+        assert not _held_by_wake(install)
+        _plain(install.clock().start())
+        _boot(install)
+        assert not install.address.path.exists() and install.stored() == seed.COLLISION
+        assert _settled(install) == [("collision", "")] and _rows(install, commits=True) == prior_rows
+        assert not _held_by_wake(install)
+        _assert_seed_absent_to_readers(install)
+    else:
+        assert _settled(install) == [("written", "")] and install.stored() == seed.WRITTEN
+        assert install.address.path.read_bytes() == seed.SEED_NOTE.encode("utf-8")
+        assert _held_by_wake(install) == [install.address]
+        published = _rows(install, commits=True)
+        _assert_publication_pair(published, writer=knowledge.SEED_WRITER, prior=prior_rows, initialization_id=init_id)
+        _assert_wake_holds(install)
+
+        # Recorded written settlement: repeated Start and boot see state=written and do not re-seed the deleted note.
+        install.address.path.unlink()
+        assert not _held_by_wake(install)
+        _plain(install.clock().start())
+        _boot(install)
+        assert not install.address.path.exists() and install.stored() == seed.WRITTEN
+        assert _settled(install) == [("written", "")] and _rows(install, commits=True) == published
+        assert not _held_by_wake(install)
+        _assert_seed_absent_to_readers(install)
 
 
 def test_an_older_install_hears_the_offer_in_direct_main_only_and_building_requests_spends_nothing(install):
@@ -490,62 +575,100 @@ def test_a_claim_removed_and_the_text_restored_while_the_seed_retries_stays_remo
 
 
 @pytest.mark.parametrize("after", ["moved", "edited"])
-def test_a_second_initialization_publishes_its_own_seed_beside_an_identical_earlier_one(install, after):
-    """A Reset whose memory wipe left the journal: the first initialization published the same bytes and claims. The
-    second's seed still records its own publication, so with its outcome lost a move is not undone and an edit is no
-    collision."""
-    from supervisor.state_initialization import mark_pending
+def test_the_seed_publishes_its_own_commit_beside_an_identical_earlier_authored_note(install, after):
+    """An ordinary author publishes ``SEED_NOTE``'s exact bytes and ``claims: [wake]`` and moves or deletes the note
+    before the first Start, leaving its real ``(source_capture, claims_published)`` pair and claim record at this
+    address. The first Start must publish ``host_seed``'s own capture and claims commit beside them rather than
+    deduping onto the earlier author's identical publication: with the outcome record later lost, a move is never
+    undone and a head edit settles as ``written``, not a collision, with both outcomes visible to the real note and
+    wake readers."""
+    init_id, prior_rows = _publish_authored_seed(install)
+    if after == "moved":
+        os.replace(install.address.path, install.address.shelf / "earlier-own-time.md")
+    else:
+        install.address.path.unlink()
+    assert not _held_by_wake(install)
 
-    install.state.init_state()
-    install.clock().start()
-    install.address.path.unlink()
-    mark_pending(install.root, origin="owner_reset")
-    install.state.init_state()
-    install.clock().start()
-    assert install.stored() == seed.WRITTEN and install.address.path.exists()
+    _plain(install.clock().start())
+    assert install.stored() == seed.WRITTEN and install.address.path.read_bytes() == seed.SEED_NOTE.encode("utf-8")
+    assert _held_by_wake(install) == [install.address]
+    published = _rows(install, commits=True)
+    _assert_publication_pair(published, writer=knowledge.SEED_WRITER, prior=prior_rows, initialization_id=init_id)
+    _assert_wake_holds(install)
+
     install.state.update_state(lambda st: st.update({seed.STATE_KEY: seed.OWED}))  # the outcome's record lost
     if after == "moved":
-        os.replace(install.address.path, install.address.shelf / "evenings.md")
+        moved = knowledge.resolve_knowledge_address(install.root, "evenings", "global")
+        os.replace(install.address.path, moved.path)
     else:
         live = knowledge.read_knowledge_note(install.address)
-        assert knowledge.write_knowledge_note(install.address, "Mine now.", "append", expected_revision=live.revision,
-                                              writer="turn").ok
+        edited = knowledge.write_knowledge_note(
+            install.address, "Mine now.", "edit", expected_revision=live.revision,
+            old_str="choosing nothing is a choice.", writer="turn",
+        )
+        assert edited.ok and edited.current.revision != seed.SEED_REVISION
     raw = install.address.path.read_bytes() if install.address.path.exists() else None
+    before_boot = _rows(install, commits=True)
     _boot(install)
     assert install.stored() == seed.WRITTEN, "its own seed was published: no collision"
     assert (install.address.path.read_bytes() if install.address.path.exists() else None) == raw, "nothing recreated"
+    assert _rows(install, commits=True) == before_boot
+    assert _held_by_wake(install) == ([install.address] if after == "edited" else [])
+    if after == "moved":
+        index = _assert_seed_absent_to_readers(install)
+        moved_note = knowledge.read_knowledge_note(moved)
+        assert moved_note.raw == seed.SEED_NOTE.encode("utf-8") and moved_note.revision == seed.SEED_REVISION
+        assert moved_note.title == "My own time" and "choosing nothing is a choice." in moved_note.text
+        assert "- **evenings**: [My own time](<evenings.md>)" in index
+    else:
+        note = knowledge.read_knowledge_note(install.address)
+        assert note.raw == raw and note.revision == edited.current.revision
+        assert "Mine now." in note.text and "choosing nothing is a choice." not in note.text
+        _assert_wake_holds(install, revision=edited.current.revision, text="Mine now.",
+                           absent=(seed.SEED_REVISION, "choosing nothing is a choice."))
+    assert [row["writer"] for row in _rows(install)] == (
+        ["turn", knowledge.SEED_WRITER, "turn"] if after == "edited" else [knowledge.SEED_WRITER, "turn"])
 
 
 def test_a_publication_restored_onto_this_initializations_source_honors_a_later_deletion(install, monkeypatch):
-    """A Reset that kept the first initialization's publication: the second's half-written capture retries with
-    equal bytes and claims, which must not dedup onto the earlier initialization's commit — the restored names are
-    committed for this source, so a later lost outcome honors the deletion instead of resurrecting the seed."""
-    from supervisor.state_initialization import mark_pending
+    """An ordinary author publishes ``SEED_NOTE``'s exact bytes and ``claims: [wake]`` and deletes the note before
+    the first Start, leaving its ``claims_published`` commit and claim record at this address. When ``host_seed``'s
+    first Start is half-written (capture and note bytes land, claims commit fails), the retry sees equal bytes and
+    claims on disk: only provenance (``publication_bound_to_source`` -> ``ClaimWrite.restored``) commits
+    ``host_seed``'s own row instead of reusing the earlier author's. A repeated lost outcome adds no duplicate row,
+    and a later deletion under a lost outcome stands for both the note and wake readers instead of resurrecting."""
+    init_id, prior_rows = _publish_authored_seed(install)
+    install.address.path.unlink()  # the earlier note leaves before this initialization's first Start
+    assert not _held_by_wake(install)
 
-    install.state.init_state()
-    install.clock().start()  # the first initialization: its capture and its claims commit
-    mark_pending(install.root, origin="owner_reset")
-    install.state.init_state()
-    install.address.path.unlink()  # the mind deleted the note before this initialization's first settle
-    with monkeypatch.context() as patch:  # its own write lands, its claims commit does not
+    with monkeypatch.context() as patch:  # host_seed's capture and note bytes land; its claims commit does not
         patch.setattr(knowledge_versions.ClaimWrite, "publish", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("disk")))
-        install.clock().start()
-    assert install.stored() == seed.OWED and install.address.path.exists()  # the claim record keeps the earlier
-    # initialization's published names until this source's own commit replaces them.
-    _boot(install)  # the retry: equal bytes and claims restore the names
+        _plain(install.clock().start())
+    assert _settled(install) == [("retrying", "publication_incomplete")]
+    assert install.stored() == seed.OWED and install.address.path.read_bytes() == seed.SEED_NOTE.encode("utf-8")
+    # The claim record still carries the earlier author's published names until host_seed's own commit lands.
+    half_rows = _rows(install, commits=True)
+    assert len(half_rows) == len(prior_rows) + 1 and half_rows[1:] == prior_rows
+    _assert_capture(half_rows[0], writer=knowledge.SEED_WRITER, initialization_id=init_id)
+
+    _boot(install)  # retry with unchanged bytes and claims: publication_bound_to_source commits host_seed's own row
     assert install.stored() == seed.WRITTEN and _held_by_wake(install) == [install.address]
-    newest = _rows(install, commits=True)[0]
-    assert knowledge_versions.is_claim_commit(newest) and newest["writer"] == knowledge.SEED_WRITER, \
-        "the restored publication is this source's own commit, not the earlier initialization's"
     rows = _rows(install, commits=True)
+    assert rows[1:] == half_rows
+    _assert_publication_pair(rows, writer=knowledge.SEED_WRITER, prior=prior_rows, initialization_id=init_id)
+    _assert_wake_holds(install)
+
     install.state.update_state(lambda st: st.update({seed.STATE_KEY: seed.OWED}))
     _boot(install)
     assert _rows(install, commits=True) == rows and install.stored() == seed.WRITTEN, \
         "an already published record adds no row"
+
     install.address.path.unlink()
     install.state.update_state(lambda st: st.update({seed.STATE_KEY: seed.OWED}))  # the outcome's record lost
-    _boot(install)  # the boot settles the debt itself: once published, the deletion stands
-    assert not install.address.path.exists() and install.stored() == seed.WRITTEN
+    _boot(install)  # the boot settles the debt itself: once published for this source, the deletion stands
+    assert not install.address.path.exists() and install.stored() == seed.WRITTEN and not _held_by_wake(install)
+    assert _rows(install, commits=True) == rows
+    _assert_seed_absent_to_readers(install)
 
 
 def test_a_start_reads_the_journal_once(install, monkeypatch):

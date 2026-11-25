@@ -1303,3 +1303,108 @@ test('a queued row\'s details say behind which work it stands only while it is l
     assert.deepEqual(behind(rowDetailLines({ ...row, settled: true })), [], 'an ended row');
     assert.deepEqual(behind(rowDetailLines({ ...row, confirmed: false })), [], 'an unconfirmed row');
 });
+
+test('an open room menu withdraws actions whose target changed under the same label while keeping unchanged commands actionable', async () => {
+    const posts = [];
+    const { prior, mount } = installDom(async (url, init) => {
+        if ((init?.method || 'GET') === 'POST') posts.push([String(url), init?.body ? JSON.parse(init.body) : null]);
+        return { ok: true, json: async () => ({ ok: true, status: 'completed', state: 'paused' }) };
+    });
+    const priorObserver = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class { observe() {} disconnect() {} takeRecords() { return []; } };
+    globalThis.window.innerWidth = 1024;
+    globalThis.window.setTimeout = setTimeout;
+    globalThis.window.clearTimeout = clearTimeout;
+    let shade = null;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge thinking', node('div', 'app-page-actions ui-chrome-group', header));
+        const messages = node('div', 'chat-messages', page);
+        const answeredWork = (pauseTarget, stopTargets) => work_({ activity_id: 'w-chain', chat_id: 1, kind: 'managed_task' }, {
+            name: 'Release follow-up', episode: { task_id: 's-latest', live: false }, outcome: 'completed', members: { ids: [] },
+            controls: [
+                { action: 'pause', target: pauseTarget },
+                ...stopTargets.map((target) => ({ action: 'stop', target, scope: 'cascade' })),
+            ],
+        });
+        let works = [answeredWork('p-1', ['p-1', 'p-2'])];
+        shade = createRoomWork({
+            page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { cancel() {}, scroll() {} },
+            works: () => workState(works, room('working')),
+            liveCardRecords: new Map(), pendingSubmissions: new Map(),
+        });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const more = () => list.children.find((el) => el.dataset.id === 'w-chain')?.querySelector('.rw-more');
+        const menu = () => document.body.querySelector('.task-control-menu');
+        const press = (el) => {
+            for (const fn of el.listeners.get('click') || []) fn({ stopPropagation() {}, target: el });
+        };
+        const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
+        const openMenu = async () => {
+            press(more());
+            await settle();
+            const portal = menu();
+            assert.ok(portal, 'room menu opened');
+            return portal;
+        };
+
+        trigger.click();
+        assert.equal(shade.isOpen(), true);
+
+        // Fresh state shifts Pause from p-1 to p-2 under the exact same labels (Pause, Stop now) and episode (s-latest):
+        // before repaint, pressing stale Pause dispatches nothing.
+        let portal = await openMenu();
+        assert.deepEqual(portal.querySelectorAll('[data-task-control]').map((item) => [item.dataset.taskControl, item.textContent]),
+            [['pause', 'Pause'], ['stop_now', 'Stop now']]);
+        works = [answeredWork('p-2', ['p-1', 'p-2'])];
+        press(portal.querySelector('[data-task-control="pause"]'));
+        await settle();
+        assert.deepEqual(posts, [], 'stale Pause whose target moved p-1 -> p-2 sends no control request');
+
+        // Same target shift on Pause (p-2 -> p-1) while Stop now keeps identical targets (['p-1', 'p-2']):
+        // before repaint, unchanged Stop now stays actionable on its recorded targets.
+        portal = await openMenu();
+        works = [answeredWork('p-1', ['p-1', 'p-2'])];
+        press(portal.querySelector('[data-task-control="stop_now"]'));
+        await settle();
+        assert.deepEqual(posts.map(([url]) => url), ['/api/tasks/p-1/cancel', '/api/tasks/p-2/cancel'],
+            'unchanged Stop now stays actionable on its exact targets');
+        posts.length = 0;
+
+        // Repaint with unchanged targets keeps the open portal mounted; repaint after Pause target changes under
+        // the same labels withdraws it immediately, and flapping back cannot revive the withdrawn menu.
+        portal = await openMenu();
+        shade.update();
+        assert.equal(menu(), portal, 'repaint with unchanged targets keeps the open menu mounted');
+        assert.equal(more().getAttribute('aria-expanded'), 'true');
+        works = [answeredWork('p-2', ['p-1', 'p-2'])];
+        shade.update();
+        assert.equal(menu(), null, 'repaint after Pause target change withdraws the stale portal');
+        assert.equal(more().getAttribute('aria-expanded'), 'false');
+        works = [answeredWork('p-1', ['p-1', 'p-2'])];
+        press(portal.querySelector('[data-task-control="pause"]'));
+        await settle();
+        assert.deepEqual(posts, [], 'withdrawn menu item cannot regain authority even if state flaps back');
+
+        // Reopening after withdrawal binds the current target (p-2), and with unchanged state Pause acts on p-2.
+        works = [answeredWork('p-2', ['p-1', 'p-2'])];
+        shade.update();
+        portal = await openMenu();
+        press(portal.querySelector('[data-task-control="pause"]'));
+        await settle();
+        assert.deepEqual(posts.map(([url]) => url), ['/api/tasks/p-2/pause'],
+            'reopened menu dispatches Pause to the fresh proven target p-2');
+    } finally {
+        shade?.destroy();
+        for (const toast of document.body.querySelectorAll('.toast')) toast.dispose?.();
+        globalThis.IntersectionObserver = priorObserver;
+        restoreDom(prior);
+    }
+});

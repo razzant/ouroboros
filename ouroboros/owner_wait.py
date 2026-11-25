@@ -49,35 +49,40 @@ _RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", 
 log = logging.getLogger(__name__)
 
 
-def classify_wake(entries: list[dict], quiz_id: str) -> str:
+def classify_wake(entries: list[dict], quiz_id: str, *, peer_question_id: str = "") -> str:
     """The typed cause of a wake; a wake is never an answer by default.
 
-    Closed vocabulary (TZ-2 B2): ``answer`` (this card), ``owner_text`` (the
-    owner's own words, or an answer to another card), ``hurry`` (the owner's
-    typed acceleration control: a request to finish sooner, never an answer),
-    ``mail:<task_id>`` (task mail, naming its sender; ``mail:unknown`` when it
-    names none), ``unknown`` (nothing observed); the callers add ``timeout``
-    and ``control:<reason>``.
-    Precedence: control, this card's answer, owner words, hurry, mail.
+    Closed vocabulary (TZ-2 B2): ``answer`` (this card, or the sender's answer
+    letter to this wait's peer question), ``owner_text`` (the owner's own words,
+    or an answer to another card), ``hurry`` (the owner's typed acceleration
+    control: a request to finish sooner, never an answer), ``mail:<task_id>``
+    (task mail, naming its sender; ``mail:unknown`` when it names none),
+    ``unknown`` (nothing observed); the callers add ``timeout`` and
+    ``control:<reason>``.
+    Precedence: control, this wait's answer, owner words, hurry, mail.
     """
     from ouroboros.owner_mailbox import (
         KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER,
         KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, KIND_OWNER_MODEL, passive_mail, place_arrival_wake, tier_only,
     )
+    from ouroboros.peer_letters import peer_question_id as _peer_qid, peer_reply_matches
 
+    peer_qid = peer_question_id or _peer_qid(quiz_id)
     entries = [row for row in entries if not (tier_only(row) or passive_mail(row))]
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
     if KIND_FINALIZE_NOW in kinds:
         return "control:finalize_now"
     if KIND_OWNER_PAUSE in kinds:
         return "control:owner_pause"
-    # This card's answer: ``quiz_answer:{asker}:{quiz}``, or saved ``quiz_answer:{quiz}`` mail.
+    # This card's answer (``quiz_answer:{asker}:{quiz}`` / ``quiz_answer:{quiz}``) or this peer question's reply.
     answers = [str(row.get("msg_id") or "") for kind, row in zip(kinds, entries) if kind == KIND_QUIZ_ANSWER]
-    if quiz_id and any(msg_id.startswith("quiz_answer:") and msg_id.rsplit(":", 1)[-1] == quiz_id
-                       for msg_id in answers):
+    if quiz_id and not peer_qid and any(msg_id.startswith("quiz_answer:") and msg_id.rsplit(":", 1)[-1] == quiz_id
+                                        for msg_id in answers):
         return "answer"
-    if any(kind == KIND_QUIZ_CLOSED and row.get("msg_id") == f"quiz_closed:{quiz_id}"
-           for kind, row in zip(kinds, entries)):
+    if peer_reply_matches(entries, peer_qid):
+        return "answer"
+    if quiz_id and not peer_qid and any(kind == KIND_QUIZ_CLOSED and row.get("msg_id") == f"quiz_closed:{quiz_id}"
+                                        for kind, row in zip(kinds, entries)):
         return "question_closed"
     if any(kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_CARD_INPUT} or row.get("work_reply") is True
            for kind, row in zip(kinds, entries)):
@@ -103,15 +108,19 @@ def _wait_entries(ctx: Any) -> list[dict]:
     )
 
 
-def _fresh_wake(ctx: Any, quiz_id: str, outcome: str) -> str:
+def _fresh_wake(ctx: Any, quiz_id: str, outcome: str, *, peer_question_id: str = "") -> str:
     """An owner answer can land while a pooled wait is awaiting capacity.
 
-    Owner authority (this card's answer, owner words, a control) replaces the
-    reason the resume was requested with; anything else replaces only
-    ``unknown``, so a bound that ended the wait keeps saying so.
+    Owner authority (this card's answer, owner words, a control) and the sender's
+    answer letter to this wait's peer question replace the reason the resume was
+    requested with; anything else replaces only ``unknown``, so a bound that ended
+    the wait keeps saying so. A peer question has no card that could close.
     """
+    from ouroboros.peer_letters import peer_question_id as _peer_qid
+
+    peer_qid = peer_question_id or _peer_qid(quiz_id)
     try:
-        observed = classify_wake(_wait_entries(ctx), quiz_id)
+        observed = classify_wake(_wait_entries(ctx), quiz_id, peer_question_id=peer_qid)
     except Exception:
         if outcome == "unknown":
             raise  # A failed refresh cannot establish a wake on its own.
@@ -119,7 +128,7 @@ def _fresh_wake(ctx: Any, quiz_id: str, outcome: str) -> str:
         return outcome
     if observed in {"answer", "owner_text", "control:finalize_now", "control:owner_pause"}:
         return observed
-    if _question_closed(ctx, {"quiz_id": quiz_id}):
+    if not peer_qid and _question_closed(ctx, {"quiz_id": quiz_id}):
         return "question_closed"
     return observed if outcome == "unknown" else outcome
 
@@ -335,9 +344,9 @@ def pause_resume_point(limit_ctx: Any, ctx: Any, *, delivery_candidate: bool = F
 def working_resume_point(state: dict) -> dict:
     """Derive the same pause program counter from an expanded working-checkpoint state."""
     working = state["working"]
-    return {**_resume_point(int(state.get("round_idx") or 0), list(working.get("pending_tool_call_ids") or []),
-                            selected=working.get("boundary") == "candidate",
-                            budget_tail=str(working.get("budget_tail") or "tool")),
+    round_idx = int(state.get("round_idx") or 0) + int(working.get("boundary") == "post_batch" and working.get("budget_tail") == "no_tool")
+    return {**_resume_point(round_idx, list(working.get("pending_tool_call_ids") or []),
+                            selected=working.get("boundary") == "candidate", budget_tail=str(working.get("budget_tail") or "tool")),
             "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
 
 
@@ -348,19 +357,28 @@ def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
 
     ``pause`` names the owner Pause a member parks WARM under (its fence id and
     generation, the critics it detached from): reason ``owner_pause``, woken by
-    that fence's release, never by ordinary mail.
+    that fence's release, never by ordinary mail. A letter root's ``ask_sender``
+    wait (``peer-question:<id>``) parks as ``owner`` with ``peer_question`` and no
+    card: its sender's answer letter is its answer.
     """
     wait_id = uuid.uuid4().hex
     sleep = getattr(ctx, "_model_sleep", None) if not (review_binding or pause) else None
-    reason = (REASON_OWNER_PAUSE_WARM if pause else "review" if review_binding
-              else ("sleep" if sleep else "owner"))
-    quiz_id = "" if (sleep or pause) else getattr(ctx, "_owner_wait_requested", "")
+    requested = "" if (sleep or pause or review_binding) else str(getattr(ctx, "_owner_wait_requested", "") or "")
+    peer_qid = requested.removeprefix("peer-question:") if requested.startswith("peer-question:") else ""
+    peer_raw = getattr(ctx, "_peer_question_wait", None) if peer_qid else None
+    peer_question = ({"question_id": peer_qid,
+                      "sender": str((peer_raw or {}).get("sender")
+                                    or ((getattr(ctx, "task_metadata", None) or {}).get("peer_letter") or {}).get("sender_label")
+                                    or "")} if peer_qid else None)
+    reason = REASON_OWNER_PAUSE_WARM if pause else "review" if review_binding else "sleep" if sleep else "owner"
+    quiz_id = "" if (sleep or pause or peer_question) else requested
     bound = {} if pause else _wait_bound_fields(ctx)
     state = {
         **continuation_state(ctx, messages, trace, usage, round_idx, tool_schemas, seen),
         "wait_id": wait_id, "quiz_id": quiz_id,
         **bound,
         "reason": reason, **({"sleep": dict(sleep)} if sleep else {}),
+        **({"peer_question": dict(peer_question)} if peer_question else {}),
         **({"owner_pause": dict(pause)} if pause else {}),
         "review_binding": review_binding,
     }
@@ -373,6 +391,7 @@ def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
         "reason": reason, **({"sleep": dict(sleep),
                                 "sleep_started_at": float(getattr(ctx, "_model_sleep_started", 0) or time.time())}
                                if sleep else {}),
+        **({"peer_question": dict(peer_question)} if peer_question else {}),
         **({"owner_pause": dict(pause)} if pause else {}),
         "review_binding": review_binding,
         # Date this wait independently of task lifetime; the stamp survives restart.
@@ -560,8 +579,9 @@ def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
                 if phase == "parked":
                     parked = True
                 elif phase == "resume_granted":
+                    peer_qid = str(((checkpoint or {}).get("peer_question") or {}).get("question_id") or "")
                     if checkpoint.get("reason") != REASON_OWNER_PAUSE_WARM:  # the Pause's own wake cause stands
-                        outcome = _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome)
+                        outcome = _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome, peer_question_id=peer_qid)
                     root = pathlib.Path(ctx.budget_drive_root or ctx.drive_root)
                     wait = (load_task_result(root, ctx.task_id, strict=True) or {}).get("owner_wait") or {}
                     if wait.get("wait_id") == checkpoint["wait_id"] and wait.get("state") == "resumed":
@@ -591,7 +611,8 @@ def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
             elif peek.pending(
                     pathlib.Path(ctx.drive_root), ctx.task_id,
                     set(getattr(ctx, "_loop_mailbox_seen_ids", set())), ctx.task_attempt or 1):
-                outcome = classify_wake(_wait_entries(ctx), str(checkpoint.get("quiz_id") or ""))
+                peer_qid = str(((checkpoint or {}).get("peer_question") or {}).get("question_id") or "")
+                outcome = classify_wake(_wait_entries(ctx), str(checkpoint.get("quiz_id") or ""), peer_question_id=peer_qid)
                 out_q.put({**identity, "phase": "resume", "resume_reason": outcome})
                 resume_requested = True
             elif deadline is not None and utc_now() >= deadline:
@@ -612,7 +633,7 @@ def _question_closed(ctx: Any, checkpoint: dict) -> bool:
     record only when its store signature (``write_seq``, ``updated_at``) changed.
     """
     quiz_id = str((checkpoint or {}).get("quiz_id") or "")
-    if not quiz_id or checkpoint.get("review_binding") or checkpoint.get("sleep"):
+    if not quiz_id or quiz_id.startswith("peer-question:") or checkpoint.get("review_binding") or checkpoint.get("sleep"):
         return False
     from ouroboros.owner_quiz import quiz_states
     from ouroboros.store import StoreError
@@ -950,8 +971,9 @@ def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
         # control only joins it. Re-checking admission here could re-park a stack that
         # is already resuming and hide it from the update drain (#2191).
         control_reason = str(control.control_reason() or "")
+    peer_qid = str(((checkpoint or {}).get("peer_question") or {}).get("question_id") or "")
     outcome = (f"control:{control_reason}" if control_reason else outcome if warm_pause else
-               _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome))
+               _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome, peer_question_id=peer_qid))
     # The current same wait, in one write: a settle tick's facts recorded meanwhile stay (#1562).
     set_owner_wait(root, ctx.task_id, lambda current: {**current, "state": "resumed", "resume_reason": outcome},
                    wait["wait_id"])
@@ -964,8 +986,9 @@ def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
 def announce_wait_ended(root: Any, task_id: str, quiz_id: str, chat_id: int) -> None:
     """A bound closed and the turn resumed: the card's projection and the live card both
     stop saying "waiting" while the question stays answerable. The direct lane calls it
-    here; the pool's supervisor grant calls the same two seams (best effort, never raises)."""
-    if not quiz_id:
+    here; the pool's supervisor grant calls the same two seams (best effort, never raises).
+    A peer question has no card, so it has nothing to say here."""
+    if not quiz_id or quiz_id.startswith("peer-question:"):
         return
     try:
         from ouroboros.owner_quiz import mark_wait_ended, quiz_states
@@ -1061,6 +1084,15 @@ def append_wake_notice(ctx: Any, checkpoint: dict, outcome: Any, messages: list)
     if checkpoint.get("review_binding") and (outcome in {"helper_result", "review_result", "timeout"} or outcome.startswith("run_question:")):
         from ouroboros.review_waiting import append_helper_notice
         append_helper_notice(ctx, messages)
+    from ouroboros.peer_letters import peer_question_id, peer_wait_notice
+
+    if checkpoint.get("reason") == "peer" or peer_question_id(checkpoint):
+        root = pathlib.Path(ctx.budget_drive_root or ctx.drive_root)
+        entries = _wait_entries(ctx) if outcome not in {"answer", "timeout", ""} and not outcome.startswith("control:") else []
+        woke = "the wait window closing" if outcome == "timeout" else _wake_description(outcome, entries)
+        if outcome and (notice := peer_wait_notice(root, ctx.task_id, checkpoint, outcome, woke)):
+            messages.append(notice)
+        return
     if checkpoint.get("review_binding") or not (
             outcome in {"timeout", "hurry", "unknown", "question_closed"} or outcome.startswith("mail")):
         return
@@ -1102,8 +1134,7 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
     if isinstance(sleep, dict) and sleep.get("mode") == "cold" and not review_binding:
         # A cold sleep ends this process at the next round boundary
         # (``budget_pause.enter_cold_sleep``), not in a warm park here.
-        ctx._owner_wait_requested = ""
-        ctx._owner_wait_deadline_at = ""
+        ctx._owner_wait_requested, ctx._owner_wait_deadline_at, ctx._peer_question_wait = "", "", None
         return
     callback = getattr(ctx, "owner_wait_callback", None)
     # Presence validates its own review/private question at this narrow seam;
@@ -1137,6 +1168,7 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
         outcome = callback(ctx, checkpoint)
         append_wake_notice(ctx, checkpoint, outcome, messages)
     ctx._owner_wait_requested, ctx._owner_wait_deadline_at, ctx._owner_wait_max_minutes = "", "", 0
+    ctx._peer_question_wait = None
     if callable(callback):
         model_sleep.announce_resumed(ctx, outcome)  # the same attempt prepares again, with no new start
 

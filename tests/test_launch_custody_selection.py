@@ -723,3 +723,107 @@ def test_the_exit_never_reports_completion_over_ledger_debt_it_could_not_count(t
     assert _owed(tmp_path, _PID)[0] == [_CHILD], "the ledger still names C"
     process_custody.reap_orphaned_processes(tmp_path, running_task_ids=set())  # the next start's sweep
     assert _CHILD not in rows, "the next start's sweep ends what the exit could not"
+
+
+# --------------------------------------------------------------------------- a forked task's kept launch
+
+
+_KERNEL_A, _KERNEL_B, _KERNEL_OTHER = ("darwin-start:1790000000.000001", "darwin-start:1790000000.000002",
+                                       "darwin-start:1790000001.000003")  # validated births of one kind
+
+
+def _forked_kept(tmp_path, monkeypatch, rows, kernel):
+    """A forked task's kept launches as ``record_process`` leaves them: each row in the fork drive's ledger, with its
+    leader's recorded kernel birth when the caller gives one, each record in the installation's ownership set, nothing
+    in the installation's own ledger. ``kernel``: the validated kernel birth each pid answers now (absent: unreadable);
+    the process table is controlled over ``rows``. No OS process is read or signalled."""
+    from ouroboros import owned_shutdown, process_custody, process_identity
+    from ouroboros.utils import append_jsonl
+
+    world = _controlled(tmp_path, monkeypatch, rows)
+    monkeypatch.setattr(process_identity, "process_kernel_birth", lambda pid: kernel.get(pid))
+    fork = tmp_path / "state" / "headless_tasks" / "producer" / "data"
+    process_custody.ledger_path(fork).parent.mkdir(parents=True)
+
+    def kept(marker, pid, name, birth):
+        row = {**_launch_row("producer", marker=marker, purpose=f"service:{name}", pid=pid), "scope": "session",
+               **({"kernel_birth": birth} if birth is not None else {})}
+        assert append_jsonl(process_custody.ledger_path(fork), row)
+        assert owned_shutdown.record_ledgered_process(fork, row)
+
+    world.kept = kept
+    return world
+
+
+@pytest.mark.parametrize("case", ["proven", "another birth", "birth unreadable", "older row", "set unreadable"])
+def test_a_worker_kill_spares_a_forked_kept_launch_only_by_its_leaders_kernel_birth(tmp_path, monkeypatch, case):
+    """The launch only the fork's ledger and the ownership set name is spared while its leader's recorded kernel birth
+    proves it; another validated birth on that pid is not spared and leaves nothing unknown; an unreadable birth or an
+    unreadable set spares nothing and says why (``blind``), which idle retirement defers on; a row an older release
+    wrote (no ``kernel_birth``) stays as it was, neither spared nor unknown."""
+    from ouroboros import launch_custody, owned_shutdown, process_census, process_custody
+
+    rows = {_PID: process_census._Row(_PID, 1, _PID, _OLD_BIRTH, 123.0, "alive", set())}
+    live = {"proven": _KERNEL_A, "another birth": _KERNEL_OTHER, "older row": _KERNEL_A, "set unreadable": _KERNEL_A}
+    world = _forked_kept(tmp_path, monkeypatch, rows, {_PID: live[case]} if case in live else {})
+    world.kept(_MARK_A, _PID, "page", None if case == "older row" else _KERNEL_A)
+    assert process_custody._read_ledger(tmp_path) == [], "the installation's own ledger names none of it"
+    if case == "set unreadable":
+        owned_shutdown.owned_processes_path(tmp_path).write_bytes(b"{torn")
+
+    spare = launch_custody.kept_service_spare(tmp_path)
+
+    assert spare.pids == ({_PID} if case == "proven" else set()), spare
+    assert bool(spare.blind) is (case in ("birth unreadable", "set unreadable")), spare
+    if case == "birth unreadable":
+        assert f"launch-{_HEX_A}" in spare.blind, spare
+    assert process_custody.live_kept_service_pids(tmp_path) == spare.pids
+    assert (world.signals, world.kills, world.native) == ([], [], []), "a spare signals nothing"
+
+
+@pytest.mark.parametrize("leader", ["proven", "another birth", "birth unreadable", "older row"])
+def test_panic_stamps_a_proven_kept_launch_and_ends_it_only_through_the_exits_record_stop(tmp_path, monkeypatch, leader):
+    """Panic over kept launches whose worker retired. One whose leader's kernel birth proves it is stamped first (no lock
+    wait), then ended by the exit's own record stop, never by a signal of Panic's own, and its end is confirmed by a
+    strict re-read of the set. A launch this process holds is left to its native owner: no stamp, no stop. Another
+    birth on that pid, an unreadable birth or an older row is no target: only the unreadable birth is named."""
+    from types import SimpleNamespace
+
+    from ouroboros import launch_custody, owned_shutdown, platform_layer, process_census, workspace_executor
+    from ouroboros.tools import services
+
+    rows = {_PID: process_census._Row(_PID, 1, _PID, _OLD_BIRTH, 123.0, "alive", set()),
+            _OTHER: process_census._Row(_OTHER, 1, _OTHER, _OLD_BIRTH, 123.0, "alive", set())}
+    live = {"proven": _KERNEL_A, "another birth": _KERNEL_OTHER, "older row": _KERNEL_A}
+    world = _forked_kept(tmp_path, monkeypatch, rows, {_OTHER: _KERNEL_B, **({_PID: live[leader]} if leader in live else {})})
+    world.kept(_MARK_A, _PID, "page", None if leader == "older row" else _KERNEL_A)
+    world.kept(_MARK_B, _OTHER, "held", _KERNEL_B)
+    monkeypatch.setattr(services, "_SERVICES", {"producer:held": SimpleNamespace(scope_marker=_MARK_B)})
+    monkeypatch.setattr(workspace_executor, "_SERVICES", {})
+    monkeypatch.setattr(launch_custody, "_PANIC_RECORD_STOP_SEC", _PATIENCE)  # a join returns once its pass is done
+    signal, stamped = platform_layer.deliver_signal, []
+
+    def first_signal(target, **kwargs):  # what the set says when the record stop's signal leaves
+        stamped.append({record["record_id"]: bool(record.get("stop_requested_at"))
+                        for record in owned_shutdown.owned_records(tmp_path, strict=True)})
+        return signal(target, **kwargs)
+
+    monkeypatch.setattr(platform_layer, "deliver_signal", first_signal)
+
+    outcome = launch_custody.panic_stop_kept(tmp_path)
+
+    assert world.kills == [] and world.native == [], "no group kill and no OS signal"
+    assert _OTHER in rows and all(target != _OTHER for target, _ in world.signals), "a held launch is its owner's"
+    records = {record["record_id"]: record for record in owned_shutdown.owned_records(tmp_path, strict=True)}
+    assert not records[f"launch-{_HEX_B}"].get("stop_requested_at")
+    if leader == "proven":
+        assert stamped[:1] == [{f"launch-{_HEX_A}": True, f"launch-{_HEX_B}": False}], stamped
+        assert _PID not in rows and f"launch-{_HEX_A}" not in records, "the record stop ended and retired it"
+        assert outcome == {"state": "completed", "requested": [f"launch-{_HEX_A}"], "unconfirmed": []}, outcome
+        return
+    assert stamped == [] and _PID in rows and outcome["requested"] == [], outcome
+    assert not records[f"launch-{_HEX_A}"].get("stop_requested_at"), "no stamp without a proven leader"
+    if leader == "birth unreadable":
+        assert outcome["state"] == "unknown" and f"launch-{_HEX_A}" in outcome["note"], outcome
+    else:
+        assert outcome == {"state": "completed", "requested": [], "unconfirmed": []}, outcome

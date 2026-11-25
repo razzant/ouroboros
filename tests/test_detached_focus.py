@@ -180,7 +180,7 @@ def test_handed_off_root_publishes_through_every_real_consumer(pooled, host):
     assert row["status"] == "running" and row["direct_chat"] is False and row["focus"]["text"] == text
     assert text in render_roster_note(independent_roots(host.root))
     [work] = [work for work in live_works_present(host.root)["works"] if work["task_id"] == TASK_ID]
-    assert work["last_line"] == text
+    assert work["focus"]["text"] == text
     # The owner's card, composed as /api/state composes it.
     owners, facts = [], {}
     _chat_activities_snapshot_safe(host.root, decision_owners=owners, work_facts=facts)

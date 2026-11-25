@@ -948,3 +948,835 @@ def test_no_resume_causes_are_untouched_by_the_continuation_seam():
 def test_receipt_lines_tolerate_partial_rows(cause):
     line = continuation._receipt_line(frozenset({"run-1"}), {"carrier": "native", "cause": cause})
     assert line.startswith("try None (?): native after " + cause) and "model unattested" in line
+
+
+# ---------------------------------------------------------------------------
+# Pre-admission continuation_superseded durable settlement (Part A)
+# ---------------------------------------------------------------------------
+
+
+_PROVEN_ENGINE_VERSION = "6.3.0"
+_PROVEN_ENGINE_SHA = "0ff3df717c2e807fdbd3a233487e35d81993fdea"
+
+
+def _continuation_superseded_problem(pred_run_id: str, head_run_id: str = "run-other-head", **extra):
+    context = {"runId": pred_run_id, "head": head_run_id, **extra.pop("context_extra", {})}
+    return {"code": "continuation_superseded", "message": f"{pred_run_id} already continued by {head_run_id}",
+            "retryable": False, "context": context, **extra}
+
+
+def _make_continuation_engine(
+    tmp_path, *, store="store-a", lookup=True, seed_projects=True,
+    engine_version=_PROVEN_ENGINE_VERSION, engine_sha=_PROVEN_ENGINE_SHA,
+):
+    import httpx
+    from ouroboros.config import CLAUDEXOR_PROTOCOL_MAJOR
+    from tests._delegated_transport_shared import Engine
+
+    class _ContinuationEngine(Engine):
+        def __init__(self):
+            super().__init__(tmp_path, store=store, lookup=lookup)
+            self.projects = [{"id": "prj-existing", "root": self.root}] if seed_projects else []
+            self.deleted_projects, self.thread_turns, self.lookup_gaps = [], [], set()
+            self.thread_refusal = self.on_before_create_response = self.create_raw_response = self.on_lookup = None
+            self.thread_head = self.thread_root = ""
+
+        def _lookup(self, request, key, path):
+            if self.on_lookup is not None:
+                self.on_lookup(key, path)
+            if key in self.lookup_gaps:
+                thread = path.split("/")[3] if path.startswith("/v2/threads/") else ""
+                self.lookups.append((thread or "run", key, json.loads(request.read())))
+                return httpx.Response(200, json={"status": "not_found", "storeId": self.store})
+            return super()._lookup(request, key, path)
+
+        def __call__(self, request):
+            path, method = request.url.path, request.method
+            if path == "/v2/handshake":
+                self.paths.append((method, path))
+                eng = {"version": engine_version, **({"sha": engine_sha} if engine_sha is not None else {})}
+                return httpx.Response(200, json={"protocolMajor": CLAUDEXOR_PROTOCOL_MAJOR, "compatible": True,
+                                                 "engine": eng, **self._named(request)})
+            if path == "/v2/agent-capabilities":
+                self.paths.append((method, path))
+                return httpx.Response(200, json={"modes": ["ask", "agent", "plan"], "runControlKeys": ["continueFrom"],
+                                                 "harnesses": [{
+                                                     "id": "some-route", "enabled": True, "status": self.health,
+                                                     "accessProfilesSupported": ["readonly", "workspace_write"]}]})
+            if path == "/v2/projects" and method == "GET":
+                self.paths.append((method, path))
+                return httpx.Response(200, json={"projects": list(self.projects)})
+            if path == "/v2/projects" and method == "POST":
+                self.paths.append((method, path))
+                root = str(json.loads(request.read())["root"])
+                existing = next((row for row in self.projects if row["root"] == root), None)
+                if existing is not None:
+                    return httpx.Response(200, json={"id": existing["id"], "created": False, "root": root,
+                                                     **self._named(request)})
+                pid = f"prj-created-{len(self.projects) + 1}"
+                self.projects.append({"id": pid, "root": root})
+                return httpx.Response(200, json={"id": pid, "created": True, "root": root, **self._named(request)})
+            if (path.startswith("/v2/projects/") and method == "DELETE") or path.endswith("/release"):
+                self.paths.append((method, path))
+                self.deleted_projects.append((method, path))
+                return httpx.Response(200, json={"state": "released"})
+            if path == "/v2/threads" and method == "POST":
+                self.paths.append((method, path))
+                self.thread_root = str((json.loads(request.read()).get("scope") or {}).get("root") or "")
+                return httpx.Response(200, json={"id": "thr-plan-1", **self._named(request)})
+            if path == "/v2/threads/thr-plan-1" and method == "GET":
+                self.paths.append((method, path))
+                return httpx.Response(200, json={"thread": {"id": "thr-plan-1", "headRunId": self.thread_head,
+                                                            "repoRoot": self.thread_root}})
+            if path.startswith("/v2/threads/") and path.endswith("/turns") and method == "POST":
+                self.paths.append((method, path))
+                key, sent = request.headers.get("Idempotency-Key"), json.loads(request.read())
+                self.thread_turns.append((key, sent))
+                if self.thread_refusal is not None:
+                    return httpx.Response(self.thread_refusal[0], json=self.thread_refusal[1])
+                job = self._held(key) or self.accept(key, sent, run=True)
+                self.thread_head = str(self.commands[job]["run"] or "")
+                return httpx.Response(200, json={"jobId": job, "runId": self.commands[job]["run"], "turnId": "turn-1",
+                                                 **self._named(request)})
+            if path == "/v2/runs" and method == "POST":
+                self.paths.append((method, path))
+                self.store, self.replace_at_post = self.replace_at_post or self.store, ""
+                key, sent = request.headers.get("Idempotency-Key"), json.loads(request.read())
+                self.creates.append((key, self.store, sent))
+                if self.on_before_create_response is not None:
+                    hook, self.on_before_create_response = self.on_before_create_response, None
+                    hook(key, sent)
+                if self.create_raw_response is not None:
+                    return self.create_raw_response
+                if self.create_refusal is not None:
+                    status, body = (self.create_refusal(key, sent) if callable(self.create_refusal)
+                                    else self.create_refusal)
+                    return httpx.Response(status, json=body)
+                job = self._held(key) or self.accept(key, sent, run=not self.queue_runs)
+                if self.on_accept is not None:
+                    hook, self.on_accept = self.on_accept, None
+                    hook(job)
+                if self.lose:
+                    self.lose -= 1
+                    raise httpx.ConnectError("the reply was lost after the POST was accepted")
+                return httpx.Response(200, json={"jobId": job, "runId": self.commands[job]["run"], "runDir": "/tmp/run",
+                                                 **self._named(request)})
+            return super().__call__(request)
+
+    return _ContinuationEngine()
+
+
+def _bind_engine(tmp_path, monkeypatch, engine, *, acting=False, task_id=None):
+    from ouroboros.gateways import claudexor as gw
+
+    _select_transport_access(monkeypatch, None if acting else "readonly")
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(tmp_path / "snap_root"))
+    monkeypatch.setattr(gw, "ClaudexorGateway", lambda *_a, **_k: engine.gateway())
+    custody._CUSTODY.clear()
+    return _delegating_ctx(tmp_path, acting=acting, task_id=task_id or f"t-nanny-{'write' if acting else 'read'}")
+
+
+def _seed_continued_engine(tmp_path, monkeypatch, name="", *, acting=False, task_id=None, mode=None, **engine_kw):
+    from ouroboros.tools import delegate
+
+    case_dir = tmp_path / name if name else tmp_path
+    case_dir.mkdir(parents=True, exist_ok=True)
+    engine = _make_continuation_engine(case_dir, **engine_kw)
+    ctx = _bind_engine(case_dir, monkeypatch, engine, acting=acting, task_id=task_id)
+    start_kw = {"mode": mode} if mode is not None else {}
+    pred_id = json.loads(delegate._delegate_start(ctx, "seed", max_seconds=120, **start_kw).text)["run_id"]
+    _settle(case_dir, pred_id, ctx.task_id)
+    return case_dir, engine, ctx, pred_id
+
+
+def test_pre_admission_continuation_superseded_settles_readonly_continuation_durably(tmp_path, monkeypatch):
+    from ouroboros import (
+        delegate_custody_current as current,
+        delegate_invocation as inv,
+        delegate_pending as pending,
+        delegate_recovery as recovery,
+    )
+    from ouroboros.gateways.claudexor_observation import canonical_request_digest
+    from ouroboros.subagent_bootstrap import _startup_refusal_definite
+    from ouroboros.tools import delegate
+
+    case_dir, engine, ctx, pred_id = _seed_continued_engine(tmp_path, monkeypatch)
+    in_guard, body_reads_in_guard, guard_calls = [False], [], []
+    real_body, real_guard = pending.request_body, continuation.can_settle_pre_admission_rejection
+
+    def spy_body(*a, **k):
+        if in_guard[0]:
+            body_reads_in_guard.append(a)
+        return real_body(*a, **k)
+
+    def spy_guard(*a, **k):
+        in_guard[0] = True
+        try:
+            ok = real_guard(*a, **k)
+            guard_calls.append(ok)
+            return ok
+        finally:
+            in_guard[0] = False
+
+    monkeypatch.setattr(pending, "request_body", spy_body)
+    monkeypatch.setattr(continuation, "can_settle_pre_admission_rejection", spy_guard)
+    engine.create_refusal = (409, _continuation_superseded_problem(pred_id, "run-other-head"))
+    refusal = json.loads(delegate._delegate_start(
+        ctx, "continue inspection", max_seconds=120, continue_from=pred_id).text)
+    iid, _store, sent_body = engine.creates[-1]
+
+    assert guard_calls == [True] and body_reads_in_guard == []
+    assert refusal["ok"] is False and refusal["status"] == "refused"
+    assert refusal["reason"] == continuation.REFUSAL_SUPERSEDED
+    assert refusal["start_rejected_before_admission"] is True
+    assert refusal["continuation_of"] == pred_id and refusal["superseded_by_head"] == "run-other-head"
+    assert refusal["project_retired"] is False
+    assert "pending_invocation_id" not in refusal and "retry_hint" not in refusal
+    assert "definitely_unrun" not in refusal and _startup_refusal_definite(refusal) is False
+
+    rows = custody.custody_rows(case_dir)
+    assert [r for r in rows if r.get("type") == custody.START_UNSENT and r.get("invocation_id") == iid] == []
+    failed_rows = [r for r in rows if r.get("type") == custody.START_FAILED and r.get("invocation_id") == iid]
+    assert len(failed_rows) == 1
+    row = failed_rows[0]
+    assert row["definite"] is True and row["pre_admission_rejected"] is True and row["start_sent"] is True
+    assert row["reason"] == continuation.REFUSAL_SUPERSEDED and row["status_code"] == 409
+    assert row["continuation_of"] == pred_id and row["superseded_by_head"] == "run-other-head"
+    assert row["daemon_store_id"] == "store-a" and row["request_digest"] == canonical_request_digest(sent_body)
+    assert row["engine_version"] == _PROVEN_ENGINE_VERSION and row["engine_build_sha"] == _PROVEN_ENGINE_SHA
+
+    custody._CUSTODY.clear()
+    assert custody.invocation_record(case_dir, iid)["state"] == "failed_definite"
+    assert inv.invocation_record(case_dir, iid, rows=rows)["state"] == "failed_definite"
+    assert custody.pending_invocations(case_dir) == []
+    assert pending.pending_invocations(case_dir, rows=rows) == []
+    assert recovery.unsettled_start_ids(case_dir, ctx.task_id)["pending_invocation_ids"] == []
+    assert recovery.unsettled_start_ids(case_dir, ctx.task_id, rows=rows)["pending_invocation_ids"] == []
+    folded = current.fold(rows)
+    assert f"invocation:{iid}" not in folded["open"] and iid in folded["refused"]
+
+    replayed = custody.replay(case_dir)
+    assert "run-other-head" not in replayed
+    assert replayed[pred_id].patch_disposed == "" and replayed[pred_id].superseded_by == ""
+
+    creates_before_retry = len(engine.creates)
+    retry = json.loads(delegate._delegate_start(ctx, "", retry_of=iid).text)
+    assert retry["ok"] is False and retry["reason"] == "invocation_definitely_refused"
+    assert len(engine.creates) == creates_before_retry
+
+
+def test_pre_admission_continuation_superseded_keeps_snapshots_and_owes_owned_registration(tmp_path, monkeypatch):
+    from ouroboros.delegate_custody_current import owed_registrations
+    from ouroboros.subagent_worktrees import find_execution_snapshot
+    from ouroboros.tools import delegate
+
+    # 1. Non-persistent newly created registration on readonly continuation: no eager DELETE, OWED duty kept.
+    ro_dir = tmp_path / "ro"
+    ro_dir.mkdir()
+    ro_engine = _make_continuation_engine(ro_dir, seed_projects=False)
+    ro_ctx = _bind_engine(ro_dir, monkeypatch, ro_engine, acting=False, task_id="t-ro")
+    _seed(ro_dir, "run-ro-pred", task_id="t-ro", root_task_id="t-root")
+    ro_engine.create_refusal = (409, _continuation_superseded_problem("run-ro-pred", "run-ro-head"))
+    ro_refusal = json.loads(delegate._delegate_start(
+        ro_ctx, "continue readonly", max_seconds=120, continue_from="run-ro-pred").text)
+    assert ro_refusal["start_rejected_before_admission"] is True and ro_refusal["project_retired"] is False
+    assert ro_refusal["project_id"].startswith("prj-created-")
+    assert ro_refusal["project_retention_reason"] == "continuation_head_may_share_registration"
+    assert ro_engine.deleted_projects == []
+    assert any(duty.get("project_id") == ro_refusal["project_id"] for duty in owed_registrations(ro_dir))
+    assert custody.pending_invocations(ro_dir) == []
+
+    # 2. Same-snapshot mutating continuation: clears CONTINUATION_PENDING and leaves predecessor snapshot intact.
+    before_snaps = _snapshot_count()
+    mut_dir, mut_engine, mut_ctx, pred_id = _seed_continued_engine(
+        tmp_path, monkeypatch, "mut", acting=True, task_id="t-mut", seed_projects=False)
+    pred = custody.replay(mut_dir)[pred_id]
+    assert _snapshot_count() == before_snaps + 1
+
+    mut_engine.create_refusal = (409, _continuation_superseded_problem(pred_id, "run-mut-head"))
+    same_snap = json.loads(delegate._delegate_start(
+        mut_ctx, "continue in snapshot", max_seconds=120, continue_from=pred_id).text)
+    assert same_snap["start_rejected_before_admission"] is True and "pending_invocation_id" not in same_snap
+    assert mut_engine.deleted_projects == []
+    assert _snapshot_count() == before_snaps + 1 and find_execution_snapshot(pred.snapshot_id) is not None
+    assert pathlib.Path(pred.execution_root).exists()
+    custody._CUSTODY.clear()
+    pred_after = custody.replay(mut_dir)[pred_id]
+    assert pred_after.patch_disposed == "" and pred_after.superseded_by == ""
+    assert "CONTINUATION_PENDING" not in continuation.disposition_refusal(mut_dir, pred_after)
+
+    # 3. Fresh-snapshot mutating continuation (predecessor already disposed): fresh snapshot stays intact too.
+    assert custody.emit(mut_dir, custody.PATCH_DISPOSED, {
+        "run_id": pred_id, "task_id": mut_ctx.task_id, "snapshot_id": pred.snapshot_id, "disposition": "rejected"})
+    custody._CUSTODY.clear()
+    fresh_refusal = json.loads(delegate._delegate_start(
+        mut_ctx, "continue in fresh snapshot", max_seconds=120, continue_from=pred_id).text)
+    fresh_rec = custody.invocation_record(mut_dir, mut_engine.creates[-1][0])
+    assert fresh_refusal["start_rejected_before_admission"] is True and fresh_rec["state"] == "failed_definite"
+    assert fresh_rec["snapshot_id"] and fresh_rec["snapshot_id"] != pred.snapshot_id
+    assert _snapshot_count() == before_snaps + 2 and find_execution_snapshot(fresh_rec["snapshot_id"]) is not None
+    assert pathlib.Path(fresh_rec["execution_root"]).exists() and mut_engine.deleted_projects == []
+
+
+def test_pre_admission_continuation_superseded_admitted_failed_job_stays_on_accepted_recovery(tmp_path, monkeypatch):
+    from ouroboros.tools import delegate
+
+    case_dir, engine, ctx, pred_id = _seed_continued_engine(tmp_path, monkeypatch)
+
+    def admit_and_refuse(key, sent):
+        problem = _continuation_superseded_problem(pred_id, "run-other-head", jobId="job-admitted", state="failed")
+        engine.accept(key, sent, run=False, state="failed", problem=problem)
+        return 409, problem
+
+    engine.create_refusal = admit_and_refuse
+    result = json.loads(delegate._delegate_start(ctx, "continue", max_seconds=120, continue_from=pred_id).text)
+    iid = engine.creates[-1][0]
+    assert result["status"] == "started" and result["run_id"]
+    assert custody.invocation_record(case_dir, iid)["state"] == "started"
+    assert custody.pending_invocations(case_dir) == []
+
+
+@pytest.mark.parametrize("mode", [
+    "unbound_possession", "lookup_refused", "lookup_unavailable", "lookup_unsupported",
+    "in_place_store_replaced",
+])
+def test_pre_admission_continuation_superseded_stays_unknown_on_possession_lookup_or_store_gap(
+        tmp_path, monkeypatch, mode):
+    from ouroboros import delegate_accepted
+    from ouroboros.tools import delegate
+
+    case_dir, engine, ctx, pred_id = _seed_continued_engine(
+        tmp_path, monkeypatch, mode, lookup=mode != "lookup_unsupported")
+    if mode == "unbound_possession":
+        engine.create_refusal = lambda key, sent: (
+            engine.accept(key, sent, run=True, state="failed"),
+            (409, _continuation_superseded_problem(pred_id, "run-other-head")),
+        )[1]
+        monkeypatch.setattr(delegate_accepted, "bind_started",
+                            lambda *_a, **_k: delegate_accepted.Bound(None, False, False))
+    else:
+        engine.create_refusal = (409, _continuation_superseded_problem(pred_id, "run-other-head"))
+        if mode == "lookup_refused":
+            engine.answer = (409, _continuation_superseded_problem(pred_id, "run-other-head"))
+        elif mode == "lookup_unavailable":
+            engine.answer = (503, {"code": "daemon_busy", "message": "busy", "retryable": True})
+        elif mode == "in_place_store_replaced":
+            engine.replace_at_post = "store-b"
+
+    payload = json.loads(delegate._delegate_start(ctx, "continue", max_seconds=120, continue_from=pred_id).text)
+    iid = engine.creates[-1][0]
+    assert payload["ok"] is False and payload["pending_invocation_id"] == iid
+    assert "start_rejected_before_admission" not in payload
+    assert custody.invocation_record(case_dir, iid)["state"] == "pending"
+    assert [row["invocation_id"] for row in custody.pending_invocations(case_dir)] == [iid]
+    assert [r for r in custody.custody_rows(case_dir)
+            if r.get("type") == custody.START_FAILED and r.get("invocation_id") == iid
+            and r.get("definite") is True] == []
+
+
+def test_pre_admission_continuation_superseded_stays_unknown_on_empty_store_rotated_descriptor_retry_thread_or_lookup_gap(
+        tmp_path, monkeypatch):
+    from ouroboros import delegate_accepted
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.tools import delegate
+
+    # 1. Empty handshake store identity -> stays unknown.
+    empty_dir, eng_empty, ctx_empty, pred_empty = _seed_continued_engine(tmp_path, monkeypatch, "empty_store", store="")
+    eng_empty.create_refusal = (409, _continuation_superseded_problem(pred_empty, "run-head-e"))
+    res_empty = json.loads(delegate._delegate_start(ctx_empty, "continue", max_seconds=120, continue_from=pred_empty).text)
+    assert res_empty["pending_invocation_id"] and custody.invocation_record(
+        empty_dir, res_empty["pending_invocation_id"])["state"] == "pending"
+
+    # 2. Descriptor rotated during POST -> stays unknown.
+    rot_dir, eng_rot, ctx_rot, pred_rot = _seed_continued_engine(tmp_path, monkeypatch, "rotated")
+    eng_rot.on_before_create_response = lambda _k, _s: pathlib.Path(
+        eng_rot.endpoint.descriptor_path).write_text('{"rotated": true}', encoding="utf-8")
+    eng_rot.create_refusal = (409, _continuation_superseded_problem(pred_rot, "run-head-r"))
+    res_rot = json.loads(delegate._delegate_start(ctx_rot, "continue", max_seconds=120, continue_from=pred_rot).text)
+    assert res_rot["pending_invocation_id"] and custody.invocation_record(
+        rot_dir, res_rot["pending_invocation_id"])["state"] == "pending"
+
+    # 3. Replay (retry_of, recovering=True) that actually re-POSTs and gets 409 -> stays unknown.
+    retry_dir, eng_retry, ctx_retry, pred_retry = _seed_continued_engine(tmp_path, monkeypatch, "retry")
+    eng_retry.lose = 1
+    seed_iid = json.loads(delegate._delegate_start(
+        ctx_retry, "continue", max_seconds=120, continue_from=pred_retry).text)["pending_invocation_id"]
+    orig_row = next(r for r in custody.custody_rows(retry_dir)
+                    if r.get("type") == custody.START_REQUESTED and r.get("invocation_id") == seed_iid)
+    orig_body = custody.invocation_record(retry_dir, seed_iid)["request"]
+    retry_iid = "inv-retry-409"
+    retry_fields = {k: v for k, v in orig_row.items()
+                    if k not in ("ts", "type", "event_id", "custody_ordinal", "request", "request_ref", "invocation_id")}
+    assert custody.record_start_requested(
+        retry_dir, **{**retry_fields, "invocation_id": retry_iid, "daemon_store_id": "store-a",
+                      "handshake_store_id": "store-a", "store_identity_unproven": False, "request": orig_body})
+    creates_before = len(eng_retry.creates)
+    eng_retry.create_refusal = (409, _continuation_superseded_problem(pred_retry, "run-head-retry"))
+    replayed_res = json.loads(delegate._delegate_start(ctx_retry, "", retry_of=retry_iid).text)
+    assert len(eng_retry.creates) == creates_before + 1
+    assert replayed_res["ok"] is False and replayed_res["pending_invocation_id"] == retry_iid
+    assert "start_rejected_before_admission" not in replayed_res
+    assert custody.invocation_record(retry_dir, retry_iid)["state"] == "pending"
+
+    # 4. Thread/plan continuation (POST /v2/threads/:id/turns) receiving 409 -> stays unknown.
+    plan_dir, eng_plan, ctx_plan, plan_pred = _seed_continued_engine(tmp_path, monkeypatch, "plan", mode="plan")
+    eng_plan.thread_refusal = (409, _continuation_superseded_problem(plan_pred, "run-head-plan"))
+    plan_res = json.loads(delegate._delegate_start(
+        ctx_plan, "continue plan", max_seconds=120, continue_from=plan_pred, mode="plan").text)
+    assert len(eng_plan.thread_turns) == 2 and plan_res["ok"] is False and plan_res["pending_invocation_id"]
+    assert eng_plan.thread_turns[-1][1]["mode"] == "plan"
+    assert "start_rejected_before_admission" not in plan_res
+    assert custody.invocation_record(plan_dir, plan_res["pending_invocation_id"])["state"] == "pending"
+
+    # 5. Historical pending continuation + same-store lookup gap (earlier accepted command remains
+    #    intact in engine.commands, lookup explicitly returns not_found): never settles without live
+    #    proof, never binds the unlooked-up run, and retry_of sends no second POST.
+    gap_dir, eng_gap, ctx_gap, pred_gap = _seed_continued_engine(tmp_path, monkeypatch, "lookup_gap")
+    eng_gap.lose = 1
+    lost_iid = json.loads(delegate._delegate_start(
+        ctx_gap, "continue", max_seconds=120, continue_from=pred_gap).text)["pending_invocation_id"]
+    accepted_before = {job: dict(row) for job, row in eng_gap.commands.items() if row["key"] == lost_iid}
+    assert len(accepted_before) == 1
+    accepted_run_id = next(iter(accepted_before.values()))["run"]
+    eng_gap.lookup_gaps.add(lost_iid)
+    gw_gap = eng_gap.gateway()
+    try:
+        untagged_409 = ClaudexorUnavailable("continuation_superseded", "historical", status_code=409)
+        held, read = delegate_accepted.accepted_after_refusal(gap_dir, gw_gap, lost_iid, untagged_409)
+        assert held is None and read["lookup"] == "not_found" and read["store_id"] == "store-a"
+        assert continuation.settle_pre_admission_continuation_rejection(
+            gap_dir, task_id=ctx_gap.task_id, root_task_id="t-root", invocation_id=lost_iid,
+            gateway=gw_gap, exc=untagged_409, accepted_read=read,
+            request_body=custody.invocation_record(gap_dir, lost_iid)["request"],
+        ) is None
+    finally:
+        gw_gap.close()
+    creates_before_gap_retry = len(eng_gap.creates)
+    gap_retry = json.loads(delegate._delegate_start(ctx_gap, "", retry_of=lost_iid).text)
+    assert gap_retry["ok"] is False and gap_retry["pending_invocation_id"] == lost_iid
+    assert len(eng_gap.creates) == creates_before_gap_retry
+    assert custody.invocation_record(gap_dir, lost_iid)["state"] == "pending"
+    assert accepted_run_id not in custody.replay(gap_dir)
+    assert {job: dict(row) for job, row in eng_gap.commands.items() if row["key"] == lost_iid} == accepted_before
+
+
+def test_pre_admission_continuation_reducer_guard_refuses_races_risk_choice_drift_or_lock_failure(
+        tmp_path, monkeypatch):
+    from ouroboros import (
+        delegate_custody_current as current,
+        delegate_invocation as inv,
+        delegate_pending as pending,
+        store,
+    )
+    from ouroboros.gateways.claudexor_observation import canonical_request_digest
+    from ouroboros.observability import write_blob
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools import delegate
+
+    # 1. Competing STARTED arrives AFTER own lookup returned not_found AND AFTER off-lock
+    #    binding prep (right before BEGIN IMMEDIATE): reducer guard fires, refuses settlement,
+    #    keeps bound run, predecessor, and root task result intact.
+    race_dir, eng_race, ctx_race, pred_race = _seed_continued_engine(tmp_path, monkeypatch, "race_started")
+    seed_result(race_dir, "t-root", {"task_id": "t-root", "root_task_id": "t-root", "status": "running", "note": "keep"})
+    eng_race.create_refusal = (409, _continuation_superseded_problem(pred_race, "run-other-head"))
+    race_guard_calls = []
+    real_prepare = continuation.prepare_pre_admission_rejection_binding
+    real_guard = continuation.can_settle_pre_admission_rejection
+
+    def inject_started_after_prepare(drive_root, event):
+        prepared = real_prepare(drive_root, event)
+        if prepared is not None:
+            assert custody.record_started(race_dir, custody.RunCustody(
+                run_id="run-won-after-lookup", task_id=ctx_race.task_id, root_task_id="t-root",
+                route_id=ROUTE, model="m", invocation_id=event["invocation_id"],
+                continuation_of=pred_race, daemon_store_id="store-a"))
+        return prepared
+
+    def spy_race_guard(txn, event, *, verified=None):
+        ok = real_guard(txn, event, verified=verified)
+        race_guard_calls.append((event["invocation_id"], ok))
+        return ok
+
+    monkeypatch.setattr(continuation, "prepare_pre_admission_rejection_binding", inject_started_after_prepare)
+    monkeypatch.setattr(continuation, "can_settle_pre_admission_rejection", spy_race_guard)
+    res_race = json.loads(delegate._delegate_start(ctx_race, "continue", max_seconds=120, continue_from=pred_race).text)
+    monkeypatch.setattr(continuation, "prepare_pre_admission_rejection_binding", real_prepare)
+    monkeypatch.setattr(continuation, "can_settle_pre_admission_rejection", real_guard)
+    race_iid = eng_race.creates[-1][0]
+    assert len(eng_race.lookups) == 1
+    assert race_guard_calls == [(race_iid, False)]
+    assert res_race["ok"] is False and "start_rejected_before_admission" not in res_race
+    assert [r for r in custody.custody_rows(race_dir)
+            if r.get("type") == custody.START_FAILED and r.get("invocation_id") == race_iid
+            and r.get("definite") is True] == []
+    with store.open_store(race_dir, write=False) as txn:
+        assert txn.get_row("custody_refused", race_iid) is None
+    assert custody.invocation_record(race_dir, race_iid)["state"] == "started"
+    assert custody.invocation_record(race_dir, race_iid)["run_id"] == "run-won-after-lookup"
+    assert pred_race in custody.replay(race_dir) and "run-won-after-lookup" in custody.replay(race_dir)
+    assert load_task_result(race_dir, "t-root")["note"] == "keep"
+
+    # 2. Concurrent START_RISK_ACCEPTED (Resume risk choice) lands during POST -> refuses settlement.
+    risk_dir, eng_risk, ctx_risk, pred_risk = _seed_continued_engine(tmp_path, monkeypatch, "race_risk")
+
+    def accept_risk_before_409(key, _sent):
+        seed_result(risk_dir, "t-root", {
+            "task_id": "t-root", "root_task_id": "t-root", "status": "paused",
+            "owner_pause": {"fence_id": "f-1"}, "budget_pause": {"pause_id": "p-1", "state": "paused"}})
+        seed_result(risk_dir, ctx_risk.task_id, {
+            "task_id": ctx_risk.task_id, "root_task_id": "t-root", "status": "paused",
+            "budget_pause": {"pause_id": "p-1", "state": "paused"}})
+        choice_id = f"delegate_start:t-root/{ctx_risk.task_id}/{key}"
+        assert custody.emit(risk_dir, custody.START_RISK_ACCEPTED, {
+            "root_task_id": "t-root", "task_id": ctx_risk.task_id, "invocation_id": key,
+            "choice_id": choice_id, "resuming_task_id": ctx_risk.task_id,
+            "decision": {"choice_id": choice_id, "fence_id": "f-1", "pause_id": "p-1",
+                         "root_task_id": "t-root", "task_id": ctx_risk.task_id, "invocation_id": key,
+                         "resuming_task_id": ctx_risk.task_id, "by": {"actor": "owner"}, "reason": "resume"}})
+
+    eng_risk.on_before_create_response = accept_risk_before_409
+    eng_risk.create_refusal = (409, _continuation_superseded_problem(pred_risk, "run-other-head"))
+    res_risk = json.loads(delegate._delegate_start(ctx_risk, "continue", max_seconds=120, continue_from=pred_risk).text)
+    risk_iid = eng_risk.creates[-1][0]
+    assert len(eng_risk.creates) == 2 and res_risk["pending_invocation_id"] == risk_iid
+    risk_rec = custody.invocation_record(risk_dir, risk_iid)
+    assert risk_rec["state"] == "pending" and risk_rec.get("resume_decisions")
+
+    # 3. Replay parity across fold, invocation_record(rows=...), and pending_invocations(rows=...).
+    synth_rows = [
+        {"type": custody.START_REQUESTED, "event_id": "e1", "invocation_id": "inv-p", "task_id": "t-a",
+         "root_task_id": "t-a", "continuation_of": "run-pred", "request": {"prompt": "x", "continueFrom": "run-pred"}},
+        {"type": custody.START_RISK_ACCEPTED, "event_id": "e2", "invocation_id": "inv-p", "task_id": "t-a",
+         "root_task_id": "t-a", "resuming_task_id": "t-a", "decision": {"choice_id": "c1"}},
+        {"type": custody.START_FAILED, "event_id": "e3", "invocation_id": "inv-p", "task_id": "t-a",
+         "root_task_id": "t-a", "definite": True, "pre_admission_rejected": True,
+         "start_sent": True, "reason": continuation.REFUSAL_SUPERSEDED},
+    ]
+    assert inv.invocation_record(tmp_path, "inv-p", rows=synth_rows)["state"] == "pending"
+    assert [r["invocation_id"] for r in pending.pending_invocations(tmp_path, rows=synth_rows)] == ["inv-p"]
+    synth_fold = current.fold(synth_rows)
+    assert "invocation:inv-p" in synth_fold["open"] and "inv-p" not in synth_fold["refused"]
+
+    # 4. Off-lock binding prep, producer allowlist, unreadable CAS blob, review row, and source identity drift.
+    guard_dir = tmp_path / "guard"
+    guard_dir.mkdir()
+    body = {"prompt": "continue", "continueFrom": "run-g-pred", "access": "readonly", "mode": "ask"}
+    assert custody.record_start_requested(
+        guard_dir, invocation_id="inv-guard", task_id="t-a", root_task_id="t-a", idempotency_key="k-1",
+        continuation_of="run-g-pred", handshake_store_id="store-a", daemon_store_id="",
+        store_identity_unproven=True, request=body)
+    good_event = {
+        "type": custody.START_FAILED, "run_id": "", "task_id": "t-a", "root_task_id": "t-a",
+        "invocation_id": "inv-guard", "idempotency_key": "k-1", "wire_idempotency_key": "inv-guard",
+        "reason": continuation.REFUSAL_SUPERSEDED, "status_code": 409, "definite": True,
+        "pre_admission_rejected": True, "start_sent": True, "continuation_of": "run-g-pred",
+        "superseded_by_head": "run-g-head", "daemon_store_id": "store-a",
+        "request_digest": canonical_request_digest(body),
+        "engine_version": _PROVEN_ENGINE_VERSION, "engine_build_sha": _PROVEN_ENGINE_SHA,
+    }
+    prepared = continuation.prepare_pre_admission_rejection_binding(guard_dir, good_event)
+    assert prepared is not None
+    assert continuation.prepare_pre_admission_rejection_binding(guard_dir, {**good_event, "request_digest": "0" * 64}) is None
+    assert continuation.prepare_pre_admission_rejection_binding(guard_dir, {**good_event, "engine_version": "3.2.0"}) is None
+    with store.open_store(guard_dir, write=False) as txn:
+        assert continuation.can_settle_pre_admission_rejection(txn, good_event) is False  # verified binding required
+        assert continuation.can_settle_pre_admission_rejection(txn, {**good_event, "daemon_store_id": "store-b"}, verified=prepared) is False
+        assert continuation.can_settle_pre_admission_rejection(txn, {**good_event, "superseded_by_head": "inv-guard"}, verified=prepared) is False
+        assert continuation.can_settle_pre_admission_rejection(txn, {**good_event, "engine_build_sha": "0" * 40}, verified=prepared) is False
+        assert continuation.can_settle_pre_admission_rejection(txn, good_event, verified=prepared) is True
+
+    # Source identity drift between off-lock prepare and commit closes nothing.
+    drifted_ref = write_blob(guard_dir, {**body, "prompt": "drifted"}, kind="json")
+
+    def drift_before_commit(drive_root, event):
+        binding = real_prepare(drive_root, event)
+        assert binding is not None
+        with store.open_store(guard_dir, write=True) as wtxn:
+            open_row = wtxn.get_row("custody_open", "invocation:inv-guard")
+            inv_row = wtxn.get_row(inv.INVOCATIONS, "inv-guard")
+            open_row["request"]["request_ref"] = dict(drifted_ref)
+            inv_row["request"]["request_ref"] = dict(drifted_ref)
+            wtxn.put_row("custody_open", "invocation:inv-guard", open_row)
+            wtxn.put_row(inv.INVOCATIONS, "inv-guard", inv_row)
+        return binding
+
+    monkeypatch.setattr(continuation, "prepare_pre_admission_rejection_binding", drift_before_commit)
+    assert custody.emit(guard_dir, custody.START_FAILED, good_event) is False
+    monkeypatch.setattr(continuation, "prepare_pre_admission_rejection_binding", real_prepare)
+    assert custody.invocation_record(guard_dir, "inv-guard")["state"] == "pending"
+    with store.open_store(guard_dir, write=False) as txn:
+        assert txn.get_row("custody_open", "invocation:inv-guard") is not None
+        assert txn.get_row("custody_refused", "inv-guard") is None
+
+    # Tampered/missing CAS blob and review-owned row both refuse settlement.
+    assert custody.emit(guard_dir, custody.START_REQUESTED, {
+        "invocation_id": "inv-bad-blob", "task_id": "t-a", "root_task_id": "t-a", "idempotency_key": "k-bad",
+        "continuation_of": "run-g-pred", "handshake_store_id": "store-a", "daemon_store_id": "",
+        "store_identity_unproven": True,
+        "request_ref": {"sha256": "f" * 64, "kind": "json", "encoding": "gzip", "size": 12},
+    })
+    bad_blob_event = {**good_event, "invocation_id": "inv-bad-blob", "wire_idempotency_key": "inv-bad-blob",
+                      "idempotency_key": "k-bad"}
+    assert continuation.prepare_pre_admission_rejection_binding(guard_dir, bad_blob_event) is None
+    assert custody.emit(guard_dir, custody.START_FAILED, bad_blob_event) is False
+    assert custody.record_start_requested(
+        guard_dir, invocation_id="inv-rev", task_id="t-a", root_task_id="t-a", idempotency_key="k-rev",
+        continuation_of="run-g-pred", handshake_store_id="store-a", daemon_store_id="",
+        store_identity_unproven=True, source="review_substrate_triad", request=body)
+    rev_event = {**good_event, "invocation_id": "inv-rev", "wire_idempotency_key": "inv-rev", "idempotency_key": "k-rev"}
+    rev_prepared = continuation.prepare_pre_admission_rejection_binding(guard_dir, rev_event)
+    assert rev_prepared is not None
+    with store.open_store(guard_dir, write=False) as txn:
+        assert continuation.can_settle_pre_admission_rejection(txn, rev_event, verified=rev_prepared) is False
+
+    # 5. Lock unavailable falls back cleanly to pending/unknown.
+    lock_dir, eng_lock, ctx_lock, pred_lock = _seed_continued_engine(tmp_path, monkeypatch, "lock_busy")
+    eng_lock.create_refusal = (409, _continuation_superseded_problem(pred_lock, "run-lock-head"))
+    real_lock = custody.actor_decision_lock
+    busy_claims = []
+
+    def fail_lock_on_second(_root, _task_id, **_kw):
+        if len(eng_lock.creates) >= 2:
+            busy_claims.append(_task_id)
+            raise custody.ActorDecisionLockUnavailable({"reason": "contention"}, 20.0)
+        return real_lock(_root, _task_id, **_kw)
+
+    monkeypatch.setattr(custody, "actor_decision_lock", fail_lock_on_second)
+    res_lock = json.loads(delegate._delegate_start(ctx_lock, "continue", max_seconds=120, continue_from=pred_lock).text)
+    lock_iid = eng_lock.creates[-1][0]
+    assert ctx_lock.task_id in busy_claims and res_lock["pending_invocation_id"] == lock_iid
+    assert "start_rejected_before_admission" not in res_lock
+    monkeypatch.setattr(custody, "actor_decision_lock", real_lock)
+    assert custody.invocation_record(lock_dir, lock_iid)["state"] == "pending"
+
+
+def _seed_queued_job_predecessor(tmp_path, monkeypatch, name, *, bind_canonical=True, store="store-a", lookup=True):
+    from ouroboros import delegate_custody_current as current
+    from ouroboros.tools import delegate
+
+    case_dir = tmp_path / name
+    case_dir.mkdir(parents=True, exist_ok=True)
+    engine = _make_continuation_engine(case_dir, store=store, lookup=lookup)
+    engine.queue_runs, engine.lose = True, 1
+    ctx = _bind_engine(case_dir, monkeypatch, engine, acting=False, task_id=f"t-{name}")
+    lost = json.loads(delegate._delegate_start(ctx, "seed queued", max_seconds=120).text)
+    pred_iid = lost["pending_invocation_id"]
+    custody._CUSTODY.clear()
+    recovered = json.loads(delegate._delegate_start(ctx, "", retry_of=pred_iid).text)
+    assert recovered["status"] == "started" and recovered["run_id"] == "job-1"
+    job_id = recovered["run_id"]
+    canonical_id = engine.bind_run(job_id, state="succeeded") if bind_canonical else ""
+    _settle(case_dir, job_id, ctx.task_id, state="succeeded")
+    assert current.run(case_dir, job_id).daemon_store_id == store
+    if canonical_id:
+        assert current.run(case_dir, canonical_id) is None
+    return case_dir, engine, ctx, pred_iid, job_id, canonical_id
+
+
+def test_pre_admission_continuation_superseded_proves_queued_job_to_canonical_run_alias_in_same_store(
+        tmp_path, monkeypatch):
+    from ouroboros import (
+        delegate_custody_current as current,
+        delegate_invocation as inv,
+        delegate_pending as pending,
+    )
+    from ouroboros.gateways.claudexor_observation import canonical_request_digest
+    from ouroboros.subagent_bootstrap import _startup_refusal_definite
+    from ouroboros.tools import delegate
+
+    case_dir, engine, ctx, pred_iid, job_id, canonical_id = _seed_queued_job_predecessor(
+        tmp_path, monkeypatch, "job_alias_ok")
+    assert canonical_id == "run-1"
+    in_guard, body_reads_in_guard, guard_calls = [False], [], []
+    real_body, real_guard = pending.request_body, continuation.can_settle_pre_admission_rejection
+
+    def spy_body(*a, **k):
+        if in_guard[0]:
+            body_reads_in_guard.append(a)
+        return real_body(*a, **k)
+
+    def spy_guard(*a, **k):
+        in_guard[0] = True
+        try:
+            ok = real_guard(*a, **k)
+            guard_calls.append(ok)
+            return ok
+        finally:
+            in_guard[0] = False
+
+    monkeypatch.setattr(pending, "request_body", spy_body)
+    monkeypatch.setattr(continuation, "can_settle_pre_admission_rejection", spy_guard)
+    engine.create_refusal = (409, _continuation_superseded_problem(canonical_id, "run-other-head"))
+    paths_before = len(engine.paths)
+    refusal = json.loads(delegate._delegate_start(
+        ctx, "continue queued predecessor", max_seconds=120, continue_from=job_id).text)
+    cont_iid, _store, sent_body = engine.creates[-1]
+
+    assert sent_body["continueFrom"] == job_id
+    assert guard_calls == [True] and body_reads_in_guard == []
+    assert not any(m == "GET" and p.startswith("/v2/runs/") for m, p in engine.paths[paths_before:])
+    assert [key for _kind, key, _sent in engine.lookups[-2:]] == [cont_iid, pred_iid]
+    assert refusal["ok"] is False and refusal["status"] == "refused"
+    assert refusal["reason"] == continuation.REFUSAL_SUPERSEDED
+    assert refusal["start_rejected_before_admission"] is True
+    assert refusal["continuation_of"] == job_id and refusal["predecessor_canonical_run_id"] == canonical_id
+    assert refusal["superseded_by_head"] == "run-other-head"
+    assert "pending_invocation_id" not in refusal and "definitely_unrun" not in refusal
+    assert _startup_refusal_definite(refusal) is False
+
+    rows = custody.custody_rows(case_dir)
+    failed_rows = [r for r in rows if r.get("type") == custody.START_FAILED and r.get("invocation_id") == cont_iid]
+    assert len(failed_rows) == 1
+    row = failed_rows[0]
+    assert row["definite"] is True and row["pre_admission_rejected"] is True and row["start_sent"] is True
+    assert row["continuation_of"] == job_id and row["predecessor_canonical_run_id"] == canonical_id
+    assert row["superseded_by_head"] == "run-other-head" and row["daemon_store_id"] == "store-a"
+    assert row["request_digest"] == canonical_request_digest(sent_body)
+    custody._CUSTODY.clear()
+    assert custody.invocation_record(case_dir, cont_iid)["state"] == "failed_definite"
+    assert inv.invocation_record(case_dir, cont_iid, rows=rows)["state"] == "failed_definite"
+    assert custody.pending_invocations(case_dir) == []
+    assert f"invocation:{cont_iid}" not in current.fold(rows)["open"] and cont_iid in current.fold(rows)["refused"]
+    creates_before_retry = len(engine.creates)
+    retry = json.loads(delegate._delegate_start(ctx, "", retry_of=cont_iid).text)
+    assert retry["ok"] is False and retry["reason"] == "invocation_definitely_refused"
+    assert len(engine.creates) == creates_before_retry
+
+
+def test_pre_admission_continuation_superseded_refuses_unproven_job_alias_cases(tmp_path, monkeypatch):
+    from ouroboros import delegate_accepted, store
+    from ouroboros.gateways.claudexor_observation import canonical_request_digest
+    from ouroboros.tools import delegate
+
+    def assert_stays_pending(case_dir, engine, refusal):
+        iid = engine.creates[-1][0]
+        assert refusal["ok"] is False and refusal["pending_invocation_id"] == iid
+        assert "start_rejected_before_admission" not in refusal
+        assert custody.invocation_record(case_dir, iid)["state"] == "pending"
+        assert [r for r in custody.custody_rows(case_dir)
+                if r.get("type") == custody.START_FAILED and r.get("invocation_id") == iid
+                and r.get("definite") is True] == []
+
+    # 1. Unrelated context.runId on a direct run-id predecessor stays unknown.
+    unrel_dir, eng_unrel, ctx_unrel, pred_unrel = _seed_continued_engine(tmp_path, monkeypatch, "alias_unrelated")
+    eng_unrel.create_refusal = (409, _continuation_superseded_problem("run-unrelated", "run-head-u"))
+    res_unrel = json.loads(delegate._delegate_start(
+        ctx_unrel, "continue", max_seconds=120, continue_from=pred_unrel).text)
+    assert_stays_pending(unrel_dir, eng_unrel, res_unrel)
+
+    # 2. Queued job still without a bound canonical runId (similar ID shape job-1 vs run-1) stays unknown.
+    unbound_dir, eng_unbound, ctx_unbound, _piid, job_unbound, _ = _seed_queued_job_predecessor(
+        tmp_path, monkeypatch, "alias_still_null", bind_canonical=False)
+    eng_unbound.create_refusal = (409, _continuation_superseded_problem("run-1", "run-head-n"))
+    res_unbound = json.loads(delegate._delegate_start(
+        ctx_unbound, "continue", max_seconds=120, continue_from=job_unbound).text)
+    assert_stays_pending(unbound_dir, eng_unbound, res_unbound)
+
+    # 3. Queued job whose canonical runId is run-1, but 409 reports a different run-2, stays unknown.
+    wrong_dir, eng_wrong, ctx_wrong, _piid, job_wrong, _canon = _seed_queued_job_predecessor(
+        tmp_path, monkeypatch, "alias_wrong_canon")
+    eng_wrong.create_refusal = (409, _continuation_superseded_problem("run-2", "run-head-w"))
+    res_wrong = json.loads(delegate._delegate_start(
+        ctx_wrong, "continue", max_seconds=120, continue_from=job_wrong).text)
+    assert_stays_pending(wrong_dir, eng_wrong, res_wrong)
+
+    # 4. Missing durable predecessor invocation record (hand-seeded row without START_REQUESTED) stays unknown.
+    noinv_dir = tmp_path / "alias_no_inv"
+    noinv_dir.mkdir()
+    eng_noinv = _make_continuation_engine(noinv_dir)
+    ctx_noinv = _bind_engine(noinv_dir, monkeypatch, eng_noinv, acting=False, task_id="t-noinv")
+    _seed(noinv_dir, "job-seeded", task_id="t-noinv", root_task_id="t-root", daemon_store_id="store-a")
+    eng_noinv.create_refusal = (409, _continuation_superseded_problem("run-seeded", "run-head-s"))
+    res_noinv = json.loads(delegate._delegate_start(
+        ctx_noinv, "continue", max_seconds=120, continue_from="job-seeded").text)
+    assert_stays_pending(noinv_dir, eng_noinv, res_noinv)
+
+    # 5. Predecessor lookup returns not_found while GET /v2/runs/job-1 would return 200 without storeId:
+    #    never falls back to GET /v2/runs/:id 200 as alias proof.
+    get200_dir, eng_get200, ctx_get200, piid_get200, job_get200, canon_get200 = _seed_queued_job_predecessor(
+        tmp_path, monkeypatch, "alias_no_get200")
+    eng_get200.lookup_gaps.add(piid_get200)
+    eng_get200.create_refusal = (409, _continuation_superseded_problem(canon_get200, "run-head-g"))
+    paths_before = len(eng_get200.paths)
+    res_get200 = json.loads(delegate._delegate_start(
+        ctx_get200, "continue", max_seconds=120, continue_from=job_get200).text)
+    assert_stays_pending(get200_dir, eng_get200, res_get200)
+    assert not any(m == "GET" and p.startswith("/v2/runs/") for m, p in eng_get200.paths[paths_before:])
+
+    # 6. Descriptor rotates during the predecessor alias lookup -> post-lookup generation re-check rejects.
+    rot_dir, eng_rot, ctx_rot, piid_rot, job_rot, canon_rot = _seed_queued_job_predecessor(
+        tmp_path, monkeypatch, "alias_rotated_lookup")
+    eng_rot.on_lookup = lambda key, _path: (
+        pathlib.Path(eng_rot.endpoint.descriptor_path).write_text('{"rotated": true}', encoding="utf-8")
+        if key == piid_rot else None
+    )
+    eng_rot.create_refusal = (409, _continuation_superseded_problem(canon_rot, "run-head-rot"))
+    res_rot = json.loads(delegate._delegate_start(
+        ctx_rot, "continue", max_seconds=120, continue_from=job_rot).text)
+    assert_stays_pending(rot_dir, eng_rot, res_rot)
+
+    # 7. Store mismatch or unbound store on predecessor custody never proves an alias.
+    other_dir, eng_other, _ctx_other, _piid_other, job_other, canon_other = _seed_queued_job_predecessor(
+        tmp_path, monkeypatch, "alias_other_store", store="store-b")
+    store_a_dir = other_dir / "store_a_gw"
+    store_a_dir.mkdir()
+    eng_store_a = _make_continuation_engine(store_a_dir, store="store-a")
+    gw_other, gw_store_a = eng_other.gateway(), eng_store_a.gateway()
+    try:
+        assert delegate_accepted.prove_job_run_alias(
+            other_dir, gw_other, job_other, canon_other, store_id="store-a") is False
+        assert delegate_accepted.prove_job_run_alias(
+            other_dir, gw_store_a, job_other, canon_other, store_id="store-a") is False
+        _seed(other_dir, "job-unbound-store", task_id="t-unbound", invocation_id="inv-unbound-store", daemon_store_id="")
+        assert delegate_accepted.prove_job_run_alias(
+            other_dir, gw_store_a, "job-unbound-store", "run-unbound-store", store_id="store-a") is False
+    finally:
+        gw_other.close()
+        gw_store_a.close()
+
+    # 8. Reducer guard rejects forged/missing predecessor custody or malformed predecessor_canonical_run_id.
+    g_dir = tmp_path / "alias_guard"
+    g_dir.mkdir()
+    body = {"prompt": "continue", "continueFrom": "job-g", "access": "readonly", "mode": "ask"}
+    assert custody.record_start_requested(
+        g_dir, invocation_id="inv-ag", task_id="t-a", root_task_id="t-a", idempotency_key="k-ag",
+        continuation_of="job-g", handshake_store_id="store-a", daemon_store_id="",
+        store_identity_unproven=True, request=body)
+    alias_event = {
+        "type": custody.START_FAILED, "run_id": "", "task_id": "t-a", "root_task_id": "t-a",
+        "invocation_id": "inv-ag", "idempotency_key": "k-ag", "wire_idempotency_key": "inv-ag",
+        "reason": continuation.REFUSAL_SUPERSEDED, "status_code": 409, "definite": True,
+        "pre_admission_rejected": True, "start_sent": True, "continuation_of": "job-g",
+        "predecessor_canonical_run_id": "run-g", "superseded_by_head": "run-g-head",
+        "daemon_store_id": "store-a", "request_digest": canonical_request_digest(body),
+        "engine_version": _PROVEN_ENGINE_VERSION, "engine_build_sha": _PROVEN_ENGINE_SHA,
+    }
+    prepared = continuation.prepare_pre_admission_rejection_binding(g_dir, alias_event)
+    assert prepared is not None
+    assert continuation.prepare_pre_admission_rejection_binding(
+        g_dir, {**alias_event, "predecessor_canonical_run_id": "job-g"}) is None
+    assert continuation.prepare_pre_admission_rejection_binding(
+        g_dir, {**alias_event, "predecessor_canonical_run_id": "run-g-head"}) is None
+    assert continuation.prepare_pre_admission_rejection_binding(
+        g_dir, {**alias_event, "predecessor_canonical_run_id": ""}) is None
+    with store.open_store(g_dir, write=False) as txn:
+        assert continuation.can_settle_pre_admission_rejection(txn, alias_event, verified=prepared) is False  # no pred row
+    _seed(g_dir, "job-g", task_id="t-a", invocation_id="inv-pred-g", daemon_store_id="store-b")
+    with store.open_store(g_dir, write=False) as txn:
+        assert continuation.can_settle_pre_admission_rejection(txn, alias_event, verified=prepared) is False  # wrong store
+    _seed(g_dir, "job-g-ok", task_id="t-a", invocation_id="inv-pred-ok", daemon_store_id="store-a")
+    body_ok = {**body, "continueFrom": "job-g-ok"}
+    assert custody.record_start_requested(
+        g_dir, invocation_id="inv-ag-ok", task_id="t-a", root_task_id="t-a", idempotency_key="k-ag-ok",
+        continuation_of="job-g-ok", handshake_store_id="store-a", daemon_store_id="",
+        store_identity_unproven=True, request=body_ok)
+    ok_event = {**alias_event, "invocation_id": "inv-ag-ok", "idempotency_key": "k-ag-ok",
+                "wire_idempotency_key": "inv-ag-ok", "continuation_of": "job-g-ok",
+                "request_digest": canonical_request_digest(body_ok)}
+    ok_prepared = continuation.prepare_pre_admission_rejection_binding(g_dir, ok_event)
+    assert ok_prepared is not None
+    with store.open_store(g_dir, write=False) as txn:
+        assert continuation.can_settle_pre_admission_rejection(txn, ok_event, verified=ok_prepared) is True
+        assert continuation.can_settle_pre_admission_rejection(
+            txn, {**ok_event, "predecessor_canonical_run_id": "run-drifted"}, verified=ok_prepared) is False

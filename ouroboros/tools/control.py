@@ -292,7 +292,7 @@ def _finish_task_entry() -> ToolEntry:
             "A full window is not such a limit: after a real size refusal the host can renew this same task's view from its exact record, keeping its custody and budget; an irreducible or non-shrinking view, or an excess a directly required handbook alone causes, can still refuse. "
             "A root's stop records unfinished work for explicit Continue under the same limits (a reached deadline or money limit refuses it): your human's Continue or a later focus's continue_task starts a new root that reads this one, with a root's work room, also when this is a chat turn; continue_in_background keeps this same turn and its work room. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
             "Ending closes this task's browser, task-session connections and services not kept alive, and any link they serve; when your work can go on only after your human's act or choice, a live root asks with escalate (wait_for_answer=true) before ending. "
-            "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride with the finish; read other results first. On a self-started run (a wake or a schedule-born root without a place), or a turn answering its place or a program's note, silent=true sends no message (any answer stays your internal note). No answer is needed; a host notice may still be owed. Silence is refused while your human awaits a reply and changes no result, review or control.",
+            "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride with the finish; read other results first. Where this finish owes no one words (a wake, a schedule-born root without a place, a turn answering its place or a program's note, a letter's own root, a root whose live message already answered its human), silent=true sends no message (any answer stays your internal note). No answer is needed; a host notice may still be owed. Silence is refused while your human awaits a reply and changes no result, review or control.",
         "parameters": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
             "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
@@ -455,8 +455,8 @@ def get_tools() -> List[ToolEntry]:
             "name": "send_user_message",
             "description": "Reach the owner while work continues: an opening that says what I will check and why, "
                            "a substantial interim result they need now, a non-blocking question or an invitation to "
-                           "collaborate. Do not pre-send a duplicate of the final answer: it already reaches this work's "
-                           "answer room. A needed owner decision uses escalate: its card shows options, stays listed "
+                           "collaborate. Send the final answer here only if work goes on after it; the finish may then "
+                           "be silent. A needed owner decision uses escalate: its card shows options, stays listed "
                            "as waiting and brings the answer here. This tool sends a normal reply in this work's room, "
                            "calls the owner back and leaves work running; routine news goes on update_focus, later "
                            "progress stays in the card. For Presence work that room is local, not the place conversation: "

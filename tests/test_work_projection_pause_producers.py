@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 from tests.test_owner_pause import _live_tree, _owner_park
 
@@ -571,3 +573,227 @@ def test_an_ordinary_pending_start_lists_no_roster_row(tmp_path, monkeypatch):
     assert not any(row["task_id"] == "root-1" for row in roster["roots"]), "its completed root is not a live root"
     _census, snapshot = _snapshot(tmp_path)
     assert all(work["work_id"] != "root-1" for work in snapshot["works"])
+
+
+def test_an_answered_continue_with_its_predecessors_accepted_start_open_keeps_that_stop_and_says_its_own_outcome(
+        tmp_path, monkeypatch):
+    """The earlier episode failed with an accepted start nobody has settled; its Continue was admitted and answered.
+    The work's episode is that answered Continue, so its card is the one the owner reads, and the word is that
+    episode's own, never the failed one's. The open start keeps the single Stop its custody owner holds; an unbound
+    start alone offers no Pause, keeping the addressed Stop confirmation intact."""
+    from ouroboros.gateway import work_projection
+    from ouroboros.owner_continue import binding_sha
+    from ouroboros.task_results import write_task_result
+    from tests._owner_pause_ended_helpers import _decide, _pending, _snapshot, _tail_tree
+
+    def accepted(root):
+        assert _decide(root, _pending(root, "child-dead", "lost"))
+
+    _tail_tree(tmp_path, monkeypatch, root_status="failed", tail=accepted, chat_id=41)
+    [before] = _snapshot(tmp_path)[1]["works"]
+    assert (before["episode"], before["outcome"]) == ({"task_id": "root-1", "live": False}, "failed")
+
+    binding = {"verb": "continue", "predecessor_task_id": "root-1", "successor_task_id": "root-1-c",
+               "action_nonce": "nonce-1234"}
+    write_task_result(tmp_path, "root-1", "failed", chat_id=41, continued_by={
+        "successor_task_id": "root-1-c", "action_nonce": "nonce-1234", "binding": binding,
+        "binding_sha256": binding_sha(binding), "state": "admitted"})
+    write_task_result(tmp_path, "root-1-c", "completed", chat_id=41, root_task_id="root-1-c", delegation_role="root",
+                      continuation_admission={"binding": binding, "binding_sha256": binding_sha(binding)},
+                      metadata={"continuation": {"predecessor_task_id": "root-1"}})
+    work_projection._RESULTS.clear()  # the batch read of the tail roots sees the new records
+    _, snapshot = _snapshot(tmp_path)
+    [answered] = snapshot["works"]
+    assert (answered["work_id"], answered["episode"], answered["outcome"], answered["unbound_start"]) == (
+        "root-1", {"task_id": "root-1-c", "live": False}, "completed", True)
+    assert answered["controls"] == [{"action": "stop", "target": "root-1", "scope": "cascade"}]
+    assert snapshot["works_complete"] is True and snapshot["works_gaps"] == [], snapshot["works_gaps"]
+
+
+def test_the_same_writer_wait_refreshes_its_resume_check_only_after_publication(tmp_path, monkeypatch):
+    """A separate ordinary run settles, while an earlier read-only request still has no outcome."""
+    from ouroboros import delegate_custody as dc
+    from ouroboros.work_stop import hold_fact
+    from supervisor.continuation_admission import release_settled_continuations
+    from tests.test_continue_independent_review import _rows
+    from tests.test_resume_attempt_history import _settle_leaf, _work
+    from tests.test_successor_start_choice import LOST, PRED, _held_continue
+
+    queue, workers, successor = _held_continue(tmp_path, monkeypatch, before=lambda root: _rows(root, review=False))
+    row = next(item for item in workers.PENDING if item["id"] == successor)
+    before = hold_fact(row)
+    assert {b.get("run_id") or b.get("invocation_id") for b in before["blockers"]} == {"run-leaf", LOST}
+    resume = {"action": "resume", "target": successor}
+    assert resume not in _work(tmp_path, successor)["controls"]
+    _settle_leaf(tmp_path)
+
+    reasons, publish = [], queue.publish_queue_snapshot
+
+    def refuse_first_change(reason=""):
+        reasons.append(reason)
+        if reason == "continuation_writer_evidence_changed" and reasons.count(reason) == 1:
+            return False
+        return publish(reason=reason)
+
+    monkeypatch.setattr(queue, "publish_queue_snapshot", refuse_first_change)
+    assert release_settled_continuations(PRED) == []
+    assert hold_fact(row) == before and resume not in _work(tmp_path, successor)["controls"]
+    assert set(reasons) == {"continuation_writer_evidence_changed", "continuation_writer_evidence_withdrawn"}
+
+    assert release_settled_continuations(PRED) == []
+    after = hold_fact(row)
+    blocker, = after["blockers"]
+    assert (blocker["invocation_id"], blocker["stop_outcome"]) == (LOST, "pending_invocation_unbound")
+    assert {**after, "blockers": before["blockers"]} == before, "same wait, not a new decision or generation"
+    assert resume in _work(tmp_path, successor)["controls"]
+    assert not dc.invocation_record(tmp_path, LOST).get("resume_decisions")
+    assert successor not in workers.RUNNING, "an offer to check does not select or dispatch"
+
+    published = reasons.copy()
+    assert release_settled_continuations(PRED) == []
+    assert reasons == published and hold_fact(row) == after, "unchanged evidence needs no publication"
+
+
+@pytest.mark.parametrize("case", ["at-limit", "too-long", "cycle", "unreadable"])
+def test_the_ended_work_projection_uses_the_admission_episode_bound_and_names_the_gap(case):
+    from ouroboros.owner_continue import WORK_CHAIN_MAX_HOPS, binding_sha
+    from tests._work_projection_shared import work_fields
+
+    first, limit = "episode-0", WORK_CHAIN_MAX_HOPS
+    ids = [f"episode-{i}" for i in range(limit + (case in {"too-long", "unreadable"}))]
+    records = {ep: {"task_id": ep, "chat_id": 41, "status": "completed"} for ep in ids}
+    successors = ids[1:] + ([first] if case == "cycle" else [])
+    for predecessor, successor in zip(ids, successors):
+        binding = {"verb": "continue", "predecessor_task_id": predecessor, "successor_task_id": successor,
+                   "action_nonce": "nonce-1234"}
+        recorded = {"binding": binding, "binding_sha256": binding_sha(binding)}
+        records[predecessor]["continued_by"] = {**recorded, "successor_task_id": successor,
+                                             "action_nonce": "nonce-1234", "state": "admitted"}
+        records[successor]["continuation_admission"] = recorded
+    if case == "unreadable":
+        del records[ids[-1]]
+
+    projected = work_fields([], results=records, held={first: ["run-open"]})
+    [work] = projected["works"]
+    assert work["work_id"] == first and work["episode"] == {"task_id": ids[limit - 1], "live": False}
+    pause = {"action": "pause", "target": first}
+    stop = {"action": "stop", "target": first, "scope": "cascade"}
+    # Both Stop controls would govern only `first`, whether the latest episode's outcome is proven or not: drop the
+    # duplicate `stop_earlier`, keep the earlier root's Pause for its proven ordinary run, and invent no later target.
+    assert work["controls"] == [pause, stop]
+    if case == "at-limit":
+        assert work["outcome"] == "completed" and projected["works_gaps"] == []
+    else:
+        gap, named = {"too-long": ("episode_chain_depth_exceeded", ids[-1]),
+                      "cycle": ("episode_chain_cycle", first),
+                      "unreadable": ("episode_record_unavailable", ids[-1])}[case]
+        assert "outcome" not in work, "the preceding episode's recorded word is not the work's outcome"
+        assert {"reason": gap, "task_id": named} in projected["works_gaps"]
+
+
+def _admitted_chain(ids, statuses=None, *, chat_id=41):
+    from ouroboros.owner_continue import binding_sha
+
+    statuses = statuses or {}
+    records = {ep: {"task_id": ep, "chat_id": chat_id, "status": statuses.get(ep, "completed")} for ep in ids}
+    for predecessor, successor in zip(ids, ids[1:]):
+        binding = {"verb": "continue", "predecessor_task_id": predecessor, "successor_task_id": successor,
+                   "action_nonce": "nonce-1234"}
+        recorded = {"binding": binding, "binding_sha256": binding_sha(binding)}
+        records[predecessor]["continued_by"] = {**recorded, "successor_task_id": successor,
+                                                "action_nonce": "nonce-1234", "state": "admitted"}
+        records[successor]["continuation_admission"] = recorded
+        records[successor]["metadata"] = {"continuation": {"predecessor_task_id": predecessor}}
+    return records
+
+
+def test_answered_continue_keeps_earlier_pause_and_deduplicates_identical_stop_targets(tmp_path):
+    """An earlier helper can stay in the census while Stop has already been recorded on its ended root."""
+    from ouroboros import cancel_intents
+    from ouroboros.gateway.work_projection import works_snapshot
+    from ouroboros.task_results import write_task_result
+
+    for record in _admitted_chain(["p", "s"], {"p": "failed", "s": "completed"}).values():
+        write_task_result(tmp_path, **record)
+    helper = {"activity_id": "h", "root_task_id": "p", "parent_task_id": "p", "chat_id": 41,
+              "kind": "managed_task", "phase": "working", "live": True, "task_attempt": 1, "started_at": 100.0}
+    available = [
+        {"action": "pause", "target": "p"},
+        {"action": "stop", "target": "p", "scope": "cascade"},
+    ]
+
+    def controls():
+        [work] = works_snapshot(tmp_path, [helper], {})["works"]
+        assert (work["work_id"], work["episode"], work["outcome"], work["activity"]) == (
+            "p", {"task_id": "s", "live": False}, "completed", "working")
+        return work["controls"]
+
+    assert controls() == available
+    request = cancel_intents.request_cancel(tmp_path, "p", source="http_cascade", requested_by="owner",
+                                            scope=cancel_intents.SCOPE_CASCADE, allow_settled_target=True)
+    assert controls() == available[1:], "a Stop pending on p hides only p's Pause"
+    assert cancel_intents.settle_intent(tmp_path, "p", outcome=cancel_intents.SETTLED_ALREADY_SETTLED,
+                                        request_id=request["request_id"], allow_cascade_scope=True)
+    # Feed the same census on purpose: the display check follows the active intent, not its retained history.
+    assert controls() == available
+
+
+def test_answered_continue_projects_unambiguous_controls_across_earlier_tails():
+    from tests._work_projection_shared import work_fields
+
+    # Unknown outcome (`t` unreadable) + earlier review-only run: no duplicate `stop_earlier`, no Pause, no outcome.
+    broken = _admitted_chain(["p", "s", "t"], {"p": "completed", "s": "completed", "t": "completed"})
+    del broken["t"]
+    snap_review = work_fields([], results=broken, held={"p": [{"run_id": "run-rv", "task_id": "p", "source": "review_substrate"}]})
+    [review_only] = snap_review["works"]
+    assert review_only["episode"] == {"task_id": "s", "live": False} and "outcome" not in review_only
+    assert review_only["controls"] == [{"action": "stop", "target": "p", "scope": "cascade"}]
+    assert {"reason": "episode_record_unavailable", "task_id": "t"} in snap_review["works_gaps"]
+
+    # Non-terminal/legacy latest status + owner-stopped earlier root: single Stop only (no duplicate, no Pause).
+    stopped_prev = _admitted_chain(["p", "s"], {"p": "cancelled", "s": "done"})
+    stopped_prev["p"]["cancel_origin"] = {"request_id": "stop-1"}
+    [owner_stopped_work] = work_fields([], results=stopped_prev, held={"p": ["run-open"]})["works"]
+    assert owner_stopped_work["controls"] == [{"action": "stop", "target": "p", "scope": "cascade"}]
+
+    # Two independent pausable earlier roots behind an answered Continue: single Stop over both, no ambiguous Pause.
+    two_earlier = _admitted_chain(["p1", "p2", "s"], {"p1": "completed", "p2": "completed", "s": "completed"})
+    [two_roots] = work_fields([], results=two_earlier, held={"p1": ["run-1"], "p2": ["run-2"]})["works"]
+    assert two_roots["episode"] == {"task_id": "s", "live": False}
+    assert [(c["action"], c["target"]) for c in two_roots["controls"]] == [("stop", "p1"), ("stop", "p2")]
+
+
+def test_unproven_continue_over_unbound_start_keeps_single_stop_and_unknown_outcome(tmp_path, monkeypatch):
+    """When an accepted unbound start outlives a Continue chain whose latest successor cannot be read, the work stays
+    unknown (never declared completed), keeps `unbound_start=True`, and offers one Stop without duplicate `stop_earlier`
+    or Pause so direct Stop confirmation stays intact."""
+    from ouroboros.gateway import work_projection
+    from ouroboros.owner_continue import binding_sha
+    from ouroboros.task_results import write_task_result
+    from tests._owner_pause_ended_helpers import _decide, _pending, _snapshot, _tail_tree
+
+    def accepted(root):
+        assert _decide(root, _pending(root, "child-dead", "lost"))
+
+    _tail_tree(tmp_path, monkeypatch, root_status="failed", tail=accepted, chat_id=41)
+    first_binding = {"verb": "continue", "predecessor_task_id": "root-1", "successor_task_id": "root-1-c",
+                     "action_nonce": "nonce-1"}
+    second_binding = {"verb": "continue", "predecessor_task_id": "root-1-c", "successor_task_id": "root-1-c2",
+                      "action_nonce": "nonce-2"}
+    write_task_result(tmp_path, "root-1", "failed", chat_id=41, continued_by={
+        "successor_task_id": "root-1-c", "action_nonce": "nonce-1", "binding": first_binding,
+        "binding_sha256": binding_sha(first_binding), "state": "admitted"})
+    write_task_result(tmp_path, "root-1-c", "completed", chat_id=41, root_task_id="root-1-c", delegation_role="root",
+                      continuation_admission={"binding": first_binding, "binding_sha256": binding_sha(first_binding)},
+                      metadata={"continuation": {"predecessor_task_id": "root-1"}},
+                      continued_by={"successor_task_id": "root-1-c2", "action_nonce": "nonce-2",
+                                    "binding": second_binding, "binding_sha256": binding_sha(second_binding),
+                                    "state": "admitted"})
+    work_projection._RESULTS.clear()
+    _, snapshot = _snapshot(tmp_path)
+    [work] = snapshot["works"]
+    assert (work["work_id"], work["episode"], work["activity"], work["live"], work["unbound_start"]) == (
+        "root-1", {"task_id": "root-1-c", "live": False}, "unknown", False, True)
+    assert "outcome" not in work, "an unreadable later episode is never declared completed"
+    assert work["controls"] == [{"action": "stop", "target": "root-1", "scope": "cascade"}]
+    assert {"reason": "episode_record_unavailable", "task_id": "root-1-c2"} in snapshot["works_gaps"]

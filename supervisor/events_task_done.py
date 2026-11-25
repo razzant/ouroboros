@@ -448,6 +448,9 @@ def _finish_task_done_dispatch(
         reconcile_terminal_task_projections(ctx.DRIVE_ROOT, str(task_id))
     except Exception:
         log.debug("terminal projection reconcile failed for %s", task_id, exc_info=True)
+    from ouroboros.peer_replies import deliver_owed  # work a peer turn handed off answers at its end
+
+    deliver_owed(ctx.DRIVE_ROOT, str(task_id), record=final_task_result)
 
     append_terminal_task_projection(
         ctx.DRIVE_ROOT, str(task_id or ""), task, final_task_result, task_done_event,
@@ -632,12 +635,8 @@ def _finish_task_done_dispatch(
             # Pending-cancel and reaper task_done arrive AFTER the row left
             # PENDING/RUNNING, so `task` is {} here: the tree identity falls
             # back to the event stamp, then the durable result.
-            tree_root = str(
-                (task if isinstance(task, dict) else {}).get("root_task_id")
-                or (task_done_event or {}).get("root_task_id")
-                or (final_task_result or {}).get("root_task_id")
-                or ""
-            )
+            tree_root = str(task.get("root_task_id") or task_done_event.get("root_task_id")
+                            or final_task_result.get("root_task_id") or "")
             clear_budget_root_fence_for_settled_tree({"id": str(task_id or ""), "root_task_id": tree_root})
         except Exception:
             log.warning("Failed to release budget root fence for %s", task_id, exc_info=True)

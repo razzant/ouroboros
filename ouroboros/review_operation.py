@@ -552,13 +552,19 @@ def _task_operation_entries(root: Any, task_id: str, *, result_loader=None) -> I
 
 
 def task_has_live_review_operation(root: Any, task_id: str, *, exclude_owner_id: str = '',
-                                   sent_only: bool = False, result_loader=None) -> bool:
-    """Physical review ownership; unsent preparation is excluded by ``sent_only``."""
+                                   sent_only: bool = False, result_loader=None, probe_controller: bool = True) -> bool:
+    """Physical review ownership; unsent preparation is excluded by ``sent_only``.
+
+    In a custody write, ``probe_controller=False`` treats an open durable pointer as possibly
+    live. The normal off-lock settle reader still checks the controller and can release it.
+    """
     for owner, _subject, entry in _task_operation_entries(root, task_id, result_loader=result_loader):
         if owner == exclude_owner_id:
             continue
         if entry.get("state") not in _OPEN_STATES or sent_only and entry.get("state") == OPERATION_PREPARING:
             continue
+        if not probe_controller:
+            return True
         with _LOCK:
             live = _LIVE.get(owner)
         if live is not None and not live.closed:

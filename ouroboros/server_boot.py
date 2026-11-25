@@ -50,6 +50,18 @@ def recover_dialogue(root: pathlib.Path, repo_dir: pathlib.Path) -> None:
     child.tick(root, repo_dir, after_dialogue=lambda: reconcile_projects(root))
 
 
+def resume_peer_replies(root: pathlib.Path) -> None:
+    """Once boot recovery reconciled their producers (``server_maintenance._run_startup_task_recovery``, on either
+    boot path): the replies a restart left owed to linked Ouroboroses, from their addressed records only
+    (``peer_replies.resume_owed``), never a scan of history."""
+    from ouroboros.peer_replies import resume_owed
+
+    try:
+        resume_owed(root)
+    except Exception:  # noqa: BLE001 - a boot step never fails over an owed reply; its record stays for a later start
+        log.warning("owed peer replies were not resumed", exc_info=True)
+
+
 def remember_log_listings(root: pathlib.Path) -> threading.Thread:
     """The archive listing a process's first owner turn would make for its task's recent tools and
     events, made once off the turn, so that turn starts from it (``Memory.remember_log_listings``).

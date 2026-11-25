@@ -330,16 +330,21 @@ def test_shared_controls_material_and_real_actions(room_ui, theme, width):
         page.locator('[data-mobile-nav-toggle]').first.click()
     update = page.locator('#update-pill')
     update.wait_for()
-    # An update on offer is the crimson primary capsule, the word Update alone (owner 21.11).
+    # The glyph the rail draws for the capsule's state (its words are its name, read but not drawn).
+    drawn = """el=>{const g=el.querySelector('.update-pill-glyph'),s=g.querySelector('svg').getBoundingClientRect(),
+        p=el.getBoundingClientRect(),w=el.querySelector('.update-pill-words').getBoundingClientRect();
+        return {says:g.dataset.says,color:getComputedStyle(g).color,ink:getComputedStyle(el).color,w:s.width,h:s.height,
+            inside:s.left>=p.left&&s.right<=p.right&&s.top>=p.top&&s.bottom<=p.bottom,words:w.width*w.height};}"""
+    # An update on offer is the neutral capsule (owner 22.11: not the crimson) holding the arrow up in the success ink,
+    # the word Update its name (owner 21.11).
     update.hover()
-    offer = update.evaluate("""el=>{const p=el.appendChild(document.createElement('i'));
-        p.style.backgroundColor='var(--tone-crimson-hover)';const v=getComputedStyle(p).backgroundColor;p.remove();return v;}""")
-    assert update.text_content() == 'Update' and paint(update)["bg"] == offer, (paint(update), offer)
-    results["update-offer"] = paint(update)
-    # The shared button states and the pill's palette on an attempt's material (the controller swaps the crimson for
-    # the neutral capsule while an attempt shows): neutral, the owner's amber (local changes) and the failure's red.
-    # A confirmed success has no capsule (owner 1B), so no green tone is drawn for it.
-    update.evaluate("el=>el.classList.replace('btn-primary', 'btn-default')")
+    offer, glyph = paint(update), update.evaluate(drawn)
+    assert update.text_content() == 'Update' and offer["bg"] == offer["hover"], offer
+    assert glyph["says"] == 'offer' and glyph["color"] == offer["ok"] and glyph["inside"], glyph
+    assert glyph["w"] == glyph["h"] == 16 and glyph["words"] <= 1, ('a drawn glyph, its words unseen', glyph)
+    results["update-offer"] = {**offer, "glyph": glyph}
+    # The shared button states and the pill's palette: neutral, the owner's amber (local changes) and the failure's red,
+    # whose glyph takes the tone's ink. A confirmed success has no capsule (owner 1B), so no green tone is drawn for it.
     results["update"] = button_states(page, update)
     for tone, token in [('neutral', '--surface-capsule'), ('warn', '--tone-amber'), ('error', '--tone-red')]:
         update.evaluate('(el,tone)=>el.dataset.tone=tone', tone)
@@ -348,6 +353,9 @@ def test_shared_controls_material_and_real_actions(room_ui, theme, width):
         expected = update.evaluate("""(el,token)=>{const p=el.appendChild(document.createElement('i'));
             p.style.backgroundColor=`var(${token}-hover)`;const v=getComputedStyle(p).backgroundColor;p.remove();return v;}""", token)
         assert value["bg"] == expected, (tone, value, expected)
+        if tone != 'neutral':
+            toned = update.evaluate(drawn)
+            assert toned["color"] == toned["ink"] != offer["ok"], (tone, toned)
         results["update-" + tone] = value
     update.evaluate("el=>{el.dataset.tone='neutral';el.classList.add('has-local');}")
     results["update-local"] = paint(update)
@@ -368,8 +376,10 @@ def test_shared_controls_material_and_real_actions(room_ui, theme, width):
         assert update.get_attribute('data-tone') == tone
         assert 'has-local' not in (update.get_attribute('class') or '')
         assert page.locator('.update-notice-close').is_visible() == bool(outcome), 'only a concluded outcome offers its close'
+        glyph = update.evaluate(drawn)
+        assert glyph["says"] == ('outcome' if outcome else 'stage') and glyph["inside"] and glyph["w"] == 16, glyph
         borderless(paint(update))
-        results['controller-' + (outcome or 'checking')] = paint(update)
+        results['controller-' + (outcome or 'checking')] = {**paint(update), "glyph": glyph}
     rw.capture(page, prefix + "-update")
     update_status['update_progress'] = {'operation_id': 'material-proof', 'active': False, 'stage': 'checking',
         'outcome': 'applied', 'concluded_by': 'boot', 'current_generation': True}

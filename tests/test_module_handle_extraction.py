@@ -394,7 +394,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/loop_model_call.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_RoundModelCallContext", "_append_or_merge_user_message",
-        "_call_round_model", "_fallback_chain_allowed",
+        "_fallback_chain_allowed",
         "_reconcile_transport_wait", "_run_cross_model_fallback_chain",
         "_context_overflow_retries", "_dispatch_round_model", "_emit_checkpoint_event",
         "_measure_round_main_fit", "_output_exhausted_notice", "_rebind_context_fit_plan",
@@ -429,7 +429,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "review_executions_from_actor_usage",
     })),
     "ouroboros/review_state_custody.py": ("ouroboros/review_state.py", "_rs", frozenset({
-        "ReviewStateMutation", "_truncate_review_artifact", "_utc_now", "load_state", "update_state",
+        "ReviewStateMutation", "_STATE_RELPATH", "_load_state_unlocked",
+        "_truncate_review_artifact", "_utc_now", "load_state", "update_state",
     })),
     "ouroboros/review_state_model.py": ("ouroboros/review_state.py", "_rs", frozenset({
         "_DEFAULT_TOOL_NAME", "_LEGACY_CURRENT_REPO_KEY", "_MAX_ATTEMPT_HISTORY",
@@ -456,7 +457,13 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "review_drive_root", "slot_id_for_row",
     })),
     "ouroboros/loop_round_limits.py": ("ouroboros/loop.py", "_loop", frozenset({
-        "DeliveryCandidate", "_append_or_merge_user_content",
+        "DeliveryCandidate",
+        # The #4247 lane (97ca81c0) re-homed this leaf's four inline finalization
+        # prompts onto the wrap-up rail's one shared tail, so its read moved into
+        # the declared set; it stays late-bound on the loop facade exactly as the
+        # budget leaf's reads of the same name do.
+        "_FORCED_BEST_EFFORT_TAIL",
+        "_append_or_merge_user_content",
         "_append_or_merge_user_message", "_current_delivery_candidate",
         "_emit_checkpoint_event", "_finalize_forced_services",
         "_forced_fallback_result", "_forced_final_answer",

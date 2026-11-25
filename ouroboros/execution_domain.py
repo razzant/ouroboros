@@ -71,6 +71,7 @@ WINDOWS_HOST_REFUSAL = ("execution needs a POSIX service host: on Windows a host
                         "example in WSL2 or a Linux container), or remove execution and extensions.trusted, which needs "
                         "it")
 WORK_ENGINE = "work"
+PEER_ENGINE = "peer"  # my human's linked Ouroboros (gateways/peer.py): a letter, not a Claudexor run
 _DOCKER_TIMEOUT_SEC = 10.0  # one Docker CLI call: the transport's bound, never a judgment
 _LOCK = threading.Lock()
 _MEASURED: Dict[str, str] = {}  # container name -> id this server generation measured (Panic runs in this process)
@@ -219,6 +220,10 @@ def is_work_ref(ref: Any) -> bool:
     return isinstance(ref, dict) and ref.get("kind") == WORK_ENGINE
 
 
+def is_peer_ref(ref: Any) -> bool:
+    return isinstance(ref, dict) and ref.get("kind") == PEER_ENGINE
+
+
 def recorded_ref(record: Any) -> dict:
     """The engine a custody row, invocation record or reference names; ``{}`` is the owned engine."""
     if isinstance(record, dict):
@@ -231,15 +236,21 @@ def recorded_ref(record: Any) -> dict:
 def same_engine(gateway: Any, record: Any) -> bool:
     """Whether ``gateway`` reaches the engine ``record`` is bound to, so its answer (404 included) speaks for it."""
     ref, held = recorded_ref(record), getattr(gateway, "engine_ref", None)
+    if is_peer_ref(ref):
+        return (is_peer_ref(held) and held.get("link_id") == ref.get("link_id")
+                and held.get("place_id") == ref.get("place_id"))
     if not is_work_ref(ref):
-        return not is_work_ref(held)
+        return not is_work_ref(held) and not is_peer_ref(held)
     return (is_work_ref(held) and held.get("descriptor") == ref.get("descriptor")
             and (not ref.get("store") or held.get("store") == ref.get("store")))
 
 
 def engine_key(record: Any) -> Optional[Tuple[str, str]]:
-    """A work engine's identity as ``record`` names it (descriptor, store); ``None`` for the owned engine."""
+    """The bound engine's identity as ``record`` names it (a work engine's descriptor and store, a peer's place and
+    link); ``None`` for the owned engine."""
     ref = recorded_ref(record)
+    if is_peer_ref(ref):
+        return ("peer", f"{ref.get('place_id')}\0{ref.get('link_id')}")
     return (str(ref.get("descriptor") or ""), str(ref.get("store") or "")) if is_work_ref(ref) else None
 
 
@@ -354,15 +365,30 @@ def native_gateway(**owned_kwargs: Any) -> Any:
     return work_gateway({"kind": WORK_ENGINE, "descriptor": domain.engine_descriptor})
 
 
+def bound_gateway(ref: Any, *, timeout_sec: Optional[float] = None) -> Any:
+    """The one resolver of a recorded engine kind: ``work`` -> its work engine (``work_gateway``), ``peer`` -> the
+    linked Ouroboros's server (``gateways.peer.peer_gateway``), ``None`` for the owned engine, which each caller's
+    own ``default()`` answers. ``run_gateway``, ``engine_factory`` and ``EngineClients`` resolve through it, so a
+    ``peer`` record's wait, cancel, answer, supervision and collection reach that server, after a restart too, and
+    never the owned Claudexor engine."""
+    if is_peer_ref(ref):
+        from ouroboros.gateways.peer import peer_gateway
+
+        return peer_gateway(ref, timeout_sec=timeout_sec)
+    if is_work_ref(ref):
+        return work_gateway(ref, timeout_sec=timeout_sec)
+    return None
+
+
 def run_gateway(record: Any, default: Callable[[], Any], *, timeout_sec: Optional[float] = None) -> Any:
     """The gateway of the engine ``record`` is bound to: ``default()`` for the owned engine (the caller's own
-    discovery, unchanged), else the recorded work engine, its handshake bounded by ``timeout_sec``."""
-    ref = recorded_ref(record)
-    return work_gateway(ref, timeout_sec=timeout_sec) if is_work_ref(ref) else default()
+    discovery, unchanged), else the recorded work or peer engine, its handshake bounded by ``timeout_sec``."""
+    bound = bound_gateway(recorded_ref(record), timeout_sec=timeout_sec)
+    return default() if bound is None else bound
 
 
 def engine_factory(ref: dict, default: Callable[[], Any]) -> Callable[[], Any]:
-    return (lambda: work_gateway(ref)) if is_work_ref(ref) else default
+    return (lambda: bound_gateway(ref)) if (is_work_ref(ref) or is_peer_ref(ref)) else default
 
 
 class _Unreachable:
@@ -400,11 +426,13 @@ class EngineClients:
             return self._clients.get(engine_key(record))
 
     def get(self, record: Any) -> Any:
-        """The client of the work engine ``record`` is bound to (``work_gateway``'s refusals raise)."""
+        """The client of the work or peer engine ``record`` is bound to (``bound_gateway``'s refusals raise; an unbound
+        record reaches ``work_gateway``, which refuses it)."""
         client = self.held(record)
         if client is not None:
             return client
-        client = work_gateway(recorded_ref(record))
+        ref = recorded_ref(record)
+        client = bound_gateway(ref) or work_gateway(ref)
         with self._lock:
             kept = self._clients.setdefault(engine_key(record), client)
         if kept is not client:
@@ -412,9 +440,10 @@ class EngineClients:
         return kept
 
     def reach(self, record: Any) -> Any:
-        """``record``'s own engine: ``owned()`` when unbound, else its work engine's client, or a stand-in raising the
-        typed cause while that engine cannot be reached (what it holds waits for a later pass)."""
-        if not is_work_ref(recorded_ref(record)):
+        """``record``'s own engine: ``owned()`` when unbound, else its work or peer engine's client, or a stand-in
+        raising the typed cause while that engine cannot be reached (what it holds waits for a later pass)."""
+        ref = recorded_ref(record)
+        if not (is_work_ref(ref) or is_peer_ref(ref)):
             return self._owned() if self._owned is not None else None
         try:
             return self.get(record)

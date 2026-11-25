@@ -195,15 +195,33 @@ def granted_shape(entry: Any) -> Any:
                              investigation=entry.authority_source == INVESTIGATION_AUTHORITY)
 
 
+def _reads_its_own_letter(gateway: Any, entry: Any, detail: Dict[str, Any]) -> bool:
+    """The detail is a linked Ouroboros's state of this record's own letter, not a run an engine here executes: the
+    record names a peer engine, the gateway is that link's adapter (``peer_gateway``: same place and link) and the
+    detail names exactly this letter (``PeerGateway.get_run`` names it by the receiver's ``letter_id``)."""
+    from ouroboros.delegate_custody_usage import run_names
+    from ouroboros.execution_domain import is_peer_ref, recorded_ref, same_engine
+
+    if not is_peer_ref(recorded_ref(entry)):
+        return False
+    from ouroboros.gateways.peer import PeerGateway
+
+    return isinstance(gateway, PeerGateway) and same_engine(gateway, entry) and str(entry.run_id) in run_names(detail)
+
+
 def hold_to_grant(drive_root: Any, gateway: Any, entry: Any, detail: Dict[str, Any]) -> bool:
     """The rights floor the body keeps on every run it observes (pool-capacity D3): what the engine
     enforced, read from a detail, against the grant recorded on the run's start row. A breach stops the
     run once (its open incident names it); the nanny reads the breach with the terminal. A row without a
     recorded grant (written before the shape rode the start row) has nothing to hold the run to here: the
-    waiting nanny's live derivation keeps it. Whether it stopped the run; a check that cannot be read is logged."""
+    waiting nanny's live derivation keeps it. A letter's state read on its own link (``_reads_its_own_letter``)
+    names no engine here that enforced anything: there is no fact to hold, and its access stays unverified.
+    Whether it stopped the run; a check that cannot be read is logged."""
     from ouroboros.tools.delegate_terminal_evidence import _containment_breach
 
     try:
+        if _reads_its_own_letter(gateway, entry, detail):
+            return False
         breach = _containment_breach(detail, granted_shape(entry)) if entry.access else None
         if breach is None or (entry.containment_fault or {}).get("reason") == breach.code:
             return False

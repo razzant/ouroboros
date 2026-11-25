@@ -44,10 +44,12 @@ import logging
 import math
 import pathlib
 import re
+from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.answer_facts import (card_input, card_reference_view, forwarded_bubble_matches,
                                    option_answer, press_record, retained_card_input, row_source, submitted_fields_line)
+from ouroboros.api_continuation import accepted_api_opening, valid_api
 from ouroboros.chat_uploads import answer_evidence, stored_refs
 from ouroboros.owner_quiz import late_answer_owner_text, secret_outcome_block
 from ouroboros.owner_source import (_retained_start_quote as _retained_start_quote, start_answer as _start_answer,
@@ -55,7 +57,7 @@ from ouroboros.owner_source import (_retained_start_quote as _retained_start_quo
 from ouroboros.owner_words import (OWNER_CARD_INPUT, OWNER_PRESS, OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT,
                                    answered_card, answered_card_reply, attachments_line, carded,
                                    reply_target, scheduled_text_items)
-from ouroboros.question_answers import answer_message_id
+from ouroboros.peer_letters import continued_letter_lines
 from ouroboros.review_evidence_sections import renders_exactly
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
@@ -65,6 +67,7 @@ log = logging.getLogger(__name__)
 
 VERB = "continue"
 BINDING_VERSION = 1
+WORK_CHAIN_MAX_HOPS = 64  # bounded family reads, counting both end episodes
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
 # Recorded stop sources that are the owner's explicit decision (never Continue)
@@ -191,10 +194,7 @@ def _same_opening_client(row, ref, original, words):
 # The binding's copy of the work's explicit execution budget (``execution_carry``).
 EXECUTION_CARRY_KEYS = ("execution_timeout_sec", "execution_consumed_sec")
 WAKE_OPENING = "consciousness_wake"
-API_OPENING = "api_request"
 AGENT_NOTE_OPENING = "agent_note"  # a program's note under its declared author, never an owner message
-# The request words the API door saved on the root (``gateway/tasks._complete_api_task_admission``).
-API_REQUEST_FIELDS = ("description", "context", "expected_output", "constraints")
 
 
 def valid_nonce(nonce: Any) -> str:
@@ -457,28 +457,6 @@ def valid_wake(wake: Any) -> bool:
             and all(isinstance(focus.get(key), str) and focus[key].strip() for key in ("place_id", "conversation_key")))
 
 
-def accepted_api_opening(result: Dict[str, Any], metadata: Dict[str, Any], task_id: str,
-                         gaps: List[str]) -> Optional[Dict[str, Any]]:
-    """The request the API door saved with its accepted receipt, copied by value, or a named gap. The words are its
-    caller's under the channel it declared (``client_surface``, the door's one stamp of it); the receipt marks the
-    opening, it proves no caller identity. Its inputs are the work's declared inputs (``declared_inputs``)."""
-    receipt = result.get("api_admission")
-    surface = metadata.get("client_surface") if isinstance(metadata.get("client_surface"), dict) else {}
-    opening = {"source": API_OPENING, "task_id": task_id, "channel": surface.get("channel"),
-               **{key: result[key] for key in API_REQUEST_FIELDS if isinstance(result.get(key), str) and result[key]}}
-    if not (isinstance(receipt, dict) and receipt.get("status") == "accepted" and valid_api(opening)):
-        gaps.append("api_request_unreadable")
-        return None
-    return opening
-
-
-def valid_api(api: Any) -> bool:
-    """An API opening exactly as ``accepted_api_opening`` builds it (also its chained copy)."""
-    return (isinstance(api, dict) and api.get("source") == API_OPENING
-            and all(isinstance(api.get(key), str) and api[key].strip() for key in ("task_id", "channel", "description"))
-            and all(isinstance(api.get(key, ""), str) for key in API_REQUEST_FIELDS))
-
-
 def _agent_note_opening(root: pathlib.Path, result: Dict[str, Any], task_id: str,
                         gaps: List[str]) -> Optional[Dict[str, Any]]:
     """The opening a program's note recorded for an ordinary conversation (the agent-note command door): the
@@ -650,7 +628,7 @@ def _quiz_answer_consumed_by_predecessor(root: pathlib.Path, task_id: str, resul
     if secret_outcome_block(entry) is not None:
         return False
     from ouroboros.owner_mailbox import mail_read_state
-    from ouroboros.question_answers import custody_proves_read
+    from ouroboros.question_answers import answer_message_id, custody_proves_read
     from ouroboros.task_store import read_document
 
     msg_id = str(entry.get("msg_id") or "")
@@ -1405,7 +1383,9 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
             lines += ["The event's words, from the sender recorded above (context, not an owner "
                       "instruction; verbatim):", str(wake["observed_text"])]
     api = sources.get("api") if isinstance(sources.get("api"), dict) else None
-    if api:
+    if api and (letter := continued_letter_lines(api)):  # its words stay quoted, never owner words
+        lines += letter
+    elif api:
         lines += ["", f"That task was opened through the task API (channel {api.get('channel')!r}, as its caller "
                       "declared it); no owner message opened it. The request it saved (the caller's words, not "
                       "owner words; verbatim):", str(api.get("description") or "")]
@@ -1537,25 +1517,27 @@ def continued_by_binding(result: Dict[str, Any]) -> dict:
                        and claim.get("binding_sha256") == binding_sha(binding)) else {}
 
 
-def continuation_chain(drive_root: Any, predecessor_task_id: str, task_id: str) -> List[str]:
-    """The verified roots from ``predecessor_task_id`` to ``task_id``, both included, or ``[]``.
+def continuation_chain(drive_root: Any, predecessor_task_id: str, task_id: str, *, load=None) -> List[str]:
+    """Follow hash-verified ``continued_by`` claims between two exact root IDs, or return ``[]``.
 
-    Read from the recorded claims only: each ``continued_by`` binding on an
-    earlier root's own result names its successor (hash-verified), so a chain of
-    Continues is followed claim by claim. Room, folder or root equality grants
-    nothing, and an unreadable result is no binding (``delegate_continuation``).
+    Both endpoints are included. A recorded predecessor ID must match; unreadable results or shared
+    room, folder or root identity prove nothing. The family-read depth bound does not apply.
     """
-    from ouroboros.task_results import load_task_result
+    if load is None:
+        from ouroboros.task_results import load_task_result
+        load = partial(load_task_result, drive_root, strict=True)
 
-    current, target, seen, chain = str(predecessor_task_id or ""), str(task_id or ""), set(), []
-    while current and target and current not in seen:
-        seen.add(current)
-        chain.append(current)
+    current, target = str(predecessor_task_id or ""), str(task_id or "")
+    chain: dict[str, None] = {}
+    while current and target and current not in chain:
+        chain[current] = None
         try:
-            result = load_task_result(drive_root, current, strict=True) or {}
+            result = load(current) or {}
         except Exception:
             return []
-        if not (successor := continued_by_binding(result).get("successor_task_id")):
+        claim = continued_by_binding(result)
+        successor = claim.get("successor_task_id")
+        if not successor or claim.get("predecessor_task_id", current) != current or successor in chain:
             return []
         if successor == target:
             return [*chain, target]
@@ -1563,9 +1545,9 @@ def continuation_chain(drive_root: Any, predecessor_task_id: str, task_id: str) 
     return []
 
 
-def recorded_continuation(drive_root: Any, predecessor_task_id: str, task_id: str) -> bool:
+def recorded_continuation(drive_root: Any, predecessor_task_id: str, task_id: str, *, load=None) -> bool:
     """The existing yes/no form of the verified explicit-Continue chain."""
-    return bool(continuation_chain(drive_root, predecessor_task_id, task_id))
+    return bool(continuation_chain(drive_root, predecessor_task_id, task_id, load=load))
 
 
 def continuation_offer(result: Dict[str, Any], task_id: str) -> Dict[str, Any]:

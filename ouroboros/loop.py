@@ -26,7 +26,6 @@ from ouroboros.llm_observability import round_starts, round_window
 from ouroboros.tool_policy import CAPABILITY_OMISSION_HEADER, format_capability_omissions, initial_tool_schemas, list_non_core_tools  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.llm_claudexor import ModelTurnState
-from ouroboros.anthropic_native_custody import custody_private_key
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.loop_completion_schema import refused_door_end, resolve_completion_selection
 from ouroboros._usage_wait import receiver_abandonable
@@ -154,8 +153,7 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
             # Enrich only this round's complete held row; earlier equal answers keep their own continuation.
             for row in limit_ctx.messages[response_start:]:
                 if row == {"role": "assistant", "content": content}:
-                    row.update({key: value for key, value in assistant_message.items()
-                                if key in ("reasoning_details", "reasoning_content") or custody_private_key(key)})
+                    row.update(output_recovery.kept_assistant_fields(assistant_message))
     return result
 
 
@@ -466,8 +464,9 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
     Returns ``(*route, round_idx, cost_ceiling, pending_tool_budget,
     pending_no_tool_budget, free_redial)``: a cold owner wait rejoins its tool
     tail; an exact pause, or its Resume handover, its saved budget tail; a
-    working checkpoint its tool tail after a batch, else the same logical round
-    (#1563). A moved Presence turn's saved work first takes its conversation and slot
+    working checkpoint its tool tail after a batch, the next round's no-tool
+    tail after a spent continuing round (``post_batch`` + ``no_tool``), else the
+    same logical round (#1563). A moved Presence turn's saved work first takes its
     (``presence_carrier.reenter``), and reads the facts since its park once restored.
     """
     from ouroboros.presence_carrier import reenter
@@ -483,8 +482,9 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
             resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), not no_tool, no_tool, no_tool)
         elif saved_working:
             *resumed, tool_tail = working_checkpoint.resume_from_working(tools, saved_working, messages, trace, usage, seen)
-            no_tool = not tool_tail and (saved_working.get("working") or {}).get("boundary") == working_checkpoint.RESUMED
-            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
+            boundary = (saved_working.get("working") or {}).get("boundary")
+            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail,
+                       not tool_tail and boundary in {working_checkpoint.RESUMED, "post_batch"}, not tool_tail and boundary != "post_batch")
         else:
             resumed = (*route, cost_ceiling, False, False, False)
             apply_current(tools._ctx)
@@ -788,8 +788,8 @@ def run_llm_loop(
             _record_transcript_prefix(tools._ctx, messages, round_idx, accumulated_usage, event_queue, task_id, drive_logs, tool_schemas)
             from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY
 
-            tool_calls = msg.get("tool_calls") or []
             tools._ctx._request_wire_custom_receipts = accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, ())
+            msg, tool_calls = output_recovery.admit_calls(tools._ctx, msg, drive_logs)  # its raw record stays as received
             content = msg.get("content")
             output_recovery.latch_final_marker(limit_ctx, msg)  # a commentary or a cut is never the answer to fall back on
             # Every metered response counts as nanny progress; its delegate verb requests
@@ -799,8 +799,8 @@ def run_llm_loop(
                 final_result = (None if output_recovery.intermediate_reply(limit_ctx, msg, emit_progress)
                                 else _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, assistant_message=msg))
                 if final_result is None:
-                    # Unfinished or intermediate (commentary): the loop keeps spending on the SAME budget tail
-                    # a tool round does. A ready answer returns above and buys no extra wrap-up.
+                    # Unfinished, intermediate (commentary) or a cut batch that started nothing: the loop keeps spending
+                    # on the SAME budget tail a tool round does. A ready answer returns above and buys no extra wrap-up.
                     pending_no_tool_budget = True
                     continue
                 return final_result

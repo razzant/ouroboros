@@ -13,7 +13,9 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { taskCancelPending } from './log_events.js';
 import { waitingModel } from './project_activity.js';
 import {
-    confirmedHelperAttemptInQueue, confirmedPausedHelperAttempt, deadlineExpiredState, indexCloseOffers, indexDeadlineExpired, memberState, openWorkControls, resumeTargets, workCloseOffer, workControls, workLine, workMenuActions, workOfEpisode, workRowView,
+    confirmedHelperAttemptInQueue, confirmedPausedHelperAttempt, deadlineExpiredState, indexCloseOffers, indexDeadlineExpired,
+    memberState, openWorkControls, resumeTargets, workCloseOffer, workControls, workLine, workMenuActions,
+    workMenuTargetGuard, workOfEpisode, workRowView,
 } from './work_status.js';
 import { censusTaskFacts, censusTaskPhase, paintTaskPhase } from './task_phase_chip.js';
 import {
@@ -520,9 +522,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
 
     function renderQueue(queue, census) {
         if (!Array.isArray(queue?.running) || !Array.isArray(queue?.pending)) throw new Error('Queue unavailable');
-        lastQueue = queue;
         if (census !== lastCensus) acceptCensus(census);
-        else lastHelperCensus = census;
         const { running, pending } = queue;
         const activities = Array.isArray(census?.active_chat_activities) ? census.active_chat_activities : [];
         const phases = new Map(activities.map((a) => [String(a?.activity_id || ''), a]));
@@ -855,16 +855,23 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             // only those: a work that lists none opens nothing, never the generic menu below, whose Stop or
             // Resume a door that work does not list would refuse.
             const tail = btn.dataset.tailWork;
-            const work = tail ? delegatedTailWorks(lastCensus).find((w) => w.work_id === tail && w.episode.task_id === id)
+            const readWork = () => tail ? delegatedTailWorks(lastCensus).find((w) => w.work_id === tail && w.episode.task_id === id)
                 : btn.dataset.root === '1' ? workOfEpisode(lastCensus, id) : null;
+            const work = readWork();
+            const cancelPending = taskCancelPending(stored);
             if (work) {
-                openWorkControls(btn, work, { cancelPending: taskCancelPending(stored), withResume: true,
-                    afterAction: afterTaskControl });
+                const stillOffered = workMenuTargetGuard(workControls(work), { cancelPending, resume: true });
+                const canAct = (action) => {
+                    const current = readWork();
+                    return !destroyed && mount.isConnected !== false && stillOffered(action,
+                        current?.work_id && current.work_id === work.work_id ? workControls(current) : null);
+                };
+                openWorkControls(btn, work, { cancelPending, withResume: true, canAct, afterAction: afterTaskControl });
                 return;
             }
             if (tail) return; // A vanished tail never falls back to the generic live-task menu.
             openTaskControlMenu(btn, {
-                cancelPending: taskCancelPending(stored),
+                cancelPending,
                 budgetPaused: btn.dataset.budgetPaused === '1',
                 resume: !hasHelperAttempt && btn.dataset.resume === '1',
                 // A child's Pause would not name its own tree (the server refuses it).

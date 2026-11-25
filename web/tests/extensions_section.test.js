@@ -12,7 +12,7 @@ import { initSettings } from '../modules/settings.js';
 import { homeAnswers, searchEntries, searchSettings } from '../modules/settings_home.js';
 import { registerSettingsPage, settingsPageFor } from '../modules/settings_pages.js';
 import { HOME_ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
-import { capturePagePlace, createPageNavigation } from '../modules/page_navigation.js';
+import { canLeavePage, capturePagePlace, createPageNavigation } from '../modules/page_navigation.js';
 import { settle, world } from './helpers/settings_dom.js';
 
 function memoryStorage(t) {
@@ -97,7 +97,32 @@ function sectionWorld(t, { wide = false, draft = false, realTools = false } = {}
         }
         options.enter?.();
     };
-    const navigation = createPageNavigation({ layers, doc: env.document, canLeave: () => true,
+    env.document.querySelector = (selector) => {
+        const layerMatch = selector.match(/^\[data-shell-back\]\[data-page-layer="([^"]+)"\]$/);
+        if (layerMatch) {
+            return env.document.body.querySelectorAll('[data-shell-back]')
+                .find((node) => node.dataset?.pageLayer === layerMatch[1]) || null;
+        }
+        return env.document.body.querySelector(selector);
+    };
+    let lands = 0;
+    const land = () => {
+        lands += 1;
+        for (const box of [section.page.querySelector('.skills-scroll'), section.page.querySelector('.section-rail'),
+            ...section.page.querySelectorAll('.settings-page')]) {
+            if (box) box.scrollTop = box.scrollLeft = 0;
+        }
+    };
+    const beforeLeave = [];
+    const setBeforePageLeave = (handler) => {
+        if (typeof handler !== 'function') return () => {};
+        beforeLeave.push(handler);
+        return () => {
+            const idx = beforeLeave.indexOf(handler);
+            if (idx >= 0) beforeLeave.splice(idx, 1);
+        };
+    };
+    const navigation = createPageNavigation({ layers, doc: env.document, canLeave: (key) => canLeavePage(key, state, beforeLeave), land,
         capture: opener => capturePagePlace({ state, navState: {}, settingsControls: settings, skillsControls: section,
             doc: env.document, commitPage, restorePlaces: { capture: (_root, target) => () => target?.focus?.() } }, opener) });
     const showPage = (name, options = {}) => navigation.go(options.key || name, () => commitPage(name, options), options);
@@ -112,16 +137,18 @@ function sectionWorld(t, { wide = false, draft = false, realTools = false } = {}
         const event = { previouslyConnected };
         opens.forEach((fn) => fn(event));
     };
-    settings = initSettings({ state, layers, showPage, ws, openExtensions: (...args) => section.open(...args) });
-    section = createExtensions({ ctx: { state, layers, showPage, ws, openSettings: settings.open },
+    settings = initSettings({ state, layers, showPage, ws, setBeforePageLeave, openExtensions: (...args) => section.open(...args) });
+    section = createExtensions({ ctx: { state, layers, showPage, ws, setBeforePageLeave, openSettings: settings.open },
         viewsHtml: '<div class="skills-scroll"><button data-view-link>Other view</button></div>',
         views: { show: view => views.push(view), hide: () => views.push('hidden') },
         facts: () => ({ installed: 3, needs: 1, sources: 2 }) });
+    settings.page.getBoundingClientRect = () => ({ width: wide ? 1000 : 390 });
+    section.page.getBoundingClientRect = () => ({ width: state.activePage === 'skills' ? (wide ? 1000 : 390) : 0 });
     for (const page of [settings.page, section.page]) {
-        page.getBoundingClientRect = () => ({ width: wide ? 1000 : 390 });
         page.querySelector('.section-rail').getClientRects = () => wide || page.dataset.sectionView === 'home' ? [{}] : [];
     }
-    const resize = async value => { wide = value; observers.forEach(observer => observer.callback()); await settle(); };
+    const pulseResize = async () => { observers.forEach(observer => observer.callback()); await settle(); };
+    const resize = async value => { wide = value; await pulseResize(); };
     const back = () => (state.activePage === 'skills' ? section.page : settings.page).querySelector('[data-shell-back]');
     const close = async method => {
         if (method === 'button') await back().fire('click', { detail: 1 });
@@ -140,7 +167,7 @@ function sectionWorld(t, { wide = false, draft = false, realTools = false } = {}
         Object.assign(globalThis, { window: env.window, document: env.document });
         try { section.destroy(); } finally { Object.assign(globalThis, kept); }
     });
-    return { ...base, store, history, settings, section, navigation, showPage, resize, close, back, current, bodies, contexts, mounted, gone, views, socketOpen };
+    return { ...base, store, history, settings, section, navigation, showPage, resize, pulseResize, close, back, current, bodies, contexts, mounted, gone, views, socketOpen, lands: () => lands };
 }
 
 test('old addresses and Settings search doors forward into Extensions without callback navigation', async t => {
@@ -427,3 +454,145 @@ test('a link between Extensions views owes its own return; a rail row just repla
     assert.deepEqual(w.current(), ['browse']);
     assert.equal(w.layers.returnPage(), null);
 });
+
+for (const wide of [false, true]) {
+    test(`revisiting Extensions via Settings’ door preserves retained levels and keeps local Back over Settings (wide=${wide})`, async t => {
+        const w = sectionWorld(t, { wide, draft: true });
+        await w.section.open('tools', { map: true }); await settle();
+        w.section.go('tools/slack'); await settle();
+        const original = w.bodies.get('tools/slack');
+        original.querySelector('[data-draft]').value = 'kept across revisit';
+        const scroller = original.closest('.settings-page');
+        scroller.scrollTop = 100;
+        await w.section.page.querySelector('.extensions-shell').fire('scroll', { target: scroller });
+        await w.pulseResize();
+        // Scroll to 420 just before leaving (captured by offLeave before hide), then simulate delayed 0 scroll + resize while hidden.
+        scroller.scrollTop = 420;
+        await w.showPage('chat', { map: true }); await settle();
+
+        await w.settings.open('', { map: true }); await settle();
+        await settle();
+        scroller.scrollTop = 0;
+        await w.section.page.querySelector('.extensions-shell').fire('scroll', { target: scroller });
+        await w.pulseResize();
+        const landsBefore = w.lands();
+        const doorRow = w.settings.page.querySelector('[data-settings-open="page:skills"]');
+        assert.ok(doorRow, 'Settings renders the Extensions door row');
+        doorRow.focus();
+        const pointer = { type: 'click', target: doorRow, detail: 1, eventPhase: 1 };
+        w.env.document.dispatchEvent(pointer);
+        await w.settings.page.querySelector('.section-rail').fire('click', { target: doorRow });
+        pointer.eventPhase = 0;
+        await settle();
+
+        assert.equal(w.state.activePage, 'skills');
+        assert.equal(w.lands(), landsBefore, 'ordinary door revisit does not invoke land() and reset scroll');
+        assert.equal(scroller.scrollTop, 420, 'revisit preserves editor scrollTop');
+        assert.equal(w.env.document.activeElement !== w.back(), true, 'pointer revisit does not force focus onto Back');
+        assert.equal(w.section.page.dataset.extensionsDepth, '2');
+        assert.equal(w.bodies.get('tools/slack'), original, 'revisit through Settings’ door must not unmount retained editor');
+        assert.equal(original.querySelector('[data-draft]').value, 'kept across revisit');
+        assert.equal(w.back().getAttribute('aria-label'), 'Back to MCP servers');
+
+        await w.close('button');
+        assert.equal(w.state.activePage, 'skills');
+        assert.deepEqual(w.current(), ['tools']);
+        assert.equal(w.section.page.dataset.extensionsDepth, '1');
+        if (!wide) {
+            assert.equal(w.back().getAttribute('aria-label'), 'Back to Extensions');
+            await w.close('button');
+            assert.deepEqual(w.current(), []);
+            assert.equal(w.section.page.dataset.extensionsDepth, '0');
+            assert.equal(w.section.page.dataset.sectionView, 'home');
+            assert.equal(w.back().getAttribute('aria-label'), 'Back to Settings');
+            for (const id of ['browse', 'sources']) {
+                assert.ok(w.section.page.querySelector(`[data-extensions-open="${id}"]`), `${id} is reachable from list`);
+            }
+            await w.section.page.querySelector('[data-extensions-rail]').fire('click', {
+                target: w.section.page.querySelector('[data-extensions-open="browse"]') });
+            assert.deepEqual(w.current(), ['browse']);
+            assert.equal(w.back().getAttribute('aria-label'), 'Back to Extensions');
+            await w.close('button');
+            assert.equal(w.section.page.dataset.sectionView, 'home');
+        }
+        assert.equal(w.back().getAttribute('aria-label'), 'Back to Settings');
+
+        await w.close('button');
+        assert.equal(w.state.activePage, 'settings');
+        assert.equal(w.env.document.activeElement === doorRow, true, 'Back from Extensions returns focus to Settings’ calling row');
+        assert.equal(w.layers.returnPage(), null);
+
+        // Imperative open('page:skills'), explicit empty request, and search result marker keep collapse/landing semantics.
+        for (const kind of ['imperative', 'empty', 'search']) {
+            await w.showPage('chat', { map: true }); await settle();
+            await w.section.open('tools', { map: true }); await settle();
+            w.section.go('tools/slack'); await settle();
+            const slackScroller = w.bodies.get('tools/slack').closest('.settings-page');
+            slackScroller.scrollTop = 420;
+            await w.section.page.querySelector('.extensions-shell').fire('scroll', { target: slackScroller });
+            const landsBefore = w.lands();
+            if (kind === 'search') {
+                await w.settings.open('', { map: true }); await settle();
+                const search = w.settings.page.querySelector('#settings-search');
+                search.value = 'Extensions';
+                await search.fire('input');
+                const hit = w.settings.page.querySelector('[data-settings-result="home:skills"]');
+                assert.ok(hit, 'Settings search renders home:skills result');
+                await w.settings.page.querySelector('.section-rail').fire('click', { target: hit });
+                await settle();
+            } else if (kind === 'imperative') {
+                await w.settings.open('', { map: true }); await settle();
+                await w.settings.open('page:skills'); await settle();
+            } else {
+                await w.section.open(''); await settle();
+            }
+            assert.deepEqual(w.current(), wide ? ['tools'] : []);
+            assert.equal(w.section.page.dataset.extensionsDepth, wide ? '1' : '0');
+            if (!wide) assert.equal(w.section.page.dataset.sectionView, 'home');
+            if (kind !== 'empty') {
+                assert.equal(w.lands(), landsBefore + 1, `${kind} still resets landing scroll via land()`);
+            }
+        }
+    });
+
+    test(`Enter on Settings’ door focuses the active layer’s Back instead of body (wide=${wide})`, async t => {
+        const w = sectionWorld(t, { wide, draft: true });
+        await w.section.open('tools', { map: true }); await settle();
+        w.section.go('tools/slack'); await settle();
+        const scroller = w.bodies.get('tools/slack').closest('.settings-page');
+        scroller.scrollTop = 420;
+        await w.section.page.querySelector('.extensions-shell').fire('scroll', { target: scroller });
+        await w.settings.open('', { map: true }); await settle();
+
+        const doorRow = w.settings.page.querySelector('[data-settings-open="page:skills"]');
+        doorRow.focus();
+        const keyPress = { type: 'click', target: doorRow, detail: 0, eventPhase: 1 };
+        w.env.document.dispatchEvent(keyPress);
+        await w.settings.page.querySelector('.section-rail').fire('click', { target: doorRow });
+        keyPress.eventPhase = 0;
+        await settle();
+
+        assert.equal(w.back().getAttribute('aria-label'), 'Back to MCP servers');
+        assert.equal(w.env.document.activeElement === w.back(), true, 'Enter focuses active header Back on retained editor');
+        assert.equal(scroller.scrollTop, 420);
+
+        await w.close('button');
+        assert.deepEqual(w.current(), ['tools']);
+        if (!wide) {
+            await w.settings.open('', { map: true }); await settle();
+            doorRow.focus();
+            const narrowKey = { type: 'click', target: doorRow, detail: 0, eventPhase: 1 };
+            w.env.document.dispatchEvent(narrowKey);
+            await w.settings.page.querySelector('.section-rail').fire('click', { target: doorRow });
+            narrowKey.eventPhase = 0;
+            await settle();
+            assert.equal(w.back().getAttribute('aria-label'), 'Back to Extensions');
+            assert.equal(w.env.document.activeElement === w.back(), true, 'Enter focuses Back to Extensions on narrow 1st level');
+            await w.close('button');
+        }
+        assert.equal(w.back().getAttribute('aria-label'), 'Back to Settings');
+        await w.close('button');
+        assert.equal(w.state.activePage, 'settings');
+        assert.equal(w.env.document.activeElement === doorRow, true);
+    });
+}

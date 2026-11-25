@@ -447,7 +447,7 @@ async def _api_identity(request: Request) -> JSONResponse:
     from ouroboros.presence_owner_contact import MAIN_CONTACT_VERSION
     from ouroboros.presence_recovery import WORK_OUTPUT_VERSION
     from ouroboros.place_guard import PLACE_BINDING_VERSION
-    from ouroboros.gateway.host_sign_in import SIGN_IN_VERSION
+    from ouroboros.gateway.host_sign_in import SIGN_IN_HANDOVER_VERSION, SIGN_IN_VERSION
     from ouroboros.place_intake import ATTENTION_VERSION
     from ouroboros.extension_late_result import VERSION as LATE_RESULT_VERSION
 
@@ -468,7 +468,8 @@ async def _api_identity(request: Request) -> JSONResponse:
                          "presence_attention_version": ATTENTION_VERSION,
                          "late_result_version": LATE_RESULT_VERSION,
                          "presence_place_binding_version": PLACE_BINDING_VERSION,
-                         "notify_version": NOTIFY_VERSION, "sign_in_version": SIGN_IN_VERSION})
+                         "notify_version": NOTIFY_VERSION, "sign_in_version": SIGN_IN_VERSION,
+                         "sign_in_handover_version": SIGN_IN_HANDOVER_VERSION})
 
 
 async def _api_tool_schemas(request: Request) -> JSONResponse:
@@ -904,6 +905,7 @@ from ouroboros.gateway.host_service_places import (  # noqa: E402
     _api_presence_work as _api_presence_work,
     _api_presence_place as _api_presence_place,
     _presence_work_view as _presence_work_view,
+    host_service_context,
 )
 
 
@@ -1517,13 +1519,10 @@ def create_host_service_app(
             WebSocketRoute("/events", _ws_events),
         ]
     )
-    app.state.host_service_context = HostServiceContext(
-        pathlib.Path(data_dir),
-        bridge_getter=bridge_getter,
-        tool_schemas_getter=tool_schemas_getter,
-        ws_broadcaster_getter=ws_broadcaster_getter,
-        presence_runner=presence_runner,
-    )
+    # The data root's one context: a linked Ouroboros's messages share it, also one that came before this service.
+    app.state.host_service_context = host_service_context(
+        data_dir, bridge_getter=bridge_getter, tool_schemas_getter=tool_schemas_getter,
+        ws_broadcaster_getter=ws_broadcaster_getter, presence_runner=presence_runner)
     return app
 
 

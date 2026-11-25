@@ -831,6 +831,8 @@ def test_the_headline_check_of_a_current_install_describes_what_it_finds(door, m
                     for tx_phase, action in (("pending_boot_smoke", "restart"), ("gate_blocked", "check"),
                                              ("assisted_resolution", "")):
                         transaction = {"active": True, "phase": tx_phase}
+                        if tx_phase == "pending_boot_smoke":
+                            transaction["pre_restart_smoke"] = "passed"
                         page.evaluate("window.__wsHandlers.get('update_progress_changed')()")
                         page.wait_for_function("action => document.querySelector('#btn-update-primary').dataset.action === action",
                                                arg=action)

@@ -1644,6 +1644,37 @@ def test_a_not_dispatched_or_unknown_outcome_never_touches_the_slot(setup, turn_
     assert slot.envelope == EARLIER
 
 
+@pytest.mark.parametrize("method", ["chat", "chat_async"])
+@pytest.mark.parametrize(("case", "stated"), [("stateless", True), ("message_continuation", False),
+                                              ("turn_continuation", False), ("incomplete", False)])
+def test_only_a_completed_reply_no_native_continuation_carries_is_stated_stateless(setup, turn_engine, case, stated,
+                                                                                    method):
+    """``claudexor.stateless_completed`` is the engine's proved ``completed`` result whose message and turn carry no
+    native continuation; the finish stays unstated, so usability is unchanged. A native continuation (on the message or
+    the turn) or an incomplete outcome states none, and only this provider's usage reaches the round's facts (#4028)."""
+    from ouroboros.loop_llm_call import _replace_response_meta
+
+    _, gateway, client = setup
+    value = (result(outcome="incomplete", problem={"code": "provider_incomplete", "context": {
+        "reason": "max_output_tokens"}}) if case == "incomplete" else result())
+    if case != "message_continuation":
+        value["message"].pop("nativeContinuation")
+    if case == "turn_continuation":
+        value["nativeContinuation"] = deepcopy(TURN)
+    gateway.results = [value]
+    call = (client.chat_async if method == "chat_async" else client.chat)(
+        [{"role": "user", "content": "hi"}], MODEL, model_turn_state=transport.ModelTurnState())
+    answer, usage = asyncio.run(call) if method == "chat_async" else call
+    assert usage["claudexor"].get("stateless_completed", False) is stated and json.dumps(usage)
+    assert usage.get("response_finish_reason") == ("length" if case == "incomplete" else None)
+    facts = {}
+    _replace_response_meta(facts, usage, answer)
+    assert facts.get("stateless_completed", False) is stated
+    assert facts["finish_reason_present"] is (case == "incomplete")
+    _replace_response_meta(facts, {**usage, "provider": "openrouter"}, answer)
+    assert "stateless_completed" not in facts
+
+
 def test_the_active_turn_token_never_reaches_usage_the_ledger_or_ordinary_logs(setup, turn_engine):
     root, gateway, client = setup
     gateway.results = [{**result(), "nativeContinuation": deepcopy(TURN)}]

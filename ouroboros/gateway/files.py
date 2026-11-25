@@ -21,10 +21,10 @@ from starlette.routing import Route
 
 from ouroboros import chat_uploads, store
 from ouroboros.gateway._helpers import json_error, run_sync_to_completion
+from ouroboros.peer_links import is_secret_file, may_be_secret_file
 from ouroboros.server_auth import is_loopback_host
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.skill_payload_policy import (
-    SKILL_OWNER_STATE_FILENAMES,
     is_skill_control_plane_path as _policy_is_skill_control_plane_path,
     is_skill_owner_state_alias,
     is_skill_owner_state_target as _policy_is_skill_owner_state_target,
@@ -42,7 +42,6 @@ _TEXT_PREVIEW_EXTENSIONS = {
     ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".ini", ".cfg",
     ".sh", ".zsh", ".bash", ".ps1", ".env", ".xml", ".csv",
 }
-_SKILL_OWNER_STATE_FILENAMES = SKILL_OWNER_STATE_FILENAMES
 
 
 def _is_skill_owner_state_target(target: pathlib.Path) -> bool:
@@ -174,7 +173,7 @@ def _is_owner_only_file(target: pathlib.Path) -> bool:
     data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
     if is_skill_owner_state_alias(target, data_root):
         return True
-    return False
+    return is_secret_file(target, data_root)  # a link's key or its landing temporary: never through Files
 
 
 def _contains_owner_only_file(target: pathlib.Path) -> bool:
@@ -371,7 +370,14 @@ async def api_files_list(request: Request) -> JSONResponse:
             return JSONResponse({"error": f"Not a directory: {rel_path}"}, status_code=400)
 
         entries: list[dict[str, Any]] = []
-        visible_entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        from ouroboros import config as _cfg
+        data_root, rows = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False), []
+        for entry in target.iterdir():
+            # Never a link's key (only a row that can be one is resolved), nor such a row the resolver failed on.
+            with suppress(OSError, RuntimeError):
+                if not (may_be_secret_file(entry) and is_secret_file(entry, data_root)):
+                    rows.append(entry)
+        visible_entries = sorted(rows, key=lambda p: (not p.is_dir(), p.name.lower()))
         for entry in visible_entries:
             if len(entries) >= _FILE_BROWSER_MAX_DIR_ENTRIES:
                 break

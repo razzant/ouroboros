@@ -143,6 +143,17 @@ def get_safety_mode(kind: str = "owner") -> str:
     return cfg.normalize_safety_mode(cfg.runtime_setting(key, default_val) or default_val)
 
 
+def coverage_kind(metadata) -> str:
+    """Which coverage setting a call meets: work a linked Ouroboros's letter began (the host-stamped
+    ``peer_letter`` of its root and helpers, ``gateway/peer_letters_api``) meets my own life's, like the work a
+    place begins, though it stays ordinary queued work; everything else follows ``work_kind``."""
+    from ouroboros.consciousness_authority import work_kind
+
+    if isinstance(metadata, dict) and isinstance(metadata.get("peer_letter"), dict):
+        return "consciousness"
+    return work_kind(metadata)
+
+
 OWNER_RULES_KEY = "OUROBOROS_SAFETY_OWNER_RULES"
 _RULES_ADDRESS = "Settings › Your rules"
 

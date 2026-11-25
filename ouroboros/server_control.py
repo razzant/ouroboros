@@ -472,6 +472,11 @@ def execute_panic_stop(
         attempt("services", lambda: kill_all_services(data_dir, request_only=True))
         attempt("companions", lambda: panic_kill_all(request_only=True))
         attempt("restart-successor", stop_restart_successor)
+        from ouroboros.launch_custody import panic_stop_kept
+
+        # A kept launch whose worker retired: no worker tree or Popen here reaches it, and on
+        # macOS a platform binary hides its markers from the census below.
+        attempt("kept-services", lambda: panic_stop_kept(data_dir))
         # One more bounded request attempt: every live member of the installation scope
         # (marker, recorded task groups, the engine's recorded runs) by re-measured identity,
         # excluding this server, its launcher and pid 1; a restart successor carries the

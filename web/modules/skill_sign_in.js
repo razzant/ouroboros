@@ -26,6 +26,8 @@ const hintKey = (value) => String(value || '').trim().toLowerCase();
 const scopeWords = (value) => String(value || '').split(/\s+/).filter(Boolean);
 const attemptOf = (row) => typeof row?.attempt_id === 'string' ? row.attempt_id : '';
 const clientOf = (service, id) => list(service.clients).find((row) => row.id === id);
+const signInClients = (service) => list(service?.clients).filter((row) => row && row.return !== 'unknown');
+const signInClientOf = (service, id) => signInClients(service).find((row) => row.id === id);
 const accountOf = (service, key) => list(service.accounts).find((row) => row.key === key);
 const bindingOf = (service) => ({ issuer: service.issuer, ...(service.endpoints && { endpoints: { ...service.endpoints } }) });
 const bindingKey = (row) => JSON.stringify([row.issuer, Object.entries(row.endpoints || {}).sort()]);
@@ -43,7 +45,7 @@ function optionalChoices(service) {
 const choicesKey = (service) => JSON.stringify([bindingKey(service), list(service.scopes), Object.entries(service.scope_labels || {}).sort(),
     Object.entries(service.scope_spellings || {}).sort(),
     optionalChoices(service).map((row) => [row.scope, row.label, row.default]),
-    list(service.clients).map((row) => [row.id, row.label, row.source, row.return, row.client_id_tail, row.registration]).sort()]);
+    signInClients(service).map((row) => [row.id, row.label, row.source, row.return, row.client_id_tail, row.registration]).sort()]);
 
 /** A fixed sentence by its code with its `{name}` values filled: plain text, or HTML that keeps each value as written. */
 function words(code, english, values = {}, asHtml = false) {
@@ -217,7 +219,7 @@ export function confirmSentence(service, account, what) {
 
 /** The client a sign-in starts with: the account's own, else the one a sibling skill used for that address, else the only one. */
 export function preselectedClient(service, { account = null, address } = {}) {
-    const clients = list(service?.clients);
+    const clients = signInClients(service);
     const who = hintKey(address ?? account?.label);
     const own = clients.find((row) => row?.id && row.id === account?.client?.id);
     if (own && who === hintKey(account?.label)) return { client: own, why: 'own' };
@@ -243,8 +245,9 @@ export function returnNoteHtml(service, client, pageHost, hasClients = true) {
     return floor ? `${exact} ${floor}` : exact;
 }
 
-const returnsHtml = (client) => (String(client?.return || 'loopback').startsWith('exact:')
-    ? html('returns_to', 'returns to {address}', { address: String(client.return).slice(6) }) : html('returns_here', 'returns to this computer'));
+const returnsHtml = (client) => client?.return === 'unknown' ? html('return_unknown', 'return address unknown')
+    : (String(client?.return || 'loopback').startsWith('exact:')
+        ? html('returns_to', 'returns to {address}', { address: String(client.return).slice(6) }) : html('returns_here', 'returns to this computer'));
 const clientLine = (client) => `${authored(client.label || client.id)} · …${escapeHtml(client.client_id_tail || '')} · ${returnsHtml(client)}`;
 
 function clientSource(client) {
@@ -305,7 +308,7 @@ export function signInEditorHtml(service, editor, pageHost = '') {
             <div class="ui-action-row">${act('start_again', words('start_again', 'Start again'))}${act('close', words('cancel', 'Cancel'))}${resultHtml('editor', editor.result)}</div>
         </div></div>`;
     }
-    const clients = list(service.clients);
+    const clients = signInClients(service);
     const draft = editor.draft || {};
     const canRegister = !clients.length && !service.endpoints;
     const pick = editor.picked ? {} : preselectedClient(service, { account: accountOf(service, editor.account), address: draft.hint });
@@ -318,7 +321,7 @@ export function signInEditorHtml(service, editor, pageHost = '') {
     }).join('');
     const optional = optionalChoices(service).map((row) => `<label class="ui-field ui-field-inline"><input class="ui-checkbox" type="checkbox" data-sign-in-optional value="${
         escapeHtml(row.scope)}"${list(draft.optional).includes(row.scope) ? ' checked' : ''}> ${authored(offerText(service, row.scope, row.label || row.scope))}</label>`).join('');
-    const note = returnNoteHtml(service, clientOf(service, draft.client), pageHost, !canRegister);
+    const note = returnNoteHtml(service, signInClientOf(service, draft.client), pageHost, !canRegister);
     const oneAccount = Boolean(editor.account && service.accounts_mode === 'one');
     const open = clients.length ? act('open', words('open', 'Open the sign-in page'), { attrs: 'data-primary' })
         : canRegister ? act('open', words('register_open', 'Register a client and sign in'), { attrs: 'data-primary' }) : '';
@@ -326,7 +329,9 @@ export function signInEditorHtml(service, editor, pageHost = '') {
         <label class="ui-field"><span>${html('account', 'Account')}</span><input class="ui-control" type="text" data-sign-in-field="hint" value="${escapeHtml(draft.hint || '')}" placeholder="${escapeHtml(words('account_hint', 'Optional: the account to sign in with'))}" autocomplete="off" spellcheck="false"${oneAccount ? ' readonly' : ''}></label>
         <p class="ui-field-help">${oneAccount ? html('one_account', 'Disconnect this account here before switching to another.')
             : html('account_at_provider', 'Choose or confirm the account at {provider}.', values)}</p>
-        <div class="ui-field" role="radiogroup" aria-label="${escapeHtml(words('client', 'Client'))}"><span>${html('client', 'Client')}</span>${radios || `<span class="ui-field-help">${html('no_clients', 'No client for {provider} is saved yet.', values)}</span>`}
+        <div class="ui-field" role="radiogroup" aria-label="${escapeHtml(words('client', 'Client'))}"><span>${html('client', 'Client')}</span>${radios || `<span class="ui-field-help">${list(service.clients).length
+            ? html('no_return_client', 'No saved client has a known return address.')
+            : html('no_clients', 'No client for {provider} is saved yet.', values)}</span>`}
             <div>${act('add_client', words('add_client', 'Add a client…'), { tone: 'ghost' })}</div></div>
         <div class="ui-field" data-sign-in-permissions><span>${html('permissions', 'Permissions')}</span><span class="ui-field-help">${html('always', 'Always: {scopes}', { scopes: list(service.scopes).map((scope) => offerText(service, scope)).join('; ') })}</span>${optional}</div>
         <p class="ui-field-help" data-sign-in-return-note${note ? '' : ' hidden'}>${note}</p>
@@ -353,7 +358,7 @@ function bindingHtml(binding) {
 
 /** One client form (Add, or Edit of a saved row): the secret is a password field that starts empty and is never filled back. */
 export function clientFormHtml(service, form = {}, returnAddress = '') {
-    const exact = String(form.return || '').startsWith('exact:');
+    const unknown = form.return === 'unknown', exact = String(form.return || '').startsWith('exact:');
     const name = escapeHtml(`sign-in-return-${service.skill}-${service.service}`);
     const input = (key, type, value = '', extra = '') => `<input class="ui-control" type="${type}" data-client-field="${key}" value="${escapeHtml(value)}" autocomplete="${
         type === 'password' ? 'new-password' : 'off'}" spellcheck="false"${extra}>`;
@@ -371,10 +376,12 @@ export function clientFormHtml(service, form = {}, returnAddress = '') {
         ${field(html('client_label', 'Label'), input('label', 'text', form.label || '', ` placeholder="${escapeHtml(words('label_example', 'Personal'))}"`),
             source || html('client_label_help', 'Use a name you will recognize, such as Personal or Work (IT-supplied).'))}
         ${credentials}
-        <div class="ui-field" role="radiogroup" aria-label="${escapeHtml(words('returns', 'Returns to'))}"><span>${html('returns', 'Returns to')}</span>
-            ${radio('loopback', !exact, html('return_here', 'This computer (desktop-app client)'))}${radio('exact', exact, html('return_web', 'This address (web-app client)'))}
-            ${input('address', 'url', exact ? String(form.return).slice(6) : '', ' placeholder="https://…"')}</div>
-        <p class="ui-field-help">${html('register', 'Register exactly this return address:')} <code data-sign-in-register>${escapeHtml(exact ? String(form.return).slice(6) : returnAddress)}</code> ${act('copy', words('copy', 'Copy'), { tone: 'ghost' })}</p>
+        ${unknown
+            ? `<p class="ui-field-help">${html('unknown_return_help', 'Return address unknown. Add a client with a known return address for new sign-ins.')}</p>`
+            : `<div class="ui-field" role="radiogroup" aria-label="${escapeHtml(words('returns', 'Returns to'))}"><span>${html('returns', 'Returns to')}</span>
+                ${radio('loopback', !exact, html('return_here', 'This computer (desktop-app client)'))}${radio('exact', exact, html('return_web', 'This address (web-app client)'))}
+                ${input('address', 'url', exact ? String(form.return).slice(6) : '', ' placeholder="https://…"')}</div>
+            <p class="ui-field-help">${html('register', 'Register exactly this return address:')} <code data-sign-in-register>${escapeHtml(exact ? String(form.return).slice(6) : returnAddress)}</code> ${act('copy', words('copy', 'Copy'), { tone: 'ghost' })}</p>`}
         <div class="ui-action-row">${act('client_save', words('save', 'Save'), { tone: 'save' })}${act('client_cancel', words('cancel', 'Cancel'))}${resultHtml('form', form.result)}</div>
     </div>`;
 }
@@ -413,7 +420,7 @@ function initialDraft(service, key) {
 // Keep only the choices still offered. Never substitute another saved client for a removed one.
 const keepDraft = (draft, service) => {
     const allowed = new Set(optionalChoices(service).map((row) => row.scope));
-    return { ...draft, client: clientOf(service, draft.client) ? draft.client : '',
+    return { ...draft, client: signInClientOf(service, draft.client) ? draft.client : '',
         optional: list(draft.optional).filter((scope) => allowed.has(scope)) };
 };
 
@@ -606,8 +613,8 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
         const editor = state.editor, shown = editor.shown;
         const draft = editor.draft = draftOf(group) || editor.draft;
         if (choicesKey(shown) !== choicesKey(service)) { showCurrentChoices(state, editor, service, group); return; }
-        const client = clientOf(shown, draft.client);
-        const register = !list(shown.clients).length && !shown.endpoints;
+        const client = signInClientOf(shown, draft.client);
+        const register = !signInClients(shown).length && !shown.endpoints;
         if (!client && !register) { say(service, 'editor', { text: failureWords(service, { reason: 'client_required' }), tone: 'warn' }); return; }
         const row = accountOf(shown, editor.account);
         const account = row && (shown.accounts_mode === 'one' || hintKey(row.label) === hintKey(draft.hint)) ? row.key : '';
@@ -730,8 +737,9 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
         const editor = state.editor, form = group.querySelector('[data-sign-in-client-form]');
         const value = (key) => String(form?.querySelector(`[data-client-field="${key}"]`)?.value || '').trim();
         const exact = Boolean(form?.querySelector('input[type="radio"][value="exact"]')?.checked);
-        const client = { ...(editor.form.id ? { id: editor.form.id } : {}), label: value('label'), client_id: value('client_id'), return: exact ? `exact:${value('address')}` : 'loopback' };
-        Object.assign(editor.form, { label: client.label, return: client.return });
+        const client = { ...(editor.form.id ? { id: editor.form.id } : {}), label: value('label'), client_id: value('client_id'),
+            ...(editor.form.return === 'unknown' ? {} : { return: exact ? `exact:${value('address')}` : 'loopback' }) };
+        Object.assign(editor.form, { label: client.label, return: client.return ?? editor.form.return });
         if (!client.label || (!client.client_id && !editor.form.id)) { say(service, 'form', { text: words('client_needs', 'Give the client a label and its client ID.'), tone: 'warn' }); return; }
         const binding = editor.form.binding;
         if (bindingKey(binding) !== bindingKey(service)) {
@@ -747,7 +755,7 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
         await refresh();
         if (closed || state.editor !== editor) return;
         const fresh = services().find((row) => row.service === service.service);
-        const available = fresh && bindingKey(fresh) === bindingKey(binding) && clientOf(fresh, result.client?.id);
+        const available = fresh && bindingKey(fresh) === bindingKey(binding) && signInClientOf(fresh, result.client?.id);
         state.editor = editor.back && available ? { ...editor.back, shown: fresh,
             draft: keepDraft({ ...editor.back.draft, client: available.id }, fresh), picked: true, result: saved }
             : { ...editor, form: null, result: saved };

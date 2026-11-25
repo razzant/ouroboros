@@ -306,13 +306,16 @@ def objective_author_line(origin: Mapping[str, Any] | None) -> str:
     origin = _mapping(origin)
     author = _mapping(origin.get("objective_author"))
     kind = str(author.get("kind") or "")
+    sender = str(_mapping(origin.get("letter_author")).get("label") or "")  # a linked Ouroboros's letter began it
+    letter = f"a letter from {sender}, an Ouroboros of my human linked to this one" if sender else ""
+    began = f"; {letter} began this work, not my human" if letter else ""
     if origin.get("delegation_role") == "subagent":
         return (f"the assignment parent task {origin.get('parent_task_id') or '?'} wrote for this helper — "
-                "Ouroboros's account, not my human's words")
+                f"Ouroboros's account, not my human's words{began}")
     if kind == "task":
-        return f"drafted by task {author.get('task_id')}, not spoken by my human"
+        return f"drafted by task {author.get('task_id')}, not spoken by my human{began}"
     if kind == "continuation":
-        return f"the host's Continue work order for task {author.get('predecessor_task_id')}"
+        return f"the host's Continue work order for task {author.get('predecessor_task_id')}{began}"
     if kind == "schedule_api":
         when = f" at {author['at']}" if author.get("at") else ""
         return (f"supplied through the Schedules API{when} (the owner's CLI, or any program with that access): "
@@ -327,6 +330,8 @@ def objective_author_line(origin: Mapping[str, Any] | None) -> str:
         # A turn an agent's note opened: the host recorded its declared author (admission_author),
         # never my human's words and never "not recorded".
         return f"a note from {origin.get('text_author') or 'a declared agent'}; not my human's words"
+    if letter:
+        return f"{letter}: its words, not my human's, and it grants no owner authority"
     if origin.get("initiator") == "consciousness":
         return "started by my consciousness"
     if origin.get("owner_ingress"):

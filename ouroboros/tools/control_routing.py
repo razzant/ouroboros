@@ -480,8 +480,14 @@ def _declare_own_start(ctx: ToolContext, evt: Dict[str, Any], metadata: Dict[str
                client_message_id="", attachment_uploads=[])
 
 
-def _mine_refusal(ctx: ToolContext, mine: Any, *, owner_words: Any, owner_source: Any, destination: Any) -> str:
-    """The published typed refusal of a ``mine`` declaration, read before any effect; ``""`` when it may proceed."""
+def _start_refusal(ctx: ToolContext, mine: Any, *, owner_words: Any, owner_source: Any, destination: Any) -> str:
+    """start_task's published typed refusals, read before any effect; ``""`` when it may proceed: work a linked
+    Ouroboros's letter began starts no separate root (``peer_letters.separate_work_refusal``), and a ``mine``
+    declaration is one and meets its switch."""
+    from ouroboros.peer_letters import separate_work_refusal
+
+    if refusal := separate_work_refusal(getattr(ctx, "task_metadata", None), "start_task's new root"):
+        return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
     if mine is None or mine is False:
         return ""
     if mine is not True or str(owner_words or "").strip() or str(owner_source or "").strip() or destination == "owner":
@@ -538,7 +544,7 @@ def _start_task(
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
-    if refused := _mine_refusal(ctx, mine, owner_words=owner_words, owner_source=owner_source, destination=destination):
+    if refused := _start_refusal(ctx, mine, owner_words=owner_words, owner_source=owner_source, destination=destination):
         return refused
     model_basis, cite_error = cited_owner_basis(ctx, owner_words, call_speech=bool(model))
     owner_basis = model_basis if model_basis and model_basis["source"] != "live_call" else None

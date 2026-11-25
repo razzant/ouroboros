@@ -5,15 +5,16 @@ starts on. Where any state exists (off, on or unreadable) there is no step. The 
 choice rides the one completion write as a completion fact, and only while a first state is still to come (decided
 before the write): ``true`` writes "on", ``false`` clears an earlier attempt's "on". The first state a mint creates (first
 boot or owner Reset) is born with it unless an installation Panic is pending. Where a state exists the field changes
-nothing, so setup never lifts an owner or Panic stop; no command is sent, so Main shows no row. Every case goes through
-the real endpoint, the real settings write and the real ``init_state``.
+nothing, so setup never lifts an owner or Panic stop; no command is sent, so Main shows no row. The carrier cases go
+through the real endpoint, the real settings write and the real ``init_state``. An owner Reset's successor (its offer,
+its Start and the state Setup makes from the Reset's identity) is read where that Reset really runs:
+tests/test_settings_policy_browser.py ``test_reset_from_about_shows_the_successors_completed_receipt_in_the_same_tab``.
 """
 
 from __future__ import annotations
 
 import json
 import pathlib
-import shutil
 
 import pytest
 from starlette.applications import Starlette
@@ -149,23 +150,30 @@ def test_the_page_reads_the_control_and_writes_nothing(monkeypatch, tmp_path):
         assert client.get("/api/onboarding/bootstrap").json()["bootstrap"]["consciousnessOffer"]["offered"] is False
 
 
-def test_only_a_root_the_next_boot_would_mint_counts_as_no_state_yet(monkeypatch, tmp_path):
-    """An owner Reset's pending witness is a first state to come: offered. A completed witness whose copies are lost
-    and a copy that cannot be read are a state that exists: no step, and nothing is written by asking. (Old copies a
-    pending Reset sets aside: ``test_copies_a_pending_reset_sets_aside_count_as_no_state_yet``.)"""
+def test_only_a_root_the_next_boot_would_mint_counts_as_no_state_yet(minted, monkeypatch, tmp_path):
+    """Setup's reader of a first state to come (``state_initialization.first_state_pending``)
+    and the page that asks it, on one root through its real first boot: due before the mint (offered; asking writes
+    nothing), not due once the state is born (its own copy is the current state), and not due when that completed
+    initialization's copies are lost, a state that exists and is never minted again. (A copy that cannot be read:
+    ``test_a_copy_that_cannot_be_read_is_a_state_that_exists_on_a_root_due_its_first_state``. An owner Reset's pending
+    witness is read only where a Reset really ran: tests/test_settings_policy_browser.py
+    ``test_reset_from_about_shows_the_successors_completed_receipt_in_the_same_tab``.)"""
     from ouroboros.gateway import onboarding_host
-    from supervisor.state_initialization import mark_pending
+    from supervisor.state_initialization import first_state_pending
 
     monkeypatch.setattr(onboarding_host, "load_settings", lambda: {})
-    mark_pending(tmp_path, origin="owner_reset")
     seeded = _tree(tmp_path)
+    assert first_state_pending(tmp_path) is True
     with _client(tmp_path) as client:
         bootstrap = client.get("/api/onboarding/bootstrap").json()["bootstrap"]
     assert (bootstrap["consciousnessOffer"]["offered"], bootstrap["consciousnessOffer"]["enabled"]) == (True, None)
     assert _tree(tmp_path) == seeded, "asking whether a first state is due wrote the witness"
-    (tmp_path / "state" / "state.initialized.json").write_text(
-        json.dumps({"initialization_id": "init-1", "phase": "complete", "completed_at": "t"}), encoding="utf-8")
+    assert _boot_control() == (False, None)  # the real mint: the state this root was due is born, its witness complete
+    assert first_state_pending(tmp_path) is False
+    for name in ("state.json", "state.last_good.json"):  # then both its copies are lost
+        (tmp_path / "state" / name).unlink(missing_ok=True)
     seeded = _tree(tmp_path)
+    assert first_state_pending(tmp_path) is False
     with _client(tmp_path) as client:
         lost = client.get("/api/onboarding/bootstrap").json()["bootstrap"]
     assert lost["consciousnessOffer"]["offered"] is False and "consciousness" not in lost["stepOrder"]
@@ -212,6 +220,31 @@ def test_an_unreadable_state_offers_no_step_and_the_page_still_serves(monkeypatc
     assert (offer["offered"], offer["enabled"]) == (False, None)
     assert "consciousness" not in response.json()["bootstrap"]["stepOrder"]
     assert (tmp_path / "state" / "state.json").read_text(encoding="utf-8") == "{not json"
+
+
+def test_a_copy_that_cannot_be_read_is_a_state_that_exists_on_a_root_due_its_first_state(monkeypatch, tmp_path):
+    """On a root its next boot would mint (the positive control), a copy the operating system refuses to read (a folder
+    where ``state.json`` belongs) reads as unreadable through the reader Setup and boot share, and is a state that
+    exists: no first state is due, the page offers no step, and asking writes nothing; without the entry the same root
+    is due again. (Bytes that are no JSON, in the test above, read as invalid, with no such control.) Beside an owner
+    Reset's pending witness the refusal is a clause of its own, asked after a real Reset with an unreadable answer
+    supplied to the predicate's reader and no entry on disk: tests/test_settings_policy_browser.py."""
+    from ouroboros.gateway import onboarding_host
+    from supervisor.state import read_state_copy
+    from supervisor.state_initialization import first_state_pending
+
+    monkeypatch.setattr(onboarding_host, "load_settings", lambda: {})
+    assert first_state_pending(tmp_path) is True
+    (tmp_path / "state" / "state.json").mkdir(parents=True)
+    assert read_state_copy(tmp_path / "state" / "state.json")[0] == "unreadable"
+    seeded = _tree(tmp_path)
+    with _client(tmp_path) as client:
+        offer = client.get("/api/onboarding/bootstrap").json()["bootstrap"]["consciousnessOffer"]
+    assert (offer["offered"], offer["enabled"]) == (False, None)
+    assert first_state_pending(tmp_path) is False
+    assert _tree(tmp_path) == seeded, "asking about an unreadable copy wrote something"
+    (tmp_path / "state" / "state.json").rmdir()
+    assert first_state_pending(tmp_path) is True
 
 
 # ---- The carrier: the real endpoint, the real settings write, the real mint ------------------------------------------
@@ -282,21 +315,6 @@ def test_a_state_minted_after_setup_owes_the_first_meeting_and_one_minted_before
     assert FIRST_MEETING_KEY not in state.init_state().values  # setup over an existing state: nothing owed
 
 
-def test_an_owner_reset_then_setup_left_on_is_born_on(minted, tmp_path):
-    from ouroboros.consciousness import OWNER_STOP, _persist_stop
-    from supervisor.state_initialization import mark_pending
-
-    _complete(minted, consciousness=True)
-    assert _boot_control() == (True, None)
-    assert _persist_stop(OWNER_STOP) == ""  # the owner turned it off before the Reset
-    for subdir in ("state", "memory", "logs", "task_results"):  # gateway/control.api_reset's wipe
-        shutil.rmtree(tmp_path / subdir, ignore_errors=True)
-    minted.settings_path.unlink(missing_ok=True)
-    mark_pending(tmp_path, origin="owner_reset")
-    _complete(minted, consciousness=True)
-    assert _boot_control() == (True, None)
-
-
 def test_a_field_sent_where_a_state_exists_changes_nothing_and_a_stale_page_lifts_no_stop(minted, tmp_path):
     """Review r1 (Opus M2, Astra C1): a second wizard tab still showing the fresh default finishes after the owner
     stopped consciousness. A state exists, so the field is ignored: the stop and its source stand, whatever it says."""
@@ -357,37 +375,6 @@ def test_an_off_after_a_saved_on_is_the_first_states_choice_while_it_is_to_come(
     _complete(minted, consciousness=True)
     assert minted.saved()[ONBOARDING_CONSCIOUSNESS_KEY] == "on"
     assert _boot_control() == (True, None)
-
-
-def test_copies_a_pending_reset_sets_aside_count_as_no_state_yet(minted, monkeypatch, tmp_path):
-    """Review r1 (Astra M5): an old writer left valid copies of the previous identity after an owner Reset. Boot sets
-    them aside and mints, so setup offers the step, nothing is written by asking, and the first state is born by the
-    choice; a copy of the pending identity itself is adopted, so it is no first state."""
-    from ouroboros.gateway import onboarding_host
-    from supervisor.state_initialization import first_state_pending, mark_pending
-
-    _complete(minted)
-    assert _boot_control() == (False, None)
-    shutil.copy(tmp_path / "state" / "state.json", tmp_path / "state" / "state.last_good.json")
-    minted.settings_path.unlink(missing_ok=True)
-    identity = mark_pending(tmp_path, origin="owner_reset")
-    monkeypatch.setattr(onboarding_host, "load_settings", lambda: {})
-    seeded = _tree(tmp_path)
-    with _client(tmp_path) as client:
-        offer = client.get("/api/onboarding/bootstrap").json()["bootstrap"]["consciousnessOffer"]
-    assert (offer["offered"], offer["enabled"]) == (True, None)
-    assert _tree(tmp_path) == seeded, "asking set copies aside or wrote the witness"
-    _complete(minted, consciousness=True)
-    assert _boot_control() == (True, None)
-    assert json.loads((tmp_path / "state" / "state.json").read_text(encoding="utf-8"))["initialization_id"] == identity
-    # The other direction: a copy of the pending identity itself is adopted, and an unreadable copy refuses.
-    document = json.loads((tmp_path / "state" / "state.json").read_text(encoding="utf-8"))
-    pending = mark_pending(tmp_path, origin="owner_reset")
-    (tmp_path / "state" / "state.json").write_text(json.dumps({**document, "initialization_id": pending}), encoding="utf-8")
-    assert first_state_pending(tmp_path) is False
-    (tmp_path / "state" / "state.json").unlink()
-    (tmp_path / "state" / "state.json").mkdir()
-    assert first_state_pending(tmp_path) is False
 
 
 def test_a_present_false_neither_stops_nor_clears_a_saved_on(minted, tmp_path):

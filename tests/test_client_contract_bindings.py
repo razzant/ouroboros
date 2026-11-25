@@ -547,7 +547,8 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     assert place["owner_accounts"][0]["platform_actor_id"] == "person"
     remove = {"remove_note": place["notes"][1]["note_id"], "revoke_owner_account": "person",
               "circle_id": "", "description": "", "expected_revision": place["revision"]}
-    assert _declared("PlaceUpdateRequest") == set(change) | set(remove)
+    # ``peer`` belongs to a linked Ouroboros's place only: tests/test_peer_caller_gate.py writes it here.
+    assert _declared("PlaceUpdateRequest") == set(change) | set(remove) | {"peer"}
     assert not validate_ingress(remove, update_type)
     removed = client.post(path, json=remove)
     assert removed.status_code == 200, removed.text

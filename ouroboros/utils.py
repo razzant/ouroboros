@@ -332,6 +332,38 @@ def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = Fals
     return _atomic_overwrite(path, _write, attest=attest)
 
 
+def write_owner_only_bytes(path: pathlib.Path, content: bytes, *, landing: str = "") -> None:
+    """Atomically and durably replace ``path`` with exact bytes only the current user may read or write.
+
+    The sibling temporary is created exclusively at 0600, and on Windows its DACL is protected to its
+    owner (``platform_layer.restrict_to_owner``), before any byte lands: no window shows the content
+    under a wider mode, and an existing file's mode is never carried over (unlike ``write_bytes_atomic``).
+    ``landing`` names that temporary ``.<name>.tmp.<landing>`` for a caller that must find exactly it after a
+    stop between its creation and the replace (``peer_links``); without it the name is unique per call."""
+    from ouroboros import platform_layer
+    path = pathlib.Path(path)
+    assert_test_data_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if landing and not all(ch.isalnum() or ch in "-_" for ch in landing):
+        raise ValueError("landing must be letters, digits, '-' or '_'")
+    tmp = path.with_name(f".{path.name}.tmp.{landing}" if landing else
+                         f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        try:
+            if platform_layer.IS_WINDOWS:
+                platform_layer.restrict_to_owner(str(tmp))
+            _write_fd_fully(fd, content, tmp)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        replace_atomic(tmp, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 # What fsync of a folder's descriptor may answer where the filesystem cannot sync a folder at all (some
 # network and FUSE mounts); EROFS stays a failure: ext4 and btrfs answer it after a disk error.
 _FOLDER_SYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP})
@@ -1401,6 +1433,7 @@ _SECRET_PATTERNS = _re.compile(
     r'|gsk_[A-Za-z0-9]{30,}'      # Groq API key
     r'|sk-[A-Za-z0-9]{40,}'       # OpenAI API key
     r'|(?:(?<=bot)|\b)[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b'  # Telegram bot token (digits:secret; matches the /bot<id>:<secret>/ URL form — no \b exists between 'bot' and a digit)
+    r'|\bouroboros-invite:1:[A-Za-z0-9_\-]{16,}'  # a linked-Ouroboros invitation carries a one-time token
 )
 _SECRET_URL_CREDENTIAL_RE = _re.compile(
     r'(?i)\b(?:postgres|postgresql|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^/\s:@]+:[^/\s@]+@'
@@ -1430,6 +1463,8 @@ CREDENTIAL_HEADER_NAMES = frozenset({
     "anthropic-api-key",
     "openai-api-key",
     "cookie",
+    "x-ouroboros-link",  # a linked Ouroboros's key, ``<link_id>.<secret>`` (peer_links)
+    "x-ouroboros-invite",  # a one-time invitation token (peer_links)
 })
 
 

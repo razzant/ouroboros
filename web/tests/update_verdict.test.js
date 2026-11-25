@@ -170,7 +170,8 @@ test('a corrupt marker names out-of-process boot recovery without offering the r
 });
 
 test('a landed-but-unrestarted transaction keeps the Restart continuation across reloads', () => {
-    const landed = updateVerdict({ managed: true, update_tx: { active: true, phase: 'pending_boot_smoke' } }, '');
+    const landed = updateVerdict({ managed: true, update_tx: { active: true, phase: 'pending_boot_smoke',
+        pre_restart_smoke: 'passed' } }, '');
     assert.match(landed.headline, /waiting for a restart/);
     assert.equal(landed.action?.id, 'restart');
 });
@@ -200,9 +201,13 @@ test('restart verdicts are true for an applied update and for a deferred store-l
     // A store-less replace moves its checkout only at the restart exit, so no restart verdict may
     // claim the version already landed; each keeps the Restart continuation.
     const phase = updateVerdict({ managed: true }, 'restart_required');
-    const progress = updateVerdict({ managed: true, update_progress: {
-        operation_id: 'op-1', active: false, result: 'restart_required', error: '' } }, '');
-    const pending = updateVerdict({ managed: true, update_tx: { active: true, phase: 'pending_boot_smoke' } }, '');
+    // The deferred Replace's own carrier: its check waits for the next start (`pending`), its apply answered
+    // restart_required; the answer, not the phase, is what offers the restart.
+    const progress = updateVerdict({ managed: true, update_tx: { active: true, phase: 'pending_boot_smoke',
+        pre_restart_smoke: 'pending', attempt_id: 'tx-1' }, update_progress: {
+        operation_id: 'op-1', active: false, result: 'restart_required', error: '', tx_attempt_id: 'tx-1' } }, '');
+    const pending = updateVerdict({ managed: true, update_tx: { active: true, phase: 'pending_boot_smoke',
+        pre_restart_smoke: 'passed' } }, '');
     assert.equal(phase.headline, 'The update needs a restart that could not be requested automatically.');
     assert.equal(progress.headline, phase.headline);
     assert.equal(pending.headline, 'An update is waiting for a restart to finish.');

@@ -413,6 +413,17 @@ def name_miss_guidance(
 
 
 CAPABILITY_OMISSION_HEADER = "[CAPABILITY_OMISSION_MANIFEST]"
+# Context-specific built-in gates that withhold a tool on ordinary unlinked turns (not a broken capability).
+INAPPLICABLE_TOOL_REASONS = frozenset({"not_a_letter_root", "no_linked_ouroboros"})
+
+
+def routine_capability_omissions(omissions: Any) -> List[Dict[str, Any]]:
+    """The omissions a start notice, a continuation notice and the callable catalog show. A tool that is simply
+    not this work's (a letter root's question to its sender, a letter with no confirmed link) is no withheld
+    capability: it stays out of all three, and asking for it by name still answers why
+    (``ToolRegistry.policy_hidden_reason``)."""
+    return [dict(item) for item in (omissions or [])
+            if isinstance(item, dict) and item.get("reason") not in INAPPLICABLE_TOOL_REASONS]
 
 
 def format_capability_omissions(

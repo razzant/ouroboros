@@ -808,6 +808,11 @@ class _ModelInvocation:
                 "length" if ((result.get("problem") or {}).get("context") or {}).get("reason") == "max_output_tokens"
                 else "incomplete"
             )
+        elif (result.get("outcome") == "completed" and result.get("nativeContinuation") is None
+              and "nativeContinuation" not in message):
+            # The engine proved this reply complete and no native continuation (message or turn) carries it: only
+            # ordinary call admission reads this (``loop_output_exhaustion``). The finish stays unstated, as before.
+            usage["claudexor"]["stateless_completed"] = True
         return copy.deepcopy(message), usage
     async def offload(self, function, *args):
         """A cancelled caller leaves the current I/O thread owning its gateway."""

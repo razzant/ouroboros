@@ -1040,7 +1040,15 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``service_sign_in.py``). PERSISTENCE.md already covers both file families.
 # 496 -> 498: call bindings in ``state/extension_late_results/*.json`` and saved API revisions
 # in ``state/connection_revisions.json`` (both documented in PERSISTENCE.md).
-EXPECTED_SCAN_PATHS = 498
+# 498 -> 504: links to my other Ouroboros (``ouroboros/peer_links.py``): ``state/peer_links.json``, ``state/peer_links``
+# and, per link, ``state/peer_links/*/token.json``, answer receipts ``state/peer_links/*/replies/*.json``, standalone
+# message receipts ``state/peer_links/*/messages/*.json`` (``_message_receipt_path``) and revocation cleanup's
+# ``state/peer_links/*/*`` (``_drop_link_files`` over ``replies`` and ``messages``); two rows.
+# 504 -> 506: the replies a link is still owed, ``state/peer_links/*/owed`` and ``state/peer_links/*/owed/*.json``
+# (``record_owed``, read back at a start by ``owed_refs``), in the same per-link row.
+# 506 -> 508: my messages to a link still unsettled, ``state/peer_links/*/sent`` and ``state/peer_links/*/sent/*.json``
+# (``record_sending`` before a send's POST, read back at a start by ``sending_records``), in the same per-link row.
+EXPECTED_SCAN_PATHS = 508
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

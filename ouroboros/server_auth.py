@@ -9,6 +9,7 @@ import html
 import ipaddress
 import os
 import pathlib
+import re
 import secrets
 import time
 from http.cookies import SimpleCookie
@@ -410,8 +411,93 @@ async def _handle_logout(scope: Scope, receive: Receive, send: Send) -> None:
     await response(scope, receive, send)
 
 
+def _peer_path() -> re.Pattern[str]:
+    """A linked Ouroboros reaches its letter verbs and nothing else: create, status, its Stop's state-only read,
+    result, cancel."""
+    from ouroboros.gateway.peer_contracts import LETTER_ID_CHARS
+
+    return re.compile(rf"/api/letters(?:/{LETTER_ID_CHARS}(?:/state|/result|/cancel)?)?")
+
+
+_PEER_PATH = _peer_path()
+_INVITE_PATH = "/api/peer-links/introduce"
+# This step links two installations of one computer: a link or invitation header counts only on a direct
+# connection from it, the raw-peer rule of the neighbour door (``recall_peer_admitted``); a proxy relays someone.
+_PEER_NOT_DIRECT = "letters and introductions are answered only over a direct connection from this computer"
+
+
+def _peer_refusal(code: str, status: int, detail: str = "") -> JSONResponse:
+    return JSONResponse({"error": code, "refusal_code": code, **({"detail": detail} if detail else {})},
+                        status_code=status, headers=_NO_STORE)
+
+
 class NetworkAuthGate:
     """Require a password for non-localhost access only when configured."""
+
+    def _drive_root(self) -> pathlib.Path:
+        app = self.app
+        for _depth in range(4):  # the wrapped Starlette app keeps the drive root on its state (server.py)
+            root = getattr(getattr(app, "state", None), "drive_root", None)
+            if root is not None:
+                return pathlib.Path(root)
+            app = getattr(app, "app", None)
+        from ouroboros import config as _cfg
+
+        return pathlib.Path(_cfg.DATA_DIR)
+
+    async def classify_caller(self, scope: Scope, receive: Receive, send: Send) -> bool:
+        """A linked Ouroboros (``X-Ouroboros-Link``) or an introduction (``X-Ouroboros-Invite``), told apart before
+        every other branch: on a direct connection from this computer (``_PEER_NOT_DIRECT``) a valid link key is
+        that peer on its letter routes only (``peer_route_forbidden`` elsewhere), a missing, revoked or wrong one
+        is ``link_unknown``, an unreadable registry ``peer_links_unreadable`` (503); each of them, like a relayed
+        request, is answered here and never passed on. A refused write is audited; a refused read is not
+        (a sender polling a revoked link would add a row each time). True when this method answered or
+        forwarded the request; False leaves a request carrying neither header to the branches below."""
+        import asyncio
+
+        from ouroboros import peer_links
+
+        headers = _headers_map(scope)
+        presented, invite = headers.get("x-ouroboros-link"), headers.get("x-ouroboros-invite")
+        if presented is None and invite is None:
+            return False
+        path = (scope.get("path") or "/").rstrip("/") or "/"
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 4403})
+            return True
+        if not recall_peer_admitted(scope):
+            await _peer_refusal("peer_route_forbidden", 403, _PEER_NOT_DIRECT)(scope, receive, send)
+            return True
+        if presented is None:
+            if path != _INVITE_PATH or scope.get("method") != "POST":
+                await _peer_refusal("peer_route_forbidden", 403)(scope, receive, send)
+                return True
+            scope["ouroboros_caller"] = {"kind": "invite"}
+            await self.app(scope, receive, send)
+            return True
+        root = self._drive_root()
+        try:
+            caller = await asyncio.to_thread(peer_links.authenticate, root, presented)
+        except peer_links.PeerLinkError as exc:
+            if scope.get("method") not in {"GET", "HEAD"}:
+                from ouroboros.peer_letters import audit
+
+                link_id = presented.strip().partition(".")[0][:64]
+                await asyncio.to_thread(audit, root, "peer_letter_refused", refusal_code=exc.code, link_id=link_id,
+                                        path=path)
+            await _peer_refusal(exc.code, exc.status)(scope, receive, send)
+            return True
+        if not _PEER_PATH.fullmatch(path):
+            if scope.get("method") not in {"GET", "HEAD"}:  # a refused read leaves no row, as above
+                from ouroboros.peer_letters import audit
+
+                await asyncio.to_thread(audit, root, "peer_letter_refused", refusal_code="peer_route_forbidden",
+                                        link_id=caller["link_id"], place_id=caller["place_id"], path=path)
+            await _peer_refusal("peer_route_forbidden", 403)(scope, receive, send)
+            return True
+        scope["ouroboros_caller"] = caller
+        await self.app(scope, receive, send)
+        return True
 
     def __init__(self, app: ASGIApp, *, served_ui: ServedUI | None = None):
         from ouroboros.gateway.widget_assets import WidgetAssetLeases
@@ -455,6 +541,8 @@ class NetworkAuthGate:
             else:
                 await JSONResponse({"error": "Requests from another site's page are not accepted.",
                                     "code": CROSS_ORIGIN_CODE}, status_code=403)(scope, receive, send)
+            return
+        if await self.classify_caller(scope, receive, send):
             return
         if scope["type"] == "http" and path in {"/auth/login", "/auth/logout"}:
             # These names belong to the gate even when it is inactive: a selected

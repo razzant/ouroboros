@@ -284,7 +284,7 @@ def registration_ref(client: Mapping[str, Any], return_base: str = "") -> str:
 
 def consent_ref(doc: Mapping[str, Any]) -> str:
     """Names the consent an account document records: the account, the sign-in or transfer that filed it, its client and its time. A
-    token refresh keeps it; a new sign-in, a transfer or another client changes it. Derived from stored fields, never stored."""
+    token refresh keeps it; a new sign-in, a transfer or another client changes it. Derived from the account document's fields, never stored in it; an imported verified transfer's receipt keeps the value it filed (``service_sign_in._settle``)."""
     consent = doc.get("consent") or {}
     facts = [(doc.get("account") or {}).get("key"), doc.get("consent_nonce"), (doc.get("origin") or {}).get("generation"),
              consent.get("via"), consent.get("at"), (doc.get("client") or {}).get("client_id")]

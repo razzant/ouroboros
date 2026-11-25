@@ -1153,8 +1153,8 @@ def stop_task_services(ctx: Any) -> list[dict[str, Any]]:
     for record in _services_snapshot():
         if record.task_id != task_id:
             continue
-        if record.keep_alive:
-            kept.append({**_service_payload(record, note="keep_alive"), "lifecycle": "kept"})
+        if record.keep_alive and (record.local_proc is None or hasattr(record.local_proc, "_ouroboros_custody")):
+            kept.append({**_service_payload(record, note="keep_alive"), "lifecycle": "kept"})  # custody took it
             continue
         try:
             from ouroboros.tools.services import _finalize_executor_service_outputs

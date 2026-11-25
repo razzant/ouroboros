@@ -56,3 +56,27 @@ def test_record_failure_kills_only_the_child_never_the_spawners_group(tmp_path):
     )
     assert spawner.returncode == 0, spawner.stderr
     assert spawner.stdout.split() == ["survived", "OSError"], (spawner.stdout, spawner.stderr)
+
+
+def test_a_kept_launch_the_ownership_set_refuses_is_no_kept_service(tmp_path, monkeypatch):
+    """A kept launch outlives its worker, and only the installation's ownership set hands it to the stops that end it
+    then. When the set takes neither its record nor a pending copy, ``record_process`` raises after the ledger append,
+    so ``spawn_supervised`` ends the child with its own handle and the start says why, instead of a keep nothing would
+    honour; a task-scoped row keeps the ledger's warning. Each kept row carries its leader's kernel birth, ``""`` when
+    it cannot be read (unknown, never a guess); other rows carry none. Synthetic: no process, no signal."""
+    from ouroboros import owned_shutdown, process_custody, process_identity
+
+    monkeypatch.setattr(owned_shutdown, "record_ledgered_process", lambda *a, **k: False)
+    monkeypatch.setattr(process_custody, "process_fingerprint", lambda pid, cmd=None: {})
+    monkeypatch.setattr(process_custody, "process_group_id", lambda pid: 0)
+    monkeypatch.setattr(process_identity, "process_kernel_birth",
+                        lambda pid: "darwin-start:1790000000.000001" if pid == 999_999_941 else None)
+    (tmp_path / "state").mkdir()
+    for pid, purpose in ((999_999_941, "service:page"), (999_999_942, "workspace_service:page")):
+        with pytest.raises(OSError, match="ownership set"):
+            process_custody.record_process(tmp_path, pid=pid, cmd=["x"], purpose=purpose, scope="session")
+    row = process_custody.record_process(tmp_path, pid=999_999_943, cmd=["x"], purpose="service:page", scope="task",
+                                         owner_task_id="t")
+    assert row["scope"] == "task"
+    births = {entry["pid"]: entry.get("kernel_birth") for entry in process_custody._read_ledger(tmp_path)}
+    assert births == {999_999_941: "darwin-start:1790000000.000001", 999_999_942: "", 999_999_943: None}

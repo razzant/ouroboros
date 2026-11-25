@@ -34,6 +34,10 @@ CANCEL_NOT_FOUND = "not_found"
 CANCEL_FAILED = "failed"
 _CANCEL_TERMINALIZED = frozenset({CANCEL_CANCELLED, CANCEL_ALREADY_SETTLED, CANCEL_NOT_FOUND})
 
+# The one spelling of a linked Ouroboros's cancel of its own letter (``gateway/peer_letters_api``), for its
+# producer and every reader of the source; never my human's Stop.
+PEER_CANCEL_SOURCE = "peer_letter_cancel"
+
 # Transport is recorded fact, never proof that an HTTP caller was the owner.
 # The browser twin is ``web/modules/cancel_presentation.js``; both
 # tables must name the same sources, because one stored ``cancel_origin`` is
@@ -52,6 +56,8 @@ CANCEL_SOURCE_PHRASES = {
     "snapshot_restore": "The server stopped while this task was still running",
     # ``join_ledger`` cancel_task, Ouroboros's own tool; the asking run is below.
     "agent_tool": "Stopped by Ouroboros",
+    # ``peer_letters_api`` cancel: the linked Ouroboros that wrote the letter (its link in ``request_origin``).
+    PEER_CANCEL_SOURCE: "Stopped by the Ouroboros that sent this letter",
     # Historical rows of the retired silence diagnostic (#1376, removed 09.11.2026):
     # a silence check whose observed work moved on, settled or stopped.
     "silence_resolved": "Silence check withdrawn: the observed work no longer needed it",

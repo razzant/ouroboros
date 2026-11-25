@@ -36,6 +36,10 @@ from ouroboros.tool_effects import (EFFECT_GESTURE, EFFECT_MESSAGE, EFFECT_READ,
 
 _PREFIX = "⚠️ RESOURCE_CONSTRAINT_BLOCKED: "
 PLACE_BINDING_VERSION = 1
+# Built-ins whose ``place_id`` names the place their words land in: the automatic reply (also a letter root's answer
+# and question, ``peer_letters.admit_words``), a work letter (``delegate_to_ouroboros``), and a standalone message
+# (``message_ouroboros``) to my human's linked Ouroboros.
+_ADDRESSED_WORDS = frozenset({"place_reply", "delegate_to_ouroboros", "message_ouroboros"})
 _DELIVERY_TARGET_FIELDS = ("provider", "account_id", "conversation_id", "thread_id")
 
 
@@ -490,21 +494,44 @@ def this_turn_sends(ctx: Any, conversation_key: str) -> dict[str, Any]:
 def place_evidence(ctx: Any, place: dict[str, Any], place_ids: set[str], tool: str,
                    args: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Each named place's guidance for the Safety bundle, read now from one snapshot (``authored_notes``); the bundle's
-    own place gets its current label and state. A ``configure_presence`` call naming a circle also carries that
-    circle's words and its places (``place["circle"]``): a circle change is judged with what it changes. Only
-    such a call reads the canonical store, so a check that names no place or circle needs no data root."""
+    own place gets its current label and state, and a named place that is my human's linked Ouroboros its facts
+    (``place["linked_ouroboros"]``: stored choices and what is in effect, ``peer_links.peer_facts_line``). The place
+    a focus was woken in joins them only where a linked Ouroboros stands at one end of the call (it lands in a
+    link's place, or the focus was woken in one): there words or work cross between installations, so the rules
+    standing now where the request came from are read beside the destination's, each entry under its own
+    ``place_id``. Between other places nothing joins: the frame keeps that place's notes as its event saw them
+    (``safety_evidence.focus_event_source``). A ``configure_presence`` call naming a circle also carries that
+    circle's words and its places (``place["circle"]``): a circle change is judged with what it changes. Only such
+    a call reads the canonical store, so a check that names no place or circle needs no data root. A store that
+    cannot be read raises (``places.PlaceError``) and the check holds its call (``safety._assess_call``): rules
+    that could not be read are never an empty list of them."""
     from ouroboros.tool_access import canonical_data_root
 
     circle_id = str(args.get("circle_id") or "") if tool == "configure_presence" else ""
     if not place_ids and not circle_id:
         return []
     records, notes = places.place_records(canonical_data_root(ctx)), []
+    from ouroboros.peer_letters import occasion_place
+    from ouroboros.peer_links import CONNECTOR, peer_facts_line, place_permissions
+
+    focus = _metadata(ctx).get("focus")
+    source = str(focus.get("place_id") or "") if isinstance(focus, Mapping) else ""
+    linked = {record.place_id for record in records.places.values() if record.connector == CONNECTOR}
+    if place_ids and source and (source in linked or place_ids & linked):
+        place_ids = {*place_ids, source}  # a link at one end: where the request came from is read beside it
+    stated = occasion_place(_metadata(ctx))  # the occasion states its own link's facts (``letter_evidence``)
     for record in records.places.values():
         if record.place_id not in place_ids:
             continue
         if record.place_id == place.get("place_id"):
             place.update(place_label=record.label, place_state=record.state)
         notes.extend(authored_notes(records, record))
+        if record.place_id in linked and record.place_id != stated:
+            # Words or work for my human's linked Ouroboros leave for another installation: its facts ride beside
+            # its notes, so "mine" is read as who it is, never as consent to what is sent there.
+            peer = records.peer(record.place_id)
+            place.setdefault("linked_ouroboros", {})[record.place_id] = peer_facts_line(
+                peer, place_permissions(canonical_data_root(ctx), record, peer))
     circle = records.circle(circle_id)
     if circle is not None:
         place["circle"] = {**{key: circle[key] for key in ("circle_id", "name", "text", "text_author")},
@@ -524,7 +551,8 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
     call acts with there, if known), "conversation_key", ...}]}``; ``{}`` when no place is involved. A call with group addresses also carries ``touches`` (each exact address with its effect,
     argument, ``match`` when exact, and the place it reached), and a grouped call's rows their ``effects`` and ``via``;
     its ``conversation_keys`` name only where the call's own effect lands. An automatic final's retained destination
-    owns its key and sending account; a blank account has no known sending identity. The place's scope and notes
+    owns its key and sending account; a blank account has no known sending identity; a letter to a linked Ouroboros
+    lands in its ``place_id``'s own conversation (``_ADDRESSED_WORDS``). The place's scope and notes
     remain its own. Calls without a destination keep the legacy scope inference. The automatic final's further addresses
     (its anchor's ``message.reply_targets``, carried in the reply's subject) are such ``write`` groups. A call whose
     addresses cannot be read carries ``problem`` and no place.
@@ -541,7 +569,7 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
                 "problem": call.problem}
     destination = args.get("destination") if name == "place_reply" else None
     routed_reply = isinstance(destination, Mapping)
-    if name == "place_reply":
+    if name in _ADDRESSED_WORDS:
         effect = ToolEffect(EFFECT_MESSAGE, targets=("account_id", "conversation_id"),
                             conversation="conversation_id", thread="thread_id", declared=True, source="builtin")
         # The reply's route is its retained destination (``place_reply.reply_carrier``), thread included.

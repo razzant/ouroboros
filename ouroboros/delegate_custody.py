@@ -360,8 +360,10 @@ def daemon_says_absent(exc: Any, *, gateway: Any = None, run: Optional[RunCustod
 
 
 def _absence_provable(run: RunCustody, absence: Any, gateway: Any = None) -> bool:
-    from ouroboros.execution_domain import same_engine
-
+    from ouroboros.execution_domain import is_peer_ref, recorded_ref, same_engine
+    if is_peer_ref(recorded_ref(run)):  # the link's own server (``same_engine``: its place and link) names the letter
+        return (not run.terminal_source and same_engine(gateway, run)
+                and (getattr(absence, "refusal_code", "") or getattr(absence, "code", "")) == "letter_not_found")
     return not run.terminal_source and same_engine(gateway, run) and (
         not run.daemon_store_id or run.daemon_store_id == _answering_store(absence))
 
@@ -794,7 +796,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         # the leak shape); no ledger row exists and none ever will.
         custody.settled = True
         custody.containment_fault = {}
-    elif kind == CONTAINMENT_FAULT:
+    elif kind == CONTAINMENT_FAULT and not (row.get("yields") is True and custody.containment_fault):
         custody.containment_fault = dict(row)
     elif kind == CONTAINMENT_RESOLVED:
         if not row.get("expected_reason") or row["expected_reason"] == custody.containment_fault.get("reason"):
@@ -1386,8 +1388,8 @@ def record_containment_fault(drive_root: Any, custody: RunCustody, reason: str,
     author for this row: an unverified cancel and a breached containment produce the
     same incident shape, so a reader never has to know which path wrote it.
 
-    The reducer keeps the incident on the run's row (the surface the health invariant
-    reads) until a resolution clears it; the chain row is the forensic record.
+    The reducer keeps the incident on the run's row (the surface the health invariant reads) until a resolution
+    clears it, and a row its writer marks ``yields`` never replaces one standing; the chain row is the forensic record.
     ``detail`` is the incident's EVIDENCE, and a durable incident whose evidence was
     silently cut is half an incident: the bound goes through the shared
     disclosed-truncation contract (marker + original length), never a bare slice
@@ -1410,7 +1412,7 @@ def resolve_containment_fault(drive_root: Any, custody: RunCustody, reason: str,
 
 def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason: str, *, owner_stop=None) -> Dict[str, Any]:
     """Cancel once and verify terminality or absence in the owning store."""
-    from ouroboros.delegate_resume import prepare_recovered_cancel, recovered_cancel_detail
+    from ouroboros.delegate_resume import prepare_recovered_cancel, recovered_cancel_detail, stop_read_run
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.transport_custody import is_pre_dispatch_transport_failure
 
@@ -1438,7 +1440,7 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
         control_error = f"{exc.code}: {exc}"
         unsent = recovered and not exc.status_code and is_pre_dispatch_transport_failure(exc)
     try:
-        detail = gateway.get_run(custody.run_id)
+        detail = stop_read_run(gateway, custody.run_id)
     except ClaudexorUnavailable as exc:
         if daemon_says_absent(exc, gateway=gateway, run=custody):
             close_absent_run(drive_root, gateway, custody, "get_run_absent", absence=exc)
@@ -1447,7 +1449,7 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
                        fault_reason="cancel_unreachable" if control_error else "cancel_unverified",
                        detail=control_error or f"{exc.code}: {exc}", control_owed=unsent)
     state = str(summary_of(detail).get("state") or "")
-    if names_another_run(detail, custody.run_id) or recovered and not recovered_cancel_detail(gateway, custody, detail):
+    if names_another_run(detail, custody.run_id) or recovered and not recovered_cancel_detail(gateway, custody, detail, for_stop=True):
         return outcome(CANCEL_CONTAINMENT_FAULT, fault_reason="cancel_unverified",
                        detail="read-back did not verify the same run and store", control_owed=unsent)
     if state in TERMINAL_STATES:

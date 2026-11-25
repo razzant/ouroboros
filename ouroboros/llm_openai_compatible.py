@@ -51,6 +51,7 @@ from ouroboros._usage_response import (
     normalize_go_price, observed_processing_mode, response_reported_price, text_token_counts,
 )
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, event_token_counts
+from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY, AssembledResponse
 
 
 # The moved warnings keep the logger identity they were emitted under.
@@ -452,12 +453,15 @@ class _OpenAICompatibleLaneMixin:
         if "service_tier" in resp_dict:
             usage["service_tier"] = resp_dict["service_tier"]
         attach_processing_receipt(target, usage)
-        if isinstance(resp_dict.get("_stream_receipt"), dict):
+        usage.pop("stream_receipt", None)  # host-owned stream receipt, never a provider usage extension
+        if (wire_completion is None or isinstance(wire_completion, AssembledResponse)) and isinstance(
+                resp_dict.get("_stream_receipt"), dict):
             usage["stream_receipt"] = dict(resp_dict["_stream_receipt"])
         if isinstance(usage, dict):
             # These keys are host-owned projections of designated outer fields;
             # provider usage extensions must not spoof their provenance.
             usage.pop("response_finish_reason", None)
+            usage.pop(LATER_OUTPUT_LIMIT_USAGE_KEY, None)
             usage.pop("response_provider", None)
             usage.pop("reasoning_pin", None)
             usage.pop("reasoning_effort_clamped", None)
@@ -489,6 +493,11 @@ class _OpenAICompatibleLaneMixin:
             usage["response_finish_reason"] = _bounded_response_metadata_label(
                 first_choice.get("finish_reason"),
             )
+        # The first finish stays every reader's. A real stream's receipt may name this choice's output limit stated
+        # after it (``llm_stream``: Chat only); that label rides beside it for ordinary call admission alone.
+        later = (usage.get("stream_receipt") or {}).get("later_output_limits") or {}
+        if isinstance(wire_completion, AssembledResponse) and (label := later.get(str(first_choice.get("index")))):
+            usage[LATER_OUTPUT_LIMIT_USAGE_KEY] = label
         response_provider = _bounded_response_metadata_label(resp_dict.get("provider"))
         if response_provider is not None:
             # This optional upstream serving label never replaces the accounting

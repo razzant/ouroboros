@@ -41,7 +41,7 @@ import { getInterfaceSize } from './modules/interface_size.js';
 import { initDashboard } from './modules/dashboard.js';
 import { initStorage } from './modules/storage.js';
 import { SHELL_ICONS } from './modules/page_icons.js';
-import { mountNavFoot, pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
+import { mountNavRail, navRowFor, pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
 import { bindPageBack, renderPageHeader } from './modules/page_header.js';
 import { createRoomHeader, panicButtonHtml } from './modules/chat_header.js';
 import { bindKeyboardViewport } from './modules/keyboard_viewport.js';
@@ -122,14 +122,14 @@ const primarySidebar = document.getElementById('primary-sidebar');
 // The phone shell's motion between places (shell_motion.js): presentation only.
 const shellMotion = createShellMotion({ content: document.getElementById('content'),
     isStack: () => isStackLayout() });
-// The places come from the one registry (pages.js): Main into the pinned head, the tools into the foot that
-// follows the Projects, before the version. Nothing below looks a row up before this.
+// The places come from the one registry (pages.js): Main into the pinned head, the tools into the rail beside the
+// Projects (owner 24.11), with the version. Nothing below looks a row up before this.
 primarySidebar?.querySelector('.sidebar-head')?.insertAdjacentHTML('beforeend', renderNavRows('head'));
-// The tools stand at the column's bottom edge in two cards, the sections and the system rows with the version (owner
-// 21.11); a document that holds a foot or a version row gets them composed by mountNavFoot (pages.js) — the retained
-// version moves into the cards, v7.7.0 gets its foot there and its replaced Utilities group leaves: one set stands.
-if (primarySidebar?.querySelector('.sidebar-foot, #nav-version')) mountNavFoot(primarySidebar);
-measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head and foot
+// The rail holds the sections at its top and the system rows with the version at its foot; a document that holds a
+// rail, a retained foot or a version row gets it composed by mountNavRail (pages.js) — the retained version and the
+// drawer's × move into it, v7.7.0's replaced Utilities group leaves: one set stands.
+if (primarySidebar?.querySelector('.nav-rail, .sidebar-foot, #nav-version')) mountNavRail(primarySidebar);
+measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head
 // A short window scrolls the whole column: rows that wait past a pinned bar fade under it (style.css), as the list's do.
 if (primarySidebar) bindScrollFade(primarySidebar);
 const navProjectsHeader = primarySidebar?.querySelector('.nav-projects-header');
@@ -412,12 +412,17 @@ function syncNavigationState() {
     const sidebarInert = isStackLayout() && !drawerOpen;
     if (primarySidebar && primarySidebar.inert !== sidebarInert) primarySidebar.inert = sidebarInert;
 
-    const choose = (button, chosen) => {  // the chosen place's class and `aria-current`, a page's or a Project's row
+    // The chosen place's class and `aria-current`, a page's or a Project's row; a row standing for the place shown
+    // behind its door is the current one of the set, not the page itself.
+    const choose = (button, chosen, current = 'page') => {
         button.classList.toggle('active', chosen);
-        if (chosen) button.setAttribute('aria-current', 'page');
+        if (chosen) button.setAttribute('aria-current', current);
         else button.removeAttribute('aria-current');
     };
-    document.querySelectorAll('[data-nav-page]').forEach((button) => choose(button, !activeProjectId && button.dataset.navPage === state.activePage));
+    // A place behind a door (Extensions) has no row: the row of the place that holds its door stands chosen (pages.js).
+    const chosenRow = navRowFor(state.activePage);
+    const current = chosenRow === state.activePage ? 'page' : 'true';
+    document.querySelectorAll('[data-nav-page]').forEach((button) => choose(button, !activeProjectId && button.dataset.navPage === chosenRow, current));
     // One chosen row at a time: the open Project's row (owner Q6).
     document.querySelectorAll('[data-project-id]').forEach((button) => choose(button, button.dataset.projectId === activeProjectId));
     let exit = Promise.resolve();
@@ -538,7 +543,8 @@ onLayoutChange((layout) => {
     syncNavigationState();
 });
 
-// A page pressed in the sidebar. Settings or Extensions pressed while it is shown (`pressedAgain`): beside the list a
+// A page pressed in the sidebar. A section with levels pressed while it is shown (`pressedAgain`: Settings, and
+// Extensions where the registry gives it a row; today it opens through Settings' door, pages.js): beside the list a
 // first-level page stays as it stands and a deeper level returns to its section's first-level page; in one column the
 // list comes back. Pressed in the open drawer it closes the drawer, as every other place pressed there does.
 function pressNavPage(name) {

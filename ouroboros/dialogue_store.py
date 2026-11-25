@@ -1034,7 +1034,7 @@ def newest_owner_candidates(root: Any, *, before: int, limit: int) -> List[Row]:
 
 # The rooms my human reads: Main, Project rooms and owner transport chats; 0 is the hidden partition, negative ids
 # are A2A traffic and ``places.conversation_chat_id`` puts correspondents' place rooms at 2**40 and above.
-_OWNER_ROOMS = (1, (1 << 40) - 1)
+OWNER_ROOMS = (1, (1 << 40) - 1)
 # What I write to my human besides an untyped answer: send_user_message's rows, my questions, what the message bus
 # delivers for me (a photo, a video, a document with my caption, a links card), a living card I show (``show_card``)
 # and my retained words of a live call.
@@ -1052,7 +1052,7 @@ def owner_exchange(root: Any) -> Tuple[bool, bool]:
     importing (``require_imported``'s probes, in the same read: a segment whose import commits meanwhile is in neither
     or both). Once both have written, this store is not asked again in this process (keyed by its file, so a Reset's
     new store is asked afresh)."""
-    low, high = _OWNER_ROOMS
+    low, high = OWNER_ROOMS
     kinds = ", ".join(f"'{kind}'" for kind in _MY_MESSAGE_KINDS)
     known = (str(path(root)), store.file_identity(path(root)))
     if known in _BOTH_WROTE:

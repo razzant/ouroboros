@@ -37,6 +37,15 @@ def test_the_seed_keeps_people_notes_and_recent_reasoning_and_addresses_the_rest
     facts = [row for row in seed if row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME]
     assert facts == [LEGACY_FACTS]  # bound host state is sent afresh next round
     assert left["tool_rows"] >= 4 and left["host_rows"] >= 1
+    # A lane's history bytes beside a call may hold its reasoning: the seed keeps the reply's visible view, even "".
+    from ouroboros.llm_messages import DISPLAY_KEY
+    lane = [row for n, (raw, visible) in enumerate((("<think>PLAN-X</think>\nSaving the note.", "Saving the note."),
+                                                    ("<think>PLAN-Y</think>", "")))
+            for row in ({"role": "assistant", "content": raw, DISPLAY_KEY: {"text": visible, "reasoning": "PLAN"},
+                         "tool_calls": [{"id": f"lane-{n}", "function": {"name": "note_fixture", "arguments": "{}"}}]},
+                        {"role": "tool", "tool_call_id": f"lane-{n}", "content": "saved"})]
+    renewed, _left = renewal_seed(messages + lane)
+    assert renewed[-1] == {"role": "assistant", "content": "Saving the note."} and "PLAN-" not in json.dumps(renewed)
 
 
 def test_renewal_publishes_the_seed_with_an_exact_source_and_continues_the_same_task(tmp_path):
@@ -69,6 +78,34 @@ def test_renewal_publishes_the_seed_with_an_exact_source_and_continues_the_same_
     assert events and events[0]["checkpoint_kind"] == "context_view_renewed" and events[0]["owner_visible"]
     assert "context-size recovery" in messages[-1]["content"]
     assert "provider refused" not in messages[-1]["content"]
+
+
+def test_renewal_projects_fragment_only_cut_prose_and_keeps_the_exact_source(tmp_path):
+    from ouroboros.context_renewal import renewal_view
+    from ouroboros.llm_messages import DISPLAY_KEY
+    from ouroboros.loop_output_exhaustion import unfinished_reply
+
+    messages = [{"role": "user", "content": "Write a note."}]
+    unrelated = {"role": "assistant", "content": [{"text": "Ordinary block reply."}]}
+    messages.append(unrelated)
+    ctx = SimpleNamespace(messages=messages, accumulated_usage={}, tools=SimpleNamespace(_ctx=SimpleNamespace(
+        _round_response_facts={"finish_reason_present": True, "finish_reason": "length"})))
+    blocks = [{"text": "PRIVATE-THOUGHT " * 1000, "thought": True}, {"text": "Keeping the note."}]
+    reply = {"role": "assistant", "content": blocks, "reasoning": "PRIVATE-ROUTE-FIELD",
+             "tool_calls": [{"id": "fixture-fragment", "function": None}]}
+    assert unfinished_reply(ctx, reply) is None
+    cut_row = messages[2]
+    assert cut_row["content"] == blocks and cut_row[DISPLAY_KEY]["text"] == "Keeping the note."
+    assert cut_row["reasoning"] == "PRIVATE-ROUTE-FIELD" and "tool_calls" not in cut_row
+
+    seed, receipt = renewal_view(messages, observation={}, drive_root=tmp_path, task_id="renewal",
+                                 measure=lambda rows: len(json.dumps(rows)))
+    assert seed[1] is unrelated
+    assert seed[2] == {"role": "assistant", "content": "Keeping the note."}
+    assert "PRIVATE-" not in json.dumps(seed)
+    assert receipt["projected_replies"] == 1 and receipt["tool_rows"] == 0
+    assert json.loads(read_actor_source_bytes(tmp_path, "renewal", receipt["source"])) == messages
+    assert messages[2] is cut_row and cut_row["content"] == blocks
 
 
 def test_the_passes_address_records_since_the_newest_note_stay_in_the_seed(tmp_path):
@@ -210,3 +247,40 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
         assert [(r["role"], r.get("content")) for r in messages] == [
             (r["role"], r.get("content")) for r in seed]  # publication also seals the last row
     assert json.loads(read_actor_source_bytes(tmp_path, "renewal", events[0]["source"])) == original
+
+
+def test_content_blocks_beside_a_call_show_their_words_and_public_parts_never_their_route_reasoning():
+    """An assistant's content blocks beside a call show, in a restored source view and in a renewed view, what a reader
+    outside the reply's route may read: its words and public blocks, without the reasoning blocks and signatures a
+    route switch drops or its thought parts. Neighbouring visual and user data stay as they are, and the raw rows, the
+    same route's send copy included, keep every byte for exact replay and restore (#4028)."""
+    from ouroboros.llm_messages import project_wire_messages
+
+    private = ("THINK-PRIVATE", "SIGNATURE-PRIVATE", "REDACTED-PRIVATE", "REASONING-BLOCK-PRIVATE",
+               "THOUGHT-PART-PRIVATE")
+    call = {"id": "blocks-1", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"a.py"}'}}
+    blocks = [{"type": "thinking", "thinking": "THINK-PRIVATE", "signature": "SIGNATURE-PRIVATE"},
+              {"type": "redacted_thinking", "data": "REDACTED-PRIVATE"},
+              {"type": "reasoning", "text": "REASONING-BLOCK-PRIVATE"},
+              {"type": "text", "text": "Reading a.py next.", "signature": "SIGNATURE-PRIVATE"},
+              {"thought": True, "text": "THOUGHT-PART-PRIVATE"},  # a thought part is display reasoning, never words
+              {"text": " Then the tests."}]  # an untyped part is visible text, never dropped as reasoning
+    rows = [{"role": "assistant", "content": blocks, "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "blocks-1", "content": [
+                {"type": "text", "text": "file body"},
+                {"type": "image_url", "image_url": {"url": "https://fixture.invalid/screen.png"}, "_caption": "SCREEN"}]}]
+    pasted = {"role": "user", "content": [{"type": "text", "text": 'Pasted: {"signature": "USER-DATA"}'},
+                                          {"type": "reasoning", "text": "USER-REASONING-DATA"},
+                                          {"thought": True, "text": "USER-THOUGHT-DATA"}]}
+    original = json.loads(json.dumps(rows))
+    [unit] = cc.context_units(rows, scope="tool")
+    assert unit.raw_sha256 == cc._sha256(cc._canonical_bytes(original))  # the exact source a restore reads
+    assert not [secret for secret in private if secret in unit.source_text]
+    assert all(shown in unit.source_text for shown in ("Reading a.py next.", " Then the tests.", "read_file",
+                                                        "file body", '"text":"SCREEN","type":"image_descriptor"'))
+    assert project_wire_messages(rows)[0]["content"] == blocks and rows == original  # its own route replays them
+    assert cc._visible_row(pasted) == pasted  # another row's data is data, whatever its names
+    seed, left = renewal_seed([{"role": "system", "content": "core"}, {"role": "user", "content": "task"},
+                               *rows, pasted])
+    assert {"role": "assistant", "content": "Reading a.py next. Then the tests."} in seed and pasted in seed
+    assert left["tool_rows"] == 2 and not [secret for secret in private if secret in json.dumps(seed)]

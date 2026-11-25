@@ -308,6 +308,10 @@ def _request_deep_self_review(ctx: ToolContext, reason: str, reviewer: str = "")
     # episode or a delegated session), not a model key alone.
     from ouroboros.deep_self_review import deep_review_route, deep_review_unavailable_text
     from ouroboros.consciousness_authority import consciousness_origin_metadata
+    from ouroboros.peer_letters import separate_work_refusal
+
+    if refusal := separate_work_refusal(getattr(ctx, "task_metadata", None), "a deep self-review"):
+        return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
     reviewer = str(reviewer or "").strip()
     if reviewer:
         from ouroboros.tools.arg_feedback import argument_refusal
@@ -882,7 +886,7 @@ def extract_forced_work_replies(body: str) -> tuple[dict[str, str], list[dict]] 
     return (pending, rejected) if (pending or rejected) else None
 
 
-def commit_forced_work_replies(tools: object, llm_trace: dict, usage: dict) -> None:
+def commit_forced_work_replies(tools: object, llm_trace: dict) -> None:
     """Dispatch staged forced ``work_reply`` returns through ``tools.execute_result('send_user_message', ...)``."""
     from collections.abc import Mapping
     from ouroboros.model_wait import ModelWaitInterrupted
@@ -925,8 +929,6 @@ def commit_forced_work_replies(tools: object, llm_trace: dict, usage: dict) -> N
         outcomes.append(entry)
     if outcomes:
         llm_trace["forced_work_replies"] = outcomes
-    if getattr(ctx, "_owner_message_sent", False):
-        usage["owner_message_sent"] = True
 
 
 def _update_identity(ctx: ToolContext, content: str | None = None, expected_revision: str | None = None,
@@ -986,6 +988,11 @@ def _update_world(ctx: ToolContext, content: str | None = None, expected_revisio
 
 def _toggle_evolution(ctx: ToolContext, enabled: bool, objective: str = "") -> str:
     """Toggle evolution mode on/off via supervisor event."""
+    from ouroboros.peer_letters import separate_work_refusal
+
+    if bool(enabled) and (refusal := separate_work_refusal(getattr(ctx, "task_metadata", None),
+                                                           "an evolution campaign")):
+        return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
     if bool(enabled):
         # Reflect the light-mode hard block in the tool's own result so the agent
         # is not told "ON" while the supervisor silently refuses it.
@@ -1326,15 +1333,31 @@ def _confirmed_handoff(ctx: ToolContext | None, work: str) -> bool:
             and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN)
 
 
+def _spoke_live_to_my_human(ctx: ToolContext | None) -> bool:
+    """A root with no place binding whose live text message of this run reached a conversation its human reads:
+    the reply mark (``owner_delivery._retain_dialogue``), set only for a live ``send_message`` frame that lands there
+    by the supervisor's rule (``lands_with_my_human``; zero included, reset per turn). A text stored in the hidden
+    task record, whose reader is the caller, sets no mark. A place-bound root keeps its own case (a turn answering its
+    place) and the base's behaviour otherwise."""
+    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.task_results import resolve_ctx_lineage
+
+    return (getattr(ctx, "_owner_reply_revision", None) is not None and resolve_ctx_lineage(ctx)["is_root_task"]
+            and presence_caller_binding(ctx) is None)
+
+
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  answer_sha256: str | None = None, rationale: str = "",
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
                  silent: bool = False, swarm_comparison: str | None = None, summary: str = "",
                  fold_read: bool = False, about_work: str = "") -> str:
-    """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
-    without a Presence binding) may choose silence and may leave a gist for its human.
-    A task that answers its place conversation or a program's note may choose silence too;
-    inherited binding authority alone names no speaker."""
+    """Stage an author act; a finish that owes no one words may choose silence: a self-started run (an
+    own-clock or focused wake, a schedule-born root without a Presence binding), which may leave a gist
+    for its human, a task that answers its place conversation or a program's note, a letter's own root, whose
+    final is otherwise offered to the linked Ouroboros that wrote it, or a root with no place binding whose
+    live text message of this run already reached a conversation its human reads, not the hidden task record
+    (``_spoke_live_to_my_human``), and whose contract owes no answer; inherited binding authority alone names
+    no speaker."""
     request, error = completion_request(ctx, {
         "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
         "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
@@ -1387,10 +1410,23 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
     # the fold it would stand for goes with it.
     ignored = ([*(["summary"] if summary else []), *(["fold_read"] if fold_read else [])]
                if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]) else [])
-    if silent and not (self_started or carrier_now(ctx, metadata) or getattr(ctx, "_admission_author", None)):
-        return None, ("silent is available only on a self-started run: "
-                      "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
-                      "silent also on a task answering its own place conversation or a program's note")
+    from ouroboros.peer_letters import is_letter_root
+
+    # A retained legacy binding resolves too; a letter's own root may keep its final from its sender (peer_letters).
+    if silent and not (self_started or carrier_now(ctx, metadata) or getattr(ctx, "_admission_author", None)
+                       or is_letter_root(metadata, str(getattr(ctx, "task_id", "") or ""))):
+        if not _spoke_live_to_my_human(ctx):
+            return None, ("silent needs a finish that owes no one words: a self-started run (a consciousness wake's "
+                          "own turn, or a schedule-born root without a Presence binding), a task answering its own place "
+                          "conversation, a program's note or the root of a letter from a linked Ouroboros, or a root "
+                          "without a place binding after its live text message of this run reached a conversation its "
+                          "human reads (send_user_message, accepted live, not queued; the hidden task record does not "
+                          "count)")
+        from ouroboros.contracts.task_contract import answer_protocol_active, review_answer_required
+
+        if review_answer_required(ctx) or answer_protocol_active(ctx):
+            return None, ("answer_owed_to_contract: this task's contract requires its final answer (a review of the "
+                          "answer or an answer protocol), so it finishes visibly: give the answer in finish_task")
     work = arguments.get("about_work")
     if work is not None and not isinstance(work, str):
         return None, "about_work must name a confirmed task"

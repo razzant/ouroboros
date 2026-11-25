@@ -59,21 +59,62 @@ def make_tool_result_record(
     }
 
 
+def make_not_started_tool_result_record(
+    tool_call_id: str, delivered_text: str, *,
+    facts: Mapping[str, Any] | None = None, source_ref: Mapping[str, Any] | None = None,
+) -> dict:
+    """Stamp host-known non-execution (e.g. a cut batch that started zero tools) on the result row.
+
+    No invocation or trace is fabricated: this binds non-execution to the call id,
+    the final visible text digest, and the raw reply reference when available.
+    """
+    return {
+        "version": 1,
+        "kind": "not_started",
+        "tool_call_id": str(tool_call_id),
+        "content_sha256": hashlib.sha256(delivered_text.encode("utf-8")).hexdigest(),
+        "facts": _facts({**dict(facts or {}), "status": "not_started", "is_error": False}),
+        "source_ref": copy.deepcopy(dict(source_ref or {})),
+    }
+
+
 def read_tool_result_record(message: Mapping[str, Any]) -> dict:
-    """Read this row's facts, or disclose an unknown outcome without blocking work."""
+    """Read this row's facts, or disclose an unknown outcome without blocking work.
+
+    ``state == "recorded"`` is strictly reserved for an occurrence-bound tool invocation;
+    host-known non-execution returns ``state == "not_started"`` without fabricating an invocation.
+    """
     record = message.get(TOOL_RESULT_RECORD_KEY)
     reason = "record_missing"
     if isinstance(record, Mapping):
-        invocation = record.get("invocation")
         text = logical_tool_result_text(message.get("content"))
+        kind = record.get("kind")
+        state, call_id = None, None
         if record.get("version") != 1 or not isinstance(record.get("facts"), Mapping):
             reason = "record_unrecognized"
-        elif not isinstance(invocation, Mapping) or not invocation.get("invocation_id"):
-            reason = "invocation_unrecorded"
-        elif message.get("role") != "tool" or invocation.get("tool_call_id") != message.get("tool_call_id"):
-            reason = "tool_result_mismatch"
-        elif not isinstance(text, str) or record.get("content_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest():
-            reason = "content_mismatch"
+        elif kind == "not_started":
+            call_id = record.get("tool_call_id")
+            if (record["facts"].get("status") != "not_started"
+                    or record.get("invocation") is not None or record.get("trace_ref") is not None):
+                reason = "record_unrecognized"
+            elif not isinstance(call_id, str) or not call_id.strip():
+                reason = "tool_result_mismatch"
+            else:
+                state = "not_started"
+        elif kind is not None:
+            reason = "record_unrecognized"
         else:
-            return {**copy.deepcopy(dict(record)), "state": "recorded", "facts": _facts(record["facts"])}
+            invocation = record.get("invocation")
+            if not isinstance(invocation, Mapping) or not invocation.get("invocation_id"):
+                reason = "invocation_unrecorded"
+            else:
+                state, call_id = "recorded", invocation.get("tool_call_id")
+        if state is not None:
+            if message.get("role") != "tool" or call_id != message.get("tool_call_id"):
+                reason = "tool_result_mismatch"
+            elif (not isinstance(text, str)
+                  or record.get("content_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest()):
+                reason = "content_mismatch"
+            else:
+                return {**copy.deepcopy(dict(record)), "state": state, "facts": _facts(record["facts"])}
     return {"state": "unknown", "reason": reason, "facts": _facts(None)}
