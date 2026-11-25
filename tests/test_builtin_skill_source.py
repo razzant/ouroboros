@@ -381,22 +381,30 @@ def test_version_reads_through_the_shared_parser(tmp_path, text, expected):
     assert _version(tmp_path / "missing") == ""
 
 
-def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypatch):
-    """The bundled ``SKILL.md`` version is the RESYNC KEY: a payload change shipped
-    without a bump never reaches an existing install. Re-pin this whenever
-    skills/telegram changes."""
-    monkeypatch.setenv("OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS", "true")
-    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", tmp_path / "settings.json")
-    seed_dir = pathlib.Path(__file__).resolve().parents[1] / "skills"
-    drive_root = tmp_path / "data"
-    installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
-    (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
-    assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.4.24\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
-    for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_connection.py", "lib/telegram_copies.py",
-                 "lib/telegram_health.py", "lib/telegram_inbound.py", "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py",
-                 "lib/telegram_state.py", "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):
-        assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
+def test_bundled_telegram_reseed_delivers_the_current_version(env):
+    """Replace the old Telegram payload while preserving the owner's recorded Off."""
+    from ouroboros.skill_loader import compute_content_hash, save_enabled, skill_state_dir_path
+
+    old_seeds, drive_root = env
+    bundled = pathlib.Path(__file__).resolve().parents[1] / "skills" / "telegram"
+    old_quiz = _write_skill(old_seeds, "telegram", version="1.4.24") / "lib" / "telegram_quiz.py"
+    old_quiz.parent.mkdir()
+    old_quiz.write_bytes(b"# Synthetic previous quiz payload.\n")
+    assert _install("telegram", old_seeds, drive_root, turn_on_when_ready=True)["ok"]
+    installed = drive_root / "skills" / "native" / "telegram"
+    save_enabled(drive_root, "telegram", False, actor="owner_ui")
+    enabled_file = skill_state_dir_path(drive_root, "telegram") / "enabled.json"
+    owner_off = enabled_file.read_bytes()
+    assert json.loads(owner_off)["enabled"] is False
+
+    assert _reseed(bundled.parent, drive_root) == 1
+    assert enabled_file.read_bytes() == owner_off
+    for path in ("SKILL.md", "plugin.py", "lib/telegram_api.py", "lib/telegram_connection.py",
+                 "lib/telegram_copies.py", "lib/telegram_health.py", "lib/telegram_inbound.py",
+                 "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py", "lib/telegram_state.py",
+                 "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):
+        assert (installed / path).read_bytes() == (bundled / path).read_bytes(), path
+    assert compute_content_hash(installed) == compute_content_hash(bundled)
 
 
 @pytest.mark.parametrize("name,source,old_version", [
