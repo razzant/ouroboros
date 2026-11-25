@@ -398,16 +398,17 @@ export function createRoomProfileLifecycle({
     // which checks it again), where the core's acceptance asks the room once more (gateway/ws.py). Only then `true`.
     // Readable history hands the copy to the ordinary read; another current answer of the core ends the word; an answer
     // asked before the room changed or was left, or on another socket, changes nothing, nor does no answer. A current
-    // refusal for authentication takes the saved text, as one of the room's own reads does (`fetchHistory`).
+    // refusal for authentication takes the saved text, as one of the room's own reads does (`fetchHistory`); a late one
+    // never takes what the room saved since.
     async function confirmNow() {
         const socket = servingSocket(), at = epoch;
         if (canonical || !socket || proof !== socket) return false;
         let answer = null, readable = false;
         try { await readHistory({ chatId, cursor: null, tags: RETRY }); readable = true; } catch (error) { answer = error; }
         if (isDestroyed() || isLeaving()) return false;
-        if (answer) getPreview().refused(answer);
         if (readable) { void syncHistory(RETRY); return false; }
         if (servingSocket() !== socket || epoch !== at) return false;
+        getPreview().refused(answer);
         if (ordinaryUnavailability(answer, chatId, profileScope)) { proof = socket; return true; }
         if (answer?.status || answer?.foreignProfile) lapse();
         return false;

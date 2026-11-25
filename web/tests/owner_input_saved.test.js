@@ -711,6 +711,48 @@ for (const [status, leaves, takes] of [[401, false, true], [403, false, true], [
     });
 }
 
+// Astra 4: Send again's read belongs to the visit and the socket it was asked on. Its refusal, landing once the room has
+// left and come back (its return read the room and saved its newest text), or once that socket gave way, takes nothing.
+for (const after of ['return', 'socket']) {
+    test(`Send again's read refused after ${after === 'return' ? 'the room left and came back' : 'its socket gave way'} takes no saved text`, async () => {
+        const tab = keptTab();
+        const family = () => [...localStorage.values].filter(([key]) => key.startsWith(PREVIEW_FAMILY));
+        try {
+            const first = tab.open();
+            await first.send('maybe');
+            first.instance.destroy();
+            localStorage.setItem(PREVIEW_KEY, '{"v":3}');
+            localStorage.setItem(previewEntryKey(PREVIEW_SCOPE, [7, '']), JSON.stringify({ read: 1, rows: [
+                { id: 'chat:1', role: 'assistant', text: 'Saved words', speaker: 'Ouroboros' }] }));
+            Object.assign(tab.host, { fails: true, previews: true });
+            const room = tab.open();
+            await until(() => room.actions('cm-1').length === 2, 'shown on the core\'s word');
+            // The press's own read is held, and refused when released; every other read answers as the host does.
+            let refuse = null;
+            const host = globalThis.fetch;
+            globalThis.fetch = (url, init) => (!refuse && String(url).startsWith('/api/chat/history') && String(url).includes('reason=retry')
+                ? new Promise((resolve) => { refuse = () => resolve({ ok: false, status: 401, json: async () => ({ error: 'Refused' }) }); })
+                : host(url, init));
+            room.press('cm-1', 'Send again');
+            await until(() => refuse, 'the press asks the core');
+            if (after === 'return') {
+                room.instance.leave();
+                Object.assign(tab.host, { fails: false, history: [{ role: 'assistant', text: 'Saved on the return', ts: TS,
+                    chat_id: 7, history_id: 'chat:2' }] });
+                room.instance.stay();
+                room.fire('open', { previouslyConnected: true, resumed: true });
+                await until(() => room.instance.hasPaintedHistory(), 'the return reads the room');
+                assert.match(JSON.stringify(family()), /Saved on the return/, 'and saves its newest text');
+            } else tab.host.socket = { readyState: 1 };  // the socket the press asked on gives way to another
+            const saved = family();
+            refuse();
+            await settle();
+            assert.deepEqual(family(), saved, 'the late refusal takes nothing');
+            assert.deepEqual(room.sent, [], 'nothing was sent');
+        } finally { tab.close(); }
+    });
+}
+
 // Each read a kept send makes says why (history_attribution.py): Send again's and its hand-over to the ordinary read
 // are a retry, as is a failed newest read asked again on the socket that serves the profile now (its proof, or a
 // socket that changed under it); the registry's word on the room is a refresh.
