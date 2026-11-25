@@ -364,8 +364,9 @@ for (const [name, options, refreshes] of [
 // hidden pending-work survivor (its draft and staged files) or builds a new instance.
 function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, covers = stack }) {
     const acked = [], built = [], held = [], forgotten = [];
-    const instance = () => {
+    const instance = (options) => {
         const inst = {
+            options, whys: [],  // what app.js built it with, and the action each paint it asked named
             page: { hidden: false, isConnected: true, dataset: {} }, generation: 0, draft: 'Yes, after the tag', leaving: false,
             // chat.js `leave`: its reads stop (a room leaving the screen); `closeTransient` closes the document it opened.
             leave() { this.leaving = true; this.generation += 1; }, stay() { this.leaving = false; },
@@ -377,7 +378,8 @@ function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, cove
             closeTransient() { this.transientCloses += 1; },
             cancelHistoryPaint() { this.generation += 1; },
             destroy() { this.destroyed = true; this.page.isConnected = false; },
-            refreshHistory({ revision }) {
+            refreshHistory({ revision, why }) {
+                this.whys.push(why);
                 const own = ++this.refreshes && this.generation;
                 return Promise.resolve().then(() => (own === this.generation && !this.destroyed
                     ? { painted: true, read: true, revision } : { painted: false, revision }));
@@ -537,6 +539,21 @@ for (const proven of [true, false]) {
         assert.equal(pruned.length, proven ? 1 : 0, 'a failed read prunes nothing');
     });
 }
+
+// The read a Project's paint makes names its action (history_attribution.py): the room built now asks it as its
+// opening, its Retry as a retry; a kept room's return, as an unread receipt's own.
+test('a Project room built now asks its paint as its opening, its Retry as a retry, a return as the receipt\'s', async () => {
+    const h = navigationHarness({ pendingWork: false });
+    await h.api.open();
+    const room = h.built[0];
+    const said = () => room.whys.map((why) => why && why.reason);  // made in app.js's own realm
+    assert.deepEqual(said(), ['open']);
+    await room.options.onHistoryRetry();
+    assert.deepEqual(said(), ['open', 'retry']);
+    h.api.close();
+    await h.api.open();
+    assert.deepEqual([h.built.length, room.whys.at(-1)], [1, null], 'the same room, back: no action named');
+});
 
 test('a reference opens what the registry answers for its id, a superseded read nothing', async () => {
     const h = navigationHarness({ pendingWork: false });

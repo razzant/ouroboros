@@ -2465,9 +2465,9 @@ export function createChatInstance({
         shown: () => !destroyed && !leaving && !page.hidden && isInstanceVisible() });
     const RECEIPT = { reason: 'read_receipt' };  // its reads and the pages its opening walks
     const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample,
-        read: async (fresh, whole) => {
+        read: async (fresh, whole, why) => {
             await (!fresh && (catchUp.reading || !catchUp.owed && roomProfile.initialHydration)
-                || historyPager.read({ whole, ...RECEIPT, decision: whole && 'latest_unknown' }));
+                || historyPager.read({ whole, ...RECEIPT, ...why, decision: whole && 'latest_unknown' }));
             return lastHistorySyncSucceeded && !catchUp.owed;
         },
         // A destroyed page reports hidden===false, hence the lifecycle flag.

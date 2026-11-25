@@ -781,7 +781,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     projectPanelOpeningSince = Date.now();
     try {
         // One paint for the whole step (the sync below): a handover leaves the room that was on screen.
-        let inst;
+        let inst, built = false;
         const movedToChat = await showPage('chat', { map, origin, key: `project:${project.id}`, closeProject: false, closeDrawer: false, sync: false,
             current: () => navigation === projectNavigationGeneration && (!sourceReveal || sourceReveal.current()),
             enter: () => {
@@ -801,6 +801,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         }
         inst = projectInstances.get(project.id);
         if (!inst) {
+            built = true;
             inst = createChatInstance({
                 ...ctx, ws: roomSocket(ws),
                 chatId: project.chat_id,
@@ -810,7 +811,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
                 asPanel: true,
                 title: project.name || project.id,
                 // Retry reads, paints and acknowledges the newest revision.
-                onHistoryRetry: () => acknowledgeProjectAfterPaint(freshProjectRow(project), null, { forcePaint: true }),
+                onHistoryRetry: () => acknowledgeProjectAfterPaint(freshProjectRow(project), null, { forcePaint: true, why: { reason: 'retry' } }),
                 // Arriving at the newest messages retries a withheld acknowledgement.
                 onReadingLatest: () => acknowledgeProjectAfterPaint(freshProjectRow(project)),
             });
@@ -823,7 +824,8 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         syncNavigationState();
         } });
         if (movedToChat === false || navigation !== projectNavigationGeneration) return;
-        return await landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation, forcePaint: !inst.hasPaintedHistory?.() });
+        return await landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation,
+            forcePaint: !inst.hasPaintedHistory?.(), why: built ? { reason: 'open' } : null });
     } finally {
         projectPanelOpeningSince = 0;
     }
@@ -831,7 +833,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
 
 // Once visible, the room returns where it was left; following the newest message, unread lands on what arrived last
 // (DESIGN "Unread"); left reading older history, it is put back there (chat.js `resume`); a notification lands latest.
-async function landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation, forcePaint = false }) {
+async function landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation, forcePaint = false, why = null }) {
     if (sourceReveal) {
         const reveal = {};
         projectReveals.set(project.id, reveal);
@@ -847,7 +849,7 @@ async function landInProject(project, inst, { taskId, quizId, latest, sourceReve
     void (latest ? inst?.showLatest?.({ arrive: projectUnread(project) }) : inst?.resume?.(projectUnread(project)));
     void inst?.revealQuestion?.();  // a plain landing cancels any pending question reveal
     // ACK the exact painted revision; chat.js owns the receipt and skips redundant reads.
-    await acknowledgeProjectAfterPaint(project, inst, { forcePaint });
+    await acknowledgeProjectAfterPaint(project, inst, { forcePaint, why });
 }
 
 // The registry's row for `id` in its exact answer (`?id=`), else null. No row, or one `deleting`, is its word that the
@@ -950,7 +952,7 @@ async function revealProjectQuestion(project, inst, taskId, quizId) {
 // Coalesce polling updates per Project, but never acknowledge a newer revision
 // until a history read covering it has been painted while the reader is at the
 // newest messages (DESIGN "Unread"); `paintOnly` paints without that decision.
-async function acknowledgeProjectAfterPaint(project, instance = null, { forcePaint = false, paintOnly = false } = {}) {
+async function acknowledgeProjectAfterPaint(project, instance = null, { forcePaint = false, paintOnly = false, why = null } = {}) {
     if (!project?.id || navState.activeProjectId !== project.id) return;
     const inst = instance || projectInstances.get(project.id);
     if (!inst || inst.page.hidden) return;
@@ -970,7 +972,7 @@ async function acknowledgeProjectAfterPaint(project, instance = null, { forcePai
         // A failed read is drawn by the instance itself (error + Retry in its
         // history control) and resolves unpainted. A rejection here is a defect,
         // not a slow network: it is reported, and still never acknowledged.
-        try { paint = await inst.refreshHistory?.({ revision }); } catch (err) {
+        try { paint = await inst.refreshHistory?.({ revision, why }); } catch (err) {
             console.error('Project history paint failed:', err);
         }
         if (

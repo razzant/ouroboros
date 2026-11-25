@@ -711,6 +711,46 @@ for (const [status, leaves, takes] of [[401, false, true], [403, false, true], [
     });
 }
 
+// Each read a kept send makes says why (history_attribution.py): Send again's and its hand-over to the ordinary read
+// are a retry, as is a failed newest read asked again on the socket that serves the profile now (its proof, or a
+// socket that changed under it); the registry's word on the room is a refresh.
+test('the reads the kept sends make name their action', async () => {
+    const tab = keptTab();
+    let since = 0;  // the reads of the room under test, after the earlier tab's
+    const reads = () => tab.host.calls.filter(([url]) => url.startsWith('/api/chat/history')).slice(since)
+        .map(([url]) => new URL(url, 'http://local').searchParams.get('reason'));
+    try {
+        const first = tab.open();
+        await first.send('maybe');
+        first.instance.destroy();
+        Object.assign(tab.host, { fails: true, profile: false });
+        since = reads().length;
+        const room = tab.open();
+        await until(() => reads().length === 1, 'the opening read');
+        await settle();
+        tab.host.profile = true;
+        room.fire('connection_profile', { type: 'connection_profile', profile_scope: PREVIEW_SCOPE });
+        await until(() => room.actions('cm-1').length === 2, 'asked again on the proving socket: shown');
+        assert.deepEqual(reads(), ['open', 'retry']);
+        room.fire('projects_changed', { type: 'projects_changed', chat_id: 7 });
+        await until(() => room.actions('cm-1').length === 2 && reads().length === 3, 'the registry\'s word, asked again');
+        assert.equal(reads()[2], 'refresh');
+        let answer;
+        tab.host.gate = new Promise((resolve) => { answer = resolve; });
+        room.fire('projects_changed', { type: 'projects_changed', chat_id: 7 });
+        await until(() => reads().length === 4, 'asked again');
+        tab.host.socket = { readyState: 1 };  // the socket changes under the read: its answer is asked again on the new one
+        tab.host.gate = null;
+        answer();
+        await until(() => reads().length === 5 && room.actions('cm-1').length === 2, 'asked again on this socket: shown');
+        assert.equal(reads()[4], 'retry');
+        tab.host.fails = false;  // history reads again
+        room.press('cm-1', 'Send again');
+        await until(() => room.instance.hasPaintedHistory(), 'the ordinary read takes over');
+        assert.deepEqual(reads().slice(5), ['retry', 'retry'], 'Send again\'s read and its hand-over to the ordinary read');
+    } finally { tab.close(); }
+});
+
 // ouro:panic reaches the page's own work through its global event bus (chat_activity.js raises it once its Panic frame
 // is sent); the DOM fixture has none, so a case installs one. Nothing here sends a Panic.
 function panicBus() {

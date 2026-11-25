@@ -20,11 +20,12 @@ const page = (messages, cursor = 'page:recent', next = null) => ({
 // the test settles, or `{ httpStatus, body }` for a refused read.
 function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShowSavedProfile = () => true } = {}) {
     let response = initial, revision = 0;
-    const calls = [], handlers = new Map();
+    const calls = [], urls = [], handlers = new Map();
     const { prior, mount } = installDom(async (url, init) => {
         if (String(url).startsWith('/api/chat/history')) {
             const cursor = new URL(String(url), 'http://local').searchParams.get('cursor');
             calls.push(cursor);
+            urls.push(new URL(String(url), 'http://local'));
             const data = cursor && fetchPage ? await fetchPage(cursor, init) : await response;
             if (data?.httpStatus) return { ok: false, status: data.httpStatus, json: async () => data.body };
             return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...data }) };
@@ -46,7 +47,7 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShow
     t.after(() => { instance.destroy(); restoreDom(prior); globalThis.WebSocket = priorSocket; });
     const messages = globalThis.document.byId.get('chat-messages');
     return {
-        instance, calls, messages,
+        instance, calls, urls, messages,
         bubbles: () => messages.children.filter((node) => node.classList.contains('chat-bubble')
             && !node.classList.contains('typing-bubble') && node.dataset.ephemeral !== '1'),
         emit: (message) => handlers.get('chat')({ chat_id: 2, ...message }),
@@ -1193,6 +1194,20 @@ test('a proof after the canonical read paints no saved text over it', async (t) 
     f.proveProfile();
     assert.equal(previewNode(f), undefined, 'the canonical page stands alone');
     assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:6']);
+});
+
+// The paint its caller names (app.js: a Project's opening, its Retry) says so on the read it makes; any other is the
+// read receipt's own (history_attribution.py).
+test('a paint whose caller names its action says so on its read; one that names none is a receipt\'s', async (t) => {
+    const f = fixture(t, page([row('chat:1', 'Answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    const reason = () => f.urls.at(-1).searchParams.get('reason');
+    const reads = f.urls.length;
+    await f.instance.refreshHistory({ revision: 1, why: { reason: 'retry' } });
+    assert.equal(f.urls.length, reads + 1);
+    assert.equal(reason(), 'retry');
+    await f.instance.refreshHistory({ revision: 2 });
+    assert.equal(reason(), 'read_receipt');
 });
 
 test('the opening\'s one retry is spent on the first proof, even one that still refused', async (t) => {

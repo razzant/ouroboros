@@ -390,6 +390,8 @@ export function createRoomProfileLifecycle({
     // return shows it again only on a word read after it, and its Send again asks anew.
     let canonical = false, proof = null, failure = null, epoch = 0;
     const asked = new WeakMap();  // a failed read -> the socket and the room's epoch it was sent under
+    // Why these reads are made (history_attribution.py): a Send again's, or a failed newest read asked again.
+    const RETRY = { reason: 'retry' };
     const servingSocket = () => (profileScope && ws?.isConnected?.() !== false
         && ws?.servingProfileScope?.() === profileScope ? ws.ws || null : null);
     const lapse = () => { proof = null; kept()?.withdraw(); };
@@ -404,10 +406,10 @@ export function createRoomProfileLifecycle({
         const socket = servingSocket(), at = epoch;
         if (canonical || !socket || proof !== socket) return false;
         let answer = null, readable = false;
-        try { await readHistory({ chatId, cursor: null }); readable = true; } catch (error) { answer = error; }
+        try { await readHistory({ chatId, cursor: null, tags: RETRY }); readable = true; } catch (error) { answer = error; }
         if (isDestroyed() || isLeaving()) return false;
         if (answer) getPreview().refused(answer);
-        if (readable) { void syncHistory(); return false; }
+        if (readable) { void syncHistory(RETRY); return false; }
         if (servingSocket() !== socket || epoch !== at) return false;
         if (ordinaryUnavailability(answer, chatId, profileScope)) { proof = socket; return true; }
         if (answer?.status || answer?.foreignProfile) lapse();
@@ -488,13 +490,13 @@ export function createRoomProfileLifecycle({
             lapse();
             // The word came before this socket proved the profile, or before the room changed: asked again on this one.
             failure = ordinary ? error : null;
-            if (failure && servingSocket()) void Promise.resolve().then(() => syncHistory());
+            if (failure && servingSocket()) void Promise.resolve().then(() => syncHistory(RETRY));
         },
         /** A socket proved the profile it serves (ws.js `connection_profile`): a word read on another socket lapses, and one
          *  that waited for this proof is asked again. */
         profileConfirmed() {
             kept()?.withdraw();
-            if (failure && !canonical) void syncHistory();
+            if (failure && !canonical) void syncHistory(RETRY);
             // An opening this proof held back paints its saved text now, once; a room away paints nothing.
             const owed = previewOwed;
             previewOwed = false;
@@ -507,7 +509,7 @@ export function createRoomProfileLifecycle({
             const held = proof !== null || failure !== null;
             epoch += 1;
             lapse();
-            if (held) void syncHistory();
+            if (held) void syncHistory({ reason: 'refresh' });
         },
         /** The room leaves the screen (chat.js `leave`): the core's word lapses and what it showed leaves the feed, kept; no
          *  answer asked before can bring it back, so a return shows it only on a word read after it. */
