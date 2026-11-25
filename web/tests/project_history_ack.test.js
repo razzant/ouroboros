@@ -9,6 +9,7 @@ import * as readAhead from '../modules/read_ahead.js';
 import { createRoomRetirement } from '../modules/room_retire.js';
 import { forgetProjectPreviews, forgetUnlistedProjectPreviews, previewEntryKey, provenScope, PREVIEW_KEY }
     from '../modules/chat_preview.js';
+import { createStateSnapshotSequencer, heldProjectChatIds } from '../modules/state_snapshots.js';
 import { WS } from '../modules/ws.js';
 import { memoryStorage, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 
@@ -325,7 +326,7 @@ const pageProfile = (proven, serving = proven ? PREVIEW_SCOPE : '') => ({ ws: { 
 // again through the real renderProjectsNav → acknowledgeProjectAfterPaint path: a
 // failed POST is retried by the next poll even when the snapshot is unchanged, and
 // the retry still posts only a read (painted, shown, the reader at the newest message).
-function pollHarness({ read = true, hidden = false, failures = 1, proven = true, saved = savedProfiles() } = {}) {
+function pollHarness({ read = true, hidden = false, failures = 1 } = {}) {
     const posts = [], refreshes = [];
     let failing = failures;
     const inst = {
@@ -334,7 +335,6 @@ function pollHarness({ read = true, hidden = false, failures = 1, proven = true,
     };
     const context = vm.createContext({
         ...readAhead,  // app.js imports these (DESIGN "Unread": a message read in another room)
-        ...pageProfile(proven), forgetProjectPreviews: saved.forget,
         state: { projectSeenRevision: {} }, navState: { activeProjectId: 'p1' },
         projectInstances: new Map([['p1', inst]]), projectPaintRequests: new Map(), projectReveals: new Map(),
         projectActivityIndex: null, knownProjectsJson: '', lastProjectRows: [], projectsNav: { unreadRows: () => [] }, rooms: { forget() {} },
@@ -349,10 +349,9 @@ function pollHarness({ read = true, hidden = false, failures = 1, proven = true,
         console: { error() {} },
     });
     vm.runInContext(`${unreadRule}${ackSource}\n${lift('markProjectViewed')}\n${lift('mergeProjectSeenRevisions')}
-        ${lift('renderProjectsNav')}\n${lift('registryScope')}
-        globalThis.render = (lifecycle) => renderProjectsNav([{ id: 'p1', name: 'P', chat_id: 9, lifecycle,
-            visible_revision: 5 }], [9]);
-        globalThis.poll = () => render('active');`, context);
+        ${lift('renderProjectsNav')}
+        globalThis.poll = () => renderProjectsNav([{ id: 'p1', name: 'P', chat_id: 9, lifecycle: 'active',
+            visible_revision: 5 }], [9]);`, context);
     const poll = async () => { context.poll(); for (let i = 0; i < 5; i++) await flush(); };
     return { context, posts, refreshes, poll, unread: () => context.lastProjectRows[0]?._unread };
 }
@@ -570,12 +569,50 @@ for (const [answer, says, kept] of [
     });
 }
 
+// app.js's one state reader as it stands at its top level: state_snapshots.js's sequencer (the feed it holds for an
+// unreadable one too) and the callback that applies every body it admits, painting the sidebar's Project list.
+const stateReader = (() => {
+    const from = source.indexOf('\nconst stateSnapshots = createStateSnapshotSequencer(') + 1;
+    const until = source.indexOf('\n});\n', from);
+    assert.ok(from > 0 && until > from, 'app.js applies its state reads at its top level');
+    return source.slice(from, until + 4);
+})();
+// The sidebar fed by that reader, p1 (room 9) its one Project: `read(lifecycle)` admits a state body carrying p1 in that
+// lifecycle (`null`: a body naming no feed; 'unreadable': a feed the registry could not read), `repaint()` paints the
+// list's own rows again as a pin confirmed and the preferences read do, `changed` is the row menu's onChanged.
+function sidebarHarness({ page = pageProfile(true), saved = savedProfiles() } = {}) {
+    const menus = [];
+    const context = vm.createContext({
+        ...readAhead, ...page, createStateSnapshotSequencer, heldProjectChatIds, forgetProjectPreviews: saved.forget,
+        state: { projectSeenRevision: {}, projectChatIds: new Set() }, navState: { activeProjectId: null },
+        projectRooms: new Map(), reconcileProjectRooms: rooms => ({ rooms }), activitySocketDisconnected: false,
+        projectActivityIndex: { byChat: new Map() }, buildProjectActivityIndex: () => ({ byChat: new Map() }),
+        applyTaskBindings() {}, hydrateOpenChatsFromState() {}, observeMainRevision() {}, markProjectActivityUnknown() {},
+        evolution: null, projectHeader: null, settingsControls: null, knownProjectsJson: '', projectsFeedOrder: 0,
+        lastProjectRows: [], rooms: { forget() {} }, IDLE_SUMMARY: {}, pendingProjectPins: new Set(), apiClient: {},
+        markView: () => ({}), markWords: () => '', openProjectRowMenu: (_project, options) => menus.push(options) > 0,
+        projectsNav: { unreadRows: () => [], row: id => context.lastProjectRows.find(row => row.id === id) || null,
+            noteChange() {}, refresh() {}, keyboardHome: () => null },
+        closeProjectPanel() {}, paintProjectsNav() {}, syncNavigationState() {}, patchProjectActivityMarkers() {},
+        refreshProjectsNav() {}, refreshSharedProjectSeen() {},
+    });
+    vm.runInContext(`${unreadRule}${['renderProjectsNav', 'registryScope', 'openProjectMenu'].map(lift).join('\n')}
+        ${stateReader}\nglobalThis.stateSnapshots = stateSnapshots;`, context);
+    const body = (projects, extra = {}) => ({ rooms: {}, works: [], project_listable_count: 1, project_chat_ids: [9],
+        project_messages_revision: 'r1', ...(projects ? { projects } : {}), ...extra });
+    const read = lifecycle => assert.equal(context.stateSnapshots.apply(context.stateSnapshots.begin(), lifecycle === 'unreadable'
+        ? body([], { project_listable_count: null, project_chat_ids: null })
+        : body(lifecycle && [{ id: 'p1', name: 'P', chat_id: 9, lifecycle, visible_revision: 5 }])), true, 'admitted');
+    return { context, read, repaint: () => context.renderProjectsNav(context.lastProjectRows, [9]),
+        changed: change => menus[0].onChanged(change) };
+}
+
 // The sidebar's `deleting` rows (the state read, which names no profile) and the delete action's own answer speak for
 // this document's profile while its socket proves it (registryScope), and for none otherwise.
 for (const proven of [true, false]) {
-    test(`a deleting row of the state read ${proven ? 'takes this profile\'s saved text of it' : 'takes nothing while the socket proves no profile'}`, async () => {
-        const saved = savedProfiles(), h = pollHarness({ failures: 0, proven, saved });
-        h.context.render('deleting');
+    test(`a deleting row of the state read ${proven ? 'takes this profile\'s saved text of it' : 'takes nothing while the socket proves no profile'}`, () => {
+        const saved = savedProfiles(), h = sidebarHarness({ page: pageProfile(proven), saved });
+        h.read('deleting');
         assert.deepEqual(saved.kept(), proven ? [OTHER_PROFILE] : [PREVIEW_SCOPE, OTHER_PROFILE]);
     });
 }
@@ -632,29 +669,43 @@ for (const [says, answer, kept] of [
         [OTHER_PROFILE]],
     ['shown deleting by a state read before the answer', (h) => h.read('deleting'), [OTHER_PROFILE]]]) {
     test(`a delete marked before the core answers takes no saved text until its word: ${says}`, () => {
-        const saved = savedProfiles(), menus = [];
-        const context = vm.createContext({
-            ...readAhead, ...pageProfile(true), forgetProjectPreviews: saved.forget, state: { projectSeenRevision: {} },
-            navState: { activeProjectId: null }, projectActivityIndex: { byChat: new Map() }, knownProjectsJson: '',
-            lastProjectRows: [], rooms: { forget() {} }, IDLE_SUMMARY: {}, pendingProjectPins: new Set(), apiClient: {},
-            markView: () => ({}), markWords: () => '', openProjectRowMenu: (_project, options) => menus.push(options) > 0,
-            projectsNav: { unreadRows: () => [], row: id => context.lastProjectRows.find(row => row.id === id) || null,
-                noteChange() {}, refresh() {}, keyboardHome: () => null },
-            closeProjectPanel() {}, paintProjectsNav() {}, syncNavigationState() {}, patchProjectActivityMarkers() {},
-            refreshProjectsNav() {}, refreshSharedProjectSeen() {},
-        });
-        vm.runInContext(`${unreadRule}${['renderProjectsNav', 'registryScope', 'openProjectMenu'].map(lift).join('\n')}`,
-            context);
-        const h = { read: lifecycle => context.renderProjectsNav([{ id: 'p1', name: 'P', chat_id: 9, lifecycle,
-            visible_revision: 5 }], [9]), changed: change => menus[0].onChanged(change) };
+        const saved = savedProfiles(), h = sidebarHarness({ saved });
         h.read('active');
-        assert.equal(context.openProjectMenu({ dataset: { navProjectId: 'p1' }, querySelector: () => null }), true);
+        assert.equal(h.context.openProjectMenu({ dataset: { navProjectId: 'p1' }, querySelector: () => null }), true);
         h.changed({ projectId: 'p1', lifecycle: 'deleting', optimistic: true });  // the menu's Delete, confirmed
-        assert.equal(context.lastProjectRows[0].lifecycle, 'deleting', 'the list shows it going at once');
-        context.renderProjectsNav(context.lastProjectRows, [9]);  // a repaint from the list's own rows
+        assert.equal(h.context.lastProjectRows[0].lifecycle, 'deleting', 'the list shows it going at once');
+        h.repaint();  // a repaint from the list's own rows
         assert.deepEqual(saved.kept(), [PREVIEW_SCOPE, OTHER_PROFILE], 'before the core answered: nothing taken');
         answer(h);
         assert.deepEqual(saved.kept(), kept, says);
+    });
+}
+
+// Astra w4 1: a `deleting` row heard before the socket proved this document's profile takes nothing, and stays in the
+// list's own rows. Painting them again once the socket proved the profile is no new word, whatever paints them: a pin
+// confirmed or the preferences read (renderProjectsNav over lastProjectRows), a state read naming no feed, or one whose
+// feed the registry could not read (state_snapshots.js holds the earlier body's rows). A state read that brings the row
+// again takes saved text: this profile's, under the proof in hand as it is admitted; the other profile's stays.
+for (const [how, repaint] of [['a repaint of the list\'s own rows', h => h.repaint()],
+    ['a state read naming no feed', h => h.read(null)], ['a state read whose feed is held', h => h.read('unreadable')]]) {
+    test(`a deleting row heard before the socket proved its profile takes nothing on ${how} after the proof`, (t) => {
+        const native = globalThis.WebSocket;
+        globalThis.WebSocket = class { static CONNECTING = 0; static OPEN = 1; readyState = 1; send() {} close() {} };
+        t.after(() => { globalThis.WebSocket = native; });
+        const ws = new WS('ws://unused'), saved = savedProfiles();
+        const h = sidebarHarness({ saved, page: { ws, document: { scope: PREVIEW_SCOPE }, documentScope: doc => doc.scope,
+            provenScope } });
+        assert.equal(ws.canShowSavedProfile(), true, 'the fresh document may paint');
+        h.read('deleting');
+        assert.deepEqual(saved.kept(), [PREVIEW_SCOPE, OTHER_PROFILE], 'heard before any socket proved it: nothing taken');
+        ws.connect();  // the serving socket's first frame names its profile (gateway/ws.py)
+        ws.ws.onmessage({ data: JSON.stringify({ type: 'connection_profile', profile_scope: PREVIEW_SCOPE }) });
+        assert.equal(h.context.registryScope(), PREVIEW_SCOPE, 'the socket now proves this document\'s profile');
+        repaint(h);
+        assert.deepEqual(h.context.lastProjectRows.map(row => row.lifecycle), ['deleting'], `${how}: still shown going`);
+        assert.deepEqual(saved.kept(), [PREVIEW_SCOPE, OTHER_PROFILE], `${how}: no new word, nothing taken`);
+        h.read('deleting');
+        assert.deepEqual(saved.kept(), [OTHER_PROFILE], 'a state read that brings it again takes this profile\'s only');
     });
 }
 

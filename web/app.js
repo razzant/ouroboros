@@ -592,7 +592,7 @@ if (navDrawerClose) {
 let projectPanelOpeningSince = 0;
 let mainChat;
 let evolution = null;  // Dashboard → Evolution, which takes every sequenced snapshot too (its campaign controls)
-const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generation) => {
+const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generation, carried) => {
     data = data && typeof data === 'object' ? data : {};
     // A complete REST body cannot prove absence while the socket is in a
     // disconnect episode. Keep the previous rooms and render them unknown until
@@ -604,6 +604,9 @@ const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generati
     if (Array.isArray(data.projects)) state.projectMessagesRevision = data.project_messages_revision ?? null;
     const chatIds = heldProjectChatIds(data, state);  // null or absent keeps a complete set the page holds
     projectActivityIndex = buildProjectActivityIndex(projectRooms, chatIds, data.projects || lastProjectRows);
+    // A `deleting` row is the registry's word as this body brings it (`carried`: never one held or carried from an
+    // earlier body), and takes saved text under the profile proven as it is admitted; no repaint hears it again.
+    forgetProjectPreviews(carried.filter(p => p?.lifecycle === 'deleting').map(p => p.id), registryScope());
     renderProjectsNav(data.projects || lastProjectRows, chatIds, projectActivityIndex,
         Array.isArray(data.projects) ? generation : 0);
     if (data.task_bindings) applyTaskBindings(data.task_bindings);  // null: unchanged, never filled here
@@ -1041,12 +1044,10 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
     if (rows.some(p => p.id === navState.activeProjectId && p.lifecycle === 'deleting')) {
         closeProjectPanel();
     }
-    // The registry's own word retires a room kept away (also one leaving now, or holding work until it ends: every read
-    // asks again) and its saved text (chat_preview.js); absence from this bounded list never does. This page's own mark
-    // of a delete the core has not answered (`_optimistic`, openProjectMenu) retires the room but takes no saved text.
-    const going = rows.filter(p => p.lifecycle === 'deleting');
-    rooms.forget(...going.map(p => p.id));
-    forgetProjectPreviews(going.filter(p => !p._optimistic).map(p => p.id), registryScope());
+    // A row going away retires a room kept away (also one leaving now, or holding work until it ends: every read asks
+    // again); absence from this bounded list never does. Its saved text leaves only as a state read admits the word.
+    const going = rows.filter(p => p.lifecycle === 'deleting').map(p => p.id);
+    rooms.forget(...going);
     const json = JSON.stringify([state.projectMessagesRevision, ...rows.map(p => [p.id, p.name, p.chat_id, p.lifecycle,
         p.visible_revision, p._unread, p.delete_error, p.pinned === true, p.last_message_at])]);  // a moved time repaints
     if (readOrder) projectsFeedOrder = readOrder;  // with its rows: nothing reads the one under the other's order
@@ -1216,8 +1217,7 @@ function openProjectMenu(item, { anchor = null, point = null } = {}) {
         onChanged: (change = {}) => {
             if (change.optimistic && change.projectId) {
                 const row = lastProjectRows.find(p => p.id === change.projectId);
-                // Shown going at once; a mark of this page's own, which takes no saved text (renderProjectsNav).
-                if (row) Object.assign(row, { lifecycle: 'deleting', _unread: false, _optimistic: true });
+                if (row) { row.lifecycle = 'deleting'; row._unread = false; }
                 projectsNav.noteChange(change.projectId, { lifecycle: 'deleting' });
                 if (navState.activeProjectId === change.projectId) closeProjectPanel();
                 paintProjectsNav();
