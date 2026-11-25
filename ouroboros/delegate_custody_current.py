@@ -474,7 +474,7 @@ _MAYBE_UNFINISHED = ("CASE WHEN json_valid(facts) THEN NOT (COALESCE(json_extrac
                      "AND json_extract(facts, '$.terminal_state') IN (SELECT value FROM json_each(?))) ELSE 1 END")
 
 
-def tree_closure(root, root_task_id: str, task_id: str = "", *, wait_sec=store.STORE_WAIT_SEC):
+def tree_closure(root, root_task_id: str, task_id: str = "", *, wait_sec=store.STORE_WAIT_SEC, transaction=None):
     """ONE transaction's answer to "is this tree's delegated work over?": ``runs``, TASK_ID's own runs in the tree;
     ``unfinished``, the tree's runs that may not be settled with a terminal state (``_MAYBE_UNFINISHED``: the settled
     majority is neither fetched nor decoded); ``pending``, every pending invocation of the tree, as
@@ -484,7 +484,8 @@ def tree_closure(root, root_task_id: str, task_id: str = "", *, wait_sec=store.S
     from ouroboros.store_hot_facts import tree_requests
 
     mine = str(task_id or "")
-    with store.open_store(root, write=False, wait_sec=wait_sec) as txn:
+    with (nullcontext(transaction) if transaction is not None
+          else store.open_store(root, write=False, wait_sec=wait_sec)) as txn:
         where, params = _selected(txn, _TREE, _LEGACY_TREE, (root_task_id, root_task_id))
         own = txn.custody_raw_rows(f"({where}) AND task_id=?", (*params, mine)) if mine else {}
         maybe = txn.custody_raw_rows(f"({where}) AND {_MAYBE_UNFINISHED}",
@@ -705,7 +706,10 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
             continue
         txn.delete_row(name, key)  # a closed duty takes the uses linked to it along
         txn.conn.execute("DELETE FROM obligations WHERE set_name=? AND id>=? AND id<?", (_USES, *_use_range(key)))
-    if iid and (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and event.get("definite") is True)):
+    closing = (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and event.get("definite") is True
+               and not (kind == c.START_FAILED and event.get("pre_admission_rejected") is True
+                        and (invocation_row or {}).get("state") != "failed_definite")))
+    if iid and closing:
         request = txn.get_row("custody_open", f"invocation:{iid}")
         txn.delete_row("custody_open", f"invocation:{iid}")
         if kind == c.START_FAILED and request is None:
@@ -828,22 +832,33 @@ def publish(root, event: Dict[str, Any], *, propagate_contention: bool = False) 
     A failed append keeps the outbox for the next flush, so the chain never leads the store.
     Transaction/append ordering: module docstring."""
     from ouroboros import delegate_invocation as inv
-    from ouroboros.delegate_resume import ACTIVE, can_reserve_cancel, hold_active_start, owe_risk_notice, publication_lock, still_pending
+    from ouroboros.delegate_resume import (ACTIVE, can_reserve_cancel, hold_active_start, owe_risk_notice, publication_lock,
+                                           settled_holders, still_pending)
 
-    owed = changed_tree = ""
-    from ouroboros.delegate_custody import (CANCEL_HANDOFF, CLOSED_ABSENT, PROJECT_RETIRED, SETTLED, START_REQUESTED,
-                                            START_RISK_ACCEPTED, START_STATE_OBSERVED, TERMINAL_STATES)
+    owed, changed = "", []
+    from ouroboros.delegate_custody import (CANCEL_HANDOFF, CLOSED_ABSENT, PROJECT_RETIRED, SETTLED, START_FAILED,
+                                            START_REQUESTED, START_RISK_ACCEPTED, START_STATE_OBSERVED, TERMINAL_STATES)
     from ouroboros.delegate_pending import pending_invocations
     from ouroboros.execution_domain import registration_engine
     # Keep the canonical reference, never a replay-authorizing copy of its body.
     pending = pending_invocations(root, [event], materialize=False) if event.get("type") == START_REQUESTED else None
     try:
         while True:
-            with publication_lock(root, event), store.open_store(root, write=True) as txn:
+            pre_admission_binding = None
+            if event.get("type") == START_FAILED and event.get("pre_admission_rejected") is True:
+                from ouroboros.delegate_continuation import prepare_pre_admission_rejection_binding
+
+                pre_admission_binding = prepare_pre_admission_rejection_binding(root, event)
+            with publication_lock(root, event) as holders, store.open_store(root, write=True) as txn:
                 if int(txn.meta("schema_version") or 1) >= store.SCHEMA_VERSION:
                     if not event.get("event_id") or txn.get_row(inv.EVENTS, str(event["event_id"])) is None:
                         if event["type"] == START_RISK_ACCEPTED and not still_pending(txn, event):
                             return False
+                        if event["type"] == START_FAILED and event.get("pre_admission_rejected") is True:
+                            from ouroboros.delegate_continuation import can_settle_pre_admission_rejection
+
+                            if not can_settle_pre_admission_rejection(txn, event, verified=pre_admission_binding):
+                                return False
                         event = {**event, "custody_ordinal": int(txn.meta(inv.ORDINAL) or 0) + 1}
                         loaded = _loaded(txn, event)
                         entry = loaded.get(event.get("run_id"))
@@ -866,12 +881,12 @@ def publish(root, event: Dict[str, Any], *, propagate_contention: bool = False) 
                             if entry.settled or entry.terminal_state or entry.resume_start_state != "unknown":
                                 return True  # A previous observer won. Its committed observation is authoritative.
                         if (event["type"] in (SETTLED, CLOSED_ABSENT) and entry and entry.resume_start_state in ACTIVE):
-                            changed_tree = entry.root_task_id or entry.task_id
+                            changed = settled_holders(txn, entry)
                         owed = _reduce(txn, event, loaded, {}, pending)
                         if event["type"] == START_RISK_ACCEPTED:
                             owe_risk_notice(txn, event)
                         if event.get("resume_start_state") in ACTIVE:
-                            changed_tree = hold_active_start(txn, event)
+                            changed = hold_active_start(txn, event, holders)
                         txn.outbox_put(event)
                     break
             # Prepare an old child before reducing anything, like store.update_task.
@@ -886,9 +901,10 @@ def publish(root, event: Dict[str, Any], *, propagate_contention: bool = False) 
         return False
     with _HELD_LOCK:
         _LOCAL_WRITES[0] += 1
-    if changed_tree:
+    if changed:
         from ouroboros.delegate_resume import recovered_writer_changed
-        recovered_writer_changed(root, changed_tree)
+        for tree in changed:
+            recovered_writer_changed(root, tree)
     flush_outbox(root)
     if owed:
         _refresh_owed_receipt(root, owed)
@@ -1072,7 +1088,10 @@ def fold(rows) -> Dict[str, Any]:
             state[rid].request_event = dict(requests[iid])
             group = requests[iid].get("billing_group")
             state[rid].billing_group = dict(group) if isinstance(group, dict) else {}
-        if iid and iid in requests and (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and row.get("definite") is True)):
+        closing = (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and row.get("definite") is True
+                   and not (kind == c.START_FAILED and row.get("pre_admission_rejected") is True
+                            and (invocations.get(iid) or {}).get("state") != "failed_definite")))
+        if iid and iid in requests and closing:
             if iid in pending_ids:
                 pending_ids.remove(iid)
                 if kind != c.STARTED:

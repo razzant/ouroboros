@@ -17,8 +17,9 @@ def _continue_in_background(ctx, reason: str = "") -> str:
 def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None, task_ids=None) -> str:
     """One control event per named work. ``task_ids`` (Pause and Resume): the roots, de-duplicated, each as an
     ordinary single event under its own nonce (as if named alone in this call), all marked with this call's id
-    (``list_call``); a list Resume is a general one (``general``). Each mails its own outcome; nothing is kept
-    between them."""
+    (``list_call``); a list Resume is a general one (``general``) and never offers, records or reuses a waiting
+    Continue's choice to go on past its predecessor's start of unknown outcome: that is the addressed Resume's alone
+    (``delegate_resume.selects``). Each mails its own outcome; nothing is kept between them."""
     from ouroboros.task_results import validate_task_id
     from ouroboros.tool_call_log import current_tool_call_id
     from ouroboros.tools.control_events import _emit_control_event
@@ -118,7 +119,9 @@ def _list_schema(schema: dict) -> dict:
                        "own record could not be read or bound: nothing was done; retry later or look at it first); "
                        "not_a_root_task (a child: its root chooses its children, or name it alone if the owner's word "
                        "names it); owner_paused_by_name or pause_author_unknown (a Resume found a Pause Ouroboros "
-                       "did not place: it stays; name that root alone by task_id when the owner's word names it)."}
+                       "did not place: it stays; name that root alone by task_id when the owner's word names it). "
+                       "A list Resume never offers or takes a waiting Continue's choice to go on past its predecessor's "
+                       "delegated start of unknown outcome (acceptable_unknown): name that Continue alone."}
     schema["parameters"]["required"] = ["reason"]
     return schema
 

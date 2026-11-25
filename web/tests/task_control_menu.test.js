@@ -559,7 +559,7 @@ test('a Resume held only by calls of unknown outcome asks once, then resumes nam
         return { ok: true };
     };
     await resumeTaskAction('root-u', { resume, toast, askOwner: async (dialog) => { asked.push(dialog); return true; } });
-    assert.deepEqual(calls, [null, { accept_unknown: ['op-1'], reason: 'The owner resumed without these results.' }]);
+    assert.deepEqual(calls, [null, { accept_unknown: ['op-1'], reason: 'The owner resumed without this result.' }]);
     assert.equal(asked.length, 1);
     assert.match(asked[0].body, /^It is unknown whether the run_command call of task 96ac2f7c981b4f54 finished/);
     assert.match(asked[0].body, /this call is never run again/);
@@ -618,6 +618,86 @@ test('the same confirmation exposes every addressed task and invocation before a
             assert.match(calls[1].reason, /spending/);
         }
     }
+});
+
+test('a proven read-only earlier request is not said to change files, and its start stays unknown', async () => {
+    const start = { kind: 'delegated_run', task_id: 'helper-old', invocation_id: 'lost-old', run_id: '',
+        state: 'stop_unknown', stop_outcome: 'pending_invocation_unbound', read_only: true,
+        choice_id: 'delegate_start:old-root/helper-old/lost-old/successor/fence-id/' };
+    const bodies = [];
+    const cases = [[start], [start, { ...start, invocation_id: 'lost-2', read_only: undefined,
+        choice_id: 'delegate_start:old-root/helper-old/lost-2/successor/fence-id/' }]];
+    for (const [i, blockers] of cases.entries()) {
+        const resume = async (task, body) => {
+            if (!body) throw Object.assign(new Error('held'), { status: 409, body: {
+                error: 'predecessor_writers_unsettled', blockers, acceptable_unknown: blockers.map(b => b.choice_id) } });
+            return { ok: true };
+        };
+        await resumeTaskAction(`successor-${i}`, { resume, toast: () => {},
+            askOwner: async (dialog) => { bodies.push(dialog.body); return false; } });
+    }
+    assert.match(bodies[0], /earlier request was read-only, without permission to change files; its work may still be running or spending money/);
+    assert.doesNotMatch(bodies[0], /changing files|was started/);
+    assert.match(bodies[1], /still be running, changing files or spending money/, 'one unproven start keeps the warning');
+});
+
+test('the choice to resume past earlier requests is said in the singular for one and the plural for several, with the same warning', async () => {
+    const start = (i) => ({ kind: 'delegated_run', task_id: 'helper', invocation_id: `lost-${i}`, run_id: '',
+        state: 'stop_unknown', stop_outcome: 'pending_invocation_unbound', read_only: true,
+        choice_id: `delegate_start:old-root/helper/lost-${i}/successor///hold` });
+    const asked = [];
+    const sent = [];
+    for (const count of [1, 2]) {
+        const blockers = Array.from({ length: count }, (_, i) => start(i));
+        const resume = async (task, body) => {
+            if (!body) throw Object.assign(new Error('held'), { status: 409, body: {
+                error: 'predecessor_writers_unsettled', blockers, acceptable_unknown: blockers.map((b) => b.choice_id) } });
+            sent.push(body);
+            return { ok: true };
+        };
+        await resumeTaskAction(`counted-${count}`, { resume, toast: () => {},
+            askOwner: async (dialog) => { asked.push(dialog); return true; } });
+    }
+    const [one, many] = asked;
+    assert.equal(one.title, 'Resume without this result?');
+    assert.equal(many.title, 'Resume without these results?');
+    assert.equal(one.details.summary, 'Inspect the request');
+    assert.equal(many.details.summary, 'Inspect all 2 requests');
+    assert.match(one.body, /listed result\? The earlier request was read-only, without permission to change files; its work may still/);
+    assert.match(many.body, /listed results\? The earlier requests were read-only, without permission to change files; their work may still/);
+    assert.match(one.body, /will not send this request again/);
+    assert.match(many.body, /will not send these requests again/);
+    for (const dialog of asked) assert.match(dialog.body, /may still be running or spending money/);
+    assert.match(sent[0].reason, /the listed start may still be working or spending money\.$/);
+    assert.match(sent[1].reason, /the listed starts may still be working or spending money\.$/);
+});
+
+test('a Resume the owner cancels at that choice sends nothing; the next press asks again and Resume anyway sends the ids once', async () => {
+    const choice = 'delegate_start:pred/pred/lost/succ///hold';
+    const start = { kind: 'delegated_run', task_id: 'pred', invocation_id: 'lost', run_id: '', state: 'stop_unknown',
+        stop_outcome: 'pending_invocation_unbound', read_only: true, choice_id: choice };
+    const calls = [];
+    const resume = async (id, body) => {
+        calls.push(body ?? null);
+        if (!body) throw Object.assign(new Error('held'), { status: 409, body: {
+            error: 'predecessor_writers_unsettled', blockers: [start], acceptable_unknown: [choice] } });
+        return { ok: true };
+    };
+    const toasts = [];
+    const toast = (text, kind) => toasts.push([text, kind]);
+    const asked = [];
+    const answer = (confirmed) => async (dialog) => { asked.push(dialog.confirmLabel); return confirmed; };
+
+    await resumeTaskAction('succ-choice', { resume, toast, askOwner: answer(false) });
+    assert.deepEqual(calls, [null], 'Cancel sends nothing beyond the Resume that asked');
+    assert.deepEqual(toasts, [], 'and says nothing: the task stays held');
+    assert.equal(resumeEligible('succ-choice', () => true), true, 'the press ended with its answer: the next one is free');
+
+    await resumeTaskAction('succ-choice', { resume, toast, askOwner: answer(true) });
+    assert.deepEqual(calls.slice(1), [null, { accept_unknown: [choice],
+        reason: 'The owner accepted that the listed start may still be working or spending money.' }]);
+    assert.deepEqual(asked, ['Resume anyway', 'Resume anyway'], 'each press asked for itself');
+    assert.deepEqual(toasts, [['Resuming: the task returns to the queue.', 'info']]);
 });
 
 // The one registry of a task's pending controls (docs/DESIGN.md "Work status": a press is pending until its answer and its

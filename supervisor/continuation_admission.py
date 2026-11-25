@@ -28,9 +28,10 @@
    diagnose; the hold releases only when a fresh check finds the writers
    settled (an explicit Resume, a reconciliation at a tree member's terminal, or
    the body cadence's re-check while the hold stands) and no newer
-   Stop/Pause/Restart hold has replaced it. An explicit Resume of the Continue a
-   later stop holds returns it to this hold while all its writers observably run;
-   an unknown outcome still refuses (``events_budget.resume_into_writer_wait``).
+   Stop/Pause/Restart hold has replaced it. Explicit Resume of a paused Continue
+   returns it here while its earlier writers observably run. An unknown start
+   still holds it unless the owner chooses that exact start after proof of
+   read-only access; the old request then stays lookup-only.
    A damaged old record no link ties to the tree is no writer: the admission and its answer name it
    (``membership_gaps``).
 
@@ -44,6 +45,7 @@ import logging
 import pathlib
 from typing import Any, Dict, List, Optional
 
+from ouroboros.owner_continue import WORK_CHAIN_MAX_HOPS as _WORK_CHAIN_MAX_HOPS
 from ouroboros.project_naming import CONTINUE_TITLE_PREFIX
 from ouroboros.task_store import patch_document
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -189,11 +191,6 @@ def accept_local_choice(q, root, tree, members, ids, decision):
         q.append_jsonl(pathlib.Path(q.DRIVE_ROOT) / "logs" / "events.jsonl", {
             "type": "local_custody_unknown_accepted", "root_task_id": tree, "by": by, **outcome})
     return outcome["accepted"]
-
-
-# Integrity bound only: a recorded chain is a handful of Continues; a corrupted one
-# must never make one admission walk its edges without limit.
-_WORK_CHAIN_MAX_HOPS = 64
 
 
 class ContinueRefusal(ValueError):
@@ -1002,7 +999,9 @@ def release_settled_continuations(tree_root: str) -> List[str]:
     are observed settled, the selection's answer is the row's latest Resume
     attempt (``work_stop.resume_asked``): a refusal for any other reason is
     said in its own words in place of the wait's, dated, while the wait and
-    this re-check go on; the release that follows replaces it. This is the
+    this re-check go on; the release that follows replaces it. While writers
+    remain, a published change to the same hold's evidence lets the work
+    card reflect their present blockers without reading custody itself. This is the
     host's own act wherever it runs, a door's Resume of the predecessor
     included (``budget_resume.resume_late_phase``): that door asked about
     another task, so nothing here is its author, lifts an allowance for it or
@@ -1010,7 +1009,9 @@ def release_settled_continuations(tree_root: str) -> List[str]:
     """
     from ouroboros.control_actor import host_control
     from ouroboros.work_stop import resume_asked, resume_outcome
-    from supervisor.events_budget import budget_hold_fact, observe_held_budget_selection, select_held_budget_row
+    from supervisor.events_budget import (
+        BUDGET_HOLD_KEY, budget_hold_fact, observe_held_budget_selection, select_held_budget_row,
+    )
 
     from supervisor import queue as q
     released: List[str] = []
@@ -1025,9 +1026,19 @@ def release_settled_continuations(tree_root: str) -> List[str]:
             with q._queue_lock:
                 task = next((row for row in q.PENDING if str(row.get("id") or "") == task_id), None)
                 hold = budget_hold_fact(task)
-                if task is None or not writer_wait(task):
+                if (task is None or not hold or not writer_wait(task)
+                        or held_continuation_predecessors([task]) != [tree_root]):
                     continue
                 outcome = select_held_budget_row(q, task, hold, selected_by="reconciliation", observation=observation)
+                blockers = outcome.get("blockers")
+                # Only this refusal follows selection's successful same-row, same-hold and control checks.
+                if (outcome.get("error") == "predecessor_writers_unsettled" and blockers
+                        and hold.get("root_task_id") == task_id and hold.get("predecessor_task_id") == tree_root
+                        and blockers != hold.get("blockers")):
+                    task[BUDGET_HOLD_KEY] = {**hold, "blockers": blockers}
+                    if q.publish_queue_snapshot(reason="continuation_writer_evidence_changed") is not True:
+                        task[BUDGET_HOLD_KEY] = hold
+                        q.publish_queue_snapshot(reason="continuation_writer_evidence_withdrawn")
             if outcome.get("ok"):
                 released.append(task_id)
             if answered is not None:  # its writers settled: why it starts, or why it does not

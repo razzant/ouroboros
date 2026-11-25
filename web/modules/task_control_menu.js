@@ -364,25 +364,30 @@ async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
     if (!Array.isArray(named) || !named.length) throw refusal;
     const blockers = refusal.body.blockers || [];
     const starts = blockers.some((b) => b.kind === 'delegated_run' && b.choice_id);
+    // `read_only`: custody proved each earlier request read-only; whether it started is still unknown.
+    const readOnly = starts && blockers.every((b) => !(b.kind === 'delegated_run' && b.choice_id) || b.read_only === true);
     const facts = heldWorkFacts(blockers, Infinity);
-    const one = named.length === 1;
+    const one = named.length === 1;  // one decision in all: said in the singular, whatever it names
     const confirmed = await askOwner({
-        title: 'Resume without these results?',
-        body: starts ? `Resume the saved task ${id} without waiting for the listed results? The delegated work may `
-            + 'still be running, changing files or spending money. Resuming will not send these requests again. '
+        title: one ? 'Resume without this result?' : 'Resume without these results?',
+        body: starts ? `Resume the saved task ${id} without waiting for the listed ${one ? 'result' : 'results'}? `
+            + (readOnly ? `${one ? 'The earlier request was' : 'The earlier requests were'} read-only, without permission `
+                + `to change files; ${one ? 'its' : 'their'} work may still be running or spending money. `
+                : 'The delegated work may still be running, changing files or spending money. ')
+            + `Resuming will not send ${one ? 'this request' : 'these requests'} again. `
             + 'Your decision is recorded in the task history.'
             : `${facts.charAt(0).toUpperCase()}${facts.slice(1)}. If you resume, ${one ? 'this call is' : 'these calls are'} `
             + `never run again, whatever ${one ? 'it' : 'they'} changed outside stays as it is, `
             + 'and your decision is recorded on the task.',
-        details: { open: true, summary: `Inspect all ${named.length} ${one ? 'request' : 'requests'}`,
+        details: { open: true, summary: one ? 'Inspect the request' : `Inspect all ${named.length} requests`,
             rows: blockers.map((b) => ({ label: `Task ${b.task_id}`,
                 value: b.kind === 'delegated_run' && b.choice_id ? `Start request ${b.invocation_id}`
                     : `${heldWorkFacts([b])} (${b.operation_id || b.attempt_id || b.receipt_id})` })) },
         confirmLabel: 'Resume anyway',
     });
     return confirmed ? resume(id, { accept_unknown: named, reason: starts
-        ? 'The owner accepted that the listed starts may still be working or spending money.'
-        : 'The owner resumed without these results.' })
+        ? `The owner accepted that the listed ${one ? 'start' : 'starts'} may still be working or spending money.`
+        : `The owner resumed without ${one ? 'this result' : 'these results'}.` })
         : KEPT_PAUSED;
 }
 

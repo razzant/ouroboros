@@ -44,6 +44,7 @@ import logging
 import math
 import pathlib
 import re
+from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.answer_facts import (card_input, card_reference_view, forwarded_bubble_matches,
@@ -65,6 +66,7 @@ log = logging.getLogger(__name__)
 
 VERB = "continue"
 BINDING_VERSION = 1
+WORK_CHAIN_MAX_HOPS = 64  # bounded family reads, counting both end episodes
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
 # Recorded stop sources that are the owner's explicit decision (never Continue)
@@ -1537,25 +1539,27 @@ def continued_by_binding(result: Dict[str, Any]) -> dict:
                        and claim.get("binding_sha256") == binding_sha(binding)) else {}
 
 
-def continuation_chain(drive_root: Any, predecessor_task_id: str, task_id: str) -> List[str]:
-    """The verified roots from ``predecessor_task_id`` to ``task_id``, both included, or ``[]``.
+def continuation_chain(drive_root: Any, predecessor_task_id: str, task_id: str, *, load=None) -> List[str]:
+    """Follow hash-verified ``continued_by`` claims between two exact root IDs, or return ``[]``.
 
-    Read from the recorded claims only: each ``continued_by`` binding on an
-    earlier root's own result names its successor (hash-verified), so a chain of
-    Continues is followed claim by claim. Room, folder or root equality grants
-    nothing, and an unreadable result is no binding (``delegate_continuation``).
+    Both endpoints are included. A recorded predecessor ID must match; unreadable results or shared
+    room, folder or root identity prove nothing. The family-read depth bound does not apply.
     """
-    from ouroboros.task_results import load_task_result
+    if load is None:
+        from ouroboros.task_results import load_task_result
+        load = partial(load_task_result, drive_root, strict=True)
 
-    current, target, seen, chain = str(predecessor_task_id or ""), str(task_id or ""), set(), []
-    while current and target and current not in seen:
-        seen.add(current)
-        chain.append(current)
+    current, target = str(predecessor_task_id or ""), str(task_id or "")
+    chain: dict[str, None] = {}
+    while current and target and current not in chain:
+        chain[current] = None
         try:
-            result = load_task_result(drive_root, current, strict=True) or {}
+            result = load(current) or {}
         except Exception:
             return []
-        if not (successor := continued_by_binding(result).get("successor_task_id")):
+        claim = continued_by_binding(result)
+        successor = claim.get("successor_task_id")
+        if not successor or claim.get("predecessor_task_id", current) != current or successor in chain:
             return []
         if successor == target:
             return [*chain, target]
@@ -1563,9 +1567,9 @@ def continuation_chain(drive_root: Any, predecessor_task_id: str, task_id: str) 
     return []
 
 
-def recorded_continuation(drive_root: Any, predecessor_task_id: str, task_id: str) -> bool:
+def recorded_continuation(drive_root: Any, predecessor_task_id: str, task_id: str, *, load=None) -> bool:
     """The existing yes/no form of the verified explicit-Continue chain."""
-    return bool(continuation_chain(drive_root, predecessor_task_id, task_id))
+    return bool(continuation_chain(drive_root, predecessor_task_id, task_id, load=load))
 
 
 def continuation_offer(result: Dict[str, Any], task_id: str) -> Dict[str, Any]:

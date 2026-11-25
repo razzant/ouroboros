@@ -3,8 +3,9 @@
 The candidate server runs from the candidate bytes (``direct_server_with_data``); the predecessor's
 interruption and its unbound delegated start are real durable rows; the Continue press and the Activity
 read go through the real endpoints. A held Continue starts by itself once the earlier attempt's work
-settles, so nothing offers Resume for it. The toast is transient, so the persistent Activity row must
-keep the cause readable on its own: on a phone and a desktop, in both themes and both engines, once
+settles. While it waits only over a start whose outcome nobody recorded, its Activity row also offers Resume,
+which asks the door to check that start; it never offers Pause. The toast is transient, so the persistent
+Activity row must keep the cause readable on its own: on a phone and a desktop, in both themes and both engines, once
 every toast is gone. Screenshots for visual review: ``OUROBOROS_UI_EVIDENCE_DIR``, else
 ``<data>/ui-evidence/held-continue``.
 """
@@ -57,7 +58,7 @@ def _toasts_gone(page):
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_data, engine):  # noqa: F811
+def test_held_continue_toast_activity_reason_and_resume_check(direct_server_with_data, engine):  # noqa: F811
     from playwright.sync_api import sync_playwright
 
     from ouroboros import delegate_custody as dc
@@ -107,7 +108,7 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
                                    f" · {UNBOUND}"), meta
             assert "paused (budget)" not in row.inner_text()
             control = row.locator('[data-act="task-control"]')
-            assert control.get_attribute("data-resume") is None, "it starts by itself: no Resume is offered"
+            assert control.get_attribute("data-resume") == "1", "its wait records only a start with no run: Resume checks it"
             _toasts_gone(page)
             for theme in ("dark", "light"):
                 page.emulate_media(color_scheme=theme)  # System, the default choice, follows the OS
@@ -139,15 +140,15 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
                                     full_page=True)
             page.emulate_media(color_scheme="dark")
 
-            # At phone width and from the keyboard: a held Continue offers neither Pause nor Resume, so the row's one
-            # control is Stop now itself (no menu of one item); its press asks first and Escape keeps the run.
-            items = [control.inner_text().strip()]
-            assert items == ["Stop now"], "a held Continue offers neither Pause nor Resume: " + str(items)
+            # At phone width and from the keyboard: the row's trigger opens a menu of Resume (the check its door
+            # answers) and Stop now, never Pause; Escape closes it, sends nothing and keeps the run.
+            assert control.inner_text().strip() == "Stop…", control.inner_text()
             control.focus()
             page.keyboard.press("Enter")
-            menu = page.locator(".confirm-dialog")
-            menu.wait_for()
-            assert page.locator("body > .task-control-menu").count() == 0, "no menu of one item"
+            menu = page.locator("body > .task-control-menu")
+            menu.wait_for(state="visible")
+            items = menu.evaluate("n => [...n.querySelectorAll('.task-control-item')].map(i => i.dataset.taskControl)")
+            assert items == ["resume", "stop_now"], "a wait over one unconfirmed start offers Resume beside Stop: " + str(items)
             page.screenshot(path=str(evidence / f"{engine}-3-held-row-menu-390.png"), full_page=True)
             page.keyboard.press("Escape")
             menu.wait_for(state="detached")
@@ -156,6 +157,7 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
             assert not after["clipped"] and not after["under_control"] and after["lines"] > 1, after
             assert row.locator(".activity-sub").inner_text().strip() == meta
             assert page.evaluate("() => document.activeElement?.dataset?.act") == "task-control"
+            assert not page.locator(".confirm-dialog").count(), "nothing was asked or sent"
             row.screenshot(path=str(evidence / f"{engine}-4-activity-held-row-after-menu-390.png"))
             (evidence / f"{engine}-facts.json").write_text(json.dumps({
                 "continue_ack": ack, "activity_meta": meta, "row_geometry": observed, "after_menu": after,

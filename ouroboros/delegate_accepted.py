@@ -304,13 +304,16 @@ def accepted_after_refusal(drive_root: Any, gateway: Any, invocation_id: str,
                            error: BaseException) -> Tuple[Any, Dict[str, Any]]:
     """Read the work behind a start whose POST the engine answered with an error and no run; bind it once.
 
-    The fate rule every start site shares: only a fresh start that never entered its POST is a definite refusal.
-    An HTTP answer to an entered POST proves no non-admission (the gateway types a non-JSON body ``http_<status>``;
-    an accepted command can end before execution and answer its start 400), so that start keeps its pending
-    token, registration and copies exactly as a lost reply does, and its still-pending invocation is read here
-    (``recover``): a found command is bound for its existing observation, capture and settlement. Every other
-    answer (not found, unsupported, refused, another store, a record no longer pending) binds nothing, sends
-    nothing and removes nothing. A transport fault, no answer at all, is left to the start's existing readers.
+    An HTTP answer to an entered POST generally proves no non-admission (the gateway types a non-JSON body
+    ``http_<status>``; an accepted command can end before execution and answer its start 400). ``START_UNSENT``
+    belongs strictly to a fresh start that never entered its POST. Here the still-pending invocation is read
+    first (``recover``): a found command is bound for its existing observation, capture and settlement. Every
+    other answer (not found, unsupported, refused, another store, a record no longer pending) binds nothing,
+    sends nothing and removes nothing; only a verified allowlisted producer's direct ``POST /v2/runs`` 409
+    ``continuation_superseded`` on a fresh ordinary continuation may then settle durably as a sent
+    pre-admission refusal (``delegate_continuation.settle_pre_admission_continuation_rejection``, ``start_sent=True``,
+    never ``START_UNSENT`` and never retiring snapshots or owned registrations) once this read returns same-store
+    ``not_found``. A transport fault, no answer at all, is left to the start's existing readers.
     Returns ``(custody or None, receipt)``; the receipt, and a STARTED row it writes, name the refusal it read
     behind (``start_refusal``). The run's own terminal stays its outcome: its typed failure, never a success."""
     refusal = {"code": str(getattr(error, "code", "") or type(error).__name__),
@@ -333,5 +336,111 @@ def accepted_after_refusal(drive_root: Any, gateway: Any, invocation_id: str,
     return held, {**read, "start_refusal": refusal}
 
 
+def prove_job_run_alias(
+    drive_root: Any,
+    gateway: Any,
+    job_id: str,
+    canonical_run_id: str,
+    *,
+    store_id: str,
+    engine_ref: Optional[Dict[str, Any]] = None,
+    exclude_invocation_id: str = "",
+) -> bool:
+    """Confirm via noncreating lookup that ``job_id`` is the durable predecessor bound to
+    ``canonical_run_id`` in ``store_id``.
+
+    Pinned Claudexor canonicalizes ``continueFrom=<jobId>`` to the predecessor's ``runId`` before
+    pre-admission checks, while custody keeps the ``jobId`` when a queued start was bound before
+    its run existed. Only an exact same-store ``locate`` lookup of the predecessor's landed durable
+    invocation proves that link — never ID shape, a missing record, or ``GET /v2/runs/:id`` 200
+    (which does not promise ``storeId``)."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_custody_current import run as current_run
+    from ouroboros.execution_domain import is_work_ref, recorded_ref, same_engine
+
+    job, canonical, expected_store = str(job_id or ""), str(canonical_run_id or ""), str(store_id or "")
+    if (not job or job != job.strip() or not canonical or canonical != canonical.strip()
+            or job == canonical or not expected_store or expected_store != expected_store.strip()):
+        return False
+    expected_ref = recorded_ref(engine_ref or {})
+    if (str(getattr(gateway, "store_identity", "") or "") != expected_store
+            or not same_engine(gateway, {"engine_ref": expected_ref})):
+        return False
+    try:
+        if custody.custody_log_unreadable(drive_root):
+            return False
+        prior = current_run(drive_root, job)
+    except Exception:
+        log.debug("Predecessor custody unreadable while checking alias %s -> %s", job, canonical, exc_info=True)
+        return False
+    if (prior is None or prior.run_id != job or prior.review_owned
+            or prior.terminal_state not in custody.TERMINAL_STATES
+            or prior.daemon_store_id != expected_store or not same_engine(gateway, prior)):
+        return False
+    prior_ref = recorded_ref(prior)
+    if is_work_ref(prior_ref) != is_work_ref(expected_ref) or (is_work_ref(expected_ref) and prior_ref != expected_ref):
+        return False
+    prior_iid = str(prior.invocation_id or "").strip()
+    if not prior_iid or prior_iid == str(exclude_invocation_id or ""):
+        return False
+    try:
+        record = custody.invocation_record(drive_root, prior_iid)
+    except Exception:
+        log.debug("Predecessor invocation %s unreadable while checking alias %s -> %s", prior_iid, job, canonical, exc_info=True)
+        return False
+    if (not isinstance(record, dict) or record.get("state") != "started"
+            or str(record.get("run_id") or "") != job
+            or str(record.get("task_id") or "") != prior.task_id
+            or custody.review_owned_source(record.get("source"))):
+        return False
+    rec_store = str(record.get("daemon_store_id") or "")
+    if rec_store and rec_store != expected_store:
+        return False
+    rec_ref = recorded_ref(record)
+    if is_work_ref(rec_ref) != is_work_ref(expected_ref) or (is_work_ref(expected_ref) and rec_ref != expected_ref):
+        return False
+    body = record.get("request")
+    if not isinstance(body, dict) or not body:
+        return False
+    thread_id = str(body.get("_thread_id") or "")
+    if (body.get("_use_thread") and not thread_id) or (thread_id and thread_id != str(prior.thread_id or "")):
+        return False
+    located = locate(gateway, {**record, "invocation_id": prior_iid, "daemon_store_id": expected_store})
+    if located.outcome != "found" or located.store_id != expected_store:
+        return False
+    facts = located.facts if isinstance(located.facts, dict) else {}
+    return facts.get("jobId") == job and facts.get("runId") == canonical
+
+
+def predecessor_alias_custody_valid(
+    txn: Any,
+    job_id: str,
+    canonical_run_id: str,
+    *,
+    store_id: str,
+    engine_ref: Optional[Dict[str, Any]] = None,
+    exclude_invocation_id: str = "",
+) -> bool:
+    """Atomic write-txn check for an aliased pre-admission rejection (zero CAS I/O): ``job_id``
+    remains a durable non-review terminal run bound to ``store_id`` on the same engine with its
+    own invocation, and ``canonical_run_id`` is not bound to the rejected continuation."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.execution_domain import is_work_ref, recorded_ref
+
+    pred_row = txn.custody_row(job_id)
+    if not isinstance(pred_row, dict) or custody.review_owned_source(pred_row.get("source")):
+        return False
+    pred_iid = str(pred_row.get("invocation_id") or "")
+    pred_ref, expected_ref = recorded_ref(pred_row), recorded_ref(engine_ref or {})
+    if (not pred_iid or pred_iid == str(exclude_invocation_id or "")
+            or str(pred_row.get("daemon_store_id") or "") != str(store_id or "")
+            or str(pred_row.get("terminal_state") or "") not in custody.TERMINAL_STATES
+            or is_work_ref(pred_ref) != is_work_ref(expected_ref)
+            or (is_work_ref(expected_ref) and pred_ref != expected_ref)):
+        return False
+    canon_row = txn.custody_row(canonical_run_id)
+    return not (isinstance(canon_row, dict) and str(canon_row.get("invocation_id") or "") == str(exclude_invocation_id or ""))
+
+
 __all__ = ["Bound", "Lookup", "NO_REPLAY", "RUN_LOOKUP", "RUN_STATES", "TURN_LOOKUP", "accepted_after_refusal",
-           "bind_started", "deferred_money", "locate", "recover"]
+           "bind_started", "deferred_money", "locate", "predecessor_alias_custody_valid", "prove_job_run_alias", "recover"]

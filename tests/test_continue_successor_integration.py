@@ -205,16 +205,19 @@ def test_successor_decides_a_shared_result_and_its_own_child_stays_ordinary(worl
         "integrated" if decision == "apply" else "irrelevant")
 
 
-def test_a_continue_chain_reaches_the_first_predecessors_child(world):
+@pytest.mark.parametrize("continues", [2, 64], ids=["short", "65-episodes"])
+def test_a_continue_chain_reaches_the_first_predecessors_child(world, continues):
     interrupted_root(world.data)
     shared = repo(world.tmp / "shared", {"a.txt": b"base\n"})
     shared_child(world, shared)
-    first = continue_from(world.data)
-    interrupted_root(world.data, first)
-    second = continue_from(world.data, first, "continue-nonce-2")
-    out = invoke(successor_ctx(world, task_id=second), task_id="shared")
+    successor = "pred"
+    for index in range(1, continues + 1):
+        successor = continue_from(world.data, successor, f"continue-nonce-{index}")
+        if index < continues:
+            interrupted_root(world.data, successor)
+    out = invoke(successor_ctx(world, task_id=successor), task_id="shared")
     assert "Verified external_workspace child" in out and "owner-Continue successor of pred" in out, out
-    assert verdict(world, second, "shared")["original_parent_task_id"] == "pred"
+    assert verdict(world, successor, "shared")["original_parent_task_id"] == "pred"
 
 
 REFUSALS = {

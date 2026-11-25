@@ -29,7 +29,8 @@ from ouroboros.work_stop import held_for_release, pause_marker
 log = logging.getLogger(__name__)
 
 # What a census reads from a member's document; a held row keeps these, never the body it was decoded from.
-MEMBER_FIELDS = ("launch_handoffs", "merge_receipts", "retired_model_consumers", "review_operations")
+MEMBER_FIELDS = ("launch_handoffs", "merge_receipts", "retired_model_consumers", "review_operations",
+                 "accepted_predecessor_starts")  # ``delegate_resume.CARRIED``: a Continue's accepted start
 # What a census reads from an observed run.
 RUN_FIELDS = ("run_id", "invocation_id", "review_owned", "state", "stop_outcome", "source", "independent_review",
               "ordinary_start", "resume_decisions")
@@ -337,6 +338,10 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
                              **{key: str(run.get(key) or "") for key in ("state", "stop_outcome", "source")}}
                             for run in observed.get("runs") or [] if isinstance(run, dict)
                             and not (for_continue and run.get("independent_review") is True))
+    if carried := (facts.rows.get(predecessor) or {}).get("accepted_predecessor_starts"):
+        # The exact earlier-episode start this root accepted is its custody too, never its tree's members or processes.
+        from ouroboros.delegate_resume import carried_start_writers
+        blockers.extend(carried_start_writers(custody_root, carried, unbound=for_continue))
     try:
         from ouroboros.launch_custody import unsettled_rows
         from ouroboros.tool_custody import task_process_blockers

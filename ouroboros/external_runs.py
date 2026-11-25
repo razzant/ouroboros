@@ -274,14 +274,14 @@ def task_owned_runs_open(external: Dict[str, Any]) -> bool:
                for run in (external or {}).get("runs") or [])
 
 
-def tree_owned_custody(root: Any, tree: str, *, bound_only: bool = False) -> set:
+def tree_owned_custody(root: Any, tree: str, *, bound_only: bool = False, transaction=None) -> set:
     """The tasks of ``tree`` holding ordinary delegated work that may still execute: a bound run custody has not
     settled (a cascade Stop's search, ``delegate_custody_reconcile.tree_open_runs``) or, unless ``bound_only``, a start
     with no run bound yet, which that search cannot see. A review panel's is never named. One read; unreadable
     raises."""
     from ouroboros.delegate_custody_current import tree_closure
 
-    closure = tree_closure(root, str(tree))
+    closure = tree_closure(root, str(tree), transaction=transaction)
     runs = {run.task_id for run in closure["unfinished"].values() if not run.settled and not run.review_owned}
     starts = () if bound_only else (str(row.get("task_id") or "") for row in closure["pending"]
                                     if not review_owned_source(row.get("source")))

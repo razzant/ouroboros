@@ -6,8 +6,9 @@ as 202 with the job id. The gateway also synthesizes a ControlProblem for a non-
 start (``delegate_start``) and the admitted sweep's replay (``_recover_pending_invocation``) keep such a start's
 token, registration and execution snapshot, read its accepted work through the engine's declared noncreating
 lookup (``delegate_accepted.accepted_after_refusal``) and bind it once for the ordinary terminal owners. A miss
-(not found, no lookup route, another store, a refused read) binds, sends and removes nothing. Only a start that
-never entered its POST is a definite refusal.
+(not found, no lookup route, another store, a refused read) binds, sends and removes nothing. A start that
+never entered its POST can be closed as unsent; the separately proved first direct continuation rejection has
+its own sent outcome, never an unsent start or a proof of no charge. A replay has no such exception.
 
 Engine doubles only: the production gateway over a scripted transport (``Engine``) or a stub. No live engine,
 provider or money.

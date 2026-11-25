@@ -146,6 +146,9 @@ def pending_invocations(
             kind in (c.START_UNSENT, c.START_FAILED)
             and row.get("definite") is True
             and state.get(invocation_id) != "started"
+            and not (kind == c.START_FAILED and row.get("pre_admission_rejected") is True
+                     and (state.get(invocation_id) is not None or invocation_id not in found
+                          or found[invocation_id].get("resume_decisions")))
         ):
             state[invocation_id] = "failed_definite"
     pending = []
