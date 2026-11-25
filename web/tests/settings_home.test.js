@@ -627,8 +627,13 @@ test('all seven Settings doors use ordinary navigation; a page\'s door retains i
         await home.fire('click', { target: row });
         await settle();
         const [kind, name] = destination.split(':');
-        if (destination === 'page:skills') assert.deepEqual(shown.at(-1), ['skills', { row: '', key: 'skills:' }]);
-        else if (kind === 'page') assert.deepEqual(shown.at(-1), [name, {}]);
+        if (destination === 'page:skills') {
+            const [page, options] = shown.at(-1);
+            const { opener, resume, ...rest } = options;
+            assert.deepEqual([page, rest], ['skills', { row: '', key: 'skills:' }]);
+            assert.ok(opener === row);
+            assert.equal(resume, true);
+        } else if (kind === 'page') assert.deepEqual(shown.at(-1), [name, {}]);
         else assert.deepEqual(dashboard.at(-1), [name, { row: '' }]);
     }
     // The page that moved to Extensions (MCP servers) opens there now. A Settings page with a door to

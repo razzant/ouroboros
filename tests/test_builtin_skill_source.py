@@ -459,6 +459,8 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
      ('live_conversation', '33d5ea79b65e994f96ccd696117b8f565b3b1cc2', '0.1.35'),
      ('gemini_live', '33d5ea79b65e994f96ccd696117b8f565b3b1cc2', '0.1.21'),
      ('live_conversation', '201f5b62ce35bdb388c3e238bad261b27d3739a8', '0.1.36'),
+     # Docked call mark bounds and sidebar clearance ship in 0.1.38: a 0.1.37 install is reseeded too.
+     ('live_conversation', '7c9cc17a497514f1180174461bab61519b05e884', '0.1.37'),
      ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
 def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
@@ -483,6 +485,10 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         retained['grants.json'] = b'{"granted_keys":["GEMINI_API_KEY"]}\n'
         (state / 'grants.json').write_bytes(retained['grants.json'])
     previous_record = read_install_record(drive, name)
+    previous_ui = {
+        path: (installed / path).read_bytes() if (installed / path).exists() else None
+        for path in (("ui/call.css", "ui/call_mark.js") if name == "live_conversation" else ())
+    }
     if edited:
         with (installed / "plugin.py").open("a", encoding="utf-8") as stream:
             stream.write("\n# The owner's local change must survive an app update.\n")
@@ -493,8 +499,12 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
     if edited:
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
+        for path, payload in previous_ui.items():
+            target = installed / path
+            assert (target.read_bytes() if target.exists() else None) == payload
+            assert payload != (repo / "skills" / name / path).read_bytes()
     else:
-        version = {'live_conversation': '0.1.37', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
+        version = {'live_conversation': '0.1.38', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
                    'unix_computer_use': '0.9.2'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
@@ -502,7 +512,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         # Pin the files that stayed stale on the stand, not just the manifest.
         paths = ["plugin.py"]
         if name == "live_conversation":
-            paths += ["driver.py", "ui/call_settings.js", "ui/index.js"]
+            paths += ["driver.py", "ui/call.css", "ui/call_mark.js", "ui/call_settings.js", "ui/index.js"]
         elif name == "openai_realtime":
             paths += ["live.py"]
         elif name == "unix_computer_use":

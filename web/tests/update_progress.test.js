@@ -1,11 +1,44 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { assistedUpdatePhase, checkFailureReason, checkOutcome, dismissUpdateAttempt, initUpdateStatus, RECOVERY_RETRY, unfinishedRecovery, updateAttemptView } from '../modules/update_status.js';
-import { installDomDouble } from './dom_double.js';
+import { appendHtml, installDomDouble } from './dom_double.js';
+import { fluentIcon } from '../modules/page_icons.js';
+import { renderNavRail, renderNavRows } from '../modules/pages.js';
+
+// The capsule's look (update_status.js PILL_GLYPHS; owner 22.11: no crimson): the neutral capsule with the arrow up for
+// an update on offer, the warning for its local caveat and a concluded outcome, the sync arrows for a stage, the
+// restart arrow for a needed restart and the bell for a resolution that stopped unconcluded, its words its name.
+const pillGlyph = (pill) => pill.querySelector('.update-pill-glyph')?.innerHTML || '';
+const OFFER_GLYPH = fluentIcon('arrow-circle-up', 16, 'filled');
+const CAVEAT_GLYPH = fluentIcon('warning', 16, 'filled');
+const STAGE_GLYPH = fluentIcon('arrow-sync', 16, 'filled');
+const RESTART_GLYPH = fluentIcon('arrow-clockwise', 16, 'regular');
+const UNRESOLVED_GLYPH = fluentIcon('alert', 16, 'filled');
 import { bindUpdateRefreshEvents, checkFailure, updateVerdict } from '../modules/updates.js';
 import { apiClient } from '../modules/api_client.js';
 
 const VERSION = 'v7.11.1-alpha.0';
+
+// The sidebar in the document order the page gives it (web/index.html, app.js, pages.js mountNavRail; owner 24.11,
+// «Рельс снаружи»): the rail leads, the drawer's × first, then its sections and at its foot the system rows over the
+// version row; Main's pinned head and the Projects follow it. The rows are the registry's own markup, so the last
+// destination in document order is Main and the one beside the version row is Settings.
+function mountSidebar(env) {
+    const sidebar = env.el('nav', { attrs: { id: 'primary-sidebar' } });
+    env.doc.body.append(sidebar);
+    appendHtml(sidebar, '<div class="nav-rail"><button id="nav-drawer-close" class="shell-icon-control nav-drawer-close" '
+        + `type="button" aria-label="Close navigation"></button>${renderNavRail()}</div>`
+        + `<div class="sidebar-head">${renderNavRows('head')}</div>`
+        + '<section id="nav-projects" class="nav-section nav-projects"><div id="nav-projects-list" class="nav-projects-list"></div></section>');
+    env.doc.getElementById('nav-version').textContent = VERSION;
+    const row = sidebar.querySelector('.nav-rail-system > .sidebar-foot-meta');
+    const settings = sidebar.querySelector('.nav-rail [data-nav-page="settings"]');
+    const main = sidebar.querySelector('.sidebar-head [data-nav-page="chat"]');
+    // The world the four fallbacks used to read: the last destination in document order is Main's row, not Settings.
+    assert.equal([...sidebar.querySelectorAll('[data-nav-page]')].pop(), main);
+    assert.equal(row.previousElementSibling, settings, 'the version row stands under Settings, the rail\'s last row');
+    return { sidebar, row, settings, main };
+}
 
 const observed = (stage, extra = {}) => ({
     managed: true,
@@ -84,7 +117,8 @@ test('assisted handoff and fresh generation use existing durable state', () => {
     const data = { ...observed('applying', { active: false, result: 'assisted_started' }),
         update_tx: { active: true, phase: 'assisted_resolution', task_id: 'resolver-a' } };
     assert.match(updateVerdict(data).hint, /resolver-a/);
-    assert.match(updateVerdict({ managed: true, update_tx: { active: true, phase: 'pending_boot_smoke' } }).headline, /waiting for a restart/);
+    assert.match(updateVerdict({ managed: true, update_tx: { active: true, phase: 'pending_boot_smoke',
+        pre_restart_smoke: 'passed' } }).headline, /waiting for a restart/);
     assert.notEqual(updateVerdict({ managed: true, update_progress: {} }).state, 'updating');
 });
 
@@ -245,9 +279,9 @@ test('a restart need belongs to the server that had it', () => {
     assert.doesNotMatch(updateAttemptView({ ...failure, current_generation: false }).text, /needs a restart/);
 });
 
-// One indicator on the DOM double: its listeners, storage and a window whose events reach their listeners, on the
-// sidebar's foot as pages.js renders it (the system rows' card with the version row), so the version's own check
-// and its answer are exercised by the same world the capsule is.
+// One indicator on the DOM double: its listeners, storage and a window whose events reach their listeners, in the
+// sidebar as the page orders it (mountSidebar: the rail with the version row at its foot, then Main), so the version's
+// own check, its answer and every focus landing are exercised by the same world the capsule is.
 async function withIndicator(run) {
     const env = installDomDouble();
     const stored = new Map();
@@ -257,9 +291,7 @@ async function withIndicator(run) {
     globalThis.window.dispatchEvent = (event) => globalThis.window.emit(event.type);
     let controller;
     try {
-        const settings = env.el('button', { className: 'nav-row', dataset: { navPage: 'settings' } });
-        const row = env.el('div', { className: 'sidebar-foot-meta' }, env.el('span', { attrs: { id: 'nav-version' }, text: VERSION }));
-        env.doc.body.append(env.el('nav', { attrs: { id: 'primary-sidebar' } }, settings, row));
+        const { row, settings, main } = mountSidebar(env);
         const listeners = new Map();
         const ws = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name); } };
         const opened = [];
@@ -279,7 +311,7 @@ async function withIndicator(run) {
         const $ = (id) => env.doc.getElementById(id);
         const parts = () => ({ check: $('nav-version-check'), version: $('nav-version'), pill: pill(),
             note: row.querySelector('.nav-check-note'), said: $('nav-check-said') });
-        await run({ env, row, settings, show, pill, close, opened, world, stored, listeners, parts });
+        await run({ env, row, settings, main, show, pill, close, opened, world, stored, listeners, parts });
     } finally {
         controller?.dispose();
         globalThis.window.dispatchEvent = priorDispatch;
@@ -345,13 +377,23 @@ test('a failed or unconfirmed outcome stays with its own close; closing hides th
 });
 
 test('restart messages are untouched: a needed restart is a stage without a close, a failed one keeps its words', async () => {
-    await withIndicator(async ({ show, pill, close }) => {
+    await withIndicator(async ({ show, pill, close, opened }) => {
+        // A stage first: the rail shows the capsule's glyph alone, so the needed restart that follows must not look
+        // like the work still going on.
+        await show({ managed: true, available: false, update_progress: { ...refusal, active: true, outcome: '', result: '',
+            stage: 'stopping_services', work_stop: 'invoked' } });
+        assert.deepEqual([pill().textContent, pill().dataset.tone, pillGlyph(pill())], ['Stopping services…', 'neutral', STAGE_GLYPH]);
         await show({ managed: true, available: false, update_progress: { ...refusal, active: false, outcome: '',
             result: 'restart_required', restart_required: true, stage: 'stopping_services', blockers: ['service:mcp'] } });
         assert.deepEqual([pill().textContent, pill().dataset.tone, close().hidden], ['Restart needed', 'neutral', true]);
+        assert.equal(pillGlyph(pill()), RESTART_GLYPH, 'the owner\'s step has its own glyph, never the stage\'s arrows');
+        assert.equal(pill().querySelector('.update-pill-glyph').dataset.says, 'restart');
+        pill().click();
+        assert.deepEqual(opened, ['updates'], 'its words in full are Dashboard → Updates\', where the restart is offered');
         await show({ managed: true, available: false, update_progress: { ...refusal, outcome: 'failed', restart_required: true,
             blockers: ['service:mcp'], work_stop: 'invoked', error: 'A service could not be stopped.' } });
         assert.deepEqual([pill().textContent, pill().dataset.tone, close().hidden], ['Update failed', 'error', false]);
+        assert.equal(pillGlyph(pill()), CAVEAT_GLYPH, 'a concluded failure is the warning, whatever it needs next');
         assert.match(pill().title, /Ouroboros needs a restart before updates can continue\./);
     });
 });
@@ -366,6 +408,11 @@ const unfinished = { ...resolverStart, outcome: 'failed', reason: 'rollback_inco
     stash_note: 'the conflicting update could not resume after the restart, and its rollback did not finish.',
     blockers: ['worker:4242'] };
 const boundTx = (phase, attempt = 'tx-r') => ({ active: true, phase, task_id: '', restart_required: false, attempt_id: attempt });
+// What every lane records in pending_boot_smoke (an ordinary merge and a Replace in ouroboros/gateway/control.py, a
+// reviewed merge in supervisor/update_merge.managed_assisted_postcommit): `pending` BEFORE its dependency and import
+// check, `passed` after it, a rollback when it fails; the status read omits what it cannot read (an older record).
+const checkedTx = (smoke, attempt = 'tx-r') => ({ ...boundTx('pending_boot_smoke', attempt),
+    ...(smoke ? { pre_restart_smoke: smoke } : {}) });
 
 test('a boot rollback that did not finish reads as incomplete recovery everywhere, with no invented control', () => {
     const view = updateAttemptView(unfinished, boundTx('rolling_back'));
@@ -399,8 +446,8 @@ test('only a bound transaction still in an assisted phase is a resolution at wor
     assert.equal(updateAttemptView(resolverStart, boundTx('assisted_resolution')).pill, 'Resolving update…');
     assert.equal(updateAttemptView(resolverStart, boundTx('committing_assisted')).pill, 'Resolving update…');
     for (const tx of [boundTx('marker_cleanup_retry'), boundTx('gate_blocked'), boundTx('rolling_back'),
-        { ...boundTx('pending_boot_smoke'), local_work_recovery: true }, boundTx('assisted_resolution', 'tx-other'),
-        { active: false }, null]) {
+        { ...boundTx('pending_boot_smoke'), local_work_recovery: true }, { ...boundTx('assisted_resolution'), local_work_recovery: true },
+        boundTx('assisted_resolution', 'tx-other'), boundTx('pending_boot_smoke', 'tx-other'), { active: false }, null]) {
         const view = updateAttemptView(resolverStart, tx);
         assert.deepEqual([view.terminal, view.tone, view.pill, view.headline],
             [false, 'neutral', 'Update not concluded', 'This update has not concluded yet.'], JSON.stringify(tx));
@@ -455,16 +502,201 @@ test('a verdict that gives the recovery instruction owns it, and a recorded comp
     assert.notEqual(plain.recoveryInstruction, true);
 });
 
-test('one assisted-phase reading serves the panel verdict and the attempt record', () => {
-    for (const phase of ['materializing_assisted', 'assisted_resolution', 'committing_assisted',
-        'assisted_unknown_future', 'gate_blocked', 'pending_boot_smoke', '']) {
-        const tx = boundTx(phase);
-        const verdict = updateVerdict({ managed: true, update_progress: resolverStart, update_tx: tx });
-        const view = updateAttemptView(resolverStart, tx);
-        const resolving = assistedUpdatePhase(phase);
-        assert.equal(verdict.headline === 'A conflicting update is being resolved under review.', resolving, phase);
-        assert.equal(view.pill === 'Resolving update…', resolving, phase);
+// R3 (Astra, rl-20261125T075413-57f5db5306e5): a reviewed merge that committed waits in pending_boot_smoke for the
+// ordinary restart the panel offers (Restart now), yet the capsule called it Update not concluded under the bell.
+test('one reading of the bound transaction serves the panel verdict and the attempt record', () => {
+    assert.equal(updateAttemptView(resolverStart, checkedTx('passed')).says, 'restart', 'the case this guards');
+    // Every phase the transaction can show, with and without local work awaiting recovery, with each check its lanes
+    // record (or none: an older record), for a start this server or an earlier one recorded. What each surface shows
+    // follows from those facts alone, never from the other surface: a resolution is at work only in the assisted phases,
+    // the restart waits only in pending_boot_smoke once that attempt's own check passed, and its check that has not
+    // passed is the check's stage. A passed check a transaction carries into another phase (a gate block, a rollback)
+    // proves nothing there. Then the two surfaces say it in one set of words.
+    for (const phase of ['materializing_assisted', 'assisted_resolution', 'committing_assisted', 'assisted_unknown_future',
+        'pending_boot_smoke', 'applying_replace', 'gate_blocked', 'marker_cleanup_retry', 'rolling_back', 'corrupt', '']) {
+        for (const local of [false, true]) {
+            for (const smoke of ['passed', 'pending', '']) {
+                const tx = { ...boundTx(phase), ...(smoke ? { pre_restart_smoke: smoke } : {}),
+                    ...(local ? { local_work_recovery: true } : {}) };
+                for (const progress of [resolverStart, { ...resolverStart, current_generation: true }]) {
+                    const label = `${phase || '(no phase)'}${local ? ' + local work' : ''}, check ${smoke || 'unsaid'}, `
+                        + `current ${progress.current_generation}`;
+                    const atWork = assistedUpdatePhase(phase) && !local;
+                    const awaiting = phase === 'pending_boot_smoke' && !local;
+                    const ready = awaiting && smoke === 'passed';
+                    const checking = awaiting && smoke === 'pending';
+                    const verdict = updateVerdict({ managed: true, update_progress: progress, update_tx: tx });
+                    const view = updateAttemptView(progress, tx);
+                    assert.equal(verdict.headline === 'A conflicting update is being resolved under review.', atWork, label);
+                    assert.equal(verdict.action?.id === 'restart', ready, `${label}: Restart now`);
+                    assert.equal(verdict.headline === 'Checking the update and dependencies…', checking, label);
+                    if (checking) assert.deepEqual(verdict.action, { id: 'check', label: 'Check again' }, label);
+                    assert.equal(view.says, atWork || checking ? 'stage' : ready ? 'restart' : 'unresolved', label);
+                    assert.equal(view.pill, atWork ? 'Resolving update…' : checking ? 'Checking update…'
+                        : ready ? 'Restart needed' : 'Update not concluded', label);
+                    if (ready || checking) {
+                        assert.equal(view.headline, verdict.headline, `${label}: the panel and the capsule say one thing`);
+                    }
+                    assert.deepEqual([view.terminal, view.tone], [false, 'neutral'], label);
+                }
+            }
+        }
     }
+});
+
+// R4 (Astra, rl-20261125T100917-7711b6c1fd40): a reviewed merge records pending_boot_smoke BEFORE its dependency and
+// import check (supervisor/update_merge.managed_assisted_postcommit), and a failed check rolls it back; yet the phase
+// alone made the rail say Restart needed and Dashboard → Updates offer Restart now while that check still ran.
+test('a reviewed merge whose own check has not passed is that check at work, never a needed restart', async () => {
+    await withIndicator(async ({ env, row, show, pill, close, opened, parts }) => {
+        const look = () => [pill().hidden, pill().textContent, pill().dataset.tone, pillGlyph(pill()), close().hidden];
+        const status = (tx, progress = resolverStart) => ({ managed: true, available: false, update_progress: progress,
+            update_tx: tx });
+        await show(status(boundTx('committing_assisted')));
+        assert.deepEqual(look(), [false, 'Resolving update…', 'neutral', STAGE_GLYPH, true]);
+        pill().focus();
+        // Committed, its check running: the check's stage in both places, no restart anywhere, nothing to close.
+        await show(status(checkedTx('pending')));
+        assert.deepEqual(look(), [false, 'Checking update…', 'neutral', STAGE_GLYPH, true]);
+        assert.equal(pill().querySelector('.update-pill-glyph').dataset.says, 'stage');
+        const checking = updateVerdict(status(checkedTx('pending')));
+        assert.deepEqual([checking.state, checking.tone, checking.headline, checking.action],
+            ['resolving', 'neutral', 'Checking the update and dependencies…', { id: 'check', label: 'Check again' }]);
+        assert.match(checking.hint, /once these checks pass/);
+        assert.equal(pill().title, checking.headline, 'the capsule\'s detail is the panel\'s own sentence');
+        assert.deepEqual([parts().check.hidden, parts().version.parentElement], [true, row], 'the version is plain beside it');
+        // The check passed: only now the restart, in its own look.
+        await show(status(checkedTx('passed')));
+        assert.deepEqual(look(), [false, 'Restart needed', 'neutral', RESTART_GLYPH, true]);
+        assert.deepEqual(updateVerdict(status(checkedTx('passed'))).action, { id: 'restart', label: 'Restart now' });
+        // The check failed and the update was rolled back: its transaction is gone, and nothing says restart.
+        await show(status({ active: false }));
+        assert.deepEqual(look(), [false, 'Update not concluded', 'neutral', UNRESOLVED_GLYPH, true]);
+        assert.notEqual(updateVerdict(status({ active: false })).action?.id, 'restart');
+        // A transaction that does not say how its check went (an older record or server) is not made ready.
+        await show(status(checkedTx('')));
+        assert.deepEqual(look(), [false, 'Update not concluded', 'neutral', UNRESOLVED_GLYPH, true]);
+        const unsaid = updateVerdict(status(checkedTx('')));
+        assert.deepEqual([unsaid.headline, unsaid.action], ['An update transaction is still active.', null]);
+        // Its local work awaiting recovery keeps its own reading, whatever the check said.
+        for (const smoke of ['pending', 'passed']) {
+            await show(status({ ...checkedTx(smoke), local_work_recovery: true }));
+            assert.deepEqual(look(), [false, 'Update not concluded', 'neutral', UNRESOLVED_GLYPH, true], smoke);
+            assert.equal(updateVerdict(status({ ...checkedTx(smoke), local_work_recovery: true })).headline,
+                'Local changes still need recovery confirmation.', smoke);
+        }
+        // A boot recovery that reported its rollback unfinished keeps the Restart that reruns it, whatever the check said:
+        // that is its recovery, said as one, not a restart the update waits for.
+        for (const smoke of ['pending', 'passed', '']) {
+            const recovery = updateVerdict(status(checkedTx(smoke), unfinished));
+            assert.deepEqual([recovery.headline, recovery.action, recovery.recoveryInstruction],
+                ['The update failed, and restoring the previous version did not finish.',
+                    { id: 'restart', label: 'Restart now' }, true], smoke || 'unsaid');
+        }
+        assert.equal(env.doc.activeElement, pill(), 'the capsule never left, so neither did the focus');
+        pill().click();
+        assert.deepEqual(opened, ['updates'], 'a press opens Dashboard → Updates; it restarts and checks nothing');
+    });
+});
+
+// R2 (Astra, rl-20261125T043832-dc397aa48cfb): when assisted resolution changed to gate_blocked, work had stopped and
+// Dashboard → Updates named the owner's quit and reopen, yet the rail, which shows the capsule's glyph alone, still drew
+// the stage's sync arrows.
+test('a reviewed resolution stopped short of a conclusion is not the work going on: its own glyph, no close', async () => {
+    await withIndicator(async ({ row, show, pill, close, opened, parts }) => {
+        await show({ managed: true, available: false, update_progress: resolverStart, update_tx: boundTx('assisted_resolution') });
+        assert.deepEqual([pill().textContent, pill().dataset.tone, pillGlyph(pill()), close().hidden],
+            ['Resolving update…', 'neutral', STAGE_GLYPH, true], 'a resolution at work is a stage');
+        const running = pillGlyph(pill());
+        for (const tx of [boundTx('gate_blocked'), boundTx('marker_cleanup_retry'), boundTx('rolling_back'),
+            { ...boundTx('assisted_resolution'), local_work_recovery: true }, { active: false }]) {
+            await show({ managed: true, available: false, update_progress: resolverStart, update_tx: tx });
+            const label = JSON.stringify(tx);
+            assert.deepEqual([pill().hidden, pill().textContent, pill().dataset.tone], [false, 'Update not concluded', 'neutral'], label);
+            assert.equal(pillGlyph(pill()), UNRESOLVED_GLYPH, `${label}: neither the stage's arrows nor an outcome's warning`);
+            assert.notEqual(pillGlyph(pill()), running);
+            assert.equal(pill().querySelector('.update-pill-glyph').dataset.says, 'unresolved');
+            assert.equal(close().hidden, true, `${label}: not concluded, so there is nothing to close`);
+            assert.ok(!pill().classList.contains('has-close'));
+            assert.deepEqual([parts().check.hidden, parts().version.parentElement], [true, row], 'the version is plain beside it');
+        }
+        assert.equal(pill().title, 'This update has not concluded yet.', 'its detail is the record\'s own words, no verdict');
+        pill().click();
+        assert.deepEqual(opened, ['updates'], 'it opens Dashboard → Updates, the one place that names the recovery');
+        assert.equal(updateVerdict({ managed: true, update_progress: resolverStart, update_tx: boundTx('gate_blocked') }).headline,
+            'An update attempt stopped mid-flight and needs recovery.');
+        // The same install rules as every attempt: an install that offers no in-app update still shows it, closeless.
+        for (const install of [{ managed: false }, { managed: true, managed_by_deployment: 'Updated by your administrator.' }]) {
+            await show({ ...install, available: false, update_progress: resolverStart, update_tx: boundTx('gate_blocked') });
+            assert.deepEqual([pill().hidden, pill().textContent, pillGlyph(pill()), close().hidden],
+                [false, 'Update not concluded', UNRESOLVED_GLYPH, true], JSON.stringify(install));
+        }
+        // The resolution back at work is the stage again.
+        await show({ managed: true, available: false, update_progress: resolverStart, update_tx: boundTx('committing_assisted') });
+        assert.deepEqual([pill().textContent, pillGlyph(pill())], ['Resolving update…', STAGE_GLYPH]);
+    });
+});
+
+test('a reviewed merge that committed is a needed restart like any update; local work awaiting recovery stays apart', async () => {
+    await withIndicator(async ({ env, row, show, pill, close, opened, parts }) => {
+        const look = () => [pill().hidden, pill().textContent, pill().dataset.tone, pillGlyph(pill()), close().hidden];
+        await show({ managed: true, available: false, update_progress: resolverStart, update_tx: boundTx('committing_assisted') });
+        assert.deepEqual(look(), [false, 'Resolving update…', 'neutral', STAGE_GLYPH, true]);
+        pill().focus();
+        const ready = { managed: true, available: false, update_progress: resolverStart, update_tx: checkedTx('passed') };
+        await show(ready);
+        assert.deepEqual(look(), [false, 'Restart needed', 'neutral', RESTART_GLYPH, true], 'the owner\'s step, never the bell');
+        assert.equal(pill().querySelector('.update-pill-glyph').dataset.says, 'restart');
+        assert.equal(env.doc.activeElement, pill(), 'a reader on the capsule stays on it');
+        const verdict = updateVerdict(ready);
+        assert.deepEqual([verdict.headline, verdict.action], ['An update is waiting for a restart to finish.',
+            { id: 'restart', label: 'Restart now' }]);
+        assert.equal(pill().title, verdict.headline, 'its detail is the panel\'s own sentence');
+        assert.deepEqual([parts().check.hidden, parts().version.parentElement], [true, row], 'the version is plain beside it');
+        pill().click();
+        assert.deepEqual(opened, ['updates'], 'a press opens Dashboard → Updates, where the restart is; it restarts nothing');
+        // Whichever server recorded the start, its own transaction is what waits for the restart.
+        await show({ ...ready, update_progress: { ...resolverStart, current_generation: true } });
+        assert.deepEqual(look(), [false, 'Restart needed', 'neutral', RESTART_GLYPH, true]);
+        // Local work still awaiting recovery defers that restart (the panel's Check again), and another attempt's
+        // transaction in that phase is not this attempt's restart: the bell for both, still no close.
+        for (const tx of [{ ...checkedTx('passed'), local_work_recovery: true }, checkedTx('passed', 'tx-other')]) {
+            await show({ ...ready, update_tx: tx });
+            assert.deepEqual(look(), [false, 'Update not concluded', 'neutral', UNRESOLVED_GLYPH, true], JSON.stringify(tx));
+        }
+        assert.equal(env.doc.activeElement, pill(), 'the capsule never left, so neither did the focus');
+    });
+});
+
+test('no two capsule states look alike in the rail: each pairs its own glyph with its own tone', async () => {
+    await withIndicator(async ({ show, pill }) => {
+        const states = {
+            offer: { managed: true, available: true, local_changes: 'absent' },
+            caveat: { managed: true, available: true, local_changes: 'present' },
+            stage: { managed: true, available: false, update_progress: { operation_id: 's', active: true, stage: 'applying' } },
+            restart: { managed: true, available: false, update_progress: { operation_id: 'r', active: false,
+                result: 'restart_required', restart_required: true } },
+            failed: { managed: true, available: false, update_progress: refusal },
+            unconfirmed: { managed: true, available: false, update_progress: { ...refusal, operation_id: 'u', outcome: 'unknown',
+                reason: 'no_completion_record', blockers: [], work_stop: '' } },
+            unresolved: { managed: true, available: false, update_progress: resolverStart, update_tx: boundTx('gate_blocked') },
+        };
+        const seen = new Map();
+        const look = () => [pillGlyph(pill()), pill().dataset.tone || '', pill().classList.contains('has-local')].join('|');
+        for (const [name, status] of Object.entries(states)) {
+            await show(status);
+            assert.equal(pill().hidden, false, name);
+            assert.ok(!seen.has(look()), `${name} looks like ${seen.get(look())}`);
+            seen.set(look(), name);
+        }
+        assert.equal(seen.size, 7);
+        // A reviewed merge that committed and passed its check is that same needed restart, so it wears that look and
+        // those words; while its check runs it is the stage's look.
+        await show({ managed: true, available: false, update_progress: resolverStart, update_tx: checkedTx('pending') });
+        assert.deepEqual([seen.get(look()), pill().textContent], ['stage', 'Checking update…']);
+        await show({ managed: true, available: false, update_progress: resolverStart, update_tx: checkedTx('passed') });
+        assert.deepEqual([seen.get(look()), pill().textContent], ['restart', 'Restart needed']);
+    });
 });
 
 test('a hidden recovery notice stays hidden for its attempt while Last attempt takes the later conclusion', async () => {
@@ -544,7 +776,10 @@ test('at rest the version is a quiet button named by the action and the version,
         assert.equal(check.title, 'Check for updates');
         assert.equal(check.getAttribute('aria-describedby'), 'nav-check-said');
         assert.ok(check.classList.contains('ui-hit-area'), 'a finger reaches 44 px however small it looks');
-        assert.ok(check.querySelector('.nav-version-glyph'), 'the turning glyph is always in its box');
+        const slot = check.querySelector('.nav-version-slot');
+        assert.ok(slot.contains(check.querySelector('.nav-version-glyph')), 'the turning glyph is always in its box');
+        assert.ok(slot.contains(note), 'the check\'s answer has that same place, under the whole version');
+        assert.equal(slot.parentElement, check);
         assert.equal(check.getAttribute('aria-busy'), null);
         assert.equal(note.hidden, true);
         assert.equal(said.getAttribute('role'), 'status');
@@ -581,6 +816,7 @@ test('up to date says so in place and aloud, then the row is at rest again by it
         assert.deepEqual([note.hidden, note.textContent, note.dataset.tone], [false, 'Up to date', undefined]);
         assert.equal(said.textContent, 'Up to date');
         assert.equal(check.hidden, false);
+        assert.equal(check.title, 'Check for updates', 'the tick needs no reason: the check keeps its name');
         assert.equal(pill.hidden, true);
         await new Promise((resolve) => setTimeout(resolve, 40));
         assert.equal(parts().note.hidden, true);
@@ -596,8 +832,11 @@ test('a failed check is said in the error tone with its reason, and the version 
         await settle();
         let { note, said, check } = parts();
         assert.deepEqual([note.hidden, note.textContent, note.dataset.tone], [false, 'Check failed', 'error']);
-        assert.equal(note.title, 'Could not check the official update channel: fetch_failed');
-        assert.equal(said.textContent, note.title, 'the reason is the version\'s description and is announced');
+        // The answer takes no pointer of its own: the reason is the tooltip of the check a pointer rests on.
+        assert.equal(check.title, 'Could not check the official update channel: fetch_failed');
+        assert.equal(note.title, undefined, 'no second, unreachable tooltip on the answer');
+        assert.equal(said.textContent, check.title, 'the reason is the version\'s description and is announced');
+        assert.equal(check.getAttribute('aria-labelledby'), 'nav-version-check-word nav-version', 'still named by its action');
         assert.equal(check.hidden, false, 'the version is still the check: a retry');
         // A progress notice that brings no newer good check leaves the failure standing.
         await show({ managed: true, available: false, checked_at: 't0' });
@@ -605,18 +844,20 @@ test('a failed check is said in the error tone with its reason, and the version 
         // A request that never reached the server is a failure too, never silence.
         parts().check.click();
         assert.equal(parts().note.hidden, true, 'a new check clears the old answer');
+        assert.equal(parts().check.title, 'Check for updates', 'and the old reason with it');
         world.checks[1].reject(new Error('Server unavailable'));
         await settle();
-        ({ note } = parts());
+        ({ note, check } = parts());
         assert.deepEqual([note.hidden, note.textContent], [false, 'Check failed']);
-        assert.match(note.title, /Server unavailable$/);
+        assert.match(check.title, /Server unavailable$/);
         // A later good check, here or from Dashboard → Updates, ends it: the two surfaces never disagree.
         await show({ managed: true, available: false, checked_at: 't2' });
         assert.equal(parts().note.hidden, true);
+        assert.equal(parts().check.title, 'Check for updates', 'the check\'s own name returns with the failure\'s end');
     });
 });
 
-test('an update found is the crimson Update capsule; the version is plain text beside it and focus follows', async () => {
+test('an update found is the neutral Update capsule; the version is plain text beside it and focus follows', async () => {
     await withIndicator(async ({ env, row, parts, show, opened, world }) => {
         await show({ managed: true, available: false, checked_at: 't0' });
         parts().check.focus();
@@ -625,7 +866,9 @@ test('an update found is the crimson Update capsule; the version is plain text b
         await settle();
         const { pill, check, version, note, said } = parts();
         assert.deepEqual([pill.hidden, pill.textContent, pill.title], [false, 'Update', 'Update 7.11.1 → 7.12.0']);
-        assert.ok(pill.classList.contains('btn-primary') && !pill.classList.contains('btn-default'));
+        assert.ok(pill.classList.contains('btn-default') && !pill.classList.contains('btn-primary') && !pill.classList.contains('has-local'),
+            'an update on offer is the neutral capsule (owner 22.11)');
+        assert.equal(pillGlyph(pill), OFFER_GLYPH, 'holding the arrow up');
         assert.equal(check.hidden, true, 'one action per row');
         assert.equal(version.parentElement, row, 'the version stands as plain text');
         assert.equal(note.hidden, true);
@@ -641,7 +884,8 @@ test('local changes keep the amber caveat, an attempt its own words; the version
     await withIndicator(async ({ row, parts, show }) => {
         await show({ managed: true, available: true, local_changes: 'present', checked_at: 't0' });
         let { pill, check, version } = parts();
-        assert.ok(pill.classList.contains('has-local') && !pill.classList.contains('btn-primary'));
+        assert.ok(pill.classList.contains('has-local') && pill.classList.contains('btn-default'));
+        assert.equal(pillGlyph(pill), CAVEAT_GLYPH, 'the caveat\'s warning, not the offer\'s arrow');
         assert.equal(pill.textContent, 'Update');
         assert.deepEqual([check.hidden, version.parentElement], [true, row]);
         await show({ managed: true, available: false, checked_at: 't0',
@@ -696,8 +940,8 @@ test('an answer with no check result is a failed check: never Up to date, and th
             await settle();
             const { check, note, said, version, pill } = parts();
             assert.deepEqual([note.hidden, note.textContent, note.dataset.tone], [false, 'Check failed', 'error'], JSON.stringify(answer));
-            assert.equal(note.title, 'Could not check the official update channel: the check did not complete');
-            assert.equal(said.textContent, note.title, 'announced as the failure it shows');
+            assert.equal(check.title, 'Could not check the official update channel: the check did not complete');
+            assert.equal(said.textContent, check.title, 'announced as the failure it shows');
             assert.doesNotMatch(`${note.textContent} ${said.textContent}`, /Up to date/);
             assert.deepEqual([check.hidden, version.parentElement, pill.hidden], [false, check, true], 'the version is the retry');
         }
@@ -740,8 +984,8 @@ test('unmanaged and organization-managed installs offer no check and no Update; 
     }
 });
 
-test('a check that finds no in-app update here says why, never a failure, and focus lands on the last row', async () => {
-    await withIndicator(async ({ env, row, settings, parts, show, world }) => {
+test('a check that finds no in-app update here says why, never a failure, and focus lands on the rail\'s Settings', async () => {
+    await withIndicator(async ({ env, row, settings, main, parts, show, world }) => {
         await show({ managed: true, available: false, checked_at: 't0' });
         parts().check.focus();
         parts().check.click();
@@ -750,7 +994,10 @@ test('a check that finds no in-app update here says why, never a failure, and fo
         const { check, version, note, said, pill } = parts();
         assert.deepEqual([check.hidden, version.parentElement, note.hidden, pill.hidden], [true, row, true, true]);
         assert.equal(said.textContent, 'Managed updates are unavailable for this checkout.');
-        assert.equal(env.doc.activeElement, settings, 'the control that held focus is gone: focus stays in the column');
+        // The check switched to an unmanaged install's plain version: the row beside it takes the focus, never Main's
+        // card at the column's top, which is the last destination in document order.
+        assert.equal(env.doc.activeElement, settings, 'the control that held focus is gone: focus stays beside the version');
+        assert.notEqual(env.doc.activeElement, main);
     });
 });
 
@@ -952,10 +1199,10 @@ test('a failed check keeps the last good check\'s facts; only a genuinely newer 
         assert.equal(world.checks[0].selection, 'stable', 'the press names the selection it believes current');
         world.checks[0].resolve({ managed: true, available: false, check_ok: false, warnings: ['fetch_error: no network'], update_channel: 'stable' });
         await settle();
-        let { note, said } = parts();
+        let { note, said, check } = parts();
         assert.deepEqual([note.hidden, note.textContent, note.dataset.tone], [false, 'Check failed', 'error']);
-        assert.match(note.title, /fetch_error: no network/);
-        assert.equal(said.textContent, note.title);
+        assert.match(check.title, /fetch_error: no network/);
+        assert.equal(said.textContent, check.title);
         // A passive read of the same cached check (the failure recorded no newer one) leaves the retry standing.
         await show({ managed: true, available: false, checked_at: 't1', update_channel: 'stable' });
         assert.equal(parts().note.hidden, false, 'the same stamp is the same check: no newer success');
@@ -1105,7 +1352,7 @@ test('a late check answer never overwrites equal-stamp checkout observations', a
         await settle();
         ({ pill } = parts());
         assert.ok(pill.classList.contains('has-local'), 'an equal stamp does not revert the later checkout reading');
-        assert.ok(!pill.classList.contains('btn-primary'), 'the older sample does not take the caveat\'s place');
+        assert.equal(pillGlyph(pill), CAVEAT_GLYPH, 'the older sample does not take the caveat\'s place');
         // A genuinely newer stamp is the check's own sample of the checkout and does own it.
         await show({ managed: true, available: false, check_ok: true, checked_at: 't2', local_changes: 'present',
             dirty: true, update_channel: 'stable' });
@@ -1116,7 +1363,7 @@ test('a late check answer never overwrites equal-stamp checkout observations', a
         await settle();
         ({ pill } = parts());
         assert.ok(!pill.classList.contains('has-local'), 'a newer stamp\'s own sample takes over');
-        assert.ok(pill.classList.contains('btn-primary'));
+        assert.equal(pillGlyph(pill), OFFER_GLYPH);
     });
 });
 
@@ -1293,7 +1540,7 @@ test('a saved channel selection invalidates the old selection\'s outcomes and in
     });
 });
 
-test('the pill losing visibility hands focus to the visible check or the last row, only when it held it', async () => {
+test('the pill losing visibility hands focus to the visible check or the rail\'s Settings, only when it held it', async () => {
     await withIndicator(async ({ env, row, settings, parts, show }) => {
         await show({ managed: true, available: false,
             update_progress: { operation_id: 'a', generation: 'g', stage: 'applying', active: true } });
@@ -1336,7 +1583,7 @@ test('the first stamped Check supplies its own coherent checkout facts over the 
         await settle();
         const { pill, note } = parts();
         assert.ok(pill.classList.contains('has-local'), 'the check\'s own sample keeps the amber caveat');
-        assert.ok(!pill.classList.contains('btn-primary'), 'not the clean offer the first read implied');
+        assert.equal(pillGlyph(pill), CAVEAT_GLYPH, 'not the clean offer the first read implied');
         assert.equal(note.hidden, true);
     });
 });
@@ -1357,7 +1604,7 @@ test('an old delayed failed POST never reverts the checkout a later passive read
         await settle();
         const { pill } = parts();
         assert.ok(pill.classList.contains('has-local'), 'the later reading of the checkout stands');
-        assert.ok(!pill.classList.contains('btn-primary'), 'not the clean offer the stale sample implied');
+        assert.equal(pillGlyph(pill), CAVEAT_GLYPH, 'not the clean offer the stale sample implied');
         assert.equal(pill.hidden, false);
     });
 });
@@ -1365,9 +1612,7 @@ test('an old delayed failed POST never reverts the checkout a later passive read
 test('after an accepted channel save the version is plain until the row\'s own read names the selection', async () => {
     const env = installDomDouble();
     try {
-        const settings = env.el('button', { className: 'nav-row', dataset: { navPage: 'settings' } });
-        const row = env.el('div', { className: 'sidebar-foot-meta' }, env.el('span', { attrs: { id: 'nav-version' }, text: VERSION }));
-        env.doc.body.append(env.el('nav', { attrs: { id: 'primary-sidebar' } }, settings, row));
+        const { row, settings } = mountSidebar(env);
         const listeners = new Map();
         const ws = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name); } };
         const reads = [];
@@ -1386,9 +1631,11 @@ test('after an accepted channel save the version is plain until the row\'s own r
             'the stable row is at rest and checkable');
         // The Dashboard card's save is one entry (row); the Settings page's is the other (keys). While the save's own
         // read is pending, no press can name a selection the row cannot vouch for: the stale channel keys no POST.
+        check().focus();
         saved({ row: 'OUROBOROS_UPDATE_CHANNEL', page: 'dashboard:updates' });
         assert.deepEqual([check().hidden, $('nav-version').parentElement], [true, row],
             'the accepted save leaves the selection unknown: the version is the plain text it was');
+        assert.equal(env.doc.activeElement, settings, 'the check that held the focus hands it to the row above the version');
         check().click();
         assert.equal(checks.length, 0, 'no POST keys the stale selection');
         // The read names the channel this install holds now — the only evidence a press keys.
@@ -1504,8 +1751,8 @@ test('the old selection\'s unanswered check neither blocks nor clears the new se
     }
 });
 
-test('the disappearing close hands focus to the capsule, the row\'s check or the last row, only when it held it', async () => {
-    await withIndicator(async ({ env, row, settings, parts, show, close }) => {
+test('the disappearing close hands focus to the capsule, the row\'s check or the rail\'s Settings, only when it held it', async () => {
+    await withIndicator(async ({ env, row, settings, main, parts, show, close }) => {
         await show({ managed: true, available: false, update_progress: { ...refusal } });
         // A new attempt starts elsewhere while the reader's focus is on the ×: the notice becomes a stage.
         close().focus();
@@ -1525,11 +1772,54 @@ test('the disappearing close hands focus to the capsule, the row\'s check or the
         close().focus();
         close().click();
         assert.equal(env.doc.activeElement, parts().check, 'the row\'s visible check, the retry the failure left');
-        // An install that offers no check has only the sidebar's last row to land on.
+        // An install that offers no check has only the rail's row beside the version to land on: Settings, never Main.
         await show({ managed: false, available: false, update_progress: { ...refusal, operation_id: 'attempt-u' } });
         close().focus();
         close().click();
-        assert.equal(env.doc.activeElement, settings, 'the last navigation row when the row offers nothing else');
+        assert.equal(env.doc.activeElement, settings, 'the rail\'s last row when the row offers nothing else');
+        assert.notEqual(env.doc.activeElement, main);
+        // A new attempt's × taken over while nothing else stands (no check here): the same landing.
+        await show({ managed: false, available: false, update_progress: { ...refusal, operation_id: 'attempt-v' } });
+        close().focus();
+        await show({ managed: false, available: false, update_progress: { ...refusal, operation_id: 'attempt-v',
+            outcome: 'applied', result: 'applied', concluded_by: 'boot', blockers: [], work_stop: '', reason: '' } });
+        assert.deepEqual([parts().pill.hidden, close().hidden], [true, true]);
+        assert.equal(env.doc.activeElement, settings, 'the × that went with its notice hands focus beside the version');
+    });
+});
+
+test('a focused check or capsule that goes with nothing left in the row hands focus to Settings beside it', async () => {
+    await withIndicator(async ({ env, row, settings, main, parts, show, world }) => {
+        // Hidden checker: an accepted channel save leaves the selection unknown and the version plain text.
+        await show({ managed: true, available: false, checked_at: 't0', update_channel: 'stable' });
+        parts().check.focus();
+        globalThis.window.emit('ouro:settings-updated', { detail: { source: 'settings-row', row: 'OUROBOROS_UPDATE_CHANNEL' } });
+        assert.deepEqual([parts().check.hidden, parts().version.parentElement], [true, row]);
+        assert.equal(env.doc.activeElement, settings, 'the hidden check hands its focus to the row above the version');
+        await settle();
+        // Switch to unmanaged by a passive read: the same.
+        await show({ managed: true, available: false, checked_at: 't0', update_channel: 'stable' });
+        assert.equal(parts().check.hidden, false);
+        parts().check.focus();
+        await show({ managed: false, available: false, update_channel: 'stable' });
+        assert.deepEqual([parts().check.hidden, env.doc.activeElement], [true, settings]);
+        // A capsule that held the focus on such an install, with no check to give it to, goes: the same, never Main.
+        await show({ managed: false, available: false, update_progress: { operation_id: 'u', active: true, stage: 'applying' } });
+        parts().pill.focus();
+        await show({ managed: false, available: false, update_progress: { operation_id: 'u', active: false, outcome: 'applied',
+            result: 'applied', concluded_by: 'boot' } });
+        assert.equal(parts().pill.hidden, true);
+        assert.equal(env.doc.activeElement, settings);
+        assert.notEqual(env.doc.activeElement, main);
+        // Focus elsewhere never moves: the landing is only for the control that held it.
+        await show({ managed: true, available: false, checked_at: 't0', update_channel: 'stable' });
+        assert.equal(parts().check.hidden, false);
+        main.focus();
+        globalThis.window.emit('ouro:settings-updated', { detail: { source: 'settings-row', row: 'OUROBOROS_UPDATE_CHANNEL' } });
+        assert.equal(parts().check.hidden, true);
+        assert.equal(env.doc.activeElement, main, 'a check that did not hold the focus takes none from Main');
+        await settle();
+        assert.equal(world.checks.length, 0, 'nothing here pressed the check');
     });
 });
 

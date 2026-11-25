@@ -1527,7 +1527,7 @@ export function initSkills(ctx = {}) {
     window.addEventListener('ouro:open-skills', onOpenSkills);
     paintFilters(null);
 
-    // `open` and `pressedAgain` are the app's doors to the section (app.js `openExtensions`, the sidebar's row).
+    // `open` and `pressedAgain` are the app's doors to the section (app.js `openExtensions`, Settings' door).
     return { open: section.open, capture: section.capture, pressedAgain: section.pressedAgain, destroy() {
         destroyed = true;
         clearListingTimers();

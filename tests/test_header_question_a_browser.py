@@ -14,6 +14,7 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests._shared import answer_projects
+from tests.settings_section_helpers import open_extensions
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -328,7 +329,10 @@ BAR = """name => {
 
 
 def _goto(page, name):
-    page.locator(f'[data-nav-page="{name}"]').click()
+    if name == 'skills':
+        open_extensions(page)  # through Settings' door: it has no place in the rail (owner 24.11)
+    else:
+        page.locator(f'[data-nav-page="{name}"]').click()
     page.locator(f'#page-{name}').wait_for(state='visible')
     page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
 
@@ -420,7 +424,11 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         assert page.locator('#page-costs').is_visible()
         assert page.locator('#page-dashboard [role=tablist]').is_visible()
 
-        _goto(page, 'skills')
+        # Extensions by its own address, so no return to Settings stands under its levels (its sidebar row is gone,
+        # owner 24.11; entered through Settings' door it would be that jump's level).
+        page.evaluate("location.hash = 'skills'")
+        page.reload()  # the address is read when the page loads
+        extensions.wait_for(state='visible')
         page.set_viewport_size({'width': 390, 'height': 844})
         back = extensions.get_by_role('button', name='Back to Extensions', exact=True)
         back.click()
@@ -772,12 +780,13 @@ def test_extensions_pages_and_existing_toolbar_survive_a_narrow_content_column(e
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
         # The page column keeps a single round return and the existing toolbar, above/below 40rem.
         for column in (488, 733):
-            page.set_viewport_size({'width': 1440, 'height': 801})
-            _goto(page, 'settings')
-            page.locator('[data-settings-open="page:skills"]').click()
-            page.set_viewport_size({'width': column + 297, 'height': 801})
+            page.set_viewport_size({'width': column + 297 + 40, 'height': 801})  # the column, its border and the rail's 40px
             page.evaluate("document.documentElement.style.setProperty('--sidebar-width', '296px')")
+            _goto(page, 'settings')
+            page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+            assert page.evaluate("() => window.__ouroSettings.open('installed', { opener: document.querySelector('#page-settings [data-settings-open=\"page:skills\"]') })") is not False
             page.locator('#page-skills [data-extensions-rail]').wait_for(state='visible' if column >= 640 else 'hidden')
+            page.locator('#skills-pane-installed').wait_for(state='visible')
             lead = page.locator('#page-skills [data-shell-back]')
             assert lead.get_attribute('aria-label') == lead.get_attribute('title') == 'Back to Settings'
             assert lead.evaluate('n => !n.textContent.trim() && Math.abs(n.offsetWidth - n.offsetHeight) < 1')
