@@ -363,7 +363,7 @@ for (const [name, options, refreshes] of [
 // reveal neither blocks nor decides that showing's read, whether the reopen reuses a
 // hidden pending-work survivor (its draft and staged files) or builds a new instance.
 function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, covers = stack }) {
-    const acked = [], built = [], held = [];
+    const acked = [], built = [], held = [], forgotten = [];
     const instance = () => {
         const inst = {
             page: { hidden: false, isConnected: true, dataset: {} }, generation: 0, draft: 'Yes, after the tag', leaving: false,
@@ -409,16 +409,17 @@ function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, cove
         mainReads: 0, acknowledgeMainAfterPaint() { context.mainReads += 1; },  // Main's read decision (its own tests)
         mainUnread: 0, mainUnreadCount: () => context.mainUnread,
         console: { error() {} }, createRoomRetirement, roomSocket: (socket) => socket, ws: {},
+        forgetProjectPreviews: (ids) => forgotten.push(...ids),  // chat_preview.js: a Project's saved text goes
     });
     vm.runInContext(`let projectNavigationGeneration = 0, projectPanelOpeningSince = 0;\n${unreadRule}
         ${['mainOnScreen', 'enterMain', 'syncMainLifetime', 'cancelProjectPaint', 'closeProjectPanel', 'openProjectPanel',
-        'landInProject', 'resolveProjectRoom', 'freshProjectRow', 'revealProjectQuestion'].map(lift).join('\n')}\n${ackSource}
+        'landInProject', 'projectAnswer', 'resolveProjectRoom', 'freshProjectRow', 'revealProjectQuestion'].map(lift).join('\n')}\n${ackSource}
         const rooms = createRoomRetirement({ instances: projectInstances, cancelPaint: cancelProjectPaint });
         Object.assign(globalThis, { rooms, openProjectPanel });
         globalThis.api = { open: (options) => openProjectPanel(lastProjectRows[0], options), close: () => closeProjectPanel(),
             openAs: (project, options) => openProjectPanel(project, options) };`,
     context);
-    return { acked, built, held, project, context, api: context.api };
+    return { acked, built, held, forgotten, project, context, api: context.api };
 }
 
 // A document a chat opened (the reader, the file dialog) is a modal over the whole
@@ -465,6 +466,7 @@ test('a row that names its room opens as it stands; a newer answer is never repl
 for (const [answer, says] of [[{ projects: [] }, 'gone'], [{ projects: [{ id: 'p1', name: 'P', chat_id: 9, lifecycle: 'deleting' }] }, 'deleting'],
     [{}, 'unreadable']]) {
     test(`a reference reads its room by its id: an older feed row opens nothing the registry answers ${says}`, async () => {
+        // Its word that the Project is gone or going takes the rooms' saved text too (astra 1); an unreadable one does not.
         const h = navigationHarness({ pendingWork: false });
         const reads = [], toasts = [];
         Object.assign(h.context, { fmt: (text) => text, showToast: (text) => toasts.push(text),
@@ -474,6 +476,65 @@ for (const [answer, says] of [[{ projects: [] }, 'gone'], [{ projects: [{ id: 'p
         assert.equal(h.built.length, 0, 'no room is built');
         assert.equal(h.context.navState.activeProjectId, null, 'the view stays');
         assert.equal(toasts.length, 1, 'and says why');
+        assert.deepEqual(h.forgotten, says === 'unreadable' ? [] : ['p1']);
+    });
+}
+
+// The registry announces a change while a Project is open: app.js asks for that Project's exact row. That answer is the
+// registry's word on it, whether the owner is still in the room when it comes or not.
+const projectsChanged = (() => {
+    const from = source.indexOf("ws.on('projects_changed', ");
+    const until = source.indexOf('\n});\n', from);
+    assert.ok(from >= 0 && until > from, 'app.js hears projects_changed at its top level');
+    return source.slice(from, until + 4);
+})();
+for (const [answer, says, forgets] of [[{ projects: [] }, 'no row', true],
+    [{ projects: [{ id: 'p1', chat_id: 9, lifecycle: 'deleting' }] }, 'deleting', true],
+    [{ projects: [{ id: 'p1', chat_id: 9, lifecycle: 'active' }] }, 'active', false], [{}, 'unreadable', false],
+    [null, 'a failed read', false]]) {
+    test(`the open Project's exact row read on projects_changed, ${says}, ${forgets ? 'takes' : 'keeps'} its saved text`, async () => {
+        const forgotten = [], heard = new Map(), closes = [];
+        let reply;
+        const context = vm.createContext({
+            ws: { on: (type, fn) => heard.set(type, fn) }, state: { projectChatIds: new Set() },
+            navState: { activeProjectId: 'p1' }, projectsNav: { refresh() {} }, refreshProjectsNav() {},
+            apiClient: { projectById: () => new Promise((resolve, reject) => { reply = data => (data ? resolve(data) : reject(new Error('offline'))); }) },
+            forgetProjectPreviews: (ids) => forgotten.push(...ids), closeProjectPanel: () => closes.push('closed'),
+        });
+        vm.runInContext(`let projectNavigationGeneration = 0;\n${lift('projectAnswer')}\n${projectsChanged}
+            globalThis.leave = () => { projectNavigationGeneration += 1; navState.activeProjectId = null; };`, context);
+        heard.get('projects_changed')({ type: 'projects_changed' });
+        context.leave();  // the owner went elsewhere before the answer came
+        reply(answer);
+        await flush();
+        assert.deepEqual(forgotten, forgets ? ['p1'] : []);
+        assert.deepEqual(closes, [], 'a room no longer on screen is closed by nothing');
+    });
+}
+
+// The registry's complete list (projects_nav.js reads it for Find a project and Show more): the Projects it omits are
+// gone, and so is their rooms' saved text read before it was asked (chat_preview.js) — under the profile this page's
+// socket proves; a list it cannot prove is its own profile's prunes nothing, and its answer reaches the list unchanged.
+for (const proven of [true, false]) {
+    test(`the complete list, read under ${proven ? 'a proven' : 'an unproven'} profile, ${proven ? 'prunes' : 'leaves'} the saved Project rooms`, async () => {
+        const pruned = [], answer = { projects: [{ id: 'kept', lifecycle: 'active' }] };
+        const context = vm.createContext({
+            apiClient: { projectList: async () => answer }, ws: { canShowSavedProfile: () => proven },
+            document: { scope: '0123456789abcdef' }, documentScope: (doc) => doc.scope,
+            forgetUnlistedProjectPreviews: (...args) => pruned.push(args),
+        });
+        vm.runInContext(lift('readProjectList'), context);
+        const before = Date.now();
+        assert.equal(await context.readProjectList({ signal: null }), answer);
+        assert.equal(pruned.length, proven ? 1 : 0);
+        if (proven) {
+            const [projects, asked, scope] = pruned[0];
+            assert.deepEqual([projects, scope], [answer.projects, '0123456789abcdef']);
+            assert.ok(asked >= before && asked <= Date.now(), 'dated as it was asked');
+        }
+        context.apiClient.projectList = async () => { throw new Error('offline'); };
+        await assert.rejects(context.readProjectList({}), /offline/);
+        assert.equal(pruned.length, proven ? 1 : 0, 'a failed read prunes nothing');
     });
 }
 

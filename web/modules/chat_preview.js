@@ -19,10 +19,11 @@
  * refused for authentication, current and not aborted (the room's fetchHistory below, app.js's link preparation, a
  * Place's in place_history.js), removes every entry and every copy painted in this document at once, selection or not
  * (`previewsRefused`); api_client.js clears them on sign-in, the core's sign-in page on every sign-out (server_auth.py,
- * by PREVIEW_FAMILY), and the registry's word that a Project is going away takes its rooms' entries
- * (`forgetProjectPreviews`, app.js). A Project deleted while this origin did not hear that word keeps its entry, never
- * painted (its room no longer opens), until the total gives it way. Its imports are the feed's tie rule and the words
- * a bubble draws (a host notice's line), so neither the order nor the words fork. */
+ * by PREVIEW_FAMILY). The registry's word that a Project is gone or going takes its rooms' entries (app.js: a
+ * `deleting` row, an exact lookup of it: `forgetProjectPreviews`), as its complete list takes those of the Projects
+ * it no longer names (`forgetUnlistedProjectPreviews`); a Project deleted where this origin hears none of these keeps
+ * its entry until one comes or the total gives it way. Its imports are the feed's tie rule and the words a bubble
+ * draws (a host notice's line), so neither the order nor the words fork. */
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 
@@ -97,6 +98,13 @@ function entryText(rows, read) {
 const readOf = text => Number(/^\{"read":(\d+),/.exec(text)?.[1]) || 0;
 // The origin's storage is full (QuotaExceededError; NS_ERROR_DOM_QUOTA_REACHED in older Firefox).
 const full = error => ['QuotaExceededError', 'NS_ERROR_DOM_QUOTA_REACHED'].includes(error?.name);
+// The profile and the Project an entry's key names (previewEntryKey); '' for Main, the record or a key of no such form.
+const roomOf = (name) => {
+    let key = null;
+    try { key = JSON.parse(name.slice(PREVIEW_KEY.length + 1)); } catch { /* the record, or not an entry */ }
+    return { scope: Array.isArray(key) ? String(key[0] ?? '') : '',
+        project: Array.isArray(key?.[1]) ? String(key[1][1] ?? '') : '' };
+};
 // Whether `store` holds this form's record. v2's one record moves into entries once, the order it kept by time read;
 // entries standing without a record (an eraser took it) are erased before anything is read or written. `create` starts
 // an empty record.
@@ -124,18 +132,34 @@ export function clearChatPreviews(storage) {
     dropPaintedPreviews();
 }
 
-/** The registry says these Projects are going away (app.js, where their rooms are let go): their rooms' entries leave,
- * in every scope; every other room keeps its own as it was, and nothing to remove writes nothing. */
+/** The registry says these Projects are gone or going (app.js, where their rooms are let go): their rooms' entries
+ * leave, in every scope; every other room keeps its own as it was, and nothing to remove writes nothing. */
 export function forgetProjectPreviews(projectIds, storage) {
     const going = new Set((projectIds || []).filter(Boolean).map(String));
     if (!going.size) return;
-    const project = (name) => {
-        try { return String(JSON.parse(name.slice(PREVIEW_KEY.length + 1))?.[1]?.[1] ?? ''); } catch { return ''; }
-    };
     try {
         const store = storage || globalThis.localStorage;
         if (!current(store)) return;
-        for (const name of familyOf(store)) if (going.has(project(name))) store.removeItem(name);
+        for (const name of familyOf(store)) if (going.has(roomOf(name).project)) store.removeItem(name);
+    } catch { /* storage unavailable or unreadable: nothing here to take */ }
+}
+
+/** The registry's complete list of Projects (`GET /api/projects?all=1`, app.js), asked at `asked` (Date.now()) under
+ * the profile `scope` this page proves: every Project still there is in it. A Project room's entry of that profile
+ * read before the list was asked, whose Project it names nowhere or names `deleting`, leaves; Main, another profile's
+ * entries and entries read since stay, and nothing to remove writes nothing. */
+export function forgetUnlistedProjectPreviews(projects, asked, scope, storage) {
+    const profile = provenScope(scope);
+    if (!profile || !Array.isArray(projects)) return;
+    const listed = new Set(projects.filter(row => row?.id && row.lifecycle !== 'deleting').map(row => String(row.id)));
+    try {
+        const store = storage || globalThis.localStorage;
+        if (!current(store)) return;
+        for (const name of familyOf(store)) {
+            const room = roomOf(name);
+            if (room.scope === profile && room.project && !listed.has(room.project)
+                && readOf(store.getItem(name) || '') < asked) store.removeItem(name);
+        }
     } catch { /* storage unavailable or unreadable: nothing here to take */ }
 }
 

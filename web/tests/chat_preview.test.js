@@ -7,8 +7,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
-import { createChatPreview, clearChatPreviews, forgetProjectPreviews, previewsRefused, previewEntryKey, PREVIEW_FAMILY,
-    PREVIEW_KEY } from '../modules/chat_preview.js';
+import { createChatPreview, clearChatPreviews, forgetProjectPreviews, forgetUnlistedProjectPreviews, previewsRefused,
+    previewEntryKey, PREVIEW_FAMILY, PREVIEW_KEY } from '../modules/chat_preview.js';
 import { senderLabel } from '../modules/chat_activity.js';
 import { installDom, memoryStorage, restoreDom, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 
@@ -236,6 +236,33 @@ test('a Project the registry says is going away takes its saved text with it; ev
     forgetProjectPreviews([], { getItem() { throw new Error('not even read'); } });
     assert.deepEqual([writes, [...f.values]], [[], before]);
     assert.doesNotThrow(() => forgetProjectPreviews(['gate-1'], { getItem() { throw new Error('denied'); } }));
+});
+
+test('the registry\'s complete list takes the entries of the Projects it no longer names, read before it was asked', t => {
+    // Astra 1, owner 2A («копии надо стирать … при удалении проекта»): a Project deleted where this browser did not hear
+    // the word. Main, another profile's rooms and a room read after the list was asked (a Project created since) stay.
+    const f = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    f.make({ room: [1, ''] }).save([row('chat:1', 'Main words')]);
+    f.make({ room: [100, 'gone'] }).save([row('chat:1', 'Words of a Project deleted elsewhere')]);
+    f.make({ room: [101, 'going'] }).save([row('chat:1', 'Words of a Project being deleted')]);
+    f.make({ room: [102, 'kept'] }).save([row('chat:1', 'A listed Project keeps these')]);
+    f.make({ room: [100, 'gone'], scope: OTHER_PROFILE }).save([row('chat:1', 'Another profile keeps its own')]);
+    t.mock.timers.tick(1000);
+    const asked = Date.now();
+    t.mock.timers.tick(1000);
+    f.make({ room: [103, 'new'] }).save([row('chat:1', 'A Project created after the list was asked')]);
+    forgetUnlistedProjectPreviews([{ id: 'kept', lifecycle: 'active' }, { id: 'going', lifecycle: 'deleting' }], asked,
+        PREVIEW_SCOPE, f.storage);
+    assert.deepEqual(f.family().map(key => key.slice(PREVIEW_KEY.length + 1)), ['', JSON.stringify([PREVIEW_SCOPE, [1, '']]),
+        JSON.stringify([PREVIEW_SCOPE, [102, 'kept']]), JSON.stringify([OTHER_PROFILE, [100, 'gone']]),
+        JSON.stringify([PREVIEW_SCOPE, [103, 'new']])]);
+    // An answer that is no list or a page that proves no profile takes nothing; storage refused throws nothing.
+    const before = JSON.stringify([...f.values]);
+    forgetUnlistedProjectPreviews(undefined, Date.now() + 1, PREVIEW_SCOPE, f.storage);
+    forgetUnlistedProjectPreviews([], Date.now() + 1, '', f.storage);
+    assert.equal(JSON.stringify([...f.values]), before);
+    assert.doesNotThrow(() => forgetUnlistedProjectPreviews([], 1, PREVIEW_SCOPE, { getItem() { throw new Error('denied'); } }));
 });
 
 test('a refusal anywhere in this document takes every entry and every painted copy, selection or not; nothing else does', t => {

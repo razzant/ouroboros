@@ -2,7 +2,7 @@
 
 import { createWS } from './modules/ws.js';
 import { apiClient, apiFetch, fetchJson } from './modules/api_client.js';
-import { forgetProjectPreviews, previewsRefused } from './modules/chat_preview.js';
+import { documentScope, forgetProjectPreviews, forgetUnlistedProjectPreviews, previewsRefused } from './modules/chat_preview.js';
 import { loadVersion } from './modules/utils.js';
 import { bindScrollFade, replaceScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
@@ -170,7 +170,7 @@ const projectsNav = createProjectsNav({ header: navProjectsHeader, list: navProj
     nextOrder: () => stateSnapshots.begin().generation,
     reserved: () => state.projectChatIds, listableCount: () => state.projectListableCount,
     activeId: () => navState.activeProjectId, messagesRevision: () => state.projectMessagesRevision,
-    readList: (options) => apiClient.projectList(options),
+    readList: readProjectList,
     isUnread: projectUnread,
     onListRead: () => { mergeProjectSeenRevisions(); if (projectsNav.unreadRows().length) refreshSharedProjectSeen(); },
     onShown: () => { patchProjectActivityMarkers(); },
@@ -850,6 +850,14 @@ async function landInProject(project, inst, { taskId, quizId, latest, sourceReve
     await acknowledgeProjectAfterPaint(project, inst, { forcePaint });
 }
 
+// The registry's row for `id` in its exact answer (`?id=`), else null. No row, or one `deleting`, is its word that the
+// Project is gone or going, which takes its rooms' saved text (chat_preview.js); an answer it cannot read says nothing.
+function projectAnswer(id, rows) {
+    const row = Array.isArray(rows) && rows.length === 1 && rows[0]?.id === id ? rows[0] : null;
+    if (Array.isArray(rows) && (!rows.length || row?.lifecycle === 'deleting')) forgetProjectPreviews([id]);
+    return row;
+}
+
 // A Project named by its id alone (a reference, a portal, a completion row, a row older than the feed) opens its own
 // room or none: the registry's row for that id (CLIENT_CONTRACT §6). A later navigation, a close or another page
 // supersedes the read; a missing, deleting or unreadable answer keeps the room on screen and says so. Never Main.
@@ -857,8 +865,8 @@ async function resolveProjectRoom(project, navigation) {
     const name = project.name || project.id;
     let rows = null, error = '';
     try { rows = (await apiClient.projectById(project.id))?.projects; } catch (err) { error = err?.message || 'unknown error'; }
+    const room = projectAnswer(project.id, rows);
     if (navigation !== projectNavigationGeneration) return null;
-    const room = Array.isArray(rows) && rows.length === 1 && rows[0]?.id === project.id ? rows[0] : null;
     const valid = room && Number.isSafeInteger(room.chat_id) && room.chat_id > 1;
     if (valid && room.lifecycle === 'active') return room;
     if (!error && !(Array.isArray(rows) && (rows.length === 0 || (valid && room.lifecycle === 'deleting')))) {
@@ -988,6 +996,16 @@ async function acknowledgeProjectAfterPaint(project, instance = null, { forcePai
 
 document.getElementById('project-panel-close')?.addEventListener('click', () => layers.back('control'));
 projectPanelBackdrop?.addEventListener('click', () => layers.back('scrim'));
+
+// The registry's complete list (Find a project, Show more: projects_nav.js) names every Project still there: a Project
+// room's saved text read before it was asked goes with a Project it omits (chat_preview.js). Only a list this page's
+// socket proves is its own profile's (ws.js canShowSavedProfile) speaks for its rooms.
+async function readProjectList(options) {
+    const asked = Date.now(), data = await apiClient.projectList(options);
+    if (ws.canShowSavedProfile?.() === true) forgetUnlistedProjectPreviews(data?.projects, asked, documentScope(document));
+    return data;
+}
+
 function renderProjectsNav(projects, projectChatIds, activityIndex = projectActivityIndex, readOrder = 0) {
     const all = projects || [];
     // Isolation fan-out SSOT: recognize EVERY registered project chat_id (incl.
@@ -1362,9 +1380,8 @@ ws.on('projects_changed', (msg) => {
         // elsewhere cannot leave a panel with a title for a room that no longer exists. Read failures keep the panel:
         // an unavailable answer is not proof of deletion.
         void apiClient.projectById(openId).then((data) => {
+            const row = projectAnswer(openId, data?.projects);
             if (navigation !== projectNavigationGeneration || navState.activeProjectId !== openId) return;
-            const rows = data?.projects;
-            const row = Array.isArray(rows) && rows.length === 1 && rows[0]?.id === openId ? rows[0] : null;
             if (!row || row.lifecycle === 'deleting') closeProjectPanel();
         }).catch(() => {});
     }
