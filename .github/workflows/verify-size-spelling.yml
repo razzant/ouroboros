@@ -1,0 +1,47 @@
+name: Check generated size manifest
+on:
+  push:
+    branches: ['ci-check/skill-size-rationale-9f4ad544']
+permissions:
+  contents: read
+jobs:
+  exact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 9f4ad544a521c4be9e224b1c23a3507e8c757411
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+      - name: Verify the checked-in manifest and size limits
+        shell: bash
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: 6584a82848f0bdc8466c561d6ba27bc782b06bc7
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 9f4ad544a521c4be9e224b1c23a3507e8c757411
+          env -u GITHUB_EVENT_NAME OURO_BOOK_GROWTH_MODE=block python -m pytest -o addopts= -vv --tb=short --junitxml=size-check.xml \
+            tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact \
+            tests/test_smoke.py::test_no_oversized_modules \
+            tests/test_smoke.py::test_no_extremely_oversized_functions \
+            tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree \
+            tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base \
+            tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book \
+            tests/test_reference_book_budgets.py::test_a_change_does_not_grow_bible_or_the_prompts
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('size-check.xml').findall('.//testcase')
+          assert len(cases) == 7 and all(not list(c) for c in cases)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: exact-size-manifest
+          path: size-check.xml
+          if-no-files-found: warn
