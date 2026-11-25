@@ -342,8 +342,9 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     from ouroboros.owner_continue import ROW_IDS, verified_delivery
     from ouroboros.owner_words import (
         OWNER_SOURCES, PLACE_CONFIRMED, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card_reply,
-        place_confirmed_words, place_row_facts, reply_target, scheduled_text_items, task_schedule_items,
+        place_confirmed_words, reply_target, scheduled_text_items, task_schedule_items,
     )
+    from ouroboros.presence_message_facts import place_row_facts
 
     def schedule_text() -> None:  # the schedule this run fired from, then what its tree carried (a helper's field)
         for item in (*scheduled_text_items(metadata, getattr(ctx, "task_contract", None)), *task_schedule_items({"metadata": metadata})):
@@ -432,12 +433,17 @@ def owner_source_sha256(ctx: Any) -> str:
                                      separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
-def owner_input_revision(ctx: Any) -> int:
-    """How many of the owner's own rows were delivered to this run (never ``initial_text``, peers or carried words)."""
+def _owner_rows(ctx: Any) -> List[Dict[str, Any]]:
+    """The owner's own rows delivered to this run, in arrival order (never ``initial_text``, peers or carried words)."""
     from ouroboros.owner_words import OWNER_SOURCES
 
-    return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES and not row.get("carried")
-               for row in getattr(ctx, "_owner_directives", None) or [])
+    return [row for row in getattr(ctx, "_owner_directives", None) or []
+            if isinstance(row, dict) and row.get("source") in OWNER_SOURCES and not row.get("carried")]
+
+
+def owner_input_revision(ctx: Any) -> int:
+    """How many of the owner's own rows were delivered to this run (``_owner_rows``)."""
+    return len(_owner_rows(ctx))
 
 
 OWNER_REPLY_OWED_REFUSAL = "owner_reply_owed: your human wrote after your last live message; answer before finishing silently"
@@ -448,8 +454,43 @@ def owner_reply_owed(ctx: Any) -> bool:
 
     A failed or deferred send discharges nothing; queue admission is not a read receipt, and
     whether a sent line answered completely remains the author's judgment, not the host's.
+    A direct Reply to this work (``work_reply``) is discharged only by its own answer: one
+    answer does not close another work-reply relay's debt, and an ordinary message closes none;
+    a first answer already kept discharges its own row by address (``discharge_reply_row``).
     """
-    return owner_input_revision(ctx) > int(getattr(ctx, "_owner_reply_revision", None) or 0)
+    if any(relay.get("work_reply") is True for relay in (getattr(ctx, "_open_relays", None) or {}).values()):
+        return True
+    answered = set(getattr(ctx, "_answered_reply_rows", None) or ())
+    return any(str(row.get("msg_id") or "") not in answered
+               for row in _owner_rows(ctx)[int(getattr(ctx, "_owner_reply_revision", None) or 0):])
+
+
+def discharge_reply_row(ctx: Any, relay: Dict[str, Any]) -> None:
+    """A first answer that the outbox or history already holds for my human's Reply to this work answers that Reply's
+    own row (``control_runtime._relay_answered``), in whatever order a run restored from before those sends meets them:
+    its one direct source (``relay.source.address``, the row ``_first_answer_witness`` checks, never another quote)
+    joins this turn's ``_answered_reply_rows``, so another unanswered owner row still holds a silent finish."""
+    source = relay.get("source") if isinstance(relay.get("source"), dict) else {}
+    if address := str(source.get("address") or ""):  # a list, as the checkpoint keeps it (``owner_wait``)
+        ctx._answered_reply_rows = sorted({*(getattr(ctx, "_answered_reply_rows", None) or ()), address})
+
+
+def work_reply_finish_hold(tools: Any, messages: List[Dict[str, Any]], content: str) -> bool:
+    """Hold a regular finish while my human's direct Reply to this work is open and the work can answer it in its
+    source room (``open_work_reply_ids``). Its local result is no answer to a question it was not keyed to: the host
+    names the one way, ``send_user_message(reply_to_relay=...)``, and sends no words. The attempted final stands in
+    the transcript before the notice. A stop is never held here; a forced rail cannot wait, its keyed words ride
+    its one call (``commit_forced_work_replies``)."""
+    from ouroboros.tools.control_runtime import open_work_reply_ids
+
+    if not (ids := open_work_reply_ids(tools)):
+        return False
+    if content.strip():
+        messages.append({"role": "assistant", "content": content})
+    _append_or_merge_user_message(messages, (
+        "[SYSTEM NOTICE] Completion held: work_reply_open: your human's Reply to this work has no answer in its source "
+        "room yet. Answer each with send_user_message(reply_to_relay=<id>), then finish: " + ", ".join(map(repr, ids))))
+    return True
 
 
 def queue_inspection_unknown(ctx: Any, exc: BaseException) -> Dict[str, Any]:
@@ -499,12 +540,16 @@ def owner_authority_kinds(entries: List[Dict[str, Any]]) -> List[str]:
 
     Context-only task mail (a host system frame, a descendant's escalation, an
     independent task) wakes the mind but is not the owner's input — the same
-    provenance boundary the ordinary drain uses for the owner corpus.
+    provenance boundary the ordinary drain uses for the owner corpus. Passive
+    carriage (``owner_mailbox.passive_mail``: a row another work answers) neither
+    wakes nor enters the corpus, so it never holds acceptance or the seal open.
     """
-    from ouroboros.owner_mailbox import CONTEXT_ONLY_TASK_PROVENANCES, KIND_OWNER_TEXT, KIND_TASK_MESSAGE
+    from ouroboros.owner_mailbox import CONTEXT_ONLY_TASK_PROVENANCES, KIND_OWNER_TEXT, KIND_TASK_MESSAGE, passive_mail
 
     kinds: List[str] = []
     for entry in entries:
+        if passive_mail(entry):
+            continue
         kind, provenance = str(entry.get("kind") or KIND_OWNER_TEXT), str(entry.get("provenance") or "ancestor_task")
         if kind != KIND_TASK_MESSAGE or provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
             kinds.append(f"{kind}:{provenance}" if kind == KIND_TASK_MESSAGE else kind)

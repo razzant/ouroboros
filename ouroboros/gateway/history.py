@@ -328,6 +328,7 @@ def _annotate_terminal_task_truth(
     evidence_anchors: Optional[dict] = None,
     evidence_scope: Optional[Callable[[str], bool]] = None,
     ending_rows: Optional[dict] = None,
+    exact_row: str = "",  # the history id of the row an exact ``around`` read lands on
 ) -> None:
     """Project task truth AFTER quotas, paying only for represented/current tasks.
 
@@ -512,6 +513,9 @@ def _annotate_terminal_task_truth(
         anchored = anchored_children or set()
         # Keep the root's summary as its truth anchor; a child's card can settle from a later progress row.
         summary_anchors.difference_update(anchored, legacy_child_meta_by_task, child_row_task_ids)
+        from ouroboros.merge_receipts import project_history_rows  # one receipt row of the page shows current truth
+        project_history_rows(data_dir, combined, lambda task_id: cache.get(task_id, {}).get("merge_receipts"),
+                             exact_row)
         for message in combined:
             task_id = str(message.get("task_id") or "")
             if not task_id or message.get("system_type") in (
@@ -520,19 +524,6 @@ def _annotate_terminal_task_truth(
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
                 message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;
                     cache.get(task_id), fallback=message.get("project_name") or "Task")  # nameless: its Project
-            # Selected receipt events keep their physical identity, but show current task-result truth.
-            row_id = str(message.get("card_row_id") or "")
-            if message.get("card_row") == "reviews" and row_id.startswith("merge-receipt:"):
-                from ouroboros.merge_receipts import card_row_projection
-                try:
-                    receipt = next(r for r in cache.get(task_id, {}).get("merge_receipts", [])
-                                   if isinstance(r, dict) and row_id == f"merge-receipt:{r.get('receipt_id')}")
-                    revision = receipt.get("revision", 0)
-                    if type(revision) is not int or revision < int(message.get("card_row_revision") or 0):
-                        raise ValueError("canonical receipt revision unavailable")
-                    message.update(**card_row_projection(data_dir, receipt), card_row_revision=revision)
-                except (StopIteration, KeyError, TypeError, ValueError, AttributeError):
-                    message["text"] += "\nCurrent merge receipt unavailable; showing recorded event."
             if cache.get(task_id, {}).get("_history_result_absent"):
                 historical = (historical_terminals or {}).get(task_id)
                 if historical and matches_history_attempt(message, historical.get("task_attempt")):
@@ -1410,7 +1401,8 @@ def _assemble_history_response(
         anchor["row_address"] = around
         if anchor["state"] != "found":
             return json.dumps({"messages": [], "anchor": anchor, "has_more": False, "next_cursor": None,
-                               "page_cursor": None, "window": {"complete": False, "truncated_by": []}}).encode()
+                               "page_cursor": None, "window": {"complete": False, "truncated_by": []},
+                               **({"profile_scope": profile_scope} if profile_scope else {})}).encode()
         from ouroboros.projects_registry import RoomResolver
         rooms = RoomResolver(data_dir)  # strict authority chose the room; its page reads rows as every page does
     row_matches_thread = _make_thread_filter(
@@ -1505,6 +1497,7 @@ def _assemble_history_response(
         evidence_anchors=evidence_anchors,
         evidence_scope=lambda task_id: row_matches_thread.evidence_matches(
             rooms(task_id) or thread_id, {"task_id": task_id}),
+        exact_row=(page.get("anchor") or {}).get("history_id", "") if exact else "",  # the exact target, not its room
     )
     for source in ("chat", "progress"):
         before[source] = max([before[source], *(entry["_history_end"] for entry in selections[source][0] or ()

@@ -279,10 +279,13 @@ def _log_registry_corrupt(drive_root: Any, delivery_id: str, *, op: str) -> None
                                "delivery_id": str(delivery_id or "")})
 
 
-def register_pending_delivery(drive_root: Any, event: Dict[str, Any], *, publication=None) -> bool:
+def register_pending_delivery(drive_root: Any, event: Dict[str, Any], *, publication=None,
+                              standing: Optional[Dict[str, Any]] = None) -> bool:
     """Owe exact bytes until confirmed delivery. Eviction retains and discloses the payload.
     Deferred handlers retain timestamps and send facts.
-    False leaves cancellation open. True includes a previously owed or delivered answer."""
+    False leaves cancellation open. True includes a previously owed or delivered answer.
+    ``standing`` owes the id once (a work Reply's one answer): one the registry holds stays as registered, nothing
+    merges in; one it forgot is owed anew only if ``standing["recorded"]`` (history) is False. ``state`` says which."""
     from ouroboros.delegate_resume import AnswerHeld
     did = str(event.get("delivery_id") or "").strip()
     if not did:
@@ -297,10 +300,17 @@ def register_pending_delivery(drive_root: Any, event: Dict[str, Any], *, publica
         evicted.clear()
         rows: List[str] = _delivered_rows(current, strict=True)
         if did in rows and not token:
+            if standing is not None:
+                standing["state"] = "delivered"
             return None  # already delivered: nothing is owed
         pending = _mapping_rows(current, "pending", strict=True)
         exhausted, superseded = (_mapping_rows(current, key, strict=True) for key in ("exhausted", "superseded"))
         kept = exhausted if did in exhausted else superseded if did in superseded else None
+        held = kept is not None or isinstance(pending.get(did), dict)
+        if standing is not None and (held or standing.get("recorded", False) is not False):
+            kind = "owed" if kept is None else "exhausted" if kept is exhausted else "superseded"
+            standing["state"] = kind if held else "recorded" if standing["recorded"] else "unknown"
+            return None  # a malformed owed row whose history holds no answer falls through to its refusal below
         if kept is not None and not token:
             # A stale copy cannot reopen given-up or replaced debt (a real receipt retires it); a send that
             # returned anyway is kept beside it as it returned, for its receipt repair (``_kept_send_facts``).

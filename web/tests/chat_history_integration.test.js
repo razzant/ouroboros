@@ -2335,3 +2335,105 @@ test('a successful Main history response under the archive carries no read recei
     assert.equal(f.instance.archiveOpen(), false);
     assert.equal((await f.instance.refreshHistory({ revision: 2 })).painted, true);
 });
+
+
+const workCardHistory = row('progress:901', 'Working in this Project', { task_id: 'reply-work', is_progress: true, narration: true });
+const workReplyHistory = row('chat:902', 'A reply from the Main portal', {
+    role: 'user', chat_id: 1, client_message_id: 'reply-902', row_address: 'row:1@t#reply902',
+    sender_session_id: 'same-tab', ingress_accepted: true,
+    reply_to: { address: 'task:reply-work', role: 'assistant', kind: 'work_card', snippet: 'Working', work_task_id: 'reply-work' },
+});
+
+// The owner's Reply to a work card is the feed's own chronological bubble (owner 23.11: one Reply, the work answers
+// under it in the same feed) — never tucked inside the card's collapsed Details. The work's answer is a standard
+// relay_reply row drawn as the feed's bubble quoting the owner message. Both appear once, live and on replay.
+const userReplies = (f) => [...f.messages.querySelectorAll('.chat-bubble.user[data-client-message-id]')];
+
+test('a live Main work reply from the same tab appears once in the open Project feed before history, and replay keeps its node', async t => {
+    const f = fixture(t, page([workCardHistory]), null, { seed: () => sessionStorage.setItem('ouro_chat_session_id', 'same-tab') });
+    await f.refresh();
+    walkCard(f.messages, workCardHistory.task_id);
+    const echo = { ...workReplyHistory, content: workReplyHistory.text, also_rooms: [2] };
+    const reads = f.calls.length;
+    f.emit(echo);
+    assert.equal(f.calls.length, reads, 'the live transport paints without a history read');
+    const shown = userReplies(f);
+    assert.equal(shown.length, 1);
+    const [bubble] = shown;
+    assert.equal(bubble.parentElement, f.messages, 'the reply is the feed\'s own node, not the card\'s Details');
+    assert.equal(bubble.dataset.rowAddress, workReplyHistory.row_address);
+    f.emit(echo);
+    await f.refresh(page([workCardHistory, workReplyHistory]));
+    f.emit(echo);
+    assert.deepEqual(userReplies(f), [bubble]);
+    assert.equal(bubble.dataset.historyId, workReplyHistory.history_id);
+    assert.equal(bubble.parentElement, f.messages);
+});
+
+test('a late older Reply is inserted before the newer Reply in the feed', async t => {
+    const f = fixture(t, page([workCardHistory, workReplyHistory]));
+    await f.refresh();
+    const [newer] = userReplies(f);
+    const older = { ...workReplyHistory, ts: '2026-01-01T00:00:00Z', history_id: 'chat:899',
+        client_message_id: 'reply-899', row_address: 'row:1@t#reply899', text: 'An older reply' };
+    f.emit({ ...older, content: older.text, also_rooms: [2] });
+    assert.deepEqual(userReplies(f).map(node => node.dataset.clientMessageId), ['reply-899', 'reply-902']);
+    assert.equal(userReplies(f)[1], newer);
+    await f.refresh(page([older, workCardHistory, workReplyHistory]));
+    assert.deepEqual(userReplies(f).map(node => node.dataset.clientMessageId), ['reply-899', 'reply-902']);
+});
+
+test('a work-reply arrival lights New activity on replay, without moving the reader or repeating the row', async t => {
+    const initial = [...presentRows(900), workCardHistory];
+    const f = fixture(t, page(initial));
+    await f.refresh();
+    walkCard(f.messages, workCardHistory.task_id);
+    readUp(f);
+    // Independent scroll geometry: a new feed row does not change this reader's distance from the live edge.
+    Object.defineProperty(f.messages, 'scrollHeight', { configurable: true, get: () => 1500, set() {} });
+    f.messages.scrollTop = 400;
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+    await f.refresh(page([...initial, workReplyHistory]));
+    assert.equal(latestButton().getAttribute('aria-label'), 'New activity — scroll to latest message');
+    assert.equal(f.messages.scrollTop, 400);
+    const shown = userReplies(f);
+    assert.equal(shown.length, 1);
+    const [bubble] = shown;
+    assert.equal(bubble.parentElement, f.messages);
+    await f.refresh(page([...initial, workReplyHistory]));
+    assert.deepEqual(userReplies(f), [bubble]);
+    assert.equal(f.messages.scrollTop, 400);
+});
+
+const localWorkReply = row('chat:910', 'Please check the search', {
+    role: 'user', chat_id: 2, client_message_id: 'reply-910', row_address: 'row:2@t#reply910',
+    sender_session_id: 'same-tab', ingress_accepted: true,
+    reply_to: { address: 'task:reply-work', role: 'assistant', kind: 'work_card', snippet: 'Working', work_task_id: 'reply-work' },
+});
+const workAnswer = row('chat:911', 'Checked — the search is fine', {
+    role: 'assistant', system_type: 'relay_reply', task_id: 'reply-work', row_address: 'row:2@t#answer911',
+    reply_to: { address: 'row:2@t#reply910', role: 'user', kind: 'message', snippet: 'Please check the search', target_home: 'room' },
+    reply_to_relay: 'relay:reply-work',
+});
+
+test('the addressed work answers with a visible relay_reply under the owner reply, once, live and on replay', async t => {
+    const f = fixture(t, page([workCardHistory, localWorkReply]));
+    await f.refresh();
+    const [replyBubble] = userReplies(f);
+    assert.equal(replyBubble.parentElement, f.messages);
+    f.emit({ ...workAnswer, content: workAnswer.text });
+    const answerOf = () => [...f.messages.querySelectorAll('.chat-bubble.assistant')]
+        .find(node => node.dataset.rowAddress === workAnswer.row_address);
+    const answer = answerOf();
+    assert.ok(answer, 'the work answer is drawn');
+    assert.equal(answer.parentElement, f.messages, 'the answer is the feed\'s node, not tucked in the card');
+    const quote = answer.querySelector('.chat-quote');
+    assert.ok(quote, 'the answer carries the quote of the owner message');
+    assert.equal(quote.dataset.address, localWorkReply.row_address);
+    const kids = [...f.messages.children];
+    assert.ok(kids.indexOf(replyBubble) < kids.indexOf(answer), 'the answer stands after the owner reply');
+    const count = f.messages.querySelectorAll('.chat-bubble.assistant').length;
+    await f.refresh(page([workCardHistory, localWorkReply, workAnswer]));
+    assert.equal(answerOf(), answer, 'replay keeps the one answer node');
+    assert.equal(f.messages.querySelectorAll('.chat-bubble.assistant').length, count, 'no second answer');
+});

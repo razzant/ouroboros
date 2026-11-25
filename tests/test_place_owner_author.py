@@ -99,8 +99,9 @@ def test_my_post_through_my_humans_account_is_never_their_words_and_their_same_w
 
     from ouroboros import own_sends
     from ouroboros.loop_messages import _record_owner_directive
-    from ouroboros.owner_words import PLACE_CONFIRMED, cited_owner_basis, place_row_facts
+    from ouroboros.owner_words import PLACE_CONFIRMED, cited_owner_basis
     from ouroboros.presence_context import focus_metadata
+    from ouroboros.presence_message_facts import place_row_facts
     from ouroboros.presence_runner import PresenceTurnEvent
 
     words = "Ship the long answer, the end changes its meaning."

@@ -238,7 +238,8 @@ export function createChatHistoryPager({
                 requestCursor: data.page_cursor, nextCursor: data.next_cursor ?? null,
                 hasMore: data.has_more, rows: messageCount, loaded: true, coverage: data.coverage ?? null });
         applyPage(data.messages, { ...page, direction, window: data.window ?? null,
-            recentVersion: data.recentVersion, page_cursor: data.page_cursor, project_registry: data.project_registry, ...extra });
+            recentVersion: data.recentVersion, page_cursor: data.page_cursor, project_registry: data.project_registry,
+            anchor: data.anchor ?? null, ...extra });
         if (!alive()) return { status: 'disposed' };
         // Only a read of the present restarts the arrivals; a page around one place is not the present.
         if (newChain) {

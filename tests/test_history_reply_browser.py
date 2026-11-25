@@ -664,6 +664,63 @@ def test_a_landed_card_answer_keeps_its_ring_in_light_reduced_motion(direct_serv
             browser.close()
 
 
+
+
+def test_explicit_reply_to_a_work_stays_a_visible_feed_row_after_reload(direct_server_with_data, tmp_path):
+    """A Reply addressed to a work stays an ordinary row of Main's feed: visible where it stands,
+    without opening any card detail, exactly once in the room and still carrying its quote
+    attribution after a reload. A card may reference the row, but the feed keeps the words —
+    the row is never only a collapsed detail of the card."""
+    from playwright.sync_api import expect, sync_playwright
+
+    root = direct_server_with_data["data_dir"]
+    task = "reply-work-card"
+    _result(root, task, chat_id=1)
+    now = datetime.now(timezone.utc)
+    ds.append(root, "progress", {"chat_id": 1, "task_id": task, "ts": (now - timedelta(seconds=5)).isoformat(),
+              "direction": "out", "type": "send_message", "is_progress": True, "narration": True,
+              "text": "Working on a work-specific note."})
+    source = ds.append(root, "chat", {"chat_id": 1, "task_id": task, "ts": (now - timedelta(seconds=3)).isoformat(),
+                       "direction": "out", "type": "proactive_message", "text": "A comment from the work."}).row
+    address = format_address(row_address(source))
+    words = "This reply belongs to that work."
+    url = direct_server_with_data["url"]
+    evidence = producer_evidence_dir(tmp_path / "work-reply-feed", "work-reply-feed")
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 850}, reduced_motion="reduce")
+            _open(page, url)
+            feed = '#chat-messages'
+            target = page.locator(f'{feed} .chat-bubble[data-row-address={json.dumps(address)}]')
+            target.locator('.chat-message-reply').click()
+            page.locator('#chat-input').fill(words)
+            page.locator('#chat-input').press('Enter')
+            for replay in (False, True):
+                if replay:
+                    page.reload(wait_until="domcontentloaded")
+                    _idle(page, feed)
+                # Only the saved bubble counts: an optimistic echo is not the work Reply's durable row.
+                line = page.locator(f'{feed} .chat-bubble.user[data-row-address]').filter(has_text=words)
+                expect(line).to_have_count(1)
+                expect(line).to_be_visible()
+                history = page.request.get(f"{url}/api/chat/history?chat_id=1")
+                assert history.ok, history.text()
+                saved = [row for row in history.json()["messages"]
+                         if (row.get("role"), row.get("text")) == ("user", words)]
+                assert len(saved) == 1 and saved[0]["reply_to"]["address"] == address, saved
+                assert saved[0]["reply_to"]["work_task_id"] == task, saved
+                expect(line).to_have_attribute('data-row-address', saved[0]["row_address"])
+                quote = line.locator('.chat-quote-main')
+                expect(quote).to_be_visible()
+                line.scroll_into_view_if_needed()
+                page.screenshot(path=str(evidence / ('replay.png' if replay else 'live.png')), animations="disabled")
+                quote.click()
+                expect(page.locator(f'{feed} .is-quote-target[data-row-address={json.dumps(address)}]')).to_be_visible()
+        finally:
+            browser.close()
+
+
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
 @pytest.mark.parametrize("viewport", [(1280, 850), (1084, 724)], ids=["wide", "sender"])
 def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, browser_engine, viewport, tmp_path):
@@ -732,6 +789,74 @@ def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, br
                 'n => n.scrollHeight - n.scrollTop - n.clientHeight') < 48
         finally:
             _evidence(page, tmp_path, f"line-conversion-{browser_engine}", fixture, facts)
+            browser.close()
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium"])
+def test_a_quoted_system_line_of_a_collapsed_child_card_opens_exactly_after_reload(
+        direct_server_with_data, browser_engine, tmp_path):
+    """A child card's System timeline line is kept by its source row and reply address once history is read again
+    (no `historyId`): quoting it from the newest page reloads, opens that card and lands on that very line,
+    never the one beside it. The frame with its row menu is kept outside the tree when ``OURO_QUOTE_FRAME_DIR`` names a folder."""
+    import os
+    from pathlib import Path
+    from playwright.sync_api import expect, sync_playwright
+
+    root = direct_server_with_data["data_dir"]
+    start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    stamp = lambda second: (start + timedelta(seconds=second)).isoformat()
+    lines = {}
+    # The child's own narration is what mints its card (as in `seed_reply_history`); the System lines then attach to it.
+    ds.append(root, "progress", {"chat_id": 1, "ts": stamp(5), "task_id": "child-system", "parent_task_id": "parent-system",
+                                 "root_task_id": "parent-system", "direction": "out", "is_progress": True, "narration": True,
+                                 "text": "Child narration", "delegation_role": "subagent",
+                                 "subagent_task_id": "child-system", "subagent_role": "worker"})
+    for name, second, text in (("beside", 10, "SYSTEM_LINE_BESIDE: a different warning"),
+                               ("quoted", 11, "SYSTEM_LINE_QUOTED: the quoted warning")):
+        row = {"chat_id": 1, "ts": stamp(second), "task_id": "child-system", "parent_task_id": "parent-system",
+               "root_task_id": "parent-system", "direction": "out", "role": "system", "system_type": "host_progress",
+               "card_row": "timeline", "card_row_id": f"system-line:{name}", "card_row_revision": 1,
+               "content": text, "text": text, "delegation_role": "subagent", "subagent_task_id": "child-system",
+               "subagent_role": "worker"}
+        saved = ds.append(root, "progress", row).row
+        lines[name] = {"row": saved, "address": format_address(row_address(saved)), "text": text}
+    for index in range(300):
+        ds.append(root, "chat", {"chat_id": 1, "ts": stamp(100 + index), "direction": "in",
+                                 "client_message_id": f"filler-{index}", "text": f"Recent context {index:03}"})
+    ds.append(root, "chat", {"chat_id": 1, "ts": stamp(500), "direction": "out", "task_id": "answer-quoted",
+                             "text": "Reply quoting the System line", "reply_to": reference_from_row(lines["quoted"]["row"])})
+    _result(root, "parent-system", chat_id=1)
+    _result(root, "child-system", chat_id=1, parent_task_id="parent-system", root_task_id="parent-system")
+    address = lines["quoted"]["address"]
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 850})
+            page.add_init_script(f"({_OBSERVE_QUOTES})()")
+            _open(page, direct_server_with_data["url"])
+            page.reload(wait_until="domcontentloaded")  # the quote is then drawn from saved history alone
+            _idle(page, "#chat-messages")
+            child = "#chat-messages .chat-live-card[data-task-id=child-system]"
+            line = f"#chat-messages [data-row-address={json.dumps(address)}]"
+            # Closed before the jump: the child's card is not open and its line is not on the page.
+            assert page.locator(f"{child}[data-expanded='1']").count() == 0
+            assert page.locator(f"{line}:visible").count() == 0
+            _quote(page, address).click()
+            _landed(page, address, "#chat-messages")
+            target = page.locator("#chat-messages .is-quote-target")
+            expect(target).to_have_count(1)
+            assert target.get_attribute("data-row-address") == address
+            assert "SYSTEM_LINE_QUOTED" in target.inner_text() and "SYSTEM_LINE_BESIDE" not in target.inner_text()
+            # The very child card that owns the quoted line is the one now open, not a neighbour or its parent.
+            assert target.evaluate("n => n.closest('.chat-live-card')?.dataset.taskId") == "child-system"
+            assert target.evaluate("n => n.closest('.chat-live-card')?.dataset.expanded") == "1"
+            target.click(button="right")
+            expect(page.locator(".chat-row-menu")).to_be_visible()
+            frames = os.environ.get("OURO_QUOTE_FRAME_DIR")
+            destination = Path(frames) if frames else tmp_path
+            destination.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(destination / "child-system-line-menu.png"), animations="disabled")
+        finally:
             browser.close()
 
 
@@ -2265,5 +2390,834 @@ def test_selected_passage_round_trip(direct_server_with_data, room, direction):
                 return r?.toString() === expected && r.startOffset === start
                     && r.startContainer.parentElement.closest('.chat-bubble')?.dataset.rowAddress === address;
             }""", arg=[address, passage, excerpt["start_utf16"]])
+        finally:
+            browser.close()
+
+
+def test_reply_to_child_narration_and_final_report_live_and_reloaded(direct_server_with_data, tmp_path):
+    """Reply inside a work card selects the exact child narration or final report (live and reloaded, pointer and
+    keyboard Tab + Shift+F10 without roving tabindex), keeps existing System-line reply and disclosure working, and
+    never silently substitutes the enclosing card for an unstamped UI-only timeline row."""
+    from playwright.sync_api import expect, sync_playwright
+
+    root, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    start = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+    stamp = lambda second: (start + timedelta(seconds=second)).isoformat()
+
+    def seed_progress(task_id, second, text, **extra):
+        row = {"chat_id": 1, "ts": stamp(second), "task_id": task_id, "direction": "out",
+               "is_progress": True, "narration": True, "text": text, "content": text, **extra}
+        saved = ds.append(root, "progress", row).row
+        return saved, format_address(row_address(saved))
+
+    seed_progress("parent-work", 1, "Coordinating child verification.")
+    lineage = {"parent_task_id": "parent-work", "root_task_id": "parent-work",
+               "delegation_role": "subagent", "subagent_task_id": "child-work", "subagent_role": "worker"}
+    _, narr1_addr = seed_progress("child-work", 5, "NARRATION_ONE: checking the archive index.", **lineage)
+    _, narr2_addr = seed_progress(
+        "child-work", 10,
+        "NARRATION_TWO: auditing the second ledger shard — " + "verified entry details " * 14,
+        **lineage,
+    )
+    sys_saved = ds.append(root, "progress", {
+        "chat_id": 1, "ts": stamp(15), "task_id": "child-work", "direction": "out",
+        "role": "system", "system_type": "host_progress",
+        "card_row": "timeline", "card_row_id": "sys-child-1", "card_row_revision": 1,
+        "content": "SYSTEM_NOTE: worker paused for verification", "text": "SYSTEM_NOTE: worker paused for verification",
+        **lineage,
+    }).row
+    sys_addr = format_address(row_address(sys_saved))
+    final_saved = ds.append(root, "chat", {
+        "chat_id": 1, "ts": stamp(20), "task_id": "child-work", "direction": "out",
+        "text": "FINAL_CHILD_REPORT: all three archive shards matched the checksum.",
+        **lineage,
+    }, feed=True).row
+    final_addr = format_address(row_address(final_saved))
+    _result(root, "parent-work", chat_id=1)
+    _result(root, "child-work", chat_id=1, parent_task_id="parent-work", root_task_id="parent-work")
+
+    live_lineage = {"parent_task_id": "parent-work", "root_task_id": "parent-work",
+                    "delegation_role": "subagent", "subagent_task_id": "live-child", "subagent_role": "scout"}
+
+    facts = {}
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 850}, reduced_motion="reduce")
+        page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+        page.add_init_script(f"({_OBSERVE_QUOTES})()")
+        try:
+            _open(page, url)
+            feed = "#chat-messages"
+            menu = page.locator(".chat-row-menu")
+            strip = page.locator(".chat-quote--composer")
+
+            def send_staged_reply(reply_words):
+                author = strip.locator(".chat-quote-author").inner_text().strip()
+                text = strip.locator(".chat-quote-text").inner_text()
+                before = page.evaluate("() => window.__quoteSends.length")
+                page.locator("#chat-input").fill(reply_words)
+                page.locator("#chat-send").click()
+                saved_bubble = page.locator(f'{feed} .chat-bubble.user[data-row-address]').filter(has_text=reply_words)
+                saved_bubble.wait_for(timeout=30_000)
+                expect(strip).to_have_count(0)
+                sent_frames = page.evaluate("""(start) => window.__quoteSends.slice(start).map((raw) => {
+                    try { return JSON.parse(raw); } catch { return null; }
+                }).filter((frame) => frame && frame.type === 'chat')""", before)
+                assert len(sent_frames) == 1, sent_frames
+                cmid = saved_bubble.get_attribute("data-client-message-id")
+                accepted = ds.accepted_row(root, 1, cmid)
+                assert accepted and accepted.row.get("reply_to"), (cmid, sent_frames)
+                outgoing_address = sent_frames[0].get("reply_to")
+                reply_to = accepted.row["reply_to"]
+                assert reply_to["address"] == outgoing_address and not reply_to.get("unresolved"), (sent_frames[0], reply_to)
+                return {
+                    "address": outgoing_address,
+                    "role": reply_to.get("role"),
+                    "author": author,
+                    "text": text,
+                }
+
+            def reply_from_menu(target, reply_words):
+                target.click(button="right")
+                expect(menu).to_be_visible()
+                menu.locator('[data-row-action="reply"]').click()
+                expect(strip).to_be_visible()
+                return send_staged_reply(reply_words)
+
+            parent = page.locator(f'{feed} .chat-live-card[data-task-id="parent-work"]')
+            if parent.get_attribute("data-expanded") != "1":
+                page.locator(f'{feed} .chat-live-card[data-task-id="parent-work"] > .chat-live-summary-button [data-live-disclosure]').click()
+            child = page.locator(f'{feed} .chat-live-card[data-task-id="child-work"]')
+            expect(child).to_be_visible()
+
+            # Emit a real log-only tool call on child-work to create an unstamped UI-only timeline row.
+            _emit_ws_frame(page, {
+                "type": "log", "chat_id": 1,
+                "data": {"type": "tool_call_finished", "task_id": "child-work", "tool": "read_file",
+                         "tool_call_id": "c1", "invocation_id": "inv-1", "duration_sec": 0.2, "ts": stamp(22)},
+            })
+            child_disclosure = page.locator(f'{feed} .chat-live-card[data-task-id="child-work"] > .chat-live-summary-button [data-live-disclosure]')
+            assert child.get_attribute("data-expanded") != "1"
+            child_disclosure.click()
+
+            timeline = page.locator(f'{feed} .chat-live-card[data-task-id="child-work"] > [data-live-timeline]')
+            narr1_row = timeline.locator(f'.chat-live-line[data-row-address={json.dumps(narr1_addr)}]')
+            narr2_row = timeline.locator(f'.chat-live-line[data-row-address={json.dumps(narr2_addr)}]')
+            final_row = timeline.locator(f'.chat-live-line[data-row-address={json.dumps(final_addr)}]')
+            sys_row = timeline.locator(f'.chat-live-line[data-row-address={json.dumps(sys_addr)}]')
+            tool_row = timeline.locator(".chat-live-line").filter(has_text="1 tool call")
+            for row in (narr1_row, narr2_row, final_row, sys_row, tool_row):
+                expect(row).to_be_visible()
+
+            # Short addressable rows get one Tab stop; expandable rows keep only their toggle stop; no duplicate DOM body.
+            assert narr1_row.get_attribute("tabindex") == "0"
+            assert narr2_row.get_attribute("tabindex") is None
+            assert narr2_row.locator("[data-live-line-toggle]").get_attribute("tabindex") == "0"
+            assert final_row.get_attribute("tabindex") is None
+            assert final_row.locator("[data-live-line-toggle]").get_attribute("tabindex") == "0"
+            assert narr2_row.get_attribute("data-row-words") is None
+            assert final_row.get_attribute("data-row-words") is None
+            assert tool_row.get_attribute("data-row-address") is None
+            assert tool_row.get_attribute("data-work-reply-row") is None
+            assert tool_row.get_attribute("tabindex") is None
+
+            # Real keyboard Tab navigation from the card's Details button (never row.focus()) reaches short narration
+            # and the expandable final report's toggle, preserving Enter disclosure and Shift+F10 Reply.
+            def tab_to(target_addr):
+                for _ in range(12):
+                    page.keyboard.press("Tab")
+                    info = page.evaluate("""() => ({
+                        addr: document.activeElement?.closest('.chat-live-line')?.dataset.rowAddress || '',
+                        isRow: Boolean(document.activeElement?.classList?.contains('chat-live-line')),
+                        isToggle: Boolean(document.activeElement?.matches?.('[data-live-line-toggle]')),
+                    })""")
+                    if info["addr"] == target_addr:
+                        return info
+                raise AssertionError(f"Tab navigation did not reach {target_addr}")
+
+            narr1_focus = tab_to(narr1_addr)
+            assert narr1_focus["isRow"]
+            page.keyboard.press("Shift+F10")
+            expect(menu).to_be_visible()
+            page.keyboard.press("Escape")
+            expect(menu).to_have_count(0)
+            assert page.evaluate("() => document.activeElement?.dataset?.rowAddress || ''") == narr1_addr
+
+            final_focus = tab_to(final_addr)
+            assert final_focus["isToggle"], "expandable report focuses its toggle, never a second wrapper stop"
+            page.keyboard.press("Enter")
+            expect(final_row).to_have_attribute("data-expanded", "1")
+            page.keyboard.press("Shift+F10")
+            expect(menu).to_be_visible()
+            _evidence(page, tmp_path, "child-report-row-menu", {"final_addr": final_addr, "narr2_addr": narr2_addr}, facts)
+            menu.locator('[data-row-action="reply"]').click()
+            expect(strip).to_be_visible()
+            staged_final = send_staged_reply("Follow up on reloaded child final report.")
+            facts["reloaded_report"] = staged_final
+            assert staged_final["address"] == final_addr
+            assert "FINAL_CHILD_REPORT" in staged_final["text"] and "Report to parent" not in staged_final["text"] and "worker" not in staged_final["text"]
+
+            # Unstamped UI-only tool row opens its child card's menu (never its enclosing parent's) without Reply.
+            expected_copy = page.evaluate("""() => {
+                window.__copiedCardText = null;
+                Object.defineProperty(navigator, 'clipboard', {
+                    configurable: true,
+                    value: { writeText: async (text) => { window.__copiedCardText = text; } },
+                });
+                const cardCopy = (id) => {
+                    const sum = document.querySelector(`#chat-messages .chat-live-card[data-task-id="${id}"] > .chat-live-summary-button`);
+                    const title = sum?.querySelector('[data-live-title]')?.textContent?.trim() || '';
+                    const act = sum?.querySelector('[data-live-activity]');
+                    const activity = (act?.dataset?.fullText || act?.textContent || '').trim();
+                    return [title, activity].filter(Boolean).join('\\n');
+                };
+                return { child: cardCopy('child-work'), parent: cardCopy('parent-work') };
+            }""")
+            assert expected_copy["child"] and expected_copy["child"] != expected_copy["parent"], expected_copy
+            tool_row.click(button="right")
+            expect(menu).to_be_visible()
+            assert menu.get_attribute("aria-label") == "Work actions"
+            assert menu.locator('[data-row-action="reply"]').count() == 0 and strip.count() == 0
+            menu.locator('[data-row-action="copy"]').click()
+            expect(menu).to_have_count(0)
+            page.wait_for_function("() => window.__copiedCardText !== null", timeout=5_000)
+            copied_info = page.evaluate("""() => ({
+                text: window.__copiedCardText,
+                focusedCard: document.activeElement?.closest('.chat-live-card')?.dataset.taskId || '',
+                focusedTool: Boolean(document.activeElement?.classList?.contains('chat-live-line')
+                    && !document.activeElement?.dataset.rowAddress),
+            })""")
+            assert copied_info == {"text": expected_copy["child"], "focusedCard": "child-work", "focusedTool": True}, copied_info
+
+            # Reloaded child narration, existing System line, and child card header each quote their own target.
+            staged_narr2 = reply_from_menu(narr2_row, "Follow up on reloaded child narration.")
+            facts["reloaded_narration"] = staged_narr2
+            assert staged_narr2["address"] == narr2_addr and staged_narr2["role"] == "assistant"
+            assert staged_narr2["author"] == "Ouroboros" and "NARRATION_TWO" in staged_narr2["text"]
+
+            staged_sys = reply_from_menu(sys_row, "Follow up on reloaded child system note.")
+            facts["reloaded_system"] = staged_sys
+            assert staged_sys["address"] == sys_addr and staged_sys["role"] == "system"
+            assert staged_sys["author"] == "System" and "SYSTEM_NOTE" in staged_sys["text"]
+
+            staged_card = reply_from_menu(
+                page.locator(f'{feed} .chat-live-card[data-task-id="child-work"] > .chat-live-summary-button [data-live-title]'),
+                "Follow up on child card header.",
+            )
+            assert staged_card["address"] == "task:child-work"
+
+            # Live WS child narration and child final report, then Send, reload, and jump-back landing.
+            live_narr_saved, live_narr_addr = seed_progress(
+                "live-child", 40, "LIVE_CHILD_NARRATION: scanning live socket output.", **live_lineage,
+            )
+            _emit_ws_frame(page, {
+                "type": "chat", "role": "assistant", "chat_id": 1, "is_progress": True, "narration": True,
+                "task_id": "live-child", "subagent_event": "progress",
+                "content": live_narr_saved["text"], "ts": live_narr_saved["ts"],
+                "row_address": live_narr_addr, **live_lineage,
+            })
+            live_card = page.locator(f'{feed} .chat-live-card[data-task-id="live-child"]')
+            expect(live_card).to_be_visible()
+            if live_card.get_attribute("data-expanded") != "1":
+                page.locator(f'{feed} .chat-live-card[data-task-id="live-child"] > .chat-live-summary-button [data-live-disclosure]').click()
+            live_timeline = page.locator(f'{feed} .chat-live-card[data-task-id="live-child"] > [data-live-timeline]')
+            live_narr_row = live_timeline.locator(f'.chat-live-line[data-row-address={json.dumps(live_narr_addr)}]')
+            expect(live_narr_row).to_be_visible()
+            staged_live_narr = reply_from_menu(live_narr_row, "Follow up on live child narration.")
+            facts["live_narration"] = staged_live_narr
+            assert staged_live_narr["address"] == live_narr_addr and "LIVE_CHILD_NARRATION" in staged_live_narr["text"]
+
+            live_final_saved = ds.append(root, "chat", {
+                "chat_id": 1, "ts": stamp(45), "task_id": "live-child", "direction": "out",
+                "text": "LIVE_CHILD_REPORT: live run completed cleanly.",
+                **live_lineage,
+            }, feed=True).row
+            live_final_addr = format_address(row_address(live_final_saved))
+            _result(root, "live-child", chat_id=1, parent_task_id="parent-work", root_task_id="parent-work")
+            _emit_ws_frame(page, {
+                "type": "chat", "role": "assistant", "chat_id": 1, "is_progress": False,
+                "task_id": "live-child", "task_terminal_status": "completed",
+                "content": live_final_saved["text"], "ts": live_final_saved["ts"],
+                "row_address": live_final_addr, **live_lineage,
+            })
+            live_final_row = live_timeline.locator(f'.chat-live-line[data-row-address={json.dumps(live_final_addr)}]')
+            expect(live_final_row).to_be_visible()
+            live_final_row.click(button="right")
+            expect(menu).to_be_visible()
+            menu.locator('[data-row-action="reply"]').click()
+            expect(strip).to_be_visible()
+            _evidence(page, tmp_path, "live-child-report-staged-reply",
+                      {"live_narr_addr": live_narr_addr, "live_final_addr": live_final_addr}, facts)
+
+            reply_words = "Follow up on the live child report."
+            staged_live_final = send_staged_reply(reply_words)
+            facts["live_report"] = staged_live_final
+            assert staged_live_final["address"] == live_final_addr and "LIVE_CHILD_REPORT" in staged_live_final["text"]
+            page.reload(wait_until="domcontentloaded")
+            _idle(page, feed)
+            reloaded_reply = page.locator(f'{feed} .chat-bubble.user[data-row-address]').filter(has_text=reply_words)
+            expect(reloaded_reply).to_be_visible()
+            reloaded_reply.locator(".chat-quote-main").click()
+            facts["reloaded_jump"] = _landed(page, live_final_addr, feed)
+            assert facts["reloaded_jump"]["address"] == live_final_addr
+            _evidence(page, tmp_path, "child-report-jump-after-reload",
+                      {"live_final_addr": live_final_addr}, facts)
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_quote_of_evolved_system_card_row_lands_on_exact_earlier_words_and_keeps_ordinary_feed_coalesced(
+    direct_server_with_data, browser_engine, tmp_path,
+):
+    """Following a quote of an earlier System update on an evolved card_row_id lands on the exact earlier
+    words (both revisioned and timestamp-only) after reload and after live evolution, leaves adjacent cards
+    untouched, refuses stale/deleted links without focusing a different revision, and restores ordinary
+    coalescing onto the current status on return to latest."""
+    from playwright.sync_api import expect, sync_playwright
+
+    root, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    start = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+    stamp = lambda second: (start + timedelta(seconds=second)).isoformat()
+
+    ds.append(root, "progress", {
+        "chat_id": 1, "ts": stamp(1), "task_id": "parent-ev", "direction": "out",
+        "is_progress": True, "narration": True,
+        "text": "Coordinating verification across child cards.", "content": "Coordinating verification across child cards.",
+    })
+    lineage = {"parent_task_id": "parent-ev", "root_task_id": "parent-ev",
+               "delegation_role": "subagent", "subagent_task_id": "child-ev", "subagent_role": "worker"}
+    neighbor_lineage = {"parent_task_id": "parent-ev", "root_task_id": "parent-ev",
+                        "delegation_role": "subagent", "subagent_task_id": "child-adj", "subagent_role": "scout"}
+
+    # Revisioned evolving System update on child-ev (v1 -> v2 under same card_row_id).
+    sys_v1 = ds.append(root, "progress", {
+        "chat_id": 1, "ts": stamp(5), "task_id": "child-ev", "direction": "out",
+        "role": "system", "system_type": "host_progress",
+        "card_row": "timeline", "card_row_id": "sys-status", "card_row_revision": 1,
+        "text": "SYSTEM_V1: waiting on first shard checksum", "content": "SYSTEM_V1: waiting on first shard checksum",
+        **lineage,
+    }).row
+    ds.append(root, "progress", {
+        "chat_id": 1, "ts": stamp(8), "task_id": "child-ev", "direction": "out",
+        "is_progress": True, "narration": True,
+        "text": "Inspecting intermediate shard metadata.", "content": "Inspecting intermediate shard metadata.",
+        **lineage,
+    })
+    sys_v2 = ds.append(root, "progress", {
+        "chat_id": 1, "ts": stamp(12), "task_id": "child-ev", "direction": "out",
+        "role": "system", "system_type": "host_progress",
+        "card_row": "timeline", "card_row_id": "sys-status", "card_row_revision": 2,
+        "text": "SYSTEM_V2: all shards verified and sealed", "content": "SYSTEM_V2: all shards verified and sealed",
+        **lineage,
+    }).row
+
+    # Timestamp-only evolving System update (no card_row_revision) on child-ev.
+    unrev_v1 = ds.append(root, "progress", {
+        "chat_id": 1, "ts": stamp(14), "task_id": "child-ev", "direction": "out",
+        "role": "system", "system_type": "host_progress",
+        "card_row": "timeline", "card_row_id": "sys-unrev",
+        "text": "UNREV_V1: retired 1 earlier reasoning block", "content": "UNREV_V1: retired 1 earlier reasoning block",
+        **lineage,
+    }).row
+    unrev_v2 = ds.append(root, "progress", {
+        "chat_id": 1, "ts": stamp(16), "task_id": "child-ev", "direction": "out",
+        "role": "system", "system_type": "host_progress",
+        "card_row": "timeline", "card_row_id": "sys-unrev",
+        "text": "UNREV_V2: retired 3 earlier reasoning blocks", "content": "UNREV_V2: retired 3 earlier reasoning blocks",
+        **lineage,
+    }).row
+
+    # Adjacent child card sharing the same card_row_id to prove no cross-card leakage.
+    ds.append(root, "progress", {
+        "chat_id": 1, "ts": stamp(17), "task_id": "child-adj", "direction": "out",
+        "is_progress": True, "narration": True,
+        "text": "Adjacent scout scanning another archive.", "content": "Adjacent scout scanning another archive.",
+        **neighbor_lineage,
+    })
+    adj_sys = ds.append(root, "progress", {
+        "chat_id": 1, "ts": stamp(18), "task_id": "child-adj", "direction": "out",
+        "role": "system", "system_type": "host_progress",
+        "card_row": "timeline", "card_row_id": "sys-status", "card_row_revision": 1,
+        "text": "ADJACENT_SYS: unrelated neighbour status", "content": "ADJACENT_SYS: unrelated neighbour status",
+        **neighbor_lineage,
+    }).row
+
+    for task, extra in (
+        ("parent-ev", {"chat_id": 1}),
+        ("child-ev", {"chat_id": 1, "parent_task_id": "parent-ev", "root_task_id": "parent-ev"}),
+        ("child-adj", {"chat_id": 1, "parent_task_id": "parent-ev", "root_task_id": "parent-ev"}),
+    ):
+        _result(root, task, **extra)
+
+    addr_v1 = format_address(row_address(sys_v1))
+    addr_v2 = format_address(row_address(sys_v2))
+    addr_unrev_v1 = format_address(row_address(unrev_v1))
+    addr_unrev_v2 = format_address(row_address(unrev_v2))
+    addr_adj = format_address(row_address(adj_sys))
+    stale_addr = "row:1@2026-10-12T12:00:09+00:00#deadbeef0000"
+
+    ds.append(root, "chat", {
+        "chat_id": 1, "ts": stamp(30), "direction": "in", "client_message_id": "q-v1",
+        "text": "Why did it pause on the first shard?", "reply_to": reference_from_row(sys_v1),
+    }, feed=True)
+    ds.append(root, "chat", {
+        "chat_id": 1, "ts": stamp(31), "direction": "in", "client_message_id": "q-v2",
+        "text": "Confirm the sealed shard status.", "reply_to": reference_from_row(sys_v2),
+    }, feed=True)
+    ds.append(root, "chat", {
+        "chat_id": 1, "ts": stamp(32), "direction": "in", "client_message_id": "q-unrev-v1",
+        "text": "Check the first retirement notice.", "reply_to": reference_from_row(unrev_v1),
+    }, feed=True)
+    ds.append(root, "chat", {
+        "chat_id": 1, "ts": stamp(32.5), "direction": "in", "client_message_id": "q-unrev-v2",
+        "text": "Confirm the latest retirement notice.", "reply_to": reference_from_row(unrev_v2),
+    }, feed=True)
+    ds.append(root, "chat", {
+        "chat_id": 1, "ts": stamp(33), "direction": "in", "client_message_id": "q-stale",
+        "text": "Quote of a removed System row.",
+        "reply_to": {"address": stale_addr, "role": "system", "author_label": "System",
+                     "kind": "system", "snippet": "DELETED_SYSTEM_TEXT", "chat_id": 1},
+    }, feed=True)
+
+    facts = {}
+    with sync_playwright() as pw:
+        try:
+            browser = getattr(pw, browser_engine).launch(headless=True)
+        except Exception as error:
+            if "Executable doesn't exist" in str(error):
+                pytest.skip(f"{browser_engine} is not installed for this Playwright")
+            raise
+        page = browser.new_page(viewport={"width": 1280, "height": 850}, reduced_motion="reduce")
+        page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+        page.add_init_script(f"({_OBSERVE_QUOTES})()")
+        try:
+            _open(page, url)
+            feed = "#chat-messages"
+
+            # 1. Ordinary feed stays coalesced onto the current status (v2), never showing v1.
+            parent_btn = page.locator(f'{feed} .chat-live-card[data-task-id="parent-ev"] > .chat-live-summary-button [data-live-disclosure]')
+            parent = page.locator(f'{feed} .chat-live-card[data-task-id="parent-ev"]')
+            if parent.get_attribute("data-expanded") != "1":
+                parent_btn.click()
+            child = page.locator(f'{feed} .chat-live-card[data-task-id="child-ev"]')
+            adj = page.locator(f'{feed} .chat-live-card[data-task-id="child-adj"]')
+            child.locator('> .chat-live-summary-button [data-live-disclosure]').click()
+            timeline = child.locator('> [data-live-timeline]')
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v2)}]')).to_be_visible()
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_unrev_v2)}]')).to_be_visible()
+            assert timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v1)}]').count() == 0
+            assert timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_unrev_v1)}]').count() == 0
+            assert adj.get_attribute("data-expanded") != "1"
+
+            # 2. Reload fresh (cards collapsed), then follow the quote of the earlier revisioned update (addr_v1).
+            q_btn = lambda cmid: page.locator(f'{feed} .chat-bubble.user[data-client-message-id="{cmid}"] .chat-quote-main')
+            page.reload(wait_until="domcontentloaded")
+            _idle(page, feed)
+            q_btn("q-v1").click()
+            facts["v1"] = _landed(page, addr_v1, feed)
+            assert facts["v1"]["address"] == addr_v1
+            target_text = page.locator(f'{feed} .is-quote-target').inner_text()
+            assert "SYSTEM_V1: waiting on first shard checksum" in target_text
+            assert "SYSTEM_V2" not in target_text
+            # Current v2 status stays intact beside v1; adjacent child card stays collapsed and unreferenced.
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v2)}]')).to_be_visible()
+            assert adj.get_attribute("data-expanded") != "1"
+            assert page.locator(f'{feed} [data-row-address={json.dumps(addr_adj)}]').count() == 0
+            # Exactly one around read for addr_v1 (no second fetch).
+            v1_reads = [r for r in page.evaluate("() => window.__quoteReads") if r["address"] == addr_v1]
+            assert len(v1_reads) == 1, v1_reads
+            _evidence(page, tmp_path, f"evolved-system-v1-landed-{browser_engine}",
+                      {"addr_v1": addr_v1, "addr_v2": addr_v2}, facts)
+
+            # 3. Follow the timestamp-only earlier update (addr_unrev_v1): replaces prior anchored v1 (no accumulation).
+            q_btn("q-unrev-v1").click()
+            facts["unrev_v1"] = _landed(page, addr_unrev_v1, feed)
+            assert facts["unrev_v1"]["address"] == addr_unrev_v1
+            assert "UNREV_V1: retired 1 earlier reasoning block" in page.locator(f'{feed} .is-quote-target').inner_text()
+            assert timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v1)}]').count() == 0
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_unrev_v2)}]')).to_be_visible()
+
+            # 4. Stale / deleted quote never fabricates a row or focuses a different revision / adjacent card.
+            q_btn("q-stale").evaluate("node => node.click()")
+            page.wait_for_function(
+                "addr => window.__quoteReads.some(r => r.address === addr && r.done)",
+                arg=stale_addr, timeout=15_000,
+            )
+            stale_read = [r for r in page.evaluate("() => window.__quoteReads") if r["address"] == stale_addr][-1]
+            assert stale_read["body"]["anchor"]["state"] == "absent", stale_read
+            page.wait_for_function(
+                "() => window.__quoteToasts.some(t => t.includes('not found in saved history'))",
+                timeout=15_000,
+            )
+            assert page.locator(f'{feed} [data-row-address={json.dumps(stale_addr)}]').count() == 0
+            assert adj.get_attribute("data-expanded") != "1"
+
+            # 5. Returning to latest drops the temporary anchored row and keeps the ordinary feed coalesced.
+            page.locator('#chat-scroll-bottom').evaluate("node => node.click()")
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_unrev_v1)}]')).to_have_count(0)
+            _idle(page, feed)
+            assert timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v1)}]').count() == 0
+            assert timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_unrev_v1)}]').count() == 0
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v2)}]')).to_be_visible()
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_unrev_v2)}]')).to_be_visible()
+            _evidence(page, tmp_path, f"evolved-system-latest-coalesced-{browser_engine}",
+                      {"addr_v2": addr_v2, "addr_unrev_v2": addr_unrev_v2}, facts)
+
+            # 5b. Negative check: ordinary keyboard focus on each newest status line (no quote navigation)
+            # must NOT pin or accumulate earlier revisions across four sequential live updates.
+            tab_addrs = [f"row:1@2026-10-12T12:00:4{step}+00:00#44444444444{step}" for step in range(1, 5)]
+            for step, tab_addr in enumerate(tab_addrs, start=1):
+                _emit_ws_frame(page, {
+                    "type": "chat", "role": "system", "chat_id": 1, "system_type": "host_progress",
+                    "task_id": "child-ev", "card_row": "timeline", "card_row_id": "sys-tab", "card_row_revision": step,
+                    "content": f"TAB_STATUS_{step}: ordinary live update", "text": f"TAB_STATUS_{step}: ordinary live update",
+                    "ts": stamp(40 + step), "row_address": tab_addr, **lineage,
+                })
+                tab_line = timeline.locator(f'.chat-live-line[data-row-address={json.dumps(tab_addr)}]')
+                expect(tab_line).to_be_visible()
+                tab_line.evaluate("node => node.focus()")
+                assert page.evaluate("addr => document.activeElement?.dataset?.rowAddress === addr", tab_addr)
+            for earlier in tab_addrs[:-1]:
+                assert timeline.locator(f'.chat-live-line[data-row-address={json.dumps(earlier)}]').count() == 0
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(tab_addrs[-1])}]')).to_be_visible()
+            facts["ordinary_focus_coalesced"] = {"kept": tab_addrs[-1], "dropped": tab_addrs[:-1]}
+
+            # 6. Quote currently displayed v2 (mounted fastpath, 0 around fetches), keep keyboard focus on its
+            # DOM node, then deliver live v3 DURING that landing (no second click): the SAME focused DOM node
+            # keeps v2/address and [v2, v3] stay chronological.
+            q_btn("q-v2").evaluate("node => node.click()")
+            facts["v2_before_live_v3"] = _landed(page, addr_v2, feed)
+            assert len([r for r in page.evaluate("() => window.__quoteReads") if r["address"] == addr_v2]) == 0
+            assert page.evaluate("""([addr, feed]) => {
+                const active = document.activeElement;
+                window.__focusedV2 = active;
+                return Boolean(active && active.matches(`${feed} .chat-live-line`) && active.dataset.rowAddress === addr);
+            }""", [addr_v2, feed])
+            addr_v3 = "row:1@2026-10-12T12:00:50+00:00#333333333333"
+            _emit_ws_frame(page, {
+                "type": "chat", "role": "system", "chat_id": 1, "system_type": "host_progress",
+                "task_id": "child-ev", "card_row": "timeline", "card_row_id": "sys-status", "card_row_revision": 3,
+                "content": "SYSTEM_V3: live evolved after reload", "text": "SYSTEM_V3: live evolved after reload",
+                "ts": stamp(50), "row_address": addr_v3, **lineage,
+            })
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v3)}]')).to_be_visible()
+            live_focus = page.evaluate("""([addrV2, addrV3, feed]) => {
+                const kept = window.__focusedV2;
+                const v3 = document.querySelector(`${feed} .chat-live-line[data-row-address="${addrV3}"]`);
+                return {
+                    sameNode: document.activeElement === kept,
+                    connected: Boolean(kept?.isConnected),
+                    address: kept?.dataset?.rowAddress || '',
+                    text: kept?.innerText || '',
+                    v3AfterV2: Boolean(kept && v3 && (kept.compareDocumentPosition(v3) & Node.DOCUMENT_POSITION_FOLLOWING)),
+                };
+            }""", [addr_v2, addr_v3, feed])
+            assert live_focus["sameNode"] and live_focus["connected"], live_focus
+            assert live_focus["address"] == addr_v2, live_focus
+            assert "SYSTEM_V2: all shards verified and sealed" in live_focus["text"] and "SYSTEM_V3" not in live_focus["text"], live_focus
+            assert live_focus["v3AfterV2"], live_focus
+            assert adj.get_attribute("data-expanded") != "1"
+            facts["v2_focused_after_live_v3"] = live_focus
+            _evidence(page, tmp_path, f"evolved-system-v2-focused-after-live-v3-{browser_engine}",
+                      {"addr_v2": addr_v2, "addr_v3": addr_v3}, facts)
+
+            # 6b. Second successive mounted fastpath jump (q-unrev-v2, 0 around fetches): immediately releases the
+            # prior v2 pin while keeping live v3, pins unrev_v2, and preserves unrev_v2's focused DOM node on live unrev_v3.
+            q_btn("q-unrev-v2").evaluate("node => node.click()")
+            facts["unrev_v2_second_mounted_jump"] = _landed(page, addr_unrev_v2, feed)
+            assert len([r for r in page.evaluate("() => window.__quoteReads") if r["address"] == addr_unrev_v2]) == 0
+            assert timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v2)}]').count() == 0
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v3)}]')).to_be_visible()
+            assert page.evaluate("""([addr, feed]) => {
+                const active = document.activeElement;
+                window.__focusedUnrevV2 = active;
+                return Boolean(active && active.matches(`${feed} .chat-live-line`) && active.dataset.rowAddress === addr);
+            }""", [addr_unrev_v2, feed])
+            addr_unrev_v3 = "row:1@2026-10-12T12:00:55+00:00#555555555555"
+            _emit_ws_frame(page, {
+                "type": "chat", "role": "system", "chat_id": 1, "system_type": "host_progress",
+                "task_id": "child-ev", "card_row": "timeline", "card_row_id": "sys-unrev",
+                "content": "UNREV_V3: retired 5 earlier reasoning blocks", "text": "UNREV_V3: retired 5 earlier reasoning blocks",
+                "ts": stamp(55), "row_address": addr_unrev_v3, **lineage,
+            })
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_unrev_v3)}]')).to_be_visible()
+            unrev_live = page.evaluate("""([addrV2, addrV3, feed]) => {
+                const kept = window.__focusedUnrevV2;
+                const v3 = document.querySelector(`${feed} .chat-live-line[data-row-address="${addrV3}"]`);
+                return {
+                    sameNode: document.activeElement === kept,
+                    connected: Boolean(kept?.isConnected),
+                    address: kept?.dataset?.rowAddress || '',
+                    text: kept?.innerText || '',
+                    v3AfterV2: Boolean(kept && v3 && (kept.compareDocumentPosition(v3) & Node.DOCUMENT_POSITION_FOLLOWING)),
+                };
+            }""", [addr_unrev_v2, addr_unrev_v3, feed])
+            assert unrev_live["sameNode"] and unrev_live["connected"], unrev_live
+            assert unrev_live["address"] == addr_unrev_v2, unrev_live
+            assert "UNREV_V2: retired 3 earlier reasoning blocks" in unrev_live["text"] and "UNREV_V3" not in unrev_live["text"], unrev_live
+            assert unrev_live["v3AfterV2"], unrev_live
+            facts["unrev_v2_focused_after_live_v3"] = unrev_live
+
+            # 7. Explicit around jump to v1 after live updates drops temporary unrev_v2, lands on exact v1, and keeps v3.
+            q_btn("q-v1").evaluate("node => node.click()")
+            facts["v1_after_live_v3"] = _landed(page, addr_v1, feed)
+            assert facts["v1_after_live_v3"]["address"] == addr_v1
+            assert "SYSTEM_V1: waiting on first shard checksum" in page.locator(f'{feed} .is-quote-target').inner_text()
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v3)}]')).to_be_visible()
+            expect(timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_unrev_v3)}]')).to_be_visible()
+            assert timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_v2)}]').count() == 0
+            assert timeline.locator(f'.chat-live-line[data-row-address={json.dumps(addr_unrev_v2)}]').count() == 0
+            assert adj.get_attribute("data-expanded") != "1"
+            _evidence(page, tmp_path, f"evolved-system-v1-after-live-v3-{browser_engine}",
+                      {"addr_v1": addr_v1, "addr_v3": addr_v3, "addr_unrev_v3": addr_unrev_v3}, facts)
+        finally:
+            browser.close()
+
+
+NARRATION = "ROOT_NARRATION: reading the merge route before I merge."
+
+
+def _produce_evolved_receipt(scratch, root, *, include_refused=True):
+    """The real merge tool, outbox and delivery write one receipt, queued then refused (#2455), after the root's own
+    narration, in a scratch store; its rows then enter the running server's store as written, with the same addresses,
+    so the server's own outbox replay has nothing to race. My human's Reply quotes the queued revision through web
+    ingress. Returns the bridge's receipt frames and the addresses."""
+    from types import SimpleNamespace
+
+    from ouroboros.chat_references import ingress_reply
+    from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
+    from ouroboros.tools import github
+    from supervisor import message_bus
+    from tests import _dialogue as dialogue_test
+    from tests import test_pr_merge_receipts as merge
+    from tests._store_shared import read_result, seed_result
+    from tests.test_merge_receipt_qualification import closed_receipt_projection, registered_merge
+
+    write_task_result(scratch, "merge-task", STATUS_RUNNING, root_task_id="merge-task", delegation_role="root")
+    write_task_result(scratch, "review-1", STATUS_COMPLETED, root_task_id="merge-task", result="PASS")
+    gh = merge.FakeGh(scratch)
+    world = SimpleNamespace(gh=gh, root=scratch, ctx=SimpleNamespace(
+        task_id="merge-task", drive_root=scratch, task_metadata={}, repo_dir=scratch, current_chat_id=1,
+        pending_events=[], emit_progress_fn=lambda *a, **k: None))
+
+    def send(args, *a, **kw):  # GitHub refuses our request while another actor's auto-merge shows
+        if merge.sent(args) and gh.pr["mergeStateStatus"] == "UNKNOWN":
+            gh.calls.append(list(args))
+            gh.pr.update(autoMergeRequest={"enabledAt": "by another actor"})
+            return github.GhResult(False, merge.NOT_MERGEABLE, 1, 405, "exit")
+        return gh(args, *a, **kw)
+
+    def act():
+        message_bus.send_with_budget(1, NARRATION, is_progress=True, task_id="merge-task", narration=True)
+        gh.pr["mergeStateStatus"] = "UNKNOWN"
+        texts = [registered_merge(world)]
+        gh.pr.update(autoMergeRequest=None)  # the queue is off: the same receipt settles refused
+        return texts + [registered_merge(world)]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(github, "_gh_run", send)
+        seen = closed_receipt_projection(world, patch, act)
+    stored_rows = [dict(row) for row in dialogue_test.rows(scratch, "progress")]
+    receipts = [frame for frame in seen.live if frame.get("card_row_id")]
+    (queued,) = [frame for frame in receipts if "merge: queued" in frame["content"]]
+    (narration,) = [frame for frame in seen.live if frame.get("content") == NARRATION]
+    refused_row = next(row for row in stored_rows if format_address(row_address(row)) == receipts[-1]["row_address"])
+    to_copy = stored_rows if include_refused else [row for row in stored_rows if row is not refused_row]
+    copied = [format_address(row_address(ds.append(root, "progress", dict(row)).row)) for row in to_copy]
+    seed_result(root, "merge-task", {**read_result(scratch, "merge-task"), "status": "completed"})
+    expected = [frame["row_address"] for frame in seen.live] if include_refused else [
+        frame["row_address"] for frame in seen.live if frame["row_address"] != receipts[-1]["row_address"]]
+    assert copied == expected  # the same rows, at the addresses the bridge sent
+    reference = ingress_reply(scratch, {"reply_to": queued["row_address"]}, route_work=True)
+    ds.append(root, "chat", {"chat_id": 1, "ts": datetime.now(timezone.utc).isoformat(), "direction": "in",
+                             "client_message_id": "q-queued", "text": "Why was it queued first?",
+                             "reply_to": reference}, feed=True)
+    return {"frames": receipts, "queued": queued["row_address"], "refused": receipts[-1]["row_address"],
+            "narration": narration["row_address"], "refused_row": refused_row,
+            "refused_ref": ingress_reply(scratch, {"reply_to": receipts[-1]["row_address"]}, route_work=True)}
+
+
+def test_a_quote_of_an_earlier_merge_receipt_revision_lands_on_its_own_words(direct_server_with_data, tmp_path):
+    """Production rows of one receipt, queued then refused: the card shows the current result at the refused row's own
+    address, with its live frames and after reload. My human's quote of the queued revision lands on the words it said,
+    by a read and then as a mounted line, and a Reply from there quotes that revision; the root's own narration is
+    quoted by its address, and a line with no address offers no Reply."""
+    from playwright.sync_api import expect, sync_playwright
+
+    root, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    (tmp_path / "producer").mkdir()
+    seed = _produce_evolved_receipt(tmp_path / "producer", root)
+    queued, refused, feed, facts = seed["queued"], seed["refused"], "#chat-messages", {}
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 850}, reduced_motion="reduce")
+        page.add_init_script(f"({_OBSERVE_QUOTES})()")
+        try:
+            card = page.locator(f'{feed} .chat-live-card[data-task-id="merge-task"]')
+            menu, strip = page.locator(".chat-row-menu"), page.locator(".chat-quote--composer")
+
+            def current(stage):
+                if card.get_attribute("data-expanded") != "1":
+                    card.locator("> .chat-live-summary-button [data-live-disclosure]").click()
+                shown = card.locator(".chat-live-line").filter(has_text="merge:")
+                expect(shown).to_have_count(1)
+                facts[stage] = {"address": shown.get_attribute("data-row-address"), "text": shown.inner_text()}
+                assert facts[stage]["address"] == refused and "merge: refused" in facts[stage]["text"], facts
+                assert page.locator(f'{feed} [data-row-address={json.dumps(queued)}]').count() == 0
+
+            def reply(row):
+                row.click(button="right")
+                expect(menu).to_be_visible()
+                menu.locator('[data-row-action="reply"]').click()
+                expect(strip).to_be_visible()
+                staged = page.evaluate("""() => {  // Main's slot, under the page's profile scope when it has one
+                    const key = Object.keys(sessionStorage).find(k => /^ouro_chat_reply(:|$)/.test(k));
+                    return key && JSON.parse(sessionStorage.getItem(key));
+                }""")
+                words = strip.locator(".chat-quote-text").inner_text()
+                strip.locator(".chat-quote-cancel").click()
+                return staged["address"], words
+
+            def follow(stage, reads):
+                page.locator(f'{feed} .chat-bubble.user[data-client-message-id="q-queued"] .chat-quote-main').click()
+                facts[stage] = _landed(page, queued, feed)
+                target = page.locator(f"{feed} .is-quote-target")
+                assert "merge: queued" in target.inner_text() and "merge: refused" not in target.inner_text()
+                expect(card.locator(f'.chat-live-line[data-row-address={json.dumps(refused)}]')).to_be_visible()
+                assert len([r for r in page.evaluate("() => window.__quoteReads") if r["address"] == queued]) == reads
+                return target
+
+            _open(page, url)
+            current("history")
+            for frame in seed["frames"]:  # the bridge's own frames of both revisions
+                _emit_ws_frame(page, {**frame, "chat_id": 1})
+            current("live")
+            target = follow("read", 1)
+            address, words = reply(target)
+            assert address == queued and "merge: queued" in words and "merge: refused" not in words, words
+            _evidence(page, tmp_path, "merge-receipt-queued-landed", seed, facts)
+            follow("mounted", 1)
+            narration = card.locator(f'.chat-live-line[data-row-address={json.dumps(seed["narration"])}]')
+            assert narration.get_attribute("data-work-reply-row") == "assistant"
+            address, words = reply(narration)
+            assert address == seed["narration"] and NARRATION in words, words
+            _emit_ws_frame(page, {"type": "log", "chat_id": 1, "data": {
+                "type": "tool_call_finished", "task_id": "merge-task", "tool": "read_file", "tool_call_id": "c1",
+                "invocation_id": "inv-1", "duration_sec": 0.2, "ts": datetime.now(timezone.utc).isoformat()}})
+            tools = card.locator(".chat-live-line").filter(has_text="tool call")
+            expect(tools).to_have_count(1)
+            assert tools.get_attribute("data-row-address") is None
+            tools.click(button="right")
+            expect(menu).to_be_visible()
+            assert menu.locator('[data-row-action="reply"]').count() == 0 and strip.count() == 0
+            page.keyboard.press("Escape")
+            page.reload(wait_until="domcontentloaded")
+            _idle(page, feed)
+            current("reloaded")
+            follow("reloaded-read", 1)  # a reload starts the page's read log again
+            _evidence(page, tmp_path, "merge-receipt-queued-landed-after-reload", seed, facts)
+        finally:
+            browser.close()
+
+
+def test_projected_merge_receipt_adopts_equal_revision_address_only_when_words_agree(direct_server_with_data, tmp_path):
+    """When server projection rewrites an earlier merge carrier to the current revision and omits row_address,
+    a genuine host-addressed equal-revision row gives that displayed line its physical identity in place (live and
+    replay) only when receipt, revision and displayed words agree; mismatched, stale and non-system frames never do."""
+    from playwright.sync_api import expect, sync_playwright
+
+    root, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    (tmp_path / "producer").mkdir()
+    seed = _produce_evolved_receipt(tmp_path / "producer", root, include_refused=False)
+    refused, refused_frame = seed["refused"], seed["frames"][-1]
+    ds.append(root, "chat", {"chat_id": 1, "ts": datetime.now(timezone.utc).isoformat(), "direction": "in",
+                             "client_message_id": "q-refused", "text": "Check the refused receipt.",
+                             "reply_to": seed["refused_ref"]}, feed=True)
+    feed, facts = "#chat-messages", {}
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        live_page = browser.new_page(viewport={"width": 1280, "height": 850}, reduced_motion="reduce")
+        live_page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+        live_page.add_init_script(f"({_OBSERVE_QUOTES})()")
+        replay_page = browser.new_page(viewport={"width": 1280, "height": 850}, reduced_motion="reduce")
+        replay_page.add_init_script(f"({_OBSERVE_QUOTES})()")
+        try:
+            def open_projected(pg):
+                _open(pg, url)
+                card = pg.locator(f'{feed} .chat-live-card[data-task-id="merge-task"]')
+                if card.get_attribute("data-expanded") != "1":
+                    card.locator("> .chat-live-summary-button [data-live-disclosure]").click()
+                shown = card.locator(".chat-live-line").filter(has_text="merge:")
+                expect(shown).to_have_count(1)
+                assert "merge: refused" in shown.inner_text() and shown.get_attribute("data-row-address") is None
+                shown.evaluate("(node) => { window.__projLine = node; }")
+                return card, shown
+
+            # Prime both views while only the rewritten unaddressed projection exists, then insert the physical row
+            # before any Reply or around-read so both UI adoption paths and server Reply resolution use the real row.
+            _, live_shown = open_projected(live_page)
+            replay_card, replay_shown = open_projected(replay_page)
+            inserted = ds.append(root, "progress", dict(seed["refused_row"])).row
+            assert format_address(row_address(inserted)) == refused
+
+            # 1. Projected -> exact around replay adopts the host address on the exact displayed DOM node.
+            assert replay_shown.get_attribute("data-row-address") is None
+            replay_page.locator(f'{feed} .chat-bubble.user[data-client-message-id="q-refused"] .chat-quote-main').click()
+            facts["replay_adopted"] = _landed(replay_page, refused, feed)
+            expect(replay_card.locator(".chat-live-line").filter(has_text="merge:")).to_have_count(1)
+            assert replay_page.evaluate("""(addr) => {
+                const line = document.querySelector(`#chat-messages .chat-live-line[data-row-address="${addr}"]`);
+                return Boolean(line && window.__projLine === line && line.dataset.workReplyRow === 'system');
+            }""", refused)
+            replay_page.close()
+
+            # 2. Projected -> live rejects mismatched/stale/non-system frames, adopts genuine equal revision in place,
+            # and sends a real Reply that resolves the physical System row on the server.
+            menu, strip = live_page.locator(".chat-row-menu"), live_page.locator(".chat-quote--composer")
+            assert live_shown.get_attribute("data-row-address") is None
+            live_shown.click(button="right")
+            expect(menu).to_be_visible()
+            assert menu.get_attribute("aria-label") == "Work actions"
+            assert menu.locator('[data-row-action="reply"]').count() == 0 and strip.count() == 0
+            live_page.keyboard.press("Escape")
+            expect(menu).to_have_count(0)
+
+            for bad in (
+                {**refused_frame, "chat_id": 1, "content": refused_frame["content"] + "\nDifferent detail."},
+                {**refused_frame, "chat_id": 1, "card_row_revision": int(refused_frame["card_row_revision"]) - 1},
+                {**refused_frame, "chat_id": 1, "role": "assistant"},
+            ):
+                _emit_ws_frame(live_page, bad)
+                assert live_shown.get_attribute("data-row-address") is None
+                assert live_page.evaluate("(node) => window.__projLine === node", live_shown.element_handle())
+
+            _emit_ws_frame(live_page, {**refused_frame, "chat_id": 1})
+            expect(live_shown).to_have_attribute("data-row-address", refused)
+            assert live_shown.get_attribute("data-work-reply-row") == "system"
+            assert live_page.evaluate("(node) => window.__projLine === node", live_shown.element_handle())
+            before = live_page.evaluate("() => window.__quoteSends.length")
+            live_shown.click(button="right")
+            expect(menu).to_be_visible()
+            menu.locator('[data-row-action="reply"]').click()
+            expect(strip).to_be_visible()
+            assert strip.locator(".chat-quote-author").inner_text().strip() == "System"
+            assert "merge: refused" in strip.locator(".chat-quote-text").inner_text()
+            reply_words = "Follow up on the adopted merge receipt."
+            live_page.locator("#chat-input").fill(reply_words)
+            live_page.locator("#chat-send").click()
+            saved = live_page.locator(f'{feed} .chat-bubble.user[data-row-address]').filter(has_text=reply_words)
+            saved.wait_for(timeout=30_000)
+            sent = live_page.evaluate("""(start) => window.__quoteSends.slice(start).map((raw) => {
+                try { return JSON.parse(raw); } catch { return null; }
+            }).filter((frame) => frame && frame.type === 'chat')""", before)
+            assert len(sent) == 1 and sent[0].get("reply_to") == refused, sent
+            accepted = ds.accepted_row(root, 1, saved.get_attribute("data-client-message-id"))
+            reply_to = accepted and accepted.row.get("reply_to")
+            assert reply_to and reply_to["address"] == refused and not reply_to.get("unresolved"), reply_to
+            assert reply_to.get("role") == "system" and reply_to.get("author_label") == "System", reply_to
+            assert "merge: refused" in (reply_to.get("snippet") or ""), reply_to
+            facts["live_adopted"] = {"outgoing": sent[0].get("reply_to"), "reply_to": reply_to}
+            _evidence(live_page, tmp_path, "merge-receipt-equal-revision-adopted", {"refused": refused}, facts)
         finally:
             browser.close()

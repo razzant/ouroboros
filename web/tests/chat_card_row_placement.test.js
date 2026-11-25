@@ -725,3 +725,80 @@ test('a retained merge row refreshes its later review and report without another
         assert.doesNotMatch(markup().at(-1), /Its later review: FAIL|data-live-line-evidence/, 'an older review cannot replace the newer read');
     } finally { replay.instance.destroy(); restoreDom(replay.prior); }
 });
+
+test('a displayed unaddressed merge projection adopts its equal-revision host address in place on live and replay without replacing its DOM node', async () => {
+    const addr = 'row:1@2026-09-16T00:02:00Z#abcdef012345';
+    const text = '⚠️ PR #7 merge: refused\nBranch protection rejected the merge.';
+    const projected = {
+        chat_id: 1, task_id: 'merge-task', role: 'system', system_type: 'host_progress',
+        is_progress: true, card_row: 'reviews', card_row_id: 'merge-receipt:r', card_row_revision: 2,
+        history_id: 'progress:1', history_position: { source: 'progress', offset: 1 },
+        ts: '2026-09-16T00:01:00Z', text,
+    };
+    const genuine = {
+        ...projected, history_id: 'progress:2', history_position: { source: 'progress', offset: 2 },
+        ts: '2026-09-16T00:02:00Z', row_address: addr,
+    };
+    const seed = [{ chat_id: 1, task_id: 'merge-task', is_progress: true, text: 'Reading the PR.',
+        history_id: 'progress:0', history_position: { source: 'progress', offset: 0 }, ts: '2026-09-16T00:00:00Z' }];
+
+    // Live adoption on an already-rendered projected row keeps the exact DOM node and lineKey stable.
+    let history = [...seed, projected].map((row) => ({ ...row, chat_id: 2 }));
+    const liveChat = openCardChat(async (url) => ({ ok: true, json: async () =>
+        (String(url).startsWith('/api/chat/history')
+            ? { profile_scope: PREVIEW_SCOPE, messages: history } : { active_direct_turns: [] }) }));
+    try {
+        const markup = captureRenderedLines();
+        await liveChat.instance.refreshHistory({ revision: 1 });
+        const card = walkCard(liveChat.messages(), 'merge-task');
+        expand(card);
+        const line = phasedLines(card, 'result')[0];
+        assert.ok(line, 'projected receipt line rendered');
+        const lineKey = line.dataset.liveLineKey;
+        assert.doesNotMatch(markup().at(-1), /data-row-address=/);
+        assert.match(markup().at(-1), /data-source-history-id="progress:1"/);
+        const beforeBad = markup().length;
+        // Mismatched equal-revision live frame must be rejected (no re-render, no address).
+        liveChat.handlers.get('chat')({
+            ...genuine, chat_id: 2, history_id: undefined, history_position: undefined,
+            content: '⚠️ PR #7 merge: refused\nDifferent reason.', text: '⚠️ PR #7 merge: refused\nDifferent reason.',
+        });
+        assert.equal(markup().length, beforeBad, 'mismatched equal-revision live frame is skipped');
+        assert.equal(phasedLines(card, 'result')[0], line);
+        // Genuine equal-revision live frame adopts address in place on the same DOM node and lineKey.
+        liveChat.handlers.get('chat')({ ...genuine, chat_id: 2, history_id: undefined, history_position: undefined, content: text });
+        assert.equal(phasedLines(card, 'result').length, 1);
+        assert.equal(phasedLines(card, 'result')[0], line, 'same DOM node preserved in place');
+        assert.match(markup().at(-1), new RegExp(`data-live-line-key="${lineKey}"`));
+        assert.match(markup().at(-1), new RegExp(`data-row-address="${addr}"`));
+        assert.match(markup().at(-1), /data-work-reply-row="system"/);
+        // Subsequent replay of the canonical stored row reconciles sourceHistoryId on the same DOM node.
+        history = [...seed, genuine].map((row) => ({ ...row, chat_id: 2 }));
+        await liveChat.instance.refreshHistory({ revision: 2 });
+        assert.equal(phasedLines(card, 'result')[0], line);
+        assert.match(markup().at(-1), new RegExp(`data-live-line-key="${lineKey}"`));
+        assert.match(markup().at(-1), new RegExp(`data-row-address="${addr}"`));
+        assert.match(markup().at(-1), /data-source-history-id="progress:2"/);
+    } finally { liveChat.instance?.destroy(); restoreDom(liveChat.prior); }
+
+    // Replay adoption directly from projected history to genuine history preserves the DOM node and lineKey too.
+    const replayRows = [...seed, projected];
+    const replay = await replayChat(replayRows);
+    try {
+        const markup = captureRenderedLines();
+        await replay.instance.refreshHistory({ revision: 1 });
+        const card = walkCard(replay.messages(), 'merge-task');
+        expand(card);
+        const line = phasedLines(card, 'result')[0];
+        const lineKey = line.dataset.liveLineKey;
+        assert.doesNotMatch(markup().at(-1), /data-row-address=/);
+        replayRows[1] = genuine;
+        await replay.instance.refreshHistory({ revision: 2 });
+        assert.equal(phasedLines(card, 'result').length, 1);
+        assert.equal(phasedLines(card, 'result')[0], line, 'replay adoption keeps the same DOM node');
+        assert.match(markup().at(-1), new RegExp(`data-live-line-key="${lineKey}"`));
+        assert.match(markup().at(-1), new RegExp(`data-row-address="${addr}"`));
+        assert.match(markup().at(-1), /data-work-reply-row="system"/);
+        assert.match(markup().at(-1), /data-source-history-id="progress:2"/);
+    } finally { replay.instance.destroy(); restoreDom(replay.prior); }
+});

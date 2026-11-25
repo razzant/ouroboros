@@ -574,3 +574,14 @@ def test_rotated_out_calls_reach_the_card_as_host_totals_on_reload_and_reconnect
                            "web/tests/chat_activity_block.test.js"], cwd=pathlib.Path(__file__).resolve().parents[1],
                           env={**os.environ, "OURO_TEST_BOUNDED_TOOL_HISTORY": str(produced)}, timeout=60)
     assert result.returncode == 0 and "# pass 1" in result.stdout + result.stderr, result.stdout + result.stderr
+
+
+def test_around_absent_anchor_preserves_profile_scope(tmp_path):
+    """Non-found exact row anchors keep the serving profile_scope so scoped browsers see the typed anchor state."""
+    stale_addr = "row:1@2026-10-12T12:00:09+00:00#deadbeef0000"
+    payload = json.loads(history._assemble_history_response(
+        tmp_path, 1, 10, 10, None, around=stale_addr, profile_scope="0123456789abcdef",
+    ))
+    assert payload["anchor"] == {"state": "absent", "row_address": stale_addr}
+    assert payload["messages"] == []
+    assert payload["profile_scope"] == "0123456789abcdef"

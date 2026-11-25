@@ -28,6 +28,10 @@ cleanup after a failed send); acceptance claims it inside the message bus's
 ingress critical section, so DELETE and acceptance are serialized and an
 accepted original is never removed. After a restart nothing is pending: DELETE
 fails closed and an unaccepted copy stays (no second store tracks it).
+
+A task that copies a held row's files reads them here too: staging specs under
+the root the row was read from (``upload_specs``), and rows verified against their
+saved identity for a successor's own copy (``quoted_inputs``).
 """
 
 from __future__ import annotations
@@ -520,10 +524,54 @@ def stored_refs(value: Any) -> List[Dict[str, Any]]:
             for ref in (value if isinstance(value, list) else []) if isinstance(ref, dict)]
 
 
+def upload_specs(row, root) -> list:
+    """A held row's files as staging specs for ``artifacts.stage_task_attachments``: each saved upload under the root
+    the row was read from, with its saved identity (a file with no saved upload keeps its name and stages nothing)."""
+    specs = []
+    for ref in stored_refs(row.get("attachments")):
+        upload = upload_id(ref.get("upload"))
+        path = str(uploads_dir(root) / upload) if upload and not ref.get("unavailable") else ""
+        specs.append({**ref, "path": path, "label": str(ref.get("name") or "attachment")})
+    return specs
+
+
+def quoted_inputs(root, refs: list) -> list:
+    """The owner files a relay's quoted rows carried (their saved chat uploads, which ``owner_relay.quote_content``
+    stages on delivery), as rows another task's own copy reads (``artifacts.materialize_inherited_attachment_manifest``):
+    each upload verified against its saved identity and named by its unique upload id, so two same-named files stay
+    two. One gone or changed is a rejected ``source_missing`` row under its name, never other bytes; a secret-named one
+    is refused as staging refuses it (``secret_source``)."""
+    from ouroboros.artifacts import stream_artifact_file
+    from ouroboros.workspace_patch_rules import _sensitive_untracked_reason
+
+    rows = []
+    for ordinal, ref in enumerate(refs):
+        uid = upload_id(ref.get("upload"))
+        source_root = ref.get("_owner_source_root") or root
+        path, original = uploads_dir(source_root) / uid, re.sub(r"^[0-9a-f]{32}_", "", uid)
+        row = {"ordinal": ordinal, "label": str(ref.get("name") or "attachment"),
+               **{key: ref[key] for key in ("mime", "size", "sha256") if key in ref}}
+        if uid and (reason := _sensitive_untracked_reason(original)):
+            rows.append({**row, "status": "rejected", "reason": "secret_source",
+                         "rule": f"uploaded file name {original!r}: {reason}"})
+            continue
+        try:
+            if not uid:
+                raise OSError("the quoted row names no saved upload")
+            stream_artifact_file(path, expected=ref)
+            mime, kind = file_media(path)
+        except OSError:
+            rows.append({**row, "status": "rejected", "reason": "source_missing"})
+            continue
+        rows.append({**row, "status": "staged", "root": "artifact_store", "relpath": f"attachments/{uid}",
+                     "abs_path": str(path), "mime": mime, "is_image": kind == "image"})
+    return rows
+
+
 __all__ = [
     "DELIVERY_FAILURES", "DOWNLOAD_ROUTE", "PLACEHOLDER_TEXTS", "attachment_identity", "attachment_view",
     "attachment_views", "bytes_identity", "claim_refs", "delete_pending_upload", "delivery_ref", "detect_media",
-    "inline_image_name", "measure_upload", "new_upload_id", "open_upload", "refs_for_frame",
+    "inline_image_name", "measure_upload", "new_upload_id", "open_upload", "quoted_inputs", "refs_for_frame",
     "safe_upload_name", "same_message", "source_identity", "store_upload", "stored_refs",
-    "unavailable_ref", "upload_id", "uploads_dir",
+    "unavailable_ref", "upload_id", "upload_specs", "uploads_dir",
 ]

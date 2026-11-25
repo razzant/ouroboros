@@ -225,6 +225,7 @@ def _wait_for_routing_annotation(
 def _emit_and_wait_for_routing(
     ctx: ToolContext,
     evt: Dict[str, Any],
+    *, about_work: str = "",
 ) -> tuple[str, Dict[str, Any]]:
     """Emit one routing event and return only its durable handler outcome."""
     from ouroboros.tool_custody import record_control_handoff, forget_unemitted_control
@@ -281,5 +282,6 @@ def _emit_and_wait_for_routing(
                 "routing_token": str(evt.get("routing_token") or ""),
                 "target": str(evt.get("task_id") or evt.get("target_task_id") or ""),
                 **scope,
+                **({"about_work": about_work} if about_work else {}),
             })
     return mode, receipt

@@ -106,6 +106,14 @@ def _stamp_owner_delivery(
     return held
 
 
+def _stamp_row(owner_ctx: Any, row: Dict[str, Any]) -> Any:
+    """``_stamp_owner_delivery`` of one queued or mailbox owner row, by its own fields (the one reading of them)."""
+    return _stamp_owner_delivery(
+        owner_ctx, msg_id=str(row.get("msg_id") or ""), client_message_id=str(row.get("client_message_id") or ""),
+        text=str(row.get("text") or ""), ts=str(row.get("ts") or ""), source_ref=row.get("origin_message_ref"),
+        origin_suppressed=row.get("origin_suppressed") is True)
+
+
 def _append_reply_context(messages, target, owner_ctx, *, root=None, owner_row=None):
     from ouroboros.chat_uploads import attachment_reply_context
     from ouroboros.context_budget import HOST_TEXT_SHA_KEY, REPLY_CITATION_KIND, REPLY_SOURCE_SHA_KEY, bound_host_row, host_row_intact
@@ -146,15 +154,13 @@ def _append_direct_input(messages, owner_ctx, drive_root, task_id, injected):
     """Put a direct turn's accepted quote beside (not inside) the owner's new words."""
     if not isinstance(injected, dict):
         _loop()._record_owner_directive(owner_ctx, source="direct_incoming", content=injected, origin=_arrival())
-        _stamp_owner_delivery(owner_ctx, msg_id="", client_message_id="", text=str(injected), ts="")
+        _stamp_row(owner_ctx, {"text": str(injected)})
         _loop()._append_or_merge_user_message(messages, _loop()._owner_marked_content(injected), slot=owner_ctx, kind=OWNER_WORDS_KIND)
         return
     attachment_facts = {}
     owner_content = _owner_content(injected, drive_root, task_id, attachment_facts=attachment_facts)
     ref = injected.get("origin_message_ref")
-    held = _stamp_owner_delivery(owner_ctx, msg_id=str(injected.get("msg_id") or ""),
-        client_message_id=str(injected.get("client_message_id") or ""), text=str(injected.get("text") or ""),
-        ts=str(injected.get("ts") or ""), source_ref=ref, origin_suppressed=injected.get("origin_suppressed") is True)
+    held = _stamp_row(owner_ctx, injected)
     target = _append_addressed_reply_context(messages, owner_ctx, drive_root, injected.get("reply_reference"),
         owner_row=held if isinstance(ref, dict) and ref.get("row_sha256") else None)
     _loop()._record_owner_directive(owner_ctx, source="direct_incoming", content=owner_content,
@@ -227,7 +233,7 @@ def _drain_incoming_messages(
     def ack_saved(entry: Dict[str, Any]) -> None:
         if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
             return
-        if ((entry.get("relay") and not entry.get("host_carried"))  # a carried row posts no receipt to the room
+        if ((entry.get("relay") and not (entry.get("host_carried") or entry.get("work_reply")))
                 or entry.get("quiz_delivery") or entry.get("card_delivery")):
             from ouroboros.owner_relay import retained_relay
             event_queue.put_nowait({"type": "owner_message_injected", "task_id": task_id,
@@ -324,7 +330,8 @@ def _drain_incoming_messages(
                     arrival = {**arrival, "confirmed_words": arrival_owner_words(owner_ctx, drive_root, entry)}  # now
                     entry = {**entry, "place_arrival": arrival}  # its delivered prefix reads the same fact
                     if confirmed := arrival["confirmed_words"]:  # provenance, as at the opening
-                        from ouroboros.owner_words import PLACE_CONFIRMED, place_row_facts
+                        from ouroboros.owner_words import PLACE_CONFIRMED
+                        from ouroboros.presence_message_facts import place_row_facts
                         from ouroboros.presence_runner import presence_chat_id
                         room = presence_chat_id(str((entry.get("sender_origin") or {}).get("conversation_key") or ""))
                         _loop()._record_owner_directive(owner_ctx, source=PLACE_CONFIRMED, carried=True,
@@ -379,40 +386,32 @@ def _drain_incoming_messages(
                 ack_content(entry)
                 continue
             # A late answer keeps the owner's act or words separately from the full stored card frame.
+            chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
             model_msg = dmsg
             if entry.get("late_answer") is not None:
                 from ouroboros.owner_quiz import late_answer_model_text
 
-                model_msg = late_answer_model_text(
-                    str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
-                    entry.get("late_answer"), dmsg,
-                )
+                model_msg = late_answer_model_text(chats, entry.get("late_answer"), dmsg)
             elif entry.get("card_press") is not None:  # a press on a finished author's card: its card frame
                 from ouroboros.gateway.card_decision import card_press_model_text
 
-                model_msg = card_press_model_text(str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
-                                                  entry.get("card_press"), dmsg)
+                model_msg = card_press_model_text(chats, entry.get("card_press"), dmsg)
             attachment_facts = {}
             owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id,
                                            attachment_facts=attachment_facts)
             from ouroboros.answer_facts import row_source
             from ouroboros.owner_words import OWNER_PRESS, answered_card_reply, answered_card_source, reply_target
 
-            chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
-            held = _stamp_owner_delivery(  # the chat row is held first: its corpus row names the same room and time
-                owner_ctx,
-                msg_id=str(entry.get("msg_id") or ""),
-                client_message_id=str(entry.get("client_message_id") or ""),
-                text=dmsg, ts=str(entry.get("ts") or ""),
-                source_ref=entry.get("origin_message_ref"),
-                origin_suppressed=entry.get("origin_suppressed") is True,
-            )
+            held = _stamp_row(owner_ctx, entry)  # the chat row is held first: its corpus row names the same room and time
             source = living.get("source") or row_source(entry, "owner_mailbox", chats)
             target = (living.get("reply_to") or answered_card_reply(*answered_card_source(entry, chats))
                       or reply_target(chats, entry.get("reply_reference")))
             ref = entry.get("origin_message_ref")
             _append_reply_context(messages, target, owner_ctx, root=chats,
                                   owner_row=held if isinstance(ref, dict) and ref.get("row_sha256") else None)
+            if isinstance(fallback := entry.get("work_reply_fallback"), dict) and fallback:
+                from ouroboros.work_reply import append_fallback_context
+                append_fallback_context(messages, fallback, reply_target=target, reply_reference=entry.get("reply_reference"))
             from ouroboros.chat_uploads import attachment_delivery_block, delivery_manifest_refs
 
             fact = attachment_delivery_block(entry.get("attachment_manifest"))

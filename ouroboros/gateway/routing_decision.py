@@ -205,7 +205,8 @@ def handle_routing_decision(
     card_effort = card_effort if card_effort in EFFORT_SCALE else ""
     # Origin provenance BY VALUE from the canonical row itself (the same rail
     # the LLM promote path rides): identity ref + full text + surface fact.
-    from ouroboros.owner_relay import origin_snapshot, owner_row_source, upload_specs
+    from ouroboros.chat_uploads import upload_specs
+    from ouroboros.owner_relay import origin_snapshot, owner_row_source
 
     manifest = receipt.get("attachment_manifest")
     evt: Dict[str, Any] = {

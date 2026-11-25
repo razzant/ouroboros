@@ -690,7 +690,7 @@ def test_form_fields_keep_their_word_boundaries_in_the_corpus_and_its_copies(tmp
             assert owner_words_contain(focus, value) and cited_owner_basis(focus, value)[0]
     check(ctx)
     from ouroboros.owner_relay import _rows_to_carry, inject_relay, write_relay
-    [(_, _, quote, _, _)] = _rows_to_carry(ctx, tmp_path)
+    [(_, _, quote, *_rest)] = _rows_to_carry(ctx, tmp_path)
     entry, created = write_relay(tmp_path, "elm-reader", relay_id="elm-fields", note="Read the dates",
                                  quotes=[quote], teller_task_id=ctx.task_id, chat_id=1)
     assert created

@@ -1242,7 +1242,7 @@ def test_a_carried_corpus_answer_keeps_its_card_without_a_room_row(tmp_path):
         {"source": "owner_mailbox", "content": "  before dusk  ", "client_message_id": "reed-text", "chat_id": "1"}]
     child = _helper(tmp_path, "reed-reader")
     frames = []
-    for _, _, quote, _, _ in _rows_to_carry(ctx, tmp_path):
+    for _, _, quote, *_rest in _rows_to_carry(ctx, tmp_path):
         assert quote["owner_row"]["_owner_corpus_rebuilt"] is True
         entry, created = _carried_entry(tmp_path, tmp_path, child.task_id, quote, went_to=ctx.task_id)
         assert created
@@ -1326,7 +1326,7 @@ def test_a_lost_submission_stays_an_input_through_carriage_and_onward_relay(tmp_
     words = lost["content"]
     assert owner_input_revision(ctx) == 1 and owner_reply_owed(ctx) and not owner_words_contain(ctx, words)
     child = _helper(tmp_path, "elm-reader")
-    [(_, _, quote, _, _)] = _rows_to_carry(ctx, tmp_path)
+    [(_, _, quote, *_rest)] = _rows_to_carry(ctx, tmp_path)
     entry, created = _carried_entry(tmp_path, tmp_path, child.task_id, quote, went_to=ctx.task_id)
     assert created
     frames = []
@@ -1379,6 +1379,41 @@ def test_reference_only_relay_quotes_one_read_of_the_askers_store(tmp_path, monk
         assert "accepted answer is unavailable" in quote["text"] and quote["text"] in history
         assert "Owner words quoted" not in history
     assert reads == [(str(source_drive), asker)]
+
+
+@pytest.mark.parametrize("passive", [True, False], ids=["reply-to-the-root", "other-context"])
+def test_a_copy_that_completes_a_citation_born_with_a_helper_keeps_a_passive_row_passive_for_the_helpers_below(tmp_path, passive):
+    """A helper born holding my human's Reply to its root by value (``went to root``) with its selected passage unread
+    takes the source from a later copy once; the row it then holds is still context that went to the root, so the
+    helper carries nothing of it down. Context carried plainly stays as it was: the same row, carried on as context."""
+    from ouroboros.owner_relay import _rows_to_carry, inject_relay, owner_quote, owner_row_address, owner_row_identity
+    from ouroboros.owner_relay import relay_envelope
+    from ouroboros.owner_words import FIELD
+
+    excerpt = {"text": "North", "start_utf16": 0}
+    reference = {"address": "row:1@source#0123456789ab", "author_label": "Mira", "role": "user", "excerpt": excerpt}
+    owner = {"chat_id": 1, "direction": "in", "source": "web", "user_id": 1, "ts": "2026-11-04T09:01:00Z",
+             "client_message_id": "owner-held", "text": "Which trail?", "reply_to": reference}
+    address, digest = owner_row_address(owner), owner_row_identity(owner)["row_sha256"]
+    full = {"address": reference["address"], "author": "Mira", "excerpt": excerpt, "role": "user", "text": "North trail."}
+    born = {"text": "Which trail?", "source": "owner_mailbox", "carrier": "went to root", "task_id": "root", "ts": owner["ts"],
+            "ref": "chat 1 / owner-held", "row_sha256": digest,
+            "reply_citation": {"address": reference["address"], "author": "Mira", "excerpt": excerpt, "role": "user",
+                               "reply_view": "unread"}}
+    quote = owner_quote(tmp_path, {**owner, "_owner_source_root": str(tmp_path), "_owner_reply_target": full}, address=address)
+    fact = {"went_to": "root", "enrich": True, **({"context_only": True} if passive else {})}
+    entry = {"kind": "relay_entry", "msg_id": f"relay:carry-source:{address}:helper", "ts": "2026-11-04T09:03:00Z", "text": "",
+             "relay": relay_envelope("carry-source", [quote], chat_id=1), "owner_rows": [quote["owner_row"]],
+             "source_task_id": "root", "relay_canonical_root": str(tmp_path), "host_carried": fact}
+    helper = _helper(tmp_path)
+    helper.task_metadata = {**helper.task_metadata, FIELD: [born]}
+    messages = []
+    inject_relay(helper, entry, messages)
+    held = held_owner_messages(helper)[address]
+    assert held["_owner_reply_target"]["text"] == "North trail." and messages == [], "the source moved; no words again"
+    assert held["carried"] == {"went_to": "root", **({"context_only": True} if passive else {})}
+    below = _rows_to_carry(helper, tmp_path)
+    assert [(item[1], item[3], item[5]) for item in below] == ([] if passive else [(address, "root", {})])
 
 
 def test_a_held_selection_with_only_a_preview_takes_a_later_source_once_and_an_addressed_flip_keeps_it(tmp_path):
@@ -1453,8 +1488,8 @@ def test_a_file_of_another_store_is_inherited_only_from_the_callers_own_verified
     import pathlib
 
     from ouroboros.artifacts import attachment_manifest_projection, stage_task_attachments
-    from ouroboros.chat_uploads import store_upload
-    from ouroboros.owner_relay import origin_snapshot, source_upload_specs, upload_specs
+    from ouroboros.chat_uploads import store_upload, upload_specs
+    from ouroboros.owner_relay import origin_snapshot, source_upload_specs
 
     teller, recipient = tmp_path / "teller", tmp_path / "recipient"
     row = _held_file(teller, "seed-counts.csv", b"bed,seeds\nwest,3\n", _owner_source_root=str(teller))
@@ -1603,3 +1638,874 @@ def test_a_relayed_quote_that_carried_only_a_file_keeps_its_descriptor_in_the_co
     shown = {"attachments": [dict(named)]}
     mark_context_files([(carried, shown)], {"client_message_id": "owner-b", "chat_id": "1", "row_sha256": "b" * 64})
     assert shown["attachments"][0]["staged"].startswith(NOT_GIVEN)
+
+
+def _replies(tmp_path, *words):
+    """My human's rows in Main, each with its address."""
+    rows = []
+    for index, text in enumerate(words):
+        row = {"chat_id": 1, "direction": "in", "ts": f"2026-11-23T10:0{index}:00Z", "text": text,
+               "client_message_id": f"reply-{index}", "attachments": []}
+        dialogue_store.append(tmp_path, "chat", row)
+        rows.append((row, format_address(row_address(row))))
+    return rows
+
+
+def test_each_direct_work_reply_is_owed_its_own_answer_and_reaches_the_tree_as_context(tmp_path):
+    """My human's Reply addressed to this work is its own input, unlike a teller's quote: two Replies stay owed
+    until an answer goes out to each one's relay (a self-started run cannot finish silent over the first while the
+    second is open), and the tree below hears them as context only, at the work's own address."""
+    from ouroboros.loop_messages import owner_input_revision, owner_reply_owed
+    from ouroboros.owner_relay import _rows_to_carry, owner_quote
+    from ouroboros.tools.control_runtime import _send_user_message
+
+    rows = _replies(tmp_path, "Change the priority?", "And drop the chart.")
+    root = context(tmp_path)
+    root.task_id, root.event_queue, root._owner_directives = "planned-root", queue.Queue(), []
+    root.task_metadata, root.messages = {"root_task_id": "planned-root"}, []
+    relays = []
+    for row, address in rows:
+        entry, fresh = write_relay(tmp_path, root.task_id, relay_id=f"work-reply:{address}", note="",
+                                   quotes=[owner_quote(tmp_path, row, address=address)], chat_id=1, teller_task_id="",
+                                   canonical_root=tmp_path, work_reply=True)
+        assert fresh
+        relays.append(entry["relay"]["relay_id"])
+    messages = []
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, root.task_id, None, set(), owner_ctx=root)
+    assert str(messages).count("The owner addressed this work directly") == 2
+    assert owner_input_revision(root) == 2 and owner_reply_owed(root)
+    assert all(not row.get("carried") for row in root._owner_directives)
+    held = held_owner_messages(root)
+    assert all(held[address]["carried"] == {"went_to": "", "work_reply": True} for _, address in rows)
+    carried = _rows_to_carry(root, tmp_path)
+    assert sorted(item[1] for item in carried) == sorted(address for _, address in rows)
+    assert all(item[3] == "planned-root" and item[5] == {"context_only": True} for item in carried)
+    assert _send_user_message(root, "Both are done.", reply_to_relay=relays[1]).startswith("OK:")
+    assert root.event_queue.qsize() == 1 and set(root._open_relays) == {relays[0]}
+    assert owner_reply_owed(root), "one answer retires its own relay only; the first Reply stays owed"
+    assert _send_user_message(root, "An ordinary word to the room.", reply_to_relay=None).startswith("OK:")
+    assert set(root._open_relays) == {relays[0]} and owner_reply_owed(root), "an ordinary send is not this relay's answer"
+    assert _send_user_message(root, "Answering the first now.", reply_to_relay=relays[0]).startswith("OK:")
+    assert not root._open_relays and not owner_reply_owed(root), "the last debt lifted, silence is allowed again"
+
+
+def test_only_a_row_its_source_room_answered_reaches_the_holder_s_tree_and_never_wakes_it(tmp_path):
+    """A paused addressee holds the room's answered row (``handled_by_source_room``); after Resume its tree hears it
+    as context, waking no one and owing nothing. Another work's context (``context_only``) stays with its holder."""
+    from ouroboros.loop_messages import owner_authority_kinds, owner_reply_owed
+    from ouroboros.model_sleep import wake_reason
+    from ouroboros.owner_mailbox import OwnerMailboxPeek, _mailbox_path
+    from ouroboros.owner_relay import ROUTED_BY_HEAD, _carry_to_member, _rows_to_carry, owner_quote
+
+    (answered, answered_at), (watched, watched_at) = _replies(tmp_path, "Paused while I asked", "Said to another work")
+    root = context(tmp_path)
+    root.task_id, root._owner_directives, root.task_metadata = "resumed-root", [], {"root_task_id": "resumed-root"}
+    for row, address, fact in [(answered, answered_at, {"went_to": ROUTED_BY_HEAD, "handled_by_source_room": True}),
+                               (watched, watched_at, {"went_to": "other-root", "context_only": True})]:
+        write_relay(tmp_path, root.task_id, relay_id=f"context:{address}", note="", chat_id=1, teller_task_id="",
+                    quotes=[owner_quote(tmp_path, row, address=address)], canonical_root=tmp_path, host_carried=fact)
+    _drain_incoming_messages([], queue.Queue(), tmp_path, root.task_id, None, set(), owner_ctx=root)
+    assert not owner_reply_owed(root) and root._owner_directives == []
+    [(_, address, quote, went, before, quiet)] = _rows_to_carry(root, tmp_path)
+    assert (address, went, quiet) == (answered_at, ROUTED_BY_HEAD, {"handled_by_source_room": True})
+    child = tmp_path / "child"
+    child.mkdir()
+    rows = [(set(), address, quote, went, before, quiet)]
+    for _ in range(2):  # the receipt's write and a drain's catch-up: one entry
+        _carry_to_member(tmp_path, child, "helper", {"task_id": "helper"}, rows, root.task_id)
+    [entry] = drain_owner_entries(child, "helper")
+    assert entry["host_carried"] == {"went_to": ROUTED_BY_HEAD, "handled_by_source_room": True}
+    assert _mailbox_path(child, "helper").read_text(encoding="utf-8").count("\n") == 1
+    assert owner_authority_kinds([entry]) == [] and not OwnerMailboxPeek(waking_only=True).pending(child, "helper", set(), 1)
+    helper, shown = _helper(child), []
+    helper.task_attempt = 1
+    assert not wake_reason(helper, {"any_mail": True})
+    _drain_incoming_messages(shown, queue.Queue(), child, "helper", None, set(), owner_ctx=helper)
+    assert "the source room handles the answer; context only" in str(shown)
+    assert helper._owner_directives == [] and not owner_reply_owed(helper) and not getattr(helper, "_open_relays", None)
+
+
+@pytest.mark.parametrize("torn", [b'{"kind": "relay_entry", "msg_id": "relay:work-reply:a:root", "text": "\xd0',
+                                  b'not json at all'], ids=["torn-character", "foreign-bytes"])
+def test_an_unreadable_earlier_row_costs_only_itself_and_the_next_relay_is_written_once(tmp_path, torn):
+    """A torn earlier append keeps its bytes; it never makes every later relay to the work unwritable (an exact
+    Reply would then answer in Main for good) and never hides a whole one from dedupe."""
+    from ouroboros.owner_mailbox import _mailbox_path
+    from ouroboros.owner_relay import owner_quote
+
+    [(row, address)] = _replies(tmp_path, "After the torn row")
+    path = _mailbox_path(tmp_path, "root")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(torn)
+    args = dict(relay_id="work-reply:a", note="", quotes=[owner_quote(tmp_path, row, address=address)], chat_id=1,
+                teller_task_id="", canonical_root=tmp_path, work_reply=True)
+    entry, fresh = write_relay(tmp_path, "root", **args)
+    again, repeated = write_relay(tmp_path, "root", **args)
+    assert fresh and not repeated and again == entry
+    raw = path.read_bytes()
+    assert raw.startswith(torn + b"\n") and raw.count(b"\n") == 2
+    assert [item["msg_id"] for item in drain_owner_entries(tmp_path, "root")] == ["relay:work-reply:a:root"]
+
+
+@pytest.mark.parametrize("first", ["owed", "delivered", "exhausted"])
+def test_a_work_reply_keeps_one_first_answer_across_continue_and_retry(tmp_path, monkeypatch, first):
+    """My human's Reply to a work is owed one answer (R3: two owed rows after a Continue). The first answer is owed
+    under the accepted relay alone, so a Continue successor (by the forced path) and a new dispatch of the same attempt
+    (by a tool call) that still hold the relay open, the close never having reached the record, meet that answer as
+    registered and send none of their own words: the outbox keeps the first words, author and source row and replays
+    exactly those, the id stays delivered, or a given-up delivery stays given up and unconfirmed, never reopened. Each
+    closes the relay on its record; the receipt and the forced record name the registered id and its standing."""
+    import copy
+    from collections import deque
+
+    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_relay import owner_quote
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_store import patch_document
+    from ouroboros.terminal_outbox import _exhausted_row
+    from ouroboros.tools.control_runtime import _send_user_message, commit_forced_work_replies
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.utils import update_json_locked
+    from supervisor import events_chat_delivery, terminal_delivery
+
+    monkeypatch.setattr(events_chat_delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
+    registry_path = tmp_path / "state" / "terminal_deliveries.json"
+    [(row, address)] = _replies(tmp_path, "Which order for the migration?")
+    rid = f"work-reply:{address}"
+    did = f"relay-return:{rid}"
+    first_answer = ("Schema first, then backfill.", "first-attempt", address, "relay_reply")
+    first_attempt = context(tmp_path)
+    first_attempt.task_id, first_attempt.event_queue, first_attempt._owner_directives = "first-attempt", queue.Queue(), []
+    first_attempt.task_metadata = {"root_task_id": "first-attempt"}
+    write_task_result(tmp_path, "first-attempt", "running")
+    write_relay(tmp_path, "first-attempt", relay_id=rid, note="", quotes=[owner_quote(tmp_path, row, address=address)],
+                chat_id=1, teller_task_id="", canonical_root=tmp_path, work_reply=True)
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "first-attempt", None, set(), owner_ctx=first_attempt)
+    stale, checkpoint = copy.deepcopy(first_attempt._open_relays), copy.deepcopy(first_attempt._owner_directives)
+    assert set(stale) == {rid}
+    assert _send_user_message(first_attempt, first_answer[0], reply_to_relay=rid).startswith(
+        f"OK: answer to relay {rid} owed to Main (delivery {did});")
+    [answer] = list(first_attempt.event_queue.queue)
+    assert answer["delivery_id"] == did and not first_attempt._open_relays
+    if first == "delivered":
+        sent = []
+        events_chat_delivery._send_message(dict(answer), SimpleNamespace(
+            DRIVE_ROOT=tmp_path, RUNNING={}, append_jsonl=lambda *_a, **_k: None,
+            send_with_budget=lambda chat, text, **kw: sent.append((chat, text, kw["task_id"])) or {"chat_id": chat}))
+        assert sent == [(1, first_answer[0], "first-attempt")]
+    elif first == "exhausted":  # the outbox gave its delivery up unconfirmed; the payload stays, the debt is not reopened
+        update_json_locked(registry_path, lambda current: {**current, "pending": {}, "exhausted": {
+            did: _exhausted_row(current["pending"][did], reason="replay_exhausted")}})
+    patch_document(tmp_path, "first-attempt", lambda current: {**current, "open_relays": stale})  # a lost close
+    sources = owner_sources(tmp_path, {"origin_message_text": "Work", "origin_message_ref": {},
+                                       "held_owner_messages": first_attempt._held_owner_messages, "open_relays": stale,
+                                       "owner_mailbox": {"rows": [], "read_complete": True}}, "first-attempt")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    successor = registry._ctx
+    successor.task_id, successor.current_chat_id, successor.event_queue = "successor", 1, queue.Queue()
+    successor.task_metadata = {"root_task_id": "successor", "continuation": {"owner_sources": sources}}
+    write_task_result(tmp_path, "successor", "running")
+    retry = context(tmp_path)
+    retry.task_id, retry.event_queue, retry.task_metadata = "first-attempt", queue.Queue(), {"root_task_id": "first-attempt"}
+    retry._owner_directives = checkpoint  # restored from a save before the send: the Reply's row is still owed
+    for later in (successor, retry):
+        held_owner_messages(later)
+        assert set(later._open_relays) == {rid}, "both start holding the answered relay open"
+
+    trace, usage = {}, {}
+    successor._forced_work_replies_pending = ({rid: "Backfill first, then the schema."}, [])
+    commit_forced_work_replies(registry, trace, usage)
+    assert trace["forced_work_replies"] == [{"relay_id": rid, "status": "ok", "code": "OK", "delivery_id": did,
+                                             "delivery_state": first, "answered_earlier": True}]
+    assert "owner_message_sent" not in usage
+    said = {"owed": "owed: the outbox retries it until sent", "delivered": "delivered",
+            "exhausted": "not confirmed as sent; a copy is saved"}[first]
+    assert owner_reply_owed(retry)
+    assert _send_user_message(retry, "Actually: backfill first.", reply_to_relay=rid) == (
+        f"OK: relay {rid} already has its first answer (delivery {did}, {said}); "
+        "these words were not sent and the relay is closed.")
+    assert not owner_reply_owed(retry), "the first answer the outbox holds answers the restored Reply's own row"
+    for later in (successor, retry):
+        assert later.event_queue.empty() and not later.pending_events and not later._open_relays
+        assert (load_task_result(tmp_path, later.task_id) or {}).get("open_relays") == {}
+
+    owed = {item["delivery_id"]: item for item in terminal_delivery.pending_deliveries(tmp_path)}
+    if first != "owed":
+        assert owed == {} and terminal_delivery.already_delivered(tmp_path, did) is (first == "delivered")
+        if first == "exhausted":
+            given_up = terminal_delivery._read_registry(tmp_path)["exhausted"][did]
+            assert (given_up["text"], given_up["task_id"], given_up["progress_meta"]["reply_to"]["address"],
+                    given_up["system_type"]) == first_answer
+        return
+    assert list(owed) == [did]
+    assert (owed[did]["text"], owed[did]["task_id"], owed[did]["progress_meta"]["reply_to"]["address"],
+            owed[did]["system_type"]) == first_answer
+
+    def aged(current):  # its send presumed lost: the outbox replays exactly the first answer
+        current["pending"][did]["registered_at"] = "2026-01-01T00:00:00+00:00"
+        return current
+
+    update_json_locked(registry_path, aged)
+    bus = []
+    assert terminal_delivery.replay_pending_deliveries(tmp_path, event_queue=SimpleNamespace(
+        put_unless_outstanding=lambda event: bus.append(event) or True)) == [did]
+    [again] = bus
+    assert (again["text"], again["task_id"], again["progress_meta"]["reply_to"]["address"],
+            again["system_type"]) == first_answer
+
+
+def test_distinct_replies_owe_their_own_answers_and_an_ordinary_relay_keeps_its_per_attempt_return(tmp_path):
+    """One answer per accepted Reply, not one for all: a successor holding an answered first Reply and an open second
+    one owes only the second, under its own id, with its own words and author. A teller's relay is no work Reply: its
+    return keeps the answering attempt in its id, so each attempt that answers it owes and sends its own, as before."""
+    from ouroboros.owner_relay import owner_quote
+    from ouroboros.tools.control_runtime import _send_user_message
+    from supervisor.terminal_delivery import pending_deliveries
+
+    (row1, addr1), (row2, addr2) = _replies(tmp_path, "First question to the work", "Second question to the work")
+    r1, r2 = f"work-reply:{addr1}", f"work-reply:{addr2}"
+    told, handle = source(tmp_path)
+    quotes, error = quote_rows(context(tmp_path, told), [handle])
+    assert not error
+
+    def attempt(task_id):
+        ctx = context(tmp_path)
+        ctx.task_id, ctx.event_queue, ctx._owner_directives = task_id, queue.Queue(), []
+        ctx.task_metadata = {"root_task_id": task_id}
+        return ctx
+
+    first = attempt("first-attempt")
+    for rid, row, address in ((r1, row1, addr1), (r2, row2, addr2)):
+        write_relay(tmp_path, first.task_id, relay_id=rid, note="", quotes=[owner_quote(tmp_path, row, address=address)],
+                    chat_id=1, teller_task_id="", canonical_root=tmp_path, work_reply=True)
+    write_relay(tmp_path, first.task_id, relay_id="told", note="context", quotes=quotes, chat_id=1, teller_task_id="teller")
+    _drain_incoming_messages([], queue.Queue(), tmp_path, first.task_id, None, set(), owner_ctx=first)
+    inherited = dict(first._open_relays)
+    assert set(inherited) == {r1, r2, "told"}
+    for rid, words in ((r1, "First answer."), ("told", "Told answer by the first attempt.")):
+        assert _send_user_message(first, words, reply_to_relay=rid).startswith(f"OK: answer to relay {rid} owed")
+    successor = attempt("successor")
+    successor._open_relays = inherited
+    assert "these words were not sent" in _send_user_message(successor, "Other words.", reply_to_relay=r1)
+    for rid, words in ((r2, "Second answer."), ("told", "Told answer by the successor.")):
+        assert _send_user_message(successor, words, reply_to_relay=rid).startswith(f"OK: answer to relay {rid} owed")
+    assert {row["delivery_id"]: (row["text"], row["task_id"]) for row in pending_deliveries(tmp_path)} == {
+        f"relay-return:{r1}": ("First answer.", "first-attempt"),
+        "relay-return:told:first-attempt": ("Told answer by the first attempt.", "first-attempt"),
+        f"relay-return:{r2}": ("Second answer.", "successor"),
+        "relay-return:told:successor": ("Told answer by the successor.", "successor")}
+    assert [(event["progress_meta"]["reply_to_relay"], event["text"]) for event in successor.event_queue.queue] == [
+        (r2, "Second answer."), ("told", "Told answer by the successor.")]
+
+
+def test_a_continue_after_the_outbox_forgot_the_answer_finds_it_in_history_and_sends_nothing(tmp_path, monkeypatch):
+    """The outbox keeps only its newest ids (512; two here), so an ordinary Continue holding a Reply answered before its
+    id was pushed out learns nothing from the registry. The answer was saved in history under its own name, the delivery
+    id, so one indexed read finds it: the successor's different words are not sent, nothing new is owed, and the receipt
+    says the answer is in history while its transport receipt is no longer kept. A fresh Reply answered after the same
+    eviction is owed as usual; with history unreadable as well, the answer is refused as unknown and the relay stays."""
+    from collections import deque
+
+    from ouroboros import dialogue_store, terminal_outbox
+    from ouroboros.owner_relay import owner_quote
+    from ouroboros.tools.control_runtime import _send_user_message
+    from supervisor import events_chat_delivery, terminal_delivery
+    from supervisor.message_ingress import log_chat
+
+    monkeypatch.setattr(events_chat_delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
+    monkeypatch.setattr(terminal_outbox, "_REGISTRY_CAP", 2)
+    (old_row, old_address), (new_row, new_address) = _replies(tmp_path, "Was the backfill run?", "One more question")
+    old_rid, new_rid = f"work-reply:{old_address}", f"work-reply:{new_address}"
+    old_did, new_did = f"relay-return:{old_rid}", f"relay-return:{new_rid}"
+
+    def attempt(task_id):
+        ctx = context(tmp_path)
+        ctx.task_id, ctx.event_queue, ctx._owner_directives = task_id, queue.Queue(), []
+        ctx.task_metadata = {"root_task_id": task_id}
+        return ctx
+
+    first = attempt("first-attempt")
+    for rid, row, address in ((old_rid, old_row, old_address), (new_rid, new_row, new_address)):
+        write_relay(tmp_path, first.task_id, relay_id=rid, note="", quotes=[owner_quote(tmp_path, row, address=address)],
+                    chat_id=1, teller_task_id="", canonical_root=tmp_path, work_reply=True)
+    _drain_incoming_messages([], queue.Queue(), tmp_path, first.task_id, None, set(), owner_ctx=first)
+    inherited = dict(first._open_relays)
+    assert _send_user_message(first, "Yes, the backfill ran.", reply_to_relay=old_rid).startswith(
+        f"OK: answer to relay {old_rid} owed")
+    [answer] = list(first.event_queue.queue)
+    events_chat_delivery._send_message(dict(answer), SimpleNamespace(
+        DRIVE_ROOT=tmp_path, RUNNING={}, append_jsonl=lambda *_a, **_k: None,
+        send_with_budget=lambda chat, text, **kw: log_chat(  # the send seam's history write (message_bus.send_with_budget)
+            "out", chat, 0, text, drive_root=tmp_path, task_id=kw["task_id"], ts=kw["ts"], record_type=kw["system_type"],
+            message_meta=kw["progress_meta"], require_write=True) and {"chat_id": chat}))
+    [saved] = dialogue_store.rows_by_client_id(tmp_path, old_did)
+    assert (saved.row["text"], saved.row["task_id"], saved.row["reply_to_relay"]) == (
+        "Yes, the backfill ran.", "first-attempt", old_rid)
+    for later in ("relay-return:later-1:t", "relay-return:later-2:t"):  # newer deliveries push the answer's id out
+        terminal_delivery.register_delivery(tmp_path, later)
+    assert not terminal_delivery.already_delivered(tmp_path, old_did) and not terminal_delivery.pending_deliveries(tmp_path)
+
+    successor = attempt("successor")
+    successor._open_relays = dict(inherited)  # the close never reached the record: the Continue holds the relay open
+    assert _send_user_message(successor, "No, the backfill still waits.", reply_to_relay=old_rid) == (
+        f"OK: relay {old_rid} already has its first answer (delivery {old_did}, in history; its transport receipt is no "
+        "longer kept); these words were not sent and the relay is closed.")
+    assert successor.event_queue.empty() and not terminal_delivery.pending_deliveries(tmp_path)
+    assert [found.row["text"] for found in dialogue_store.rows_by_client_id(tmp_path, old_did)] == ["Yes, the backfill ran."]
+    assert _send_user_message(successor, "A fresh answer.", reply_to_relay=new_rid).startswith(
+        f"OK: answer to relay {new_rid} owed")
+    owed = [(row["delivery_id"], row["text"], row["task_id"]) for row in terminal_delivery.pending_deliveries(tmp_path)]
+    assert owed == [(new_did, "A fresh answer.", "successor")]
+
+    unread = attempt("unread-history")
+    unread._open_relays = {old_rid: inherited[old_rid]}
+    readable = dialogue_store.rows_by_client_id
+    monkeypatch.setattr(dialogue_store, "rows_by_client_id", lambda root, name, **kw: (_ for _ in ()).throw(
+        OSError("history unreadable")) if name == old_did else readable(root, name, **kw))
+    assert _send_user_message(unread, "Words with no known first answer.", reply_to_relay=old_rid).startswith(
+        f"⚠️ RELAY_RETURN_UNKNOWN: whether relay {old_rid} already has its answer cannot be read now")
+    assert unread.event_queue.empty() and set(unread._open_relays) == {old_rid}
+    assert [row["delivery_id"] for row in terminal_delivery.pending_deliveries(tmp_path)] == [new_did]
+
+
+def test_first_answer_witness_requires_verified_same_room_match_and_fails_closed_on_doubt(tmp_path, monkeypatch):
+    """History recovery accepts only a verified outbound ``relay_reply`` for this Reply in its source room.
+    Foreign-room rows never match or consume the room's read cap; any same-room row under the delivery id without a
+    verified match (lost/conflicting link, wrong voice/type, or truncated batch) yields ``unknown`` (sends nothing,
+    keeps the relay open); a genuine match still wins behind a newer non-matching row."""
+    from ouroboros import dialogue_store
+    from ouroboros.chat_references import resolve_reply
+    from ouroboros.tools import control_runtime
+    from ouroboros.tools.control_runtime import _first_answer_witness, _send_user_message
+    from supervisor import terminal_delivery
+    from supervisor.message_ingress import log_chat
+
+    (_, addr), (_, other_addr) = _replies(tmp_path, "Should we migrate now?", "Other question")
+    rid, did = f"work-reply:{addr}", f"relay-return:work-reply:{addr}"
+    resolved = resolve_reply(tmp_path, addr)
+    base = {"chat_id": 1, "direction": "out", "type": "relay_reply", "client_message_id": did,
+            "delivery_id": did, "reply_to_relay": rid, "reply_to": resolved}
+    event = {"chat_id": 1, "delivery_id": did, "progress_meta": {"reply_to": resolved, "reply_to_relay": rid}}
+    ctx = context(tmp_path)
+    ctx.task_id, ctx.event_queue, ctx.task_metadata = "root", queue.Queue(), {"root_task_id": "root"}
+    ctx._open_relays = {rid: {"relay_id": rid, "work_reply": True, "source": {"chat_id": 1, "address": addr, "label": "Main"}}}
+
+    # Foreign-room row under the same delivery id neither matches nor eats into room 1's read cap.
+    dialogue_store.append(tmp_path, "chat", {**base, "chat_id": 42, "ts": "2026-11-23T10:10:00Z", "text": "Other room",
+                                             "reply_to": {**resolved, "chat_id": 42}})
+    with monkeypatch.context() as mp:
+        mp.setattr(control_runtime, "_FIRST_ANSWER_WITNESS_LIMIT", 1)
+        assert _first_answer_witness(ctx, event) == {"recorded": False}
+
+        # Every ambiguous/mismatched same-room row under did yields unknown, never False or True.
+        for bad in (
+            {"direction": "in"},
+            {"direction": "system", "role": "system"},
+            {"type": "proactive_message"},
+            {"reply_to_relay": f"work-reply:{other_addr}"},
+            {"reply_to": {**resolved, "address": other_addr}},
+            {"reply_to": {**resolved, "unresolved": True}},
+            {"reply_to": {}},
+            {"delivery_id": "relay-return:other"},
+        ):
+            mp.setattr(dialogue_store, "rows_by_client_id",
+                       lambda *_a, _row={**base, **bad}, **_kw: [dialogue_store.Row("chat", 10, _row, None, 1)])
+            assert _first_answer_witness(ctx, event) == {"recorded": None}, bad
+
+    # Real store: outbound relay_reply with lost reply_to link -> unknown, nothing sent, relay stays open.
+    dialogue_store.append(tmp_path, "chat", {**base, "reply_to": {}, "ts": "2026-11-23T10:11:00Z", "text": "Lost link"})
+    assert _send_user_message(ctx, "Must not resend.", reply_to_relay=rid).startswith(
+        f"⚠️ RELAY_RETURN_UNKNOWN: whether relay {rid} already has its answer cannot be read now")
+    assert ctx.event_queue.empty() and set(ctx._open_relays) == {rid} and not terminal_delivery.pending_deliveries(tmp_path)
+
+    # Genuine match wins behind a newer non-matching row, while a cap truncating before it stays unknown.
+    log_chat("out", 1, 0, "Genuine answer.", drive_root=tmp_path, task_id="earlier", ts="2026-11-23T10:12:00Z",
+             record_type="relay_reply",
+             message_meta={"row_client_message_id": did, "delivery_id": did, "reply_to_relay": rid, "reply_to": resolved},
+             require_write=True)
+    dialogue_store.append(tmp_path, "chat", {**base, "type": "proactive_message", "ts": "2026-11-23T10:13:00Z", "text": "Noise"})
+    with monkeypatch.context() as mp:
+        mp.setattr(control_runtime, "_FIRST_ANSWER_WITNESS_LIMIT", 1)
+        assert _send_user_message(ctx, "Truncated read.", reply_to_relay=rid).startswith(
+            f"⚠️ RELAY_RETURN_UNKNOWN: whether relay {rid} already has its answer cannot be read now")
+        assert ctx.event_queue.empty() and set(ctx._open_relays) == {rid}
+    assert _send_user_message(ctx, "Different words.", reply_to_relay=rid) == (
+        f"OK: relay {rid} already has its first answer (delivery {did}, in history; its transport receipt is no "
+        "longer kept); these words were not sent and the relay is closed.")
+    assert ctx.event_queue.empty() and not ctx._open_relays and not terminal_delivery.pending_deliveries(tmp_path)
+
+
+def test_first_answer_witness_respects_post_reply_coverage_without_blocking_on_older_history(tmp_path):
+    """Older pending archives or skipped lines before a new Reply do not block answering it; incomplete coverage or
+    skipped lines after the Reply turn absence into ``unknown``, while a verified saved row still wins."""
+    from ouroboros import dialogue_store
+    from ouroboros.chat_references import resolve_reply
+    from ouroboros.tools.control_runtime import _send_user_message
+    from supervisor import terminal_delivery
+    from supervisor.message_ingress import log_chat
+
+    def reply_ctx(task_id, rid, addr):
+        ctx = context(tmp_path)
+        ctx.task_id, ctx.event_queue, ctx.task_metadata = task_id, queue.Queue(), {"root_task_id": task_id}
+        ctx._open_relays = {rid: {"relay_id": rid, "work_reply": True, "source": {"chat_id": 1, "address": addr, "label": "Main"}}}
+        return ctx
+
+    early = dialogue_store.append(tmp_path, "chat", {
+        "chat_id": 1, "direction": "in", "ts": "2026-11-23T09:00:00Z", "text": "Old", "client_message_id": "old-0", "attachments": []})
+    new_row = {"chat_id": 1, "direction": "in", "ts": "2026-11-23T10:00:00Z", "text": "Fresh Reply",
+               "client_message_id": "reply-fresh", "attachments": []}
+    dialogue_store.append(tmp_path, "chat", new_row)
+    new_addr = format_address(row_address(new_row))
+    new_rid, new_did = f"work-reply:{new_addr}", f"relay-return:work-reply:{new_addr}"
+
+    gap_row = {"chat_id": 1, "direction": "in", "ts": "2026-11-23T10:01:00Z", "text": "Reply before gap",
+               "client_message_id": "reply-gap", "attachments": []}
+    gap_receipt = dialogue_store.append(tmp_path, "chat", gap_row)
+    gap_addr = format_address(row_address(gap_row))
+    gap_rid, gap_did = f"work-reply:{gap_addr}", f"relay-return:work-reply:{gap_addr}"
+
+    # Older pending segment and skipped line strictly before new_row do not block answering new_rid.
+    with dialogue_store.transaction(tmp_path, write=True) as conn:
+        conn.execute("INSERT INTO import_ledger (stream, name, base, size, state) VALUES ('chat', 'chat_old.jsonl', 0, ?, 'pending')",
+                     (early.end,))
+        conn.execute("INSERT INTO skipped (stream, seq, length, kind) VALUES ('chat', 0, 10, 'invalid')")
+    assert not dialogue_store.range_coverage(tmp_path, "chat", lower=0)["imported"]
+    fresh_ctx = reply_ctx("fresh-root", new_rid, new_addr)
+    assert _send_user_message(fresh_ctx, "Fresh answer.", reply_to_relay=new_rid).startswith(f"OK: answer to relay {new_rid} owed")
+    assert fresh_ctx.event_queue.qsize() == 1 and not fresh_ctx._open_relays
+
+    # Post-Reply skipped line, then post-Reply pending segment -> unknown (nothing sent, relay stays open).
+    gap_ctx = reply_ctx("gap-root", gap_rid, gap_addr)
+    for sql, params in (
+        ("INSERT INTO skipped (stream, seq, length, kind) VALUES ('chat', ?, 12, 'invalid')", (gap_receipt.end,)),
+        ("INSERT INTO import_ledger (stream, name, base, size, state) VALUES ('chat', 'chat_later.jsonl', ?, 50, 'pending')",
+         (gap_receipt.end,)),
+    ):
+        with dialogue_store.transaction(tmp_path, write=True) as conn:
+            conn.execute("DELETE FROM skipped WHERE stream='chat' AND seq=?", (gap_receipt.end,))
+            conn.execute(sql, params)
+        assert _send_user_message(gap_ctx, "Hold across gap.", reply_to_relay=gap_rid).startswith(
+            f"⚠️ RELAY_RETURN_UNKNOWN: whether relay {gap_rid} already has its answer cannot be read now")
+        assert gap_ctx.event_queue.empty() and set(gap_ctx._open_relays) == {gap_rid}
+        assert [row["delivery_id"] for row in terminal_delivery.pending_deliveries(tmp_path)] == [new_did]
+
+    # A verified saved answer still wins while the later pending segment remains.
+    log_chat("out", 1, 0, "Saved earlier.", drive_root=tmp_path, task_id="earlier", ts="2026-11-23T10:15:00Z",
+             record_type="relay_reply",
+             message_meta={"row_client_message_id": gap_did, "delivery_id": gap_did, "reply_to_relay": gap_rid,
+                           "reply_to": resolve_reply(tmp_path, gap_addr)},
+             require_write=True)
+    assert _send_user_message(gap_ctx, "Duplicate words.", reply_to_relay=gap_rid) == (
+        f"OK: relay {gap_rid} already has its first answer (delivery {gap_did}, in history; its transport receipt is no "
+        "longer kept); these words were not sent and the relay is closed.")
+    assert gap_ctx.event_queue.empty() and not gap_ctx._open_relays
+    assert [row["delivery_id"] for row in terminal_delivery.pending_deliveries(tmp_path)] == [new_did]
+
+
+def _forced_reply_json(*, relay_replies: dict[str, str], **fields):
+    import json
+
+    return {"role": "assistant", "content": json.dumps({"action": "finish", "relay_replies": relay_replies, **fields})}
+
+
+def test_forced_finalization_answers_open_work_reply_in_source_room_and_keeps_project_final(tmp_path, monkeypatch):
+    """Project-bound root receiving an owner Reply in Main before its last round answers under the originating Main row
+    via the forced JSON-text envelope while keeping its own Project final separate."""
+    import json
+    import ouroboros.loop as loop
+    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.owner_relay import owner_quote
+    from ouroboros.projects_registry import RoomResolver, bind_task_to_project, reserved_project_chat_ids
+    from ouroboros.room_membership import row_rooms
+    from ouroboros.task_finalization import deliver_final_message_live
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.registry import ToolRegistry
+    from supervisor.events_chat_delivery import _send_message
+    from supervisor.message_ingress import log_chat
+    from supervisor.terminal_delivery import already_delivered, pending_deliveries
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
+    tid = "proj-root-e2e"
+    project_chat = int(bind_task_to_project(tmp_path, tid, "proj-alpha", origin={"absent": "system"})["project_chat_id"])
+    write_task_result(tmp_path, tid, "running", chat_id=project_chat, root_task_id=tid)
+    [(owner_row, address)] = _replies(tmp_path, "Can you confirm the migration order too?")
+    relay_id = f"work-reply:{address}"
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.current_chat_id = project_chat
+    registry._ctx.task_metadata = {"root_task_id": tid}
+    event_q, seen_prompts = queue.Queue(), []
+
+    def respond(_llm, messages, *_a, **_kw):
+        seen_prompts.append(json.loads(json.dumps(messages)))
+        if len(seen_prompts) == 1:
+            write_relay(tmp_path, tid, relay_id=relay_id, note="", chat_id=1, teller_task_id="",
+                        quotes=[owner_quote(tmp_path, owner_row, address=address)], canonical_root=tmp_path, work_reply=True)
+            return {"role": "assistant", "content": "Checking.", "tool_calls": [{
+                "id": "r1", "type": "function", "function": {"name": "chat_history", "arguments": "{}"}}]}, 0.0
+        return _forced_reply_json(answer="Project Alpha migration completed.",
+                                  relay_replies={relay_id: "Yes: schema first, then backfill."}), 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", respond)
+    final_text, usage, trace = loop.run_llm_loop(
+        [{"role": "user", "content": "Run Alpha migration"}], registry,
+        SimpleNamespace(default_model=lambda: "test-model"), tmp_path / "logs",
+        lambda *_a, **_kw: None, queue.Queue(), event_queue=event_q, task_id=tid, drive_root=tmp_path)
+    assert len(seen_prompts) == 2 and relay_id in seen_prompts[-1][-1]["content"]
+    assert final_text == "Project Alpha migration completed." and usage.get("owner_message_sent") is True
+    assert trace["forced_work_replies"] == [{  # the id the send registered: the Reply's relay alone
+        "relay_id": relay_id, "status": "ok", "code": "OK", "delivery_id": f"relay-return:{relay_id}", "delivery_state": "owed"}]
+    assert not registry._ctx._open_relays and not owner_reply_owed(registry._ctx)
+    assert not load_task_result(tmp_path, tid).get("open_relays")
+
+    queued = [e for e in iter(lambda: event_q.get_nowait() if not event_q.empty() else None, None)
+              if e.get("type") == "send_message" and not e.get("is_progress")]
+    assert len(queued) == 1 and queued[0]["system_type"] == "relay_reply" and queued[0]["chat_id"] == 1
+    assert queued[0]["progress_meta"]["reply_to"]["address"] == address
+    assert not queued[0]["progress_meta"]["reply_to"].get("unresolved")
+    assert queued[0]["progress_meta"]["reply_to_relay"] == relay_id
+    assert [row["delivery_id"] for row in pending_deliveries(tmp_path)] == [f"relay-return:{relay_id}"]
+
+    shortcut_q = queue.Queue()
+    assert deliver_final_message_live(shortcut_q, [dict(queued[0])], tid, drive_root=tmp_path) is False
+    assert shortcut_q.empty()
+
+    sent_frames = []
+    sup_ctx = SimpleNamespace(
+        DRIVE_ROOT=tmp_path, RUNNING={tid: {"task": {"id": tid, "chat_id": project_chat, "root_task_id": tid}}},
+        append_jsonl=lambda *_a, **_kw: None,
+        send_with_budget=lambda cid, txt, **kw: (
+            sent_frames.append((cid, txt, kw.get("system_type", "")))
+            or log_chat("system" if kw.get("role") == "system" else "out", cid, 0, txt,
+                        drive_root=tmp_path, task_id=kw.get("task_id", ""), ts=kw.get("ts"),
+                        fmt=kw.get("fmt", ""), record_type=kw.get("system_type", ""),
+                        message_meta=kw.get("progress_meta"), require_write=bool(kw.get("require_write")))
+            and {"chat_id": cid}))
+    _send_message(dict(queued[0]), sup_ctx)
+    _send_message(dict(queued[0]), sup_ctx)  # duplicate suppressed by delivery_id
+    _send_message({"type": "send_message", "chat_id": 1, "task_id": tid, "root_task_id": tid,
+                   "text": final_text, "format": "markdown", "is_progress": False, "delivery_id": f"final:{tid}:1"}, sup_ctx)
+    assert sent_frames == [
+        (1, "Yes: schema first, then backfill.", "relay_reply"),
+        (project_chat, "Project Alpha migration completed.", ""),
+    ]
+    assert already_delivered(tmp_path, f"relay-return:{relay_id}", task_id=tid)
+    rows = dialogue_test.chat_rows(tmp_path)
+    [relay_row] = [r for r in rows if r.get("type") == "relay_reply"]
+    [final_row] = [r for r in rows if r.get("delivery_id") == f"final:{tid}:1"]
+    assert relay_row["reply_to"]["address"] == address and relay_row["reply_to_relay"] == relay_id and "type" not in final_row
+    projects, resolver = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path)
+    assert row_rooms(1, relay_row, projects, resolver) == frozenset({1, project_chat})
+    assert row_rooms(project_chat, final_row, projects, resolver) == frozenset({project_chat})
+
+
+def test_forced_finalization_multiple_mixed_and_retained_candidates_keep_exact_reply_isolation(tmp_path, monkeypatch):
+    """A current retained answer_sha256 (created after drain) answers only valid resolvable open work_reply IDs without
+    stealing tell_task, answered, duplicate, empty or missing-source relays (a stale one: test_work_reply_finish.py)."""
+    import ouroboros.loop as loop
+    from ouroboros.owner_relay import owner_quote
+    from ouroboros.tools.control_runtime import _send_user_message
+    from tests.test_acceptance_preparation_loop import _delivery_ctx
+
+    (row1, addr1), (row2, addr2), (row3, addr3), (row_tell, addr_tell) = _replies(
+        tmp_path, "First Reply", "Second Reply", "Already answered", "Relayed by teller")
+    r1, r2, r3, rtell = f"work-reply:{addr1}", f"work-reply:{addr2}", f"work-reply:{addr3}", f"tell:{addr_tell}"
+
+    # Current answer_sha256 (candidate retained AFTER draining owner Replies) -> isolated per-reply dispatch.
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    registry, ctx = _delivery_ctx(tmp_path, trace)
+    ctx.tool_schemas = registry.schemas()
+    registry._ctx.current_chat_id = 1
+    registry._ctx.event_queue = ctx.event_queue = queue.Queue()
+    for rid, row, addr, is_wr in [(r1, row1, addr1, True), (r2, row2, addr2, True),
+                                  (r3, row3, addr3, True), (rtell, row_tell, addr_tell, False)]:
+        write_relay(tmp_path, ctx.task_id, relay_id=rid, note="" if is_wr else "teller note", chat_id=1,
+                    teller_task_id="" if is_wr else "teller", quotes=[owner_quote(tmp_path, row, address=addr)],
+                    canonical_root=tmp_path, work_reply=is_wr)
+    loop._drain_forced_owner_directives(ctx, trace)
+    missing_addr = "row:1@2026-11-23T00:00:00Z#deadbeefdead"
+    r_missing = f"work-reply:{missing_addr}"
+    registry._ctx._open_relays[r_missing] = {
+        "relay_id": r_missing, "work_reply": True, "source": {"chat_id": 1, "address": missing_addr, "label": "Main"},
+    }
+    assert _send_user_message(registry._ctx, "Answered earlier.", reply_to_relay=r3).startswith("OK:")
+    while not ctx.event_queue.empty():
+        ctx.event_queue.get_nowait()
+    retained = loop._replace_delivery_candidate(registry, ctx, trace, "Retained synthesis report.", control="candidate")
+
+    raw_body = (
+        '{"action":"finish","answer_sha256":"' + retained.content_sha256 + '","relay_replies":{'
+        f'"{r1}":"Answer for first",'
+        f'"{r2}":"First draft","{r2}":"Conflicting second draft",'
+        f'"{r3}":"Do not resend answered",'
+        f'"{rtell}":"Do not steal tell_task",'
+        f'"{r_missing}":"Do not emit unanchored speech",'
+        '"":"Never empty-key fallback",'
+        '"work-reply:unknown":"Unknown id"}}'
+    )
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_kw: ({"role": "assistant", "content": raw_body}, 0.0))
+    text, _, _ = loop._forced_final_answer(
+        ctx, prompt="[ROUND_LIMIT]", fallback_text="fallback", reason_code="round_limit_exceeded")
+    assert text == "Retained synthesis report."
+    sent = [e for e in iter(lambda: ctx.event_queue.get_nowait() if not ctx.event_queue.empty() else None, None)
+            if e.get("type") == "send_message" and not e.get("is_progress")]
+    assert [(e["progress_meta"]["reply_to_relay"], e["progress_meta"]["reply_to"]["address"], e["text"]) for e in sent] == [
+        (r1, addr1, "Answer for first")]
+    assert set(registry._ctx._open_relays) == {r2, rtell, r_missing}
+
+
+def test_forced_owner_refresh_discards_stale_attempt_zero_reply_and_answers_both_work_replies_once(tmp_path, monkeypatch):
+    """When a second work_reply arrives during attempt 0 of forced finalization, attempt 0 emits nothing and
+    [FORCED_OWNER_REFRESH] lets attempt 1 answer both open Replies once."""
+    import ouroboros.loop as loop
+    from ouroboros.owner_relay import owner_quote
+    from tests.test_acceptance_preparation_loop import _delivery_ctx
+
+    (row1, addr1), (row2, addr2) = _replies(tmp_path, "First late Reply", "Arrived mid-wrapup")
+    r1, r2 = f"work-reply:{addr1}", f"work-reply:{addr2}"
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    registry, ctx = _delivery_ctx(tmp_path, trace)
+    ctx.tool_schemas = registry.schemas()
+    registry._ctx.current_chat_id = 1
+    registry._ctx.event_queue = ctx.event_queue = queue.Queue()
+    write_relay(tmp_path, ctx.task_id, relay_id=r1, note="", chat_id=1, teller_task_id="",
+                quotes=[owner_quote(tmp_path, row1, address=addr1)], canonical_root=tmp_path, work_reply=True)
+    calls = []
+
+    def respond(_llm, messages, *_a, **_kw):
+        calls.append(messages[-1]["content"])
+        if len(calls) == 1:
+            write_relay(tmp_path, ctx.task_id, relay_id=r2, note="", chat_id=1, teller_task_id="",
+                        quotes=[owner_quote(tmp_path, row2, address=addr2)], canonical_root=tmp_path, work_reply=True)
+            return _forced_reply_json(answer="Stale draft", relay_replies={r1: "Stale answer"}), 0.0
+        return _forced_reply_json(answer="Fresh final incorporating both",
+                                  relay_replies={r1: "Fresh first", r2: "Fresh second"}), 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", respond)
+    text, _, _ = loop._forced_final_answer(
+        ctx, prompt="[ROUND_LIMIT]", fallback_text="fallback", reason_code="round_limit_exceeded")
+    assert len(calls) == 2 and r1 in calls[0] and "[FORCED_OWNER_REFRESH]" in calls[1] and r2 in calls[1]
+    assert text == "Fresh final incorporating both" and not registry._ctx._open_relays
+    sent = [(e["progress_meta"]["reply_to_relay"], e["text"])
+            for e in iter(lambda: ctx.event_queue.get_nowait() if not ctx.event_queue.empty() else None, None)
+            if e.get("type") == "send_message" and not e.get("is_progress")]
+    assert sent == [(r1, "Fresh first"), (r2, "Fresh second")]
+
+
+def test_forced_work_reply_outbox_refusal_deferred_buffer_and_error_isolation(tmp_path, monkeypatch):
+    """Outbox refusal carries real ToolResult status/code/reason_code and keeps the relay open; live-queue failure
+    buffers in pending_events while retiring the owed relay once; an unexpected error on one reply leaves it untouched
+    without breaking a sibling reply or the task final."""
+    import ouroboros.loop as loop
+    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.owner_relay import owner_quote
+    from supervisor.terminal_delivery import pending_deliveries
+    from tests.test_acceptance_preparation_loop import _delivery_ctx
+
+    (row1, addr1), (row2, addr2), (row3, addr3) = _replies(
+        tmp_path, "Hold open if outbox refuses", "Live queue fails to deferred", "Sibling survives error")
+    r1, r2, r3 = f"work-reply:{addr1}", f"work-reply:{addr2}", f"work-reply:{addr3}"
+
+    # 1. Outbox registration refuses -> real unavailable/CAPABILITY_UNAVAILABLE/RELAY_RETURN_NOT_OWED, relay stays open.
+    tr1 = {"tool_calls": [], "reasoning_notes": []}
+    reg1, ctx1 = _delivery_ctx(tmp_path, tr1)
+    ctx1.task_id = reg1._ctx.task_id = ctx1.root_task_id = "outbox-refused"
+    ctx1.tool_schemas = reg1.schemas()
+    reg1._ctx.current_chat_id = 1
+    reg1._ctx.event_queue = ctx1.event_queue = queue.Queue()
+    write_relay(tmp_path, "outbox-refused", relay_id=r1, note="", chat_id=1, teller_task_id="",
+                quotes=[owner_quote(tmp_path, row1, address=addr1)], canonical_root=tmp_path, work_reply=True)
+    with monkeypatch.context() as mp:
+        mp.setattr("supervisor.terminal_delivery.register_pending_delivery", lambda *_a, **_kw: False)
+        mp.setattr(loop, "call_llm_with_retry", lambda *_a, **_kw: (
+            _forced_reply_json(answer="Task result stands.", relay_replies={r1: "Attempted answer"}), 0.0))
+        text1, _, out1 = loop._forced_final_answer(
+            ctx1, prompt="[ROUND_LIMIT]", fallback_text="fallback", reason_code="round_limit_exceeded")
+    assert text1 == "Task result stands."
+    assert out1["forced_work_replies"] == [{
+        "relay_id": r1, "status": "unavailable", "code": "CAPABILITY_UNAVAILABLE", "reason_code": "RELAY_RETURN_NOT_OWED"}]
+    assert set(reg1._ctx._open_relays) == {r1} and owner_reply_owed(reg1._ctx) and not reg1._ctx.pending_events
+    assert ctx1.event_queue.empty()
+
+    # 2. Failing live event_queue falls back to deferred pending_events + outbox; unexpected error on one reply stays unknown.
+    tr2 = {"tool_calls": [], "reasoning_notes": []}
+    reg2, ctx2 = _delivery_ctx(tmp_path, tr2)
+    ctx2.task_id = reg2._ctx.task_id = ctx2.root_task_id = "outbox-deferred"
+    ctx2.tool_schemas = reg2.schemas()
+    reg2._ctx.current_chat_id = 1
+    reg2._ctx.event_queue = ctx2.event_queue = SimpleNamespace(
+        put_nowait=lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("live queue full")))
+    for rid, r_row, r_addr in ((r2, row2, addr2), (r3, row3, addr3)):
+        write_relay(tmp_path, "outbox-deferred", relay_id=rid, note="", chat_id=1, teller_task_id="",
+                    quotes=[owner_quote(tmp_path, r_row, address=r_addr)], canonical_root=tmp_path, work_reply=True)
+    real_exec = reg2.execute_result
+    monkeypatch.setattr(reg2, "execute_result", lambda name, args, **kw: (
+        (_ for _ in ()).throw(RuntimeError("post-dispatch boom"))
+        if args.get("reply_to_relay") == r2 else real_exec(name, args, **kw)))
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_kw: (
+        _forced_reply_json(answer="Deferred task result.", relay_replies={r2: "Uncertain", r3: "Buffered in outbox"}), 0.0))
+    text2, usage2, out2 = loop._forced_final_answer(
+        ctx2, prompt="[ROUND_LIMIT]", fallback_text="fallback", reason_code="round_limit_exceeded")
+    assert text2 == "Deferred task result." and usage2.get("owner_message_sent") is True
+    assert out2["forced_work_replies"] == [
+        {"relay_id": r2, "status": "unknown", "error": "RuntimeError"},
+        {"relay_id": r3, "status": "ok", "code": "OK", "delivery_id": f"relay-return:{r3}", "delivery_state": "owed"},
+    ]
+    assert set(reg2._ctx._open_relays) == {r2}
+    assert [e["progress_meta"]["reply_to_relay"] for e in reg2._ctx.pending_events if e.get("system_type") == "relay_reply"] == [r3]
+    assert [row["delivery_id"] for row in pending_deliveries(tmp_path)] == [f"relay-return:{r3}"]
+
+
+def test_forced_work_reply_safety_stop_disabled_single_encoding_and_audience_gates(tmp_path, monkeypatch):
+    """No-relay zero prompt drift, plain prose, companion tool batches / preambles / unknown native finish_task fields,
+    elapsed deadlines / timeout repeats, hard Stop (direct mailbox interrupt and durable cancel intent), disabled
+    send_user_message (contract and Consciousness), and non-root/hidden/Presence lanes never emit relay_reply."""
+    import json
+    import time
+    import ouroboros.loop as loop
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.consciousness_authority import apply_consciousness_authority
+    from ouroboros.loop_llm_call import TIMEOUT_REPEAT_KEY
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+    from ouroboros.owner_relay import owner_quote
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_runtime import _send_user_message, open_work_reply_ids
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+    from supervisor.terminal_delivery import pending_deliveries
+    from tests.test_acceptance_preparation_loop import _delivery_ctx
+    from tests.test_presence_runner import _admission
+
+    [(row, addr)] = _replies(tmp_path, "Question near boundary")
+    rid = f"work-reply:{addr}"
+
+    def fresh_case(tid):
+        tr = {"tool_calls": [], "reasoning_notes": []}
+        reg, rctx = _delivery_ctx(tmp_path, tr)
+        rctx.task_id = reg._ctx.task_id = rctx.root_task_id = tid
+        rctx.tool_schemas = reg.schemas()
+        reg._ctx.current_chat_id = 1
+        reg._ctx.event_queue = rctx.event_queue = queue.Queue()
+        return tr, reg, rctx
+
+    # 1. No open work_reply -> early return before registry reads and zero prompt drift.
+    tr0, reg0, rctx0 = fresh_case("case-none")
+    with monkeypatch.context() as mp:
+        mp.setattr(reg0, "get_schema_by_name", lambda *_a: pytest.fail("must return before registry read"))
+        assert open_work_reply_ids(reg0) == () and "relay_replies" not in loop._prepare_forced_prompt(rctx0, "[ROUND_LIMIT]", tr0)
+
+    # 2. Plain prose forced reply never auto-forwards to source room; companion batches, preambles & native finish_task fields reject.
+    for cid, reply_msg, expect_final in (
+        ("prose", {"role": "assistant", "content": "Plain task prose only."}, "Plain task prose only."),
+        ("preamble", {"role": "assistant", "content": "Wait", "tool_calls": [
+            {"id": "s1", "type": "function", "function": {
+                "name": "send_user_message", "arguments": json.dumps({"reply_to_relay": rid, "text": "Leak?"})}}]}, None),
+        ("paired-batch", {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "r1", "type": "function", "function": {
+                "name": "send_user_message", "arguments": json.dumps({"reply_to_relay": rid, "text": "Nope"})}},
+            {"id": "f1", "type": "function", "function": {
+                "name": "finish_task", "arguments": json.dumps({"action": "finish", "answer": "Done"})}}]}, None),
+        ("native-field", {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "f1", "type": "function", "function": {
+                "name": "finish_task", "arguments": json.dumps({
+                    "action": "finish", "answer": "Done", "relay_replies": {rid: "Nope"}})}}]}, None),
+    ):
+        tr, reg, rctx = fresh_case(f"case-{cid}")
+        write_relay(tmp_path, rctx.task_id, relay_id=rid, note="", chat_id=1, teller_task_id="",
+                    quotes=[owner_quote(tmp_path, row, address=addr)], canonical_root=tmp_path, work_reply=True)
+        monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, _m=reply_msg, **_kw: (_m, 0.0))
+        out_text, _, _ = loop._forced_final_answer(rctx, prompt="[ROUND_LIMIT]", fallback_text="fb", reason_code="round_limit_exceeded")
+        if expect_final is not None:
+            assert out_text == expect_final
+        assert set(reg._ctx._open_relays) == {rid} and "forced_work_replies" not in tr and rctx.event_queue.empty()
+
+    # 3. Elapsed deadline and TIMEOUT_REPEAT_KEY buy zero model call and emit zero relay_reply.
+    for mode in ("deadline", "timeout_repeat"):
+        tr3, reg3, rctx3 = fresh_case(f"case-{mode}")
+        write_relay(tmp_path, rctx3.task_id, relay_id=rid, note="", chat_id=1, teller_task_id="",
+                    quotes=[owner_quote(tmp_path, row, address=addr)], canonical_root=tmp_path, work_reply=True)
+        if mode == "deadline":
+            rctx3.deadline_ts = time.time() - 5.0
+        else:
+            rctx3.accumulated_usage[TIMEOUT_REPEAT_KEY] = {"owed": True}
+        monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_kw: pytest.fail("must not call model"))
+        loop._forced_final_answer(rctx3, prompt="[DEADLINE]", fallback_text="Host deadline notice", reason_code="deadline_local")
+        assert set(reg3._ctx._open_relays) == {rid} and "forced_work_replies" not in tr3
+
+    # 4a. Hard Stop on direct turn interrupting call_llm_with_retry via real mailbox finalize_now control.
+    tr4a, reg4a, rctx4a = fresh_case("case-stop-direct")
+    write_relay(tmp_path, "case-stop-direct", relay_id=rid, note="", chat_id=1, teller_task_id="",
+                quotes=[owner_quote(tmp_path, row, address=addr)], canonical_root=tmp_path, work_reply=True)
+    def stop_interrupt(*_a, **_kw):
+        write_owner_message(tmp_path, REASON_OWNER_STOPPED_DIRECT_TURN, "case-stop-direct", kind=KIND_FINALIZE_NOW)
+        raise ModelWaitInterrupted("finalize_requested")
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", stop_interrupt)
+    _, stop_usage_a, _ = loop._forced_final_answer(rctx4a, prompt="[ROUND_LIMIT]", fallback_text="fb", reason_code="round_limit_exceeded")
+    assert stop_usage_a["reason_code"] == "owner_requested_finalization"
+    assert set(reg4a._ctx._open_relays) == {rid} and "forced_work_replies" not in tr4a and rctx4a.event_queue.empty()
+
+    # 4b. Hard Stop via durable immediate cancel intent after draft returns: preserves draft bytes, sends zero relay_reply.
+    tr4b, reg4b, rctx4b = fresh_case("case-stop-intent")
+    write_task_result(tmp_path, "case-stop-intent", "running", chat_id=1, root_task_id="case-stop-intent")
+    reg4b._ctx.model_wait_context = SimpleNamespace(
+        task={"_presence_turn": True}, worker_slot_held=False, task_id="case-stop-intent", canonical_root=tmp_path)
+    write_relay(tmp_path, "case-stop-intent", relay_id=rid, note="", chat_id=1, teller_task_id="",
+                quotes=[owner_quote(tmp_path, row, address=addr)], canonical_root=tmp_path, work_reply=True)
+
+    def stop_after_draft(*_a, **_kw):
+        request_cancel(tmp_path, "case-stop-intent", reason="owner_stop", source="owner_ui")
+        return _forced_reply_json(answer="Draft before stop", relay_replies={rid: "Must not send on Stop"}), 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", stop_after_draft)
+    stop_text_b, stop_usage_b, _ = loop._forced_final_answer(
+        rctx4b, prompt="[ROUND_LIMIT]", fallback_text="fb", reason_code="round_limit_exceeded")
+    assert stop_text_b == "Draft before stop" and stop_usage_b["reason_code"] == "owner_requested_finalization"
+    assert set(reg4b._ctx._open_relays) == {rid} and "forced_work_replies" not in tr4b
+    assert not pending_deliveries(tmp_path) and rctx4b.event_queue.empty()
+
+    # 5. Disabled send_user_message (contract disabled_tools & Consciousness dispatch-only disabled_tools) blocks send, keeps final.
+    for disable_mode in ("contract_disabled", "consciousness_disabled"):
+        tr5, reg5, rctx5 = fresh_case(f"case-{disable_mode}")
+        if disable_mode == "contract_disabled":
+            reg5._ctx.task_contract = {"disabled_tools": ["send_user_message"]}
+        else:
+            reg5._ctx.task_metadata = apply_consciousness_authority({
+                "metadata": {"initiator": "consciousness", "consciousness_autonomy": "observe",
+                             "disabled_tools": ["send_user_message"]}})["metadata"]
+        rctx5.tool_schemas = reg5.schemas()
+        write_relay(tmp_path, rctx5.task_id, relay_id=rid, note="", chat_id=1, teller_task_id="",
+                    quotes=[owner_quote(tmp_path, row, address=addr)], canonical_root=tmp_path, work_reply=True)
+        seen_p = []
+        monkeypatch.setattr(loop, "call_llm_with_retry", lambda _l, msgs, *_a, _m=disable_mode, **_kw: (
+            seen_p.append(msgs[-1]["content"]) or _forced_reply_json(
+                answer=f"Final on {_m}", relay_replies={rid: "Blocked send"}), 0.0))
+        final5, _, out5 = loop._forced_final_answer(rctx5, prompt="[ROUND_LIMIT]", fallback_text="fb", reason_code="round_limit_exceeded")
+        if disable_mode == "contract_disabled":
+            assert "relay_replies" not in seen_p[0]
+        assert final5 == f"Final on {disable_mode}"
+        assert out5["forced_work_replies"] == [{"relay_id": rid, "status": "blocked", "code": "RESOURCE_CONSTRAINT_BLOCKED"}]
+        assert set(reg5._ctx._open_relays) == {rid} and not reg5._ctx.pending_events and rctx5.event_queue.empty()
+
+    # 6. Audience & real Presence fixtures reject both prompt advertisement and direct _send_user_message return.
+    adm = _admission()
+    _, reg6, _ = fresh_case("case-audience")
+    reg6._ctx._open_relays = {rid: {"relay_id": rid, "work_reply": True, "source": {"chat_id": 1, "address": addr}}}
+    assert open_work_reply_ids(reg6) == (rid,)
+    for chat_val, meta_val, contract_val in (
+        (0, {}, {}),
+        (None, {}, {}),
+        (1, {"parent_task_id": "root-1", "root_task_id": "root-1", "delegation_role": "subagent"}, {}),
+        (1, {"parent_task_id": "root-1", "root_task_id": "root-1"}, {}),
+        (1, {"presence": {"binding_id": adm.binding_id}}, {"capability_ceiling": presence_ceiling_payload(adm.capability_ceiling)}),
+    ):
+        reg6._ctx.current_chat_id, reg6._ctx.task_metadata, reg6._ctx.task_contract = chat_val, meta_val, contract_val
+        assert open_work_reply_ids(reg6) == ()
+        if chat_val is not None:
+            assert "OK:" not in _send_user_message(reg6._ctx, "Nope", reply_to_relay=rid)
+    reg6._ctx.current_chat_id, reg6._ctx.task_metadata, reg6._ctx.task_contract = 1, {}, {}
+    for bad_source_chat in (None, 0):
+        reg6._ctx._open_relays = {rid: {"relay_id": rid, "work_reply": True, "source": {"chat_id": bad_source_chat, "address": addr}}}
+        assert open_work_reply_ids(reg6) == ()

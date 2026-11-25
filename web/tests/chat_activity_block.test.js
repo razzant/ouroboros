@@ -14,6 +14,7 @@ import { createChatInstance } from '../modules/chat.js';
 import {
     clearStickyCardState, noteToolCall, noteToolHostMetrics, toolEvidenceView,
 } from '../modules/chat_activity.js';
+import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
 import { upsertToolFoldRow } from '../modules/chat_render_batch.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { clock } from '../modules/work_status.js';
@@ -1556,4 +1557,121 @@ for (const kind of ['review', 'model-wait', 'model-wait-outcome', 'nested-review
         f.log({ ...carrier, type: carrier.system_type });
         assert.equal(f.rows().filter(row => row.innerHTML.includes('2 tool calls')).length, 1);
     } finally { f.close(); }
+});
+
+test('root and child narration and a child final report keep exact row addresses live and on reload; synthetic, tool, and stale rows stay unstamped', async () => {
+    const lineage = {
+        delegation_role: 'subagent', parent_task_id: TASK, root_task_id: TASK,
+        subagent_task_id: CHILD, subagent_role: 'worker',
+    };
+    const rootProgress = {
+        task_id: TASK, role: 'assistant', is_progress: true, narration: true,
+        content: 'Coordinating.', text: 'Coordinating.', ts: TS, row_address: 'row:1@t0#root00000000',
+    };
+    const narr1 = {
+        ...lineage, task_id: CHILD, role: 'assistant', is_progress: true, narration: true,
+        subagent_event: 'progress', content: 'First child narration.', text: 'First child narration.',
+        ts: '2026-09-15T12:00:02Z', row_address: 'row:1@t1#narr00000001',
+    };
+    const narr2 = {
+        ...lineage, task_id: CHILD, role: 'assistant', is_progress: true, narration: true,
+        subagent_event: 'progress', content: 'Second child narration.', text: 'Second child narration.',
+        ts: '2026-09-15T12:00:04Z', row_address: 'row:1@t2#narr00000002',
+    };
+    const sysLine = {
+        ...lineage, task_id: CHILD, role: 'system', system_type: 'host_progress',
+        card_row: 'timeline', card_row_id: 'sys-1', card_row_revision: 1,
+        content: 'Host warning on child.', text: 'Host warning on child.',
+        ts: '2026-09-15T12:00:05Z', row_address: 'row:1@t4#syst00000004',
+    };
+    const childFinal = {
+        ...lineage, task_id: CHILD, role: 'assistant', is_progress: false,
+        content: 'Final child report.', text: 'Final child report.', task_terminal_status: 'completed',
+        ts: '2026-09-15T12:00:06Z', row_address: 'row:1@t3#rprt00000003',
+    };
+
+    const directRows = (f, id = TASK) => f.card(id).querySelector('[data-live-timeline]').children
+        .filter((row) => row.classList?.contains('chat-live-line'));
+
+    const live = fixture();
+    try {
+        live.census(managed());
+        live.emit('chat', rootProgress);
+        live.emit('chat', { ...lineage, task_id: CHILD, role: 'system', is_progress: true,
+            subagent_event: 'scheduled', content: 'Scheduled worker', ts: '2026-09-15T12:00:01Z', row_address: 'row:1@t1#life00000001' });
+        live.emit('chat', narr1);
+        live.emit('chat', narr2);
+        live.log({ type: 'tool_call_started', task_id: CHILD, tool: 'read_file', tool_call_id: 'k1' });
+        live.log({ type: 'tool_call_finished', task_id: CHILD, tool: 'read_file', tool_call_id: 'k1', duration_sec: 0.2 });
+        live.emit('chat', sysLine);
+        live.emit('chat', childFinal);
+        live.card(CHILD).querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
+        const rootRows = directRows(live, TASK);
+        assert.ok(rootRows.some((row) => /Coordinating\./.test(row.innerHTML)));
+        // The root's own saved words are quoted by their own address, never the card's.
+        assert.equal(rootRows.find((row) => /Coordinating\./.test(row.innerHTML))?.dataset.rowAddress, rootProgress.row_address);
+        assert.equal(rootRows.find((row) => /Coordinating\./.test(row.innerHTML))?.dataset.workReplyRow, 'assistant');
+        const rows = live.rows(CHILD);
+        const byAddr = (addr) => rows.find((row) => row.dataset.rowAddress === addr);
+        assert.equal(byAddr(narr1.row_address), undefined, 'newer live narration replaces the earlier live note in place');
+        assert.equal(byAddr(narr2.row_address)?.dataset.workReplyRow, 'assistant');
+        assert.equal(byAddr(narr2.row_address)?.dataset.rowWords, undefined);
+        assert.equal(byAddr(childFinal.row_address)?.dataset.workReplyRow, 'assistant');
+        assert.equal(byAddr(childFinal.row_address)?.dataset.rowWords, undefined);
+        assert.equal(byAddr(sysLine.row_address)?.dataset.workReplyRow, 'system');
+        assert.equal(byAddr('row:1@t1#life00000001'), undefined, 'synthetic lifecycle rows stay unstamped');
+        const toolRow = rows.find((row) => /1 tool call/.test(row.innerHTML));
+        assert.ok(toolRow && toolRow.dataset.rowAddress === undefined && toolRow.dataset.workReplyRow === undefined);
+    } finally { live.close(); }
+
+    // Newer unsaved live narration before terminal clears the replaced row's old address instead of reusing it.
+    const cleared = fixture();
+    try {
+        cleared.census(managed());
+        cleared.emit('chat', rootProgress);
+        cleared.emit('chat', narr1);
+        cleared.emit('chat', { ...narr1, content: 'Unsaved newer note.', text: 'Unsaved newer note.',
+            ts: '2026-09-15T12:00:03Z', row_address: '' });
+        cleared.card(CHILD).querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
+        const rows = cleared.rows(CHILD);
+        assert.equal(rows.some((row) => row.dataset.rowAddress === narr1.row_address), false);
+        const unsaved = rows.find((row) => /Unsaved newer note\./.test(row.innerHTML));
+        assert.ok(unsaved && unsaved.dataset.rowAddress === undefined && unsaved.dataset.workReplyRow === undefined);
+    } finally { cleared.close(); }
+
+    const replay = fixture([
+        { ...rootProgress, history_id: 'progress:1', history_position: { source: 'progress', offset: 1 } },
+        { ...narr1, history_id: 'progress:2', history_position: { source: 'progress', offset: 2 } },
+        { ...narr2, history_id: 'progress:3', history_position: { source: 'progress', offset: 3 } },
+        { ...sysLine, history_id: 'progress:4', history_position: { source: 'progress', offset: 4 } },
+        { ...childFinal, history_id: 'chat:5', history_position: { source: 'chat', offset: 5 } },
+        toolCarrier({ observations: [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }] }, {
+            ...lineage, task_id: CHILD, ts: '2026-09-15T12:00:07Z',
+            history_id: 'chat:6', history_position: { source: 'chat', offset: 6 },
+        }),
+    ]);
+    try {
+        await replay.instance.refreshHistory({ revision: 1 });
+        replay.card(CHILD).querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
+        const rootRows = directRows(replay, TASK);
+        assert.ok(rootRows.some((row) => /Coordinating\./.test(row.innerHTML)));
+        assert.equal(rootRows.find((row) => /Coordinating\./.test(row.innerHTML))?.dataset.rowAddress, rootProgress.row_address);
+        assert.equal(rootRows.find((row) => /Coordinating\./.test(row.innerHTML))?.dataset.workReplyRow, 'assistant');
+        const rows = replay.rows(CHILD);
+        const byAddr = (addr) => rows.find((row) => row.dataset.rowAddress === addr);
+        assert.equal(byAddr(narr1.row_address)?.dataset.workReplyRow, 'assistant');
+        assert.equal(byAddr(narr2.row_address)?.dataset.workReplyRow, 'assistant');
+        assert.equal(byAddr(sysLine.row_address)?.dataset.workReplyRow, 'system');
+        assert.equal(byAddr(childFinal.row_address)?.dataset.workReplyRow, 'assistant');
+        const toolRow = rows.find((row) => /1 tool call/.test(row.innerHTML));
+        assert.ok(toolRow && toolRow.dataset.rowAddress === undefined);
+    } finally { replay.close(); }
+
+    // Older history rows must not attach their stale address onto newer evolving text.
+    const evolving = { items: [{ dedupeKey: 'subagent-result:c1', phase: 'done', headline: 'worker',
+        body: 'Newer report', fullBody: 'Newer report', sourceTs: '2026-09-15T12:00:10Z', ts: '12:00', lineKey: 'r1' }] };
+    mergeHistoricalTimelineItem(evolving, { dedupeKey: 'subagent-result:c1', terminal: true, phase: 'done',
+        headline: 'worker', body: 'Older report', replyAddress: 'row:1@old#1', replyRole: 'assistant' },
+        { history_id: 'chat:1', ts: '2026-09-15T12:00:05Z', history_position: { source: 'chat', offset: 1 } }, '12:00');
+    assert.equal(evolving.items[0].replyAddress, undefined);
 });

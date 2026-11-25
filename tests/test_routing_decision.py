@@ -1083,3 +1083,25 @@ def test_the_turns_own_unconfirmed_acts_report_their_recorded_outcome_once(tmp_p
     _admit(tmp_path, "wake-root", "tok-p")
     assert _append_routing_receipts(ctx) is True
     assert "- promote_chat_to_task → wake-root: scheduled" in messages[-1]["content"]
+    assert not hasattr(ctx.tools._ctx, "_confirmed_reply_works")
+
+
+def test_only_this_turns_exact_positive_late_handoff_can_address_a_final(tmp_path):
+    from ouroboros.loop_model_call import _append_routing_receipts
+
+    own = [{"action": "promote_chat_to_task", "client_message_id": "", "routing_token": "launch-own",
+            "target": "launched", "about_work": "launched"},
+           {"action": "steer_task", "client_message_id": "owner-reply", "routing_token": "relay-own",
+            "target": "relayed", "about_work": "relayed"}]
+    ctx = _boundary(tmp_path, {"client_message_id": "owner-reply"}, [], own=own)
+    append_chat_annotation(tmp_path, "owner-reply", action="steer_task", target="relayed", status="delivered",
+                           routing_token="relay-other-turn")
+    _admit(tmp_path, "launched", "launch-other-turn")
+    _append_routing_receipts(ctx)
+    assert not hasattr(ctx.tools._ctx, "_confirmed_reply_works")
+    append_chat_annotation(tmp_path, "owner-reply", action="steer_task", target="relayed", status="delivered",
+                           routing_token="relay-own")
+    _admit(tmp_path, "launched", "launch-own")
+    assert _append_routing_receipts(ctx)
+    assert ctx.tools._ctx._confirmed_reply_works == {"launched", "relayed"}
+    assert "finish_task(about_work='launched'" in ctx.messages[-1]["content"]
