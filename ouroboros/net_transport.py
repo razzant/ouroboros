@@ -18,8 +18,9 @@ The same module owns the trust bundle: ``extra_ca_bundle`` merges the owner's
 client (httpx transports here, the Anthropic ``requests`` lane, the GigaChat
 SDK, catalog and probe clients) verifies against that one path.
 
-It also owns how an openai SDK client authenticates: ``openai_client_class``
-gives a route the routing leaf declared keyless the SDK's keyless form.
+It also owns how an openai SDK client takes its target: ``openai_client_class`` gives a route
+the routing leaf declared keyless the SDK's keyless form, and a private compatible base URL with
+its own query the form that composes each request path before that query.
 """
 from __future__ import annotations
 
@@ -260,10 +261,51 @@ def keepalive_http_client(async_client: bool = False, *, follow_redirects: bool 
 
 
 _keyless_client_classes: Dict[Any, Any] = {}
+_queried_client_classes: Dict[Any, Any] = {}
+
+
+def _queried_client_class(base):
+    """``base`` for a base URL with its own query, which the SDK would otherwise fold into the path: it
+    composes each request path after the base's raw path, query inside it, so ``?route=1`` meets
+    ``/chat/completions`` as the query ``route=1/chat/completions``. This form keeps the query as the tail
+    of its stored base URL, the bytes the address was saved with, and composes each path before it: order,
+    repeats and escapes reach the server as typed, and ``copy()``/``with_options()`` carry it with the base.
+    A request that adds query parameters of its own (``extra_query``, ``default_query``) takes the SDK's
+    merge, which keeps one value per name; no route here sets any."""
+    queried = _queried_client_classes.get(base)
+    if queried is None:
+        class Queried(base):
+            def _enforce_trailing_slash(self, url):
+                path, mark, query = url.raw_path.partition(b"?")
+                return url if path.endswith(b"/") else url.copy_with(raw_path=path + b"/" + mark + query)
+
+            def _prepare_url(self, url):
+                import httpx
+
+                subpath = httpx.URL(url)
+                if not subpath.is_relative_url:
+                    return subpath
+                path, _, query = self.base_url.raw_path.partition(b"?")
+                return self.base_url.copy_with(
+                    raw_path=path + subpath.raw_path.lstrip(b"/") + (b"?" + query if query else b""))
+
+        queried = _queried_client_classes[base] = Queried
+        queried.__name__ = queried.__qualname__ = f"Queried{base.__name__}"
+    return queried
+
+
+def _keeps_query_after_path(target: Dict[str, Any]) -> bool:
+    """The route whose metadata read keeps the base URL's query verbatim (``llm_ollama._discoverable`` and
+    ``_url``): a private compatible address that has one. Every other route keeps the SDK's composition."""
+    from ouroboros.server_window import private_host
+
+    base_url = str(target.get("base_url") or "").strip()
+    return bool(target.get("provider") == "openai-compatible" and "?" in base_url.partition("#")[0]
+                and private_host(base_url))
 
 
 def openai_client_class(target: Dict[str, Any], *, async_client: bool = False):
-    """The openai SDK client class for ``target``: the SDK's own, or its keyless form.
+    """The openai SDK client class for ``target``: the SDK's own, its keyless form, its query form, or both.
 
     Only the route declares an endpoint keyless (``target["keyless"]``: the dedicated
     OpenAI-compatible endpoint saved without a key, "Leave empty for no auth"); a key on
@@ -272,17 +314,19 @@ def openai_client_class(target: Dict[str, Any], *, async_client: bool = False):
     and each request "Could not resolve authentication method". The keyless form waives
     the construction check and sends the SDK's own explicit ``Authorization`` omission
     with every request, so no credential from any source (a key, the SDK's environment,
-    default headers) reaches the endpoint, and no placeholder key exists anywhere.
+    default headers) reaches the endpoint, and no placeholder key exists anywhere. A private compatible
+    base URL that carries its own query gets the query form (``_queried_client_class``), so the send
+    names the connection its metadata read named; the two forms compose.
     """
     import openai
 
-    base = openai.AsyncOpenAI if async_client else openai.OpenAI
-    if not target.get("keyless") or str(target.get("api_key") or ""):
-        return base
-    keyless = _keyless_client_classes.get(base)
-    if keyless is None:
-        keyless = _keyless_client_classes[base] = _keyless_client_class(base, async_client)
-    return keyless
+    client = openai.AsyncOpenAI if async_client else openai.OpenAI
+    if target.get("keyless") and not str(target.get("api_key") or ""):
+        keyless = _keyless_client_classes.get(client)
+        if keyless is None:
+            keyless = _keyless_client_classes[client] = _keyless_client_class(client, async_client)
+        client = keyless
+    return _queried_client_class(client) if _keeps_query_after_path(target) else client
 
 
 def _keyless_client_class(base, async_client: bool):

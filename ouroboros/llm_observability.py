@@ -458,7 +458,7 @@ def record_main_response(
         },
         model=model, display_model=display_model, provider=provider,
         request_ref=request_ref, response_ref=response_ref,
-        reported_model=usage.get("resolved_model"), use_local=bool(use_local),
+        reported_model=usage.get("reported_model", usage.get("resolved_model")), use_local=bool(use_local),
         requested_profile=(usage.get("claudexor") or {}).get(
             "requested_profile", host_route.get("credential_profile_id", model_account_override)
         ),

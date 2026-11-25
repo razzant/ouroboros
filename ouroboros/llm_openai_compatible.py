@@ -455,6 +455,13 @@ class _OpenAICompatibleLaneMixin:
         if isinstance(usage, dict):
             # These keys are host-owned projections of designated outer fields;
             # provider usage extensions must not spoof their provenance.
+            # Only the native adapter states a bounded input count and the load it answered under.
+            for native_fact in ("capacity_input_tokens", "ollama_load_statement", "ollama_context"):
+                usage.pop(native_fact, None)
+            usage.pop("reported_model", None)
+            usage.pop("route_notice", None)
+            usage.pop("route_caution", None)
+            usage.pop("route_caution_key", None)
             usage.pop("response_finish_reason", None)
             usage.pop(LATER_OUTPUT_LIMIT_USAGE_KEY, None)
             usage.pop("response_provider", None)
@@ -541,22 +548,11 @@ class _OpenAICompatibleLaneMixin:
         # already gets. Cross-family sends strip it (sanitize_reasoning_on_model_switch
         # + the outbound scrubber), and the deepseek outbound build replays it.
         provider = str(target.get("provider") or "")
-        if (provider == "openai-compatible" and isinstance(msg.get("content"), str)
-                and not any(msg.get(key) for key in ("reasoning_content", "reasoning", "reasoning_details"))):
-            # A local server (llama.cpp without a reasoning parser, vLLM) can return the model's leading reasoning, or
-            # its lone closing ``</think>``, inside the answer; a reply with its own reasoning field is not read. The
-            # built-in lane's reader splits it off (``llm_local._split_leading_reasoning``); the reasoning stays beside
-            # the answer as the portable ``reasoning`` the outbound scrubber drops. An answer left empty takes the
-            # empty-response recovery. A reply with tool calls keeps its history (llama.cpp #24890) and gains its
-            # display projection (``llm_local.stamp_display``).
-            from ouroboros.llm_local import _split_leading_reasoning, stamp_display
-
-            if msg.get("tool_calls"):
-                stamp_display(msg)
-            elif (split := _split_leading_reasoning(msg["content"]))[0] != msg["content"]:
-                msg["content"] = split[0]
-                if split[1]:
-                    msg["reasoning"] = split[1]
+        if provider == "openai-compatible":
+            # Native Ollama and compatible local servers share the built-in lane's reader.
+            # Tool-call history keeps its bytes and gains the common display projection.
+            from ouroboros.llm_local import split_message_reasoning
+            split_message_reasoning(msg)
         # MiniMax's two continuation carriers stay verbatim, including unknown
         # shapes. Retention does not make an opaque value displayable or portable.
         if provider not in {"deepseek", "minimax"}:
