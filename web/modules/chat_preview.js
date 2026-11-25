@@ -417,7 +417,8 @@ export function createRoomProfileLifecycle({
     const word = { room: chatId, holds: () => canonical || (proof !== null && proof === servingSocket()), confirm: confirmNow };
     // The opening's saved text waits for this socket's proof (ws.js canShowSavedProfile: after a disconnect only the
     // current socket proves the profile): `profileConfirmed` paints it then, once, unless a canonical read landed first.
-    // A room away hears no proof (room_retire.js roomSocket): its return's newest read spends it where the proof came.
+    // A room away hears no proof (room_retire.js roomSocket): back on screen (`stayed`) it paints it where the proof
+    // came, before the preferences or any read its return asks for.
     let previewOwed = false;
     const showPreview = () => { if (getPreview().show()) onPreviewShown(); };
 
@@ -439,7 +440,6 @@ export function createRoomProfileLifecycle({
 
     // Every read of this room (newest, a page, ↓, arrivals): a current one refused for authentication takes the saved text.
     async function fetchHistory(cursor, options = {}) {
-        if (cursor == null && previewOwed && ws?.canShowSavedProfile?.() === true) { previewOwed = false; showPreview(); }
         const recentVersion = cursor == null ? nextRecentVersion() : 0, sent = { socket: servingSocket(), epoch };
         try {
             return { ...await readHistory({ chatId, cursor, ...options }), recentVersion };
@@ -464,7 +464,7 @@ export function createRoomProfileLifecycle({
         await awaitInitialHydration();
     }
 
-    return {
+    const lifecycle = {
         storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow, startOpening,
         get initialHydration() { return initialHydrationPromise; },
         settleInitialHydration(promise) { initialHydrationPromise = promise; },
@@ -512,5 +512,18 @@ export function createRoomProfileLifecycle({
         /** The room leaves the screen (chat.js `leave`): the core's word lapses and what it showed leaves the feed, kept; no
          *  answer asked before can bring it back, so a return shows it only on a word read after it. */
         left() { epoch += 1; lapse(); },
+        /** The room is back on screen (chat.js `stay`): an opening's saved text owed since paints now, where the page's
+         *  socket proved the profile while the room was away, once. */
+        stayed() {
+            if (!previewOwed || ws?.canShowSavedProfile?.() !== true || isDestroyed() || isLeaving()) return;
+            previewOwed = false;
+            showPreview();
+        },
+        /** The room's socket words, on chat.js's own subscriptions (`onWs`: released with the room). */
+        listen(on) {
+            on('connection_profile', lifecycle.profileConfirmed);
+            on('projects_changed', lifecycle.roomChanged);
+        },
     };
+    return lifecycle;
 }

@@ -3352,8 +3352,7 @@ export function createChatInstance({
         showOutage();
     });
     onWs(SERVER_ANSWERS_EVENT, () => syncChatStatus());
-    onWs('connection_profile', roomProfile.profileConfirmed);  // this socket's proof: a failed read's kept sends, an owed saved text
-    onWs('projects_changed', roomProfile.roomChanged);  // the registry's word on a Project room lapses what it showed
+    roomProfile.listen(onWs);  // a socket's proof (an owed saved text, kept sends), the registry's word on the room
     function showOutage(doubted) {
         unconfirmed.unsettle(doubted);
         workState = reconcileWorkState(workState, null, chatId);
@@ -3444,6 +3443,7 @@ export function createChatInstance({
             installChatResizeObservers();
             reviewHydrator.resume(); drawOwedTimelines();
             if (outageAway) { const doubted = outageAway; outageAway = null; showOutage(doubted); }
+            roomProfile.stayed();  // an opening's saved text owed since paints at once (chat_preview.js)
         },
         // How the room was opened (app.js): pressed open by a pointer, its focus corners wait for a key.
         quietFocus: (quiet) => messagesDiv.classList.toggle('is-quiet-focus', Boolean(quiet)),

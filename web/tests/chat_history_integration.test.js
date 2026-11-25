@@ -1185,6 +1185,36 @@ test('an opening away when the proof came paints its saved text on its return, o
     assert.equal(previewNode(f), undefined, 'once');
 });
 
+// Astra 9: the return paints where the proof came as the room comes back on screen, before the preferences its return
+// asks for or the read that follows them; holding the preferences holds nothing of it.
+test('an opening away when the proof came paints its saved text as it comes back, before its preferences answer', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    f.instance.leave();
+    f.instance.ws.pause();
+    proven = true;  // the page's socket proves the profile; the room away hears nothing of it
+    read.release(page([row('chat:6', 'Answered after the room left')]));
+    await settle();
+    const prefs = held(), host = globalThis.fetch, asked = [];
+    globalThis.fetch = (url, init) => (String(url).startsWith('/api/ui/preferences')
+        ? (asked.push(url), prefs.promise.then(() => host(url, init))) : host(url, init));
+    const back = held();
+    f.respond(back.promise);
+    f.instance.stay();
+    f.instance.ws.resume();
+    assert.equal(asked.length, 1, 'its return asks for the preferences, held here');
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · updating', 'painted as it comes back');
+    assert.equal(f.calls.length, 1, 'before its return reads');
+    prefs.release();
+    await settle(() => f.calls.length === 2);
+    assert.equal(f.calls.length, 2, 'the return reads once the preferences answer');
+    back.release(page([row('chat:7', 'Canonical answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    assert.equal(previewNode(f), undefined, 'the canonical page replaces it');
+});
+
 test('a proof after the canonical read paints no saved text over it', async (t) => {
     let proven = false;
     const f = fixture(t, page([row('chat:6', 'Canonical answer')]), null,
