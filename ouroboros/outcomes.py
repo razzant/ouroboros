@@ -922,14 +922,10 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
                     stack.append((child_value, clone, child_key))
     if not isinstance(public, dict):
         return {}
-    # ABI-3 projection boundary: the public contract carries NO retired cost
-    # alias — a stored legacy row's pair resolves deprecated-wins and leaves
-    # under the honest names only, at the top level and on the nested public
-    # cost planes (the subagent envelope with its usage snapshot and the
-    # loop-outcome usage snapshot) — ONE shared normalizer with the
-    # write_task_result rewrite seam (fix-round-3). Internal planes that
-    # merely share the spelling inside evidence blobs (review receipts,
-    # ledger rows) are their own schemas and pass through untouched.
+    # ABI-3 projection boundary: the public contract carries NO retired cost alias —
+    # a stored legacy row's pair resolves deprecated-wins and leaves it under the honest
+    # names only, through the ONE shared normalizer with the write_task_result rewrite
+    # seam; internal evidence blobs keep their own schemas and pass through untouched.
     from ouroboros.cost_projection import normalize_task_result_cost_planes
 
     public = normalize_task_result_cost_planes(public)
@@ -946,6 +942,9 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
     plan_state = public.get("plan_review_state")
     if isinstance(plan_state, dict) and plan_state.get("schema_version") == 1:
         plan_state["legacy_v1_projection"] = legacy_plan_review_projection(plan_state)
+    from ouroboros.chat_uploads import public_quiz_copies
+
+    public_quiz_copies(public)
     if include_outcome_axes:
         public["outcome_axes"] = normalize_outcome_axes(result)
         if isinstance(public.get("artifact_bundle"), dict) and public["artifact_bundle"].get("status"):

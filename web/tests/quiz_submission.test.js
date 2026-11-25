@@ -291,3 +291,80 @@ test('a late negative response of an older attempt cannot clear a different atte
         assert.equal(fx.toasts.length, 0); assert.equal(fx.calls.length, 1);
     } finally { fx.restore(); }
 });
+
+test('a competing browser press settles cleanly on a file-only winner (409, 200, 503 owed, auto and manual reconcile) without prompting a retry', async () => {
+    const files = [
+        { name: 'shot.png', kind: 'image', size: 12, sha256: 'a'.repeat(64) },
+        { name: 'big.mp4', kind: 'file', unavailable: 'too_large', limit_bytes: 10485760 },
+    ];
+    const shown = '📎 shot.png\n📎 big.mp4: not received, too large';
+    for (const [label, status, ok, body] of [
+        ['409 race loser', 409, false, { state: 'answered', attachments: files }],
+        ['200 replay', 200, true, { ok: true, state: 'answered', duplicate: true, attachments: files }],
+        ['503 owed delivery', 503, false, {
+            state: 'answered', attachments: files,
+            question_delivery: { state: 'owed', kind: 'answer', reason_code: 'mailbox_write_failed' },
+        }],
+    ]) {
+        const fx = fixture({ fetchImpl: async () => ({ ok, status, json: async () => body }) });
+        try {
+            const card = fx.decision.buildQuizCard(WS_MSG);
+            edit(card, 'my browser draft');
+            choose(card);
+            await turn();
+            assert.equal(card.dataset.state, 'answered', label);
+            assert.equal(card.dataset.submission, '', `${label}: no unconfirmed/retry hold`);
+            assert.equal(card.querySelector('.chat-quiz-retry').hidden, true, label);
+            assert.equal(field(card), null, label);
+            assert.equal(card.querySelector('.chat-quiz-answer'), null, `${label}: no owner caption`);
+            assert.equal(card.querySelector('.chat-quiz-answer-files')?.textContent, shown, label);
+        } finally { fx.restore(); }
+    }
+
+    // Auto-reconcile on POST loss settles immediately when GET /api/tasks/{id} already returns the file-only winner.
+    const auto = fixture({
+        fetchImpl: async () => { throw new Error('network lost'); },
+        fetchDetail: async () => detail({ ...WS_MSG, state: 'answered', asked_at: WS_MSG.ts, attachments: files }),
+    });
+    try {
+        const card = auto.decision.buildQuizCard(WS_MSG);
+        choose(card); await turn();
+        assert.equal(card.dataset.state, 'answered');
+        assert.equal(card.dataset.submission, '');
+        assert.equal(card.querySelector('.chat-quiz-retry').hidden, true);
+        assert.equal(card.querySelector('.chat-quiz-answer'), null);
+        assert.equal(card.querySelector('.chat-quiz-answer-files')?.textContent, shown);
+    } finally { auto.restore(); }
+
+    // Manual Check status: first read sees the question still open (card stays unknown), next read returns the file-only winner.
+    let settledBlock = { ...WS_MSG, state: 'open', asked_at: WS_MSG.ts };
+    const manual = fixture({
+        fetchImpl: async () => { throw new Error('network lost'); },
+        fetchDetail: async () => detail(settledBlock),
+    });
+    try {
+        const card = manual.decision.buildQuizCard(WS_MSG);
+        choose(card); await turn();
+        assert.equal(card.dataset.state, 'open');
+        assert.equal(card.dataset.submission, 'unknown');
+        assert.equal(card.querySelector('.chat-quiz-retry').hidden, false);
+        settledBlock = { ...WS_MSG, state: 'answered', asked_at: WS_MSG.ts, attachments: files };
+        card.querySelector('.chat-quiz-check').click(); await turn();
+        assert.equal(card.dataset.state, 'answered');
+        assert.equal(card.dataset.submission, '');
+        assert.equal(card.querySelector('.chat-quiz-retry').hidden, true);
+        assert.equal(card.querySelector('.chat-quiz-answer'), null);
+        assert.equal(card.querySelector('.chat-quiz-answer-files')?.textContent, shown);
+    } finally { manual.restore(); }
+
+    // Malformed empty or nameless answered bodies (no index, no comment, no named file outcome) stay unconfirmed.
+    for (const bad of [{ state: 'answered' }, { state: 'answered', attachments: [{}] }]) {
+        const empty = fixture({ fetchImpl: async () => ({ ok: false, status: 409, json: async () => bad }) });
+        try {
+            const card = empty.decision.buildQuizCard(WS_MSG);
+            choose(card); await turn();
+            assert.equal(card.dataset.state, 'open', JSON.stringify(bad));
+            assert.equal(card.dataset.submission, 'unknown', JSON.stringify(bad));
+        } finally { empty.restore(); }
+    }
+});

@@ -1,6 +1,7 @@
 /** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, a skill's Connect tools in ./skill_mcp_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js, the Dashboard › Logs compact and Raw envelopes in ./logs_types.js, the task cost envelopes (`CostPresentation`, `CostCustody`) in ./cost_types.js. */
 /** @typedef {import('./cost_types.js').CostPresentation} CostPresentation */
 /** @typedef {import('./cost_types.js').CostCustody} CostCustody */
+/** @typedef {import('./client_contract_types.js').QuizAnswerFile} QuizAnswerFile */
 /** @typedef {Object} StateResponse
  * @property {number} uptime
  * @property {number} workers_alive  // live worker slots of both lanes; inline carriers may be thread-backed
@@ -273,7 +274,7 @@
  * @property {boolean=} ingress_accepted Canonical inbound row saved; not proof of task start or model delivery.
  * @property {boolean=} ingress_dispatched This live host process accepted the row and entered its dispatch; absent after a host restart (unknown).
  * @property {boolean=} ingress_pending This live host process accepted the row and has entered or refused neither yet: a later echo or history read says which.
- * @property {Array<NonNullable<UploadResponse['view']>>=} attachments The owner message's ChatAttachmentView list: the same views history replays.
+ * @property {Array<NonNullable<UploadResponse['view']>|QuizAnswerFile>=} attachments The owner message's ChatAttachmentView list: the same views history replays. On a `project_question_pointer` row: the mirrored answer's QuizAnswerFile list (name, size, digest or why not received), never a link.
  * @property {boolean=} text_placeholder The owner row's text is the host's placeholder (no words were sent): no caption is shown.
  * @property {boolean=} reply_excerpt_disabled The displayed card input is not one authored passage.
  * @property {boolean=} markdown
@@ -626,6 +627,7 @@
  * @property {string} ts
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {QuizAnswerFile[]=} attachments  // replay: the files a Telegram Reply answered with (name, size, digest or why not received), never a link
  * @property {string=} answer_row_address  // replay: the answer row its card shows (DESIGN "Replies"); never quiz_state
  * @property {string=} host_facts
  * @property {number=} chat_id
@@ -662,6 +664,7 @@
  * @property {string} ts
  * @property {number=} answered_index
  * @property {string=} comment  The owner's recorded free-text answer, when one was recorded.
+ * @property {QuizAnswerFile[]=} attachments  The files the owner's Telegram Reply answered with, when recorded: name, size, digest or why not received.
  * @property {boolean=} wait_for_answer  False once a bounded wait closed and the task resumed; the card stays open and answerable.
  * @property {number=} chat_id
  * @property {import('./decision_types.js').SecretOutcome=} secret_outcome A secret request's typed completion, metadata only.
@@ -1579,7 +1582,6 @@ export const MAX_DECISION_COMMENT = 2000;
 export const GATEWAY_CONTRACT_VERSION = '7.12.0';
 /** @typedef {import('./client_contract_types.js').ChatHistoryPosition} ChatHistoryPosition */
 /** @typedef {import('./client_contract_types.js').ChatHistoryResponse} ChatHistoryResponse */
-
 /** @typedef {import('./management_contract_types.js').UiContribution} UiContribution */
 /** @typedef {import('./management_contract_types.js').UiContributionsResponse} UiContributionsResponse */
 

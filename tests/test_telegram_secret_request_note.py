@@ -115,6 +115,8 @@ def _owner_reply(plugin, api, monkeypatch, mode, fields, *, to=1, date=None):
 
     async def fake_post(_api, path, body):
         posts.append((path, body))
+        if body.get("rejoin"):  # a Reply's file: this request has no recorded answer yet
+            return 404, {"ok": False, "reason_code": "request_not_recorded"}
         return 200, {"ok": True, "state": "answered"}
 
     async def fake_inject(_api, payload):
@@ -202,11 +204,15 @@ def test_ordinary_replies_and_media_keep_their_paths(subtests, tmp_path, monkeyp
             # A text reply to an ordinary question is its answer, as before.
             _client, posts, injected, lookups = _owner_reply(plugin, api, monkeypatch, mode, {"text": "postgres"}, to=plain)
             assert len(posts) == 1 and injected == [] and len(lookups) == 1
-            # A captionless photo replying to it, and a photo with no reply at all, reach ordinary chat with the image.
-            for to in (plain, None):
-                _client, posts, injected, _lookups = _owner_reply(plugin, api, monkeypatch, mode, {"photo": [{"file_id": "p1"}]}, to=to)
-                assert posts == [] and len(injected) == 1 and injected[0]["image_base64"] == "aGk="
-                assert _MediaClient.downloads == ["p1"]
+            # A captionless photo replying to it answers it with the photo alone (the owner's choice, 18 Nov): one
+            # decision after the host's read, never a chat turn. A photo with no reply still reaches ordinary chat.
+            _client, posts, injected, _lookups = _owner_reply(plugin, api, monkeypatch, mode, {"photo": [{"file_id": "p1"}]}, to=plain)
+            assert [body.get("rejoin", False) for _path, body in posts] == [True, False] and injected == []
+            assert [item["name"] for item in posts[1][1]["attachments"]] == ["photo.jpg"] and "comment" not in posts[1][1]
+            assert _MediaClient.downloads == ["p1"]
+            _client, posts, injected, _lookups = _owner_reply(plugin, api, monkeypatch, mode, {"photo": [{"file_id": "p1"}]}, to=None)
+            assert posts == [] and len(injected) == 1 and injected[0]["image_base64"] == "aGk="
+            assert _MediaClient.downloads == ["p1"]
             # A document with a caption and a voice note ride the shared attachment path.
             _client, posts, injected, _lookups = _owner_reply(plugin, api, monkeypatch, mode, {"voice": {"file_id": "v1"}}, to=None)
             assert len(injected) == 1 and injected[0].get("attachments")

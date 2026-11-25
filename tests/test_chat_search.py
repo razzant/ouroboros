@@ -753,3 +753,63 @@ def test_a_bound_works_descendant_the_lens_cannot_name_is_unavailable_never_left
     assert (code, body.get("reason_code"), body["candidates"], body["searched"]["beginning"]) == (
         503, "history_source_unavailable", [], False), body
     assert _texts(_found(tmp_path, chat_id=room, q="plover")) == ["plover from the bound work's follow-up"]
+
+
+def test_settled_question_search_carries_projected_answer_files_without_disk_reads(tmp_path, monkeypatch):
+    """Chat search carries display-only QuizAnswerFile outcomes on settled answered question cards
+    (both file+caption from task projection and file-only from later quiz_answer rows via the
+    bounded probe), strips upload/mtime_ns, touches no upload disk files, and omits files on open cards."""
+    from ouroboros import chat_uploads
+    from ouroboros.task_results import write_task_result
+
+    raw_both = [
+        {"upload": "u-1_spec.pdf", "name": "spec.pdf", "kind": "file", "mime": "application/pdf",
+         "size": 512, "sha256": "c" * 64, "mtime_ns": 111},
+        {"name": "huge.zip", "kind": "file", "unavailable": "too_large", "limit_bytes": 10 * 1024 * 1024},
+    ]
+    raw_only = [
+        {"upload": "u-2_diag.png", "name": "diag.png", "kind": "image", "mime": "image/png",
+         "size": 64, "sha256": "d" * 64, "mtime_ns": 222},
+        {"name": "clip.mp4", "kind": "file", "unavailable": "download_failed"},
+        {"name": "gone.txt", "kind": "file", "unavailable": "missing"},
+    ]
+    # 1. Settled file+caption in task projection (owner_quiz).
+    write_task_result(tmp_path, "t-both", "completed", owner_quiz={
+        "q-both": {"quiz_id": "q-both", "state": "answered", "comment": "check spec", "attachments": raw_both},
+    })
+    _say(tmp_path, 1, "Which spec file?", direction="out", type="quiz", task_id="t-both",
+         quiz={"quiz_id": "q-both", "question": "Which spec file?", "options": ["A", "B"]})
+    # 2. Settled file-only in a later quiz_answer row (no task projection; cross-page probe).
+    _say(tmp_path, 2, "Send diagnostics", direction="out", type="quiz", task_id="t-only",
+         quiz={"quiz_id": "q-only", "question": "Send diagnostics", "options": ["Skip"]})
+    # 3. Still open question (must not carry attachments).
+    _say(tmp_path, 3, "Still open?", direction="out", type="quiz", task_id="t-open",
+         quiz={"quiz_id": "q-open", "question": "Still open?", "options": ["Yes"]})
+    for index in range(4, 8):
+        _say(tmp_path, index, f"filler {index}")
+    _say(tmp_path, 8, "", direction="system", type="quiz_answer", task_id="t-only",
+         quiz={"quiz_id": "q-only", "state": "answered", "comment": "", "attachments": raw_only})
+
+    # Quiz answer file projection must never touch upload files on disk.
+    monkeypatch.setattr(chat_uploads, "open_upload", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("disk read")))
+    monkeypatch.setattr(chat_uploads, "measure_upload", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("disk stat")))
+    monkeypatch.setattr(chat_search, "_SCAN_ROWS", 3)
+
+    cards = {row["quiz"]["quiz_id"]: row["quiz"]
+             for page in _all(tmp_path, q="spec")
+             for row in page["candidates"] if row.get("msg_type") == "quiz"}
+
+    assert cards["q-both"]["comment"] == "check spec"
+    assert cards["q-both"]["attachments"] == [
+        {"name": "spec.pdf", "kind": "file", "mime": "application/pdf", "size": 512, "sha256": "c" * 64},
+        {"name": "huge.zip", "kind": "file", "unavailable": "too_large", "limit_bytes": 10 * 1024 * 1024},
+    ]
+    assert "comment" not in cards["q-only"]
+    assert cards["q-only"]["attachments"] == [
+        {"name": "diag.png", "kind": "image", "mime": "image/png", "size": 64, "sha256": "d" * 64},
+        {"name": "clip.mp4", "kind": "file", "unavailable": "download_failed"},
+        {"name": "gone.txt", "kind": "file", "unavailable": "missing"},
+    ]
+    assert "attachments" not in cards["q-open"]
+    for item in (*cards["q-both"]["attachments"], *cards["q-only"]["attachments"]):
+        assert not (set(item) & {"upload", "mtime_ns", "url", "available", "path"})

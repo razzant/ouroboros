@@ -31,7 +31,7 @@ const SPACES = new RegExp(`${SPACE.source}+`, 'g');
 // formula's TeX source (`annotation`) or what assistive technology does not read (a formula's drawn glyphs).
 const QUIZ_CARD = '.chat-quiz-card:not(.chat-routing-card)';
 const WORDS = `.message, .chat-quiz-question, ${QUIZ_CARD} > :is(.chat-quiz-stake:not(.chat-quiz-details-unavailable), `
-    + '.chat-quiz-options, .chat-quiz-answer), .chat-attachments';
+    + '.chat-quiz-options, .chat-quiz-answer, .chat-quiz-answer-files), .chat-attachments';
 const CHROME = '.sender, .msg-time, .chat-message-actions, .chat-quote, .md-code-language, button, .chat-media-player, '
     + '.chat-photo-actions, .chat-quiz-stake-label, .chat-quiz-answer-label, [hidden], [aria-hidden="true"], '
     + 'details:not([open]) > :not(summary), annotation';
@@ -98,7 +98,7 @@ export function candidateBox(candidate, doc) {
             }
         }
         // The owner's own words on a card settled as answered (the host sends `comment` for that state only).
-        renderOwnerAnswer(card, quiz.comment);
+        renderOwnerAnswer(card, quiz.comment, quiz.attachments);
         renderLatexIn(card);
         return box;
     }

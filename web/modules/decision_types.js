@@ -47,6 +47,7 @@
  * @property {string=} state
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {Array<import('./client_contract_types.js').QuizAnswerFile>=} attachments  // quiz: the winner's Telegram Reply files (name, size, digest or why not received)
  * @property {boolean=} duplicate
  * @property {boolean=} answered_after_terminal
  * @property {boolean=} forwarded

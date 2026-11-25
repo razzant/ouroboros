@@ -1848,7 +1848,11 @@ Anatomy, top to bottom:
    or unconfirmed answer; nothing else clears drafts. Canonical
    settlement clears the copy; winning bytes appear literally as `Owner's answer: …`
    under the options, beside the highlighted choice or as the whole answer if none,
-   retaining line breaks (`--type-body`/`--text-primary`).
+   retaining line breaks (`--type-body`/`--text-primary`). Recorded file outcomes of an
+   ordinary answer stand in a separate host-facts block (`--type-meta`/`--text-meta`,
+   never under `Owner's answer:` and never a link), one line per file: `📎` and the
+   name, or the name and why it never arrived, whether beside words or alone as a
+   file-only answer.
 6. **Assumption or waiting** — the signature line (`Continuing meanwhile: …`
    for optional clarification, an explicit waiting statement for required input),
    `--type-meta`, `--text-meta`, parted by space. While the card is
@@ -1988,8 +1992,9 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   right under the owner's words ("Not attached to the task: …", from the routing
   receipt, live and on replay, never folded away in Main), and Telegram gets the
   same line. A new turn whose every file was refused is the System mark "Not
-  started: the attachments could not be staged (N files)"; one that starts with
-  only some of them says so in its own words.
+  started: the attachments could not be staged (N files)", except a late answer
+  to a question card, which starts and says why; one that starts with only some
+  says so in its own words.
 - **The same view everywhere:** the sender's bubble, another tab and the replay
   after reload or restart render the one server view of each attachment. The
   stored text still names the files for the model; only the exact tail the web
@@ -2172,6 +2177,7 @@ snippet with the words in the crimson word. Its corner is the composer field's s
 field alone, a capsule; matches or a note (searching, a failure, how far it read) make a card with the same corner,
 never an oval. Words match as shown: through bold and links, never a link's hidden address or a diagram's or chart's
 contents; code literal; a formula by its characters; a file by its name and caption, a photo or video by its caption;
+a settled question's recorded answer files by their shown names and host failure wording;
 System words in the chosen language; any case, accents kept, white space as one space; never attachments, file contents,
 narration or other rooms (Main's copy of a Project's question is the Project's). Enter or ↓ lands on the next match,
 older, Shift+Enter or ↑ the previous, a press its match: the exact row through a quote's landing, its first matched

@@ -944,3 +944,40 @@ def test_sign_in_contracts_have_field_identical_javascript_twins():
             / "web/modules/sign_in_contract_types.js").read_text(encoding="utf-8")
     for name in contracts.__all__:
         assert _js_typedef_fields(text, name) == set(get_type_hints(getattr(contracts, name))), name
+
+
+def test_quiz_answer_file_contract_shape_and_twins():
+    """Dedicated display-only QuizAnswerFile contract:
+    identical across Python contracts and JS JSDoc twins, distinct from ChatAttachmentView,
+    and free of internal storage/download locators."""
+    from ouroboros.gateway import contracts
+    from ouroboros.gateway.attachment_contracts import QuizAnswerFile
+    from ouroboros.gateway.history_contracts import ChatHistoryQuiz, ChatSearchQuestion
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    client_js = (repo / "web/modules/client_contract_types.js").read_text(encoding="utf-8")
+    decision_js = (repo / "web/modules/decision_types.js").read_text(encoding="utf-8")
+    api_js = (repo / "web/modules/api_types.js").read_text(encoding="utf-8")
+
+    expected = {"name", "kind", "mime", "size", "sha256", "unavailable", "limit_bytes"}
+    forbidden = {"upload", "mtime_ns", "url", "available", "path", "abs_path"}
+    assert "QuizAnswerFile" in contracts.__all__
+    assert contracts.QuizAnswerFile is QuizAnswerFile
+    py_fields = set(get_type_hints(QuizAnswerFile, include_extras=True))
+    assert py_fields == expected
+    assert not (py_fields & forbidden)
+    assert _js_typedef_fields(client_js, "QuizAnswerFile") == expected
+
+    # Twin parity on every quiz-answer carrier.
+    assert _js_typedef_fields(client_js, "ChatHistoryQuiz") == set(get_type_hints(ChatHistoryQuiz, include_extras=True))
+    assert _js_typedef_fields(client_js, "ChatSearchQuestion") == set(get_type_hints(ChatSearchQuestion, include_extras=True))
+    assert "attachments" in get_type_hints(ChatSearchQuestion, include_extras=True)
+    for cls in (QuizOutbound, QuizStateOutbound, DecisionResponse, ChatHistoryQuiz, ChatSearchQuestion):
+        ann = get_type_hints(cls, include_extras=True)["attachments"]
+        assert "QuizAnswerFile" in str(ann), cls.__name__
+    assert "QuizAnswerFile" in str(get_type_hints(ChatOutbound, include_extras=True)["attachments"])
+
+    assert "@property {QuizAnswerFile[]=} attachments" in client_js
+    assert "@property {Array<import('./client_contract_types.js').QuizAnswerFile>=} attachments" in decision_js
+    assert "@property {QuizAnswerFile[]=} attachments" in api_js
+    assert "@property {Array<NonNullable<UploadResponse['view']>|QuizAnswerFile>=} attachments" in api_js

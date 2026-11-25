@@ -598,7 +598,7 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
 
     Everything that once happened in the server between the registration and the
     model: the late-answer / card-press text, the inline image, the staged
-    attachments (a fully rejected set refuses the turn: ``ConversationRefusal``),
+    attachments (a fully rejected set refuses the turn: ``ConversationRefusal``; a late answer's starts, naming why),
     the Project binding under the room basis the turn then carries like queued
     work (#2547), consciousness authority, the task contract, the frozen tool
     profile and a wake's cause (a late input's head: its admission name) as its title.
@@ -659,8 +659,12 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
 
         manifest = stage_task_attachments(root, str(task["id"]), uploads)
         # Partial staging is the default (В25c, capinv-447); a FULLY-rejected
-        # set stays atomic — the task would start with none of its material.
-        if attachment_manifest_all_rejected(manifest):
+        # set stays atomic — the task would start with none of its material. A recorded
+        # late quiz answer is the one exception: its words or choice are already the
+        # owner's accepted answer, so it starts and reads why a file is missing beside it.
+        from ouroboros.owner_quiz import late_answer_ref
+
+        if attachment_manifest_all_rejected(manifest) and late_answer_ref(task_metadata.get("late_answer")) is None:
             from ouroboros.artifacts import remove_staged_attachments
             from ouroboros.project_dialogue import routing_refusal_cause
 

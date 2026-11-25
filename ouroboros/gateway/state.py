@@ -520,6 +520,10 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
                                                  "closed_by_task_id", "closed_actor", "closed_request_id", "delivery",
                                                  "secret_request", "secret_outcome", "secret_save")
                       if isinstance(quiz, dict) and key in quiz}}
+    if isinstance(quiz, dict) and quiz.get("attachments"):  # a Telegram Reply's files as its card states them
+        from ouroboros.chat_uploads import answer_files
+
+        facts["quiz"]["attachments"] = answer_files(quiz["attachments"])  # never the stored refs: no id, path or link
     if len(_FINALIZING_MEMO) >= _FINALIZING_MEMO_MAX:
         _FINALIZING_MEMO.clear()
     _FINALIZING_MEMO[memo_id] = (key, facts)

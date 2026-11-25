@@ -85,6 +85,7 @@ from typing import Any, Callable, ContextManager, Dict, Iterator, List, Optional
 from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
 from ouroboros.utils import utc_now_iso
 from ouroboros.owner_mailbox import _mailbox_path, _MAILBOX_DIR as _OWNER_MAILBOX_DIR
+from ouroboros.question_answers import mail_store_key, mail_stores, settle_quiz_mailbox_receipts
 from ouroboros.store import StoreBusy, StoreError, WalIndexRefused, close_connections_under
 
 log = logging.getLogger(__name__)
@@ -348,10 +349,9 @@ def unread_mail_rows(drive_root: Any, task_id: str) -> Tuple[List[str], bool]:
 
 
 def merge_unread_mail(*values: Any) -> Optional[Dict[str, Any]]:
-    """Union of ``unread_mailbox`` custody values: exact rows never shrink (the first copy
-    of a line wins), ``inputs`` (canonical input closures per row) accumulate, and
-    ``read_complete`` is the latest capture's (``captured_at``; a later complete read
-    covers every row still unread). None when no value is a capture."""
+    """Union of ``unread_mailbox`` custody values: exact rows never shrink (the first copy of a line wins), ``inputs``
+    (canonical input closures per row) accumulate, ``read_complete`` is the latest capture's (``captured_at``; a later
+    complete read covers every row still unread) and stores read whole unite (``mail_stores``). None without a capture."""
     rows: List[str] = []
     keys: set = set()
     inputs: Dict[str, Any] = {}
@@ -371,7 +371,7 @@ def merge_unread_mail(*values: Any) -> Optional[Dict[str, Any]]:
             latest, complete = stamp, value.get("read_complete") is True
     if complete is None:
         return None
-    custody = {"schema": 1, "total": len(rows), "rows": rows, "read_complete": complete, "captured_at": latest}
+    custody = {"schema": 1, "total": len(rows), "rows": rows, "read_complete": complete, "captured_at": latest, **mail_stores(values)}
     return {**custody, "inputs": {key: inputs[key] for key in inputs if key in keys}} if inputs else custody
 
 
@@ -405,28 +405,29 @@ def owner_mail_rows(drive_root: Any, task_id: str) -> Tuple[List[str], bool]:
 
 
 def capture_owner_mail(root: Any, task_id: str) -> Optional[Dict[str, Any]]:
-    """The terminal capture of a ROOT's owner rows (``owner_mailbox``): its own mailbox and
-    each own child drive's, in the ``unread_mailbox`` shape (exact rows, grow-only). Always a
-    capture, an empty one included — it proves the mailbox was read at the terminal, so a
-    later reader can tell "nothing was said" from "not captured". Never ACKs; never raises
-    (a failure is ``read_complete=False``, which a Continue refuses as a gap)."""
+    """The terminal capture of a ROOT's owner rows (``owner_mailbox``): its own mailbox's and each own child drive's,
+    in the ``unread_mailbox`` shape (exact rows, grow-only), naming each store it read whole (``mail_store_key``). It
+    is a capture even when empty, proving the mailbox was read at the terminal ("nothing was said", not "not captured").
+    Never ACKs; never raises (a failure is ``read_complete=False``, which a Continue refuses as a gap)."""
     rows: List[str] = []
+    stores: List[str] = []
     complete = True
     try:
         for drive in [pathlib.Path(root), *own_child_drives(root, task_id)]:
             found, whole = owner_mail_rows(drive, task_id)
             rows.extend(found)
             complete = complete and whole
+            stores += [mail_store_key(root, task_id, drive)] if whole else []
     except Exception:
         log.warning("Owner mail capture failed for %s", task_id, exc_info=True)
         complete = False
-    return merge_unread_mail({"rows": rows, "read_complete": complete, "captured_at": utc_now_iso()})
+    return merge_unread_mail({"rows": rows, "read_complete": complete, "captured_at": utc_now_iso(), "stores": stores})
 
 
-def unread_mail_held(custody: Any, rows: List[str]) -> bool:
-    """Whether the canonical custody keeps every one of these exact rows."""
+def unread_mail_held(custody: Any, rows: List[str], stores: Any = ()) -> bool:
+    """Whether the canonical custody keeps every one of these exact rows and names every one of these stores."""
     held = merge_unread_mail(custody) or {"rows": []}
-    return not ({_row_key(row) for row in rows} - {_row_key(row) for row in held["rows"]})
+    return not ({_row_key(row) for row in rows} - {_row_key(row) for row in held["rows"]} or set(stores) - set(held.get("stores", ())))
 
 
 def capture_unread_mail(root: Any, task_id: str) -> Optional[Dict[str, Any]]:
@@ -502,11 +503,11 @@ def _mail_fields(current: Dict[str, Any], rows: List[str], inputs: Optional[Dict
 
 
 def _owner_mail_fields(current: Dict[str, Any], captured: Dict[str, Any]) -> Dict[str, Any]:
-    """Deletion requires complete current capture and exact canonical readback, ACKs included."""
+    """Deletion requires complete current capture and exact canonical readback, ACKs and the stores it read included."""
     if captured.get("read_complete") is not True:
         raise _Retained("owner_mailbox_unreadable")
     held = current.get("owner_mailbox") or {}
-    if held.get("read_complete") is True and unread_mail_held(held, captured["rows"]):
+    if held.get("read_complete") is True and unread_mail_held(held, captured["rows"], captured.get("stores") or ()):
         return {}
     return {"owner_mailbox": merge_unread_mail(held, captured)}
 
@@ -567,11 +568,11 @@ def settle_task_mailbox(canonical_root: Any, task_id: str, mailbox_root: Any, *,
                     def mail_fields(row):
                         return {**_mail_fields(row, rows, inputs), **_owner_mail_fields(row, owner_capture)}
                     if mail_fields(current):
-                        _write_custody_fields(canonical, task_id, current, mail_fields,
-                                              closed=stop)
+                        _write_custody_fields(canonical, task_id, current, mail_fields, closed=stop)
                         readback = load_task_result(canonical, task_id, strict=True) or {}
                         if mail_fields(readback):
                             return False  # rows landed since the closure, or inputs are owed: the next call carries them
+                    settle_quiz_mailbox_receipts(canonical, task_id, mailbox_root)
                     fence_publication()
                     mailbox.unlink()
                 acks.unlink(missing_ok=True)
@@ -1162,9 +1163,9 @@ def _secure_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dic
 
     def fields_for(row: Dict[str, Any]) -> Dict[str, Any]:
         return {**_custody_fields(row, source, published), **_mail_fields(row, rows, prepared["inputs"]),
-                **_owner_mail_fields(row, owner_capture),
-                **prepared["input_fields"]}
+                **_owner_mail_fields(row, owner_capture), **prepared["input_fields"]}
 
+    settle_quiz_mailbox_receipts(canonical, task_id, drive, lock=True)
     _write_custody_fields(canonical, task_id, current, fields_for, basis=prepared["basis"], closed=closed)
     readback = load_task_result(canonical, task_id, strict=True) or {}
     if attempt_basis(readback) != prepared["basis"]:
@@ -1444,7 +1445,7 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
         outcome["reason"] = "generation_closed" if closed() else str(retained)
     except StoreBusy:
         outcome["reason"] = "generation_closed" if closed() else "store_busy"
-    except (OSError, ValueError, TimeoutError) as exc:
+    except (OSError, ValueError, TimeoutError, StoreError) as exc:
         outcome["reason"] = "generation_closed" if closed() else f"custody_error: {type(exc).__name__}"
         if not closed():
             log.warning("Child drive %s kept: custody could not be proven", drive, exc_info=True)

@@ -388,7 +388,7 @@ def acknowledge_transcript_entry(
                               str(press.get("request_id") or ""))
         except Exception:
             log.warning("Card press read receipt failed for %s", msg_id, exc_info=True)
-    if entry.get("relay") and not (entry.get("host_carried") or entry.get("work_reply")):
+    if entry.get("relay") and not (entry.get("host_carried") or entry.get("work_reply")):  # a carried row: no "read by that work" receipt
         from ouroboros.owner_relay import acknowledge_relay
         acknowledge_relay(entry.get("relay_canonical_root") or drive_root, task_id, entry)
     return True
@@ -558,23 +558,25 @@ def write_task_message(
 
 def owner_attachment_manifest(
     drive_root: pathlib.Path, task_id: str, *, _source_refs: Optional[List[Dict[str, Any]]] = None,
+    answers: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Read all owner input history, including ACKed rows, with optional exact refs. A row
-    that is not JSON (torn or unreadable, so possibly owner text with inputs) fails the
-    read closed with ``OSError``, as an unreadable file does."""
+    """Read all owner input history, including ACKed rows, with optional exact refs (``answers``: also a card answer's
+    staged files, which only this task's own promotion keeps). A row that is not JSON (torn or unreadable, so possibly
+    owner text with inputs) fails the read closed with ``OSError``, as an unreadable file does."""
 
     path = _mailbox_path(drive_root, task_id)
     if not path.exists():
         return []
     manifests: List[Dict[str, Any]] = []
     seen_ids: set[str] = set()
+    kinds = (KIND_OWNER_TEXT, KIND_QUIZ_ANSWER)[:2 if answers else 1]  # controls and task messages carry no inputs
     try:
         for line in mailbox_lines(path.read_text(encoding="utf-8")):
             try:
                 entry = json.loads(line)
             except ValueError as exc:
                 raise OSError(f"owner mailbox of {task_id} holds an unreadable row") from exc
-            if not isinstance(entry, dict) or str(entry.get("kind") or KIND_OWNER_TEXT) != KIND_OWNER_TEXT:
+            if not isinstance(entry, dict) or str(entry.get("kind") or KIND_OWNER_TEXT) not in kinds:
                 continue
             msg_id = str(entry.get("msg_id") or "")
             if msg_id and msg_id in seen_ids:
@@ -606,7 +608,7 @@ def promote_owner_attachments(parent: Any, child: Any, task_id: str, state: Dict
 
     refs: List[Dict[str, Any]] = []
     try:
-        rows = owner_attachment_manifest(pathlib.Path(child), task_id, _source_refs=refs)
+        rows = owner_attachment_manifest(pathlib.Path(child), task_id, _source_refs=refs, answers=True)
         if not rows and not refs:
             return
         _copied, error = materialize_inherited_attachment_manifest(rows, parent, task_id)

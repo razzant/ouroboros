@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.23
+version: 1.4.24
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -15,7 +15,7 @@ subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.docu
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
-  what_model_sees: Setup can request the bot token with the existing showSecretHitl('telegram', ['botToken']). Its protected form saves the token in Settings → Accounts and keys. Saving grants, enables or resumes nothing. The enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never instructions to running work; a Reply to any message of a Project opens its own turn in that Project. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
+  what_model_sees: Setup can request the bot token with the existing showSecretHitl('telegram', ['botToken']). Its protected form saves the token in Settings → Accounts and keys. Saving grants, enables or resumes nothing. The enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never instructions to running work; a Reply to any message of a Project opens its own turn in that Project. Quiz answers use the web card's decision ingress; a Reply's file (or why it never arrived) answers with its caption. Answers to earlier owner messages use native Telegram replies.
   token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
 timeout_sec: 60
 companion_processes:
@@ -43,8 +43,17 @@ indicator stays on while a reply you asked for, mirrored to this chat, is active
 being prepared by Ouroboros or a working helper; it stops for Pause, Stop now and
 after the answer, and a question waiting for you, a model-access wait or background work
 never keep it on (DESIGN §9). A quiz card is
-answered by tapping an option or by replying to the card with a free-form
-answer; both reach the same host decision ingress as the web UI. Owner `/panic`
+answered by tapping an option or by replying to the card with a free-form answer, a file, or both
+(received first; one that never arrives goes as why); all reach the same host decision ingress as
+the web UI. Before receiving a reply's file, the bridge checks the host's record for that request:
+a recognized reply rejoins without redownloading or resending, an already answered or closed card
+skips the download and tells the owner once, a finished task's unanswered card still takes a late
+answer, and an unconfirmed lookup downloads and submits nothing and sends one notice without asking
+to resend or blocking later updates. Each Telegram update carries one item (Telegram albums are not
+combined, and there is no multi-file queue): when multiple album updates each reply to the same
+card, the first item (with its caption) answers, later items skip the download with the conflict
+notice once answered, and non-reply album updates or non-quiz media continue separately. Owner
+`/panic`
 is available in every command mode, including strict: it sends once through the emergency door,
 never queues or replays. Telegram dates before the host's whole-second import time are refused;
 their previous outcome is unknown. This assumes aligned clocks: a host ahead rejects fresh Panic
@@ -181,11 +190,13 @@ of its task episode and reply origin (Continue episodes stay separate); question
 and problems keep their sound. A question card is the
 answer's receipt: it shows the answer Ouroboros recorded, never the words or option sent
 from here, and whether its delivery is saved for the task, pending or unknown; no line
-says the task read it. A tap also gets a toast. A tap or a text answer gets one message
-only for a conflict, which names the recorded answer, a closed question, an error, an
+says the task read it. A tap also gets a toast. A tap or a reply gets one message
+only for a conflict, which names the recorded answer (when known), a closed question, an error, an
 unconfirmed answer, or a card that could not be updated.
-A card goes out as one message only while its answered form still fits in the install's
-language. A request Ouroboros refused is told in one message replying to it, even to the
+A card goes out as one message only while its answered form still fits in the install's language;
+host file/limit facts appear on a separate line from any caption, and near Telegram's text limit
+the settled edit reserves room for the file/result fact even with a long caption. A request
+Ouroboros refused is told in one message replying to it, even to the
 latest message: its target and the host's reason, then the choice of target when one is
 needed, then the files that were not attached. The System line the web shows for the same
 refusal comes here only when no acknowledgement carried the reason, and an accepted

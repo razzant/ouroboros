@@ -970,24 +970,21 @@ async def _handle_owner_message(
         await telegram_quiz.answer_from_reply(api, client, quiz_ref, "", chat_id=chat_id,
                                               request_key=update_key(update), lang=lang, post=_host_post)
         return
-    if safe_text and not _SLASH_COMMAND_RE.match(text) and isinstance(reply_to, dict) and reply_to:
-        if quiz_ref is not None:
-            # A reply to a quiz card is the owner's own answer to
-            # that question, not a new chat turn (#472).
-            # Commands keep their existing dispatch even in replies. Other
-            # answers, including code-formatted command names, stay verbatim.
-            answer_text = str(message.get("text") or message.get("caption") or "")
-            await telegram_quiz.answer_from_reply(
-                api, client, quiz_ref, answer_text, chat_id=chat_id,
-                request_key=update_key(update), lang=lang, post=_host_post,
-            )
-            return
+    photos = message.get("photo") or []
+    media = telegram_inbound.photo_media(photos[-1]) if photos else telegram_inbound.inbound_file(message)
+    if quiz_ref is not None and (safe_text or media) and not _SLASH_COMMAND_RE.match(text):
+        # A reply to a quiz card is the owner's own answer to that question, not a new chat turn (#472): its words
+        # verbatim (code-formatted command names included) and its file, received only while no answer of this very
+        # update is recorded, as ONE answer (owner's choice, 18 Nov). Commands keep their existing dispatch.
+        await telegram_quiz.answer_from_reply(
+            api, client, quiz_ref, str(message.get("text") or message.get("caption") or ""), chat_id=chat_id,
+            request_key=update_key(update), lang=lang, post=_host_post,
+            receive=(lambda: telegram_inbound.receive_media(api, client, media, park_photo=True)) if media else None)
+        return
     def read_target():
         return _reply_target(api, client.bot_id, chat_id, message)
 
     target = reply_target(read_target) if reply_target is not None else read_target()
-    photos = message.get("photo") or []
-    media = telegram_inbound.photo_media(photos[-1]) if photos else telegram_inbound.inbound_file(message)
     if not safe_text and media is None:
         # Acknowledge an unsupported message kind (sticker, poll,
         # location…) instead of silently swallowing it.

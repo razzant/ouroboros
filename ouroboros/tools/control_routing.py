@@ -86,7 +86,7 @@ def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any], source: Opt
 
     The corpus is persisted with the start (its receipt, the queue snapshot, the running
     record): the one owner-corpus projection (``owner_words.carried_owner_corpus``);
-    ``source``: the held row ``owner_source`` selected to open the start.
+    ``source``: the held or verified row (``owner_source`` or private ``owner_quote``) selected to open the start.
     """
     from ouroboros.owner_words import carried_owner_corpus, merged_corpus
 
@@ -417,8 +417,9 @@ def _task_card_title_arg(title: str, verb: str) -> tuple[str, str]:
 
 
 def _start_destination(ctx: ToolContext, carrier: Dict[str, Any], destination: Any,
-                       owner_quote: Any) -> tuple[Dict[str, Any], str]:
-    """``(private start's event fields, refusal)`` of a start's named destination, read before any effect.
+                       owner_quote: Any) -> tuple[Dict[str, Any], Dict[str, Any], str]:
+    """``(private start's event fields, verified Main answer row, refusal)`` of a start's named destination, read
+    before any effect.
 
     A caller holding Presence authority (``carrier``) names where each new work belongs; omitted, unknown
     or contradictory choices refuse and the mind chooses again. Work without one has nothing to choose.
@@ -427,24 +428,26 @@ def _start_destination(ctx: ToolContext, carrier: Dict[str, Any], destination: A
         DESTINATION_OWNER,
         DESTINATION_PLACE,
         ContactRequestInvalid,
-        private_start_fields,
+        private_start_source,
     )
 
     refused = "⚠️ TOOL_ARG_ERROR (start_task): {} Nothing was scheduled."
     if not carrier:
-        return {}, (refused.format("destination and owner_quote apply only to a start from a Presence "
-                                   "conversation or work acting for a place.")
-                    if destination not in (None, "") or owner_quote not in (None, "") else "")
+        return {}, {}, (refused.format("destination and owner_quote apply only to a start from a Presence "
+                                       "conversation or work acting for a place.")
+                        if destination not in (None, "") or owner_quote not in (None, "") else "")
     if destination not in (DESTINATION_PLACE, DESTINATION_OWNER):
-        return {}, refused.format(
+        return {}, {}, refused.format(
             f"destination must be {DESTINATION_PLACE!r} (this place's work) or {DESTINATION_OWNER!r} (the owner's "
             "private work, with owner_quote naming their held answer to a private question).")
     if destination == DESTINATION_PLACE:
-        return {}, refused.format("owner_quote belongs to destination='owner'.") if owner_quote not in (None, "") else ""
+        return {}, {}, (refused.format("owner_quote belongs to destination='owner'.")
+                        if owner_quote not in (None, "") else "")
     try:
-        return private_start_fields(ctx, owner_quote), ""
+        fields, verified = private_start_source(ctx, owner_quote)
+        return fields, verified, ""
     except ContactRequestInvalid as exc:
-        return {}, refused.format(str(exc))
+        return {}, {}, refused.format(str(exc))
 
 
 def own_time_on(ctx: Any) -> bool:
@@ -535,8 +538,8 @@ def _start_task(
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
-    if mine_error := _mine_refusal(ctx, mine, owner_words=owner_words, owner_source=owner_source, destination=destination):
-        return mine_error
+    if refused := _mine_refusal(ctx, mine, owner_words=owner_words, owner_source=owner_source, destination=destination):
+        return refused
     model_basis, cite_error = cited_owner_basis(ctx, owner_words, call_speech=bool(model))
     owner_basis = model_basis if model_basis and model_basis["source"] != "live_call" else None
     if cite_error and model:
@@ -553,7 +556,7 @@ def _start_task(
         return title_error
     metadata = getattr(ctx, "task_metadata", {})
     presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
-    private, destination_error = _start_destination(ctx, presence_carrier, destination, owner_quote)
+    private, private_row, destination_error = _start_destination(ctx, presence_carrier, destination, owner_quote)
     if destination_error:
         return destination_error
     chosen: Dict[str, Any] = {"destination": destination} if presence_carrier else {}
@@ -725,9 +728,10 @@ def _start_task(
 
             if transported := reply_transport_from_metadata(canonical_data_root(ctx), metadata):
                 evt[TURN_ADDRESS] = transported
-    # An ordinary owner-word start settles its source's files; a private start and a place's work keep their own doors.
-    files = None if private or presence_carrier or mine else _source_files(ctx, evt, selected=bool(source_row))
-    _attach_drafted_objective(ctx, evt, source_row or None, owner_basis=owner_basis, own=bool(mine))
+    # An ordinary owner-word start settles its source's files; a private start carries its answer's files alone.
+    files = (([], False) if private and evt.get("attachment_uploads")
+             else None if private or presence_carrier or mine else _source_files(ctx, evt, selected=bool(source_row)))
+    _attach_drafted_objective(ctx, evt, private_row or source_row or None, owner_basis=owner_basis, own=bool(mine))
     kind_note = " " + model_note if model_note else ""
     source_note = (_source_note(ctx, evt, selected if source_row else "") if isinstance(evt.get("source_ref"), dict)
                    and evt["source_ref"] and not private and not presence_carrier else "")
@@ -985,7 +989,7 @@ def _cause_words(code: str, *, mine: bool = False) -> str:
     from ouroboros.project_dialogue import ROUTING_REFUSAL_CAUSES
 
     phrase = ROUTING_REFUSAL_CAUSES.get(str(code or "").strip(), "")
-    if mine and str(code or "").startswith("consciousness_"):  # a declared start the cap or the allowance refused
+    if mine and str(code or "").startswith("consciousness_"):
         way = MINE_WAY_FORWARD.rstrip(".")  # the caller ends the sentence
         phrase = f"{phrase}. {way}" if phrase else way
     return f": {phrase}" if phrase else ""

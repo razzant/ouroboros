@@ -153,6 +153,10 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
         pointer["answered_index"] = int(block["answered_index"])
     if str(block.get("comment") or ""):
         pointer["comment"] = str(block["comment"])
+    if block.get("attachments"):  # a Telegram Reply's files, as every card states them: no stored id, path or link
+        from ouroboros.chat_uploads import answer_files
+
+        pointer["attachments"] = answer_files(block["attachments"])
     for key in (*CLOSURE_FIELDS, "materials"):
         if block.get(key):
             pointer[key] = block[key]

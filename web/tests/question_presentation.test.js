@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { carryOpenQuestions, questionMark, questionPresentation, questionWaits, vouchedBy, waitFacts }
+import { answerFileLines, carryOpenQuestions, hasAnswerFiles, questionMark, questionPresentation, questionWaits, vouchedBy, waitFacts }
     from '../modules/question_presentation.js';
 
 // Each fixture row is the pointer row the Python producer emits for that case
@@ -179,4 +179,27 @@ test('a partial read keeps a known question whatever its item was; a bare wait i
     const bare = { ...gap, rooms: { 42: idle([{ kind: 'question', task_id: 't' }]) } };
     assert.deepEqual(carryOpenQuestions({ rooms: { 42: idle([open]) } }, bare).rooms['42'].turn,
         [{ kind: 'question', task_id: 't' }, open]);
+});
+
+test('a Telegram Reply\'s files read as host file-outcome lines: received name, or why one never arrived; no link', () => {
+    assert.deepEqual(answerFileLines([
+        { name: 'shot.png', kind: 'image', size: 12, sha256: 'a'.repeat(64) },
+        { name: 'clip.mp4', kind: 'file', unavailable: 'too_large', limit_bytes: 10485760 },
+        { name: 'voice.ogg', kind: 'file', unavailable: 'download_failed' },
+        { name: 'gone.pdf', kind: 'file', unavailable: 'missing' },
+        {},
+    ]), [
+        '📎 shot.png',
+        '📎 clip.mp4: not received, too large',
+        '📎 voice.ogg: not received, the download failed',
+        '📎 gone.pdf: not received, unavailable',
+        '📎 attachment',
+    ]);
+    assert.deepEqual(answerFileLines(undefined), []);
+    assert.equal(hasAnswerFiles([{ name: 'shot.png' }]), true);
+    assert.equal(hasAnswerFiles([{ name: 'clip.mp4', unavailable: 'too_large' }]), true);
+    assert.equal(hasAnswerFiles([{}]), false);
+    assert.equal(hasAnswerFiles([{ name: '  ' }]), false);
+    assert.equal(hasAnswerFiles([]), false);
+    assert.equal(hasAnswerFiles(undefined), false);
 });

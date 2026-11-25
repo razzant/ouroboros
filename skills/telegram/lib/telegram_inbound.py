@@ -104,12 +104,13 @@ def _unavailable(info: Dict[str, Any], reason: str) -> Dict[str, Any]:
             **({"limit_bytes": _MAX_TELEGRAM_DOWNLOAD_BYTES} if reason == "too_large" else {})}
 
 
-async def receive_media(api, client, info: Dict[str, Any]) -> tuple[Dict[str, Any], Optional[ParkedFile]]:
+async def receive_media(api, client, info: Dict[str, Any], *, park_photo: bool = False,
+                        ) -> tuple[Dict[str, Any], Optional[ParkedFile]]:
     """``/chat/inject`` fields for one media item: the inline photo, the parked file's spec, or the fact of why
     nothing was received. Only a failed fetch is such a fact: a changed token still ends the update, and a
     failure to park or hand over the received bytes stays a delivery error. Bytes count only when complete:
     a body shorter or longer than Telegram's announced size is a failed download; an announced 0 is a true
-    empty file."""
+    empty file. ``park_photo``: a photo is parked as a file too, for ``/chat/decision``, which takes no inline image."""
     size = info["size"]
     fetch = client.download_photo if info["kind"] == "photo" else client.download_file
     try:
@@ -125,7 +126,7 @@ async def receive_media(api, client, info: Dict[str, Any]) -> tuple[Dict[str, An
     content = base64.b64decode(received[0]) if info["kind"] == "photo" else received
     if size is not None and len(content) != size:
         return {"attachments": [_unavailable(info, "download_failed")]}, None
-    if info["kind"] == "photo":
+    if info["kind"] == "photo" and not park_photo:
         return {"image_base64": received[0], "image_mime": received[1]}, None
     inbox = pathlib.Path(api.get_state_dir()) / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)

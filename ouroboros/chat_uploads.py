@@ -37,6 +37,7 @@ saved identity for a successor's own copy (``quoted_inputs``).
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import pathlib
@@ -524,11 +525,249 @@ def stored_refs(value: Any) -> List[Dict[str, Any]]:
             for ref in (value if isinstance(value, list) else []) if isinstance(ref, dict)]
 
 
-def upload_specs(row, root) -> list:
-    """A held row's files as staging specs for ``artifacts.stage_task_attachments``: each saved upload under the root
-    the row was read from, with its saved identity (a file with no saved upload keeps its name and stages nothing)."""
+def answer_files(refs: Any) -> List[Dict[str, Any]]:
+    """A recorded answer's files as its card and receipt state them: name, kind, type, size, digest, or why one was
+    never received. No stored id or stat witness: these facts open no download."""
+    return [{key: ref[key] for key in ("name", "kind", "mime", "size", "sha256", "unavailable", "limit_bytes")
+             if key in ref} for ref in stored_refs(refs)]
+
+
+def _project_attachments(mapping: Dict[str, Any], key: str = "attachments") -> Dict[str, Any]:
+    """Shallow-copy ``mapping`` with ``key`` projected via ``answer_files`` (dropped when empty)."""
+    out = dict(mapping)
+    if key in out:
+        files = answer_files(out[key])
+        if files:
+            out[key] = files
+        else:
+            out.pop(key, None)
+    return out
+
+
+def _is_secret_quiz(block: Any) -> bool:
+    """Whether ``block`` carries protected secret-form metadata (never altered by display projection)."""
+    if not isinstance(block, dict):
+        return False
+    from ouroboros.owner_quiz import SECRET_FIELDS, secret_outcome_block
+
+    return any(block.get(key) for key in SECRET_FIELDS) or secret_outcome_block(block) is not None
+
+
+def public_quiz_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy a stored quiz/answer block with top-level and ``delivery.answer_row`` attachments projected via
+    ``answer_files`` (shallow-copying only touched branches, never mutating ``block``)."""
+    out = _project_attachments(block)
+    delivery = out.get("delivery")
+    answer_row = delivery.get("answer_row") if isinstance(delivery, dict) else None
+    if isinstance(answer_row, dict) and ("attachments" in answer_row or (
+            isinstance(answer_row.get("quiz"), dict) and "attachments" in answer_row["quiz"])):
+        row_copy = _project_attachments(answer_row)
+        if isinstance(row_copy.get("quiz"), dict) and "attachments" in row_copy["quiz"]:
+            row_copy["quiz"] = _project_attachments(row_copy["quiz"])
+        out["delivery"] = {**delivery, "answer_row": row_copy}
+    return out
+
+
+def _public_late_answer(late: Any) -> Any:
+    """Copy a ``late_answer`` carrier with ``answer_snapshot.quiz`` projected via ``public_quiz_block``."""
+    snapshot = late.get("answer_snapshot") if isinstance(late, dict) else None
+    if not (isinstance(snapshot, dict) and isinstance(snapshot.get("quiz"), dict)) or _is_secret_quiz(snapshot["quiz"]):
+        return late
+    return {**late, "answer_snapshot": {**snapshot, "quiz": public_quiz_block(snapshot["quiz"])}}
+
+
+def _late_quiz_file_snapshot(late: Any) -> bool:
+    """Pure typed-shape check for an accepted late-answer snapshot of an ordinary (non-secret)
+    quiz carrying recorded file refs — the exact shape ``gateway/task_decision._forward_late_quiz_answer``
+    and ``supervisor/message_ingress._chat_record`` pair with ``metadata.chat_attachments`` /
+    ``metadata.chat_attachment_uploads`` and a held late-answer row's ``attachments``. Never reads a store."""
+    if not isinstance(late, dict):
+        return False
+    snapshot = late.get("answer_snapshot")
+    quiz = snapshot.get("quiz") if isinstance(snapshot, dict) else None
+    if not isinstance(quiz, dict):
+        return False
+    if not (quiz.get("answered_after_terminal") is True or quiz.get("delivery_after_terminal") is True
+            or isinstance(quiz.get("delivery"), dict)):
+        return False
+    from ouroboros.owner_quiz import late_answer_ref
+
+    ref = late_answer_ref(late)
+    block = (ref.get("answer_snapshot") or {}).get("quiz") if isinstance(ref, dict) else None
+    if not isinstance(block, dict) or _is_secret_quiz(block):
+        return False
+    return any(stored_refs(block.get("attachments")))
+
+
+def _public_late_carrier(
+    mapping: Dict[str, Any], *, attachments_key: str, drop_uploads: bool = False,
+) -> Dict[str, Any]:
+    """Project ``late_answer.answer_snapshot.quiz`` and, when ``_late_quiz_file_snapshot`` holds,
+    the carrier's companion file refs (and optional transport-only uploads) without mutating ``mapping``."""
+    late = mapping.get("late_answer")
+    projected_late = _public_late_answer(late)
+    late_files = _late_quiz_file_snapshot(late)
+    if projected_late is late and not late_files:
+        return mapping
+    out = _project_attachments(mapping, attachments_key) if late_files else dict(mapping)
+    if projected_late is not late:
+        out["late_answer"] = projected_late
+    if late_files and drop_uploads:
+        out.pop("chat_attachment_uploads", None)
+    return out
+
+
+def public_owner_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """A held owner row's display copy: its ``quiz`` block and/or accepted ``late_answer`` snapshot as their cards
+    state them (``public_quiz_block`` / ``_public_late_carrier``), plus its own ``attachments`` when the row carries
+    a ``quiz`` block or a typed late ordinary quiz file snapshot, shallow-copying only the touched branches. A row
+    carrying neither stays as it is."""
+    if not isinstance(row, dict):
+        return row
+    out = _public_late_carrier(row, attachments_key="attachments")
+    if not isinstance(row.get("quiz"), dict):
+        return out
+    return {**public_quiz_block(out), "quiz": public_quiz_block(row["quiz"])}
+
+
+def _public_held_rows(held: Dict[str, Any]) -> Dict[str, Any]:
+    return {address: public_owner_row(row) if isinstance(row, dict) else row
+            for address, row in held.items()}
+
+
+def _public_mailbox_row(line: Any) -> Any:
+    """Project ``quiz_delivery.answer_snapshot`` on one serialized ordinary ``quiz_answer`` mailbox line,
+    keeping its string wire type and leaving every other line byte-for-byte untouched."""
+    if not isinstance(line, str):
+        return line
+    try:
+        entry = json.loads(line)
+    except (ValueError, TypeError):
+        return line
+    if not isinstance(entry, dict) or entry.get("kind") != "quiz_answer":
+        return line
+    delivery = entry.get("quiz_delivery")
+    snapshot = delivery.get("answer_snapshot") if isinstance(delivery, dict) else None
+    if not isinstance(snapshot, dict) or _is_secret_quiz(snapshot) or _is_secret_quiz(entry):
+        return line
+    projected = public_quiz_block(snapshot)
+    if projected == snapshot:
+        return line
+    from ouroboros.utils import machine_json
+
+    return machine_json({**entry, "quiz_delivery": {**delivery, "answer_snapshot": projected}})
+
+
+def _public_mailbox_capture(capture: Any) -> Any:
+    """Project serialized ``quiz_answer`` lines inside a mailbox capture dict without mutating ``capture``."""
+    rows = capture.get("rows") if isinstance(capture, dict) else None
+    if not isinstance(rows, list):
+        return capture
+    projected = [_public_mailbox_row(line) for line in rows]
+    if all(new is old for new, old in zip(projected, rows)):
+        return capture
+    return {**capture, "rows": projected}
+
+
+def public_quiz_copies(payload: Dict[str, Any]) -> None:
+    """Project all named public task-result and task-event carriers of quiz answer files in place on ``payload``:
+    a task-scoped ``quiz_answer`` event row's top-level ``quiz`` (and ``attachments`` if present),
+    ``owner_quiz``, top-level ``held_owner_messages`` (both ``quiz`` rows and held inbound ``late_answer`` rows),
+    serialized ``quiz_answer`` rows inside ``owner_mailbox.rows`` / ``unread_mailbox.rows``,
+    ``metadata.late_answer.answer_snapshot.quiz`` (plus sibling ``metadata.chat_attachments`` and transport-only
+    ``metadata.chat_attachment_uploads`` when ``metadata.late_answer`` establishes a typed late ordinary quiz file
+    snapshot) and ``metadata.continuation.owner_sources.held_owner_messages``. Only these named carriers are touched —
+    never a walk of the whole document, and non-quiz rows stay verbatim — shallow-copying touched containers so the
+    stored result, the canonical chat row, exact owner reads and every other carrier keep their own bytes."""
+    if not isinstance(payload, dict):
+        return
+    quiz = payload.get("quiz")
+    if (payload.get("type") == "quiz_answer" and isinstance(quiz, dict)
+            and not _is_secret_quiz(quiz) and not _is_secret_quiz(payload)):
+        payload["quiz"] = public_quiz_block(quiz)
+        if "attachments" in payload:
+            files = answer_files(payload["attachments"])
+            if files:
+                payload["attachments"] = files
+            else:
+                payload.pop("attachments", None)
+    owner_quiz = payload.get("owner_quiz")
+    if isinstance(owner_quiz, dict):
+        payload["owner_quiz"] = {
+            qid: public_quiz_block(block) if isinstance(block, dict) else block
+            for qid, block in owner_quiz.items()
+        }
+    held = payload.get("held_owner_messages")
+    if isinstance(held, dict):
+        payload["held_owner_messages"] = _public_held_rows(held)
+    for key in ("owner_mailbox", "unread_mailbox"):
+        capture = payload.get(key)
+        projected_capture = _public_mailbox_capture(capture)
+        if projected_capture is not capture:
+            payload[key] = projected_capture
+    meta = payload.get("metadata")
+    if not isinstance(meta, dict):
+        return
+    meta_out = _public_late_carrier(meta, attachments_key="chat_attachments", drop_uploads=True)
+    continuation = meta_out.get("continuation")
+    sources = continuation.get("owner_sources") if isinstance(continuation, dict) else None
+    inherited = sources.get("held_owner_messages") if isinstance(sources, dict) else None
+    if isinstance(inherited, dict):
+        meta_out = {
+            **meta_out,
+            "continuation": {
+                **continuation,
+                "owner_sources": {**sources, "held_owner_messages": _public_held_rows(inherited)},
+            },
+        }
+    if meta_out is not meta:
+        payload["metadata"] = meta_out
+
+
+def staging_specs(refs: Any, data_dir: Any = None) -> List[Dict[str, Any]]:
+    """Recorded refs as ``artifacts.stage_task_attachments`` specs, built when delivered: a stored upload by its path
+    and measured size and digest, verified while copied (a file changed or gone since is refused, never replaced); a
+    file never received or gone at acceptance, by its reason and facts, with no path."""
     specs = []
-    for ref in stored_refs(row.get("attachments")):
+    for ref in stored_refs(refs):
+        upload = "" if ref.get("unavailable") else upload_id(ref.get("upload"))
+        specs.append({"label": str(ref.get("name") or "attachment"),
+                      **{key: ref[key] for key in ("mime", "size", "sha256", "unavailable", "limit_bytes") if key in ref},
+                      **({"path": str(uploads_dir(data_dir) / upload)} if upload else {})})
+    return specs
+
+
+def answer_evidence(refs: Any) -> List[Dict[str, Any]]:
+    """The recorded refs that are a file's evidence: a stored upload id, or the typed reason none was held. A ref
+    with neither (an empty or display-only entry) evidences nothing and answers nothing."""
+    return [ref for ref in stored_refs(refs) if upload_id(ref.get("upload"))
+            or ref.get("unavailable") in (*DELIVERY_FAILURES, "missing", "outside_store")]
+
+
+def row_attachments(row: Any, root: Any = None) -> List[Dict[str, Any]]:
+    """The stored refs of the files an owner row carries, by its own record: an inbound row's ``attachments``; a card's
+    answer row (``type == quiz_answer``), the files its recorded winner holds (``quiz.attachments``); a late answer's
+    row recorded without them, its accepted snapshot's. Display facts (``answer_files``) never come here."""
+    if not isinstance(row, dict):
+        return []
+    if row.get("attachments") or (row.get("type") != "quiz_answer" and not row.get("late_answer")):
+        return stored_refs(row.get("attachments"))
+    if row.get("type") == "quiz_answer":  # the host's own answer row (``owner_relay.quotable_owner_row``), never a secret outcome
+        from ouroboros.owner_quiz import secret_outcome_block
+        quiz = row.get("quiz")
+        return (stored_refs(quiz.get("attachments")) if row.get("source") == "owner_quiz_answer" and isinstance(quiz, dict)
+                and quiz.get("state") == "answered" and secret_outcome_block(row) is None else [])
+    from ouroboros.owner_quiz import late_answer_ref, resolved_late_quiz
+    late = late_answer_ref(row.get("late_answer"))
+    return stored_refs(resolved_late_quiz(root, late).get("attachments")) if late else []
+
+
+def upload_specs(row: Any, root: Any) -> List[Dict[str, Any]]:
+    """A held row's files as staging specs for ``artifacts.stage_task_attachments``: each saved upload under the root
+    the row was read from, with its saved identity (a file with no saved upload keeps its name and stages nothing).
+    Retains the full stored ref fields and an explicit ``path`` (empty when unavailable), distinct from ``staging_specs``."""
+    specs = []
+    for ref in row_attachments(row, root):
         upload = upload_id(ref.get("upload"))
         path = str(uploads_dir(root) / upload) if upload and not ref.get("unavailable") else ""
         specs.append({**ref, "path": path, "label": str(ref.get("name") or "attachment")})
@@ -569,9 +808,9 @@ def quoted_inputs(root, refs: list) -> list:
 
 
 __all__ = [
-    "DELIVERY_FAILURES", "DOWNLOAD_ROUTE", "PLACEHOLDER_TEXTS", "attachment_identity", "attachment_view",
-    "attachment_views", "bytes_identity", "claim_refs", "delete_pending_upload", "delivery_ref", "detect_media",
-    "inline_image_name", "measure_upload", "new_upload_id", "open_upload", "quoted_inputs", "refs_for_frame",
-    "safe_upload_name", "same_message", "source_identity", "store_upload", "stored_refs",
-    "unavailable_ref", "upload_id", "upload_specs", "uploads_dir",
+    "DELIVERY_FAILURES", "DOWNLOAD_ROUTE", "PLACEHOLDER_TEXTS", "answer_files", "attachment_identity",
+    "attachment_view", "attachment_views", "bytes_identity", "claim_refs", "delete_pending_upload", "delivery_ref",
+    "detect_media", "inline_image_name", "measure_upload", "new_upload_id", "open_upload", "public_owner_row",
+    "public_quiz_copies", "quoted_inputs", "refs_for_frame", "row_attachments", "safe_upload_name", "same_message", "source_identity",
+    "staging_specs", "store_upload", "stored_refs", "unavailable_ref", "upload_id", "upload_specs", "uploads_dir",
 ]

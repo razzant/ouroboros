@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
-from ouroboros.gateway.attachment_contracts import ChatAttachmentView
+from ouroboros.gateway.attachment_contracts import ChatAttachmentView, QuizAnswerFile
 from ouroboros.gateway.reference_contracts import ChatReplyReference, HostNoticeField
 
 try:
@@ -61,7 +61,8 @@ class PresenceContact(TypedDict, total=False):
 class ChatHistoryQuiz(TypedDict, total=False):
     """The question card of a ``msg_type: "quiz"`` row (the question itself is the row's ``text``).
     ``state`` is the durable lifecycle merged at read time: open, answered, closed,
-    expired_terminal or superseded. ``answered_index`` and ``comment`` are the recorded answer,
+    expired_terminal or superseded. ``answered_index``, ``comment`` and ``attachments`` (the files a Telegram
+    Reply answered with: ``chat_uploads.answer_files``, never a link) are the recorded answer,
     ``answer_row_address`` its own row, which the card shows (DESIGN "Replies")."""
 
     quiz_id: Required[str]
@@ -75,6 +76,7 @@ class ChatHistoryQuiz(TypedDict, total=False):
     host_facts: str
     answered_index: int
     comment: str
+    attachments: List[QuizAnswerFile]
     answer_row_address: str
     owner_wait_state: str
     owner_wait_resume_reason: str
@@ -209,7 +211,7 @@ class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     ingress_accepted: bool
     ingress_dispatched: bool
     ingress_pending: bool
-    attachments: List[ChatAttachmentView]
+    attachments: List[Union[ChatAttachmentView, QuizAnswerFile]]
     text_placeholder: bool
     chat_annotation: Dict[str, Any]  # the routing outcome shown on an owner message
     origin_id: str
@@ -388,14 +390,16 @@ class ChatSearchLink(TypedDict):
 
 class ChatSearchQuestion(TypedDict, total=False):
     """A question row's card as its words are drawn (the question is the row's ``text``): the offered answers'
-    labels and details (``QuizOption`` rows, or a legacy row's labels with ``option_details``), the stake and the
-    owner's own words (``comment``) once the card is settled as answered."""
+    labels and details (``QuizOption`` rows, or a legacy row's labels with ``option_details``), the stake, the
+    owner's own words (``comment``) and recorded answer files (``attachments``, ``chat_uploads.answer_files``)
+    once the card is settled as answered."""
 
     quiz_id: Required[str]
     options: List[Any]
     option_details: List[str]
     stake: str
     comment: str
+    attachments: List[QuizAnswerFile]
 
 
 class ChatSearchCandidate(HostNoticeField, AgentNoteFields, total=False):

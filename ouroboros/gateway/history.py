@@ -143,16 +143,14 @@ _SKILL_REVIEW_INT_FIELDS = ("review_round", "snapshot_attempt")
 _SKILL_REVIEW_BOOL_FIELDS = ("snapshot_revised",)
 
 
-def _skill_review_fields(row: Dict[str, Any], *, present_only: bool = False) -> Dict[str, Any]:
+def _skill_review_fields(source: Dict[str, Any], *, present_only: bool = False) -> Dict[str, Any]:
     from ouroboros.review_execution_projection import normalize_review_executions
 
-    keep = (lambda key: key in row) if present_only else (lambda _key: True)
-    return {
-        **{key: str(row.get(key, "") or "") for key in _SKILL_REVIEW_STRING_FIELDS if keep(key)},
-        **{key: coerce_int(row.get(key), 0) for key in _SKILL_REVIEW_INT_FIELDS if keep(key)},
-        **{key: bool(row.get(key)) for key in _SKILL_REVIEW_BOOL_FIELDS if keep(key)},
-        "executions": normalize_review_executions(row.get("executions")),
-    }
+    specs = ((_SKILL_REVIEW_STRING_FIELDS, lambda v: str(v or "")),
+             (_SKILL_REVIEW_INT_FIELDS, lambda v: coerce_int(v, 0)), (_SKILL_REVIEW_BOOL_FIELDS, bool))
+    fields = {key: cast(source.get(key)) for keys, cast in specs for key in keys if not present_only or key in source}
+    fields["executions"] = normalize_review_executions(source.get("executions"))
+    return fields
 
 
 def _stored_chat_id(value: Any, default: int = 1) -> int:
@@ -222,10 +220,11 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
     origin_rows = project_origin_rows(data_dir, thread_id, gaps=gaps)
     emitted_origins = {m.get("origin_id") for m in human_tail if m.get("origin_id")}
     synthesized: list = []
-    def _omission_row(text: str, ts: str = "", **extra: Any) -> Dict[str, Any]:
-        return {"text": text, **extra, "role": "system", "ts": ts, "is_progress": False,
-                "system_type": "origin_omission", "markdown": False, "source": "",
-                "sender_label": "", "sender_session_id": "", "client_message_id": "", "task_id": ""}
+    omission = {
+        "role": "system", "ts": "", "is_progress": False, "system_type": "origin_omission",
+        "markdown": False, "source": "", "sender_label": "", "sender_session_id": "",
+        "client_message_id": "", "task_id": "",
+    }
     for index, row in enumerate(origin_rows):
         ref = row.get("ref") or {}
         cmid = str(ref.get("client_message_id") or "")
@@ -263,10 +262,11 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
             if omitted:
                 text, said = phrase("origin_omission", "{n} more archived Project start message(s) are not shown here; their "
                                     "full copies are kept.", details="state/project_task_bindings.json (source_text)", n=omitted)
-                # Where they are kept is its notice's detail (DESIGN principle 7).
-                synthesized.append(_omission_row(text, str(ref.get("ts") or ""), **notice_view({"text": text, **said})))
+                synthesized.append({  # where they are kept is its notice's detail (DESIGN principle 7)
+                    "text": text, **notice_view({"text": text, **said}), **omission, "ts": str(ref.get("ts") or ""),
+                })
             break
-    synthesized.extend(_omission_row(gap) for gap in sorted(gaps))
+    synthesized.extend({"text": gap, **omission} for gap in sorted(gaps))
     return synthesized
 
 
@@ -562,6 +562,7 @@ def _annotate_terminal_task_truth(
                 message["task_phase"] = "unfinished"
                 if same_attempt and latest_progress_by_task.get(task_id) is message and task_id in running_gate_by_task:
                     message["review_overrides"] = running_gate_by_task[task_id]  # the card's line on a reload
+            is_latest = latest_progress_by_task.get(task_id) is message
             plain_final = task_id not in carriers and plain_finals.get(task_id) is message
             # #496: an anchored child whose progress rows fell out of the read tail keeps its executor receipt (its harness
             # chip needs no "Load older") on one answer row: its selected summary of this attempt, else its selected plain words.
@@ -571,14 +572,11 @@ def _annotate_terminal_task_truth(
             if (same_attempt and task_id in terminal_status_by_task
                     and (message.get("is_progress") or is_summary or plain_final or message.get("system_type") == "task_evidence")):
                 message["task_terminal_status"] = terminal_status_by_task[task_id]
-                if latest_progress_by_task.get(task_id) is message or answer:
+                if is_latest or answer:
                     message.update(terminal_receipt_by_task.get(task_id) or {})
-            elif same_attempt and latest_progress_by_task.get(task_id) is message:
-                message.update(live_cost_by_task.get(task_id) or {})
-            elif same_attempt and answer:
-                message.update(terminal_receipt_by_task.get(task_id) or {})
+            elif same_attempt and (is_latest or answer):
+                message.update((live_cost_by_task if is_latest else terminal_receipt_by_task).get(task_id) or {})
             system_type = str(message.get("system_type") or "")
-            is_latest = latest_progress_by_task.get(task_id) is message
             final_row = not message.get("is_progress") and message.get("task_terminal_status")
             if same_attempt and (system_type == "task_summary" or final_row or (is_latest and task_id not in summary_anchors)):
                 message.update(truth)
@@ -729,8 +727,9 @@ def _collect_chat_rows(
             if entry.get("type") in {"quiz_answer", "quiz_closed"}:
                 if (replay_evidence is not None and isinstance(entry.get("quiz"), dict)
                         and row_matches_thread(_stored_chat_id(entry.get("chat_id"), 1), entry)):
+                    from ouroboros.chat_uploads import public_quiz_block
                     from ouroboros.owner_quiz import question_delivery_now  # as recorded; its delivery as it is now
-                    quiz, live = saved(entry["quiz"]), _quiz_source(str(entry.get("task_id") or ""))["quizzes"]
+                    quiz, live = saved(public_quiz_block(entry["quiz"])), _quiz_source(str(entry.get("task_id") or ""))["quizzes"]
                     quiz.update(question_delivery_now(live.get(str(quiz.get("quiz_id") or ""))))
                     _replay_row(entry, {"system_type": entry["type"], "quiz": quiz})
                 continue
@@ -809,8 +808,7 @@ def _collect_chat_rows(
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
             rec.update(frame_project(chat_path.parent.parent, entry))
-            annotation = None if author else _user_annotation(
-                role, rec["client_message_id"], chat_annotations, entry_chat, rec.get("row_address", ""))
+            annotation = None if author else _user_annotation(role, rec["client_message_id"], chat_annotations, entry_chat, rec.get("row_address", ""))
             if origin := getattr(row_matches_thread, "origin_identity", lambda entry: "")(entry):
                 rec["origin_id"] = origin
             if annotation is not None:
@@ -830,7 +828,8 @@ def _collect_chat_rows(
             if delivery := delivery_fields(entry):
                 rec.update(delivery)
             elif entry.get("type") == "quiz" and isinstance(entry.get("quiz"), dict):
-                quiz = saved(entry["quiz"])  # as published: whatever delivery it then owed, only its block says now
+                from ouroboros.chat_uploads import answer_files, public_quiz_block
+                quiz = saved(public_quiz_block(entry["quiz"]))  # as published: whatever delivery it then owed, only its block says now
                 _qtid = str(entry.get("task_id") or "")
                 if _qtid:
                     _qid = str(quiz.get("quiz_id") or "")
@@ -842,12 +841,23 @@ def _collect_chat_rows(
                         for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials", *SECRET_FIELDS):
                             if key in _live:
                                 quiz[key] = _live[key]
+                        if _files := answer_files(_live.get("attachments")):  # a Reply's files, as its card states them
+                            quiz["attachments"] = _files
                         selected = selected_answers.get((_qtid, _qid))
                         answer = selected or answered.get((_qtid, _qid)) or (_live.get("delivery") or {}).get("answer_row") or {}
                         if quiz["state"] == "answered" and answer.get("type") == "quiz_answer":  # DESIGN "Replies"
                             quiz["answer_row_address"] = _history_identity(answer)["row_address"]  # its row, else its copy
-                            if selected:
-                                quiz.update(answered_index=selected["quiz"].get("answered_index"), comment=selected["quiz"].get("comment", ""))
+                            if selected and isinstance(selected.get("quiz"), dict):
+                                sel = public_quiz_block(selected["quiz"])
+                                sel_index = sel.get("answered_index")
+                                quiz.pop("answered_index", None)
+                                if isinstance(sel_index, int) and not isinstance(sel_index, bool):
+                                    quiz["answered_index"] = sel_index
+                                quiz["comment"] = sel.get("comment", "")
+                                if sel.get("attachments"):
+                                    quiz["attachments"] = sel["attachments"]
+                                else:
+                                    quiz.pop("attachments", None)
                         if _live.get("host_facts") and not quiz.get("host_facts"):
                             quiz["host_facts"] = str(_live["host_facts"])  # the ask-time sentence the block holds
                         if "wait_for_answer" not in _live:
@@ -1012,7 +1022,7 @@ def _fold_task_bound_skill_reviews(combined: list[Dict[str, Any]]) -> list[Dict[
         ]
         attempts: list[Dict[str, Any]] = []
         for position, (_index, row) in enumerate(surviving_rows):
-            attempt = {
+            attempts.append({
                 "ts": str(row.get("ts") or ""),
                 "task_id": str(row.get("task_id") or ""),
                 # Legacy jobless rows have no exact-detail ref. Their compact
@@ -1021,31 +1031,18 @@ def _fold_task_bound_skill_reviews(combined: list[Dict[str, Any]]) -> list[Dict[
                 "superseded": position < len(surviving_rows) - 1,
                 **_history_identity(row),
                 **_skill_review_fields(row, present_only=True),
-                "skill": skill,
-                "group_id": group_id,
-                "presentation_owner_task_id": owner,
-            }
-            attempts.append(attempt)
+                "skill": skill, "group_id": group_id, "presentation_owner_task_id": owner,
+            })
         latest_index, latest_source = surviving_rows[-1]
-        latest = dict(latest_source)
-        latest["group_id"] = group_id
-        latest["presentation_owner_task_id"] = owner
-        latest["review_group"] = {
-            "surface": "skill",
-            "id": group_id,
-            "skill": skill,
-            "presentation_owner_task_id": owner,
-            "projected_attempt_count": len(attempts),
-            "count_is_authoritative": False,
-            "attempts": attempts,
+        replacements[latest_index] = {
+            **latest_source, "group_id": group_id, "presentation_owner_task_id": owner,
+            "review_group": {
+                "surface": "skill", "id": group_id, "skill": skill, "presentation_owner_task_id": owner,
+                "projected_attempt_count": len(attempts), "count_is_authoritative": False, "attempts": attempts,
+            },
         }
-        replacements[latest_index] = latest
         removed.update(index for index, _row in indexed_rows if index != latest_index)
-    return [
-        replacements.get(index, row)
-        for index, row in enumerate(combined)
-        if index not in removed
-    ]
+    return [replacements.get(index, row) for index, row in enumerate(combined) if index not in removed]
 
 
 def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:

@@ -408,7 +408,21 @@
  */
 
 /**
- * The question card of a `msg_type: "quiz"` history row (the question itself is the row's `text`).
+ * Display-only facts for one file of a recorded quiz answer (`chat_uploads.answer_files`): name, kind, type,
+ * size and digest, or why it never arrived (`unavailable` and, for `too_large`, `limit_bytes`). Carries no
+ * stored upload id, stat witness, path or download URL.
+ * @typedef {Object} QuizAnswerFile
+ * @property {string=} name
+ * @property {'image'|'video'|'audio'|'file'=} kind
+ * @property {string=} mime
+ * @property {number=} size
+ * @property {string=} sha256
+ * @property {string=} unavailable
+ * @property {number=} limit_bytes
+ */
+
+/**
+ * The question card of a `msg_type: "quiz"` history row (the question itself is `text`).
  * `state`: open | answered | closed | expired_terminal | superseded, merged at read time.
  * @typedef {Object} ChatHistoryQuiz
  * @property {PresenceContact=} presence_contact
@@ -422,6 +436,7 @@
  * @property {string=} host_facts
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {QuizAnswerFile[]=} attachments  // the files a Telegram Reply answered with (name, size, digest or why not received), never a link
  * @property {string=} answer_row_address  // the answer's own row, shown on this card (DESIGN "Replies")
  * @property {string=} owner_wait_state
  * @property {string=} owner_wait_resume_reason
@@ -541,7 +556,7 @@
  * @property {boolean=} ingress_accepted
  * @property {boolean=} ingress_dispatched
  * @property {boolean=} ingress_pending
- * @property {Object[]=} attachments  // ChatAttachmentView
+ * @property {Array<Object|QuizAnswerFile>=} attachments  // ChatAttachmentView on owner rows; QuizAnswerFile on project_question_pointer
  * @property {boolean=} text_placeholder
  * @property {Object=} chat_annotation
  * @property {string=} origin_id
@@ -736,14 +751,15 @@
 
 /**
  * A question row's card as its words are drawn (the question is the row's `text`): the offered answers' labels and
- * details (`QuizOption` rows, or a legacy row's labels with `option_details`), the stake and the owner's own words
- * (`comment`) once the card is settled as answered.
+ * details (`QuizOption` rows, or a legacy row's labels with `option_details`), the stake, the owner's own words
+ * (`comment`) and recorded answer files (`attachments`) once the card is settled as answered.
  * @typedef {Object} ChatSearchQuestion
  * @property {string} quiz_id
  * @property {Array<Object|string|null>=} options
  * @property {string[]=} option_details
  * @property {string=} stake
  * @property {string=} comment
+ * @property {QuizAnswerFile[]=} attachments
  */
 
 /**

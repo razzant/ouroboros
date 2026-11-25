@@ -17,7 +17,7 @@ Decision/language writers: §4. Review waits reach their live controller after a
 
 ### Operation correlation
 
-Named injection returns `operation_ref=<chat_id>:<client_message_id>` on 202/200/504/disconnect. `accept_local_message` resolves Reply and writes the row before enqueue. Same input rejoins; changed content/source/Reply is 409. Identity uses ordered `[sha256,name]` or the native Telegram bridge's pathless download facts, not storage names (`chat_uploads.same_message`). Download refusal stays host context on input, follow-up and Reply.
+Named injection returns `operation_ref=<chat_id>:<client_message_id>` on 202/200/504/disconnect. `accept_local_message` resolves Reply and writes the row before enqueue. Same input rejoins; changed content/source/Reply is 409. Identity uses ordered `[sha256,name]` or the native Telegram bridge's download refusals, not storage names (`chat_uploads.same_message`). Download refusal stays host context wherever it goes.
 
 `chat_uploads` parks inline photos once (pre-decode `_INLINE_IMAGE_MAX`), always staging them and retaining the parked originals for model pixels. Other bytes stage as files, never vision by the transport's label (CREATING_SKILLS `inject_chat`). The queue is in memory: accepted delivery lost on crash reads `lost`, without second-enqueue authority. A same-id retry takes still-owed dispatch.
 

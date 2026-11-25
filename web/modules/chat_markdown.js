@@ -513,7 +513,7 @@ export function renderLatexIn(root) {
             { left: '\\(', right: '\\)', display: false },
         ],
         ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
-        ignoredClasses: ['md-mermaid', 'md-chart', 'md-code-block'],
+        ignoredClasses: ['md-mermaid', 'md-chart', 'md-code-block', 'chat-quiz-answer-files'],
         throwOnError: false,
         strict: false,
     });

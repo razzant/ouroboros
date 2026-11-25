@@ -1718,7 +1718,7 @@ def test_continue_retypes_the_previous_releases_later_quiz_answers(tmp_path, mon
     from types import SimpleNamespace
 
     from ouroboros.loop_messages import _initialize_owner_directives
-    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.owner_mailbox import acknowledge_transcript_entry, write_owner_message
     from ouroboros.owner_words import cited_owner_basis, owner_words_contain
     from ouroboros.task_results import load_task_result
     from supervisor.continuation_admission import admit_continuation
@@ -1735,6 +1735,8 @@ def test_continue_retypes_the_previous_releases_later_quiz_answers(tmp_path, mon
         assert write_owner_message(tmp_path, typed or "2. " + label, asker, kind="quiz_answer",
                                    msg_id=f"quiz_answer:{asker}:{quiz_id}", quiz_delivery={
                                        "task_id": asker, "quiz_id": quiz_id, "answer_snapshot": card})
+        # The work read each answer: only a read answer rides into its Continue (no asker record holds these cards).
+        assert acknowledge_transcript_entry(tmp_path, asker, {"msg_id": f"quiz_answer:{asker}:{quiz_id}"})
 
     # The previous Continue wrote both accepted cards and their corpus copies under owner_quiz_answer.
     with monkeypatch.context() as previous:

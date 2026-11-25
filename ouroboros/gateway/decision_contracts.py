@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from ouroboros.gateway.attachment_contracts import QuizAnswerFile
 
 try:
     from typing import Literal, NotRequired, TypedDict
@@ -94,6 +96,7 @@ class DecisionResponse(TypedDict, total=False):
     state: str
     answered_index: int
     comment: str
+    attachments: List[QuizAnswerFile]  # quiz: the winner's Telegram Reply files (chat_uploads.answer_files)
     closed_reason: str
     closed_at: str
     closed_actor: Literal["owner", "model"]
