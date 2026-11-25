@@ -80,13 +80,14 @@ from ouroboros.project_admission import (  # noqa: E402, F401
 )
 
 
-def _load(drive_root: Any, *, strict: bool = False,
-          project_id: Optional[str] = None, require_readable: bool = False, sidebar: bool = False) -> Dict[str, Any]:
+def _load(drive_root: Any, *, strict: bool = False, project_id: Optional[str] = None, require_readable: bool = False,
+          sidebar: bool = False, prove_absence: bool = False) -> Dict[str, Any]:
     # A writer validates global identity and its target, preserving every other
     # raw row. None means a full strict reader; "" selects no row (append/census).
     data = (_strict_admission_snapshot(drive_root, allow_missing=True,
             identity_only=project_id is not None, preserve_raw=project_id is not None)[0] if strict
-            else display_registry_snapshot(drive_root, require_readable=require_readable, sidebar=sidebar))
+            else display_registry_snapshot(drive_root, require_readable=require_readable, sidebar=sidebar,
+                                           prove_absence=prove_absence))
     for index, row in enumerate(data["projects"]):
         if strict and project_id is not None:
             if row["id"] != project_id:
@@ -753,9 +754,11 @@ def project_chat_for_task_tree(
 
 
 def _registry_projects_snapshot(drive_root: Any, *, strict: bool = False, require_readable: bool = False,
-                                sidebar: bool = False) -> tuple[List[Dict[str, Any]], bool]:
+                                sidebar: bool = False,
+                                prove_absence: bool = False) -> tuple[List[Dict[str, Any]], bool]:
     with _LOCK:
-        snapshot = _load(drive_root, strict=strict, require_readable=require_readable, sidebar=sidebar)
+        snapshot = _load(drive_root, strict=strict, require_readable=require_readable, sidebar=sidebar,
+                         prove_absence=prove_absence)
     projects = sorted(
         snapshot["projects"],
         key=lambda p: str(p.get("last_active_at") or p.get("updated_at") or p.get("created_at") or ""),
@@ -784,10 +787,12 @@ def list_projects(drive_root: Any, *, strict: bool = False,
                            closed=closed, oldest_first=oldest_first)
 
 
-def list_sidebar_projects(drive_root: Any, *, require_readable: bool = False,
-                          with_coverage: bool = False) -> List[Dict[str, Any]] | tuple[List[Dict[str, Any]], bool]:
-    """Active and quiescing rooms; optionally pair rows with completeness. Strict about unproved emptiness on request."""
-    snapshot = _registry_projects_snapshot(drive_root, require_readable=require_readable, sidebar=True)
+def list_sidebar_projects(drive_root: Any, *, require_readable: bool = False, with_coverage: bool = False,
+                          prove_absence: bool = False) -> List[Dict[str, Any]] | tuple[List[Dict[str, Any]], bool]:
+    """Active and quiescing rooms; optionally pair rows with completeness. Strict about unproved emptiness on request.
+    ``prove_absence``: the completeness a client may erase by, where a missing registry counts only on first use."""
+    snapshot = _registry_projects_snapshot(drive_root, require_readable=require_readable, sidebar=True,
+                                           prove_absence=prove_absence)
     return snapshot if with_coverage else snapshot[0]
 
 

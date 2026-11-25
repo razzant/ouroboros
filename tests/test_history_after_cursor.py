@@ -81,13 +81,14 @@ def test_a_changed_room_view_or_a_long_absence_takes_the_newest_page_again(tmp_p
     project = create_project(tmp_path, "room", name="Room")
     bind_task_to_project(tmp_path, "some-task", project["id"], origin={"absent": "system"})
     status, refused = _read(tmp_path, page["after_cursor"])
-    assert status == 409 and refused["reason_code"] == "history_view_changed"
+    assert status == 409 and refused["reason_code"] == "history_view_changed" and "detail" not in refused  # its own code
 
     _, page = _read(tmp_path)
     monkeypatch.setattr(history_paging, "_DELTA_CEILING_BYTES", 64)
     _say(tmp_path, *(f"message {index}" for index in range(5)), start=1)
     status, refused = _read(tmp_path, page["after_cursor"])
     assert status == 409 and refused["reason_code"] == "history_delta_reset"
+    assert (refused["detail"], refused["stream"]) == ("delta_byte_limit", "chat")
     assert _read(tmp_path)[0] == 200
 
 
@@ -103,7 +104,7 @@ def test_a_new_owner_message_annotation_takes_the_newest_page_again(tmp_path):
     assert status == 200 and quiet["messages"] == []  # nothing changed: the delta answers
     append_chat_annotation(tmp_path, "msg-1", action="promote_chat_to_task", status="scheduled")
     status, refused = _read(tmp_path, quiet["after_cursor"])
-    assert status == 409 and refused["reason_code"] == "history_delta_reset"
+    assert status == 409 and refused["reason_code"] == "history_delta_reset" and refused["detail"] == "notes_changed"
     status, fresh = _read(tmp_path)
     assert status == 200 and fresh["messages"][0]["chat_annotation"]["status"] == "scheduled"
     assert _read(tmp_path, fresh["after_cursor"])[0] == 200

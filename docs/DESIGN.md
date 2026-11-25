@@ -1467,9 +1467,15 @@ An initial read shows one disabled `Loading saved history…` pill at the feed e
 not a header sentence; where this browser kept the room's newest text under the proven
 data profile, a bounded preview stands under one `Saved text preview · updating`
 line: plain words under their speakers, no times, actions or read credit
-(`web/modules/chat_preview.js`). The first canonical page replaces it, a selected
-passage staying until released; a failed read leaves it `not current` beside Retry; a
-refused session, sign-out or deletion erases only this copy. Task activity remains separate.
+(`web/modules/chat_preview.js`). Every Main and Project room read in this browser keeps
+such a copy: its newest 80 whole rows within 200,000 characters, all rooms within 1,000,000
+(about 2 MB of the origin's storage), the room saved least recently (each newest read
+saves it) giving way first. The first canonical page replaces it, a selected passage
+staying until released; after a failed read it says `not current` beside Retry, painted
+before or after; a refused session or sign-out erases only these copies, and a deleted
+Project's copy in its data profile goes once this browser learns of the deletion (a `deleting`
+row a state read brings once the socket proved that profile, a lookup of that Project, or the
+complete list Find a project and Show more read), staying within the total until then. Task activity remains separate.
 Failure and approximate-restoration notices are wrapping text in the room's header
 chrome: the Project status bar, or Main's floating note on its float-sheet backing (§5).
 
@@ -3601,7 +3607,7 @@ past the page only the saved preview (History edges) keeps words. Main is quiet 
 nothing of it shows: beside a docked Project it stays live; covered by a Project (the
 phone's card, a finger's docked column), behind another page or in a hidden window it is away. Docked,
 moving between destinations stays instant, and a section's page arrives beside its list on `--motion-fade`; the Project panel comes in from the window's right edge
-once its room has painted (or after a read's 300 ms bound, with its loading row)
+once its room or its saved text (History edges) has painted (or after a read's 300 ms bound, with its loading row)
 and goes back there whole, only its scrim fading (owner 20.10, Q2 A). A dismissed
 toast fades where it stood while the ones that stay glide into its place. Moving
 status marks share one document phase while keeping their three-dot delay

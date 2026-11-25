@@ -240,8 +240,8 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         find('[data-history-status]').textContent = find('[data-history-messages]').childElementCount ? '' : 'No stored messages in these returned ranges.';
     };
     // `replacing`: a loaded range's index, or a newest page that replaces every range once it arrives:
-    // 'chain' (Refresh history) or 'changed' (the shown chain's view changed).
-    async function loadPage(askedCursor = null, replacing = null) {
+    // 'chain' (Refresh history) or 'changed' (the shown chain's view changed). `reason`: why, which the server counts.
+    async function loadPage(askedCursor = null, replacing = null, reason = 'navigate') {
         if (closed || busy) return;
         controller?.abort(); controller = new AbortController(); const version = ++generation;
         const focused = host.contains(document.activeElement) ? document.activeElement : null;
@@ -250,16 +250,18 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         find('[data-history-status]').dataset.tone = 'muted';
         find('[data-history-older]').disabled = true; find('[data-history-refresh]').disabled = true;
         let cursor = askedCursor, target = replacing;
+        const mode = cursor === null ? 'newest' : target === null ? 'older' : 'page';
         try {
             let page;
             try {
-                page = await readHistory({ chatId: room.room_chat_id, cursor, signal: controller.signal });
+                page = await readHistory({ chatId: room.room_chat_id, cursor, signal: controller.signal, tags: { reason, mode } });
             } catch (error) {
                 // A changed view (such as the room's first imported history) refuses every cursor of the shown
                 // chain, so the newest page is read afresh; the shown ranges stay until it arrives.
                 if (cursor === null || error?.body?.reason_code !== 'history_view_changed' || closed || version !== generation) throw error;
                 cursor = null; target = 'changed';
-                page = await readHistory({ chatId: room.room_chat_id, cursor, signal: controller.signal });
+                page = await readHistory({ chatId: room.room_chat_id, cursor, signal: controller.signal,
+                    tags: { reason, mode: 'newest', decision: 'view_changed' } });
             }
             if (closed || version !== generation) return;
             if (!Array.isArray(page?.messages) || page.messages.some((row) => typeof row?.text !== 'string')
@@ -280,7 +282,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
             previewsRefused(error);  // a current refusal takes this browser's saved conversation text (chat_preview.js)
             find('[data-history-status]').textContent = failureText(error);
             find('[data-history-status]').dataset.tone = 'error';
-            retry = () => loadPage(cursor, target); find('[data-history-retry]').hidden = false;
+            retry = () => loadPage(cursor, target, 'retry'); find('[data-history-retry]').hidden = false;
         } finally {
             if (!closed && version === generation) {
                 busy = false; find('[data-history-older]').disabled = false; find('[data-history-refresh]').disabled = false;
@@ -298,9 +300,9 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
     const click = (event) => {
         if (event.target.closest('[data-history-back]')) { onBack(); return; }
         if (event.target.closest('[data-history-retry]')) { void retry?.(); return; }
-        if (event.target.closest('[data-history-refresh]')) { void loadPage(null, 'chain'); return; }
+        if (event.target.closest('[data-history-refresh]')) { void loadPage(null, 'chain', 'refresh'); return; }
         const range = event.target.closest('[data-history-range]');
-        if (range) { const index = Number(range.dataset.historyRange); void loadPage(pages[index].askedCursor, index); return; }
+        if (range) { const index = Number(range.dataset.historyRange); void loadPage(pages[index].askedCursor, index, 'retry'); return; }
         if (event.target.closest('[data-history-older]')) void loadPage(pages[0]?.page.next_cursor);
     };
     host.addEventListener('click', click);
@@ -310,7 +312,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         updateHeardLabels(host, place);
     };
     updatePlace(place);
-    void loadPage();
+    void loadPage(null, null, 'open');
     return { updatePlace, close() {
         if (closed) return;
         closed = true; generation += 1; controller?.abort(); clear(); host.removeEventListener('click', click); host.replaceChildren();

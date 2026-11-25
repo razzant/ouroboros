@@ -1545,12 +1545,14 @@ def test_the_project_panel_sliding_in_never_widens_the_window(shell_ui, tmp_path
     assert facts['scrollLeft'] == 0 and facts['sidebarLeft'] == 0, facts
 
 
-# What the panel shows: how many of its room's answers, and whether its loading row is up (chat_render_batch.js).
+# What the panel shows: how many of its room's answers, whether its loading row is up (chat_render_batch.js), and how
+# many rows of this browser's saved text of the room stand (chat_preview.js).
 PANEL_SHOWS = """(panel, answers) => ({
     rows: answers.filter(answer => [...panel.querySelectorAll('.chat-messages .chat-bubble')]
         .some(row => row.textContent.includes(answer))).length,
     loading: [...panel.querySelectorAll('.chat-load-older[aria-busy="true"]')]
-        .some(row => !row.hidden && row.getClientRects().length > 0)})"""
+        .some(row => !row.hidden && row.getClientRects().length > 0),
+    saved: panel.querySelectorAll('[data-saved-preview] .chat-bubble').length})"""
 # Seek the real slide: a busy runner must not turn missed compositor frames into a missing-motion failure. `setOff`
 # is the time from just before the open was asked to the slide's start: the panel's own wait begins after the ask.
 PANEL_FRAMES = """({project, opening, answers}) => { const panel = document.getElementById('project-panel');
@@ -1576,12 +1578,14 @@ HISTORY_READS = """(() => { const real = window.fetch, waiting = [];
             : setTimeout(() => resolve(r), 150))); }; })()"""
 
 
-@pytest.mark.parametrize('read', ['slow', 'held'])
+@pytest.mark.parametrize('read', ['slow', 'held', 'saved'])
 def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(shell_ui, tmp_path, read):
     """Owner 20.10 (Q2 A): docked, the panel comes in from the window's right edge once its room has painted (or at
     its read's bound, with its loading row) and goes back there whole: samples along both real transitions show where
     it is and what it shows, from the edge to Main and back. A 150 ms read normally paints first, though a busy runner
-    may reach the bound first, which is the designed branch, not a defect; a held read always reaches the bound."""
+    may reach the bound first, which is the designed branch, not a defect; a held read always reaches the bound. A
+    room this browser kept the saved text of (owner 25.11, 2A) paints it at once: with its read held, the panel sets
+    off at once with those words (chat_preview.js, app.js arrivePanel)."""
     app_js = (setup_browser.WEB / 'app.js').read_text(encoding='utf-8')
     bound = int(re.search(r'PANEL_ARRIVAL_BOUND_MS = (\d+);', app_js).group(1))
     page = seed_page(shell_ui, 1143, 790)
@@ -1589,14 +1593,23 @@ def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(s
     rows = [{'role': 'assistant', 'text': f'Answer {i}. ' + 'Ordinary context. ' * 8,
              'content': f'Answer {i}.', 'ts': f'2026-10-14T09:{i:02d}:00Z'} for i in range(6)]
     answers = [row['content'] for row in rows]  # A startup System bubble is not the room's history.
-    page.route('**/api/chat/history*', lambda route: route.fulfill(json={'messages': rows, 'progress': []}))
+    # The document proves its data profile (the shell fixture's meta): a read of another profile would never paint.
+    page.route('**/api/chat/history*', lambda route: route.fulfill(json={'messages': rows, 'progress': [],
+                                                                          'profile_scope': setup_browser.PREVIEW_SCOPE}))
     page.add_init_script(HISTORY_READS)
+    if read == 'saved':
+        room_key = json.dumps([setup_browser.PREVIEW_SCOPE, [PROJECTS[0]['chat_id'], PROJECTS[0]['id']]], separators=(',', ':'))
+        entry = json.dumps({'read': 1, 'rows': [{'id': 'chat:s1', 'role': 'assistant', 'text': 'Saved answer words',
+                                                 'speaker': 'Ouroboros'}]}, separators=(',', ':'))
+        page.add_init_script(f"""(() => {{ try {{ localStorage.setItem('ouroboros.chat-preview.v1', '{{"v":3}}');
+            localStorage.setItem({json.dumps('ouroboros.chat-preview.v1:' + room_key)}, {json.dumps(entry)}); }}
+            catch {{ /* storage refused: the case then fails on its saved rows */ }} }})()""")
     facts = {'engine': shell_ui['engine'], 'read': read, 'bound': bound}
     room = f"() => ({PANEL_SHOWS})(document.getElementById('project-panel'), {json.dumps(answers)})"
     try:
         boot(page, shell_ui)
         width = page.evaluate('innerWidth')
-        page.evaluate('hold => { window.__historyReads.hold = hold; }', read == 'held')
+        page.evaluate('hold => { window.__historyReads.hold = hold; }', read != 'slow')
         facts['opening'] = page.evaluate(PANEL_FRAMES, {'project': PROJECTS[0], 'opening': True, 'answers': answers})
         facts['held'] = page.evaluate('window.__historyReads.held()')
         page.evaluate('window.__historyReads.release()')
@@ -1622,16 +1635,19 @@ def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(s
     leaving = closing + facts['closing']['live']
     # The slide's first sample is the panel as it set off: its room already painted, or not (then it waited the bound).
     painted = opening[1]['rows'] == len(answers)
-    if read == 'held':
+    if read != 'slow':
         assert facts['held'] >= 1 and not painted, ('its read was still held as it came in', facts)
-    if painted:
+    if read == 'saved':
+        assert facts['opening']['setOff'] < bound, ('with its saved text painted it sets off at once', facts['opening'])
+        assert all(f['saved'] == 1 and not f['rows'] for f in moving(arriving)), ('it comes in with that text', arriving)
+    elif painted:
         assert all(f['rows'] == len(answers) for f in moving(arriving)), ('it sets off with its room painted', arriving)
     else:
         assert facts['opening']['setOff'] >= bound, ('without its room it waits until the bound', facts['opening'])
         seen = ''.join('R' if f['rows'] == len(answers) else 'L' if f['loading'] and not f['rows'] else '?'
                        for f in moving(arriving))
         assert re.fullmatch('L+R*', seen), ('at the bound it comes in with its loading row, then its room', seen, arriving)
-    assert facts['room'] == {'rows': len(answers), 'loading': False}, ('its read lands in the room', facts['room'])
+    assert facts['room'] == {'rows': len(answers), 'loading': False, 'saved': 0}, ('its read lands in the room', facts['room'])
     assert len(moving(closing)) >= 3, ('the way back is seen moving', closing)
     assert all(f['rows'] == len(answers) for f in leaving if not f['hidden']), ('it goes back with its room', leaving)
 

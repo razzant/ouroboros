@@ -8,7 +8,8 @@ import { wakeFactWord } from '../modules/consciousness_words.js';
 import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeHistoryState, placeRoomsHtml, shownTime } from '../modules/place_history.js';
 import { openPlaceSheet } from '../modules/place_sheet.js';
 import { mountConnectorPlaces } from '../modules/connector_places.js';
-import { PREVIEW_KEY } from '../modules/chat_preview.js';
+import { previewEntryKey, PREVIEW_KEY } from '../modules/chat_preview.js';
+import { memoryStorage, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const unsafeText = '<img src="x" onerror="bad()"> & "hello"';
@@ -495,9 +496,9 @@ const viewChanged = () => Object.assign(new Error('history_view_changed'), { sta
 const shownTexts = (f) => [...f.q('[data-history-messages]').children].map((node) => node.querySelector('.chat-markdown').textContent);
 
 test('a changed view rereads the newest page and replaces the shown ranges only once it arrives', async (t) => {
-    const f = fixture(t); const requests = []; const fresh = deferred(); let busyOnce = true;
-    const reader = mount(f, { readHistory: async ({ cursor }) => {
-        requests.push(cursor);
+    const f = fixture(t); const requests = []; const fresh = deferred(); let busyOnce = true; const told = [];
+    const reader = mount(f, { readHistory: async ({ cursor, tags }) => {
+        requests.push(cursor); told.push(tags);
         if (requests.length === 1) return page([row('live', 'newest live')], 'stored-order');
         if (cursor === 'stored-order') throw viewChanged();  // the room's first import changed its view
         if (busyOnce) { busyOnce = false; throw new Error('Saved history is busy.'); }
@@ -517,13 +518,18 @@ test('a changed view rereads the newest page and replaces the shown ranges only 
     assert.equal(f.q('[data-history-retry]').hidden, true);
     assert.equal(f.doc.activeElement, f.q('[data-history-older]'), 'focus stays in the reader');
     f.q('[data-history-older]').click(); await tick();
-    assert.equal(requests.at(-1), 'time-order'); reader.close();
+    assert.equal(requests.at(-1), 'time-order');
+    // Each read says why, which the server counts: the same vocabulary as a room's reads.
+    assert.deepEqual(told, [{ reason: 'open', mode: 'newest' }, { reason: 'navigate', mode: 'older' },
+        { reason: 'navigate', mode: 'newest', decision: 'view_changed' }, { reason: 'retry', mode: 'newest' },
+        { reason: 'navigate', mode: 'older' }]);
+    reader.close();
 });
 
 test('a changed view met by Retry this range replaces the chain too; closing ignores the late fresh page', async (t) => {
-    const f = fixture(t); const requests = []; const fresh = deferred(); let signal;
-    const reader = mount(f, { readHistory: async ({ cursor, signal: aborted }) => {
-        requests.push(cursor);
+    const f = fixture(t); const requests = []; const fresh = deferred(); let signal; const told = [];
+    const reader = mount(f, { readHistory: async ({ cursor, signal: aborted, tags }) => {
+        requests.push(cursor); told.push(tags);
         if (requests.length === 1) return { ...page([row('live', 'newest live')], 'older'), page_cursor: 'same-page', window: { complete: false, truncated_by: ['chat_malformed_jsonl'] } };
         if (cursor === 'same-page') throw viewChanged();
         signal = aborted; return fresh.promise;
@@ -531,6 +537,7 @@ test('a changed view met by Retry this range replaces the chain too; closing ign
     await tick();
     f.q('[data-history-range]').click(); await tick(); await tick();
     assert.deepEqual(requests, [null, 'same-page', null]);
+    assert.deepEqual(told.slice(1), [{ reason: 'retry', mode: 'page' }, { reason: 'retry', mode: 'newest', decision: 'view_changed' }]);
     reader.close(); assert.equal(signal.aborted, true);
     fresh.resolve(page([row('late', 'late answer')])); await tick();
     assert.equal(f.q('.place-convo'), null);
@@ -549,9 +556,9 @@ test('a time outside the current year names its year, in rows and in the room li
 });
 
 test('the start is the record saved when it was read; Refresh history reads the newest page again', async (t) => {
-    const f = fixture(t); const requests = [];
-    const reader = mount(f, { readHistory: async ({ cursor }) => {
-        requests.push(cursor);
+    const f = fixture(t); const requests = []; const told = [];
+    const reader = mount(f, { readHistory: async ({ cursor, tags }) => {
+        requests.push(cursor); told.push(tags);
         if (requests.length === 1) return page([row('b', 'newest')], 'older');
         if (cursor === 'older') return page([row('a', 'oldest as read')]);
         return page([row('z', 'imported since'), row('b', 'newest')], 'after-import');
@@ -564,6 +571,7 @@ test('the start is the record saved when it was read; Refresh history reads the 
     assert.equal(f.q('[data-history-refresh]').disabled, true, 'one read at a time');
     await tick();
     assert.deepEqual(requests, [null, 'older', null]);
+    assert.deepEqual(told.at(-1), { reason: 'refresh', mode: 'newest' });
     assert.deepEqual(shownTexts(f), ['imported since', 'newest']);
     assert.match(f.q('[data-history-coverage]').textContent, /Earlier saved records are available\./);
     assert.equal(f.q('[data-history-refresh]').disabled, false); reader.close();
@@ -585,25 +593,25 @@ test('a row shows the send time its arrival recorded; the title keeps when it wa
 
 test('a current refused read takes the saved conversation text; a failed one, or one the closed sheet left, does not', async (t) => {
     // The Place sheet reads history outside any room (chat_preview.js previewsRefused): the session's refusal is the same.
-    const f = fixture(t), values = new Map(), prior = globalThis.localStorage;
-    globalThis.localStorage = { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)),
-        removeItem: (key) => values.delete(key) };
+    const f = fixture(t), prior = globalThis.localStorage, storage = memoryStorage(), { values } = storage;
+    globalThis.localStorage = storage;
     t.after(() => { globalThis.localStorage = prior; });
-    const seed = () => values.set(PREVIEW_KEY, '{"v":2,"rooms":[]}');
+    const room = previewEntryKey(PREVIEW_SCOPE, [1, '']);
+    const seed = () => { values.set(PREVIEW_KEY, '{"v":3}'); values.set(room, '{"read":1,"rows":[]}'); };
     const failing = (status) => async () => { throw Object.assign(new Error('Authentication required.'), { status }); };
     seed();
     let reader = mount(f, { readHistory: failing(500) }); await tick();
-    assert.equal(values.has(PREVIEW_KEY), true, 'a failed read is no statement about the session');
+    assert.equal(values.has(room), true, 'a failed read is no statement about the session');
     reader.close();
     reader = mount(f, { readHistory: failing(401) }); await tick();
-    assert.equal(values.has(PREVIEW_KEY), false, 'a current refusal takes it at once');
+    assert.deepEqual([...values.keys()], [], 'a current refusal takes the record and every entry at once');
     reader.close();
     seed();
     const pending = deferred();
     reader = mount(f, { readHistory: () => pending.promise.then(failing(403)) });
     f.q('[data-history-back]').click(); reader.close();
     pending.resolve(); await tick(); await tick();
-    assert.equal(values.has(PREVIEW_KEY), true, 'a read the closed sheet abandoned decides nothing');
+    assert.equal(values.has(room), true, 'a read the closed sheet abandoned decides nothing');
 });
 
 test('a room opened for a work a letter started reads that work\'s own rows; any other room stays its speech only', async (t) => {

@@ -275,7 +275,7 @@ def test_list_projects_still_answers_no_projects_for_a_provably_empty_registry(t
     app.state.drive_root = tmp_path
     with TestClient(app) as client:
         assert "No matching projects" in _list_projects(context(tmp_path))
-        assert client.get("/api/projects?all=1").json() == {"projects": []}
+        assert client.get("/api/projects?all=1").json() == {"projects": [], "complete": True}
         path.parent.mkdir(exist_ok=True)
         path.write_text('{"projects": []}')
         assert "No matching projects" in _list_projects(context(tmp_path), closed=True)
@@ -336,7 +336,7 @@ def test_skipped_project_beside_tombstone_does_not_prove_empty_sidebar(room, unr
 
         path.write_text(json.dumps({**data, "projects": [gone, unreadable, healthy]}))
         response = client.get("/api/projects?all=1")
-        assert response.status_code == 200
+        assert response.status_code == 200 and response.json()["complete"] is False, "the skipped room is unknown"
         assert [row["id"] for row in response.json()["projects"]] == [healthy["id"]]
 
     reads, snapshot = [], project_admission._registry_snapshot

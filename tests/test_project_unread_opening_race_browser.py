@@ -66,12 +66,19 @@ class _Race:
         self.room = opening._Room(browser, server["url"], project_id, hold=5,
                                   init=(opening._read_receipts(LATEST),))
         self.recent, self.arrivals, self.history, self.returning = [], [], [], []
-        self.hold_return = False
+        # The room's newest reads its reconnect named (`reason=reconnect`), and how many newest reads were asked.
+        self.reconnects, self.asked = [], 0
+        # The pager's return, or the reconnect's own read, held when asked to (`admit`'s order).
+        self.hold_return = self.hold_reconnect = False
+        self.reconnecting = []
 
         def recent_route(route):
             if self.hold_return:
                 self.hold_return = False
                 self.returning.append(route)
+            elif self.hold_reconnect and parse_qs(urlparse(route.request.url).query).get("reason") == ["reconnect"]:
+                self.hold_reconnect = False
+                self.reconnecting.append(route)
             else:
                 route.continue_()
 
@@ -83,18 +90,37 @@ class _Race:
             self.history.append({"url": response.url, "kind": kind, "window": body.get("window"),
                                  "coverage": body.get("coverage"),
                                  "ids": [row.get("history_id") for row in body.get("messages", [])]})
-            if kind is None:
+            # Counted as the requests are: a read around a place names no cursor either, and is no newest read.
+            if self.newest_of_room(response.url):
                 self.recent.append(body)
+                if query.get("reason") == ["reconnect"]:
+                    self.reconnects.append(body)
             elif kind == "after":
                 self.arrivals.append(body)
 
-        self.room.page.route(lambda url: "/api/chat/history?" in url and "cursor=" not in url, recent_route)
+        def asked(request):
+            if self.newest_of_room(request.url):
+                self.asked += 1
+
+        # Only this room's newest read is held: Main's newest read carries a query too (its tags), as a page or a
+        # read around a place carries its selector.
+        self.room.page.route(self.newest_of_room, recent_route)
+        self.room.page.on("request", asked)
         self.room.page.on("response", record)
 
-    def admit(self, kind="named"):
+    def newest_of_room(self, url):
+        parts = urlparse(url)
+        # Blank values kept: an empty ``around=`` or ``cursor=`` is a selector (refused 400), not the newest read.
+        query = parse_qs(parts.query, keep_blank_values=True)
+        return (parts.path == "/api/chat/history" and query.get("chat_id") == [str(self.chat_id)]
+                and "cursor" not in query and "around" not in query)
+
+    def admit(self, kind="named", order=None):
         """``named``: 160 child words; the reconnect's fresh read names the reply. ``searched``: 1310, more
         than the recent read's window and its search past it cover: its bounded search runs out first.
-        ``arrived``: 160 child words read by a state refresh, whose read of the arrivals holds the reply."""
+        ``arrived``: 160 child words read by a state refresh, whose read of the arrivals holds the reply.
+        ``order`` places the reconnect's own answer: ``during`` the wait for its new socket, or held until ``after``
+        it; None leaves it to the browser."""
         room = self.room
         room.open()
         assert _wait_for(room.page, lambda: len(room.held) == 1, attempts=250), room.older
@@ -114,14 +140,26 @@ class _Race:
             assert _wait_for(room.page, lambda: named() is not None, attempts=150), self.history
             self.fresh = named()
         else:
-            sockets = room.page.evaluate("() => window.__testSockets.length")
+            # Every count is taken before the socket drops: the reconnect's answer may land while its socket is
+            # awaited (astra w3 4).
+            sockets, asked_before = room.page.evaluate("() => window.__testSockets.length"), self.asked
+            reconnects, self.hold_reconnect = len(self.reconnects), order == "after"
             room.page.evaluate(_RECONNECT)
+            if order == "during":
+                assert _wait_for(room.page, lambda: len(self.reconnects) > reconnects, attempts=600), self.history
             # The socket reopens on its own, and only then the room reads its newest page whole: on a loaded host
             # both take their time, the server's search of the long room above all, so each is waited for itself.
             room.page.wait_for_function("n => window.__testSockets.length > n && window.__testSockets.at(-1).readyState === 1",
                                         arg=sockets, timeout=60_000)
-            assert _wait_for(room.page, lambda: len(self.recent) > before, attempts=600), self.history
-            self.fresh = self.recent[-1]
+            if order == "after":
+                assert _wait_for(room.page, lambda: self.reconnecting, attempts=600), self.history
+                self.reconnecting.pop().continue_()
+            # The reconnect's own read names it (`reason=reconnect`). A receipt read the owed catch-up sends
+            # (`reason=read_receipt&decision=catch_up_owed`) can come before it, so the fresh read is that one, and
+            # the room's later count starts once every newest read asked so far has answered.
+            assert _wait_for(room.page, lambda: len(self.reconnects) > reconnects and len(self.recent) - before
+                             >= self.asked - asked_before, attempts=600), self.history
+            self.fresh = self.reconnects[-1]
         latest = self.fresh["window"]["latest_message"]
         if kind == "searched":
             assert latest is None and isinstance(self.fresh["window"].get("latest_before"), int), self.fresh["window"]
@@ -157,26 +195,28 @@ class _Race:
                 self.room.page.evaluate("() => window.__receipts") if self.project_id in (posted.get("seen") or {})]
 
 
-@pytest.mark.parametrize("kind", ["named", "searched", "arrived"])
+@pytest.mark.parametrize(("kind", "order"), [("named", "during"), ("named", "after"), ("searched", None),
+                                             ("arrived", None)])
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_a_new_offpage_reply_replaces_the_openings_frozen_target(direct_server_with_data, monkeypatch, engine, kind):
+def test_a_new_offpage_reply_replaces_the_openings_frozen_target(direct_server_with_data, monkeypatch, engine, kind,
+                                                                  order):
     """Latest admission wins while this opening still owns navigation, whether the fresh read names the
-    reply, only searched past the frozen chain's bytes, or brought the reply with the arrivals; then
-    later reads never jump."""
+    reply (the reconnect's answer landing while its socket is awaited, or after), only searched past the
+    frozen chain's bytes, or brought the reply with the arrivals; then later reads never jump."""
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()
         try:
             race = _Race(browser, direct_server_with_data, monkeypatch, "arrival-race")
-            race.admit(kind)
-            room = race.room
+            race.admit(kind, order)
+            room, suffix = race.room, f"{kind}-{order}" if order else kind
             before_return = len(race.recent)
             room.release()
             read = _wait_for(room.page, lambda: race.revision in room.seen(), attempts=200)
             room.settled(300)
             landed = room.shown()
-            race.evidence(engine, f"new-arrival-{kind}", read=read, before_return=before_return,
+            race.evidence(engine, f"new-arrival-{suffix}", read=read, before_return=before_return,
                           recent_reads=len(race.recent))
             assert read and opening._on_screen(landed), ("latest admitted reply is reached and read", landed, room.acks)
             receipts = race.receipts()
@@ -201,7 +241,7 @@ def test_a_new_offpage_reply_replaces_the_openings_frozen_target(direct_server_w
             _emit_ws_frame(room.page, {"type": "projects_changed"})
             room.settled(800)
             after = room.messages.evaluate("n => n.scrollTop")
-            race.evidence(engine, f"later-read-{kind}", pages=pages, before=top, after=after,
+            race.evidence(engine, f"later-read-{suffix}", pages=pages, before=top, after=after,
                           before_return=before_return, recent_reads=len(race.recent))
             assert len(room.older) == pages and len(race.recent) == recent, race.history
             assert abs(after - top) <= 1, ("a later read preserves the reader's position", top, after)
@@ -229,6 +269,10 @@ def test_cancelling_a_rebased_opening_never_resumes_it(direct_server_with_data, 
                 race.hold_return = True
                 room.release()
                 assert _wait_for(room.page, lambda: len(race.returning) == 1, attempts=200), race.history
+                held = urlparse(race.returning[0].request.url)
+                asked = parse_qs(held.query, keep_blank_values=True)
+                assert held.path == "/api/chat/history" and asked.get("chat_id") == [str(race.chat_id)] \
+                    and "cursor" not in asked and "around" not in asked, ("the room's own newest read is held", held)
             if move == "question":
                 room.page.evaluate("""project => window.dispatchEvent(new CustomEvent('ouro:open-project', {
                     detail: {project, task_id: 'rebase-task', quiz_id: 'q-rebase'}}))""", race.question)

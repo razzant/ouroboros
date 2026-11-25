@@ -8,11 +8,15 @@ as often as one with 3.
 """
 from __future__ import annotations
 
+import asyncio
 import collections
 import json
 import os
 import pathlib
 import sqlite3
+from types import SimpleNamespace
+
+import pytest
 
 from tests._store_shared import seed_result
 from tests.test_chat_history_paging import isolated_runtime, request, row, write  # noqa: F401
@@ -168,3 +172,137 @@ def test_remembered_bound_children_read_their_parents_lineage_in_one_batch(tmp_p
         assert status == 200 and len([r for r in page["messages"] if r.get("history_id")]) == tasks
         costs[tasks] = len(reads)
     assert costs[30] == costs[3], costs  # one read of the parents together, not one per child
+
+
+@pytest.mark.parametrize("number", [0, 4242])
+def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path, monkeypatch, number):
+    """A page asks the routing-receipt journal about the owner messages it can show (its selected owner rows; on
+    the newest page, its Project's origins), never the install's other id-only receipts, and a room showing none
+    reads no journal: neither a room of answers and agent notes carrying ids nor an empty delta of a Project with a
+    retained origin. Each message resolves alone, so every page keeps the bytes the whole-journal read gave it:
+    Main's newest page and an older one, a Project whose retained origin copy wears its receipt with its row gone,
+    also when the page's read of its Project's refs failed or predates the binding (the copy then asks for itself).
+    A page asks an id as its row looks it up (``str``): one another writer saved as a number, zero too, is asked and
+    worn; a null or empty id asks nothing. An origin is asked as its copy looks it up (``str(id or "")``), so an older
+    origin ref naming the number 0 asks nothing either."""
+    from ouroboros import chat_annotations, dialogue_store, project_dialogue
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.dialogue_provenance import recorded_author
+    from ouroboros.gateway import history
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    alpha, beta, gamma, delta = (create_project(tmp_path, slug, name=slug.title())["chat_id"]
+                                 for slug in ("alpha", "beta", "gamma", "delta"))
+    gone = {"direction": "in", "chat_id": 1, "client_message_id": "origin-gone", "ts": "2026-09-01T00:00:00Z",
+            "text": "Start alpha"}
+    ref, words = owner_row_source(gone)  # never stored: the binding's exact copy is all that is left of it
+    bind_task_to_project(tmp_path, "alpha-root", "alpha", origin={"ref": ref, "text": words, "snapshot": {"projectable": True}})
+    owners = {room: [row(index, chat_id=chat, client_message_id=f"{room}-{index}") for index in range(count)]
+              for room, chat, count in (("main", 1, 6), ("alpha", alpha, 3), ("beta", beta, 40))}
+    ineligible = [row(0, chat_id=gamma, direction="out", text="An answer alone", client_message_id="gamma-out"),
+                  row(1, chat_id=gamma, client_message_id="gamma-note", system_type="agent_note_received",
+                      agent_note_text="A program's words", declared_author=recorded_author("Scout"))]
+    unnamed = row(2, chat_id=gamma, text="An owner's words saved without an id", client_message_id=None)
+    blank = row(4, chat_id=gamma, text="An owner's words saved with an empty id", client_message_id="")
+    numbered = row(3, chat_id=delta, text="Words another writer saved under a number", client_message_id=number)
+    write(tmp_path / "logs" / "chat.jsonl",
+          [*(entry for rows in owners.values() for entry in rows), *ineligible, unnamed, blank, numbered])
+    for rows in (*owners.values(), ineligible):  # id-only receipts, as older installs wrote them: the store places each
+        for entry in rows:
+            chat_annotations.append_chat_annotation(tmp_path, entry["client_message_id"], action="steer_task",
+                                                    status="delivered", routing_token="act")
+    chat_annotations.append_chat_annotation(tmp_path, str(number), action="steer_task", status="delivered",
+                                            routing_token="act", source_chat_id=delta,  # addressed, as this tree
+                                            source_row_address=format_address(row_address(numbered)))  # writes them
+    chat_annotations.append_chat_annotation(tmp_path, "origin-gone", action="ensure_project_scope", status="delivered",
+                                            routing_token="act", source_chat_id=1, source_row_address=format_address(ref))
+    status, first = request(tmp_path, n_human="2")  # imports the rows; its cursor reads the older page below them
+    assert status == 200 and first["has_more"]
+
+    asked, resolved, parsed = [], [], []
+    index, sources, lines, whole = (chat_annotations._annotation_index, dialogue_store.annotation_sources,
+                                    chat_annotations.iter_jsonl_objects, chat_annotations.addressed_chat_annotations)
+
+    def asking(path, **kwargs):
+        asked.append(kwargs.get("message_ids"))
+        return index(path, **kwargs)
+
+    def resolving(root, ids):
+        resolved.append(set(ids))
+        return sources(root, resolved[-1])
+
+    def parsing(path, *args, **kwargs):
+        parsed.append(path)
+        return lines(path, *args, **kwargs)
+
+    monkeypatch.setattr(chat_annotations, "_annotation_index", asking)
+    monkeypatch.setattr(dialogue_store, "annotation_sources", resolving)
+    monkeypatch.setattr(chat_annotations, "iter_jsonl_objects", parsing)
+
+    def read(params, *, unscoped=False, refs=None):
+        for seen in (asked, resolved, parsed):
+            seen.clear()
+        with monkeypatch.context() as patch:
+            if unscoped:  # the read every page made before: the whole journal, every id-only receipt resolved
+                patch.setattr(chat_annotations, "addressed_chat_annotations", lambda root, **_kwargs: whole(root))
+            if refs is not None:  # the page's own read of its Project's origin refs
+                patch.setattr(project_dialogue, "source_refs_for_project", refs)
+            response = asyncio.run(history.make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params=params)))
+        assert response.status_code == 200
+        return response.body, list(asked), set().union(*resolved), len(parsed)
+
+    main, alpha_ids, beta_ids = ({entry["client_message_id"] for entry in owners[room]} for room in ("main", "alpha", "beta"))
+    pages = {"main": {}, "main older": {"cursor": first["next_cursor"]}, "alpha": {"chat_id": str(alpha)},
+             "gamma": {"chat_id": str(gamma)}, "delta": {"chat_id": str(delta)}}
+    for name, params in pages.items():
+        body, page_asked, page_resolved, page_parsed = read(params)
+        old_body, old_asked, old_resolved, old_parsed = read(params, unscoped=True)
+        assert body == old_body, name  # the same receipts on the same rows, byte for byte
+        assert (old_asked, old_parsed) == ([None], 1) and beta_ids <= old_resolved, name  # the whole journal, resolved
+        shown = {message["client_message_id"]: message.get("chat_annotation", {}).get("status")
+                 for message in json.loads(body)["messages"] if message["role"] == "user"}
+        if name == "gamma":  # an answer and an agent's note carry ids and receipts, yet neither wears one; an owner
+            assert "gamma-note" in shown and len(shown) == 3 and not any(shown.values()), shown  # row without an id
+            assert (page_asked, page_parsed, page_resolved) == ([set()], 0, set()), "no owner row: no journal read"
+            continue
+        [ids] = page_asked  # one question per page, about its own owner messages only
+        assert ids is not None and page_parsed == 1, f"{name}: the page read every receipt of the install"
+        assert shown and set(shown.values()) == {"delivered"} and set(shown) <= ids, name
+        assert not ids & beta_ids and page_resolved == ids - {"origin-gone", str(number)}, name  # addressed: not placed
+        if name == "main older":
+            newer = {message["client_message_id"] for message in first["messages"] if message["role"] == "user"}
+            assert ids < main and newer and not ids & newer, "the newer page's rows are not asked again"
+        else:
+            assert ids == {"main": main, "alpha": alpha_ids | {"origin-gone"}, "delta": {str(number)}}[name], name
+        assert name != "alpha" or "origin-gone" in shown, "the retained origin copy wears its receipt"
+
+    # The Project's delta with nothing new renders no origin: it asks about nobody and opens no journal.
+    after = json.loads(read({"chat_id": str(alpha)})[0])["after_cursor"]
+    body, page_asked, page_resolved, page_parsed = read({"chat_id": str(alpha), "cursor": after})
+    assert json.loads(body)["messages"] == [] and (page_asked, page_parsed, page_resolved) == ([set()], 0, set())
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("the Project's refs cannot be read this time")
+
+    # The page's refs miss the binding (a failed read, or one taken before the binding landed); the origin its own
+    # read renders still wears its receipt, asked for after the page's rows, as the whole-journal read gave it.
+    for name, refs in (("refs unreadable", unreadable), ("refs before the binding", lambda *_args, **_kwargs: [])):
+        body, page_asked, _resolved, page_parsed = read({"chat_id": str(alpha)}, refs=refs)
+        assert body == read({"chat_id": str(alpha)}, unscoped=True, refs=refs)[0], name
+        shown = {message["client_message_id"]: message.get("chat_annotation", {}).get("status")
+                 for message in json.loads(body)["messages"] if message["role"] == "user"}
+        assert shown.get("origin-gone") == "delivered", f"{name}: the retained copy lost its receipt"
+        assert (page_asked, page_parsed) == ([alpha_ids, {"origin-gone"}], 2), name
+
+    # Astra w4 3: an older partial origin ref (a room, a time and a checksum) on a newest page showing no owner id. Its
+    # copy looks a number 0 up as "", so the page asks nothing and opens no journal; one naming an id asks that id.
+    for client_id, ids in ((0, set()), ("legacy-origin", {"legacy-origin"})):
+        legacy = {"chat_id": 1, "client_message_id": client_id, "ts": "2020-01-01T00:00:00Z", "text_sha256": "e" * 64}
+
+        def refs(*_args, _legacy=legacy, **_kwargs):  # the page's read of its refs, the partial one resolved
+            return [_legacy]
+
+        body, page_asked, _resolved, page_parsed = read({"chat_id": str(gamma)}, refs=refs)
+        assert body == read({"chat_id": str(gamma)}, unscoped=True, refs=refs)[0], client_id
+        assert (page_asked, page_parsed) == ([ids], len(ids)), f"an origin ref naming {client_id!r}"

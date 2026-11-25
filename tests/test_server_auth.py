@@ -205,14 +205,16 @@ def test_builtin_form_without_readable_assets_stays_a_usable_form(tmp_path, capl
     assert "was not inlined" in caplog.text
 
 
-PREVIEW_KEY = re.search(r"export const PREVIEW_KEY = '([^']+)'",
-                        (WEB / "modules" / "chat_preview.js").read_text(encoding="utf-8")).group(1)
+_PREVIEW_SOURCE = (WEB / "modules" / "chat_preview.js").read_text(encoding="utf-8")
+PREVIEW_KEY, PREVIEW_FAMILY = (re.search(rf"export const {name} = '([^']+)'", _PREVIEW_SOURCE).group(1)
+                               for name in ("PREVIEW_KEY", "PREVIEW_FAMILY"))
 
 
 def test_every_sign_out_and_ended_session_reaches_the_form_that_releases_the_saved_conversation(monkeypatch):
     """GET or POST /auth/logout and any page whose session ended land on the builtin form before the interface can run
-    again. It removes this browser's saved conversation preview (web/modules/chat_preview.js PREVIEW_KEY), nothing else
-    the browser keeps, after the appearance owner (tests/test_phone_chat_reopen_browser.py runs it in real engines)."""
+    again. Its script removes this browser's saved conversation text (web/modules/chat_preview.js: the record
+    PREVIEW_KEY, then every key of PREVIEW_FAMILY), nothing else the browser keeps, after the appearance owner
+    (web/tests/chat_preview.test.js runs it against a store, tests/test_phone_chat_reopen_browser.py in real engines)."""
     theme = (WEB / "theme.js").read_text(encoding="utf-8")
     with _make_client(monkeypatch) as client:
         for response in (client.get("/auth/logout"), client.post("/auth/logout", data={"next": "/api/secret"}, headers={"accept": "text/html"}),
@@ -220,5 +222,5 @@ def test_every_sign_out_and_ended_session_reaches_the_form_that_releases_the_sav
             assert response.status_code in (200, 401) and "Enter the network password" in response.text
             scripts = re.findall(r"<script>(.*?)</script>", response.text, re.S)
             assert scripts == [theme, server_auth._END_OF_SESSION_SCRIPT], response.url
-    assert server_auth._END_OF_SESSION_SCRIPT.count("removeItem") == 1
     assert f'removeItem("{PREVIEW_KEY}")' in server_auth._END_OF_SESSION_SCRIPT
+    assert f'indexOf("{PREVIEW_FAMILY}")===0' in server_auth._END_OF_SESSION_SCRIPT

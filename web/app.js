@@ -2,7 +2,7 @@
 
 import { createWS } from './modules/ws.js';
 import { apiClient, apiFetch, fetchJson } from './modules/api_client.js';
-import { forgetProjectPreviews, previewsRefused } from './modules/chat_preview.js';
+import { documentScope, forgetProjectPreviews, forgetUnlistedProjectPreviews, previewsRefused, provenScope } from './modules/chat_preview.js';
 import { loadVersion } from './modules/utils.js';
 import { bindScrollFade, replaceScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
@@ -170,7 +170,7 @@ const projectsNav = createProjectsNav({ header: navProjectsHeader, list: navProj
     nextOrder: () => stateSnapshots.begin().generation,
     reserved: () => state.projectChatIds, listableCount: () => state.projectListableCount,
     activeId: () => navState.activeProjectId, messagesRevision: () => state.projectMessagesRevision,
-    readList: (options) => apiClient.projectList(options),
+    readList: readProjectList,
     isUnread: projectUnread,
     onListRead: () => { mergeProjectSeenRevisions(); if (projectsNav.unreadRows().length) refreshSharedProjectSeen(); },
     onShown: () => { patchProjectActivityMarkers(); },
@@ -505,9 +505,9 @@ function focusAfterProjectClosed(closedId, focused) {
 }
 
 // Docked, the panel comes in from the window's edge with its room in it (owner 20.10, Q2 A): it starts once the room
-// has painted, or at a slow read's bound, when it comes in with its loading row (a read seen to take seconds).
-// Its promise is the panel's arrival (its motion's end, at once when it was already in): a room that covers Main makes
-// it inert only then.
+// has painted (its saved text too, chat_preview.js), or at a slow read's bound, when it comes in with its loading row
+// (a read seen to take seconds). Its promise is the panel's arrival (its motion's end, at once when it was already in):
+// a room that covers Main makes it inert only then.
 const PANEL_ARRIVAL_BOUND_MS = 300;
 let panelArrival = Promise.resolve();  // the running arrival's end: a sync again mid-slide waits for the same one
 function arrivePanel(pid, since) {
@@ -515,7 +515,7 @@ function arrivePanel(pid, since) {
         const step = () => requestAnimationFrame(() => {
             if (navState.activeProjectId !== pid) { resolve(); return; }
             if (projectPanel.classList.contains('open')) { panelArrival.then(() => resolve()); return; }
-            const waits = !isStackLayout() && !reducedMotion() && !projectInstances.get(pid)?.hasPaintedHistory?.();
+            const waits = !isStackLayout() && !reducedMotion() && !projectInstances.get(pid)?.hasPaintedWords?.();
             if (waits && performance.now() - since < PANEL_ARRIVAL_BOUND_MS) { step(); return; }
             projectPanel.classList.add('open');
             const property = reducedMotion() ? 'opacity' : 'transform';
@@ -598,7 +598,7 @@ if (navDrawerClose) {
 let projectPanelOpeningSince = 0;
 let mainChat;
 let evolution = null;  // Dashboard → Evolution, which takes every sequenced snapshot too (its campaign controls)
-const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generation) => {
+const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generation, carried) => {
     data = data && typeof data === 'object' ? data : {};
     // A complete REST body cannot prove absence while the socket is in a
     // disconnect episode. Keep the previous rooms and render them unknown until
@@ -610,6 +610,9 @@ const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generati
     if (Array.isArray(data.projects)) state.projectMessagesRevision = data.project_messages_revision ?? null;
     const chatIds = heldProjectChatIds(data, state);  // null or absent keeps a complete set the page holds
     projectActivityIndex = buildProjectActivityIndex(projectRooms, chatIds, data.projects || lastProjectRows);
+    // A `deleting` row is the registry's word as this body brings it (`carried`: never one held or carried from an
+    // earlier body), and takes saved text under the profile proven as it is admitted; no repaint hears it again.
+    forgetProjectPreviews(carried.filter(p => p?.lifecycle === 'deleting').map(p => p.id), registryScope());
     renderProjectsNav(data.projects || lastProjectRows, chatIds, projectActivityIndex,
         Array.isArray(data.projects) ? generation : 0);
     if (data.task_bindings) applyTaskBindings(data.task_bindings);  // null: unchanged, never filled here
@@ -787,7 +790,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     projectPanelOpeningSince = Date.now();
     try {
         // One paint for the whole step (the sync below): a handover leaves the room that was on screen.
-        let inst;
+        let inst, built = false;
         const movedToChat = await showPage('chat', { map, origin, key: `project:${project.id}`, closeProject: false, closeDrawer: false, sync: false,
             current: () => navigation === projectNavigationGeneration && (!sourceReveal || sourceReveal.current()),
             enter: () => {
@@ -807,6 +810,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         }
         inst = projectInstances.get(project.id);
         if (!inst) {
+            built = true;
             inst = createChatInstance({
                 ...ctx, ws: roomSocket(ws),
                 chatId: project.chat_id,
@@ -816,7 +820,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
                 asPanel: true,
                 title: project.name || project.id,
                 // Retry reads, paints and acknowledges the newest revision.
-                onHistoryRetry: () => acknowledgeProjectAfterPaint(freshProjectRow(project), null, { forcePaint: true }),
+                onHistoryRetry: () => acknowledgeProjectAfterPaint(freshProjectRow(project), null, { forcePaint: true, why: { reason: 'retry' } }),
                 // Arriving at the newest messages retries a withheld acknowledgement.
                 onReadingLatest: () => acknowledgeProjectAfterPaint(freshProjectRow(project)),
             });
@@ -829,7 +833,8 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         syncNavigationState();
         } });
         if (movedToChat === false || navigation !== projectNavigationGeneration) return;
-        return await landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation, forcePaint: !inst.hasPaintedHistory?.() });
+        return await landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation,
+            forcePaint: !inst.hasPaintedHistory?.(), why: built ? { reason: 'open' } : null });
     } finally {
         projectPanelOpeningSince = 0;
     }
@@ -837,7 +842,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
 
 // Once visible, the room returns where it was left; following the newest message, unread lands on what arrived last
 // (DESIGN "Unread"); left reading older history, it is put back there (chat.js `resume`); a notification lands latest.
-async function landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation, forcePaint = false }) {
+async function landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation, forcePaint = false, why = null }) {
     if (sourceReveal) {
         const reveal = {};
         projectReveals.set(project.id, reveal);
@@ -853,7 +858,25 @@ async function landInProject(project, inst, { taskId, quizId, latest, sourceReve
     void (latest ? inst?.showLatest?.({ arrive: projectUnread(project) }) : inst?.resume?.(projectUnread(project)));
     void inst?.revealQuestion?.();  // a plain landing cancels any pending question reveal
     // ACK the exact painted revision; chat.js owns the receipt and skips redundant reads.
-    await acknowledgeProjectAfterPaint(project, inst, { forcePaint });
+    await acknowledgeProjectAfterPaint(project, inst, { forcePaint, why });
+}
+
+// The data profile a registry answer speaks for (CLIENT_CONTRACT §6): the one it names, else this document's where its
+// current socket is connected and has proved that profile (ws.js servingProfileScope; the paint gate,
+// canShowSavedProfile, is open before any socket spoke and proves nothing), else none. Its word that a Project is gone
+// takes only that profile's saved text of it (chat_preview.js); the same Project id in another profile keeps its own.
+function registryScope(answer) {
+    if (answer?.profile_scope) return provenScope(answer.profile_scope);
+    const scope = documentScope(document);
+    return scope && ws.isConnected?.() !== false && ws.servingProfileScope?.() === scope ? scope : '';
+}
+
+// The registry's row for `id` in its exact answer (`?id=`), else null. No row, or one `deleting`, is its word that the
+// Project is gone or going, which takes its rooms' saved text (registryScope); an answer it cannot read says nothing.
+function projectAnswer(id, answer) {
+    const rows = answer?.projects, row = Array.isArray(rows) && rows.length === 1 && rows[0]?.id === id ? rows[0] : null;
+    if (Array.isArray(rows) && (!rows.length || row?.lifecycle === 'deleting')) forgetProjectPreviews([id], registryScope(answer));
+    return row;
 }
 
 // A Project named by its id alone (a reference, a portal, a completion row, a row older than the feed) opens its own
@@ -861,10 +884,10 @@ async function landInProject(project, inst, { taskId, quizId, latest, sourceReve
 // supersedes the read; a missing, deleting or unreadable answer keeps the room on screen and says so. Never Main.
 async function resolveProjectRoom(project, navigation) {
     const name = project.name || project.id;
-    let rows = null, error = '';
-    try { rows = (await apiClient.projectById(project.id))?.projects; } catch (err) { error = err?.message || 'unknown error'; }
+    let answer = null, error = '';
+    try { answer = await apiClient.projectById(project.id); } catch (err) { error = err?.message || 'unknown error'; }
+    const rows = answer?.projects, room = projectAnswer(project.id, answer);
     if (navigation !== projectNavigationGeneration) return null;
-    const room = Array.isArray(rows) && rows.length === 1 && rows[0]?.id === project.id ? rows[0] : null;
     const valid = room && Number.isSafeInteger(room.chat_id) && room.chat_id > 1;
     if (valid && room.lifecycle === 'active') return room;
     if (!error && !(Array.isArray(rows) && (rows.length === 0 || (valid && room.lifecycle === 'deleting')))) {
@@ -892,7 +915,7 @@ async function revealQuotedSource(address, chatId, isCurrent, locate = null) {
     // message gives around-history a row to find.
     if (chatId !== 1 || !address.startsWith('task:') || !mainChat.drawsSource(address)) {
         // A current refusal takes the saved text and every copy painted from it, as a room's own reads do.
-        page = await apiClient.chatHistory({ chatId, around: address })
+        page = await apiClient.chatHistory({ chatId, around: address, tags: { reason: 'navigate', mode: 'around' } })
             .catch((error) => { if (current()) previewsRefused(error); throw error; });
         if (!current()) return null;
         if (page?.anchor?.state !== 'found') return page?.anchor || { state: 'unknown' };
@@ -948,7 +971,7 @@ async function revealProjectQuestion(project, inst, taskId, quizId) {
 // Coalesce polling updates per Project, but never acknowledge a newer revision
 // until a history read covering it has been painted while the reader is at the
 // newest messages (DESIGN "Unread"); `paintOnly` paints without that decision.
-async function acknowledgeProjectAfterPaint(project, instance = null, { forcePaint = false, paintOnly = false } = {}) {
+async function acknowledgeProjectAfterPaint(project, instance = null, { forcePaint = false, paintOnly = false, why = null } = {}) {
     if (!project?.id || navState.activeProjectId !== project.id) return;
     const inst = instance || projectInstances.get(project.id);
     if (!inst || inst.page.hidden) return;
@@ -968,7 +991,7 @@ async function acknowledgeProjectAfterPaint(project, instance = null, { forcePai
         // A failed read is drawn by the instance itself (error + Retry in its
         // history control) and resolves unpainted. A rejection here is a defect,
         // not a slow network: it is reported, and still never acknowledged.
-        try { paint = await inst.refreshHistory?.({ revision }); } catch (err) {
+        try { paint = await inst.refreshHistory?.({ revision, why }); } catch (err) {
             console.error('Project history paint failed:', err);
         }
         if (
@@ -994,6 +1017,15 @@ async function acknowledgeProjectAfterPaint(project, instance = null, { forcePai
 
 document.getElementById('project-panel-close')?.addEventListener('click', () => layers.back('control'));
 projectPanelBackdrop?.addEventListener('click', () => layers.back('scrim'));
+
+// The registry's list of every Project (Find a project, Show more: projects_nav.js): one that says it is complete
+// under the profile it names takes that profile's saved text of the Projects it omits (chat_preview.js).
+async function readProjectList(options) {
+    const asked = Date.now(), data = await apiClient.projectList(options);
+    forgetUnlistedProjectPreviews(data, asked);
+    return data;
+}
+
 function renderProjectsNav(projects, projectChatIds, activityIndex = projectActivityIndex, readOrder = 0) {
     const all = projects || [];
     // Isolation fan-out SSOT: recognize EVERY registered project chat_id (incl.
@@ -1018,11 +1050,10 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
     if (rows.some(p => p.id === navState.activeProjectId && p.lifecycle === 'deleting')) {
         closeProjectPanel();
     }
-    // The registry's own word retires a room kept away (also one leaving now, or holding work until it ends: every read
-    // asks again) and its saved text (chat_preview.js); absence from this bounded list never does.
+    // A row going away retires a room kept away (also one leaving now, or holding work until it ends: every read asks
+    // again); absence from this bounded list never does. Its saved text leaves only as a state read admits the word.
     const going = rows.filter(p => p.lifecycle === 'deleting').map(p => p.id);
     rooms.forget(...going);
-    forgetProjectPreviews(going);
     const json = JSON.stringify([state.projectMessagesRevision, ...rows.map(p => [p.id, p.name, p.chat_id, p.lifecycle,
         p.visible_revision, p._unread, p.delete_error, p.pinned === true, p.last_message_at])]);  // a moved time repaints
     if (readOrder) projectsFeedOrder = readOrder;  // with its rows: nothing reads the one under the other's order
@@ -1198,7 +1229,7 @@ function openProjectMenu(item, { anchor = null, point = null } = {}) {
                 paintProjectsNav();
             } else refreshProjectsNav();
             // A delete the core answered is going away even if it is gone before a read shows it `deleting`.
-            if (change.authoritative && change.lifecycle === 'deleting') forgetProjectPreviews([change.projectId]);
+            if (change.authoritative && change.lifecycle === 'deleting') forgetProjectPreviews([change.projectId], registryScope());
             projectsNav.refresh();  // a row beyond the feed takes its new name or lifecycle from the registry's list
             knownProjectsJson = '';
         },
@@ -1368,9 +1399,8 @@ ws.on('projects_changed', (msg) => {
         // elsewhere cannot leave a panel with a title for a room that no longer exists. Read failures keep the panel:
         // an unavailable answer is not proof of deletion.
         void apiClient.projectById(openId).then((data) => {
+            const row = projectAnswer(openId, data);
             if (navigation !== projectNavigationGeneration || navState.activeProjectId !== openId) return;
-            const rows = data?.projects;
-            const row = Array.isArray(rows) && rows.length === 1 && rows[0]?.id === openId ? rows[0] : null;
             if (!row || row.lifecycle === 'deleting') closeProjectPanel();
         }).catch(() => {});
     }

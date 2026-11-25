@@ -186,7 +186,7 @@ export function createHistoryResyncScheduler({
     isReplayActive, run, debounceMs = 700,
     setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id),
 }) {
-    let timer = null;
+    let timer = null, why = null;  // `why`: the tags of the first schedule the pending run serves (its read's record)
     return {
         /**
          * @param {boolean} keepPending an armed full rebuild is a DEADLINE, not a
@@ -200,13 +200,13 @@ export function createHistoryResyncScheduler({
          * window fetched before the arm, so the caller re-arms when such a run settles
          * with the bound still armed.
          */
-        schedule(keepPending = false) {
+        schedule(keepPending = false, tags = null) {
             if (isReplayActive()) return false;
             if (timer != null) {
                 if (keepPending) return true;
                 clearTimer(timer);
-            }
-            timer = setTimer(() => { timer = null; run(); }, debounceMs);
+            } else why = tags;
+            timer = setTimer(() => { timer = null; run(why); }, debounceMs);
             return true;
         },
         cancel() { if (timer != null) { clearTimer(timer); timer = null; } },

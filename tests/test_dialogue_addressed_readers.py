@@ -299,6 +299,54 @@ def test_annotation_compaction_asks_the_store_once_however_many_messages_it_keep
     assert counts[0] == counts[1], counts
 
 
+def test_a_receipt_question_asks_the_store_about_its_own_message_only(tmp_path, monkeypatch):
+    """The waiter reading its act's receipt and a guarded append comparing its message's latest act ask the store
+    about that one message on every branch, never the journal's other id-only receipts (each question used to pay
+    for all of them). Each message resolves alone, so each answer is the whole journal's: the act's own room, a
+    stated-unplaced act and an act saved at two rows (no answer) included."""
+    from ouroboros import chat_annotations as journal
+
+    for message, room in (("owner-one", 1), ("owner-two", 1), *((f"foreign-{number}", 22) for number in range(30))):
+        ds.append(tmp_path, "chat", owner(message, chat_id=room))
+        append_chat_annotation(tmp_path, message, action="steer_task", status="queued", routing_token="act")  # id-only
+    append_chat_annotation(tmp_path, "foreign-0", action="steer_task", status="read", routing_token="act", source_chat_id=22)
+    first, second = (chat_chain.format_address(chat_chain.row_address(owner(text=text))) for text in ("one", "two"))
+    for token, status, address, unplaced in (("act", "delivered", "", False), ("unplaced", "delivered", "", True),
+                                              ("twice", "delivered", first, False), ("twice", "read", second, False)):
+        append_chat_annotation(tmp_path, "owner-one", action="steer_task", status=status, routing_token=token,
+                               source_chat_id=1, source_row_address=address, source_unplaced=unplaced)
+    path, asked, sources = tmp_path / "logs" / "chat_annotations.jsonl", [], ds.annotation_sources
+
+    def resolving(root, ids):
+        asked.append(set(ids))
+        return sources(root, asked[-1])
+
+    monkeypatch.setattr(ds, "annotation_sources", resolving)
+
+    def whole(scoped, key, by_token=True):  # the whole journal's answer, as each question was read before
+        answer = journal._compatible_annotations(path, by_token=by_token, scoped=scoped).get(key)
+        asked.clear()
+        return answer
+
+    for token in ("act", "unplaced", "twice", "absent"):
+        for room in (None, 1):
+            expected = whole(room is not None, (room, "owner-one", token) if room else ("owner-one", token))
+            assert journal.chat_annotation_receipt(tmp_path, "owner-one", token, source_chat_id=room) == dict(expected or {})
+            assert set().union(*asked) <= {"owner-one"}, (token, room, asked)
+    assert journal.chat_annotation_receipt(tmp_path, "owner-one", "act")["status"] == "delivered"
+    assert journal.chat_annotation_receipt(tmp_path, "owner-one", "unplaced", source_chat_id=1)["source_row_address"] == ""
+    for room, latest_status in ((None, "queued"), (1, "closing")):  # the guarded append's compare, either branch
+        expected = whole(room is not None, (room, "owner-two") if room else "owner-two", by_token=False)
+        assert expected["status"] == latest_status
+        assert append_chat_annotation(tmp_path, "owner-two", action="steer_task", status="closing", routing_token="act",
+                                      source_chat_id=room, require_latest_status={latest_status})
+        assert set().union(*asked) <= {"owner-two"}, (room, asked)
+    assert whole(False, "owner-one", by_token=False) is None  # its act saved at two rows: no latest act to compare
+    assert not append_chat_annotation(tmp_path, "owner-one", action="steer_task", status="closing",
+                                      require_latest_status={"delivered", "read"})
+    assert set().union(*asked) <= {"owner-one"}, asked
+
+
 def test_continuation_narrative_is_addressed_to_its_task_and_checks_result_identity(tmp_path):
     result_ref = {"kind": "task_result", "task_id": "selected", "reader": "get_task_result"}
     summary = {"task_id": "selected", "chat_id": 1, "type": "task_summary",

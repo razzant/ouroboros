@@ -8,7 +8,6 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 import * as readAhead from '../modules/read_ahead.js';
-import { forgetProjectPreviews } from '../modules/chat_preview.js';
 import { IDLE_SUMMARY, pictureOwner } from '../modules/project_activity.js';
 import { markView, paintStatusMark } from '../modules/status_mark.js';
 
@@ -273,7 +272,7 @@ function listHarness({ host = {}, beyond = [], seen = {}, main = [90, 90] } = {}
     const toggle = { attrs: {}, querySelector: (selector) => (selector === '.status-mark' ? mark : null),
         setAttribute(name, value) { this.attrs[name] = value; } };
     const context = vm.createContext({
-        ...readAhead, markView, paintStatusMark, IDLE_SUMMARY, pictureOwner, forgetProjectPreviews, beyond, paints,
+        ...readAhead, markView, paintStatusMark, IDLE_SUMMARY, pictureOwner, beyond, paints,
         navState: { activeProjectId: null },
         state: { mainVisibleRevision: main[0], mainSeenRevision: main[1], mainSeenLoaded: true, activePage: 'files',
             projectSeenRevision: seen },
