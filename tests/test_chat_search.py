@@ -639,6 +639,20 @@ def test_media_files_links_and_questions_carry_what_their_bubble_draws_from_neve
     assert legacy["quiz"] == {"quiz_id": "legacy", "options": ["Weir", None], "option_details": ["Below the mill", ""]}
 
 
+def test_a_program_note_is_searched_by_its_literal_body_under_its_author(tmp_path):
+    from ouroboros.dialogue_provenance import recorded_author
+
+    body = "The example comparison is ready."
+    _say(tmp_path, 1, "Program message received.", direction="in", role="system",
+         system_type="agent_note_received", agent_note_text=body,
+         declared_author=recorded_author("Build agent"),
+         sender_label='agent "Build agent" (declared, not verified)')
+    candidate, = _found(tmp_path, q="comparison")["candidates"]
+    assert candidate["text"] == body and candidate["role"] == "user"
+    assert candidate["declared_author"]["label"] == "Build agent"
+    assert "received" not in candidate["text"]  # the neutral receipt fact is never the shown words
+
+
 def test_the_search_runs_off_the_event_loop(tmp_path, monkeypatch):
     import threading
 

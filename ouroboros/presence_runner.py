@@ -51,6 +51,9 @@ class PresenceTurnResult:
     continuation_version: int = 0
     # Version 2: ``{source_event_id, message}`` of the last input this output covers.
     reply_anchor: Mapping[str, Any] | None = None
+    # A heard answer's recorded decision, ``{decision: "heard", reason}`` (``place_arrivals.heard_replay``); a
+    # negotiated answer projects it (``place_intake.attention_view``), every other answer leaves it None.
+    attention: Mapping[str, Any] | None = None
 
 
 def _presence_delivery(outcome: str, text: str, terminal_origin: str, *, legacy: bool = False) -> tuple[str, str]:

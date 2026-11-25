@@ -148,7 +148,7 @@ ORIGIN_ABSENT_REASONS = frozenset({
     "producer_missing_ref",
 })
 
-_ORIGIN_REF_KEYS = ("chat_id", "client_message_id", "ts", "text_sha256")
+_ORIGIN_REF_KEYS = ("chat_id", "client_message_id", "ts", "text_sha256", "row_sha256")
 
 
 def _validated_origin(origin: Any, resolved_chat: int) -> Dict[str, Any]:
@@ -170,9 +170,7 @@ def _validated_origin(origin: Any, resolved_chat: int) -> Dict[str, Any]:
     from ouroboros.project_dialogue import _text_sha256, owner_message_ref_is_valid
     if not owner_message_ref_is_valid(ref):
         raise ValueError("origin['ref'] requires a room, client id (possibly empty), non-empty timestamp and SHA-256")
-    clean_ref = {key: ref.get(key) for key in _ORIGIN_REF_KEYS}
-    if "row_sha256" in ref:
-        clean_ref["row_sha256"] = ref["row_sha256"]
+    clean_ref = {key: ref[key] for key in _ORIGIN_REF_KEYS if key in ref}
     try:
         cross_thread = int(clean_ref.get("chat_id") or 0) != int(resolved_chat or 0)
     except (TypeError, ValueError):
@@ -227,6 +225,7 @@ def bind_task_to_project(
     origin: Dict[str, Any],
     admission_basis: Optional[dict] = None,
     execution_readmission: bool = False,
+    reopen_closed: bool = True,
 ) -> Dict[str, Any]:
     """Durably bind an existing task/live card to a project thread.
 
@@ -243,7 +242,7 @@ def bind_task_to_project(
         raise ValueError("task_id is required")
     if not pid:
         raise ValueError(f"unusable project id: {project_id!r}")
-    if admission_basis is None and get_reserved_project(drive_root, pid) is None:
+    if reopen_closed and admission_basis is None and get_reserved_project(drive_root, pid) is None:
         _validated_origin(origin, int(chat_id) if chat_id is not None else project_chat_id(pid))
         create_project(drive_root, pid)
     media = _origin_media(drive_root, origin)  # a chat read: never under the registry's cross-process lock
@@ -255,6 +254,8 @@ def bind_task_to_project(
         if not isinstance(project, dict) or project.get("lifecycle") != PROJECT_ACTIVE:
             lifecycle = project.get("lifecycle") if isinstance(project, dict) else "missing"
             raise ValueError(f"project {pid!r} is {lifecycle}; it cannot accept bindings")
+        if not reopen_closed and ("closed" in project or project.get("chat_id") != chat_id):
+            raise ValueError("the local Project return address no longer accepts bindings")
         try:
             resolved_chat = int(chat_id if chat_id is not None else project.get("chat_id"))
         except (TypeError, ValueError):
@@ -292,7 +293,7 @@ def bind_task_to_project(
             start = bindings_identity(drive_root)  # under the lock: this save's own step of the file
             _save_bindings(drive_root, data)
             end = bindings_identity(drive_root)
-            if not enriching and "closed" in project:
+            if reopen_closed and not enriching and "closed" in project:
                 apply_closed(project, None)
                 _save(drive_root, registry_data)
     if not enriching:

@@ -89,6 +89,8 @@ from ouroboros.dialogue_provenance import is_presence_task, presence_provenance_
 from ouroboros.presence_runner import PRESENCE_DELIVERY_KEYS, build_presence_result_event
 from ouroboros.task_finalization import PROJECT_ROOM_ADDRESS, presence_root_project_room
 
+LOCAL_FINAL_ADDRESS = "local"
+
 log = logging.getLogger(__name__)
 
 
@@ -645,6 +647,17 @@ def _wake_outcome_notice(text: str, loop_outcome: Dict[str, Any], custody_audit:
             f"({reason or 'unspecified'}).{owed}{kept}")
 
 
+def _unavailable_cost_fields(error: str) -> Dict[str, Any]:
+    return {
+        "cost_accounting_status": "unavailable", "cost_final": False,
+        "cost_accounting_error": error, "cost_presentation": None,
+        "accounted_upper_bound_usd": None, "total_rounds": None,
+        "prompt_tokens": None, "completion_tokens": None,
+        "reserved_usd": None, "unresolved_upper_bound_usd": None,
+        "unknown_unmetered": None,
+    }
+
+
 def _task_cost_fields(env: Any, task: Dict[str, Any]) -> Dict[str, Any]:
     """The terminal frames' cost authority (the usage ledger), never the loop's own tally."""
     try:
@@ -660,15 +673,7 @@ def _task_cost_fields(env: Any, task: Dict[str, Any]) -> Dict[str, Any]:
         task_cost_fields = with_task_cost_presentation(task_cost_fields, task, env.drive_root)
     except Exception:
         log.error("Task cost authority unavailable at finalization", exc_info=True)
-        task_cost_fields = {
-            "cost_accounting_status": "unavailable", "cost_final": False,
-            "cost_accounting_error": "ledger_unavailable",
-            "accounted_upper_bound_usd": None, "total_rounds": None,
-            "prompt_tokens": None, "completion_tokens": None,
-            "reserved_usd": None, "unresolved_upper_bound_usd": None,
-            "unknown_unmetered": None,
-            "cost_presentation": None,
-        }
+        task_cost_fields = _unavailable_cost_fields("ledger_unavailable")
     # SSOT cost naming (C2/ABI-3): the honest names on every terminal frame
     # this pipeline emits; the seam also strips any legacy alias spelling.
     from ouroboros.cost_projection import with_cost_aliases
@@ -943,7 +948,9 @@ def emit_task_results(
         _stamp_presence_terminal_facts(task, usage, llm_trace, ctx, reason_code)
     # A Stop marker already on the task suppresses paid synthesis, not the durable outbox or free facts.
     _root_outbox = _is_root_post_task({k: v for k, v in task.items() if k != "_skip_post_task_synthesis"})
-    if getattr(ctx, "_skip_post_task_synthesis", False):   # "Stop now": paid root predicates see it
+    from ouroboros.extension_late_result import restricted_return
+    _local_return = restricted_return(task)
+    if getattr(ctx, "_skip_post_task_synthesis", False) or _local_return:
         task["_skip_post_task_synthesis"] = True
     _presence = is_presence_task(task)
     # Its conversation hears the Presence result alone; a root that lives in an internal Project (an
@@ -961,8 +968,8 @@ def emit_task_results(
     send_event = {
         "type": "send_message", "chat_id": _local_room or task["chat_id"],
         "text": published or "\u200b", "log_text": published or "",
-        "format": "markdown",
-        "task_id": task.get("id"), "ts": utc_now_iso(),
+        "format": "markdown", "task_id": task.get("id"), "ts": utc_now_iso(),
+        **({"address": LOCAL_FINAL_ADDRESS} if _local_return else {}),
     }
     if _message_meta:
         # Final frames carry their own durable identity; replay must not depend
@@ -1256,15 +1263,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         trace_summary = build_trace_summary(llm_trace)
         from ouroboros.cost_projection import with_cost_aliases
 
-        cost_fields = with_cost_aliases(cost_fields or {
-            "cost_accounting_status": "unavailable", "cost_final": False,
-            "cost_accounting_error": "ledger_projection_missing",
-            "cost_presentation": None,
-            "accounted_upper_bound_usd": None, "total_rounds": None,
-            "prompt_tokens": None, "completion_tokens": None,
-            "reserved_usd": None, "unresolved_upper_bound_usd": None,
-            "unknown_unmetered": None,
-        })
+        cost_fields = with_cost_aliases(cost_fields or _unavailable_cost_fields("ledger_projection_missing"))
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
         from ouroboros.owner_model import preserve_carrier
 
@@ -1420,6 +1419,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             subagent_availability=task.get("subagent_availability"),
             metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
             **{key: task[key] for key in ("origin_message_ref", "origin_message_text") if key in task},
+            **({"admission_author": task["admission_author"]} if task.get("admission_author") else {}),
             result=text or "", **terminal_result_fields(usage, existing=existing, title=task.get("title"), metadata=task.get("metadata"), task_contract=task_contract),
             final_answer=str(loop_outcome.get("final_answer") or ""),
             trace_summary=trace_summary,

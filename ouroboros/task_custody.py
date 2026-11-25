@@ -449,6 +449,9 @@ def capture_unread_mail(root: Any, task_id: str) -> Optional[Dict[str, Any]]:
 
 def unread_mail_notice(custody: Any, *, preview_chars: int = 300, limit: int = 10) -> str:
     """One bounded host line naming the unread mail a result holds and where its exact rows are."""
+    from ouroboros.dialogue_provenance import unread_mail_line
+    from ouroboros.owner_mailbox import PROVENANCE_AGENT_NOTE
+
     held = merge_unread_mail(custody)
     if not held or not held["rows"]:
         return ""
@@ -459,11 +462,9 @@ def unread_mail_notice(custody: Any, *, preview_chars: int = 300, limit: int = 1
         except (TypeError, ValueError):
             entry = {}
         entry = entry if isinstance(entry, dict) else {}
-        text = str(entry.get("text") or "")
-        source = str(entry.get("source_task_id") or "owner")
-        shown.append(f"- {entry.get('ts') or '?'} {entry.get('kind') or 'owner_text'} from {source}: "
-                     + text[:preview_chars] + (f" [... {len(text) - preview_chars} more chars]"
-                                               if len(text) > preview_chars else ""))
+        default_source = "owner" if (entry.get("kind") or "owner_text") in OWNER_MAIL_KINDS else "not recorded"
+        shown.append(unread_mail_line(entry, preview_chars=preview_chars, default_source=default_source,
+                                      program=entry.get("provenance") == PROVENANCE_AGENT_NOTE))
     more = held["total"] - len(shown)
     return (f"[UNREAD_MAILBOX] {held['total']} message(s) written to this task's mailbox were never read by "
             "its model" + ("" if held["read_complete"] else " (the last mailbox read was incomplete)") + ":\n"

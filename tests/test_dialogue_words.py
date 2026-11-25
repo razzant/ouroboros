@@ -148,6 +148,20 @@ def test_plain_rows_press_rows_and_empty_rows():
         Field("text", "done: merged", "author")]
 
 
+def test_a_program_note_is_searched_by_its_literal_body():
+    from ouroboros.dialogue_provenance import recorded_author
+    from ouroboros.dialogue_words import match_fields, parse
+
+    body = "The example comparison is ready."
+    note = {"direction": "in", "role": "system", "system_type": "agent_note_received",
+            "text": "Program message received.", "agent_note_text": body,
+            "declared_author": recorded_author("Build agent")}
+    assert fields_of(note) == [Field("text", body, "author")]
+    assert match_fields(parse(["comparison"]), fields_of(note)) == ["text"]
+    assert match_fields(parse(["received"]), fields_of(note)) == []  # the neutral receipt fact is not searched
+    assert fields_of({**note, "agent_note_text": None}) == []  # fail-closed: no body, no field
+
+
 def test_the_receipt_says_what_owner_quiz_says():
     from ouroboros.owner_quiz import secret_outcome_summary
 

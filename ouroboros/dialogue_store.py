@@ -830,7 +830,7 @@ def dispatch_facts(root: Any, chat_id: Optional[int], client_message_id: str) ->
     recorded = json.loads(record["dispatch_input"] or "{}")
     return {"state": record["dispatch"], "process": str(recorded.get("process") or ""),
             "dispatcher": str(recorded.get("dispatcher") or ""),
-            **({"refused": str(recorded["refused"])} if recorded.get("refused") else {})}
+            **{key: str(recorded[key]) for key in ("refused", "delivery", "claim") if recorded.get(key)}}
 
 
 def dispatch_state(root: Any, chat_id: Optional[int], client_message_id: str) -> Optional[str]:
@@ -839,7 +839,7 @@ def dispatch_state(root: Any, chat_id: Optional[int], client_message_id: str) ->
 
 
 def _move_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, states: Tuple[str, ...],
-                   process: str, read_reply: bool = False) -> tuple[bool, Optional[Dict[str, Any]]]:
+                   process: str, read_reply: bool = False, claim: str = "") -> tuple[bool, Optional[Dict[str, Any]]]:
     if not client_message_id or not present(root):
         return False, None
     # A pending retry takes the original reply snapshot in the same transaction as the claim. Select only the
@@ -849,25 +849,26 @@ def _move_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *,
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
             "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='dispatched', "
-            "dispatch_input=json_set(coalesce(dispatch_input, '{}'), '$.process', ?) WHERE stream='chat' AND client_message_id=? "
+            "dispatch_input=json_patch(coalesce(dispatch_input, '{}'), ?) "
+            "WHERE stream='chat' AND client_message_id=? "
             f"AND chat_id IS ? AND direction='in' AND dispatch IN ({','.join('?' * len(states))}){returning}",
-            (process, client_message_id, chat_id, *states))
+            (json.dumps({"process": process, **({"claim": claim} if claim else {})}), client_message_id, chat_id, *states))
         rows = cursor.fetchall() if read_reply else []
         reply = json.loads(rows[0][0]) if len(rows) == 1 else None
         return cursor.rowcount == 1, reply if isinstance(reply, dict) else None
 
 
-def claim_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
+def claim_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "", claim: str = "") -> bool:
     """Take the owed dispatch of an accepted row (pending -> dispatched): the durable "entered"
     mark, with the ``process`` (custody session) that takes it. Exactly one caller wins -- the
     acceptor, a same-id retry or the recovery."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process)[0]
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process, claim=claim)[0]
 
 
 def claim_dispatch_with_reply(root: Any, chat_id: Optional[int], client_message_id: str, *,
-                              process: str = "") -> tuple[bool, Optional[Dict[str, Any]]]:
+                              process: str = "", claim: str = "") -> tuple[bool, Optional[Dict[str, Any]]]:
     """The same one-winner claim plus its accepted Reply reference, when one was recorded."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process, read_reply=True)
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process, read_reply=True, claim=claim)
 
 
 def note_dispatched(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
@@ -876,7 +877,20 @@ def note_dispatched(root: Any, chat_id: Optional[int], client_message_id: str, *
     return _move_dispatch(root, chat_id, client_message_id, states=("none", "pending"), process=process)[0]
 
 
-def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str) -> bool:
+def defer_dispatch(root: Any, chat_id: int, client_message_id: str, *, dispatcher: str, process: str, claim: str) -> bool:
+    """The same dispatcher proves it had no effect: return only its own claim, keeping the accepted input."""
+    with transaction(root, write=True) as conn:
+        cursor = conn.execute(
+            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='pending', "
+            "dispatch_input=json_remove(dispatch_input, '$.process', '$.claim') "
+            "WHERE stream='chat' AND client_message_id=? AND chat_id=? AND direction='in' AND dispatch='dispatched' "
+            "AND json_extract(dispatch_input, '$.dispatcher')=? AND json_extract(dispatch_input, '$.process')=? "
+            "AND json_extract(dispatch_input, '$.claim')=?",
+            (client_message_id, chat_id, dispatcher, process, claim))
+        return cursor.rowcount == 1
+
+
+def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, delivery: str = "", claim: str = "") -> bool:
     """The handoff returned (dispatched -> completed; the recorded input shrinks to the dispatcher
     and the process); a callback that raised after entry leaves ``dispatched``, which is
     ambiguous and never replayed."""
@@ -884,13 +898,11 @@ def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str)
         return False
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
-            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=CASE WHEN "
-            "json_extract(dispatch_input, '$.refused') IS NULL THEN json_object("
-            "'dispatcher', json_extract(dispatch_input, '$.dispatcher'), 'process', json_extract(dispatch_input, '$.process')) "
-            "ELSE json_object('dispatcher', json_extract(dispatch_input, '$.dispatcher'), 'process', "
-            "json_extract(dispatch_input, '$.process'), 'refused', json_extract(dispatch_input, '$.refused')) END "
-            "WHERE stream='chat' AND client_message_id=? AND chat_id IS ? AND direction='in' AND dispatch='dispatched'",
-            (client_message_id, chat_id))
+            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=json_remove("
+            "json_patch(dispatch_input, ?), '$.text', '$.message') "
+            "WHERE stream='chat' AND client_message_id=? AND chat_id IS ? AND direction='in' AND dispatch='dispatched' "
+            "AND (?='' OR json_extract(dispatch_input, '$.claim')=?)",
+            (json.dumps({"delivery": delivery} if delivery else {}), client_message_id, chat_id, claim, claim))
         return cursor.rowcount == 1
 
 
@@ -1030,7 +1042,7 @@ _BOTH_WROTE: set = set()  # stores (path, file identity) where both have written
 def owner_exchange(root: Any) -> Tuple[bool, bool]:
     """``(my human has written, I have written to them)`` in the rooms my human reads, in ONE statement of two
     existence probes over those rooms that stop at their first match: an untyped inbound row (``dialogue_inbound``;
-    my human's words, as ``newest_owner_candidates`` counts them) and an outbound row of mine, untyped (an answer)
+    except a host-stamped program message, including the old author format) and an outbound row of mine, untyped (an answer)
     or one of ``_MY_MESSAGE_KINDS`` (``dialogue_room``; host rows are System or other types). A store that cannot be
     read raises: the caller says unknown, never no; so does a negative answer while the store's history is still
     importing (``require_imported``'s probes, in the same read: a segment whose import commits meanwhile is in neither
@@ -1046,7 +1058,10 @@ def owner_exchange(root: Any) -> Tuple[bool, bool]:
     with transaction(root, write=False) as conn:
         theirs, mine = conn.execute(
             "SELECT EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_inbound WHERE stream='chat' AND direction='in' "
-            "AND chat_id BETWEEN ? AND ? AND kind IS NULL), EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_room "
+            "AND chat_id BETWEEN ? AND ? AND kind IS NULL "
+            "AND json_extract(body, '$.system_type') IS NOT 'agent_note_received' "
+            "AND json_extract(body, '$.declared_author.kind') IS NOT 'agent'), "
+            "EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_room "
             "WHERE stream='chat' AND chat_id BETWEEN ? AND ? AND direction='out' "
             f"AND (kind IS NULL OR kind IN ({kinds})))",
             (low, high, low, high)).fetchone()

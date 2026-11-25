@@ -44,10 +44,11 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import row_lineage
+from ouroboros.chronicle_quotes import SPEAKERS
 from ouroboros.chronicle_store import ChronicleStore, PublishResult, source_time_span
 from ouroboros.consolidator import LIGHT_ANSWER_CEILING_TOKENS
-from ouroboros.dialogue_provenance import (memory_row_header, recorded_finality, render_memory_row, render_row_text,
-                                           row_class)
+from ouroboros.dialogue_provenance import (memory_row_header, program_source, recorded_finality, render_memory_row,
+                                           render_row_text, row_class)
 from ouroboros.memory_floor import crowded_by_memory
 from ouroboros.memory_inventory import VIEW_TRACE_KEY, OpenSegment, ShortageFact, shortage_from_trace
 from ouroboros.utils import extract_trailing_json_object, utc_now_iso
@@ -64,7 +65,7 @@ CONFLICT_REASONS = frozenset({"revision_conflict", "already_sealed", "already_fo
 
 _PAGE = ("You are a helper drafting one memory page for Ouroboros from the rows below. You are not Ouroboros "
          "and did not live these events: write in the third person and attribute every statement to whoever "
-         "made it — the owner or another person, Ouroboros, a child task, the host.\n"
+         "made it — the owner or another person, a program, Ouroboros, a child task, the host.\n"
          "Cover only the rows supplied; say nothing of what is not here. A row shown only as an address was "
          "not read: name it if it matters, never guess its words.\n")
 _PART = ("You are a helper drafting one memory part for Ouroboros: one account that folds the records below, "
@@ -85,12 +86,12 @@ _COMMON = ("A task's outcome is its host stamp: never call a task done, accepted
            "says so.\n"
            "Keep what a later reader needs: what was asked and by whom, what was decided or refused, what was "
            "done and how it ended, what stays open.\n"
-           "Quote the words of people and of Ouroboros only through the quotes field; in the text, say it in "
+           "Quote the words of people, programs and Ouroboros only through the quotes field; in the text, say it in "
            "your own words.\n")
 _QUOTES = ("Quote the decisive words — what was asked, decided, promised or refused — exactly in quotes.\n"
            "Each quote is an exact substring of one supplied row, with that row's address (row:…) and its "
-           "speaker: the author class written first in the row's brackets — human, ouroboros, child, host, "
-           "helper or unattributed.\n"
+           "speaker: the author class written first in the row's brackets (allowed: "
+           + ", ".join(sorted(SPEAKERS)) + ").\n"
            "A quote is copied character for character, markdown included (**, _, `).\n")
 _NO_QUOTES = "No chat rows are supplied here, so leave quotes empty.\n"
 _MEMBER_QUOTES = ("No chat rows are supplied here: quote only by copying a quote shown under a record below exactly, "
@@ -449,6 +450,7 @@ class _Row:
     task: str
     line: str  # its verbatim text line; "" for a task's host/child row (its task line stands for it)
     pointer: str  # its address line: only my own spoken words may become one (people's words never do)
+    address_only: bool = False  # a restricted result is supplied by address and never covered
 
 
 def _rows(root: pathlib.Path, read_rows: List[Tuple[Dict[str, Any], Dict[str, Any]]],
@@ -461,11 +463,17 @@ def _rows(root: pathlib.Path, read_rows: List[Tuple[Dict[str, Any], Dict[str, An
             pos = chat_chain.stream_position_of(root, address)
         cls = row_class(row, pos=pos, **lineage)
         author = {"label": f"{cls['author'].get('kind')}: {cls['author'].get('label')}"}
+        if program_source(row) == "late_result":
+            items.append(_Row((address, row, pos), "", render_memory_row(address, row, author=author, model_reply=True),
+                              "", address_only=True))
+            continue
         task = str(row.get("task_id") or "")
         spoken = cls["lane"] == 1
-        line = render_memory_row(address, row, author=author, indent=INDENT) if spoken or not task else ""
-        pointer = (f"{memory_row_header(address, row, author=author)} (words, {len(render_row_text(row))} chars — "
-                   "read by address)") if spoken and cls["author"].get("kind") != "human" else ""
+        line = render_memory_row(address, row, author=author, indent=INDENT, model_reply=True) if spoken or not task else ""
+        pointer = ""
+        if spoken and cls["author"].get("kind") not in {"human", "agent"}:
+            chars = len(render_row_text(row, model_reply=True))
+            pointer = f"{memory_row_header(address, row, author=author)} (words, {chars} chars — read by address)"
         if cls["author"].get("kind") == "place_fact":
             pointer = f"{memory_row_header(address, row, author=author)} (reaction — read by address)"
         items.append(_Row((address, row, pos), task, line, pointer))
@@ -602,7 +610,7 @@ def _page_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, b
     stamps = {entry["task_id"]: entry for entry in full["tasks"]}
     n, addressed, refs = _floor(items, budget, measure,
                                 lambda k, a, r: _compose(head, label, items, k, a, owners, r, stamps, tail))
-    kept = [item for index, item in enumerate(items[:n]) if index not in addressed]
+    kept = [item for index, item in enumerate(items[:n]) if index not in addressed and not item.address_only]
     if not kept:
         return None
     covers = read["covers"]
@@ -615,7 +623,8 @@ def _page_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, b
     return WriterInput(prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                        measure(prompt) if budget is not None else None, covers=covers,
                        positions={item.entry[0]["row_sha256"]: item.entry[2] for item in items},
-                       addressed_rows=tuple(chat_chain.format_address(items[i].entry[0]) for i in sorted(addressed)),
+                       addressed_rows=tuple(chat_chain.format_address(item.entry[0]) for i, item in enumerate(items[:n])
+                                            if i in addressed or item.address_only),
                        stamp=stamp, fitted_to=items[n - 1].entry[0])
 
 

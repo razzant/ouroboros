@@ -133,6 +133,13 @@ class ToolContext:
     _review_iteration_count: int = 0
     _review_history: list = field(default_factory=list)
 
+    @property
+    def call_ref(self) -> str:
+        """A scoped return reference for a reviewed extension call; empty on other tools."""
+        from ouroboros.extension_late_result import call_ref
+
+        return call_ref(self)
+
     def active_repo_dir(self) -> pathlib.Path:
         if self.is_workspace_mode():
             return pathlib.Path(self.workspace_root)

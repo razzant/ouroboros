@@ -448,6 +448,8 @@ async def _api_identity(request: Request) -> JSONResponse:
     from ouroboros.presence_recovery import WORK_OUTPUT_VERSION
     from ouroboros.place_guard import PLACE_BINDING_VERSION
     from ouroboros.gateway.host_sign_in import SIGN_IN_VERSION
+    from ouroboros.place_intake import ATTENTION_VERSION
+    from ouroboros.extension_late_result import VERSION as LATE_RESULT_VERSION
 
     return JSONResponse({"ok": True, "name": name, "description": description,
                          "presence_delivery_version": DELIVERY_VERSION, "places_version": 1,
@@ -463,6 +465,8 @@ async def _api_identity(request: Request) -> JSONResponse:
                          "presence_reaction_context": 1,
                          "presence_change_context": 1,
                          "presence_identity": 1,
+                         "presence_attention_version": ATTENTION_VERSION,
+                         "late_result_version": LATE_RESULT_VERSION,
                          "presence_place_binding_version": PLACE_BINDING_VERSION,
                          "notify_version": NOTIFY_VERSION, "sign_in_version": SIGN_IN_VERSION})
 
@@ -1440,6 +1444,7 @@ def create_host_service_app(
     from ouroboros.gateway.host_notify import _api_notify
     from ouroboros.gateway.host_call import host_call_routes
     from ouroboros.gateway.host_sign_in import host_sign_in_routes
+    from ouroboros.gateway.host_late_result import api_late_result
 
     app = Starlette(
         routes=[
@@ -1458,6 +1463,7 @@ def create_host_service_app(
             Route("/presence/delivery", _api_presence_delivery, methods=["POST"]),
             Route("/presence/history", _api_presence_history, methods=["POST"]),
             Route("/presence/work/{work_ref}", _api_presence_work, methods=["GET", "POST"]),
+            Route("/late_result", api_late_result, methods=["POST"]),
             Route("/ui/ws-message", _api_ws_message, methods=["POST"]),
             Route("/notify", _api_notify, methods=["POST"]),
             WebSocketRoute("/events", _ws_events),

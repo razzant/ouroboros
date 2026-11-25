@@ -181,6 +181,17 @@ def render_governance(governance: Tuple[Any, ...], addressed: Optional[Mapping[s
                  for part in governance)
 
 
+def with_program_history(rows, data):
+    """Bind the projected data after the assignment, never as the first (owner) input or a system block."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, PROGRAM_HISTORY_KIND, bound_host_row
+
+    tail = [row for row in rows if row.get(HOST_CONTEXT_KIND_KEY) != PROGRAM_HISTORY_KIND]
+    if data:
+        after = next((i + 1 for i, row in enumerate(tail) if row.get("role") == "user"), len(tail))
+        tail.insert(after, bound_host_row(PROGRAM_HISTORY_KIND, data))
+    return tail
+
+
 def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room: str = "", mode: str = "",
                    addressed: Optional[Mapping[str, str]] = None, story_whole: bool = True,
                    trace: Any = None) -> List[Dict[str, Any]]:

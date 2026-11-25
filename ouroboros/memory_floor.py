@@ -29,6 +29,7 @@ from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ord
                                     form_counts, holding_room, Selection, supersedes, WorkPrices, restore,
                                     ORDINARY_STAGES, TELLING_STAGES, ROOM_STEPS)
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
+from ouroboros.memory_view_work import PROGRAM_HISTORY_HEAD, has_program_history, model_room as model_room
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
 from ouroboros.section_floor import (PROTECTED, capture_system_projection, predicted_section, projection_fields,
@@ -50,6 +51,11 @@ _SHOWN += (("F8", "{} unsealed notes by label"), ("F8a", "{} aggregate note list
 # The forms a floor fact names (``view_facts``): a change to what a step's elements are or how they are listed raises
 # it, so a fact of other forms is read anew (``kept_level``). A fact without one names the forms before it, version 1.
 FORMS_VERSION = 2
+
+
+def program_history_head(snapshot):
+    # The room's existing size includes each selected line; reserve just the one new data envelope.
+    return PROGRAM_HISTORY_HEAD if snapshot and has_program_history(snapshot) else ""
 
 
 def tokens_of(chars: int) -> int:
@@ -99,6 +105,20 @@ class ViewFit:
     @cached_property
     def room_chars(self) -> int:
         return mv.room_chars(self.snapshot, self.level, floor_note=self.note)
+
+    def model_parts(self, opening_address: str) -> Tuple[str, str]:
+        """The room a send carries: its system part and program data (``model_room``), drawn once per opening note."""
+        drawn = self.__dict__.setdefault("_model_parts", {})
+        if opening_address not in drawn:
+            from ouroboros.context_assembly_trace import RoomWitness
+
+            witness = RoomWitness(self.snapshot)
+            room, data = model_room(self.snapshot, self.level, floor_note=self.note,
+                                    opening_address=opening_address, observe=witness.observe, witness=witness.part)
+            drawn[opening_address] = (room, data, witness.pieces)
+        room, data, pieces = drawn[opening_address]
+        self.room_pieces = pieces
+        return room, data
 
 
 NO_VIEW = SimpleNamespace(story="", room="", facts={}, level=None, story_chars=0, room_chars=0)  # a frame with no memory
@@ -447,38 +467,39 @@ def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], 
 
 
 def fit_required_book(shown, *, book, fixed, ratio, reserve, output_reserve, window, window_record, mode, work, lowered,
-                      note_window, admit, optional_map):
-    """Price the book and its note beside the same ordinary memory; each retry takes the next yield ``optional_map``
-    names (``yield_for_book``: optional maps, then an integrating Low start's book maps), its new fixed price, until
-    none is left (None, or no smaller request).
+                      note_window, admit, optional_map, opening_address):
+    """Render the selected room as system and program data; price the book and note beside both.
 
-    The book does not set the reply allowance. Return the last frame's measured costs for the caller to refuse.
-    A frame without a memory snapshot can still carry the required book but has no floor receipt to annotate.
+    Each retry takes the next yield from ``optional_map`` (optional attachments, then an unread integrating Low
+    start's book maps) until none remains or the fixed price stops shrinking. The book does not set the reply
+    allowance. Return the last frame's costs for a refusal; without a memory snapshot there is no floor receipt.
     """
-    room = shown.room
+    room, room_data = shown.model_parts(opening_address) if shown.level is not None else ("", "")
     if not book:
-        return room, 0, None
+        return room, room_data, 0, None
+    # The fitted envelope already priced the program history header and its row shape.
+    data_chars = mv.json_chars(room_data) - mv.json_chars(PROGRAM_HISTORY_HEAD) if room_data else 0
     story_tokens = view_tokens(shown.story)
     while True:
-        ordinary = fixed + story_tokens + view_tokens(room)
+        ordinary = fixed + story_tokens + tokens_of(mv.json_chars(room) + data_chars)
         price = math.ceil((ordinary + book) * ratio)
         note = required_book_note(lowered=lowered, book_tokens=math.ceil(book * ratio), work=work,
             free=window - reserve - price if note_window else None) if getattr(shown, "snapshot", None) else ""
         presented = "\n\n".join(filter(None, (room, note)))
         note_tokens = view_tokens("\n\n" + note) if note else 0
         if not admit:
-            return presented, note_tokens, None
+            return presented, room_data, note_tokens, None
         reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=mode == "nano",
             owner_nano=False, input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary,
             window_tokens=window, window_record=window_record)
-        memory = story_tokens + view_tokens(presented)
+        memory = story_tokens + tokens_of(mv.json_chars(presented) + data_chars)
         held = max(reserve, reply)
         input_room = window_record.input_room(reply) if window_record else None
         if math.ceil((fixed + book + memory) * ratio) <= (window - held if input_room is None else input_room):
-            return presented, note_tokens, None
+            return presented, room_data, note_tokens, None
         smaller = optional_map()
         if smaller is None or smaller >= fixed:
-            return presented, note_tokens, {"fixed_tokens": fixed + book, "memory_tokens": memory, "reserve_tokens": held}
+            return presented, room_data, note_tokens, {"fixed_tokens": fixed + book, "memory_tokens": memory, "reserve_tokens": held}
         fixed = smaller
 
 
@@ -711,15 +732,16 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     if receipts:
         facts["host_sections_addressed"] = receipts
     selected = ViewFit(snapshot, level, note, facts)
-    story, room = selected.story, selected.room
+    story = selected.story
+    room, data = selected.model_parts(plan.core.opening_program_address)
     system, observation = capture_system_projection(plan.core, governance, story, room, mode,
         section_views(sections, receipts), receipts, mv.story_is_whole(level), shown=selected,
-        facts=view_receipt(snapshot, story, room, facts))
+        facts=view_receipt(snapshot, story, room, facts, room_data=data))
     tokens = _request_tokens(system, shown.user_content_json or plan.user_content_json,
-                            current_messages=plan.messages_for(mode))
+                            current_messages=plan.messages_for(mode), room_data=data)
     projection = dataclasses.replace(shown, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
         estimated_tokens=tokens, calibrated_tokens=int(tokens * shown.calibration_ratio),
-        **projection_fields(system, observation))
+        room_data=data, **projection_fields(system, observation))
     return dataclasses.replace(plan, **{f"{mode}_projection": projection})
 
 
@@ -978,7 +1000,7 @@ def trace_facts(receipt: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: receipt[key] for key in TRACE_FIELDS if key in receipt}
 
 
-def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: Mapping[str, Any]) -> Dict[str, Any]:
+def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: Mapping[str, Any], *, room_data="") -> Dict[str, Any]:
     """A projection's view fact: the floor fact plus the spec, the chronicle's state and block sizes.
 
     ``role``, ``room_id``, ``floor``, ``story_status`` and the start's ``max_room`` are what a task trace
@@ -986,7 +1008,7 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
     """
     return {**facts, "spec": dataclasses.asdict(snapshot.spec), "store_status": dict(snapshot.store_status),
             "legacy_frontier_status": snapshot.frontier.get("status"),
-            "blocks": {"story_tokens": view_tokens(story), "room_tokens": view_tokens(room),
+            "blocks": {"story_tokens": view_tokens(story), "room_tokens": view_tokens(room) + view_tokens(room_data),
                        "conversations": len(snapshot.conversations), "marks": len(snapshot.marks)}}
 
 
@@ -1346,7 +1368,8 @@ def step_book_map(plan: Any, mode: str, *, maps: Optional[bool] = None) -> Optio
     new = [{**system[0], "text": after}, *system[1:-1], {**system[-1], "text": new_head + system[-1]["text"][len(head):]}]
     tail = json.loads(shown.continuation_messages_json) if shown.continuation_messages_json is not None else None
     old, size = (_request_tokens(blocks, shown.user_content_json or plan.user_content_json, current_messages=tail,
-                                 supplementary_messages_json=core.supplementary_messages_json) for blocks in (system, new))
+                                 supplementary_messages_json=core.supplementary_messages_json,
+                                 room_data=shown.room_data) for blocks in (system, new))
     if size >= old:
         return None
     return dataclasses.replace(plan, **{f"{mode}_projection": dataclasses.replace(

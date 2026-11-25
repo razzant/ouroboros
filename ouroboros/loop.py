@@ -644,6 +644,8 @@ def run_llm_loop(
                 _owner_msg_seen, owner_ctx=ctx, defer_content_ack=True, place_live_runs=True)
             if pending_candidate and _controls.get("owner_carried_addressed"):
                 ctx._delivery_candidate.finalization_control = "owner_revision_required"
+            if _controls.get("agent_note"):
+                pending_candidate = False  # a ready answer is context, not consideration of new mail
             active_model, active_use_local, active_effort, context_fit_plan, active_context_mode = after_mail(
                 limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode, _controls)
             _held = _delegate_hold_round_top(tools, limit_ctx, _controls, emit_progress,

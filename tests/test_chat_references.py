@@ -39,6 +39,66 @@ def test_reply_is_host_resolved_and_replay_uses_the_same_address(tmp_path, monke
         bridge.handle_web_message("this one", client_message_id="reply", task_metadata={"reply_to": "task:other"})
 
 
+@pytest.mark.parametrize("late", [False, True])
+def test_web_reply_quotes_a_passage_of_a_saved_agent_note(tmp_path, monkeypatch, late):
+    from ouroboros.chat_references import reply_target
+    from ouroboros.context import _fresh_reply_owner, _owner_message_facts
+    from ouroboros.dialogue_provenance import program_reply_text, relation_text
+    from ouroboros.gateway.agent_note import _accept, note_request
+    from supervisor.message_ingress import record_inbound_message
+
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    sentence = "The north trail is open."
+    body = {"text": f"🌿 {sentence} Meet by the oak.", "author": {"kind": "agent", "label": "Trail Notebook"}}
+    text, author = note_request(body)
+    if late:  # A retained example letter: this fixture calls neither the sender nor the recipient.
+        source = message_bus.log_chat("in", 1, 0, text, source="web", client_message_id="trail-archive",
+            require_write=True, message_meta={"declared_author": author, "late_report_sha256": "a" * 64,
+                                              "late_report_id": "trail-archive"})
+    else:
+        source = _accept(bridge, tmp_path, text, author, body)
+        frame = bridge._inbox.get_nowait()
+        record_inbound_message(bridge, frame, chat_id=1, user_id=0, client_message_id=source["client_message_id"],
+                               text=text, ts=source["ts"])
+    address = format_address(row_address(source))
+
+    excerpt = {"text": sentence, "start_utf16": 3}
+    bridge.handle_web_message("Let's take that trail.", client_message_id="trail-reply",
+                              task_metadata={"reply_to": address, "reply_excerpt": excerpt})
+    _, saved = dialogue_test.chat_rows(tmp_path)
+    quoted = saved["reply_to"]
+    assert quoted["address"] == address and quoted["row_sha256"] == row_address(source)["row_sha256"]
+    assert quoted["excerpt"] == excerpt
+    assert quoted["author_label"] == 'agent "Trail Notebook" (declared, not verified)'
+    assert echoes[-1]["reply_to"] == quoted
+    queued = bridge._inbox.get_nowait()
+    reference = queued["task_metadata"]["reply_reference"]
+    assert reference == {**quoted, "text": text}
+    kind = "late_result" if late else "agent_note"
+    assert reference["program_source"] == kind
+    target = reply_target(tmp_path, reference)
+    facts = _owner_message_facts(queued["task_metadata"], program_source=kind)
+    assert facts["reply_to"] == {"address": address, "program_source": kind}
+    assert sentence in relation_text(saved) and sentence not in relation_text(saved, model=True)
+    owner = _fresh_reply_owner({"_is_direct_chat": True}, {"origin_message_ref": queued["accepted_source_ref"]}, tmp_path)
+    assert owner["reply_to"] == quoted and owner["text"] == saved["text"]
+    data = program_reply_text(target, root=tmp_path, owner_row=owner, room=1)
+    assert sentence in data and "Trail Notebook" in data and address in data and text not in data
+    if late:
+        assert program_reply_text(target) == relation_text(saved, model=True).strip()
+    history = _history(tmp_path)
+    note_view = next(row for row in history if row["row_address"] == address)
+    assert (note_view["role"], note_view["system_type"], note_view["text"], note_view["declared_author"]) == (
+        "user", "agent_note_received", text, author)
+    assert note_view["ingress_accepted"] is True
+    assert "subagents_mode" not in note_view and "chat_annotation" not in note_view
+    if not late:
+        live = next(echo for echo in echoes if echo.get("declared_author") == author)
+        for key in ("role", "system_type", "sender_label", "ingress_accepted", "ingress_pending", "ingress_dispatched"):
+            assert live.get(key) == note_view.get(key)
+    assert next(row for row in history if row.get("client_message_id") == "trail-reply")["reply_to"] == quoted
+
+
 def test_reply_survives_rotation_and_missing_reference_stays_explicit(tmp_path):
     row = {"chat_id": 1, "ts": "2026-10-01T00:00:00Z", "direction": "in", "text": "yes"}
     dialogue_test.seed(tmp_path, archives={"chat_20261002T000000.jsonl": [row]})

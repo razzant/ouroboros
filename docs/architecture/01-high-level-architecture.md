@@ -337,7 +337,7 @@ ouroboros/ — agent core and shared runtime (§6)
   desktop_autostart.py, windows_autostart.py — Host sign-in adapter table: Windows registry, macOS LaunchAgent, Linux systemd/XDG state (Runtime topology below)
   plan_intention_ledger.py — An ask's `intention` review-ledger record; never a verdict
   plan_record.py — Per-task plan record (schema 3): revisions, asks, typed replies, folds, legacy import (§6 Plan construction and review)
-  provider_models.py, provider_connections.py — Kind table, route grammar, connection rows (§7); model-ID helpers; `ACTIVE_MODEL_SETTING_KEYS` keeps Heavy out of route selection
+  provider_models.py, provider_connections.py — Kind table, route grammar, connection rows and revisions (§7); model IDs; `ACTIVE_MODEL_SETTING_KEYS` keeps Heavy out of routing
   runtime_mode_policy.py — Protected-path policy (§6 Safety and runtime mode)
   schedule_contract.py — Schedule id, 5-field cron and IANA timezone validation SSOT
   post_task_evolution.py — Worker's durable promotion signal for the supervisor idle tick (§6 Background consciousness and Evolution)
@@ -474,7 +474,7 @@ ouroboros/ — agent core and shared runtime (§6)
     settings_secrets.py, secret_rows.py — Explicit single-secret reads; list-row secrets masked/rehydrated by row identity (§3)
     settings.py — /api/settings and /api/owner/*; `GET /api/review-pool` (`ReviewPoolResponse`); an unreadable catalog is a typed `config_error`, never a 500 (§7 Review pool)
     desktop_autostart.py — GET/POST /api/desktop/autostart and /api/desktop/background (§4)
-    control.py — /api/reset, /api/command, /api/git/*, /api/update/*, /api/evolution-data
+    control.py — /api/reset, /api/command (agent notes: agent_note.py), /api/git/*, /api/update/*, /api/evolution-data
     update_progress.py — Retained last-attempt observation, executor stages and boot conclusions; WS invalidation (§3)
     schedules.py — Cron schedule HTTP surface
     files.py — File Browser and chat upload
@@ -495,7 +495,7 @@ ouroboros/ — agent core and shared runtime (§6)
     claudexor_passive.py, claudexor_contracts.py — passive quota read and envelope types (docs/PASSIVE_QUOTA_READ.md)
     claudexor_quota.py — Owned-daemon refresh/reset/receipt proxies; catalog negotiation, exact key/body and typed errors, no start/retry/browser token (§3 Agent accounts; §4)
     harness_maintenance.py — Owner maintenance HTTP over shared service (§6; routes: §4)
-    host_service.py, host_notify.py, host_sign_in.py — Loopback-only Host Service API, /notify `skill_notice` rows, a skill's own sign-in tokens (§12)
+    host_service.py, host_notify.py, host_sign_in.py, host_late_result.py — Loopback notices, skill sign-ins and call-bound returns (§12)
     history.py, history_deliveries.py — Shared Chat room/quiz/media/review/terminal/receipt projection, cost-breakdown factories; delivery rows' `msg_type`
     history_paging.py, history_chronology.py, chat_search.py, chat_archive.py, recall.py — dialogue pages/search/read-only archive, Project `latest_arrival`, neighbour door; no history copy (§3 History reads)
     cost_breakdown.py, cost_period.py — Physical-attempt ledger projections: dashboard, UTC room days, cache periods, root detail

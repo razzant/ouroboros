@@ -540,8 +540,9 @@ HTTP_SHAPES: dict[str, Shape] = {
                                                       "ScheduleActionRequest"),
     "DELETE /api/schedules/{schedule_id}": Shape("200:ScheduleActionResponse 400:ErrorResponse"),
     "POST /api/command": Shape(
-        "200:CommandResponse 400,409:CommandRefusal 503:ErrorResponse", "CommandRequest",
-        note="queued, not done, except /panic: accepted immediately, never queued; /panic and /restart may end the connection before or after the answer"),
+        "200:CommandResponse|AgentNoteResponse 400,409:CommandRefusal 503:ErrorResponse|CommandRefusal",
+        "CommandRequest|AgentNoteRequest",
+        note="queued, not done, except /panic: accepted immediately, never queued; /panic and /restart may end the connection before or after the answer; an agent note is saved, then queued, and never a command"),
     "GET /api/reset": Shape("200:ResetResponse"),
     "POST /api/reset": Shape("400,409:ErrorResponse", "ResetRequest",
                              note="legacy path: refused; the versioned request is POST /api/reset/v1"),

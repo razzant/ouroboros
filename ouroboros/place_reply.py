@@ -352,23 +352,25 @@ def riding_sends(ctx, calls) -> list:
     return riding
 
 
-def _could_be_record_send(call, connector: str) -> bool:
+def _could_be_record_send(call, connector: str, *, include_gestures: bool = False) -> bool:
     """Historical connector calls without their own declaration are unknown, not today's sends or reads."""
     from ouroboros.extension_surface_names import extension_name_prefix
-    from ouroboros.tool_effects import EFFECT_MESSAGE, bound_declaration, effect_of, retained_descriptor
+    from ouroboros.tool_effects import EFFECT_GESTURE, EFFECT_MESSAGE, bound_declaration, effect_of, retained_descriptor
 
     name = str(call.get("tool") or "")
     descriptor = retained_descriptor(call)
     if bound_declaration(descriptor) is not None:
+        effects = (EFFECT_MESSAGE, EFFECT_GESTURE) if include_gestures else (EFFECT_MESSAGE,)
         return (descriptor["skill"] == connector
-                and effect_of(name, ext_tool=descriptor, args=call.get("args")).effect == EFFECT_MESSAGE)
+                and effect_of(name, ext_tool=descriptor, args=call.get("args")).effect in effects)
     return name.startswith(extension_name_prefix(connector))
 
 
 def restore_send_facts(ctx, trace, messages) -> None:
     """Read an interrupted batch before its pending calls get synthetic results. Never resolve its old targets anew."""
     carrier = carrier_now(ctx)
-    if not _door_declared(carrier):
+    connector = str(carrier.get("transport_skill") or "")
+    if not _door_declared(carrier) and not conversation_gesture_tools(connector):
         return
     from ouroboros.budget_pause import pending_tool_call_ids
 
@@ -376,7 +378,6 @@ def restore_send_facts(ctx, trace, messages) -> None:
     if legacy.get("noted") is True:  # this work already read the old record-only reminder
         ctx._records_only_noted = True
     pending = set(pending_tool_call_ids(messages))
-    connector = carrier["transport_skill"]
     batch = next((row for row in reversed(messages)
                   if isinstance(row, dict) and row.get("role") == "assistant"), {}) if pending else {}
     prefix_calls = ({"tool": fn.get("name")} for call in batch.get("tool_calls") or ()
@@ -385,8 +386,8 @@ def restore_send_facts(ctx, trace, messages) -> None:
     prior_calls = trace.get("tool_calls") or () if getattr(ctx, "_place_message_calls", None) is None else ()
     ctx._restored_send_unknown = bool(
         getattr(ctx, "_restored_send_unknown", False) or legacy.get("sends") == "possible"
-        or any(_could_be_record_send(call, connector) for call in prefix_calls)
-        or any(isinstance(call, dict) and _could_be_record_send(call, connector) for call in prior_calls))
+        or any(_could_be_record_send(call, connector, include_gestures=True) for call in prefix_calls)
+        or any(isinstance(call, dict) and _could_be_record_send(call, connector, include_gestures=True) for call in prior_calls))
 
 
 def restored_riding_send(ctx, calls) -> bool | None:
@@ -604,6 +605,44 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
                                 **({"quiet": True} if record else {})}
     ctx._presence_completion_accepted = True
     return True, ""
+
+
+def accept_focus_completion(ctx, usage: dict, terminal_origin: str) -> None:
+    """At the loop's common accepted exit, record the selected Presence outcome. Explicit silence is the
+    model's own silent selection, not a transport's record-only reply, a hold, delivery by a tool, or the
+    host-set quiet of a planned report. A response sent or still possible in this conversation is not silence."""
+    completion = getattr(ctx, "_presence_completion", None)
+    if not isinstance(completion, dict):
+        return
+    ctx._presence_completion_accepted = True
+    usage.update(presence_completion_outcome=completion["outcome"], terminal_origin=terminal_origin)
+    selected = getattr(ctx, "_completion_selected", None) or {}
+    from ouroboros.loop_completion_schema import SCHEDULE_DOOR
+    if (completion["outcome"] != "silent" or selected.get("wake_silent") is not True
+            or selected.get("source") == SCHEDULE_DOOR  # the schedule door's wake_silent is the host's plan, never the model's own choice
+            or any(getattr(ctx, key, None) for key in ("_focus_reply_hold", "_owner_message_sent",
+                                                        "_completion_riding_send", "_restored_send_unknown"))):
+        return
+    try:
+        carrier = carrier_now(ctx, getattr(ctx, "task_metadata", None) or {})
+        if not carrier or _conversation_has_response(ctx, carrier["conversation_key"]):
+            return
+    except Exception:
+        return  # unreadable evidence cannot strengthen the neutral attention projection
+    usage["presence_explicit_silence"] = True
+
+
+def _conversation_has_response(ctx, conversation_key: str) -> bool:
+    """Both possible calls and typed receipts of this task count; receipts in another conversation do not."""
+    from ouroboros.presence_runner import _latest_receipts, _live_task_rows
+    from ouroboros.tool_access import canonical_data_root
+
+    if any(isinstance(row, dict) and conversation_key in (row.get("conversation_keys") or ())
+           for row in getattr(ctx, "_place_message_calls", None) or ()):
+        return True
+    rows = _live_task_rows(canonical_data_root(ctx), str(ctx.task_id), conversation_key)
+    return any(row["transport"]["delivery"]["state"] in {"accepted", "delivered", "uncertain"}
+               for row in _latest_receipts(rows, same_generation=True) or ())
 
 
 def refusal_facts(ctx) -> str:

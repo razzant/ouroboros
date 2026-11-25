@@ -320,7 +320,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
 
     Drafted and continued work seed the retained owner corpus. Ordinary stamped first
     turns are ``initial_user`` (``run_origin``'s ``owner_ingress``). Unstamped turns
-    and host-composed ``ui_control`` turns use ``initial_text``. A late quiz or
+    and host-composed ``ui_control`` turns use ``initial_text``. An agent-note opening stays outside this corpus. A late quiz or
     living-card press without words is ``owner_press``. A living form with words is
     ``owner_mailbox``. An unavailable living submission or an unresolved late quiz answer
     is ``owner_card_input``. A private Presence quiz with words uses ``owner_quiz_answer``. Confirmed place
@@ -332,6 +332,8 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     existing = getattr(ctx, "_owner_directives", None)
     if isinstance(existing, list) and existing:
         return
+    if getattr(ctx, "_admission_author", None):
+        return  # the note is visible in the dialogue, not an opening owner input
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     from ouroboros.answer_facts import answer_source, card_input

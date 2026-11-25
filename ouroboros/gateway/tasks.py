@@ -117,7 +117,7 @@ _RESERVED_METADATA_KEYS = frozenset({
     "origin_message_ref", "origin_message_snapshot", "reply_reference",
     "origin_suppressed", "origin_message_absent", "presence_binding_relation",
     # Who wrote the text, the words a tree carries and a control press: host attestations, never a caller's.
-    "objective_author", "context_author", "owner_corpus", "ui_control",
+    "objective_author", "context_author", "owner_corpus", "ui_control", "declared_author", "admission_author",
     "governing_owner_words", "governing_owner_words_absent", "governing_schedule_text",
 })
 

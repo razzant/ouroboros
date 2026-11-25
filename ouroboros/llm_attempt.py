@@ -558,6 +558,7 @@ def _attempt_request(
         prompt_chars = len(str(prompt_payload or ""))
     from ouroboros.context_fit import bounded_prompt_tokens_for_payload
     from ouroboros.context_window import signed_first_contact
+    from ouroboros.physical_attempt_context import with_dispatch_account
 
     bounded_tokens = bounded_prompt_tokens_for_payload(prompt_payload, prompt_chars)
     request_source = source
@@ -595,8 +596,9 @@ def _attempt_request(
         candidate_context_sha256=hashlib.sha256(context).hexdigest(),
         candidate_context_size_bytes=len(context),
         candidate_measurement_kind="canonical_json_v1",
-        physical_context=signed_first_contact(current_physical_attempt_context(), target, payload, reply_cap)
-        or helper_context_for(target, payload),
+        physical_context=with_dispatch_account(
+            signed_first_contact(current_physical_attempt_context(), target, payload, reply_cap)
+            or helper_context_for(target, payload), str(target.get("dispatch_account") or "")),
         route_is_loopback=is_loopback_base_url(target.get("base_url")),
         prompt_tokens_bounded_estimate=bounded_tokens,
         prompt_tokens_exact=measured.get("input_tokens"),
@@ -769,6 +771,13 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 )
                 failure.candidate_manifest_ref = persisted["manifest_ref"]
                 raise failure
+        from ouroboros.physical_attempt_context import check_wire_admission
+
+        try:
+            check_wire_admission(request, candidate, reservation)
+        except PhysicalAttemptPreconditionFailed as exc:
+            exc.candidate_manifest_ref = persisted["manifest_ref"]
+            raise
         if prepare is not None:
             prepare(reservation, canonical_bytes=raw, sha256=request.candidate_raw_sha256,
                     size_bytes=request.candidate_raw_size_bytes)

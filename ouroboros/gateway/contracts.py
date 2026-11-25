@@ -32,7 +32,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
 )
 from ouroboros.gateway.work_contracts import ProcessingTiers, TaskCancelRequest, WorkLeadFields, WorkStateFields  # noqa: F401
 from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
-from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
+from ouroboros.gateway.history_contracts import AgentNoteFields, ChatHistoryResponse, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
     AttachmentManifestEntry, ChatAttachmentInbound, ChatAttachmentView,
@@ -120,7 +120,7 @@ class TransportMetadata(TypedDict, total=False):
     sender_label: str
 
 
-class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
+class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField, AgentNoteFields):
     """Outbound WS chat frame."""
 
     presence_contact: NotRequired[PresenceContact]
@@ -294,7 +294,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     review_overrides: NotRequired[Dict[str, Any]]  # the work's review-gate field (TaskDetailResponse), on its summary
     worker_saturation_warning: NotRequired[bool]
     source: NotRequired[str]
-    sender_label: NotRequired[str]
+    sender_label: NotRequired[str]  # a program note's rendered identity, as in history
     sender_session_id: NotRequired[str]
     client_message_id: NotRequired[str]
     subagents_mode: NotRequired[Literal["swarm"]]  # Accepted owner message, never a client claim.

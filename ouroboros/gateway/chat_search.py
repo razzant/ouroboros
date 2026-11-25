@@ -192,6 +192,14 @@ def _candidate(entry, data_dir, answers=None) -> Dict[str, Any]:
     if entry.get("narration") is True:  # authored words outrank a stale host type (host_notice_text.js)
         found["narration"] = True
     found.update(host_notice.view(entry))  # a notice's line is its visible words (a read: no translation is offered)
+    from ouroboros.dialogue_provenance import agent_note_text, declared_author
+
+    if author := declared_author(entry):  # an agent's note: its literal body as program data, as history shows it
+        found["role"] = "user"
+        found["text"] = agent_note_text(entry)
+        found["declared_author"] = author
+        if entry.get("late_report_id"):
+            found["late_report_id"] = entry["late_report_id"]
     if found["role"] == "user" and isinstance(entry.get("attachments"), list) and entry["attachments"]:
         # History's own views (``attachment_views``, its stat witness too): a card or a player shows the name, an
         # available image only its picture.

@@ -17,6 +17,7 @@ from ouroboros.artifacts import store_chat_media_bytes
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.event_bus import CHAT_DOCUMENT, CHAT_LINKS, CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ, CHAT_QUIZ_STATE, CHAT_TYPING, CHAT_VIDEO, publish_event
 from ouroboros import dialogue_store
+from ouroboros.dialogue_provenance import declared_author
 from ouroboros.store import StoreError, acquisition_budget
 from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
 from supervisor.state import load_state
@@ -364,8 +365,13 @@ class LocalChatBridge:
         record that copies the fact carries it. Panic uses the server's independent
         emergency owner; ordinary ingress is a dict put, no lock or I/O."""
         clean_text = str(text or "").strip()
-        if isinstance(accepted_source_row, dict) and (accepted_source_row.get("late_answer") or accepted_source_row.get("card_press")):
-            clean_text = accepted_source_row["text"]  # an accepted card submission retains the edges of entered values
+        author = declared_author(accepted_source_row)
+        if author:
+            from ouroboros.dialogue_provenance import agent_note_text
+
+            clean_text = agent_note_text(accepted_source_row)  # the canonical host receipt itself is not the payload
+        elif isinstance(accepted_source_row, dict) and (accepted_source_row.get("late_answer") or accepted_source_row.get("card_press")):
+            clean_text = accepted_source_row["text"]  # these accepted words retain their edges
         caption_text = str(image_caption or "").strip()
         if (source == "skill:telegram" and caption_text and isinstance(accepted_source_row, dict)
                 and accepted_source_row.get("text") == str(image_caption) and not accepted_source_row.get("text_placeholder")):
@@ -373,7 +379,8 @@ class LocalChatBridge:
         image_b64 = str(image_base64 or "").strip()
         if not clean_text and caption_text:
             clean_text = caption_text
-        if self.panic.request(clean_text, source=source, user_id=user_id, chat_id=chat_id):
+        # An agent's note is literal text, "/panic" included: only the owner's own command stops everything.
+        if not author and self.panic.request(clean_text, source=source, user_id=user_id, chat_id=chat_id):
             return
         if not clean_text and not image_b64 and not (task_metadata or {}).get("chat_attachment_uploads"):
             return  # nothing to say and nothing attached (a file-only message carries uploads)
@@ -418,6 +425,8 @@ class LocalChatBridge:
         progress_meta: Optional[Dict[str, Any]] = None,
         role: str = "",
         system_type: str = "",
+        *,
+        local_only: bool = False,
     ) -> Tuple[bool, str]:
         """Send text to UI, A2A subscribers, and host event stream.
 
@@ -432,8 +441,10 @@ class LocalChatBridge:
         # without it render escaped). The old best-effort strip here predated
         # that client contract and only made live diverge from history replay.
         message_ts = ts or utc_now_iso()
-        transport = self.chat_transport(chat_id)
+        transport = {} if local_only else self.chat_transport(chat_id)
         meta = dict(progress_meta or {})
+        if local_only:
+            meta.pop("transport", None)
         msg = {
             "type": "text",
             "content": text,
@@ -444,14 +455,15 @@ class LocalChatBridge:
         }
         if meta:
             msg.update(meta)
-        with self._response_subs_lock:
-            subs = [(sid, cb) for sid, (cid, cb) in self._response_subs.items()
-                    if cid == chat_id and not is_progress]
-        for sid, cb in subs:
-            try:
-                cb(text)
-            except Exception:
-                log.debug("A2A response callback error for sub %s", sid, exc_info=True)
+        if not local_only:
+            with self._response_subs_lock:
+                subs = [(sid, cb) for sid, (cid, cb) in self._response_subs.items()
+                        if cid == chat_id and not is_progress]
+            for sid, cb in subs:
+                try:
+                    cb(text)
+                except Exception:
+                    log.debug("A2A response callback error for sub %s", sid, exc_info=True)
         if self._broadcast_fn and not is_a2a_chat_id(chat_id):
             payload = {
                 "type": "chat",
@@ -472,7 +484,7 @@ class LocalChatBridge:
             payload.pop("project_thread", None)
             stamp_project_thread(DATA_DIR, payload)
             self._broadcast_fn(payload)
-        if not is_a2a_chat_id(chat_id):
+        if not local_only and not is_a2a_chat_id(chat_id):
             event = {
                 "chat_id": int(chat_id or 0),
                 "text": text,
@@ -1203,6 +1215,8 @@ def _send_markdown(
     progress_meta: Optional[Dict[str, Any]] = None,
     role: str = "",
     system_type: str = "",
+    *,
+    local_only: bool = False,
 ) -> Tuple[bool, str]:
     """Send markdown text through the bridge."""
     bridge = get_bridge()
@@ -1218,6 +1232,7 @@ def _send_markdown(
         progress_meta=progress_meta,
         role=role,
         system_type=system_type,
+        **({"local_only": True} if local_only else {}),
     )
 
 
@@ -1230,7 +1245,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      narration: Optional[bool] = None,
                      require_write: bool = False,
                      ensure_record_boundary: bool = False,
-                     replay_delivery_id: str = "") -> Dict[str, Any] | bool:
+                     replay_delivery_id: str = "",
+                     *, local_only: bool = False) -> Dict[str, Any] | bool:
     """Send an owner-visible row with one voice and timestamp for history and live.
 
     Narration True means model speech, False host speech; absent legacy rows keep
@@ -1333,7 +1349,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         meta.pop("origin_reply", None)  # only the stored row needs this provenance for future room moves
         if _text.strip() in ("", "\u200b"):
             return {"chat_id": chat_id}
-        if "transport" not in meta and (carried := live_transport(
+        if not local_only and "transport" not in meta and (carried := live_transport(
                 DATA_DIR, meta, lambda: get_bridge().chat_transport(chat_id), task_id,
                 role=role, system_type=system_type, is_progress=is_progress)):
             meta["transport"] = carried  # live only, after the rows are written: a room's binding stays its own
@@ -1352,10 +1368,11 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             if not record_replay_dispatch(DATA_DIR, replay_delivery_id):
                 return False
         try:
+            local = {"local_only": True} if local_only else {}
             if fmt == "markdown":
-                receipt = _send_markdown(chat_id, full, **transport, role=role, system_type=system_type)
+                receipt = _send_markdown(chat_id, full, **transport, role=role, system_type=system_type, **local)
             else:
-                receipt = get_bridge().send_message(chat_id, full, **transport, role=role, system_type=system_type)
+                receipt = get_bridge().send_message(chat_id, full, **transport, role=role, system_type=system_type, **local)
             if meta.get("delivery_id"):
                 ok, err = receipt
                 if not ok:

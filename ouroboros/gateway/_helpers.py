@@ -158,6 +158,21 @@ def json_error(message: str, status: int = 500, **extra: Any) -> JSONResponse:
     return UTF8JSONResponse(payload, status_code=status)
 
 
+def boot_precondition(body: dict) -> JSONResponse | None:
+    """A command's or an agent note's optional ``if_boot``: refused before anything is queued when it is not a
+    non-empty string (400) or the server restarted since that boot (409 ``boot_changed``); None otherwise."""
+    if "if_boot" not in body:
+        return None
+    from ouroboros.server_liveness import BOOT
+
+    expected = body["if_boot"]
+    if not isinstance(expected, str) or not expected:
+        return json_error("if_boot must be a non-empty boot.since string", 400, accepted=False)
+    if expected != BOOT.snapshot(jobs=False)["since"]:
+        return json_error("Ouroboros restarted before this command arrived.", 409, accepted=False, reason_code="boot_changed")
+    return None
+
+
 def migrating_error(drive_root: Any) -> JSONResponse | None:
     """The write doors' 503 while the boot import owns the store (P1), else ``None``."""
     from ouroboros.store import migrating

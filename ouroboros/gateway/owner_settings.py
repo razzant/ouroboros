@@ -873,6 +873,7 @@ def _owner_update_settings(
     Returns the commit's receipt (``_committed_changes``), taken under the same lock after the bytes
     land; empty when nothing was written or nothing changed."""
     from ouroboros import config as _config
+    from ouroboros.provider_connections import record_connection_revisions, settings_snapshot
 
     _config._guard_live_settings_write()
     _config.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -888,7 +889,10 @@ def _owner_update_settings(
             if refusal:
                 raise SettingsPreconditionFailed(refusal)
         document: Dict[str, Any] = {}
+        read_snapshot = settings_snapshot()
         current = _owner_read_settings_raw(document_out=document, strict=True)
+        if settings_snapshot() != read_snapshot:
+            read_snapshot = None  # the read may straddle another write: no connection revision is carried from it
         if expected_digest and settings_document_digest() != expected_digest:
             raise SettingsPreconditionFailed(STALE_SETTINGS_READ_REFUSAL)
         check_setting_tokens(document, if_unchanged)
@@ -933,6 +937,7 @@ def _owner_update_settings(
             commit()
         elif not commit_if_current(commit):
             return {}  # a replay found this decision already saved
+        record_connection_revisions(read_snapshot, document, to_write)  # still under the lock; never raises
         try:
             changes = _committed_changes(document, shown, to_write, effective_before)
             if boundary is not None:

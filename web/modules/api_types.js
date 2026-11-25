@@ -466,7 +466,9 @@
  * @property {Object=} review_overrides The work's review-gate field (TaskDetailResponse), on its summary rows.
  * @property {boolean=} worker_saturation_warning
  * @property {string=} source
- * @property {string=} sender_label
+ * @property {string=} sender_label A program note's rendered identity, as in history.
+ * @property {import('./client_contract_types.js').DeclaredAuthor=} declared_author An agent's note in Main, never the owner's words.
+ * @property {string=} late_report_id The displayed letter id, not the host return reference.
  * @property {string=} sender_session_id
  * @property {string=} client_message_id
  * @property {"swarm"=} subagents_mode  // host annotation at owner-message acceptance

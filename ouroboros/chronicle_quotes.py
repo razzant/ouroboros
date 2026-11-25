@@ -10,7 +10,9 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Optional, Tuple
 
-SPEAKERS = frozenset({"human", "ouroboros", "child", "host", "helper", "unattributed"})
+# ``agent``: a program's note under its declared author (``dialogue_provenance.row_author``), its literal body the
+# quotable words (``quote_parts``); never the owner, the host or Ouroboros. The tool's speaker enum derives from this set.
+SPEAKERS = frozenset({"human", "ouroboros", "child", "host", "helper", "unattributed", "agent"})
 QuoteSource = str | tuple[str, ...]
 QuoteResolver = Callable[[Any], Optional[Tuple[QuoteSource, str]]]
 
