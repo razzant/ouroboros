@@ -10,6 +10,7 @@ from ouroboros.composer_cognition import update_project_cognition
 from ouroboros.subagent_runtime import subagents_availability
 from ouroboros.gateway.history import make_chat_history_endpoint
 from supervisor import message_ingress
+from tests._dialogue import confirm_first_use
 from tests.test_task_settings_snapshot import document, isolated_runtime, save_owner  # noqa: F401
 from tests.test_chat_attachments import _web_bridge
 
@@ -60,6 +61,7 @@ def test_unannotated_legacy_history_is_readable_and_has_no_inferred_label():
     save_owner({**document("old"), "OUROBOROS_SUBAGENTS_MODE": "swarm"})
     path = config.DATA_DIR / "logs/chat.jsonl"
     path.parent.mkdir(exist_ok=True)
+    confirm_first_use(config.DATA_DIR)  # the installation's first use is confirmed before its old rows are saved
     path.write_text(json.dumps({"direction": "in", "chat_id": 1, "user_id": 1,
                                "text": "old row", "ts": "2026-10-01T01:00:00Z"}) + "\n")
     response = asyncio.run(make_chat_history_endpoint(config.DATA_DIR)(SimpleNamespace(query_params={})))

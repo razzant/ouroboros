@@ -59,6 +59,36 @@ def test_a_resumed_turn_keeps_its_own_unconfirmed_acts(tmp_path):
     assert restored.unconfirmed_routing_acts == []
 
 
+def test_a_resumed_turn_keeps_its_confirmed_reply_works_only_for_the_same_task(tmp_path):
+    """A cold continuation restores the exact confirmed reply set: a start/tell confirmed at call
+    time never enters unconfirmed_routing_acts, so the set must ride the continuation itself. A
+    successor of another task id borrows no reply authority, and a legacy/empty state leaves the
+    attribute absent exactly as a fresh turn that confirmed nothing (never guessed from a fresher id)."""
+    import json
+
+    from ouroboros.owner_wait import continuation_state, restore_continuation_state
+
+    ctx = types.SimpleNamespace(task_id="turn-1", unconfirmed_routing_acts=[],
+                                _confirmed_reply_works={"work-a", "work-b"})
+    state = json.loads(json.dumps(continuation_state(ctx, [], {}, {}, 1, [], set())))
+    assert state["confirmed_reply_works"] == ["work-a", "work-b"]
+
+    restored = types.SimpleNamespace(task_id="turn-1", unconfirmed_routing_acts=[])
+    restore_continuation_state(types.SimpleNamespace(_ctx=restored), state, [], {}, {}, set())
+    assert restored._confirmed_reply_works == {"work-a", "work-b"}
+
+    # A successor (a different task id, e.g. an idle retry) borrows no reply authority.
+    successor = types.SimpleNamespace(task_id="turn-2", unconfirmed_routing_acts=[])
+    restore_continuation_state(types.SimpleNamespace(_ctx=successor), state, [], {}, {}, set())
+    assert not hasattr(successor, "_confirmed_reply_works")
+
+    # A legacy state without the key restores none, leaving the attribute absent.
+    legacy = {key: value for key, value in state.items() if key != "confirmed_reply_works"}
+    fresh = types.SimpleNamespace(task_id="turn-1", unconfirmed_routing_acts=[])
+    restore_continuation_state(types.SimpleNamespace(_ctx=fresh), legacy, [], {}, {}, set())
+    assert not hasattr(fresh, "_confirmed_reply_works")
+
+
 # --- (d) an admitted promote names where the task actually landed -------------
 
 

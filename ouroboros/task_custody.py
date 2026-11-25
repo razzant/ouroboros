@@ -449,6 +449,9 @@ def capture_unread_mail(root: Any, task_id: str) -> Optional[Dict[str, Any]]:
 
 def unread_mail_notice(custody: Any, *, preview_chars: int = 300, limit: int = 10) -> str:
     """One bounded host line naming the unread mail a result holds and where its exact rows are."""
+    from ouroboros.dialogue_provenance import unread_mail_line
+    from ouroboros.owner_mailbox import PROVENANCE_AGENT_NOTE
+
     held = merge_unread_mail(custody)
     if not held or not held["rows"]:
         return ""
@@ -459,11 +462,9 @@ def unread_mail_notice(custody: Any, *, preview_chars: int = 300, limit: int = 1
         except (TypeError, ValueError):
             entry = {}
         entry = entry if isinstance(entry, dict) else {}
-        text = str(entry.get("text") or "")
-        source = str(entry.get("source_task_id") or "owner")
-        shown.append(f"- {entry.get('ts') or '?'} {entry.get('kind') or 'owner_text'} from {source}: "
-                     + text[:preview_chars] + (f" [... {len(text) - preview_chars} more chars]"
-                                               if len(text) > preview_chars else ""))
+        default_source = "owner" if (entry.get("kind") or "owner_text") in OWNER_MAIL_KINDS else "not recorded"
+        shown.append(unread_mail_line(entry, preview_chars=preview_chars, default_source=default_source,
+                                      program=entry.get("provenance") == PROVENANCE_AGENT_NOTE))
     more = held["total"] - len(shown)
     return (f"[UNREAD_MAILBOX] {held['total']} message(s) written to this task's mailbox were never read by "
             "its model" + ("" if held["read_complete"] else " (the last mailbox read was incomplete)") + ":\n"
@@ -511,8 +512,8 @@ def _owner_mail_fields(current: Dict[str, Any], captured: Dict[str, Any]) -> Dic
 
 def settle_task_mailbox(canonical_root: Any, task_id: str, mailbox_root: Any, *, carry_inputs: bool = True,
                         stop: Optional[Callable[[], bool]] = None) -> bool:
-    """Unlink one mailbox and its acks only once the task is settled with post-work and input
-    copy closed (``owner_mailbox.settled_mailbox_cleanup_allowed``) and the canonical row
+    """Unlink one mailbox, its acks and any intake fact beside them only once the task is settled with post-work and
+    input copy closed (``owner_mailbox.settled_mailbox_cleanup_allowed``) and the canonical row
     durably holds every owner row (acknowledged ones included), every unread row
     AND a verified canonical projection of every input-bearing
     row's attachments (a drive's acknowledged inputs are carried through
@@ -521,12 +522,12 @@ def settle_task_mailbox(canonical_root: Any, task_id: str, mailbox_root: Any, *,
     such a mailbox for the off-loop sweep or the drive settlement. ``stop()`` is the off-loop
     generation's close, fenced over every copy and asked again after each lock wait, at the
     row commit and before the unlinks: a close keeps the mailbox. A no-op retry rewrites
-    nothing. Returns whether the mailbox is gone."""
-    from ouroboros.owner_mailbox import promote_owner_attachments, settled_mailbox_cleanup_allowed
+    nothing. Returns whether the mailbox and its intake fact are gone, never a fact that stayed."""
+    from ouroboros.owner_mailbox import promote_owner_attachments, retire_intake, settled_mailbox_cleanup_allowed
 
     canonical, source = pathlib.Path(canonical_root).resolve(strict=False), pathlib.Path(mailbox_root)
     mailbox = _mailbox_path(mailbox_root, task_id)
-    acks = mailbox.with_name(f"{validate_task_id(task_id)}.acks.jsonl")
+    acks, intake = (mailbox.with_name(f"{validate_task_id(task_id)}{end}") for end in (".acks.jsonl", ".intake.json"))
     with publication_fence(stop):
         try:
             current = load_task_result(canonical, task_id, strict=True) or {}
@@ -563,8 +564,7 @@ def settle_task_mailbox(canonical_root: Any, task_id: str, mailbox_root: Any, *,
                         raise _Retained("unread_mailbox_unreadable")
                     owner_capture = capture_owner_mail(canonical, task_id)
                     def mail_fields(row):
-                        return {**_mail_fields(row, rows, inputs),
-                                **_owner_mail_fields(row, owner_capture)}
+                        return {**_mail_fields(row, rows, inputs), **_owner_mail_fields(row, owner_capture)}
                     if mail_fields(current):
                         _write_custody_fields(canonical, task_id, current, mail_fields,
                                               closed=stop)
@@ -574,11 +574,11 @@ def settle_task_mailbox(canonical_root: Any, task_id: str, mailbox_root: Any, *,
                     fence_publication()
                     mailbox.unlink()
                 acks.unlink(missing_ok=True)
-                return True
+                return retire_intake(intake)  # a loop's positive close (``conversation_lease.close_root_intake``)
         except (_Retained, OSError, ValueError, TimeoutError, StoreError):
             if stop is None or not stop():
                 log.warning("Mailbox of %s kept: its unread rows are not in canonical custody", task_id, exc_info=True)
-            return not mailbox.exists()
+            return not (mailbox.exists() or intake.exists())
 
 
 def _write_custody_fields(canonical_root: Any, task_id: str, observed: Dict[str, Any],

@@ -778,7 +778,9 @@ def copy_generation_hold(drive: Any, entry: Any, record: Dict[str, Any]) -> str:
     """Why RECORD's present checkout is not positively ENTRY's own terminal generation (``""`` when it is): the
     durable record names the run's snapshot, its provisioning owner, target and baseline; the run's execution
     root is that checkout or a folder in it; the run ended; no hand-over took the copy or is pending; and a
-    same-tree continuation's shared copy is not its own before its capture row (as ``_restored_from_pin``)."""
+    same-tree continuation's shared copy is its own only after its capture row (as ``_restored_from_pin``) or
+    when its predecessor's durable record names this run as the one that took this very snapshot over."""
+    from ouroboros.delegate_custody_current import run
     from ouroboros.subagent_worktrees import checkout_whole
     from ouroboros.workspace_copies import same_directory
 
@@ -792,7 +794,14 @@ def copy_generation_hold(drive: Any, entry: Any, record: Dict[str, Any]) -> str:
         return "its recorded copy is no longer present whole"
     if not Path(entry.execution_root).resolve().is_relative_to(copy.resolve()):
         return "the run's execution root is not its recorded copy"
-    if entry.terminal_state not in custody.TERMINAL_STATES or entry.capture_id and not entry.patch_captured:
+    unreceipted = bool(entry.capture_id and not entry.patch_captured)
+    try:
+        prior = run(drive, entry.continuation_of) if unreceipted and entry.continuation_of else None
+    except Exception as exc:  # noqa: BLE001 - an unreadable hand-over proves nothing either way
+        return f"its predecessor's hand-over could not be read ({type(exc).__name__})"
+    if entry.terminal_state not in custody.TERMINAL_STATES or unreceipted and (
+            prior is None or prior.superseded_by != entry.run_id or prior.patch_disposed != custody.SUPERSEDED
+            or prior.snapshot_id != entry.snapshot_id):
         return "the copy is not provably this run's own ended generation"
     return "a hand-over holds its copy" if disposition_refusal(drive, entry) else ""
 

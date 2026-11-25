@@ -20,6 +20,9 @@ pytestmark = [pytest.mark.ui_browser]
 def test_answered_direct_task_waits_through_task_done_and_reload(subscription_ui, tmp_path, main_status):
     ui, page = subscription_ui, subscription_ui["page"]
     task = "post-owner"
+    failed_chip = page.locator(f'#chat-messages .chat-live-card[data-task-id="{task}"] [data-live-phase]').and_(
+        page.get_by_text("Failed", exact=True)
+    )
     row = {"wait_id": "post-light", "task_attempt": 1, "revision": 1, "role": "light",
            "model": "claudexor::codex=gpt-test", "source": "codex", "credential_profile_id": "personal",
            "credential_harness": "codex", "reason": "quota", "reset_at": "", "auto_continue": True,
@@ -70,14 +73,14 @@ def test_answered_direct_task_waits_through_task_done_and_reload(subscription_ui
     page.wait_for_function("before => window.postTaskFrames > before", arg=before_frame)
     assert page.locator('[data-wait-id="post-light"]').is_visible()
     if main_status == "failed":
-        assert page.get_by_text("Failed", exact=True).count() > 0
+        failed_chip.wait_for(state="visible")
     ui["errors"].watch(page)  # the reloads may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="post-light"]')
-    # The wait card can rejoin before the independent history request finishes.
+    # The wait card and answer can rejoin before the saved outcome paints its chip.
     page.get_by_text("final answer", exact=True).wait_for(state="visible")
     if main_status == "failed":
-        assert page.get_by_text("Failed", exact=True).first.is_visible()
+        failed_chip.wait_for(state="visible")
         assert detail()["outcome_axes"]["execution"]["status"] == "failed"
     assert page.get_by_text("final answer", exact=True).is_visible()
     ui_fixture.capture(page, f"post-task-{main_status}-light-wait-after-reload")
@@ -88,4 +91,4 @@ def test_answered_direct_task_waits_through_task_done_and_reload(subscription_ui
     page.wait_for_function("() => !document.querySelector('[data-wait-id=post-light]')")
     assert page.locator('.model-waits').count() == 0
     if main_status == "failed":
-        assert page.get_by_text("Failed", exact=True).first.is_visible()
+        failed_chip.wait_for(state="visible")

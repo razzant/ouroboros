@@ -161,7 +161,8 @@ OFFERED, ELSEWHERE, UNCONFIRMED = "offered", "elsewhere", "unconfirmed"
 
 def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: dict,
                             *, activities_complete: bool = True, bindings_complete: bool = True,
-                            verdicts: dict | None = None, recovery_rooms: dict | None = None) -> dict:
+                            verdicts: dict | None = None, recovery_rooms: dict | None = None,
+                            expired: frozenset = frozenset()) -> dict:
     """Return complete current question forms and existing human recovery controls.
 
     ``verdicts`` is an out-parameter (as the census's ``decision_owners``): task id to what this measurement decided
@@ -170,6 +171,8 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
     work projection places its owner turn by it, so a room's amber and Main's pill never answer from two reads.
     ``recovery_rooms`` maps requested Panic member IDs to optional room fields from the same authority;
     an unresolved label never drops an already observed hold or supplies a Resume decision.
+    ``expired`` names parks whose hard deadline passed while the census withheld their Close: their row says
+    ``deadline_expired`` with the Stop the census already allows, never a token, Resume or hold write.
 
     Project lookup uses the complete registry, including archived/deleting rows;
     a sidebar display limit never changes destination or visibility authority.
@@ -275,7 +278,8 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
             phase = activity.get("phase")
             parked = phase in {"budget_paused", "budget_pausing"}
             if str(activity.get("activity_id") or "") and phase != "unknown" and (
-                    ({} if parked else activity.get("model_waits") or {}) or parked and activity.get("can_resume")):
+                    ({} if parked else activity.get("model_waits") or {}) or parked and (
+                        activity.get("can_resume") or activity.get("close_expired") or activity["activity_id"] in expired)):
                 offered.add(str(activity["activity_id"]))
         if offered:
             try:
@@ -333,7 +337,9 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
         attempt = int(activity.get("task_attempt") or 1)
         parked = phase in {"budget_paused", "budget_pausing"}
         current_waits = {} if parked else activity.get("model_waits") or {}
-        offers = bool(current_waits or parked and activity.get("can_resume"))
+        close = activity.get("close_expired") if parked else None
+        withheld = parked and not close and task_id in expired  # ``expired``: a census-withheld Close; Stop only
+        offers = bool(current_waits or close or withheld or parked and activity.get("can_resume"))
         placed = {}  # the room fields the strict rule proves against the row's own census address
         if not project and (not native_rooms_known or not offers):
             if offers:  # Main's own row whose room the strict rule cannot run for: no room, so no offer
@@ -374,7 +380,7 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
         # The census owner derived can_resume from the row's release rule: own
         # Pause, an unheld sleep and a self-reconciling hold stay quiet.
         waits, can_resume = owner_actions(activity)
-        if not waits and not can_resume:
+        if not waits and not can_resume and not close and not withheld:
             continue
         from ouroboros.work_stop import activity_stop_view
         cause = activity_stop_view(activity)["pause_cause"]
@@ -389,7 +395,7 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
                           "model_waits": waits, "can_resume": can_resume,
                           "cancelable": activity.get("cancelable") is True,
                           "attention_reason": (cause if cause in {"budget", "restart"} else "resume")
-                          if can_resume else "model_access"})
+                          if can_resume else "deadline_expired" if close or withheld else "model_access"})
     questions.sort(key=lambda row: (str(row.get("ts") or ""), row["task_id"], row["quiz_id"]))
     return {"current_questions": questions, "current_questions_complete": questions_complete,
             "current_questions_gaps": gaps,

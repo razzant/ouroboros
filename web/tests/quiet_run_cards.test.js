@@ -4,7 +4,7 @@ import { createChatInstance } from '../modules/chat.js';
 import { summarizeLogEvent, taskTerminalSummary } from '../modules/log_events.js';
 import { censusTaskPhase, desiredLiveCardPhase } from '../modules/task_phase_chip.js';
 import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 // Retain each parsed row's markup, as in chat_activity_block.test.js.
 const innerHTML = Object.getOwnPropertyDescriptor(ElementStub.prototype, 'innerHTML');
@@ -74,7 +74,7 @@ for (const [name, flags, headline, notice] of cases) {
         const rows = [...(withProgress ? [progress] : []), ...(answer ? [answer] : []), summaryRow];
         let reportReads = 0;
         const { prior, mount } = installDom(async (url, options) => ({ ok: true, json: async () => {
-            if (String(url).startsWith('/api/chat/history')) return { messages: rows };
+            if (String(url).startsWith('/api/chat/history')) return { profile_scope: PREVIEW_SCOPE, messages: rows };
             if (String(url) === '/api/tasks/check') {
                 if (options?.cache === 'no-store') reportReads++;  // separate from the card's shared artifact/detail read
                 return { result: RETAINED_REPORT, trace_summary: RETAINED_TRACE };

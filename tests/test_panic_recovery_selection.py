@@ -68,6 +68,49 @@ def test_owner_census_reads_other_rooms_and_members_before_filtering(recovered_g
     assert {r["activity_id"] for r in state["active_chat_activities"]}.isdisjoint({"child"})
 
 
+def test_restored_panic_hold_offers_exact_close_only_after_its_deadline(recovered_gateway, monkeypatch):
+    from ouroboros.gateway.tasks import api_task_cancel
+    from ouroboros.task_results import load_task_result
+    from supervisor import queue
+    from supervisor.restart_retention import hold_after_stop
+
+    gateway = recovered_gateway
+    gateway.client.app.router.add_route("/api/tasks/{task_id}/cancel", api_task_cancel, methods=["POST"])
+    monkeypatch.setattr(queue, "ACCEPTANCE_FENCES", {})
+    monkeypatch.setattr(queue, "PRIOR_DIRECT_ROOTS", {})
+    monkeypatch.setattr(queue, "QUEUE_SEQ_COUNTER_REF", {"value": 0})
+    expired, healthy = "expired-park", "healthy-park"
+    for tid, deadline in ((expired, "2026-01-01T00:00:00Z"), (healthy, "2099-01-01T00:00:00Z")):
+        row = {"id": tid, "root_task_id": tid, "type": "task", "chat_id": 1, "_attempt": 1,
+               "admitted_dispatch": "none", "deadline_at": deadline}
+        write_task_result(gateway.root, tid, "scheduled", root_task_id=tid, chat_id=1, deadline_at=deadline)
+        gateway.pending.append(hold_after_stop(row, gateway.root, eb.HOLD_PANIC))
+    holds = {row["id"]: panic_hold_id(row) for row in gateway.pending}
+    assert all(holds.values()) and queue.publish_queue_snapshot(reason="fixture_panic_retained")
+    gateway.pending.clear()
+    # Model an owner-started generation with no active emergency latch; do not invoke Panic.
+    assert queue.restore_pending_from_snapshot() == 2
+    parked = {row["id"]: row for row in gateway.pending}
+    assert {tid: panic_hold_id(row) for tid, row in parked.items()} == holds
+    untouched = copy.deepcopy(parked[healthy]), load_task_result(gateway.root, healthy)
+
+    state = read_state(gateway)
+    assert state["panic_recovery_complete"]
+    by_id = {row["task_id"]: row for row in state["panic_recovery"]}
+    assert by_id[healthy]["panic_hold_id"] == holds[healthy] and "close_expired" not in by_id[healthy]
+    offer = by_id[expired]["close_expired"]
+    assert (offer["action"], offer["target"], offer["scope"]) == ("close", expired, "cascade")
+    old_resume = _resume(gateway, parked[expired], holds[expired])
+    assert old_resume.status_code == 409 and old_resume.json()["error"] == "deadline_passed", old_resume.text
+    request = {"stop_policy": "close_expired", "close_expired": offer["close_expired"]}
+    assert gateway.client.post(f"/api/tasks/{healthy}/cancel", json=request).status_code == 409
+    closed = gateway.client.post(f"/api/tasks/{expired}/cancel", json=request)
+    assert closed.status_code == 200 and closed.json()["ok"], closed.text
+    assert load_task_result(gateway.root, expired)["cancel_origin"]["source"] == "deadline_close"
+    assert gateway.pending == [untouched[0]] and load_task_result(gateway.root, healthy) == untouched[1]
+    assert read_state(gateway)["panic_recovery"] == [by_id[healthy]] and not gateway.running
+
+
 @pytest.mark.parametrize("gap", ["hold-identity", "activity-availability"])
 def test_a_census_gap_preserves_known_rows_without_certifying_all(recovered_gateway, monkeypatch, gap):
     _held(recovered_gateway, "known")
@@ -364,3 +407,173 @@ def test_owner_panic_return_completes_interrupted_member_choice_only(gateway, mo
     selected = owner_pause.read_fence(gateway.root, root)["selected_members"]
     assert set(selected) == {child_id} and selected[child_id]["grant_id"] == grant["grant_id"]
     assert eb.BUDGET_HOLD_KEY not in child and sibling == saved_sibling and not gateway.running
+
+
+@pytest.mark.parametrize("shape", ["root-with-unbound-member", "helper-with-own-helper"])
+def test_an_expired_panic_hold_without_a_usable_close_is_mains_deadline_row_with_its_existing_stop(
+        recovered_gateway, monkeypatch, shape):
+    """#4123: no token, no Resume choice, no owner turn and no hold write; the Stop is the census's own."""
+    from ouroboros.task_results import load_task_result
+    from supervisor import queue
+
+    gateway = recovered_gateway
+    monkeypatch.setattr(queue, "ACCEPTANCE_FENCES", {})
+    due = "2026-01-01T00:00:00Z"
+    if shape == "root-with-unbound-member":
+        target = _held(gateway, "expired-root")
+        target["deadline_at"] = due
+        blocker = {"id": "queued-kid", "root_task_id": "expired-root", "parent_task_id": "expired-root",
+                   "chat_id": 1, "type": "task", "_attempt": 1, "delegation_role": "subagent"}
+        write_task_result(gateway.root, "queued-kid", "scheduled", root_task_id="expired-root",
+                          parent_task_id="expired-root", chat_id=1, delegation_role="subagent")
+        stop_door = True
+    else:
+        _held(gateway, "lead")
+        target = _held(gateway, "expired-helper", parent="lead")
+        target["deadline_at"] = due
+        blocker = {"id": "nested-kid", "root_task_id": "lead", "parent_task_id": "expired-helper",
+                   "chat_id": 1, "type": "task", "_attempt": 1, "delegation_role": "subagent"}
+        write_task_result(gateway.root, "nested-kid", "scheduled", root_task_id="lead",
+                          parent_task_id="expired-helper", chat_id=1, delegation_role="subagent")
+        stop_door = False
+    gateway.pending.append(blocker)
+    tid, hold, before = target["id"], copy.deepcopy(target[eb.BUDGET_HOLD_KEY]), load_task_result(gateway.root, target["id"])
+
+    state = read_state(gateway)
+    assert tid not in {row["task_id"] for row in state["panic_recovery"]}  # never a Resume choice
+    attention = [row for row in state["main_attention"] if row["task_id"] == tid]
+    if stop_door:
+        [row] = attention
+        assert (row["attention_reason"], row["can_resume"], row["cancelable"]) == ("deadline_expired", False, True)
+        assert "close_expired" not in row and not row["model_waits"]
+        [activity] = [a for a in state["active_chat_activities"] if a["activity_id"] == tid]
+        assert activity["cancelable"] is True and activity["can_resume"] is False and "close_expired" not in activity
+    else:
+        assert all(row["cancelable"] is False and "close_expired" not in row for row in attention)
+    assert target[eb.BUDGET_HOLD_KEY] == hold and load_task_result(gateway.root, tid) == before  # nothing written
+    resumed = _resume(gateway, target)
+    assert resumed.status_code == 409 and resumed.json()["error"] == "deadline_passed", resumed.text
+
+    gateway.pending.remove(blocker)  # once nothing Close would not take remains, the exact offer returns
+    by_id = {row["task_id"]: row for row in read_state(gateway)["panic_recovery"]}
+    assert by_id[tid]["close_expired"]["target"] == tid
+
+
+@pytest.mark.parametrize("lineage", ["recovered", "unnamed"])
+def test_previously_run_work_restored_after_panic_closes_through_the_published_token(recovered_gateway, monkeypatch,
+                                                                                     lineage):
+    """#4123 R3: Panic re-queues attempt 1 as attempt 2 (``restart_retention.recover_saved_running``, the genuine
+    producer) while the stored record keeps attempt 1. /api/state's token is the one Close accepts; a neighbour's
+    ordinary Stop stays an ordinary Stop. Without the producer's named lineage the adjacent attempt is no park."""
+    from ouroboros import working_checkpoint as wc
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.gateway.tasks import api_task_cancel
+    from ouroboros.task_results import load_task_result
+    from supervisor import queue
+    from supervisor.restart_retention import recover_saved_running
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    gateway = recovered_gateway
+    gateway.client.app.router.add_route("/api/tasks/{task_id}/cancel", api_task_cancel, methods=["POST"])
+    monkeypatch.setattr(queue, "ACCEPTANCE_FENCES", {})
+    ran, due = "ran-before-panic", "2026-01-01T00:00:00Z"
+    write_task_result(gateway.root, ran, "running", chat_id=1, root_task_id=ran, task_attempt=1, deadline_at=due)
+    _ctx, limit = _loop_ctx(gateway.root, ran, attempt=1)
+    wc.save_round(limit, "pre_effect")
+    meta = {"task": {"id": ran, "type": "task", "chat_id": 1, "_attempt": 1, "root_task_id": ran, "deadline_at": due},
+            "attempt": 1}
+    [restored] = recover_saved_running([meta], gateway.root, transaction={}, cause="panic", stop_door="panic")
+    assert restored["_attempt"] == 2 and load_task_result(gateway.root, ran)["task_attempt"] == 1
+    source = restored["_working_recovery"]
+    assert (source["source_task_id"], source["from_attempt"]) == (ran, 1)
+    if lineage == "unnamed":
+        restored.pop("_working_recovery")
+    gateway.pending.append(restored)
+    neighbour = _held(gateway, "ordinary-neighbour")
+    saved = read_actor_source_bytes(gateway.root, ran, source["source_ref"])
+
+    state = read_state(gateway)
+    by_id = {row["task_id"]: row for row in state["panic_recovery"]}
+    [activity] = [a for a in state["active_chat_activities"] if a["activity_id"] == ran]
+    assert activity["can_resume"] is False and activity["cancelable"] is True  # Stop stays; Resume would refuse
+    if lineage == "unnamed":
+        assert ran not in by_id and "close_expired" not in activity  # Deadline expired with Stop, no token
+        assert [row for row in state["main_attention"] if row["task_id"] == ran][0]["attention_reason"] == "deadline_expired"
+        return
+    offer = by_id[ran]["close_expired"]
+    assert offer == activity["close_expired"] and offer["target"] == ran
+    request = {"stop_policy": "close_expired", "close_expired": offer["close_expired"]}
+    closed = gateway.client.post(f"/api/tasks/{ran}/cancel", json=request)
+    assert closed.status_code == 200 and "reason_code" not in closed.json(), closed.text
+    record = load_task_result(gateway.root, ran)
+    assert record["status"] == "cancelled" and record["pause_at_close"]["close_token"] == offer["close_expired"]
+    assert read_actor_source_bytes(gateway.root, ran, source["source_ref"]) == saved  # the saved work is kept
+    assert all(row["id"] != ran for row in gateway.pending)
+    replay = gateway.client.post(f"/api/tasks/{ran}/cancel", json=request)
+    assert replay.status_code == 200 and replay.json()["request_id"] == closed.json()["request_id"]
+
+    stop = gateway.client.post(f"/api/tasks/{neighbour['id']}/cancel", json={})
+    assert stop.status_code == 200, stop.text
+    stopped = load_task_result(gateway.root, neighbour["id"])
+    assert stopped["status"] == "cancelled" and "pause_at_close" not in stopped  # an ordinary Stop, not a Close
+    assert ran not in {row["task_id"] for row in read_state(gateway)["panic_recovery"]}
+
+
+def test_an_answered_root_under_owner_pause_closes_its_parked_helper_from_the_published_token(recovered_gateway,
+                                                                                              monkeypatch):
+    """The answered root's deadline lives on its own record: R2's census read a thin row and never offered Close."""
+    from ouroboros.gateway.tasks import api_task_cancel
+    from ouroboros.owner_pause import FENCE_PAUSED, FENCE_REQUESTED, install_fence, read_fence, set_fence_state
+    from ouroboros.task_results import load_task_result
+    from supervisor import queue
+
+    gateway = recovered_gateway
+    gateway.client.app.router.add_route("/api/tasks/{task_id}/cancel", api_task_cancel, methods=["POST"])
+    monkeypatch.setattr(queue, "ACCEPTANCE_FENCES", {})
+    root = "answered-root"
+    write_task_result(gateway.root, root, "running", chat_id=1, root_task_id=root, delegation_role="root", title="A work")
+    write_task_result(gateway.root, root, "completed", result="the answer", deadline_at="2026-01-01T00:00:00Z")
+    fence, _ = install_fence(gateway.root, root, request_id="late-fixture", late_work=True)
+    set_fence_state(gateway.root, root, fence_id=fence["fence_id"], expected_state=FENCE_REQUESTED, state=FENCE_PAUSED)
+    from supervisor.events_budget import _set_root_budget_pause_locked
+    with queue._queue_lock:  # the owner Pause's own tree latch (``owner_pause_control``)
+        _set_root_budget_pause_locked(root, {"fence_id": str(fence["fence_id"]), "cause": "owner_pause",
+                                             "paused_at": str(fence.get("requested_at") or "")})
+    helper = {"id": "late-helper", "root_task_id": root, "parent_task_id": root, "chat_id": 1, "type": "task",
+              "_attempt": 1, "admitted_dispatch": "none", "delegation_role": "subagent"}
+    write_task_result(gateway.root, helper["id"], "scheduled", root_task_id=root, parent_task_id=root, chat_id=1,
+                      delegation_role="subagent")
+    gateway.pending.append(helper)
+
+    from ouroboros import review_operation
+    real_review = review_operation.task_has_live_review_operation
+    with monkeypatch.context() as owned:  # a positively read late review owns the root: the expiry shows, no Close
+        owned.setattr(review_operation, "task_has_live_review_operation",
+                      lambda _root, task_id, **_k: task_id == root or real_review(_root, task_id, **_k))
+        state = read_state(gateway)
+        [activity] = [a for a in state["active_chat_activities"] if a["activity_id"] == root]
+        assert "close_expired" not in activity and activity["can_resume"] is False, activity
+        assert [row for row in state["main_attention"] if row["task_id"] == root][0]["attention_reason"] == \
+            "deadline_expired"
+    # Ending the mock does not move a task-store revision as a real review settlement does.
+    gateway.client.app.state.state_publication.held = None
+    state = read_state(gateway)
+    [activity] = [a for a in state["active_chat_activities"] if a["activity_id"] == root]
+    offer = activity["close_expired"]
+    assert (offer["target"], offer["scope"]) == (root, "cascade") and activity["can_resume"] is False
+    # Its saved synthesis still waits: the expiry shows and Close waits, and a stale press takes no member first.
+    write_task_result(gateway.root, root, "completed", root_phase_checkpoint={"post_task_synthesis": "paused"})
+    state = read_state(gateway)
+    [activity] = [a for a in state["active_chat_activities"] if a["activity_id"] == root]
+    assert "close_expired" not in activity and activity["can_resume"] is False, activity
+    stale = gateway.client.post(f"/api/tasks/{root}/cancel",
+                                json={"stop_policy": "close_expired", "close_expired": offer["close_expired"]})
+    assert stale.status_code == 409 and load_task_result(gateway.root, helper["id"])["status"] == "scheduled"
+    write_task_result(gateway.root, root, "completed", root_phase_checkpoint={"post_task_synthesis": "completed"})
+    closed = gateway.client.post(f"/api/tasks/{root}/cancel",
+                                 json={"stop_policy": "close_expired", "close_expired": offer["close_expired"]})
+    assert closed.status_code == 200 and closed.json()["reason_code"] == "result_kept", closed.text
+    after = load_task_result(gateway.root, root)
+    assert (after["status"], after["result"]) == ("completed", "the answer")
+    assert read_fence(gateway.root, root)["state"] == "released"
+    assert load_task_result(gateway.root, helper["id"])["status"] == "cancelled" and not gateway.pending

@@ -1,7 +1,7 @@
 // Shared real createChatInstance consumer and geometry for project-read tests.
 import assert from 'node:assert/strict';
 import { createChatInstance } from '../modules/chat.js';
-import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
 
 export const TS = '2026-09-28T12:00:00.000Z';
 export const row = (n) => ({
@@ -33,13 +33,13 @@ export function room(t, { onReadingLatest, projectId, fetchHistory } = {}) {
             }
             const page = server.pages?.[k - 1] || { rows: server.older, window: server.olderWindow, coverage: server.olderCoverage };
             const more = k < (server.pages?.length || 1);
-            return { ok: true, json: async () => ({ messages: [...page.rows], page_cursor: `page:older:${k}`,
+            return { ok: true, json: async () => ({ messages: [...page.rows], profile_scope: PREVIEW_SCOPE, page_cursor: `page:older:${k}`,
                 next_cursor: more ? `older:${k + 1}` : null, has_more: more, coverage: page.coverage,
                 window: { complete: false, truncated_by: ['page'], ...page.window } }) };
         }
         if (String(url).startsWith('/api/chat/history')) {
             const older = Boolean(server.older || server.pages?.length);
-            const data = { messages: [...server.rows], page_cursor: 'page:recent',
+            const data = { messages: [...server.rows], profile_scope: PREVIEW_SCOPE, page_cursor: 'page:recent',
                 next_cursor: older ? 'older:1' : null, has_more: older, window: server.window,
                 coverage: server.coverage };
             reads.push(data.messages.map((item) => item.history_id));

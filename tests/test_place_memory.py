@@ -173,8 +173,10 @@ def test_gateway_keeps_full_place_id_and_its_terminal_summary(tmp_path):
     endpoint = make_chat_history_endpoint(tmp_path)
 
     def words(chat):
+        # A served request always has its app: the history door reads the serving generation from ``app.state``.
         request = Request({"type": "http", "method": "GET", "path": "/api/chat/history",
-                           "query_string": f"chat_id={chat}".encode(), "headers": []})
+                           "query_string": f"chat_id={chat}".encode(), "headers": [],
+                           "app": SimpleNamespace(state=SimpleNamespace())})
         response = asyncio.run(endpoint(request))
         assert response.status_code == 200
         return [row.get("text") for row in json.loads(response.body)["messages"]]

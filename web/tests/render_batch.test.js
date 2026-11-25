@@ -219,8 +219,8 @@ test('sticky single-flight never swallows the post-completion resync', () => {
     // The reconnect branch of the open handler reads the newest page whole (frames sent while away are lost),
     // through the pager. chat_history_integration.test.js exercises queued reconnects and the actual re-fetch.
     assert.match(chatSource, /isReconnect \? historyPager\.read\(\{ fromReconnect: true, whole: true,/);
-    // Every failed sync resets the sticky promise.
-    assert.ok((chatSource.match(/initialHydrationPromise = null;/g) || []).length >= 3);
+    // Every failed sync resets the sticky promise, which the room's profile lifecycle holds (chat_preview.js).
+    assert.ok((chatSource.match(/roomProfile\.resetInitialHydration\(\);/g) || []).length >= 3);
 });
 
 // ──────────── replay-time resync suppression (double-fetch fix) ────────────

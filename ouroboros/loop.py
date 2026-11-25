@@ -438,7 +438,7 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._completion_conflict, ctx._completion_held_sha256, ctx._acceptance_pending_review_choice = False, "", ""
     ctx._result_review_pending, ctx._result_review_shown, ctx._result_review_refused = "", [], {}  # this turn's result review step
     ctx._result_review_request_asked = []
-    ctx._owner_reply_revision = None  # no live reply of an earlier turn answers this turn's owner rows
+    ctx._owner_reply_revision = ctx._answered_reply_rows = None  # no reply of an earlier turn answers this turn's rows
     ctx._delivery_candidate, ctx._delivery_candidate_revision, ctx._delivery_control_required = None, 0, False
     ctx._selected_answer_context = None
     ctx._delivery_evidence_revision, ctx._delivery_evidence_fingerprint = 0, ""
@@ -644,6 +644,8 @@ def run_llm_loop(
                 _owner_msg_seen, owner_ctx=ctx, defer_content_ack=True, place_live_runs=True)
             if pending_candidate and _controls.get("owner_carried_addressed"):
                 ctx._delivery_candidate.finalization_control = "owner_revision_required"
+            if _controls.get("agent_note"):
+                pending_candidate = False  # a ready answer is context, not consideration of new mail
             active_model, active_use_local, active_effort, context_fit_plan, active_context_mode = after_mail(
                 limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode, _controls)
             _held = _delegate_hold_round_top(tools, limit_ctx, _controls, emit_progress,

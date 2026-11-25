@@ -1034,10 +1034,13 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``ouroboros/capability_breakage.py`` ``_keep_main``), so Main's next turn hears a repair.
 # 488 -> 490: the subscription census and its refresh request (``ouroboros/subscription_census.py``), each with
 # its row.
-# 490 -> 494: ``service_sign_in`` names ``state/sign_in``, its ``clients.json``,
-# its ``grants`` directory and ``grants/*/*/*.json``. Pending and account files
-# share the latter spelling and its PERSISTENCE.md row.
-EXPECTED_SCAN_PATHS = 494
+# 490 -> 491: #4148 adds ``state/skill_grant_receipts.json`` (``skill_grant_follow.py``).
+# 491 -> 496: #4196 adds ``state/sign_in``, its ``clients.json``, ``grants`` and
+# ``grants/*/*/*.json``, plus ``state/skills/*/sign_in_withdrawn.json``
+# (``service_sign_in.py``). PERSISTENCE.md already covers both file families.
+# 496 -> 498: call bindings in ``state/extension_late_results/*.json`` and saved API revisions
+# in ``state/connection_revisions.json`` (both documented in PERSISTENCE.md).
+EXPECTED_SCAN_PATHS = 498
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

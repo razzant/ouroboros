@@ -10,7 +10,7 @@ import { createChatInstance } from '../modules/chat.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { taskSourceDownloadUrl } from '../modules/api_client.js';
 import { evidenceLinkHtml } from '../modules/chat_activity.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const HASH = 'a'.repeat(64);
 const SOURCE_REF = { kind: 'task_source', root: 'artifact_store', sha256: HASH, size: 75000,
@@ -109,7 +109,7 @@ test('history replay keeps the late row on its card with its record link', async
           history_position: { source: 'chat', offset: 3 } },
     ];
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] } }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: rows } : { active_direct_turns: [] } }));
     const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
     let instance;
     try {
@@ -160,7 +160,7 @@ test('history replay of a card-less late row keeps its record link on the System
     const rows = [{ ...lateRow('h1', evidenceFor('h1')), chat_id: 1, text: SHORTENED, history_id: 'h-h1-late',
         history_position: { source: 'chat', offset: 1 } }];
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] } }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: rows } : { active_direct_turns: [] } }));
     const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
     let instance;
     try {

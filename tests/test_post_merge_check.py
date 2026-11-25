@@ -1021,6 +1021,106 @@ def test_a_red_node_lane_is_retried_as_one_target(tmp_path):
             assert record["failed"][0]["retry"] == "unknown"
 
 
+@pytest.mark.parametrize("code, receipt, expected", [
+    (0, '{"exit": 0}', 0), (1, '{"exit": 1}', 1),  # a confirmed pass; a confirmed failure of the tests
+    (1, None, 2), (0, None, 2),  # a runner that predates the receipt: its bare exit is unknown, pass or fail
+    (1, '{"exit":', 2),  # a torn record
+    (1, '{"exit": 0}', 2), (0, '{"exit": 1}', 2),  # a record that contradicts the exit
+    (1, '{"exit": true}', 2), (1, '{"exit": "1"}', 2),  # an exit that is no integer (True == 1)
+    (2, None, 2), (2, '{"exit": 1}', 2),  # the launcher's own failure, whatever a record says
+    (127, None, 127), (-9, '{"exit": 1}', -9), (130, None, 130),  # any other exit passes through
+])
+def test_node_retry_and_historical_probe_read_matching_terminal_result(tmp_path, monkeypatch, code, receipt, expected):
+    seen = []
+
+    def invoke(command, *, cwd):
+        assert command[1:4] == [str(tmp_path / "scripts" / "run_tests.py"), "--node", "--evidence-dir"]
+        assert cwd == str(tmp_path)
+        output = Path(command[-1]) / "node.json"
+        assert not output.exists()  # a directory of this call's own: no earlier result can stand in
+        seen.append(Path(command[-1]))
+        if receipt is not None:
+            output.write_text(receipt, encoding="utf-8")
+        return code
+
+    monkeypatch.setattr(pmc.subprocess, "call", invoke)
+    assert pmc.run_node_lane(tmp_path) == expected
+    assert not seen[0].exists()
+
+
+_RECORDS = ("import json, pathlib, sys; "
+            "pathlib.Path(sys.argv[sys.argv.index('--evidence-dir') + 1], 'node.json').write_text(json.dumps({'exit': %d})); "
+            "sys.exit(%d)")
+
+
+@pytest.mark.parametrize("runner, expected", [
+    ("import sys; sys.exit(1)", 2), ("import sys; sys.exit(0)", 2),  # a runner that predates the receipt
+    (_RECORDS % (1, 1), 1), (_RECORDS % (0, 0), 0),  # one whose record names its own exit
+    (_RECORDS % (0, 1), 2),  # one that crashed after recording another
+], ids=["bare 1", "bare 0", "records 1", "records 0", "records another"])
+def test_a_real_runner_process_answers_through_its_receipt(tmp_path, runner, expected):
+    """The claim lives at the process boundary: the child's exit status and the file it wrote reach the check."""
+    script = tmp_path / "scripts" / "run_tests.py"
+    script.parent.mkdir()
+    script.write_text(runner + "\n", encoding="utf-8")
+    assert pmc.run_node_lane(tmp_path) == expected
+
+
+@pytest.mark.parametrize("code, receipt, verdict, retry", [
+    (0, '{"exit": 0}', "flaky", "passed"),  # the red did not repeat: flaky, not handed over
+    (1, '{"exit": 1}', "failed", "failed"),  # the tests failed again
+    (1, None, "failed", "unknown"),  # a bare 1 is no repeat of the red: it stays RED, unconfirmed
+])
+def test_the_node_retry_of_the_head_trusts_only_its_runners_record(tmp_path, monkeypatch, code, receipt, verdict, retry):
+    _selection(tmp_path, node="failure")
+
+    def invoke(command, *, cwd):
+        assert command[1] == str(pmc.REPO_ROOT / "scripts" / "run_tests.py") and cwd == str(pmc.REPO_ROOT)
+        if receipt is not None:
+            (Path(command[-1]) / "node.json").write_text(receipt, encoding="utf-8")
+        return code
+
+    monkeypatch.setattr(pmc.subprocess, "call", invoke)
+    record = pmc.classify(tmp_path, run=lambda *a: pytest.fail("no pytest red to retry"))
+    assert [(row["id"], row["retry"]) for row in record[verdict]] == [(pmc.NODE_LANE, retry)]
+    assert record["complete"] is (retry != "unknown")
+    assert any("Node retry did not run to completion" in problem for problem in record["problems"]) is (retry == "unknown")
+
+
+@pytest.mark.parametrize("runner, verdict", [
+    ("writes its receipt", "culprit"),  # its runner recorded the red it saw: the first bad revision
+    ("predates the receipt", "unattributed"),  # its bare 1 may be a lane that never ran: unknown, so no blame
+])
+def test_a_historical_runners_bare_one_is_unknown_never_a_failure(tmp_path, monkeypatch, runner, verdict):
+    base, middle = "b" * 40, "c" * 40
+    prober = _tree_prober(tmp_path, monkeypatch, {sha: {PROTECTED: "a" * 40} for sha in (base, middle, HEAD)})
+    prober.node = pmc.run_node_lane
+    runners = {base[:12]: (0, '{"exit": 0}'), middle[:12]: (1, '{"exit": 1}' if runner == "writes its receipt" else None)}
+
+    def invoke(command, *, cwd):  # each revision's own runner, found by the name of its worktree
+        code, receipt = runners[Path(cwd).name[-12:]]
+        if receipt is not None:
+            (Path(command[-1]) / "node.json").write_text(receipt, encoding="utf-8")
+        return code
+
+    monkeypatch.setattr(pmc.subprocess, "call", invoke)
+    [result] = pmc.bisect([base, middle, HEAD], [pmc.NODE_LANE], prober)
+    assert result["verdict"] == verdict
+    if verdict == "culprit":
+        assert (result["culprit"], result["last_good"]) == (middle, base)
+    else:
+        assert middle[:12] in result["why"] and "no confirmed Node test result" in result["why"]
+
+
+def test_the_receipt_the_runner_writes_is_the_one_the_check_reads(run_tests, tmp_path, monkeypatch):
+    for lane, name in (((0, "/lane/node"), "passed"), ((1, "/lane/node"), "failed"), ((1, ""), "not run"), ((0, ""), "no tests")):
+        monkeypatch.setattr(run_tests, "_node_lane", lambda lane=lane: lane)
+        evidence = tmp_path / name
+        code = run_tests.main(["--node", "--evidence-dir", str(evidence)])
+        known = bool(lane[1])  # a Node that ran: its test result; none ran: the exit stands alone, so it is unknown
+        assert pmc.confirmed_node_exit(code, pmc._read_json(evidence / "node.json")) == (lane[0] if known else 2), name
+
+
 @pytest.mark.parametrize("sibling_red", [False, True])
 def test_a_retry_pytest_refuses_runs_the_nodes_the_tree_defines(tmp_path, sibling_red):
     red = "tests/t.py::test_p[redacted-value]"
@@ -1098,12 +1198,23 @@ def test_bisection_only_receives_the_ids_that_failed_again(tmp_path, monkeypatch
     assert red and gone in text and "retry: unknown" in text
 
 
-@pytest.mark.parametrize("fault", ["lost export", "runner failure"])
+@pytest.mark.parametrize("fault", ["lost export", "runner failure", "stale", "stale nodes"])
 def test_a_passing_retry_without_a_matching_final_result_stays_unconfirmed(tmp_path, monkeypatch, fault):
     red = "tests/t.py::test_retry"
     _selection(tmp_path, parallel="failure", reports={"parallel": _whole(red, _row(red, "failed"))})
+    direct = tmp_path / "retry"
+    if fault == "stale":
+        _results(direct, _whole(red))
+    elif fault == "stale nodes":
+        _results(direct / "nodes", _whole(red))
+    sessions = []
 
     def retry(ids, directory):
+        sessions.append((list(ids), directory))
+        if fault == "stale nodes" and directory == direct:
+            return _results(directory, [], exit_code=4)
+        if fault in ("stale", "stale nodes"):
+            return 0
         code = _results(directory, _whole(red))
         if fault == "lost export":
             (directory / "results.json").unlink()
@@ -1112,13 +1223,38 @@ def test_a_passing_retry_without_a_matching_final_result_stays_unconfirmed(tmp_p
             return code
         return 2
 
-    record = pmc.classify(tmp_path, run=retry)
+    record = pmc.classify(tmp_path, run=retry, read_source={"tests/t.py": "def test_retry(): pass\n"}.get)
+    assert sessions == [([red], direct)] + ([([red], direct / "nodes")] if fault == "stale nodes" else [])
     assert record["selection_executed"] and not record["complete"]
     assert record["flaky"] == [] and record["failed"][0]["retry"] == "unknown"
     (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
     assert pmc.render_summary(tmp_path, system="windows")[1]
     monkeypatch.setattr(pmc, "first_parent_chain", lambda *_: pytest.fail("no bisection of an unconfirmed retry"))
     assert pmc.main(["attribute", "--evidence-dir", str(tmp_path), "--base", "b" * 40, "--head", HEAD]) == 0
+
+
+@pytest.mark.parametrize("first", ["journal", "abnormal export"])
+def test_an_aborted_first_pass_cannot_send_a_same_phase_retry_to_bisection(tmp_path, monkeypatch, first):
+    red = "tests/t.py::test_retry"
+    rows = _whole(red, _row(red, "failed"))
+    _selection(tmp_path, parallel="failure", reports={"parallel": rows})
+    directory = tmp_path / "parallel"
+    if first == "journal":
+        (directory / "results.json").unlink()
+        (directory / "events.jsonl").write_text("\n".join(json.dumps({"event": "report", **row}) for row in rows[:-1]),
+                                                encoding="utf-8")
+    else:
+        _results(directory, rows, exit_code=2)
+
+    record = pmc.classify(tmp_path, run=lambda ids, dest: _results(dest, rows))
+    assert not record["flaky"] and not record["selection_executed"]
+    assert record["failed"] == [{"id": red, "pass": "parallel", "why": "failed in call", "retry": "first confirmed on retry"}]
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(pmc, "first_parent_chain", lambda *_: pytest.fail("no confirmed first failure to bisect"))
+    assert pmc.main(["attribute", "--evidence-dir", str(tmp_path), "--base", "b" * 40, "--head", HEAD]) == 0
+    assert json.loads((tmp_path / "attribution.json").read_text(encoding="utf-8"))["verdicts"] == [
+        {"id": red, "verdict": "unattributed", "why": "retry: first confirmed on retry"}]
+    assert pmc.render_summary(tmp_path, system="windows")[1]
 
 
 def test_a_check_that_could_not_see_its_failures_says_so(tmp_path):
@@ -1546,7 +1682,9 @@ def test_a_missing_report_does_not_establish_removal_and_a_skip_does_not_establi
     ids = ["tests/t.py", "tests/t.py::test_deselected", "tests/gone.py::test_removed"]
     def run(args, directory):
         assert args == ["tests/t.py"]
-        return _results(directory, [_row("tests/t.py::test_ok"), _row("tests/t.py::test_skip", "skipped", "setup")])
+        skipped = "tests/t.py::test_skip"
+        return _results(directory, [*_whole("tests/t.py::test_ok"), _row(skipped, "skipped", "setup"),
+                                    _row(skipped, phase="teardown")])
     found = pmc.check_ids(ids, tmp_path, read_source={"tests/t.py": "def test_deselected(): pass\n"}.get, run=run)
     assert found == dict(zip(ids, ["skipped", "unknown", "absent"]))
 
@@ -1738,7 +1876,7 @@ def test_source_read_failure_is_not_module_removal(tmp_path, monkeypatch):
 
     def run(args, directory):
         assert args == [red]
-        return _results(directory, [_row(red, "failed")])
+        return _results(directory, _whole(red, _row(red, "failed")))
 
     assert pmc.check_ids([red, unknown, gone], tmp_path, read_source=source, run=run) == {
         red: "failed", unknown: "unknown", gone: "absent"}
@@ -2026,13 +2164,14 @@ def test_attribute_probes_detached_worktrees_of_the_commits_and_removes_them(tmp
         assert args == ["tests/test_v.py::test_value"]
         probed.append(Path(cwd))
         red = (Path(cwd) / "VALUE").read_text(encoding="utf-8").startswith("2")
-        return _results(directory, [_row(args[0], "failed" if red else "passed")])
+        return _results(directory, _whole(args[0], _row(args[0], "failed" if red else "passed")))
 
     def size_session(directory, *, base, mode, cwd, modules=None):  # each probe runs its own tree's size lane
         assert modules == ["tests/test_v.py"]
         measured.append((base, mode, Path(cwd)))
         red = (Path(cwd) / "VALUE").read_text(encoding="utf-8").startswith("2")
-        code = _results(directory, [_row("tests/test_v.py::test_size", "failed" if red else "passed")])
+        test_id = "tests/test_v.py::test_size"
+        code = _results(directory, _whole(test_id, _row(test_id, "failed" if red else "passed")))
         return {**pmc.read_session(directory), "runner_exit": code}
 
     monkeypatch.setattr(pmc, "run_pytest", run)
@@ -2061,8 +2200,9 @@ def test_a_probe_answers_a_size_test_from_the_size_check_of_its_tree(tmp_path, m
 
     def size(tree, directory, modules):
         assert modules == [path]
-        code = _results(directory, [_row(ids[0].removeprefix("size "), "failed"), _row(ids[1].removeprefix("size ")),
-                                    _row(ids[3].removeprefix("size "), "skipped", "setup")])
+        red, green, _, skipped = [nodeid.removeprefix("size ") for nodeid in ids]
+        code = _results(directory, [*_whole(red, _row(red, "failed")), *_whole(green),
+                                    _row(skipped, "skipped", "setup"), _row(skipped, phase="teardown")])
         return {**pmc.read_session(directory), "runner_exit": code}
 
     prober = pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD, size=size,
@@ -2150,7 +2290,7 @@ def _tree_prober(tmp_path, monkeypatch, trees, *, ids=(), importers=None, size_m
         if ran is not None:
             ran.append(list(args))
         selected = [nodeid for nodeid in suite if nodeid in args or nodeid.split("::", 1)[0] in args]
-        code = _results(directory, [_row(nodeid, outcome) for nodeid in selected])
+        code = _results(directory, [row for nodeid in selected for row in _whole(nodeid, _row(nodeid, outcome))])
         return code if runner_exit is None else runner_exit
 
     def size(tree, directory, modules):
@@ -2193,7 +2333,7 @@ def test_inventory_mentions_do_not_block_independent_pytest_and_size(tmp_path, m
 
     def size_run(args, directory, *, cwd, env):
         measured.append(args)
-        return _results(directory, [_row(size_id)])
+        return _results(directory, _whole(size_id))
 
     prober.size = lambda tree, directory, modules: pmc.size_session(
         directory, base=revision, cwd=tree, modules=modules, run=size_run)
@@ -2308,6 +2448,7 @@ def test_an_unparseable_test_candidate_does_not_erase_its_neighbour(tmp_path, mo
     pytest.param("failed", 0, 0, False, "error", id="green-exit-red-row"),
     pytest.param("passed", 0, 1, False, "error", id="wrapper-disagrees"),
     pytest.param("failed", 2, 2, False, "error", id="abnormal-exit"),
+    pytest.param("partial", 0, 0, False, "error", id="no-teardown-for-pass"),
     pytest.param("passed", 0, 0, True, "error", id="stale-pass"),
     pytest.param("failed", 1, 1, True, "error", id="stale-red"),
 ])
@@ -2321,13 +2462,15 @@ def test_historical_pytest_and_size_need_a_fresh_consistent_export(
     prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[nodeid], size_modules={revision: [module]})
     if stale:  # the same evidence directories a second `attribute` invocation would find
         prefix = prober.evidence / "probes" / f"01-{revision[:12]}"
-        _results(prefix, [_row(nodeid, outcome)], exit_code=pytest_exit)
-        _results(prefix.with_name(prefix.name + "-size"), [_row(sized, outcome)], exit_code=pytest_exit)
+        _results(prefix, _whole(nodeid, _row(nodeid, outcome)), exit_code=pytest_exit)
+        _results(prefix.with_name(prefix.name + "-size"), _whole(sized, _row(sized, outcome)), exit_code=pytest_exit)
 
     def run(args, directory, *, cwd, env=None):
         ran.append(args)
         if not stale:
-            _results(directory, [_row(sized if env else nodeid, outcome)], exit_code=pytest_exit)
+            test_id = sized if env else nodeid
+            rows = _whole(test_id, _row(test_id, outcome)) if outcome != "partial" else _whole(test_id)[:-1]
+            _results(directory, rows, exit_code=pytest_exit)
         return runner_exit
 
     prober.run = run

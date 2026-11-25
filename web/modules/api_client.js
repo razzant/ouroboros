@@ -278,6 +278,16 @@ export function cancelTask(taskId, { cascade = false, stopPolicy = '', stopActio
     return Object.keys(body).length ? jsonPost(url, body) : fetchJson(url, { method: 'POST' });
 }
 
+/** Exact parked Close; old bodies reject the policy instead of treating it as a Stop.
+ * @param {string} taskId
+ * @param {string} closeExpired
+ * @returns {Promise<import('./api_types.js').TaskCancelResponse>} */
+export function closeExpiredTask(taskId, closeExpired) {
+    /** @type {import('./api_types.js').TaskCancelRequest} */
+    const body = { stop_policy: 'close_expired', close_expired: closeExpired };
+    return jsonPost(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, body);
+}
+
 const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
 const plainSegments = (text) => typeof text === 'string' && !!text && !text.includes('\\') && !text.includes('\0')
@@ -576,8 +586,11 @@ export const apiClient = {
     harnessMaintenanceOperation,
     cancelHarnessMaintenance,
     /** Read a recent window, replay a room-bound page, or read around a task or exact row address.
-     * Independently of socket readiness, a scoped document consumes only a match from the serving generation. */
+     * Independently of socket readiness, a scoped document consumes only a match from the serving generation.
+     * `requestedAt` (Date.now() as it was asked for) dates the rows: a question's delivery a live frame stated since
+     * is newer than they are (chat_decision observe). */
     chatHistory: async ({ chatId = 1, cursor = null, around = null, signal } = {}) => {
+        const requestedAt = Date.now();
         const scope = documentScope(globalThis.document);
         const params = new URLSearchParams();
         if (chatId !== 1) params.set('chat_id', String(chatId));
@@ -589,7 +602,7 @@ export const apiClient = {
         if (scope && servingScope !== scope) {
             throw Object.assign(new Error('History does not belong to this data profile.'), { foreignProfile: true, servingScope });
         }
-        return data;
+        return { ...data, requestedAt };
     },
     /** While Main's history refuses for the Project registry: one read-only page of a saved room (`room_archive.py`),
      * oldest first; `before` is a page's `next_cursor`. Reads only: it acknowledges nothing.

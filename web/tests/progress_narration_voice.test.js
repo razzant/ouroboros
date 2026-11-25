@@ -15,7 +15,7 @@ import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { buildTimelineItemHtml } from '../modules/chat_activity.js';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { formatMsgTime } from '../modules/utils.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const originalQuery = ElementStub.prototype.querySelector;
 after(() => { ElementStub.prototype.querySelector = originalQuery; });
@@ -35,7 +35,7 @@ const NOTE = 'Checkpoint 3 at round 12';
 function fixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/chat/history')
-            ? { messages: history, window: { complete: true } }
+            ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : { active_direct_turns: [] } }));
     const handlers = new Map();
     let generation = 0;

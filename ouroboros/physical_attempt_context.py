@@ -59,6 +59,7 @@ class PhysicalAttemptContext:
     first_contact_plan: InitVar[Optional[Tuple[str, bool]]] = None
     window_boundary_tokens: InitVar[Optional[int]] = None  # stated boundary, not admission's reserve-adjusted total
     window_record: InitVar[Optional[WindowRecord]] = None  # live capacity terms; not an extra ledger projection
+    dispatch_account: InitVar[str] = ""  # private route witness, not part of the priced or delivered context view
 
     bible_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
     assembly_witnesses: InitVar[tuple] = ()
@@ -67,7 +68,8 @@ class PhysicalAttemptContext:
     def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]], first_contact_scope: str,
                       first_contact_dispatch: Optional[Tuple[int, str]],
                       first_contact_plan: Optional[Tuple[str, bool]], window_boundary_tokens: Optional[int],
-                      window_record: Optional[WindowRecord], bible_source: Optional[Tuple[str, str, int, str]],
+                      window_record: Optional[WindowRecord], dispatch_account: str,
+                      bible_source: Optional[Tuple[str, str, int, str]],
                       assembly_witnesses: tuple, contribution_input: Optional[tuple]) -> None:
         # Only a witness is kept on the instance: without one, ``vars`` holds just the record's fields, and ``replace``
         # reads the class's None back (it reads every InitVar with ``getattr``).
@@ -82,12 +84,36 @@ class PhysicalAttemptContext:
             object.__setattr__(self, "window_boundary_tokens", window_boundary_tokens)
         if window_record is not None:
             object.__setattr__(self, "window_record", window_record)
+        if dispatch_account:
+            object.__setattr__(self, "dispatch_account", dispatch_account)
         if bible_source is not None:
             object.__setattr__(self, "bible_source", tuple(bible_source))
         if assembly_witnesses:
-            object.__setattr__(self, 'assembly_witnesses', assembly_witnesses)
+            object.__setattr__(self, "assembly_witnesses", assembly_witnesses)
         if contribution_input is not None:
-            object.__setattr__(self, 'contribution_input', contribution_input)
+            object.__setattr__(self, "contribution_input", contribution_input)
+
+
+def with_dispatch_account(context: Optional[PhysicalAttemptContext], account: str) -> Optional[PhysicalAttemptContext]:
+    return replace(context, dispatch_account=account) if context is not None and account else context
+
+
+_WIRE_ADMISSION = contextvars.ContextVar("physical_wire_admission", default=None)
+
+
+@contextlib.contextmanager
+def with_wire_admission(check):
+    """One logical caller's extra admission over its final wire copy; never priced or serialized."""
+    token = _WIRE_ADMISSION.set(check)
+    try:
+        yield
+    finally:
+        _WIRE_ADMISSION.reset(token)
+
+
+def check_wire_admission(request, candidate, reservation) -> None:
+    if check := _WIRE_ADMISSION.get():
+        check(request, candidate, reservation)
 
 
 def with_dispatch_stamp(request: Any, stamp: Tuple[int, str]) -> Any:

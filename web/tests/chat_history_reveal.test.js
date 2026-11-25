@@ -191,6 +191,31 @@ test('an exact reference cannot fall back to a task, portal, retained origin or 
     } finally { env.restore(); }
 });
 
+test('after a reload a collapsed child card opens by its System line’s source row and lands on exactly the quoted line', () => {
+    const env = installDomDouble();
+    try {
+        const quoted = 'row:5@then#aaaaaaaaaaaa', neighbor = 'row:5@then#bbbbbbbbbbbb';
+        const feed = env.el('div');
+        env.doc.body.append(feed);
+        const card = env.el('div', { className: 'chat-live-card', dataset: { taskId: 'child', expanded: '0' } });
+        feed.append(card);
+        // The replayed line has no `historyId` (an evolving System line): its source row and reply address name it.
+        const record = { groupId: 'child', root: card, items: [
+            { sourceHistoryId: 'chat:200', replyAddress: neighbor }, { sourceHistoryId: 'chat:201', replyAddress: quoted }] };
+        const lines = () => [neighbor, quoted].map((address, index) => env.el('div', {
+            dataset: { rowAddress: address, sourceHistoryId: `chat:20${index}` }, text: `line ${index}` }));
+        const opened = [];
+        const reveal = createHistoryReveal({ feed, records: new Map([['child', record]]), present: () => true,
+            reading: {}, pager: {}, expand(rec) { opened.push(rec); card.dataset.expanded = '1'; card.append(...lines()); } });
+        const target = reveal.exact(quoted, 'chat:201');
+        assert.deepEqual(opened, [record], 'the owning card was opened by the existing disclosure owner');
+        assert.equal(target.dataset.rowAddress, quoted);
+        assert.equal(target.textContent, 'line 1', 'the quoted line, never the one beside it');
+        // An address the card does not hold stays unavailable, however its source row is named.
+        assert.equal(reveal.exact('row:5@then#cccccccccccc', 'chat:201'), null, 'no node carries that exact address');
+    } finally { env.restore(); }
+});
+
 test('a destination page prepared before switching joins the same pager without a second read', async () => {
     const h = harness(() => { throw new Error('a prepared page must not refetch'); });
     const data = around({ state: 'found', row_address: 'row:1@then#aaaaaaaaaaaa', chat_id: 1, history_id: 'chat:100' });
@@ -233,5 +258,48 @@ test('an exact tucked relay remains a target for its deck owner; other hidden ro
         relay.dataset.deckTucked = '1';
         relay.hidden = true;
         assert.equal(reveal.exact('row:42@a#1'), null, 'an explicitly hidden row stays unavailable');
+    } finally { env.restore(); }
+});
+
+test('around passes server anchor into applyPage and exact reveal never opens or focuses a different revision or adjacent card', async () => {
+    const env = installDomDouble();
+    try {
+        const oldAddr = 'row:1@t1#aaaaaaaaaaaa', newAddr = 'row:1@t2#bbbbbbbbbbbb', neighborAddr = 'row:1@t1#cccccccccccc';
+        const h = harness(() => around({ state: 'found', row_address: oldAddr, history_id: 'progress:10' }));
+        const res = await h.pager.around(oldAddr, () => true);
+        assert.equal(res.status, 'applied');
+        assert.deepEqual(h.applied.at(-1).anchor, { state: 'found', row_address: oldAddr, history_id: 'progress:10' });
+
+        // Collapsed card with only the later revision (even carrying a matching sourceHistoryId) must not open or match oldAddr.
+        const feed = env.el('div');
+        env.doc.body.append(feed);
+        const targetCard = env.el('div', { className: 'chat-live-card', dataset: { taskId: 'child-1', expanded: '0' } });
+        const neighborCard = env.el('div', { className: 'chat-live-card', dataset: { taskId: 'child-2', expanded: '0' } });
+        feed.append(targetCard, neighborCard);
+        const rec1 = { groupId: 'child-1', root: targetCard, items: [{ sourceHistoryId: 'progress:10', replyAddress: newAddr }] };
+        const rec2 = { groupId: 'child-2', root: neighborCard, items: [{ sourceHistoryId: 'progress:11', replyAddress: neighborAddr }] };
+        const opened = [];
+        const reveal = createHistoryReveal({
+            feed, records: new Map([['child-1', rec1], ['child-2', rec2]]), present: () => true,
+            reading: { claim: () => () => true },
+            pager: { around: async () => ({ status: 'applied', anchor: { state: 'found', row_address: oldAddr, history_id: 'progress:10' } }) },
+            expand(rec) {
+                opened.push(rec.groupId);
+                rec.root.dataset.expanded = '1';
+                for (const item of rec.items) {
+                    rec.root.append(env.el('div', { dataset: { rowAddress: item.replyAddress, sourceHistoryId: item.sourceHistoryId }, text: item.headline || 'line' }));
+                }
+            },
+        });
+        assert.deepEqual(await reveal.reference(oldAddr, () => true), { state: 'unavailable', left: true });
+        assert.deepEqual(opened, [], 'neither the evolved card nor an adjacent card is opened when the exact address is absent');
+
+        // Once the anchored earlier revision is present in rec1.items beside the current revision, only rec1 opens and lands on oldAddr.
+        rec1.items.unshift({ sourceHistoryId: 'progress:10', replyAddress: oldAddr, headline: 'Exact earlier update', anchoredCardRow: 'cardrow|sys-1' });
+        const landed = await reveal.reference(oldAddr, () => true);
+        assert.deepEqual(opened, ['child-1']);
+        assert.equal(landed.target.dataset.rowAddress, oldAddr);
+        assert.equal(landed.target.textContent, 'Exact earlier update');
+        assert.equal(neighborCard.dataset.expanded, '0');
     } finally { env.restore(); }
 });

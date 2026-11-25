@@ -25,11 +25,13 @@ from __future__ import annotations
 import functools
 import logging
 import threading
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros import dialogue_store, host_notice
 from ouroboros.chat_uploads import attachment_views, same_message, stored_refs
+from ouroboros.dialogue_provenance import author_words, declared_author
 from ouroboros.store import StoreBusy, StoreError, StoreMigrating
 from ouroboros.subagent_messages import CARD_ROW_PLACEMENTS, SUBAGENT_MESSAGE_FIELDS
 from ouroboros.utils import utc_now_iso
@@ -37,6 +39,9 @@ from ouroboros.utils import utc_now_iso
 log = logging.getLogger(__name__)
 
 _INGRESS_LOCK = threading.Lock()
+LATE_RESULT_DISPATCHER = "late_result"
+AGENT_NOTE_DISPATCHER = "agent_note"
+_PROGRAM_DISPATCHERS = frozenset({AGENT_NOTE_DISPATCHER, LATE_RESULT_DISPATCHER})
 # The dispatchers an obligation can name: replayable from the recorded input and the stored row.
 _DISPATCHERS: Dict[str, Callable[..., Any]] = {}
 
@@ -55,7 +60,8 @@ def _dispatchers() -> Dict[str, Callable[..., Any]]:
     if not _DISPATCHERS:
         from ouroboros.server_control import dispatch_accepted_restart
 
-        _DISPATCHERS.update({"bus": _bus_dispatch, "accepted_restart": dispatch_accepted_restart})
+        _DISPATCHERS.update({"bus": _bus_dispatch, "accepted_restart": dispatch_accepted_restart,
+                             **dict.fromkeys(_PROGRAM_DISPATCHERS, _bus_dispatch)})
     return _DISPATCHERS
 
 
@@ -65,7 +71,8 @@ def dispatcher_name(dispatch: Any) -> Optional[str]:
     if dispatch is None:
         return "bus"
     target = dispatch.func if isinstance(dispatch, functools.partial) else dispatch
-    return next((name for name, known in _dispatchers().items() if known is target and name != "bus"), None)
+    return next((name for name, known in _dispatchers().items()
+                 if known is target and name != "bus" and name not in _PROGRAM_DISPATCHERS), None)
 
 
 def obligation(name: Optional[str], text: str, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -246,11 +253,14 @@ def _chat_record(
             "transport": dict(transport or {}),
             "task_id": str(task_id or ""),
         }
+        meta = dict(message_meta or {})
+        author = declared_author(meta) if direction == "in" else {}
         if direction == "in":
+            record["message_accepted_at"] = utc_now_iso()
+        if direction == "in" and not author:  # a program's note does not express the owner's Swarm request
             from ouroboros.settings_integrity import effective_subagents_mode
 
-            record["message_accepted_at"] = utc_now_iso()
-            sent = (message_meta or {}).get("reply_to") if source == "skill:telegram" else None
+            sent = meta.get("reply_to") if source == "skill:telegram" else None
             room = sent.get("telegram_room_chat_id") if isinstance(sent, dict) else None  # the turn's room, not this chat
             try:
                 if effective_subagents_mode(task={"chat_id": room if type(room) is int and room > 0 else chat_id},
@@ -281,7 +291,8 @@ def _chat_record(
             record["client_surface"] = dict(client_surface)
         # Speech rows persist only the compact identity required to route a
         # child final after progress retention/rotation has removed its cards.
-        meta = dict(message_meta or {})
+        if direction != "in" and not client_message_id and meta.get("row_client_message_id"):
+            record["client_message_id"] = str(meta["row_client_message_id"])  # an outgoing row saved under its own name
         if meta.get("role") == "system":
             record["role"] = "system"
             record["system_type"] = str(meta.get("system_type") or "")
@@ -292,6 +303,16 @@ def _chat_record(
         if isinstance(meta.get("ui_control"), dict) and meta["ui_control"].get("name"):
             # The control my human typed these words into (``ui_control_fact``): a fact about the message.
             record["ui_control"] = {"name": str(meta["ui_control"]["name"])}
+        if author:  # the host's own record (``recorded_author``)
+            # Older bodies must see a host receipt, never these data as their owner's or system instructions.
+            record.update(role="system", system_type="agent_note_received", text="Program message received.",
+                          agent_note_text=text)
+            record["declared_author"], record["sender_label"] = author, author_words(author)
+            if meta.get("late_report_sha256"):
+                record["late_report_sha256"] = meta["late_report_sha256"]
+            if letter_id := meta.get("late_report_id"):
+                record["late_report_id"] = letter_id
+                record["sender_label"] += f" · Letter {letter_id}"
         if isinstance(meta.get("execution_transport"), dict):
             record["execution_transport"] = dict(meta["execution_transport"])
         if direction == "out" and meta.get("logical_room_chat_id") == 1:
@@ -308,6 +329,8 @@ def _chat_record(
                 record[key] = stored_reply(meta[key]) if key == "reply_to" else dict(meta[key])  # no captured source
         if meta.get("reply_to_relay"):
             record["reply_to_relay"] = str(meta["reply_to_relay"])
+        if direction == "out" and isinstance(meta.get("about_work_task_id"), str) and meta["about_work_task_id"]:
+            record["about_work_task_id"] = meta["about_work_task_id"]
         if isinstance(meta.get("presence_contact"), dict):
             record["presence_contact"] = dict(meta["presence_contact"])
         if meta.get("card_press"):
@@ -391,7 +414,7 @@ def reopen_for_owner_message(drive_root, row: dict) -> None:
     """
     from ouroboros.contracts.chat_id_policy import is_project_chat_id
 
-    if (row.get("direction") != "in" or row.get("source") != "web" or row.get("user_id") != 1
+    if (row.get("direction") != "in" or row.get("source") != "web" or row.get("user_id") != 1 or declared_author(row)
             or not is_project_chat_id(row.get("chat_id"))):
         return
     from ouroboros.projects_registry import PROJECT_ACTIVE, list_reserved_projects, update_project
@@ -481,11 +504,15 @@ class ClientMessageIdConflict(ValueError):
 
 
 def rejoin_or_refuse(root, row: dict, source: str, logged: str, refs: Any, reply: Optional[dict] = None,
-                    *, execution_transport: Optional[dict] = None) -> None:
+                    *, execution_transport: Optional[dict] = None, author: Optional[dict] = None, report_digest: str = "") -> None:
     """A redelivered frame may rejoin the accepted row only as the same message of the same source
     (text, ordered attachment content and the Reply it points at)."""
     if row.get("source") != source:
         raise ClientMessageIdConflict("client_message_id is already bound to another source")
+    if declared_author(row) != (author or {}):
+        raise ClientMessageIdConflict("client_message_id already names another author")
+    if (row.get("late_report_sha256") or "") != report_digest:
+        raise ClientMessageIdConflict("another result is already recorded")
     if row.get("execution_transport") != execution_transport:
         from ouroboros.contracts.realtime import RealtimeSetupError
 
@@ -495,25 +522,30 @@ def rejoin_or_refuse(root, row: dict, source: str, logged: str, refs: Any, reply
 
         raise RealtimeSetupError("realtime_restart_required", "this call's accepting process ended; start a new call")
     from ouroboros.chat_references import same_reply
-    if (not same_message(row, logged, refs)
+    from ouroboros.dialogue_provenance import agent_note_text
+    visible = {**row, "text": agent_note_text(row)} if author else row
+    if (not same_message(visible, logged, refs)
             or not same_reply(root, row.get("reply_to") or {}, reply or {})):
         raise ClientMessageIdConflict("client_message_id was already used for a different message")
 
 
-def hand_over(root: Path, chat_id: int, message_id: str, name: Optional[str]) -> bool:
+def hand_over(root: Path, chat_id: int, message_id: str, name: Optional[str], *, claim: str = "") -> bool:
     """The durable "entered" mark before the handoff, stamped with this process: the owed
     dispatch (one winner) or the caller's own dispatcher's entry."""
     if name is None:
         return dialogue_store.note_dispatched(root, chat_id, message_id, process=_process())
-    return dialogue_store.claim_dispatch(root, chat_id, message_id, process=_process())
+    return dialogue_store.claim_dispatch(root, chat_id, message_id, process=_process(), claim=claim)
 
 
-def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, dispatch=None, **message) -> tuple[dict, bool]:
+def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, dispatch=None, author=None,
+                         report_digest: str = "", letter_id: str = "", before_accept=None,
+                         room_echo: bool = False, **message) -> tuple[dict, bool]:
     """Accept a named skill delivery once, then schedule/queue its exact source: ``(row, rejoined)``.
     The ingress lock serializes receipt-before-dispatch. A same-id retry rejoins without dispatch
     unless the row's dispatch is still owed (``pending``: the acceptor died before the handoff):
     then it dispatches, not ``rejoined``. ``retain_inputs`` takes custody of the request's copies
     once a write is attempted or a row is handed over; a refusal before that adopts nothing.
+    ``author``: the host's ``recorded_author`` for an agent's note, written on its row; never request data.
     """
     from ouroboros.owner_relay import owner_row_source
     from ouroboros.chat_uploads import attachment_placeholder, local_message_words
@@ -528,7 +560,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     task_metadata = message.get("task_metadata") or {}
     press = late_press_ref(task_metadata.get("card_press"))
     late_answer = late_answer_ref(task_metadata.get("late_answer"))
-    words = (text if (press or late_answer) and text else
+    words = (text if (author or press or late_answer) and text else
              local_message_words(source, text, str(message.get("image_caption") or "")))
     logged = words or attachment_placeholder(message.get("image_base64"), task_metadata)
     if not logged:
@@ -539,7 +571,9 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
         root, source, chat_id, message_id, message.get("transport"))
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
     placeholder = not words.strip()
-    name = dispatcher_name(dispatch)
+    # A late result's obligation is the actual local routing, not the in-memory put.
+    name = LATE_RESULT_DISPATCHER if report_digest else AGENT_NOTE_DISPATCHER if author else dispatcher_name(dispatch)
+    claim = uuid.uuid4().hex if name == LATE_RESULT_DISPATCHER else ""
     with _INGRESS_LOCK:
         try:
             row = accepted_chat_message(root, chat_id, message_id)
@@ -572,16 +606,20 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                 message["task_metadata"] = carried
         fresh = attempted = False
         if row is None:
+            if before_accept is not None:
+                before_accept()
             attempted = True
             try:
                 receipt = message_bus.accept_chat(
                     chat_id, int(message.get("user_id") or 0), logged, ts=utc_now_iso(), source=source,
                     client_message_id=message_id, sender_label=str(message.get("sender_label") or ""),
-                    transport=message.get("transport"), drive_root=root,
+                    transport=message.get("transport"), drive_root=root, room_echo=room_echo,
                     message_meta={"attachments": refs, "text_placeholder": placeholder, "reply_to": reply,
                                   **({"late_answer": late_answer} if late_answer else {}), **({"card_press": press} if press else {}),
-                                  "execution_transport": (message.get("task_metadata") or {}).get("execution_transport")},
-                    dispatch=obligation(name, text, message))
+                                  "execution_transport": (message.get("task_metadata") or {}).get("execution_transport"),
+                                  **({"declared_author": author} if author else {}),
+                                  **({"late_report_sha256": report_digest, "late_report_id": letter_id} if report_digest else {})},
+                    dispatch=obligation(name, "" if author else text, message))  # canonical receipt holds program data
             finally:
                 # Once the write is attempted, failure may have left the canonical row: transfer input
                 # custody without claiming acceptance or queue success.
@@ -589,17 +627,19 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                     retain_inputs()
             row, fresh = receipt.row, not receipt.duplicate
         if fresh:
-            hand_over(root, chat_id, message_id, name)
+            if not hand_over(root, chat_id, message_id, name, claim=claim):
+                return row, True  # another process took the persisted obligation
         else:
             # The row an earlier delivery landed (or the race lost by a hair): rejoin it, or take its owed dispatch.
             rejoin_or_refuse(root, row, source, logged, refs, reply,
-                            execution_transport=(message.get("task_metadata") or {}).get("execution_transport"))
+                            execution_transport=(message.get("task_metadata") or {}).get("execution_transport"),
+                            author=author, report_digest=report_digest)
             if saved_press := late_press_ref(row.get("card_press")):
                 message["task_metadata"] = {**(message.get("task_metadata") or {}), "card_press": saved_press}
             saved_answer = late_answer_ref(row.get("late_answer"))
             if saved_answer:
                 message["task_metadata"] = {**(message.get("task_metadata") or {}), "late_answer": saved_answer}
-            claimed, reply = dialogue_store.claim_dispatch_with_reply(root, chat_id, message_id, process=_process())
+            claimed, reply = dialogue_store.claim_dispatch_with_reply(root, chat_id, message_id, process=_process(), claim=claim)
             if not claimed:
                 return row, True
             # Its dispatch was still owed: this retry's identical copies feed it; the echo shows the row's refs.
@@ -611,11 +651,14 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
         if row.get("reply_to"):
             message["task_metadata"] = with_turn_address({**(message.get("task_metadata") or {}),
                 "reply_reference": delivery_reply(row["reply_to"], reply)}, row)
+        if claim:
+            message["task_metadata"] = {**(message.get("task_metadata") or {}), "_late_dispatch_claim": claim}
         ref, _ = owner_row_source(row)
         # record_inbound_message gets the row witness and receipt time.
         # Dispatch only schedules/queues; slow work must not hold the ingress lock.
         (dispatch or bridge.enqueue_local_message)(text, **message, accepted_source_ref=ref, accepted_source_row=row, received_at=ts)
-        dialogue_store.complete_dispatch(root, chat_id, message_id)
+        if name != LATE_RESULT_DISPATCHER:
+            dialogue_store.complete_dispatch(root, chat_id, message_id)
         return row, False
 
 
@@ -637,18 +680,24 @@ def recover_pending_dispatches(bridge, drive_root) -> int:
             log.warning("Owed dispatch of %s:%s abandoned: dispatcher %r unknown", chat_id, message_id, name)
             continue
         with _INGRESS_LOCK:
-            if not dialogue_store.claim_dispatch(root, chat_id, message_id, process=_process()):
+            claim = uuid.uuid4().hex if name == LATE_RESULT_DISPATCHER else ""
+            if not dialogue_store.claim_dispatch(root, chat_id, message_id, process=_process(), claim=claim):
                 continue  # a retry took it meanwhile
             ts = str(row.get("ts") or "")
-            text = str(payload.get("text") or "")
+            from ouroboros.dialogue_provenance import agent_note_text
+
+            text = agent_note_text(row) if name in _PROGRAM_DISPATCHERS else str(payload.get("text") or "")
             message = dict(payload.get("message") or {})
+            if claim:
+                message["task_metadata"] = {**(message.get("task_metadata") or {}), "_late_dispatch_claim": claim}
             ref, _ = owner_row_source(row)
             try:
                 dispatcher(bridge, text, **message, accepted_source_ref=ref, accepted_source_row=row, received_at=ts)
             except Exception:
                 log.error("Owed dispatch of %s:%s raised after entry; its outcome is unknown", chat_id, message_id, exc_info=True)
                 continue
-            dialogue_store.complete_dispatch(root, chat_id, message_id)
+            if name != LATE_RESULT_DISPATCHER:
+                dialogue_store.complete_dispatch(root, chat_id, message_id)
             dispatched += 1
     return dispatched
 
@@ -661,6 +710,7 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
         resolve_owner_message_source,
     )
     from ouroboros.owner_relay import origin_snapshot, owner_row_source
+    from ouroboros.dialogue_provenance import agent_note_text
     from supervisor import message_bus
 
     message.pop("_origin_snapshot", None)
@@ -677,7 +727,7 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
                else resolve_owner_message_source(message_bus.DATA_DIR, ref)) if owner_message_ref_is_valid(ref) else None
         if (not row or row.get("source") != source or row.get("chat_id") != chat_id
                 or row.get("client_message_id") != client_message_id or not entry_matches_source_ref(row, [ref])
-                or ref["text_sha256"] != _text_sha256(text)):
+                or (agent_note_text(row) != text if declared_author(row) else ref["text_sha256"] != _text_sha256(text))):
             raise ValueError("accepted source does not match the queued message")
         ref, _ = owner_row_source(row)
         ts = ref["ts"]
@@ -724,9 +774,9 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
             chat_id=chat_id, client_message_id=client_message_id, ts=ts, text=text)
         if not row:
             message["_origin_unkept"] = True
-    from ouroboros.chat_references import projection_fields
-    from ouroboros.room_appearances import frame_rooms
-    if source != "web":
+    from ouroboros.chat_references import owner_frame_fields
+    author = declared_author(row)
+    if author or source != "web":
         # A parked inline photo is one of the views: one bubble, never a second photo frame;
         # its text is the row's, placeholder mark included, as history replays it.
         views = attachment_views((message.get("task_metadata") or {}).get("chat_attachments"))
@@ -736,12 +786,15 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
             "caption": str(message.get("image_caption") or ""), **({"text_placeholder": True} if views and placeholder else {}),
             "image_base64": "" if views else str(message.get("image_base64") or ""), **({"attachments": views} if views else {}),
             "mime": str(message.get("image_mime") or "image/jpeg"), "ts": ts, "source": source,
-            "sender_label": str(message.get("sender_label") or ""),
+            "sender_label": str(row.get("sender_label") if author else message.get("sender_label") or ""),
             "sender_session_id": str(message.get("sender_session_id") or ""),
             "client_message_id": client_message_id, "transport": message.get("transport") or {},
-            "chat_id": chat_id, **(projection_fields(row, message_bus.DATA_DIR) if row else {}),
-            **frame_rooms(message_bus.DATA_DIR, row),
-            **({"subagents_mode": "swarm"} if row and row.get("subagents_mode") == "swarm" else {}),
+            "chat_id": chat_id, **(owner_frame_fields(message_bus.DATA_DIR, chat_id, row) if row else {}),
+            **({"declared_author": author, "system_type": str(row.get("system_type") or row.get("type") or ""), "ingress_accepted": True,
+                **delivery_facts(row, chat_id)} if author else {}),
+            **({"kind": "room_echo"} if author and row.get("kind") == "room_echo" else {}),
+            **({"late_report_id": row["late_report_id"]} if author and row.get("late_report_id") else {}),
+            **({"subagents_mode": "swarm"} if row and not author and row.get("subagents_mode") == "swarm" else {}),
         })
     if row:
         message["_origin_snapshot"] = origin_snapshot(row, message_bus.DATA_DIR)
@@ -806,7 +859,7 @@ def handle_web_message(
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
         row = accepted_chat_message(bus.DATA_DIR, thread_id, client_message_id) if client_message_id else None
-        reply = ingress_reply(bus.DATA_DIR, metadata, accepted=row)
+        reply = ingress_reply(bus.DATA_DIR, metadata, accepted=row, route_work=True)
         if reply:  # the obligation of a fresh acceptance replays the same reference
             metadata["reply_reference"] = reply
         fresh = False

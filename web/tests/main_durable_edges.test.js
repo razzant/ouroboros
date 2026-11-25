@@ -5,13 +5,13 @@ import { createChatInstance } from '../modules/chat.js';
 import { taskArtifactDownloadUrl } from '../modules/api_client.js';
 import { stampNodeTimestamp } from '../modules/chat_activity.js';
 import { createMainWaiting } from '../modules/main_waiting.js';
-import { installDom, restoreDom, ElementStub, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, ElementStub, walkCard } from './chat_dom_fixture.js';
 import { fixture as mediaFixture, NodeStub } from './helpers/media_dom.js';
 
 const turn = () => new Promise(resolve => setTimeout(resolve, 0));
 const find = (node, predicate) => predicate(node) ? node : node.children.reduce((found, child) => found || find(child, predicate), null);
 const all = (node, predicate) => [...(predicate(node) ? [node] : []), ...node.children.flatMap(child => all(child, predicate))];
-const page = (messages, next = null) => ({ messages, page_cursor: 'recent', next_cursor: next,
+const page = (messages, next = null) => ({ profile_scope: PREVIEW_SCOPE, messages, page_cursor: 'recent', next_cursor: next,
     has_more: Boolean(next), window: { complete: !next, truncated_by: next ? ['quota'] : [] } });
 function nestedQueries(t) {
     const original = ElementStub.prototype.querySelector;

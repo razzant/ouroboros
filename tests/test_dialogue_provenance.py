@@ -43,6 +43,63 @@ def test_presence_provenance_survives_recent_and_consolidated_rendering():
     assert expected in _chronicle_view(_row())
 
 
+def test_place_program_is_signed_but_not_listed_as_a_person(tmp_path):
+    from datetime import datetime
+
+    from ouroboros import dialogue_store
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.dialogue_provenance import recorded_person, row_author, row_class
+    from ouroboros.gateway.place_history import record_facts
+    from ouroboros.memory_inventory import row_meta
+    from ouroboros.place_arrivals import account_candidates, recent_people
+
+    human = {**_row(), "chat_id": 17, "place_id": "qa-place", "type": "place_arrival",
+             "client_message_id": "message-alex", "sender_session_id": "user-7"}
+    program = {**human, "sender_label": "Calendar & Reports", "sender_session_id": "calendar-reports",
+               "client_message_id": "message-report", "text": "The weekly report is ready.",
+               "transport": {**human["transport"], "actor": {"kind": "user", "platform_actor_id": "calendar-reports",
+                                                               "origin": "machine", "authenticated": True}}}
+    signed = 'Program "Calendar & Reports"'
+    assert all(row_author(source)["label"].startswith(signed) for source in (program, row_meta(program)))
+    assert row_class(program)["lane"] == 1 and not recorded_person(row_author(program))
+    assert recorded_person(row_author(human))
+    assert reference_from_row(program)["author_label"] == signed
+    assert record_facts(program)["actor_origin"] == "machine"
+    outgoing = {**program, "direction": "out", "text": "Thanks for the report.", "type": "message"}
+    assert row_author(outgoing)["kind"] == "ouroboros" and "actor_origin" not in record_facts(outgoing)
+    for row in (human, program):
+        dialogue_store.append(tmp_path, "chat", row)
+    now = datetime.fromisoformat(human["ts"]).timestamp()
+    assert account_candidates(tmp_path, "qa-place") == [{"platform_actor_id": "user-7", "label": "Alex"}]
+    assert recent_people(tmp_path, ["qa-place"], days=1, now=now)["by_place"] == {"qa-place": 1}
+
+
+def test_reply_previews_a_program_note_under_its_author():
+    from ouroboros.chat_references import excerpt_source_text, projection_fields, reference_from_row
+    from ouroboros.dialogue_provenance import recorded_author
+
+    row = {"chat_id": 1, "ts": "2026-11-23T07:10:00+00:00", "direction": "in", "role": "system",
+           "system_type": "agent_note_received", "text": "Program message received.",
+           "agent_note_text": "A new summary is ready.", "declared_author": recorded_author("Minutes")}
+    reply = reference_from_row(row)
+    assert reply["author_label"] == projection_fields(row)["reply_author_label"] == 'agent "Minutes" (declared, not verified)'
+    assert reply["snippet"] == excerpt_source_text(row) == row["agent_note_text"]
+    assert reply["role"] == "system" and reply["address"] == projection_fields(row)["row_address"]
+
+
+def test_a_program_notes_quote_is_its_own_body_even_when_it_quoted_another():
+    from ouroboros.dialogue_provenance import quote_parts, quote_words, recorded_author
+
+    body = "The example comparison is ready."
+    note = {"chat_id": 1, "direction": "in", "role": "system", "system_type": "agent_note_received",
+            "text": "Program message received.", "agent_note_text": body,
+            "declared_author": recorded_author("Build agent"),
+            "reply_to": {"address": "row:1@t#abc", "excerpt": {"text": "an earlier owner line", "start_utf16": 0}}}
+    assert quote_parts(note) == (body,) and quote_words(note) == body
+    assert "Program message received." not in quote_words(note)  # the receipt fact is never the program's words
+    assert quote_words({**note, "agent_note_text": None}) == ""  # fail-closed, even with a Reply it cited
+
+
 def _presence_task():
     return {
         "id": "presence-1",

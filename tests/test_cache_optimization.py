@@ -663,6 +663,11 @@ WORK_LIVES = {
 }
 
 
+# A life whose name is a path: the provider's refusal is met on the primary and every answer stays there, so a tip to
+# the fallback fails here by name, not only through the sequence pattern.
+_NAMED_PATHS = {"a_total_refused_as_a_size_with_no_number": "opus"}
+
+
 class LifeBreach(AssertionError):
     """A life broke the law where a ``WORK_LIFE_GAPS`` row excuses it. Any other failure is a real one."""
 
@@ -696,6 +701,11 @@ def test_a_works_life_writes_its_start_only_at_its_entries(name, main_call, monk
     if excused and record["text"] and found and all(line.startswith(excused) for line in found):
         raise LifeBreach(f"{name}:\n" + "\n".join(found))
     assert record["text"] and not found, f"{name}:\n" + "\n".join(found)
+    if name in _NAMED_PATHS:
+        primary, log = _NAMED_PATHS[name], record["log"]
+        refused = [entry for entry in log if entry["kind"] == "refused"]
+        assert refused and all(entry["place"] == primary for entry in refused), (name, refused)
+        assert {entry["place"] for entry in log if entry["kind"] == "answered"} == {primary}, (name, log)
     if life.second:  # both stories narrowed, each its own way: the tool array, A' and B's head are what they share
         second = record["second"]
         assert all(second["narrowed"]), f"{name}: the row needs two narrowed stories, got {second['narrowed']}"

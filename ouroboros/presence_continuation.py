@@ -912,13 +912,15 @@ def replay_envelope(drive_root: Path, task_id: str, identity: str) -> Any:
         continuation_version=CONTINUATION_VERSION))
 
 
-def turn_response(result: Any, version: int, drive_root=None) -> dict:
-    """The /presence/turn success body; version 0 keeps the legacy shape exactly."""
+def turn_response(result: Any, version: int, drive_root=None, attention: int = 0) -> dict:
+    """The /presence/turn success body; version 0 keeps the legacy shape exactly. ``attention`` (the request's
+    negotiated ``attention_version``) adds the arrival's attention, never otherwise (``place_intake.attention_view``)."""
+    stored = {}
     if drive_root is not None:
         from ouroboros.place_reply import project_reply
         from ouroboros.task_results import load_task_result
-        metadata = (load_task_result(drive_root, result.task_id) or {}).get("metadata") or {}
-        result = project_reply(drive_root, metadata, result)
+        stored = load_task_result(drive_root, result.task_id) or {}
+        result = project_reply(drive_root, stored.get("metadata") or {}, result)
     body = {"ok": True, "status": "completed", "outcome": result.outcome, "text": result.text,
             "turn_ref": result.task_id, "work_ref": result.work_ref,
             "delivery_reporting_version": getattr(result, "delivery_reporting_version", 0)}
@@ -928,6 +930,9 @@ def turn_response(result: Any, version: int, drive_root=None) -> dict:
                     output_ref=getattr(result, "output_ref", ""))
     if version == EARLY_CONTINUATION_VERSION and getattr(result, "reply_anchor", None):
         body["reply_anchor"] = dict(result.reply_anchor)
+    if attention:
+        from ouroboros.place_intake import attention_view
+        body["attention"] = attention_view(getattr(result, "attention", None), stored)
     return body
 
 

@@ -230,6 +230,7 @@ def handle_chat_direct(
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
     realtime_turn: Any = None,
+    admission_author: Optional[dict] = None,
 ) -> Optional[Dict[str, Any]]:
     """Admit one owner turn: to the conversation lane, or inline for a live call.
 
@@ -237,6 +238,7 @@ def handle_chat_direct(
     receipt sent) or refused; the body runs in the carrier. A live call keeps
     this thread (``executor=inline_call``): its host port is process-local.
     The lane's admitted RUNNING meta (its ``task.id``), None when refused, deferred or inline.
+    ``admission_author``: the routing's host-only record of an agent's note this turn answers (``_seed_task``).
     """
     # The admission is a short execution of its own: a door that stalls before
     # deciding still says where it stands (server_liveness reads the registry's
@@ -247,7 +249,7 @@ def handle_chat_direct(
     registry = get_direct_activity_registry()
     execution = registry.begin_execution(chat_id, client_message_id=client_msg_id)
     try:
-        if not owner_conversation_admitted(chat_id, client_msg_id):
+        if not (admission_author or {}).get("late_report_ref") and not owner_conversation_admitted(chat_id, client_msg_id):
             return
         if realtime_turn is not None:
             from supervisor.inline_carrier import run_inline_turn
@@ -255,7 +257,8 @@ def handle_chat_direct(
             run_inline_turn(chat_id, text, image_data, task_constraint, task_metadata,
                             realtime_turn=realtime_turn, executor=EXECUTOR_INLINE_CALL, execution=execution)
             return
-        return admit_owner_turn(chat_id, text, image_data, task_constraint=task_constraint, task_metadata=task_metadata)
+        return admit_owner_turn(chat_id, text, image_data, task_constraint=task_constraint, task_metadata=task_metadata,
+                                admission_author=admission_author)
     finally:
         registry.end_execution(execution)
 
@@ -271,9 +274,12 @@ def _client_message_id(task_metadata: Optional[dict]) -> str:
 
 def _seed_task(
     chat_id: int, text: str, image_data: Any, task_constraint: Optional[dict], task_metadata: Optional[dict],
+    admission_author: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """The admitted seed: identity, address, the owner's words and origin facts, the inline image as a durable source,
-    the name of a late input's head. Everything else is the carrier's first step (``prepare_conversation_task``)."""
+    the name of a late input's head. Everything else is the carrier's first step (``prepare_conversation_task``).
+    ``admission_author``: an agent's note this turn answers, its row's recorded author and address, kept at the
+    task's top level, where no request body or caller metadata can write (``dialogue_provenance.recorded_author``)."""
     task: Dict[str, Any] = {
         "id": uuid.uuid4().hex[:8],
         "type": "task",
@@ -281,6 +287,7 @@ def _seed_task(
         "text": str(text or ""),
         "_is_direct_chat": True,
         "_fresh_identity": True,  # host-only, set at this mint; no task row or client metadata carries it
+        **({"admission_author": dict(admission_author)} if admission_author else {}),
     }
     if task_constraint:
         task["task_constraint"] = dict(task_constraint)
@@ -295,6 +302,12 @@ def _seed_task(
             origin_text = task_metadata.get("origin_message_text")
             if isinstance(origin_text, str) and origin_text:
                 task["origin_message_text"] = origin_text
+        if (admission_author or {}).get("late_report_ref"):
+            task.update({key: task_metadata[key] for key in ("deadline_at", "execution_timeout_sec") if key in task_metadata})
+            task["constraints"] = str(task_metadata.get("_late_result_constraints") or "")
+            task["allowed_resources"] = {"network": False}
+            task["metadata"].update(constraints=task["constraints"], allowed_resources=task["allowed_resources"])
+            task["_skip_post_task_synthesis"] = True
         # Project-thread conversations scope the direct lane to the
         # project's memory (knowledge/journal/workpad sections).
         pid = str(task_metadata.get("project_id") or "").strip()
@@ -345,7 +358,7 @@ def _late_input_naming(root: Any, task: Dict[str, Any]) -> Optional[Tuple[str, s
 
 def admit_owner_turn(
     chat_id: int, text: str, image_data: Any = None, *, task_constraint: Optional[dict] = None,
-    task_metadata: Optional[dict] = None,
+    task_metadata: Optional[dict] = None, admission_author: Optional[dict] = None,
 ) -> Optional[Dict[str, Any]]:
     """Admit one owner turn to the lane; the RUNNING meta, or None when refused or deferred.
 
@@ -355,25 +368,39 @@ def admit_owner_turn(
     started work; only the physical drain saves it on the ordinary durable queue. The row's
     barrier and its carrier follow outside that transaction (``dispatch_admitted_turn``).
     """
+    from ouroboros.extension_late_result import LateResultWaiting
     from ouroboros.server_restart import agent_restart_draining, agent_restart_pending, note_started_restart_work
+    from ouroboros.store import StoreBusy, StoreMigrating, acquisition_budget
     from supervisor import queue
     from supervisor.active_activity import reply_expected
     from supervisor.conversation_lane import admit_turn, dispatch_admitted_turn, replenish_after_claim
 
     client_msg_id = _client_message_id(task_metadata)
-    task = _seed_task(chat_id, text, image_data, task_constraint, task_metadata)
+    task = _seed_task(chat_id, text, image_data, task_constraint, task_metadata, admission_author)
     root = pathlib.Path(str(task.get("drive_root") or "") or _pool().DRIVE_ROOT)
+    report_ref = (admission_author or {}).get("late_report_ref")
     intake = open_owner_intake(task, root)  # before its row exists: a carrier only ever replaces the fact
     meta = None
     try:
         with queue._queue_lock, _pool()._repo_writer_gate_lock:
-            if not owner_conversation_admitted(chat_id, client_msg_id):
-                return None
-            if agent_restart_pending() and queue.RETURNS_NAMED:
-                _pool().send_with_budget(chat_id, "Restart intake is closed. This turn was not accepted; send it after Restart.",
-                    **_host_operation_failure(task_metadata), role="system", system_type="task_not_started")
-                return None
-            deferred = agent_restart_draining()
+            if report_ref:
+                # Unlike owner input, a program's note cannot use the owner's Restart deferral door.
+                if not owner_conversation_gate_open() or agent_restart_pending() or agent_restart_draining():
+                    raise LateResultWaiting("conversation admission is temporarily closed")
+                try:
+                    with acquisition_budget(0):
+                        _verify_late_turn(root, task, report_ref, admit=True, settling=queue.RUNNING)
+                except (StoreBusy, StoreMigrating) as exc:
+                    raise LateResultWaiting("source admission proof is temporarily unavailable") from exc
+                deferred = False
+            else:
+                if not owner_conversation_admitted(chat_id, client_msg_id):
+                    return None
+                if agent_restart_pending() and queue.RETURNS_NAMED:
+                    _pool().send_with_budget(chat_id, "Restart intake is closed. This turn was not accepted; send it after Restart.",
+                        **_host_operation_failure(task_metadata), role="system", system_type="task_not_started")
+                    return None
+                deferred = agent_restart_draining()
             meta = None if deferred else admit_turn(
                 task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
                 reply_expected=reply_expected({"metadata": task_metadata or {}}),
@@ -389,6 +416,8 @@ def admit_owner_turn(
         _announce_turn_start({"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat"})
         return meta
     except Exception as e:
+        if report_ref:
+            raise  # only failures proved before admission may be retried as an owed handoff
         _report_direct_chat_error({"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id,
                                    "task_metadata": task_metadata}, e)
         return None
@@ -407,13 +436,14 @@ def open_owner_intake(task: Dict[str, Any], root: Any) -> str:
         owner_conversation_key,
         retire_author_intake,
         task_attempt,
+        task_handoff,
     )
 
     key, attempt = owner_conversation_key(task), task_attempt(task)
     if not key:
         return ""
-    try:
-        if open_author_intake(root, str(task["id"]), key, attempt=attempt):
+    try:  # a carrier's copy names its handoff; the host's row before any put names none
+        if open_author_intake(root, str(task["id"]), key, attempt=attempt, handoff=task_handoff(task)):
             return key
     except Exception:
         log.warning("Owner turn %s reads no follow-up: its intake fact was not written", task.get("id"), exc_info=True)
@@ -534,6 +564,34 @@ class ConversationRefusal(Exception):
         self.code, self.owner_text = str(code), str(owner_text)
 
 
+def _verify_late_turn(root: pathlib.Path, task: dict, report_ref: str, *, admit: bool = False, settling=()) -> None:
+    """Verify the actual local note and the source allowance before publishing/taking this turn."""
+    from ouroboros.dialogue_provenance import agent_note_text, declared_author
+    from ouroboros.extension_late_result import (
+        LateResultUnavailable, _return_source_scopes, preview_return_execution, return_time_owned,
+    )
+    from supervisor.message_ingress import accepted_chat_message
+
+    binding, source, scopes = _return_source_scopes(root, task, report_ref, settling=settling)
+    row = accepted_chat_message(root, binding["chat_id"], report_ref) or {}
+    if (not row.get("late_report_sha256") or agent_note_text(row) != task.get("text")
+            or declared_author(row) != (task.get("admission_author") or {}).get("author")):
+        raise LateResultUnavailable("the retained letter did not match")
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if admit:
+        if (left := preview_return_execution(root, source, scopes, settling=settling)) is not None:
+            task["execution_timeout_sec"] = metadata["execution_timeout_sec"] = left
+        elif task.get("execution_timeout_sec") is not None or metadata.get("execution_timeout_sec") is not None:
+            raise LateResultUnavailable("source execution window changed")
+        return
+    bound, meta_bound = task.get("execution_timeout_sec"), metadata.get("execution_timeout_sec")
+    if isinstance(bound, bool) or isinstance(meta_bound, bool) or bound != meta_bound:
+        raise LateResultUnavailable("the original execution window changed")
+    if not return_time_owned(source, scopes, task["id"], report_ref, bound):
+        if not scopes or preview_return_execution(root, source, scopes) != bound:
+            raise LateResultUnavailable("the original execution window was not reserved for this turn")
+
+
 def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any, *,
                               broadcast: Optional[Callable[[dict], None]] = None) -> Dict[str, Any]:
     """Layer the owner's input onto the admitted seed, in the process that runs the turn.
@@ -551,6 +609,13 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     from supervisor.conversation_lane import PREPARE_KEY
 
     root = pathlib.Path(drive_root)
+    report_ref = (task.get("admission_author") or {}).get("late_report_ref")
+    if report_ref:
+        task["_skip_post_task_synthesis"] = True  # recover the restriction even from an older saved seed
+        try:
+            _verify_late_turn(root, task, report_ref)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ConversationRefusal("late_result_source_unavailable", "The letter was kept without starting a turn.") from exc
     if task.get("_wake_prepare") is not None:
         from ouroboros.consciousness_wake import prepare_wake
 
@@ -644,14 +709,14 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     # row (#2547: a sibling's later folder must not move folderless work). Placement replaces the basis.
     if pid and admitted_folder(task.get("_project_admission"), pid) is None:
         try:
-            from ouroboros.project_admission import direct_turn_basis
+            from ouroboros.project_admission import direct_turn_basis, project_admission_view
             from ouroboros.projects_registry import bind_task_to_project
 
-            basis = direct_turn_basis(root, pid)
+            basis = project_admission_view(root, pid, frozen=True) if report_ref else direct_turn_basis(root, pid)
             bind_task_to_project(
                 root, task["id"], pid, int(task.get("chat_id") or 0),
                 origin=_pool()._origin_from_mapping(task_metadata, absent="mid_task_no_origin"),
-                admission_basis=basis,
+                admission_basis=basis, reopen_closed=not report_ref,
             )
             task["_project_admission"] = basis
             task.pop("_project_scope_none", None)
@@ -659,6 +724,8 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
                 broadcast({"type": "direct_turn_bound", "task_id": str(task["id"]), "task_attempt": int(task.get("_attempt") or 1),
                            "facts": {"_project_admission": basis, "project_id": pid}})
         except Exception as exc:
+            if report_ref:
+                raise ConversationRefusal("late_result_room_unavailable", "The letter was kept without starting a turn.") from exc
             _pool()._report_binding_failure(task["id"], pid, exc, path="direct_project_turn")
     if not task.get("text") and not (uploads and failures):
         from ouroboros.chat_uploads import attachment_placeholder
@@ -741,6 +808,7 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
                 _terminal_observed=True, result=notice.get("record") or text, reason_code=control, metadata=metadata,
                 outcome_axes=infra_failed_axes(control, lifecycle="cancelled" if stopped else "failed",
                                                review_trigger="before_task_start"),
+                **({"admission_author": task["admission_author"]} if task.get("admission_author") else {}),
                 **origin, **effort_result_fields(task))
         else:
             from ouroboros.agent import _task_exception_terminal
@@ -884,7 +952,8 @@ class CarrierTurn:
         self.initiator = str(metadata.get("initiator") or "")
         self.intake = open_owner_intake(task, drive_root)  # the host's fact becomes this carrier's, whatever follows
         self._namer = None
-        if not task.get("project_id") and not wake_cause(metadata) and not task.get("_presence_turn"):
+        if (not task.get("project_id") and not wake_cause(metadata) and not task.get("_presence_turn")
+                and not (task.get("admission_author") or {}).get("late_report_ref")):
             from ouroboros.project_naming import spawn_turn_namer
 
             naming = _late_input_naming(drive_root, task)  # a late input's head: what it answers, never its frame

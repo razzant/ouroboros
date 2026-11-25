@@ -100,6 +100,14 @@ def _capture_failed_refusal(rid: str, cap_status: str, note: str, step: str = ""
     )
 
 
+def _apply_acts_on(manifest: Dict[str, Any], baseline_sha: str) -> bool:
+    """A capture an apply would act on: changed files, or an empty result over a moved HEAD whose
+    commits the apply's release of the copy and its pins would discard (the projection's head_moved)."""
+    status, head = manifest.get("status"), str(manifest.get("current_head") or "")
+    return status == ARTIFACT_STATUS_READY_WITH_CHANGES or (
+        status == ARTIFACT_STATUS_READY_NO_CHANGES and bool(head and baseline_sha) and head != baseline_sha)
+
+
 def prepared_capture_inspection(rid: str, decision: str, applies_changes: bool,
                                 describe: Callable[[], Dict[str, Any]], *, prepared: bool) -> str:
     """A capture this call prepared, or one that finished while it waited for the lock, was
@@ -167,6 +175,9 @@ def _capture_at_disposition(
     return _capture_failed_refusal(rid, cap_status, note, step)
 
 
+_EVIDENCE_UNRETAINED = "⚠️ INTEGRATE_DELEGATED_EVIDENCE_UNRETAINED"  # reached only over a ready capture
+
+
 def _disposition_evidence(drive, entry, custody_held) -> Dict[str, Any] | str:
     """Keep evidence failure distinct from a failed patch capture."""
     try:
@@ -178,7 +189,7 @@ def _disposition_evidence(drive, entry, custody_held) -> Dict[str, Any] | str:
             return named
         gaps = [str(gap.get("path") or "") for gap in named.get("gaps") or [] if isinstance(gap, dict)]
         cause = ", ".join(gaps[:5]) or named.get("error") or named.get("reason") or named["status"]
-    return (f"⚠️ INTEGRATE_DELEGATED_EVIDENCE_UNRETAINED: run {entry.run_id}'s named evidence could not all be "
+    return (f"{_EVIDENCE_UNRETAINED}: run {entry.run_id}'s named evidence could not all be "
             f"retained ({cause}). No disposition was recorded; no target files changed. Any private copy is kept. "
             "Fix the evidence retention problem, then call again.")
 
@@ -295,10 +306,35 @@ def _unwritten_disposition_text(rid: str, target_root: str, disposition: str,
     )
 
 
+# ToolResult meta holds 8192 bytes of ASCII-escaped JSON; a transfer's typed view stays near 6 KiB of it. A root
+# over its share is marked instead (the text names it whole); the unindexed names are the receipt's first 20
+# within theirs, their count stays whole and the verdict keeps every name.
+_ROOT_META_BYTES, _UNINDEXED_SHOWN, _UNINDEXED_META_BYTES = 2048, 20, 4096
+
+
 def _transfer_facts(target: Any, touched: List[str], unindexed: List[str]) -> Dict[str, Any]:
-    """The typed file effect of a Git transfer that reached TARGET, whatever was or was not recorded after it."""
+    """The whole file effect of a Git transfer that reached TARGET, whatever was or was not recorded after it.
+    TOUCHED is the operation's own path set. Text reads these whole; typed meta takes ``_typed_transfer``."""
     return {"target_files_changed": True, "target_root": str(target), "files_changed": len(touched),
             "unindexed": list(unindexed)}
+
+
+def _typed_transfer(facts: Dict[str, Any], *, settled: bool = True) -> Dict[str, Any]:
+    """FACTS as ToolResult meta, bounded for any supported root and output. An unsettled transfer (its undo did not
+    complete) claims only its attempt: ``files_attempted``, with ``files_changed`` null as what remains is unknown."""
+    root = str(facts["target_root"])
+    typed: Dict[str, Any] = {"target_files_changed": True, **(
+        {"target_root": root} if len(json.dumps(root, ensure_ascii=True)) <= _ROOT_META_BYTES
+        else {"target_root_omitted": True})}
+    if not settled:
+        return {**typed, "files_attempted": facts["files_changed"], "files_changed": None}
+    unindexed, shown, room = list(facts["unindexed"]), [], _UNINDEXED_META_BYTES
+    for path in unindexed[:_UNINDEXED_SHOWN]:
+        room -= len(json.dumps(str(path), ensure_ascii=True)) + 1
+        if room < 0:
+            break
+        shown.append(str(path))
+    return {**typed, "files_changed": facts["files_changed"], "unindexed": shown, "unindexed_count": len(unindexed)}
 
 
 def _native_gap_note(native_gap: str) -> str:
@@ -308,9 +344,11 @@ def _native_gap_note(native_gap: str) -> str:
 
 def _git_unwritten_disposition(ctx, entry, disposition: str, *, staging_proof: bool | None = None,
                                transfer: Dict[str, Any] | None = None, changed: bool = True,
-                               native_gap: str = "") -> str:
+                               native_gap: str = "", orphan: bool = False) -> str:
     """Report an effect, apart from the availability of proof for a receipt-only retry. ``staging_proof`` is
-    None when no apply landed; ``changed`` says whether THIS call made the TRANSFER (a recovery made none)."""
+    None when no apply landed; ``changed`` says whether THIS call made the TRANSFER (a recovery made none).
+    Only the starter or its host-confirmed retry successor may complete the record; an ORPHAN adopter's later
+    call meets the ambiguity, whose provided exit (``acknowledge_ambiguous``) the report names."""
     if staging_proof is None:
         text = _unwritten_disposition_text(entry.run_id, str(entry.target_root), disposition, applied=False)
     else:
@@ -322,7 +360,13 @@ def _git_unwritten_disposition(ctx, entry, disposition: str, *, staging_proof: b
             "records this apply without changing a file, provided this attempt's verdict row, its manifest, the "
             "target folder and its .git, HEAD, the touched files and their index entries are unchanged; otherwise "
             "it refuses as ambiguous."
-            if staging_proof else
+            if staging_proof and not orphan else
+            "An orphan's adopter cannot complete this record by calling again: a later integrate_delegated_patch for "
+            "this run refuses as ambiguous instead of applying again. Inspect the working tree and index against the "
+            "saved patch, then call it with acknowledge_ambiguous=true to take that state over: the normal decision "
+            "then runs, where an apply re-checks drift first and a reject releases the private copy and pins while "
+            "the captured patch is kept."
+            if orphan else
             "No staging proof was recorded, so a later integrate_delegated_patch for this run refuses as "
             "ambiguous instead of applying again. Inspect the working tree and index against the saved patch."
         )
@@ -331,7 +375,8 @@ def _git_unwritten_disposition(ctx, entry, disposition: str, *, staging_proof: b
                 f"durable disposition was not recorded.{delivered} {next_step} The saved result and pins are kept."
                 f"{_native_gap_note(native_gap)}")
     return _publish_tool_result(ctx, ToolResult("blocked", "INTEGRATION_BLOCKED", text,
-        {"target_files_changed": False, **(transfer if transfer and changed else {}), "disposition_recorded": False,
+        {"target_files_changed": False, **(_typed_transfer(transfer) if transfer and changed else {}),
+         "disposition_recorded": False,
          **({"native_capture_effect": "unknown"} if native_gap else {})}))
 
 
@@ -448,6 +493,7 @@ def retain_investigation_evidence(drive: Any, entry: Any, block: Dict[str, Any],
     import hashlib
 
     from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_directory import is_directory_run
     from ouroboros.delegate_registration_policy import INVESTIGATION_NOTE, candidate_apply_possible
 
     ready = {"ready", ARTIFACT_STATUS_READY_WITH_CHANGES, ARTIFACT_STATUS_READY_NO_CHANGES}
@@ -455,7 +501,7 @@ def retain_investigation_evidence(drive: Any, entry: Any, block: Dict[str, Any],
             or entry.patch_disposed not in ("", custody.EVIDENCE_RETAINED)):
         return block
     retained_note = INVESTIGATION_NOTE
-    directory = str(block.get("capture_kind") or "") == "engine_directory"
+    directory = str(block.get("capture_kind") or "") == "engine_directory" or is_directory_run(entry)
     if named is None:
         named = {} if directory else _retain_named_evidence(drive, entry, reread=bool(entry.patch_disposed), recapture=recapture)
     shown = {**block, **({"named_evidence": named} if named else {})}
@@ -466,11 +512,14 @@ def retain_investigation_evidence(drive: Any, entry: Any, block: Dict[str, Any],
                                  f"({named['status']}), so the private copy {entry.execution_root} is kept and nothing "
                                  "named is lost. Nothing was applied."}
     receipt: Dict[str, Any] = {}
-    if gateway is not None and directory:
+    if directory:
+        unconfirmed = "Investigation evidence retained; the engine copy's discard is unconfirmed."
+        if gateway is None:
+            return {**shown, "retry": "transient", "note": unconfirmed}
         key = hashlib.sha256(f"discard:{entry.run_id}:investigation".encode()).hexdigest()
         receipt = gateway.decide_run(entry.run_id, {"action": "discard"}, idempotency_key=key) or {}
-        if receipt.get("status") != "discarded":
-            return {**block, "note": "Investigation evidence retained; the engine copy's discard is unconfirmed."}
+        if not isinstance(receipt, dict) or receipt.get("accepted") is not True or receipt.get("status") != "discarded":
+            return {**shown, "retry": "transient", "note": unconfirmed}
     recorded, note = _dispose_delegated(
         drive, entry, entry.snapshot_id, "evidence-only investigation: retained, never applied",
         custody.EVIDENCE_RETAINED, bool(entry.snapshot_id), disposed_by=entry.task_id,
@@ -799,11 +848,32 @@ def _integrate_delegated_patch_locked(
         result = _integrate_git_capture(ctx, entry, decision, prior["git_apply_completion"]["reason"], manifest,
                                        cap_dir, orphan_of, custody_held=custody_held, raw_manifest=raw, prior=prior)
         return append_published_text(ctx, result, selection_note)
+    from ouroboros.delegate_collection import capture_projection
+    from ouroboros.delegate_custody_current import run
+    from ouroboros.store import StoreError
+
+    def fresh():  # the receipt this call published, not the row read before it; None when unreadable
+        try:
+            return run(drive, rid)
+        except (OSError, StoreError):
+            return None
+
+    def described():  # an unreadable receipt shows the earlier row
+        return capture_projection(drive, fresh() or entry, reader_task_id=str(getattr(ctx, "task_id", "") or "")) or {}
+
     # A different capture that arrived while the caller waited was not seen before this call.
     prepared = not (captured_before == (entry.patch_manifest_sha or True)
                     and _manifest_capture_status(manifest_path, entry=entry) in _READY_CAPTURE_STATUSES)
     capture = _si()._capture_at_disposition(drive, entry, rid, manifest_path, decision, custody_held=custody_held)
     if isinstance(capture, str):
+        # A named-evidence refusal stands over a ready capture; once its custody names that capture, a capture
+        # this call prepared is shown, as the next call no longer counts it as prepared. No other refusal is.
+        if decision == "apply" and prepared and capture.startswith(_EVIDENCE_UNRETAINED) and (
+                (row := fresh()) is not None and row.patch_captured
+                and _apply_acts_on(_saved_manifest(manifest_path, entry=row), entry.baseline_sha)):
+            capture += ("\nIts captured result, prepared during this call, was NOT applied; read it now (manifest_read, "
+                        "its file artifacts, and patch_read when present). Once the cause above is fixed, a later "
+                        "apply decides this same retained capture.\n" + json.dumps(described(), ensure_ascii=False, indent=2))
         return capture
     if capture.get("disposition_unwritten") == custody.NO_CHANGES:
         return capture["note"]  # do not turn the failed automatic disposition into an explicit one
@@ -820,19 +890,8 @@ def _integrate_delegated_patch_locked(
             manifest = loaded if isinstance(loaded, dict) else {}
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             return f"⚠️ INTEGRATE_MANIFEST_UNREADABLE: {manifest_path}: {type(exc).__name__}: {exc}."
-    from ouroboros.delegate_collection import capture_projection
-    from ouroboros.delegate_custody_current import run
-    from ouroboros.store import StoreError
-
-    def described():  # the receipt this call published, not the row read before it; unreadable shows the earlier row
-        try:
-            fresh = run(drive, rid) or entry
-        except (OSError, StoreError):
-            fresh = entry
-        return capture_projection(drive, fresh, reader_task_id=str(getattr(ctx, "task_id", "") or "")) or {}
-
     if inspection := prepared_capture_inspection(
-            rid, decision, manifest.get("status") == ARTIFACT_STATUS_READY_WITH_CHANGES, described, prepared=prepared):
+            rid, decision, _apply_acts_on(manifest, entry.baseline_sha), described, prepared=prepared):
         return inspection
     if entry.authority_source == "skill_payload" or str(manifest.get("capture_kind") or "") == "skill_payload":
         # The exact-payload branch (R1 item 3) lives in delegate_integration:
@@ -1123,20 +1182,19 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
                 f"{format_patch_exclusions(manifest, file_changes, 'reverted')}"
             )
         recorded, _ = _dispose("applied", cleanup=False)
-        tail = "" if recorded else (
-            " ⚠️ the durable disposition row could ALSO not be written — record this "
-            "outcome yourself before any further integration attempt."
-        )
+        record = ("The run is recorded as applied, so a later call does not apply it again" if recorded else
+                  "⚠️ Its disposition could NOT be recorded either: a later call refuses as ambiguous instead of "
+                  "applying again; record this outcome yourself before any further integration attempt")
         return _publish_tool_result(ctx, ToolResult("blocked", "INTEGRATION_BLOCKED", (
-            f"⚠️ INTEGRATE_APPLIED_UNSTAGED: run {rid}'s result transfer in {target} "
-            f"({len(touched)} file(s)) is incomplete ({staging_failure[:300]}), "
-            "and the apply could not be cleanly reversed. Do NOT retry this call — the "
-            "changes are already in your working tree and a second apply would double "
-            "them. Inspect with vcs_read diff, stage what you accept yourself, and note that "
-            "the run is recorded as applied. Its captured patch is kept for "
-            f"comparison. Verdict: {verdict_path or '(unwritten)'}.{format_patch_exclusions(manifest, file_changes, 'incomplete')}{tail}"
-            f"{_native_gap_note(native_gap)}"
-        ), {**_transfer_facts(target, touched, unindexed), "disposition_recorded": recorded}))
+            f"⚠️ INTEGRATE_APPLIED_UNSTAGED: run {rid}'s result reached {target} over "
+            f"{len(ordered_touched)} path(s), but staging failed and the apply could not be cleanly reversed "
+            f"({staging_failure[:300]}); which of those paths still carry the run's changes is not known. "
+            "Do NOT apply it again: a second apply could double changes still in the working tree. "
+            f"Inspect with vcs_read diff and stage what you accept yourself. {record}. Its captured patch is "
+            f"kept for comparison. Verdict: {verdict_path or '(unwritten)'}."
+            f"{format_patch_exclusions(manifest, file_changes, 'incomplete')}{_native_gap_note(native_gap)}"
+        ), {**_typed_transfer(_transfer_facts(target, ordered_touched, unindexed), settled=False),
+            "disposition_recorded": recorded}))
 
     if proc.returncode != 0:
         # `git apply` is atomic (all-or-nothing without --reject): a non-zero exit
@@ -1183,18 +1241,18 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     # A proven apply waits for its native receipt (the receipt-only lane appends it); an unproven one is disposed.
     recorded, note = (False, "") if native_gap and staging_proof else _dispose("applied", cleanup=True)
     if not recorded:
-        return _git_unwritten_disposition(ctx, entry, "applied", staging_proof=staging_proof,
-                                          transfer=_transfer_facts(target, touched, unindexed), native_gap=native_gap)
+        return _git_unwritten_disposition(ctx, entry, "applied", staging_proof=staging_proof, orphan=bool(orphan_of),
+                                          transfer=_transfer_facts(target, ordered_touched, unindexed), native_gap=native_gap)
     diffstat = str(manifest.get("diffstat") or "").strip()
     prot_note = (f" Includes {len(protected)} protected path(s) (allowed: runtime_mode={runtime_mode})."
                  if protected else "")
-    staged, delivered, closing = staging_receipt(len(touched), unindexed)
+    staged, delivered, closing = staging_receipt(len(ordered_touched), unindexed)
     return _git_disposition_result(ctx,
         f"{orphan_note}✅ Integrated delegated run {rid}'s patch into {target} ({staged}).{prot_note}{delivered}\n"
         f"{diffstat}{format_patch_exclusions(manifest, file_changes, 'applied', unindexed)}\n"
         f"Verdict: {verdict_path or '(unwritten)'}. "
         f"{'Disposition recorded.' if note else 'Its private copy and pins are released.'}\n"
         f"{closing} — review them yourself; you are the sole committer.{note}{_native_gap_note(native_gap)}",
-        changed=True, facts={**_transfer_facts(target, touched, unindexed), "disposition_recorded": True,
+        changed=True, facts={**_typed_transfer(_transfer_facts(target, ordered_touched, unindexed)), "disposition_recorded": True,
                              **({"native_capture_effect": "unknown"} if native_gap else {}), "verdict_file_recorded": bool(verdict_path)},
     )

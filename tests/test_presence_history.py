@@ -643,10 +643,15 @@ def test_a_time_ordered_page_costs_its_own_rows_newest_and_deep(tmp_path, monkey
     import math
 
     from ouroboros.gateway import history
+    from ouroboros.project_registry_recovery import registry_path
+    from ouroboros.server_boot import reconcile_projects
+
     measured = {}
     for size in (2_000, 20_000):
         root = tmp_path / f"rows{size}" / "data"
         _bulk_room(root, size, shared=lambda _n: shared)
+        reconcile_projects(root)  # normal boot reconciles the registry after dialogue import
+        assert registry_path(root).is_file()
 
         def read(cursor=None, around=None):
             return json.loads(history._assemble_history_response(root, BULK_CHAT, 100, 60, cursor, around))
@@ -1031,6 +1036,7 @@ def test_main_keeps_its_own_newest_page_after_a_bulk_import_into_a_place_room(tm
 
     from ouroboros.gateway import history
     from ouroboros.place_arrivals import _dialogue_indexes
+    from tests._dialogue import confirm_first_use
     measured = {}
     for size, places in ((2_000, 0), (11_000, 0), (2_000, 5)):
         root = tmp_path / f"main{size}-{places}" / "data"
@@ -1052,6 +1058,7 @@ def test_main_keeps_its_own_newest_page_after_a_bulk_import_into_a_place_room(tm
                       "client_message_id": f"elsewhere-{place}-{n}", "task_id": f"turn-{place}-{n}", "place_id": f"place-{place}",
                       "sender_session_id": "person"} for place in range(places) for n in range(8)]
         (root / "logs").mkdir(parents=True)
+        confirm_first_use(root)  # a booted installation: first use is confirmed before any history is saved
         (root / "logs" / "chat.jsonl").write_text("".join(json.dumps(row) + "\n" for row in elsewhere + main + imported))
         ds.ensure(root)
         _dialogue_indexes(root)  # as the import writer builds them before its rows land (``record_history``)

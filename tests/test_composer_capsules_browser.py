@@ -1046,6 +1046,8 @@ CTX_SCENES = [
     ("last-low", [], "Low", ["low"], True, "Context: Low last, Max chosen"),
 ]
 
+LOW_NOW_MEMORY_FACT_PREFIX = "Low nowLow for now, not Max: the whole books do not fit beside the history. Request at "
+
 
 @pytest.mark.parametrize("engine,width,height,mobile", [("webkit", 1100, 750, False), ("chromium", 1100, 750, False),
                                                         ("webkit", 390, 844, True), ("chromium", 390, 844, True)])
@@ -1103,7 +1105,7 @@ def test_context_says_the_observed_mode_and_keeps_the_saved_one_as_a_dot(direct_
                         seen[f"{name}-open-{theme}"] = opened = page.evaluate(CTX_FACTS)
                         _shot(page, tmp_path, f"context-synthetic-{name}-open-{engine}-{theme}-{width}")
                         assert opened["hintShown"] and opened["factShown"], opened
-                        assert opened["factWords"].startswith("Low nowThe history does not fit the Max window. Request at "), opened
+                        assert opened["factWords"].startswith(LOW_NOW_MEMORY_FACT_PREFIX), opened
                         left, top, right, bottom = opened["hintBox"]
                         assert left >= 0 and top >= 0 and right <= width and bottom <= height, opened
                         assert page.locator(f'{CONTEXT} .chat-seg[data-mode="max"]').get_attribute("aria-checked") == "true"
@@ -1222,7 +1224,7 @@ def test_a_project_rooms_context_reads_only_its_own_root_works(direct_server_wit
                 page.wait_for_timeout(450)
                 seen[f"project-open-{width}"] = opened = facts(ctx)
                 _shot(page, tmp_path, f"context-synthetic-project-open-webkit-dark-{width}")
-                assert opened["fact"].startswith("Low nowThe history does not fit the Max window. Request at "), seen
+                assert opened["fact"].startswith(LOW_NOW_MEMORY_FACT_PREFIX), seen
                 page.keyboard.press("Escape")
                 page.wait_for_function(f"() => document.querySelector('{ctx}').dataset.open === 'false'")
                 page.evaluate("() => document.activeElement?.blur()")

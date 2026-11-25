@@ -37,6 +37,7 @@ from ouroboros.chat_annotations import _ANNOTATIONS_NAME
 from ouroboros.project_dialogue import (
     MAIN_PINNED_ROW_TYPES, ORIGIN_ADDRESSED_NOTICE_TYPES, WORK_SPEECH_ELSEWHERE_TYPES, owner_message_entries,
 )
+from ouroboros.room_archive import ordinary_room
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import subagent_message_meta
 
@@ -147,6 +148,18 @@ class HistoryCursorError(ValueError):
 class RegistryUnavailable(StoreError):
     """Main's rows cannot be told from a Project's (a registry row's identity unreadable): its 503 offers ``room_archive``."""
     fields = {"project_registry": "unavailable"}
+
+
+def failed_read_facts(exc: Exception, data_dir: Any, thread_id: int, newest: bool, profile_scope: str) -> Dict[str, Any]:
+    """What a failed read's answer says beside its reason, read off the event loop. Main's refusal offers its archive
+    (``RegistryUnavailable.fields``). A newest read whose room is still one of this profile's ordinary rooms
+    (``room_archive.ordinary_room``) names that room with the serving generation's scope: the one fact on which a page
+    shows the sends it kept for that room while the room's history cannot be read. Any other failure names nothing."""
+    if isinstance(exc, RegistryUnavailable):
+        return dict(exc.fields)
+    if profile_scope and newest and ordinary_room(data_dir, thread_id):
+        return {"ordinary_room": thread_id, "profile_scope": profile_scope}
+    return {}
 
 
 def parse_around(value):

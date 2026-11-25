@@ -345,7 +345,8 @@ def test_room_label_cache_keeps_source_failure_and_ambiguous_names_unknown(tmp_p
     assert "destination unavailable" in _send_user_message(ctx, "Progress")
     path.unlink()  # the committed witness remains: this is not a new empty install
     assert "destination unavailable" in _send_user_message(ctx, "Progress")
-    projects._save(tmp_path, data)
+    # A writer never re-creates a lost registry; reconciliation restores this root's own from its committed witness.
+    projects.reconcile_projects(tmp_path)
     assert 'Project room "Launch"' in _send_user_message(ctx, "Progress")
     data["projects"].append({"id": "duplicate-chat", "chat_id": chat, "name": "Other"})
     projects._save(tmp_path, data)

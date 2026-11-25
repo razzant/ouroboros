@@ -141,29 +141,38 @@ function lifecycleKey(row) {
 
 // A paused task reads its mail only after its Resume, which nobody presses for the owner (owner 07.10): an answer it
 // waits for, or one saved in its mailbox, says so while its work is paused, in one clause after its lead word (owner
-// 04.11, 1A: why it is paused is the work's own line). A queued or held one keeps the plain words.
+// 04.11, 1A: why it is paused is the work's own line). A confirmed expired task cannot Resume: its saved answer stays
+// saved with no promise of Resume. A queued, held or unknown one keeps the plain words.
 const PAUSED_STATUS = {
     waiting: 'Waiting for your answer · read after Resume',
     answer_saved: 'Answer saved · read after Resume',
 };
+const EXPIRED_STATUS = {
+    waiting: 'Unanswered · task deadline expired',
+    answer_saved: 'Answer saved · task deadline expired',
+};
 
-export function questionPresentation(row = {}, { paused = false } = {}) {
+export function questionPresentation(row = {}, { paused = false, expired = false } = {}) {
     if (deliveryOwed(row)) {
         if ((row.quiz_state || row.state) !== 'answered') {
             return { status: tr('question.status.closure_pending', 'Question closed · update pending') };
         }
         // An accepted late answer whose dispatch witness ended with its process: no retry knows more.
-        // An answer in its task's mailbox waits for that task to read it, also through a pause.
+        // An answer in its task's mailbox waits for that task to read it, also through a pause; positive per-member
+        // expiry leaves the answer saved without promising Resume.
         const reason = row.question_delivery.reason_code;
         return { status: reason === 'late_answer_delivery_unknown'
             ? tr('question.status.answer_unknown', 'Answer recorded · delivery unknown')
-            : reason === 'awaiting_recipient_read' && paused
-                ? tr('question.status.answer_saved_paused', PAUSED_STATUS.answer_saved)
-                : reason === 'awaiting_recipient_read'
-                    ? tr('question.status.answer_saved', 'Answer saved · the task reads it when it continues')
-                    : tr('question.status.answer_pending', 'Answer recorded · delivery pending') };
+            : reason === 'awaiting_recipient_read' && expired
+                ? tr('question.status.answer_saved_expired', EXPIRED_STATUS.answer_saved)
+                : reason === 'awaiting_recipient_read' && paused
+                    ? tr('question.status.answer_saved_paused', PAUSED_STATUS.answer_saved)
+                    : reason === 'awaiting_recipient_read'
+                        ? tr('question.status.answer_saved', 'Answer saved · the task reads it when it continues')
+                        : tr('question.status.answer_pending', 'Answer recorded · delivery pending') };
     }
     const key = lifecycleKey(row);
+    if (expired && key === 'waiting') return { status: tr('question.status.waiting_expired', EXPIRED_STATUS.waiting) };
     if (paused && key === 'waiting') return { status: tr('question.status.waiting_paused', PAUSED_STATUS.waiting) };
     // The English words stay the source (and the Python twin's); the install language reads
     // them by the lifecycle code (web/modules/i18n.js).

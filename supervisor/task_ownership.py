@@ -8,8 +8,11 @@ callers supply the reads they prepared before acquiring the lock.
 """
 from __future__ import annotations
 
+import logging
 import pathlib
 import threading
+
+log = logging.getLogger(__name__)
 
 UNCHANGED, CHANGED, BUSY = "unchanged", "changed", "busy"
 _SETTLEMENT_READS = threading.local()
@@ -121,3 +124,29 @@ def settlement_reads(root, task_id, *, locked, prepared=None):
     if locked:
         return pending.pop(key, None)
     return TaskOwnershipRead(root)
+
+
+def observe_cancel_retry(q, task_id):
+    """Read the physical retry witness off Q and revalidate under the same lock as admission.
+
+    A top-level timeout retry has a new physical id while the old id stays the logical/status handle. If
+    admission won the race, cancellation follows the host-written lineage; if not, ordinary custody settles
+    the old attempt and the reaper's final terminal check suppresses the clone."""
+    from supervisor.queue_transitions import _live_retry_target_locked
+
+    try:
+        reads = TaskOwnershipRead(q.DRIVE_ROOT)
+        prepare_retry_chain(q, task_id, reads.load)
+        with q._queue_lock:
+            retry_target, settled_retry_status = _live_retry_target_locked(q, task_id, results=reads)
+    except Exception as exc:
+        # A busy store or a changed chain row under the lock is UNKNOWN: nothing
+        # was claimed or touched, the intent stays open, the watchdog retries.
+        log.error(
+            "Cancellation retry-lineage authority is indeterminate for %s (%s)",
+            task_id,
+            exc,
+            exc_info=True,
+        )
+        return None
+    return reads, retry_target, settled_retry_status

@@ -8,13 +8,8 @@ from ouroboros.chat_chain import format_address, row_address
 from ouroboros.chat_references import reference_from_row, resolve_reply
 from supervisor import message_bus
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture as healthy_main_fixture  # noqa: F401
 from tests.test_chat_attachments import _history, _web_bridge
-
-
-@pytest.fixture
-def healthy_main(tmp_path):
-    from ouroboros.project_registry_recovery import initialize_new_root
-    initialize_new_root(tmp_path)
 
 
 def test_reply_is_host_resolved_and_replay_uses_the_same_address(tmp_path, monkeypatch, healthy_main):
@@ -37,6 +32,66 @@ def test_reply_is_host_resolved_and_replay_uses_the_same_address(tmp_path, monke
     assert bridge._inbox.empty()
     with pytest.raises(ValueError, match="different message"):
         bridge.handle_web_message("this one", client_message_id="reply", task_metadata={"reply_to": "task:other"})
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_web_reply_quotes_a_passage_of_a_saved_agent_note(tmp_path, monkeypatch, late, healthy_main):
+    from ouroboros.chat_references import reply_target
+    from ouroboros.context import _fresh_reply_owner, _owner_message_facts
+    from ouroboros.dialogue_provenance import program_reply_text, relation_text
+    from ouroboros.gateway.agent_note import _accept, note_request
+    from supervisor.message_ingress import record_inbound_message
+
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    sentence = "The north trail is open."
+    body = {"text": f"🌿 {sentence} Meet by the oak.", "author": {"kind": "agent", "label": "Trail Notebook"}}
+    text, author = note_request(body)
+    if late:  # A retained example letter: this fixture calls neither the sender nor the recipient.
+        source = message_bus.log_chat("in", 1, 0, text, source="web", client_message_id="trail-archive",
+            require_write=True, message_meta={"declared_author": author, "late_report_sha256": "a" * 64,
+                                              "late_report_id": "trail-archive"})
+    else:
+        source = _accept(bridge, tmp_path, text, author, body)
+        frame = bridge._inbox.get_nowait()
+        record_inbound_message(bridge, frame, chat_id=1, user_id=0, client_message_id=source["client_message_id"],
+                               text=text, ts=source["ts"])
+    address = format_address(row_address(source))
+
+    excerpt = {"text": sentence, "start_utf16": 3}
+    bridge.handle_web_message("Let's take that trail.", client_message_id="trail-reply",
+                              task_metadata={"reply_to": address, "reply_excerpt": excerpt})
+    _, saved = dialogue_test.chat_rows(tmp_path)
+    quoted = saved["reply_to"]
+    assert quoted["address"] == address and quoted["row_sha256"] == row_address(source)["row_sha256"]
+    assert quoted["excerpt"] == excerpt
+    assert quoted["author_label"] == 'agent "Trail Notebook" (declared, not verified)'
+    assert echoes[-1]["reply_to"] == quoted
+    queued = bridge._inbox.get_nowait()
+    reference = queued["task_metadata"]["reply_reference"]
+    assert reference == {**quoted, "text": text}
+    kind = "late_result" if late else "agent_note"
+    assert reference["program_source"] == kind
+    target = reply_target(tmp_path, reference)
+    facts = _owner_message_facts(queued["task_metadata"], program_source=kind)
+    assert facts["reply_to"] == {"address": address, "program_source": kind}
+    assert sentence in relation_text(saved) and sentence not in relation_text(saved, model=True)
+    owner = _fresh_reply_owner({"_is_direct_chat": True}, {"origin_message_ref": queued["accepted_source_ref"]}, tmp_path)
+    assert owner["reply_to"] == quoted and owner["text"] == saved["text"]
+    data = program_reply_text(target, root=tmp_path, owner_row=owner, room=1)
+    assert sentence in data and "Trail Notebook" in data and address in data and text not in data
+    if late:
+        assert program_reply_text(target) == relation_text(saved, model=True).strip()
+    history = _history(tmp_path)
+    note_view = next(row for row in history if row["row_address"] == address)
+    assert (note_view["role"], note_view["system_type"], note_view["text"], note_view["declared_author"]) == (
+        "user", "agent_note_received", text, author)
+    assert note_view["ingress_accepted"] is True
+    assert "subagents_mode" not in note_view and "chat_annotation" not in note_view
+    if not late:
+        live = next(echo for echo in echoes if echo.get("declared_author") == author)
+        for key in ("role", "system_type", "sender_label", "ingress_accepted", "ingress_pending", "ingress_dispatched"):
+            assert live.get(key) == note_view.get(key)
+    assert next(row for row in history if row.get("client_message_id") == "trail-reply")["reply_to"] == quoted
 
 
 def test_reply_survives_rotation_and_missing_reference_stays_explicit(tmp_path):
@@ -1006,6 +1061,35 @@ def test_a_reply_to_a_system_row_names_system_on_every_surface_never_you(tmp_pat
         tmp_path, format_address(row_address(own)))["role"] == "user"
 
 
+def test_both_local_frames_of_a_late_answer_quote_its_question_as_its_history_row_does(tmp_path, monkeypatch):
+    """A late answer the bundled bridge relayed reaches the local UI twice: the delivery's echo
+    (``task_decision.deliver_as_owner_message``) and the named source's frame at dequeue (``message_ingress``). Both
+    carry the rooms and the quote of the question it answers that its history row shows; nothing is stored."""
+    from ouroboros.chat_references import TELEGRAM_SOURCE
+    from ouroboros.gateway.task_decision import deliver_as_owner_message
+    from ouroboros.project_registry_recovery import initialize_new_root
+
+    initialize_new_root(tmp_path)  # an ordinary first-use root: a bare folder has no registry, so history reads as migrating
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    asked = message_bus.log_chat("out", 1, 0, "## Ridge or creek?\nThe ridge is shorter.", ts="2026-10-01T00:00:00Z",
+                                 task_id="trail-work", record_type="quiz", quiz={"quiz_id": "trail", "state": "open"})
+    block = {"quiz_id": "trail", "state": "answered", "answered_after_terminal": True, "options": ["Ridge"], "comment": "creek"}
+    late = {"task_id": "trail-work", "quiz_id": "trail", "answer_snapshot": {"task_id": "trail-work", "quiz": block}}
+    name = "quiz_late_answer:trail-work:trail"
+    assert deliver_as_owner_message(tmp_path, 1, "creek", name, source=TELEGRAM_SOURCE,
+                                    task_metadata={"late_answer": late}) == (True, "")
+    accepted = dialogue_test.chat_rows(tmp_path)[-1]
+    message_bus.record_inbound_message(bridge, bridge._inbox.get_nowait(), chat_id=1, user_id=1, client_message_id=name,
+                                       text="creek", ts=accepted["ts"])
+    echo, frame = echoes
+    [history] = [r for r in _history(tmp_path) if r.get("client_message_id") == name]
+    quote = {**reference_from_row(asked, tmp_path), "snippet": "Ridge or creek?", "derived_question": True}
+    assert echo["reply_to"] == frame["reply_to"] == history["reply_to"] == quote
+    assert "also_rooms" not in echo and "also_rooms" not in frame
+    assert "reply_to" not in accepted, "the quote is shown, never written into the row"
+
+
 @pytest.mark.parametrize("comment", ["", "  Follow the creek at dawn.  "])
 def test_late_quiz_bubble_is_selectable_only_when_it_contains_entered_words(tmp_path, monkeypatch, comment, healthy_main):
     from ouroboros.chat_references import ReplyExcerptNotAuthored, ingress_reply
@@ -1062,7 +1146,8 @@ def test_selected_reply_preserves_source_author_citation_and_replay_identity(tmp
     bridge.handle_web_message("Trace this path.", client_message_id="selected", task_metadata=meta)
     stored = dialogue_test.chat_rows(tmp_path)[-1]
     ref = stored["reply_to"]
-    assert ref == {**reference_from_row(original), "excerpt": excerpt}
+    # An accepted ordinary Reply carries the host's verdict beside the source's reference; a client claim never does.
+    assert ref == {**reference_from_row(original), "excerpt": excerpt, "ordinary": True}
     delivered = bridge._inbox.get_nowait()["task_metadata"]["reply_reference"]
     assert ref == echoes[-1]["reply_to"] == stored_reply(delivered), "the row and its echo keep the compact reference"
     assert delivered["text"] == source, "delivery carries the source whole, captured before the owner row was saved"

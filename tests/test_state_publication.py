@@ -283,6 +283,59 @@ def test_an_unchanged_revision_serves_the_held_publication_without_reading_a_tas
     assert len(productions) == 1 and third.headers[publication.GENERATION_HEADER] == "2"
 
 
+@pytest.mark.parametrize("subject", ["root", "helper"])
+def test_a_confirmed_park_crosses_the_hard_deadline_in_the_published_state(serving, monkeypatch, subject):
+    """No Resume attempt, queue write, or supervisor tick is needed to retire the now-dead offer."""
+    import time
+    from datetime import datetime, timezone
+
+    from ouroboros.task_results import load_task_result, write_task_result
+    from tests._budget_pause_exact_helpers import _parked
+
+    now = [time.time()]
+    edge = round(now[0]) + 60
+    end = datetime.fromtimestamp(edge, timezone.utc).isoformat()
+    tree = "park-tree"
+    target = tree if subject == "root" else "expired-helper"
+    for task_id, deadline in ((target, {"deadline_at": end}), ("unexpired-park", {"execution_timeout_sec": 1})):
+        is_helper = task_id == "expired-helper"
+        lineage = {"parent_task_id": tree, "delegation_role": "subagent"} if is_helper else {"delegation_role": "root"}
+        root_id = tree if is_helper else task_id
+        _parked(serving.root, monkeypatch, task_id=task_id, root_task_id=root_id,
+                extra={"chat_id": 1, **lineage, **deadline})
+        write_task_result(serving.root, task_id, "scheduled", chat_id=1, root_task_id=root_id, **lineage, **deadline)
+    if subject == "helper":
+        write_task_result(serving.root, tree, "running", chat_id=1, root_task_id=tree, delegation_role="root")
+        serving.workers.RUNNING[tree] = {"task": {"id": tree, "chat_id": 1, "root_task_id": tree},
+                                         "attempt": 1, "started_at": now[0]}
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    def read():
+        response = _get(serving.app)
+        body = _payload(response)
+        work = next(row for row in body["works"] if row["work_id"] == tree)
+        neighbor = next(row for row in body["works"] if row["work_id"] == "unexpired-park")
+        assert {row["action"] for row in neighbor["controls"]} >= {"resume"}
+        return (response.headers[publication.GENERATION_HEADER], work["members"]["states"][target],
+                [row for row in work["controls"] if row["target"] == target])
+
+    now[0] = edge - 0.001
+    before, member, controls = read()
+    assert member["activity"] == "paused" and member["release"] == "mind"
+    assert "close" not in {row["action"] for row in controls}
+    assert read()[0] == before, "quiet state should reuse its publication before the deadline"
+
+    now[0] = edge
+    after, member, controls = read()
+    assert after != before, "crossing the deadline alone must invalidate the old publication"
+    assert member["because"][0]["code"] == "deadline_expired"
+    assert "close" in {row["action"] for row in controls}
+    assert "resume" not in {row["action"] for row in controls}
+    assert load_task_result(serving.root, target)["status"] == "scheduled", "reading is not a Close press"
+    now[0] += 5
+    assert read()[0] == after, "an elapsed deadline is not a recurring publication trigger"
+
+
 def test_a_cached_member_tail_expires_without_a_queue_or_custody_write(serving, monkeypatch):
     from ouroboros import delegate_collection, delegate_custody, delegate_feed
     from tests.test_owner_pause import _live_tree

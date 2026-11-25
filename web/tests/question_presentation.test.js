@@ -90,6 +90,28 @@ test('a question whose task is a paused member of its work says that its answer 
     assert.deepEqual(questionMark(waiting), { shape: 'dot', hue: 'owner' });
 });
 
+test('a confirmed expired recipient keeps its saved answer without promising Resume, leaving healthy and unknown unchanged', () => {
+    const waiting = { state: 'open', owner_wait_state: 'waiting' };
+    const saved = { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'awaiting_recipient_read' } };
+    const savedExpired = questionPresentation(saved, { expired: true }).status;
+    assert.equal(savedExpired, 'Answer saved · task deadline expired');
+    assert.doesNotMatch(savedExpired, /\bResume\b|when it continues/i);
+    assert.equal(questionPresentation(saved, { paused: true, expired: true }).status, savedExpired,
+        'positive expiry overrides paused and never promises Resume');
+    assert.equal(questionPresentation(saved, { paused: true, expired: false }).status, 'Answer saved · read after Resume');
+    assert.equal(questionPresentation(saved, { paused: false, expired: false }).status,
+        'Answer saved · the task reads it when it continues');
+    const waitingExpired = questionPresentation(waiting, { expired: true }).status;
+    assert.equal(waitingExpired, 'Unanswered · task deadline expired');
+    assert.doesNotMatch(waitingExpired, /\bResume\b/i);
+    assert.equal(questionPresentation(waiting, { paused: true, expired: true }).status, waitingExpired);
+    // Non-recipient-read lifecycles keep their own words unchanged.
+    for (const row of [{ state: 'open' }, { quiz_state: 'answered' }, { quiz_state: 'closed' }, { state: 'expired_terminal' },
+        { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'late_answer_delivery_unknown' } }]) {
+        assert.equal(questionPresentation(row, { expired: true }).status, questionPresentation(row).status, JSON.stringify(row));
+    }
+});
+
 test('a read vouches for every question when complete, for what its gaps do not name when not, for nothing without gaps', () => {
     assert.equal(vouchedBy({ current_questions_complete: true })('t', 'q'), true);
     const named = vouchedBy({ current_questions_complete: false, current_questions_gaps: [{ task_id: 't', quiz_id: 'q' }] });

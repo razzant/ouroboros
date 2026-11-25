@@ -24,7 +24,7 @@ import queue
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from ouroboros import working_checkpoint
+from ouroboros import extension_late_result, working_checkpoint
 from ouroboros.config import get_context_mode
 from ouroboros.conversation_lease import follow_loop_admission
 from ouroboros.delivery_facts import FACTS_NOTED_CONTROL, note_delivery_facts as _note_delivery_facts
@@ -992,13 +992,14 @@ def _resolve_forced_delivery_control_body(
     tool_ctx: Any = None, native: bool = False,
 ) -> Tuple[str, bool, bool, bool, bool]:
     """Return text plus retained/degraded/consumed/replaced facts. ``native`` marks ``raw`` as the
-    arguments of the reply's one ``finish_task`` call: a completion request whatever its shape.
+    arguments of the reply's one ``finish_task`` call: a completion request whatever its shape, as is a body read with
+    the ``relay_replies`` envelope (the offered relay return: refused without its action, never prose).
     With ``tool_ctx`` the request's verdict is left on ``tool_ctx._forced_completion``."""
 
     if not isinstance(candidate, _loop().DeliveryCandidate):
         candidate = None
     parsed, duplicate_protocol_key, embedded_protocol = _parse_delivery_control_body(raw if isinstance(raw, str) else "")
-    if native or isinstance(parsed, dict) and "action" in parsed:
+    if native or isinstance(parsed, dict) and ("action" in parsed or "relay_replies" in envelope_keys):
         request, text, error = forced_completion_selection(
             parsed, duplicate_protocol_key or embedded_protocol, candidate, tool_ctx=tool_ctx,
             envelope_keys=envelope_keys, messages=messages, held_sha256=held_sha256)
@@ -1247,7 +1248,7 @@ def _no_tool_final_answer(
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Run the no-tool finalization gates; ``None`` requests another model round."""
     messages = limit_ctx.messages
-    from ouroboros.loop_messages import transcript_growth_signature
+    from ouroboros.loop_messages import transcript_growth_signature, work_reply_finish_hold
     before, response_start = transcript_growth_signature(messages), len(messages)
     origin = "resume" if resume_candidate else "selection" if explicit_candidate else "prose"
     # A tool-less response carries nothing that rides. A restored answer whose checkpoint predates its saved send fact
@@ -1277,6 +1278,8 @@ def _no_tool_final_answer(
 
         stopping = ready and (getattr(tools._ctx, "_completion_selected", None) or {}).get("action") == "stop"
         if not stopping:
+            if ready and work_reply_finish_hold(tools, messages, str(content or "")):  # an open Reply is answered first
+                return held("work_reply_open")
             if ready and _loop()._enforce_plan_gate(
                 str(content or ""), messages, tools, llm_trace, emit_progress,
             ):
@@ -1457,6 +1460,9 @@ def _no_tool_final_answer(
             text, usage, forced_trace = _handle_direct_turn_hard_stop(limit_ctx)
             _loop()._merge_finalization_trace(llm_trace, forced_trace)
             return text, usage, llm_trace
+        if not stopping and (post_controls.get("agent_note") or extension_late_result.owed_letter(tools._ctx)):
+            solving_again()  # context only; never release an owner seal or change the owner corpus
+            return held("agent_note")
         from ouroboros.place_intake import reopen_for_place_mail
         if not stopping and reopen_for_place_mail(tools._ctx, post_controls):
             return held("place_mail")  # keep the answer; the accepted place context gets a model round
@@ -1485,7 +1491,7 @@ def _no_tool_final_answer(
     if isinstance(candidate, _loop().DeliveryCandidate):
         _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
         content = candidate.full_text
-    from ouroboros.place_reply import prepare_focus_reply, refusal_facts
+    from ouroboros.place_reply import accept_focus_completion, prepare_focus_reply, refusal_facts
     if stopping:
         request = tools._ctx._completion_selected
         record_stopped_completion(llm_trace, request, candidate)
@@ -1512,14 +1518,12 @@ def _no_tool_final_answer(
             _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
         solving_again()
         return held("focus_reply_refused")
-    if isinstance(getattr(tools._ctx, "_presence_completion", None), dict):  # Accept only at this common exit.
-        tools._ctx._presence_completion_accepted = True
-        limit_ctx.accumulated_usage["presence_completion_outcome"] = tools._ctx._presence_completion["outcome"]
-        limit_ctx.accumulated_usage["terminal_origin"] = _loop().TERMINAL_ORIGIN_MODEL_FINAL
+    accept_focus_completion(tools._ctx, limit_ctx.accumulated_usage, _loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or a focus's records-only finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
-    if summary := (getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_summary"): limit_ctx.accumulated_usage["wake_summary"] = summary
-    if (getattr(tools._ctx, "_completion_selected", None) or {}).get("fold_read") is True: limit_ctx.accumulated_usage["fold_read"] = True
+    for key, value in (getattr(tools._ctx, "_completion_selected", None) or {}).items():
+        if (key in {"wake_summary", "about_work_task_id"} and value) or (key == "fold_read" and value is True):
+            limit_ctx.accumulated_usage[key] = value
     if getattr(tools._ctx, "_owner_message_sent", False): limit_ctx.accumulated_usage["owner_message_sent"] = True
     from ouroboros.swarm_receipt import retain_comparison
     retain_comparison(tools._ctx)

@@ -1253,6 +1253,8 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
     (``place_at_receipt``): each run this task started and still holds open (``open_runs`` by this focus, never a
     review-owned run) hears each row of the rows this run carries down (``owner_relay._rows_to_carry``) whose
     identity stands in no START body of the run's line and whose last frame has not ended it (``_place_into_run``).
+    A row carried only as passive context (``owner_mailbox.member_carriage``: my human's direct Reply to this work)
+    takes no frame here, as at receipt: a session reads its words in its work order or with its next continuation.
     ``delivered``, ``accepted``, ``rejected`` and ``unsupported`` end a row for that run (``unsupported``: no live
     input, so the row rides the next continuation); ``delivery_unknown`` and a frame never answered replay its bytes
     under the same id; ``not_active`` or ``not_found`` on a run the census still holds open takes a new frame.
@@ -1277,8 +1279,9 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
             last = {str(row["frame"]["owner_words"].get("address") or ""): row for row in frames}
             untold = [row for row in frames if row.get("untold") and row.get("outcome") not in PLACEMENT_REPLAYS]
             owed_by_run[run.run_id] = (run, untold, [
-                (address, quote, went) for identities, address, quote, went, _before in rows
-                if not identities & seen and str((last.get(address) or {}).get("outcome") or "") not in PLACEMENT_ENDED])
+                (address, quote, went) for identities, address, quote, went, _before, quiet in rows
+                if not quiet and not identities & seen
+                and str((last.get(address) or {}).get("outcome") or "") not in PLACEMENT_ENDED])
     except Exception:  # noqa: BLE001 — a census that cannot be read places nothing this round; the loop goes on
         log.warning("owner words placement census unavailable this round", exc_info=True)
         return lines
@@ -1329,8 +1332,8 @@ def _place_runs_at_receipt(root: Any, runs: List[Any], rows: List[Tuple[Any, ...
             seen = stamped_refs("\n".join(bodies)) if bodies is not None else set()
             ended = {row["frame"]["owner_words"].get("address") for row in placed_words(ctx, run.run_id)
                      if row.get("outcome") in PLACEMENT_ENDED}  # a later frame of a row is chosen again in its write
-            if owed := [(address, quote, went) for identities, address, quote, went, _before in rows
-                        if not identities & seen and address not in ended]:
+            if owed := [(address, quote, went) for identities, address, quote, went, _before, quiet in rows
+                        if not quiet and not identities & seen and address not in ended]:
                 _place_into_run(ctx, run, owed, host=True)
             owe_placement(root)
         except Exception:  # noqa: BLE001 — a host thread: what it could not place waits for the next pass

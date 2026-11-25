@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { buildTimelineItemHtml, cardRowSummary } from '../modules/chat_activity.js';
+import { buildTimelineItemHtml } from '../modules/chat_activity.js';
+import { cardRowSummary } from '../modules/chat_row_placement.js';
 import { applyPayload, tx } from '../modules/i18n.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
 import { PREVIEW_KEY } from '../modules/chat_preview.js';
 
 // The owner's own press (ouroboros/pause_notices.notice_text); rows an earlier body wrote keep their bytes.
@@ -42,7 +43,7 @@ test('typed System pause card rows translate through the installed memory withou
 for (const history of [false, true]) test(`pause notice without a card translates ${history ? 'on history replay' : 'live'} but preserves model speech and stored English`, async () => {
     const source = { ...notice, history_id: 'chat:pause-one' }, original = JSON.stringify(source);
     const env = installDom(async url => ({ ok: true, json: async () => String(url).startsWith('/api/chat/history')
-        ? { messages: history ? [source] : [], page_cursor: 'page:pause', window: { complete: true } } : { active_direct_turns: [] } }));
+        ? { profile_scope: PREVIEW_SCOPE, messages: history ? [source] : [], page_cursor: 'page:pause', window: { complete: true } } : { active_direct_turns: [] } }));
     let instance;
     try {
         russian();

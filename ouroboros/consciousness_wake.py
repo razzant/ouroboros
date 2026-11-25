@@ -37,7 +37,7 @@ from ouroboros.consciousness_transitions import (CHAT_BOUNDARY_KEYS, TRANSITIONS
 from ouroboros.chat_chain import row_address, source_row_id
 from ouroboros.context_health import safe_read
 from ouroboros.deadline_utils import ago_text
-from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, owner_speech,
+from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, owner_speech, program_source,
                                            reaction_note, render_memory_row, render_row_text, row_author,
                                            wordless_reaction)
 
@@ -341,13 +341,14 @@ def _row_kind(row: Dict[str, Any], accounts: Any = None) -> str:
             return "correspondent_reaction"
         # My human's own words (a forward from their account carries another author's: listed, never counted away)
         return "owner_message" if owner_speech(row, row_author(row, owner_accounts=accounts)) else "correspondent_message"
-    return "owner_message"
+    return "agent_note" if program_source(row) else "owner_message"
 
 
 _KIND_WORDS = {  # (one, many)
     "owner_message": ("owner message (counted, not listed: my view holds the words)",
                       "owner messages (counted, not listed: my view holds the words)"),
     "correspondent_message": ("message in a place", "messages in places"),
+    "agent_note": ("program message", "program messages"),
     "correspondent_reaction": ("Presence reaction (context, not speech)", "Presence reactions (context, not speech)"),
     "card_answer": ("card answer", "card answers"), "task_terminal": ("task terminal", "task terminals"),
     "direct_turn": ("own direct turn ended (counted, not listed: its exchange is the dialogue itself)",
@@ -394,10 +395,11 @@ def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any
     stamp = _parse_iso(row.get("ts"))
     when = when or (ago_text(now - stamp) if stamp is not None else "at an unknown time")
     task_id = str(row.get("task_id") or "")
-    if kind in {"owner_message", "correspondent_message"}:  # under the author the host knows now, words never cut
+    if kind in {"owner_message", "correspondent_message", "agent_note"}:  # under the author the host knows now, words never cut
         heard = (f" (heard: {attention.get('reason') or 'reason not recorded'}"
                  + (f"; given to {attention['recipient']}" if attention.get("recipient") else "") + ")") if attention else ""
-        words = render_memory_row(row_address(row), row, author=row_author(row, owner_accounts=accounts), indent="  ")
+        words = render_memory_row(row_address(row), row, author=row_author(row, owner_accounts=accounts),
+                                  indent="  ", model_reply=True)
         return f"- {_KIND_WORDS[kind][0].split(' (counted', 1)[0]} in {rooms.label(row)}, {when}{heard}: {words}"
     if kind == "correspondent_reaction":  # who acted, the gesture and its target, in the host's words
         transport = row.get("transport") if isinstance(row.get("transport"), dict) else {}

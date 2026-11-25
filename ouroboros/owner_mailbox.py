@@ -3,7 +3,7 @@ import json
 import logging
 import pathlib
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from ouroboros.task_results import validate_task_id
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -32,6 +32,9 @@ PROVENANCE_INDEPENDENT_TASK = "independent_task"
 # it is context the receiving model judges: it enters no owner corpus and
 # records no directive.
 PROVENANCE_PEER_TASK = "peer_task"
+# An agent's note in Main (#3873) the running Main reader takes: the program's words under the author its row
+# records (``agent_note``), context the model judges like an independent task's, never the owner's words.
+PROVENANCE_AGENT_NOTE = "agent_note"
 # The one relation map: the recipient-side prefix label and the sender-side
 # receipt phrase are the two perspectives of the same stamped fact. The drain
 # prefix, the forward_to_worker receipts and the telemetry filter all read it.
@@ -47,11 +50,11 @@ PEER_RELATION_LABELS = {
 TASK_MESSAGE_MAX_CHARS = 8000
 TASK_MESSAGE_PROVENANCES = frozenset({
     "ancestor_task", "peer_via_ancestor", "system", "descendant_task",
-    PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event",
+    PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event", PROVENANCE_AGENT_NOTE,
 })
 # These messages wake the mind but do not enter its owner's directive corpus.
 CONTEXT_ONLY_TASK_PROVENANCES = frozenset({
-    "system", "descendant_task", PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event",
+    "system", "descendant_task", PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event", PROVENANCE_AGENT_NOTE,
 })
 KIND_FINALIZE_NOW = "finalize_now"
 # Hurry's internal reason is not dialogue; retained until terminal cleanup so a
@@ -104,8 +107,16 @@ def _ack_path(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
     return pathlib.Path(drive_root) / _MAILBOX_DIR / f"{validate_task_id(task_id)}.acks.jsonl"
 
 
+class MailboxWriteUnconfirmed(OSError):
+    """Raised when requested after append_jsonl began on a mailbox write without confirmation."""
+
+    def __init__(self, task_id: str, reason: str = "mailbox_write_unconfirmed"):
+        super().__init__(f"{reason}: {task_id}")
+        self.task_id = task_id
+
+
 def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, entry: Dict[str, Any],
-                 admit: Optional[Any] = None) -> bool:
+                 admit: Optional[Any] = None, *, raise_on_unconfirmed: bool = False) -> bool:
     """Append one mailbox row under the task's mail lock (``task_custody.task_mail_lock``,
     on the canonical side), so a row can never land between a settlement's custody read and
     the unlink or drive move it permits (a sender after that recreates the mailbox, which
@@ -115,27 +126,54 @@ def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, ent
     A False from the append itself is NOT write-free: bytes of a torn row may have landed. They stay
     as they are, and the record boundary keeps the next row from being glued onto them."""
     from ouroboros.task_custody import task_mail_lock
-
+    reminder = (entry.get("work_attention") or {}).get("kind") == "deadline_expired"  # stays once after its drain too
     with task_mail_lock(drive_root, task_id) as locked:
-        if locked and entry.get("provenance") == "place_event" and _holds(path, entry["msg_id"]):
+        if locked and (entry.get("provenance") == "place_event" or reminder) and (_holds(path, entry["msg_id"]) or (
+                reminder and _holds(_ack_path(drive_root, task_id), entry["msg_id"]))):
             return True
-        if locked and admit is not None and not admit():
+        if not locked or (admit is not None and not admit()):
             return False
-        return bool(locked and append_jsonl(path, entry, ensure_record_boundary=True))
+        try:
+            confirmed = bool(append_jsonl(path, entry, ensure_record_boundary=True))
+        except OSError as exc:
+            if raise_on_unconfirmed:
+                raise MailboxWriteUnconfirmed(task_id) from exc
+            raise
+        if not confirmed and raise_on_unconfirmed:
+            raise MailboxWriteUnconfirmed(task_id)
+        return confirmed
+
+
+def iter_mail_records(path: pathlib.Path) -> Iterator[Dict[str, Any]]:
+    """The whole rows of a mailbox, in order, read and decoded one line at a time so a torn or foreign row costs only
+    itself, its bytes stay where they landed, and a first-match reader stops without reading or decoding the tail."""
+    try:
+        with path.open("rb") as handle:
+            for raw_line in handle:
+                raw_line = raw_line[:-2] if raw_line.endswith(b"\r\n") else raw_line.removesuffix(b"\n")
+                line = raw_line.decode("utf-8", errors="replace")
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    yield row
+    except FileNotFoundError:
+        return
+
+
+def mail_records(path: pathlib.Path) -> List[Dict[str, Any]]:
+    """``iter_mail_records`` read whole, for the readers that need every row."""
+    return list(iter_mail_records(path))
 
 
 def _holds(path: pathlib.Path, msg_id: str) -> bool:
-    """A whole row of this id, the only form a drain can deliver. False is not proof its append wrote nothing:
-    a torn row of it may lie among the rows skipped here, as the drain skips them."""
-    if not path.exists():
-        return False
-    for line in mailbox_lines(_mail_text(path)):
-        try:
-            if json.loads(line).get("msg_id") == msg_id:
-                return True
-        except (ValueError, AttributeError):
-            continue
-    return False
+    """A whole row of this id, the only form a drain can deliver, found without decoding the rows after it. False
+    is not proof its append wrote nothing: a torn row of it may lie among the rows skipped here, as the drain skips
+    them."""
+    return any(row.get("msg_id") == msg_id for row in iter_mail_records(path))
 
 
 def place_event_retained(drive_root: pathlib.Path, task_id: str, msg_id: str) -> bool:
@@ -163,6 +201,51 @@ def tier_only(entry: Any) -> bool:
     """An owner tier act's mail (``owner_processing:<id>``): the round's drain applies it; alone it wakes nothing."""
     return (isinstance(entry, dict) and entry.get("kind") == KIND_OWNER_MODEL
             and str(entry.get("msg_id") or "").startswith("owner_processing:"))
+
+
+def passive_facts(fact: dict) -> dict:
+    """The facts of a carriage ``fact`` that say its row reaches a work's tree as context only (``member_carriage``)."""
+    return {key: True for key in ("context_only", "handled_by_source_room") if fact.get(key) is True}
+
+
+def passive_mail(entry: dict) -> bool:
+    carried = entry.get("host_carried")
+    return isinstance(carried, dict) and bool(passive_facts(carried))
+
+
+def member_carriage(fact: dict, holder: str) -> Optional[tuple]:
+    """How a row its holder keeps under carriage ``fact`` reaches the holder's tree: ``(went_to, passive fact)``, or
+    None when it stays with the holder. Another work's context (``context_only``) stays. A row its source room
+    answered (``handled_by_source_room``) and my human's direct Reply the holder answers (``work_reply``, at the
+    holder's address) go down as passive context: they wake no one and owe nothing. Any other row keeps its standing."""
+    if fact.get("context_only") is True:
+        return None
+    if fact.get("handled_by_source_room") is True:
+        return str(fact.get("went_to") or ""), {"handled_by_source_room": True}
+    if fact.get("work_reply") is True:
+        return holder, {"context_only": True}
+    return str(fact.get("went_to") or ""), {}
+
+
+def passive_carriage(ctx: Any) -> dict:
+    """``{row_sha256: (went_to, address)}`` for each owner row ``ctx`` holds as context only that a helper it schedules is
+    born holding by value, as one running holds it from the host: my human's direct Reply to this work
+    (``member_carriage``) and the passive copy of one that the root of this work's own tree carried to it
+    (``context_only``, the host's ``from`` or its ``went_to`` naming the ``root_task_id`` its metadata holds). A row that
+    merely went to a work, or another root's observer copy, is neither."""
+    from ouroboros.owner_relay import owner_row_identity
+
+    held, holder, found = getattr(ctx, "_held_owner_messages", None), str(getattr(ctx, "task_id", "") or ""), {}
+    root = str((getattr(ctx, "task_metadata", None) or {}).get("root_task_id") or holder)
+    for address, row in held.items() if isinstance(held, dict) else ():
+        fact = row.get("carried") if isinstance(row, dict) else None
+        fact = fact if isinstance(fact, dict) else {}
+        mine = member_carriage(fact, holder)
+        tree = fact.get("context_only") is True and root and root in (fact.get("from"), fact.get("went_to"))
+        went = str(fact.get("went_to") or "") if tree else mine[0] if mine and mine[1].get("context_only") else ""
+        if went:
+            found[owner_row_identity(row)["row_sha256"]] = (went, str(address))
+    return found
 
 
 def acknowledged_task_message_ids(
@@ -305,7 +388,7 @@ def acknowledge_transcript_entry(
                               str(press.get("request_id") or ""))
         except Exception:
             log.warning("Card press read receipt failed for %s", msg_id, exc_info=True)
-    if entry.get("relay") and not entry.get("host_carried"):  # a carried row: no "read by that work" receipt
+    if entry.get("relay") and not (entry.get("host_carried") or entry.get("work_reply")):
         from ouroboros.owner_relay import acknowledge_relay
         acknowledge_relay(entry.get("relay_canonical_root") or drive_root, task_id, entry)
     return True
@@ -328,6 +411,8 @@ def write_owner_message(
     reply_reference: Optional[Dict[str, Any]] = None,
     origin_message_ref: Optional[Dict[str, Any]] = None,
     origin_suppressed: bool = False,
+    work_reply_fallback: Optional[Dict[str, Any]] = None,
+    raise_on_unconfirmed: bool = False,
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
@@ -378,6 +463,8 @@ def write_owner_message(
         entry["late_answer"] = late_ref
     if isinstance(reply_reference, dict) and reply_reference.get("address"):
         entry["reply_reference"] = dict(reply_reference)
+    if isinstance(work_reply_fallback, dict) and work_reply_fallback:
+        entry["work_reply_fallback"] = dict(work_reply_fallback)
     if isinstance(client_surface, dict) and client_surface:
         # Owner Surface Fact (additive, like ``ts``): which client surface sent
         # this follow-up, so the loop can note a mid-task device change.
@@ -386,11 +473,12 @@ def write_owner_message(
         if isinstance(attachment_manifest, list):
             from ouroboros.artifacts import attachment_manifest_projection
             entry.update(attachment_manifest_projection(drive_root, task_id, attachment_manifest))
-        if not _append_mail(drive_root, task_id, path, entry, admit=admit):
+        if not _append_mail(drive_root, task_id, path, entry, admit=admit,
+                            raise_on_unconfirmed=raise_on_unconfirmed):
             log.warning("Owner message for task %s not appended (refused by its admission or not durable)", task_id)
             return False
         return True
-    except StoreForeign:
+    except (StoreForeign, MailboxWriteUnconfirmed):
         raise
     except Exception:
         log.warning("Failed to write owner message for task %s", task_id, exc_info=True)
@@ -413,6 +501,7 @@ def write_task_message(
     reply_to: Optional[Dict[str, Any]] = None,
     place_arrival: Optional[Dict[str, Any]] = None,
     admit: Optional[Any] = None,
+    agent_note: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write an addressed task-tree message without forging owner provenance.
 
@@ -420,7 +509,8 @@ def write_task_message(
     recipient (a ``PEER_RELATION_LABELS`` key); stored only when non-empty.
     ``sender_origin`` is the sending run's host-recorded origin (a Presence
     room/event), never the author of the words it quotes. ``place_arrival``
-    keeps a place event's typed facts (source event, message, wake) unrendered.
+    keeps a place event's typed facts (source event, message, wake) unrendered;
+    ``agent_note`` an agent's note's recorded author and row address.
     """
 
     from ouroboros.delegate_reply import normalize_reply_to
@@ -451,6 +541,8 @@ def write_task_message(
         entry["sender_origin"] = {str(key): str(value) for key, value in dict(sender_origin).items()}
     if provenance == "place_event" and isinstance(place_arrival, dict):
         entry["place_arrival"] = dict(place_arrival)
+    if provenance == PROVENANCE_AGENT_NOTE and isinstance(agent_note, dict):
+        entry["agent_note"] = dict(agent_note)
     if provenance == "system" and isinstance(review_feedback, dict):
         entry["review_feedback"] = dict(review_feedback)
     if provenance == "system" and isinstance(work_attention, dict):
@@ -551,6 +643,11 @@ def deliver_task_message(
         arrival = entry.get("place_arrival") or {}  # whose words: provenance; whom they are for: the reader's judgment
         prefix = ("[Place event from your human's confirmed account; whom it is for, and whether it asks you for work, is yours to read]"
                   if arrival.get("confirmed_words") or arrival.get("owner_words") else "[Place event; context only, never an owner directive]")
+    elif provenance == PROVENANCE_AGENT_NOTE:  # its row's recorded author and address, by value
+        from ouroboros.dialogue_provenance import agent_note_heading, declared_author
+        note = entry.get("agent_note") if isinstance(entry.get("agent_note"), dict) else {}
+        prefix = agent_note_heading(declared_author(note, "author") or {"label": "not recorded"},
+                                    ts=str(entry.get("ts") or ""), address=str(note.get("row_address") or ""))
     elif provenance == "peer_via_ancestor" and relayed:
         prefix = f"[Message from task {relayed}, relayed by ancestor {source}]"
     elif provenance == "system":
@@ -586,6 +683,10 @@ def deliver_task_message(
                 "type": "task_message_injected", "task_id": task_id,
                 "source_task_id": source, "provenance": provenance,
                 "relayed_from_task_id": relayed,
+                # An agent's note carries its recorded author and row address (the program's signature
+                # as data), so the visible row names the declared agent, never "task unknown".
+                **({"agent_note": dict(entry["agent_note"])}
+                   if provenance == PROVENANCE_AGENT_NOTE and isinstance(entry.get("agent_note"), dict) else {}),
                 **({"relation": relation} if relation else {}),
                 **({"reply_to": address} if address else {}),
                 # A bounded preview for the receiver's visible timeline row
@@ -768,7 +869,7 @@ def drain_owner_entries(
                 # Carry the host's typed source and delivery facts through the drain, by value.
                 for relay_field in ("relay", "owner_rows", "source_task_id", "source_row", "quiz_delivery", "card_delivery",
                                     "card_press", "relay_canonical_root", "sender_origin", "reply_reference", "host_carried",
-                                    "origin_message_ref", "origin_suppressed"):
+                                    "origin_message_ref", "origin_suppressed", "work_reply", "work_reply_fallback"):
                     if relay_field in entry:
                         drained[relay_field] = entry[relay_field]
                 if isinstance(entry.get("late_answer"), dict):
@@ -800,6 +901,8 @@ def drain_owner_entries(
                         drained["sender_origin"] = dict(entry["sender_origin"])  # rendered beside the words
                     if drained["provenance"] == "place_event" and isinstance(entry.get("place_arrival"), dict):
                         drained["place_arrival"] = dict(entry["place_arrival"])  # wake and anchor facts, unrendered
+                    if drained["provenance"] == PROVENANCE_AGENT_NOTE and isinstance(entry.get("agent_note"), dict):
+                        drained["agent_note"] = dict(entry["agent_note"])  # its recorded author and row, rendered
                 entries.append(drained)
         if _read_status is not None:
             _read_status["complete"] = complete
@@ -841,7 +944,8 @@ class OwnerMailboxPeek:
         status: Dict[str, bool] = {}
         # Drain changes only this private set; normal loop delivery owns the real one.
         entries = [row for row in drain_owner_entries(root, task_id, set(seen), attempt, _read_status=status)
-                   if not tier_only(row) and not (self._waking_only and place_arrival_wake(row) is False)]
+                   if not (tier_only(row) or passive_mail(row))
+                   and not (self._waking_only and place_arrival_wake(row) is False)]
         if not entries and before is not None and status.get("complete"):
             try:
                 if before == self._fingerprint(root, task_id, attempt, seen):
@@ -915,16 +1019,9 @@ def mail_write_receipt(recipient_status: str, *, drain_ended: bool = False) -> D
 def mailbox_holds(drive_root: pathlib.Path, task_id: str, msg_id: str) -> bool:
     """True while TASK_ID's mailbox still carries MSG_ID: written and not yet drained away."""
     try:
-        content = _mail_text(_mailbox_path(drive_root, task_id))
+        return _holds(_mailbox_path(drive_root, task_id), msg_id)
     except (OSError, ValueError):
         return False
-    for line in mailbox_lines(content):
-        try:
-            if json.loads(line).get("msg_id") == msg_id:
-                return True
-        except (ValueError, AttributeError):
-            continue
-    return False
 
 
 def mail_read_state(drive_root: pathlib.Path, task_id: str, msg_id: str) -> Optional[bool]:
@@ -957,6 +1054,18 @@ def settled_mailbox_cleanup_allowed(result: Dict[str, Any]) -> bool:
     )
 
 
+def retire_intake(path: pathlib.Path) -> bool:
+    """Remove the intake fact beside a settled task's mailbox (``task_custody.settle_task_mailbox``, under its mail
+    lock); True once it is gone. A refused unlink (Windows, while a reader holds it open) keeps it for the next sweep
+    and returns False: settlement never reports gone a fact that stayed."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        log.warning("Intake fact %s kept for the next sweep: its removal was refused", path, exc_info=True)
+        return False
+    return True
+
+
 def sweep_settled_owner_mailboxes(drive_root: pathlib.Path, *, stop: Any = None) -> Dict[str, Any]:
     """Off-loop sweep of canonical mailboxes whose task settled without a cleanup (CPL4-C18:
     a task that never reached the task_done dispatch - crash, lost event, hard kill - leaked
@@ -971,10 +1080,15 @@ def sweep_settled_owner_mailboxes(drive_root: pathlib.Path, *, stop: Any = None)
     mailbox_dir = pathlib.Path(drive_root) / _MAILBOX_DIR
     try:
         entries = sorted(p for p in mailbox_dir.glob("*.jsonl") if p.is_file())
+        # A settled task that never had mail can still leave its loop's closed intake fact (``close_root_intake``):
+        # the same settlement removes it.
+        named = {p.name for p in entries}
+        entries += sorted(p for p in mailbox_dir.glob("*.intake.json")
+                          if p.is_file() and p.name[: -len(".intake.json")] + ".jsonl" not in named)
     except OSError:
         return report
     for path in entries:
-        stem = path.name[: -len(".jsonl")]
+        stem = path.name[: -len(".intake.json") if path.name.endswith(".intake.json") else -len(".jsonl")]
         if stem.endswith(".acks"):
             continue  # swept with its mailbox
         try:
@@ -991,9 +1105,8 @@ def sweep_settled_owner_mailboxes(drive_root: pathlib.Path, *, stop: Any = None)
         if not settled or (stop is not None and stop()):
             report["kept"] += 1
             continue
-        cleanup_task_mailbox(pathlib.Path(drive_root), task_id, stop=stop)
-        if path.exists():
-            report["kept"] += 1  # unlink refused: still owned by the mailbox
-        else:
+        if cleanup_task_mailbox(pathlib.Path(drive_root), task_id, stop=stop):
             report["removed"].append(task_id)
+        else:
+            report["kept"] += 1  # refused or unproven: its mailbox or its intake fact stays for the next pass
     return report

@@ -13,7 +13,7 @@ import json
 import pathlib
 from types import SimpleNamespace
 
-from tests._dialogue import chat_rows
+from tests._dialogue import chat_rows, healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 from ouroboros.client_surface import (
     CLIENT_SURFACE_UA_LIMIT,
@@ -476,7 +476,7 @@ def test_presentation_env_is_stripped_by_benchmark_server_runner():
 # History endpoint negative: the field never replays to the SPA (R3)
 # ---------------------------------------------------------------------------
 
-def test_chat_history_does_not_emit_client_surface(tmp_path):
+def test_chat_history_does_not_emit_client_surface(tmp_path, healthy_main):
     from ouroboros.gateway.history import make_chat_history_endpoint
 
     logs = tmp_path / "logs"

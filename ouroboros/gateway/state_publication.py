@@ -42,8 +42,8 @@ body; ``task_bindings`` follows the request's ``bindings_since``, compared with 
 as the last production read them: the in-memory value ``/api/health`` serves without a store read.
 
 Display only: no mutation authority is derived from a publication (every door re-reads its own);
-its generation and age ride the response headers. Residual: a fact that changes by clock passage
-alone (the consciousness "due" wording, the rolling 24 h allowance) refreshes at the next revision move.
+its generation and age ride the response headers. A parked deadline bounds reuse on the ordinary state poll;
+other clock-only wording (consciousness due, rolling allowance) refreshes at the next revision move.
 """
 from __future__ import annotations
 
@@ -77,6 +77,11 @@ class Publication:
     jobs: Dict[str, Any] = field(default_factory=dict)  # the store's named-job rows this production read
     member_run_activity: dict = field(default_factory=dict)  # addressed observer facts used by nested cards
     panic_recovery_complete: bool = False  # complete census, measured after task and queue readiness
+    park_clock_range: tuple[float | None, float | None] = (None, None)
+
+    def covers_clock(self, now: float) -> bool:
+        lower, upper = self.park_clock_range
+        return (lower is None or lower <= now) and (upper is None or now < upper)
 
 
 def encode(value: Any) -> bytes:
@@ -120,9 +125,10 @@ def _failure(exc: BaseException) -> Tuple[str, str]:
 
 
 def _queue_revision() -> Tuple[Any, ...]:
-    """The queue's revision, the live ids, and each RUNNING row's model activity, sent attempt context and start
-    step (``turn_phase``, #2862: in-memory facts the documents omit). Read without Q: ``list()`` copies a dict or
-    list whole."""
+    """The queue's revision, the live ids, each RUNNING row's model activity, sent attempt context and start
+    step (``turn_phase``, #2862: in-memory facts the documents omit), and the admission reservations (id and token:
+    one withholds an expired park's Close offer, and its arrival or release moves no document). Read without Q:
+    ``list()``/``dict()`` copy a dict or list whole."""
     from supervisor import queue
     from supervisor.queue_publication import queue_revision
 
@@ -135,7 +141,8 @@ def _queue_revision() -> Tuple[Any, ...]:
                             meta, dict) else None, meta.get("lead") if isinstance(meta, dict) else None,
                             meta.get("_lead_request_id") if isinstance(meta, dict) else None], sort_keys=True, default=str),
                         str(meta.get("turn_phase") or "") if isinstance(meta, dict) else ""))
-    return (queue_revision(), tuple(pending), tuple(running))
+    reserved = tuple(sorted((str(tid), str(token)) for tid, token in dict(queue.ADMISSION_RESERVATIONS).items()))
+    return (queue_revision(), tuple(pending), tuple(running), reserved)
 
 
 def _store_revision(root: str) -> Any:
@@ -308,7 +315,7 @@ class Publisher:
         direct = _direct_turns_source()
         key = (*probe(self.drive_root, held.roots if held else frozenset(), direct=direct),
                ("panic_recovery_ready", panic_ready))
-        if held is not None and held.key == key:
+        if held is not None and held.key == key and held.covers_clock(time.time()):
             if not held.member_run_activity:
                 return held
             from ouroboros.delegate_feed import current_activities
@@ -325,7 +332,8 @@ class Publisher:
                 bindings=encode(bindings), bindings_revision=str(produced.get("task_bindings_revision") or ""),
                 roots=frozenset(map(str, produced.get("roots") or ())) - {self.drive_root},
                 jobs=dict(produced.get("jobs") or {}), member_run_activity=produced.get("member_run_activity") or {},
-                panic_recovery_complete=panic_ready and produced.get("panic_recovery_complete") is True)
+                panic_recovery_complete=panic_ready and produced.get("panic_recovery_complete") is True,
+                park_clock_range=produced.get("park_clock_range", (None, None)))
             self.held = publication
         return publication
 

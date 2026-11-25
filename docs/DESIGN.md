@@ -1176,7 +1176,10 @@ holding the owner's `notify_owner` grant speaks the same way in its own name: a
 per work and destination: when Ouroboros's identical re-issue goes ahead over a flag whose
 final reading marked the act as one the owner would stop, a `safety_notice` System row
 signed `Safety Supervisor · not Ouroboros's words` names the call, the flag's reason and
-quote, the work and the owner's brakes, and claims no delivery.
+quote, the work and the owner's brakes, and claims no delivery. An external program's note
+signs its own name the same way: its row shows the program's literal words under
+`agent "<label>" (declared, not verified)` — an author the host recorded but never verified,
+never the owner's or Ouroboros's name (`agent_note_received`).
 
 Formatting is asymmetric: assistant text always uses the sanitized chat markdown
 renderer regardless of `markdown`; ordinary System text is escaped unless
@@ -1566,7 +1569,10 @@ what still runs beside it (subagents, external runs, review work beside a task t
 running, such as the review a Pause lets finish, a run nobody can confirm); a work card's chip says the same word with the same line
 beside it, and the sidebar's name says both. An outcome stays beside `Finalizing…`; `Paused` stays until Resume, its
 line saying who or what paused it (the owner's press with its time, Ouroboros, nobody when a press declared no one),
-the words the declaring press recorded following its head verbatim whoever declared it (`You paused it: …`);
+the words the declaring press recorded following its head verbatim whoever declared it (`You paused it: …`); a park
+past its hard deadline says `Deadline expired` instead, even for work remaining after an answer, keeping that author,
+time, answer and outcome without a wait-to-resume line, while `Close` is a separate neutral offer, once on its exact
+task's own row or card, described by that name (a granted Stop stays, Panic selection leaves it out, materials stay);
 `Waiting` says what it waits for and goes on by itself when that happens (a sleep: each source it chose, joined by
 `or` — the subagent by its name, else how many, its external run, a service, a reviewer, a sender by its name, else a
 message — and its time last, in the viewer's clock, a time alone also waking on a message; a record
@@ -1900,8 +1906,8 @@ Unavailable canonical refresh retains text, references and drafts but disables a
 **Work portal.** Work keeps its Main card at the request’s place after a Project move
 (Turn into project, the mind's move, a binding); start/transfer rows name the destination, no second entry. Its portal: status chip and quiet fact, title,
 latest line (two lines, cut on a word), the meta line (tool calls · money ·
-updated), one action row: the Project reference, then `[Reply] [Resume] [Stop…]`
-with one primary (owner 26.10, B). Timeline, Reviews and children live
+updated), one action row: the Project reference, then `[Resume] [Stop…]`
+with one primary (owner 26.10, B); Reply is the row menu’s. Timeline, Reviews and children live
 in the room; the summary is reading content, not a disclosure. The room’s census supplies
 last line, tool calls and `in background` for detached work; missing facts change nothing.
 At the end, show the closing sentence unless it repeats the title; a held cause
@@ -2013,7 +2019,11 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   not destroyed. The tab's sessionStorage keeps its words, id, routing and
   upload references (never file bytes) across a reload (the asset reload a
   reconnect forces included) and a room's teardown; after a reload the first
-  history read settles it or shows the same doubt. A browser that refuses to
+  history read settles it or shows the same doubt. A read that fails shows it
+  only while the core says, on the connection serving this page's data profile,
+  that the room is still one of its ordinary rooms; Send again sends once, only on
+  the core's fresh word. When the word lapses or the room is left, the copy
+  leaves the feed, kept, until a fresh one. A browser that refuses to
   keep it says so, and Send again then lasts until a reload; a kept copy it
   cannot read back is said too, never silently dropped. A saved row the host
   knows never reached the agent (its write failed before dispatch, in the
@@ -2033,9 +2043,25 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 ### Replies
 
 Reply quotes a row for Ouroboros to interpret. In the owner’s bundled Telegram chat, a confirmed Project Reply
-opens a turn there; other ordinary Replies stay in the physical conversation (`skills/telegram/SKILL.md`).
-A Main reply to a Project row appears there at its time without waking work. Answers stay in Main
-(owner 28.10, A). Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
+opens a turn there; other ordinary Replies stay in the physical conversation (`skills/telegram/SKILL.md`). The bridge
+owns that turn; the browser Reply below never opens one.
+A browser Reply to a row the host links to a work goes to that work’s root, which alone answers: one Reply, one
+answerer, no picker. The host decides the link from the row: its card (a child’s card goes to its root), its System
+rows and child lines, its summary and relay notes, an ordinary line of any work but an undetached direct turn in Main,
+the message that confirmed it started or told it, and his earlier Reply to a work. A private contact, a place row and
+a host refusal are never linked. An ordinary quote keeps its routing and appearances; a linked row that lost its
+addressee is answered by its source room. The quote stays the exact row he pressed, with its own author; a row inside
+a card has its own Reply, and Resume, Pause and Stop… stay the card’s own.
+The host hands his words over at once, with no separate Main turn. A reading work takes them at its next step, a
+long step delays the answer; a queued work at its first drain; a sleeping work wakes unless a hold keeps it asleep.
+Other work reading now in the source or the work’s room hears them as context only: no second answer, no wake. A work
+not reading now (last drain closed, result settled, or a Stop, Pause, money pause or other hold keeps it) or unable
+to answer keeps that state, the room answers from what the work saved, and a Reply lifts none of them; a paused work
+finds the words as context later. If a write began but its outcome is not confirmed, his message says it may not have
+arrived, no other turn answers in its place, and the work may still read and answer. A late quiz answer is not such
+a Reply. Answers stay in the room where he wrote, one row under his words, which also show in the work’s room.
+Neither is a copy, and neither folds away.
+Saved bubbles offer Reply beside Copy and in the row menu; work cards and the rows inside them use the
 menu, questions their own field. Select words in one message for **Reply to quote** beside them or
 in the native Mac menu alongside Copy and Look Up. On touch, **Select text** opens native handles.
 Selection alone leaves the draft intact. Reply stages a row or passage in the composer; × or Esc cancels and keeps typed words. Send fixes
@@ -2055,7 +2081,16 @@ New gestures or navigation cancel the read. Only the quoted stream loads: its si
 unloaded down that chain until `Scroll to latest message`. Reading an old source reads no newer
 messages. Ouroboros quotes its addressee unless directly above, ignoring its own card.
 The answer to a new work replies to the selected row. A saved question answer lands on its recorded
-choice when present, otherwise on the answer line.
+choice when present, otherwise on the answer line. An owner answer shown as its own bubble with no
+Reply of its own (a late answer delivered once the asking work ended, or a Project’s bound opening
+from a saved question answer) shows its question’s first line above it by its recorded link, never a
+guess. Built on display without rewriting history, it appears on older saved answers too whenever the
+question is available; otherwise no quote appears and the answer stays readable. It is no explicit
+Reply. Pressing it opens the original question card in its recorded state, and from another room Back
+returns to the answer. Unlike Ouroboros’s quote of its addressee it stays when the question’s card
+stands directly above: that card may be only a Project question’s Main copy, and the press opens the
+original, which changes the visible page and where the question stands. Only this quote names the
+question’s other room in its head, with ↗.
 
 A relay is a note one work leaves another (`tell_task`), drawn so a reader sees at once
 that it is not a reply and which room wrote to which (`chat_relay_deck.js`):
@@ -2105,7 +2140,9 @@ Resume, Pause and Stop… exactly when the card does. Esc/outside press closes i
 and returns focus. Links, selected words and fields keep their native content menu;
 the desktop shell removes only commands that cannot work there (navigation away, stalls or no-ops).
 On touch the row sinks a little while held and lifts over the dimmed feed while its
-menu is open.
+menu is open; inside a card, which would clip a lift, a line with its own Reply takes the
+quiet tone instead, and a line with no address presses its nearest card: that card's menu,
+without a Reply since nothing quotes the line, and no swipe.
 
 Reading, setup and dialogs support familiar host actions to copy links and selected text and edit fields
 (owner, 2 Nov 2026); a disabled native menu is insufficient. Text buttons share one clipboard path,
@@ -2498,10 +2535,10 @@ roots and direct turns the same card: a coined name or narration headline
 host-attested Stop, and `Turn into project` in Main unless bound. A naming refusal
 explains why and leaves the card and button for explicit retry. Bound turns route
 later rows like `move_to_project`. The foot
-holds metadata and one action row: [Reply], Turn into project, Resume, Stop…,
-one primary; on a root they share one band, the row right, wrapping whole
-(owner 30.10, B). Nested children stay inside their root, carry no root control,
-and convert with it. Attention-only blocks and workless non-Done endings have
+holds metadata and one action row: Turn into project, Resume, Stop…, one
+primary (Reply is the row menu’s); on a root they share one band, the row right,
+wrapping whole (owner 30.10, B). Nested children stay inside their root, carry
+no root control, and convert with it. Attention-only blocks and workless non-Done endings have
 status and wait controls but no title or conversion until the first work row
 adds one.
 

@@ -269,6 +269,7 @@ def _write_private_bytes(path: pathlib.Path, data: bytes) -> None:
 
 
 def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
+    callback = getattr(ctx, "call_ref", "")
     return {
         "task_id": str(ctx.task_id or ""),
         "current_chat_id": ctx.current_chat_id,
@@ -282,12 +283,14 @@ def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
         "task_depth": int(ctx.task_depth or 0),
         # A managed task's call whose row cannot be read has unknown Stop; a standalone call has no task.
         "task_lifecycle_bound": getattr(ctx, "task_lifecycle_bound", False) is True,
+        **({"call_ref": callback} if callback else {}),
         "task_metadata": _json_safe(dict(ctx.task_metadata or {})),
         "task_contract": _json_safe(dict(getattr(ctx, "task_contract", {}) or {})),
     }
 
 
 def _apply_tool_context_payload(ctx: ToolContext, payload: Dict[str, Any]) -> ToolContext:
+    ctx._child_call_ref = str(payload.get("call_ref") or "")
     ctx.task_id = str(payload.get("task_id") or "") or None
     raw_chat_id = payload.get("current_chat_id")
     ctx.current_chat_id = raw_chat_id if isinstance(raw_chat_id, int) else None

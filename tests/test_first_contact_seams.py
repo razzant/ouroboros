@@ -547,10 +547,19 @@ def test_only_a_reply_a_stored_later_larger_one_answers_for_is_not_written(seam)
     assert store.read_bytes() == written
 
 
-def _contents(story, *, runs=1, room=None, maps_note=""):
+def _contents(story, *, runs=1, room=None, maps_note="", room_data=""):
     facts = {"floor": {"runs": runs}, **({"max_room": room} if room else {})}
     return {mode: ([{"type": "text", "text": ("B" * 400_000 if mode == "max" else "M" * 40_000) + maps_note},
-                    {"type": "text", "text": "S" * story}], dict(facts)) for mode in ("max", "low")}
+                    {"type": "text", "text": "S" * story}], dict(facts), room_data) for mode in ("max", "low")}
+
+
+def _folded_data(data):
+    """A folded walk's own data row, as ``model_room`` builds it: its own address-only note, never the ordinary bodies."""
+    if not data:
+        return ""
+    from ouroboros.memory_view_work import PROGRAM_HISTORY_HEAD
+
+    return f"{PROGRAM_HISTORY_HEAD}\nNote kept in address form: fixture fold."
 
 
 def _prefer(normal, limits, *, required=0, story_after=200_000, mode_after=None, compact=False, target=None):
@@ -563,7 +572,9 @@ def _prefer(normal, limits, *, required=0, story_after=200_000, mode_after=None,
 
     def forms(start_saving):
         asked.append(start_saving)
-        return _contents(story_after, runs=2, room=normal[0]["max"][1].get("max_room")), mode_after or normal[1]
+        _, facts, data = normal[0]["max"]
+        return _contents(story_after, runs=2, room=facts.get("max_room"),
+                         room_data=_folded_data(data)), mode_after or normal[1]
 
     target = target or dispatch_target(MODEL, {"OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:1/v1",
                                                "OPENAI_COMPATIBLE_API_KEY": "fixture-not-a-credential"})
@@ -599,14 +610,21 @@ def test_the_required_handbook_never_takes_the_books_to_maps():
 
 
 def test_a_maps_rung_keeps_the_folded_tellings_and_says_why():
+    from ouroboros.memory_view_work import PROGRAM_HISTORY_HEAD
+
     held = {"cause": "held", "cuts": ["F2"], "window": 1}
-    normal = (_contents(800_000, room=held), "max")
+    ordinary_data = f"{PROGRAM_HISTORY_HEAD}\nFixture report: 37 pages."
+    folded_data = _folded_data(ordinary_data)  # the fold's own data row, distinct from the ordinary bodies
+    assert folded_data != ordinary_data
+    normal = (_contents(800_000, room=held, room_data=ordinary_data), "max")
     chosen, _ = _prefer(normal, (90_000, 120_000, 90_000), story_after=200_000)
     assert chosen[1] == "low" and _story(chosen) == 200_000  # the folded tellings, not every story body again
     facts = chosen[0]["low"][1]
     assert facts["first_contact_preference"] and facts["max_room"]["cause"] == "first_contact"
+    assert chosen[0]["low"][2] == folded_data and chosen[0]["low"][2].startswith(PROGRAM_HISTORY_HEAD)
     folded, _ = _prefer(normal, (90_000, 0, 90_000), story_after=200_000)
     assert folded[1] == "max" and _story(folded) == 200_000  # still above F1, yet smaller than the whole: kept
+    assert folded[0]["max"][2] == folded_data and isinstance(folded[0]["max"][2], str)
     note = folded[0]["max"][0][-1]["text"].split("### First-send composition")[1]
     assert "smaller than its ordinary form" in note and "larger request" not in note
 

@@ -228,11 +228,16 @@ def project_main_task_authority(task: Mapping[str, Any]) -> Dict[str, Any]:
     author = metadata.get("objective_author") if isinstance(metadata.get("objective_author"), Mapping) else {}
     carried = _carried_beside_origin(metadata.get("owner_corpus"), origin_ref, origin_text, typed_opening=opening)
     if author.get("kind") == "task" and carried:
+        from ouroboros.dialogue_provenance import PROGRAM_REPLY_SOURCES
         from ouroboros.owner_relay import mark_context_files  # D03->D01 is lazy-only
 
         # A message carried beside the one this work answers keeps its files named, not given.
         mark_context_files([(row, row) for row in carried if row.get("attachments")],
                            origin_ref if isinstance(origin_ref, Mapping) else {})
+        for row in carried:
+            target = row.get("reply_to")
+            if isinstance(target, Mapping) and target.get("program_source") in PROGRAM_REPLY_SOURCES:
+                row["reply_to"] = {key: target[key] for key in ("address", "program_source") if key in target}
         projection["task_owner_words"] = {"carried_by": str(author.get("task_id") or ""), "rows": carried}
     if isinstance(task.get("authority_historical_gaps"), list):
         projection["authority_historical_gaps"] = copy.deepcopy(task["authority_historical_gaps"])

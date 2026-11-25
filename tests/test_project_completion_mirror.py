@@ -173,6 +173,7 @@ def test_the_roots_closing_sentence_rides_its_row_live_durable_and_replayed(monk
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
+    dialogue_test.confirm_first_use(tmp_path)  # Main's first use is confirmed before its first saved row
     message_bus.send_with_budget(1, event["text"], task_id="root-project", role="system",
                                  system_type="project_completion_summary", progress_meta=meta)
     live = next(frame for frame in frames if frame.get("type") == "chat")
@@ -257,6 +258,7 @@ def test_a_place_born_roots_origin_rides_its_completion_row_and_detail_as_its_ce
 def test_a_row_without_the_key_replays_without_it(monkeypatch, tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir(parents=True)
+    dialogue_test.confirm_first_use(tmp_path)  # Main's first use is confirmed before its first saved row
     (logs / "chat.jsonl").write_text(json.dumps({
         "ts": "2026-08-21T00:00:03Z", "direction": "system", "chat_id": 1,
         "type": "project_completion_summary", "task_id": "root-project", "project_id": "launch",

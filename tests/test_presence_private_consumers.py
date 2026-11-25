@@ -13,7 +13,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.conversation_lease import open_root_intake, root_conversation_key
+from ouroboros.conversation_lease import (
+    LOCAL_RESULT_INTAKE,
+    author_intake_accepting,
+    open_root_intake,
+    root_conversation_key,
+)
 from ouroboros.dialogue_provenance import presence_caller_binding, presence_related_work, run_origin
 from ouroboros.presence_admission import admit_presence_turn
 from ouroboros.presence_runner import build_presence_result_event
@@ -147,7 +152,11 @@ def test_beside_an_outward_root_the_next_message_goes_to_the_outward_root(asked)
     world, turn = asked
     private, outward = _started(world, turn, PRIVATE, OUTWARD)
     dispatched(world, private), dispatched(world, outward)
-    assert open_root_intake(world.data, private) is False and open_root_intake(world.data, outward) is True
+    conversation = root_conversation_key(outward)
+    assert open_root_intake(world.data, private) and open_root_intake(world.data, outward)
+    assert author_intake_accepting(world.data, private["id"], LOCAL_RESULT_INTAKE)
+    assert not author_intake_accepting(world.data, private["id"], conversation)
+    assert author_intake_accepting(world.data, outward["id"], conversation)
     spent = world.allowance.calls
 
     source, reply = post(world, text=ARRIVAL)

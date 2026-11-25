@@ -263,6 +263,15 @@ def message_routing_acts(root: Path, sources: list) -> list:
     return [routing_act_fields(root, message, row) for message, row in message_receipts(root, sources)]
 
 
+def confirmed_reply_work(own_ref: dict, act: dict) -> str:
+    """A positive late receipt qualifies only an explicitly replyable act of this turn."""
+    work, action = own_ref.get("about_work"), own_ref.get("action")
+    if not work or act["target"] != work or act["action"] != action:
+        return ""
+    statuses = {"delivered", "read"} if action == "steer_task" else {"scheduled"}
+    return work if act["status"] in statuses else ""
+
+
 def routing_act_lines(acts: Any) -> list:
     """One line per act (``routing_act_fields``), oldest first: the observer's row and the
     facts it compares against render the same way."""
@@ -277,3 +286,16 @@ def routing_act_lines(acts: Any) -> list:
 
     return [f"- {act.get('action') or '?'} → {where(act)}: {act.get('status') or 'unknown'}{note(act)}, "
             f"recorded {act.get('ts') or '?'}" for act in sorted(acts, key=lambda row: str(row.get("ts") or ""))]
+
+def append_own_routing_acts(root: Path, own: list[dict], acts: list[dict]) -> set[str]:
+    """Collect late receipts by their own act and return confirmed Reply targets."""
+    replyable = set()
+    for ref in own:  # the exact token answers even when no owner row carries the act
+        message = str(ref.get("client_message_id") or "")
+        row = recorded_act_receipt(root, ref) if message else {}  # in the room a note's relay named for it
+        act = routing_act_fields(root, message, row or ref)
+        if act and (work := confirmed_reply_work(ref, act)):
+            replyable.add(work)
+        if act and act["status"] != "unconfirmed" and act not in acts:
+            acts.append(act)
+    return replyable

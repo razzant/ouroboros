@@ -1394,7 +1394,7 @@ def _late_phase_refusal(q: Any, root: pathlib.Path, task_id: str, row: Dict[str,
                         *, gaps: Optional[List[Dict[str, str]]] = None) -> Optional[Dict[str, Any]]:
     """The exact Resume's own refusals for an answered root's late work; nothing is consumed."""
     from ouroboros.cancel_intents import has_active_intent
-    from ouroboros.deadline_utils import parse_deadline_ts, utc_now
+    from ouroboros.deadline_utils import task_deadline, utc_now
     from supervisor.continuation_admission import action_writers
     from supervisor.events_budget import budget_hold_fact
     from supervisor.state import budget_remaining
@@ -1419,8 +1419,7 @@ def _late_phase_refusal(q: Any, root: pathlib.Path, task_id: str, row: Dict[str,
     # Reviewers already launched finish separately; Resume does not wait for them.
     blockers = [{"kind": "continuation_successor", "task_id": tid} for tid in successors] + _owner_pause_blockers(
         action_writers(q, task_id, drive_root=root, owner_pause_fence_id=str(fence.get("fence_id") or ""), gaps=gaps))
-    deadline = parse_deadline_ts(row.get("deadline_at") or (row.get("task_contract") or {}).get("deadline_at")
-                                 or (row.get("metadata") or {}).get("deadline_at"))
+    deadline = task_deadline(row, late_phase=True)
     if deadline is not None and deadline <= utc_now():
         return {"ok": False, "error": "deadline_passed"}
     refusal = _global_money_refusal(q, budget_remaining, members) or _root_money_refusal(

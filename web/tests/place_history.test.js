@@ -99,6 +99,19 @@ test('role-first names and facts never infer delivery or exact wake', () => {
     assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'conversation_work'}}}), ['Passed to work in this conversation']);
 });
 
+test('a recorded program keeps its name and shows a Program fact', async (t) => {
+    const f = fixture(t);
+    const program = { ...row('program', 'The weekly report is ready.'), sender_label: 'Calendar & Reports',
+        place_history: { kind: 'message', actor_origin: 'machine', owner_confirmed: false } };
+    const reader = mount(f, { readHistory: async () => page([program]) }); await tick();
+    const message = f.q('.place-convo-row');
+    assert.equal(message.className, 'place-convo-row is-participant');
+    assert.equal(message.querySelector('.place-convo-who').textContent, 'Calendar & Reports');
+    assert.equal(message.querySelector('.place-convo-fact').textContent, 'Program');
+    assert.equal(message.querySelector('.place-convo-text').textContent, program.text);
+    reader.close();
+});
+
 test('a retained row without new fields renders byte for byte as on e3bd98c20', async (t) => {
     const f = fixture(t);
     const legacy = { history_id: 'chat:legacy', role: 'user', text: 'Already saved <plain> & unchanged.', sender_label: 'Maya',

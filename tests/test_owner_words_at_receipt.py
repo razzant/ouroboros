@@ -294,6 +294,7 @@ def test_each_ingress_carries_at_receipt(tmp_path, monkeypatch):
     from supervisor.steering import _handle_steer_task
     from ouroboros import server_owner_routing, server_routing_context as routing
     from ouroboros.owner_relay import quote_rows
+    from ouroboros.project_registry_recovery import initialize_new_root
     from ouroboros.projects_registry import create_project
     from tests.test_owner_relay import context
     from tests.test_project_routing_v664 import _ctx as routing_ctx
@@ -301,6 +302,7 @@ def test_each_ingress_carries_at_receipt(tmp_path, monkeypatch):
     from tests.test_steer_relay import _supervisor_ctx
     from tests import _dialogue as dialogue_test
 
+    initialize_new_root(tmp_path)  # A healthy root has its empty Project registry before any history is written.
     dialogue_test.seed(tmp_path, archives={"chat_20261108T000000.jsonl": [
         {"chat_id": 777, "direction": "in", "ts": "2026-11-08T08:00:00Z", "text": "Old room notes"}]})
     room = create_project(tmp_path, "receipt-room")
@@ -458,3 +460,124 @@ def test_frames_the_receipt_could_not_send_wait_for_the_body_which_sends_them_on
     _round_top(nanny, messages)
     assert len(stub.posts) == sent, "the round top sends nothing the body ended"
     assert _said(messages).count(f"[Host fact: my human's row {address} for session run run-live: delivered]") == 1
+
+
+def test_a_direct_reply_reaches_the_work_s_members_once_as_context_and_wakes_none(tmp_path):
+    """My human's Reply addressed to a root has one recipient, the root, which answers it; the ingress carries it to
+    no member (``server_owner_routing``). The root's own drain catch-up gives each live member one passive copy at
+    the root's address (``context_only``): a sleeping helper stays asleep, and a second pass adds nothing."""
+    from ouroboros.loop_messages import owner_authority_kinds
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.model_sleep import wake_reason
+    from ouroboros.owner_mailbox import OwnerMailboxPeek, _mailbox_path
+    from ouroboros.owner_relay import carry_to_members, owner_quote, write_relay
+
+    row = {"chat_id": 1, "direction": "in", "ts": "2026-11-23T10:00:00+00:00", "text": "Only for the root",
+           "client_message_id": "m-1"}
+    dialogue_store.append(tmp_path, "chat", row)
+    address = format_address(row_address(row))
+    write_task_result(tmp_path, "t-root", "running", delegation_role="root", root_task_id="t-root")
+    write_task_result(tmp_path, "t-nanny", "running", delegation_role="subagent", parent_task_id="t-root",
+                      root_task_id="t-root")
+    root = _ctx(tmp_path, "t-root")
+    root.task_metadata, root._owner_directives, root.task_attempt = {"root_task_id": "t-root"}, [], 1
+    write_relay(tmp_path, "t-root", relay_id=f"work-reply:{address}", note="", chat_id=1, teller_task_id="",
+                quotes=[owner_quote(tmp_path, row, address=address)], canonical_root=tmp_path, work_reply=True)
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "t-root", None, set(), owner_ctx=root)
+    for _ in range(2):
+        carry_to_members(root, delivered=True)
+        assert root._carriage_memo["failed"] is False
+    mail = _mail(tmp_path, "t-nanny")
+    assert list(mail) == [f"relay:carry-context:{address}:t-nanny"]
+    entry = mail[f"relay:carry-context:{address}:t-nanny"]
+    carried = entry["host_carried"]
+    assert (carried["went_to"], carried["context_only"]) == ("t-root", True) and "handled_by_source_room" not in carried
+    assert _mailbox_path(tmp_path, "t-nanny").read_text(encoding="utf-8").count("\n") == 1
+    assert owner_authority_kinds([entry]) == []
+    assert not OwnerMailboxPeek(waking_only=True).pending(tmp_path, "t-nanny", set(), 1)
+    assert not wake_reason(_nanny(tmp_path), {"any_mail": True})
+
+
+def _held_with_a_reply(tmp_path):
+    """The root of ``_tree`` holding the ordinary row (owed to its own session) and, as ``inject_relay`` holds it,
+    my human's direct Reply to it (passive context for its tree). Returns ``(root, ordinary address, reply address,
+    the Reply's quote)``."""
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_relay import owner_quote, retain_owner_message, write_relay
+
+    row, address = _tree(tmp_path)
+    reply = {"chat_id": 1, "direction": "in", "ts": "2026-11-23T10:00:00+00:00", "text": "Only for the root",
+             "client_message_id": "m-2"}
+    dialogue_store.append(tmp_path, "chat", reply)
+    reply_address = format_address(row_address(reply))
+    root = _ctx(tmp_path, "t-root")
+    root.task_metadata, root._owner_directives, root.task_attempt = {"root_task_id": "t-root"}, [], 1
+    retain_owner_message(root, row)
+    quote = owner_quote(tmp_path, reply, address=reply_address)
+    write_relay(tmp_path, "t-root", relay_id=f"work-reply:{reply_address}", note="", chat_id=1, teller_task_id="",
+                quotes=[quote], canonical_root=tmp_path, work_reply=True)
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "t-root", None, set(), owner_ctx=root)
+    return root, address, reply_address, quote
+
+
+def test_the_round_top_frames_an_ordinary_row_into_the_roots_session_and_leaves_a_direct_reply_as_context(tmp_path, monkeypatch):
+    """The catch-up agrees with the receipt (``carry_at_receipt``: a passive row takes no frame): the root's round top
+    sends the ordinary row it owes its own session, a lost one replaying its recorded bytes, and nothing for the Reply
+    it holds as passive context, whose words its session reads with its next continuation."""
+    from ouroboros import delegate_interactions as interactions, owner_relay
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    root, address, reply_address, quote = _held_with_a_reply(tmp_path)
+    assert owner_relay.held_owner_messages(root)[reply_address]["carried"] == {"went_to": "", "work_reply": True}
+    lost = _install(monkeypatch, _Stub(error=ClaudexorUnavailable("daemon_unreachable", "reset", status_code=503)))
+    first = interactions.place_rows_into_runs(root)
+    sent = _posts(lost)
+    assert [(run, addr) for run, _key, addr, _text in sent] == [("run-root", address)], "the ordinary row alone, to the root's session"
+    assert any(f"{address} for session run run-root: delivery_unknown" in line for line in first)
+    assert not any(reply_address in line for line in first)
+    delivered = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
+    assert interactions.place_rows_into_runs(root) == [f"[Host fact: my human's row {address} for session run run-root: delivered]"]
+    assert _posts(delivered) == sent, "the frame already owed goes again as it was recorded: its id and bytes"
+    assert interactions.place_rows_into_runs(root) == [] and len(delivered.posts) == 1, "ended: nothing again"
+    assert owner_relay.carry_at_receipt(tmp_path, "t-root", [quote], went_to="t-root", tree="t-root",
+                                        passive={"context_only": True}) is None and len(delivered.posts) == 1
+    assert reply_address not in {addr for _run, _key, addr, _text in _posts(delivered)}
+
+
+def test_an_open_session_reads_a_direct_reply_with_its_next_continuation_never_as_a_live_frame(tmp_path, monkeypatch):
+    """The whole scope of a passive row's delivery to a session: its starter (the nanny) holds the copy as context, no
+    live frame goes to its session, and the continuation it starts carries the words, stamped as the row went to the
+    root; the ordinary row beside it is framed as before."""
+    from ouroboros.delegate_continuation import continuation_words
+
+    root, address, reply_address, _quote = _held_with_a_reply(tmp_path)
+    stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""},
+                                       harnesses=[_row(), _row("deaf-route", live_input="none")]))
+    nanny, messages = _nanny(tmp_path), [{"role": "user", "content": "your assignment"}]
+    _round_top(nanny, messages)  # its drain holds the passive copy; its round top frames what is ordinary
+    assert "carried to this work by the host (went to t-root)" in _said(messages) and "Only for the root" in _said(messages)
+    assert {addr for _run, _key, addr, _text in _posts(stub)} == {address}, "the ordinary row alone is a frame"
+    assert reply_address not in {addr for _run, _key, addr, _text in _posts(stub)}
+    tail = continuation_words(nanny, tmp_path, "run-live")
+    assert "Only for the root" in tail and "went to t-root" in tail and "chat 1 / m-2" in tail
+    assert "Only for the root" in continuation_words(root, tmp_path, "run-root"), "the root's own session reads it as well"
+
+
+@pytest.mark.parametrize("passive", [{"context_only": True}, {"handled_by_source_room": True}])
+def test_a_passive_row_takes_no_frame_where_frames_are_chosen_and_the_same_row_ordinary_takes_one(tmp_path, monkeypatch, passive):
+    """One boundary for both placers: the row's carriage decides. Passive (``member_carriage``), the host's receipt
+    thread frames it into no open session; the same row ordinary is framed into every open session of the tree on a
+    route with live input."""
+    from ouroboros import delegate_interactions as interactions
+    from ouroboros.owner_relay import owner_quote
+
+    row, address = _tree(tmp_path)
+    quote = owner_quote(tmp_path, row, address=address)
+    stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""},
+                                       harnesses=[_row(), _row("deaf-route", live_input="none")]))
+    for quiet in (passive, {}):
+        thread = interactions.place_at_receipt(tmp_path, "t-root", [({address}, address, quote, "t-root", "", quiet)])
+        assert thread is not None
+        thread.join(10)
+        assert not thread.is_alive()
+        assert sorted(run for run, *_rest in _posts(stub)) == ([] if quiet else ["run-live", "run-root"])

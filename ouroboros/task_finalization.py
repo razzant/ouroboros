@@ -311,6 +311,9 @@ def prepare_terminal_send_event(
         )
     usage["delegate_terminal_reconciliation"] = custody_audit
     origin = str(usage.get("terminal_origin") or "")
+    if (not presence and task.get("_is_direct_chat") and origin == TERMINAL_ORIGIN_MODEL_FINAL
+            and (work := usage.get("about_work_task_id"))):
+        send_event.setdefault("progress_meta", {})["about_work_task_id"] = work
     notice = str(usage.get("terminal_provider_notice") or "")
     # One voice: the host disclosure stays a typed field OF THE RESULT (CLI
     # stderr, --jsonl, parent handoff, reviewers, synthesis, the child-result
@@ -380,6 +383,8 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
         fields["terminal_salvage_path"] = path
     if usage.get("wake_silent") is True:
         fields["wake_silent"] = True
+    if usage.get("presence_explicit_silence") is True:
+        fields["presence_explicit_silence"] = True  # a conscious accepted silence with no delivered answer
     if usage.get("wake_summary"):
         fields["wake_summary"] = str(usage["wake_summary"])  # a self-started run's name, never over a title
         if summary_names_run(metadata, task_contract) and not str(title or prior.get("title") or "").strip():
@@ -440,9 +445,9 @@ def deliver_final_message_live(
     tid = str(task_id or "")
     final = fallback = None
     for event in pending_events:
-        # A mid-task reply or Main notice is never the answer, even with no final after it.
+        # A mid-task reply, relay return or Main notice is never the answer, even with no final after it.
         if (isinstance(event, dict) and event.get("type") == "send_message"
-                and event.get("system_type") not in ("proactive_message", "main_notice")):
+                and event.get("system_type") not in ("proactive_message", "main_notice", "relay_reply")):
             fallback = event
             if str(event.get("task_id") or "") == tid:
                 final = event

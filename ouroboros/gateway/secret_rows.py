@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict
 
-from ouroboros.provider_models import PROVIDER_KINDS
+from ouroboros.provider_models import CONNECTIONS_KEY, PROVIDER_KINDS
 from ouroboros.secret_masking import (
     MCP_RESPONSE_ONLY_FIELDS, looks_masked_mcp_secret, looks_masked_settings_secret,
     mask_mcp_url, mask_prefixed_secret, mask_settings_secret, rehydrate_mcp_url,
@@ -159,7 +159,7 @@ def public_rows(key: str, rows: Any) -> list | None:
              "auth_configured": bool(str(row.get("auth_token") or "").strip())}
             for row in rows if isinstance(row, dict)
         ]
-    if key == "OUROBOROS_CONNECTIONS":
+    if key == CONNECTIONS_KEY:
         return [{"kind": row["kind"], "name": row["name"]} for row in rows if isinstance(row, dict)
                 and isinstance(row.get("kind"), str) and row["kind"] in PROVIDER_KINDS
                 and isinstance(row.get("name"), str)]

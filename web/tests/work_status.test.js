@@ -18,7 +18,7 @@ import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
     OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, behindWords, cardControls, cardMenuActions, cardWorkView, clock,
-    emptyWorkState, memberPaused, memberState, ownStopPress, promoteChildCard, reasonText, reconcileWorkState, resumeAttemptClause,
+    emptyWorkState, indexDeadlineExpired, memberDeadlineExpired, memberPaused, memberState, ownStopPress, promoteChildCard, reasonText, reconcileWorkState, resumeAttemptClause,
     resumeAttemptWords,
     resumeTargets, roomAmber, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
@@ -522,6 +522,76 @@ test('a member is paused only where a confirmed work in any room says so', () =>
     assert.equal(memberPaused(emptyWorkState(), 'o'), false);
     const unconfirmed = { episodes: new Map([['o', { ...work('paused_by_owner'), confirmed: false }]]) };
     assert.equal(memberPaused(unconfirmed, 'o'), false, 'an unconfirmed work proves nothing');
+});
+
+test('per-member expiry clears memberPaused and sets memberDeadlineExpired only from confirmed member state', () => {
+    const expired = { code: 'deadline_expired', text: 'Deadline expired' };
+    const paused = { code: 'paused_by_owner', text: 'You paused it' };
+    const state = reconcileWorkState(emptyWorkState(), {
+        supervisor_ready: true, works_complete: true, rooms: {},
+        works: [{
+            work_id: 'root', room: 2, confirmed: true, episode: { task_id: 'root', live: true },
+            activity: 'paused', because: [expired, paused],
+            members: {
+                ids: ['root', 'healthy', 'unconfirmed-member', 'missing-confirmed'],
+                states: {
+                    root: { confirmed: true, activity: 'paused', because: [expired, paused] },
+                    healthy: { confirmed: true, activity: 'paused', because: [paused] },
+                    'unconfirmed-member': { confirmed: false, activity: 'paused', because: [expired] },
+                    'missing-confirmed': { activity: 'paused', because: [expired] },
+                },
+            },
+        }],
+    }, 1);
+    assert.deepEqual([memberPaused(state, 'root'), memberDeadlineExpired(state, 'root')], [false, true]);
+    // Work-level expiry never leaks onto a sibling member whose own state is resumable paused.
+    assert.deepEqual([memberPaused(state, 'healthy'), memberDeadlineExpired(state, 'healthy')], [true, false]);
+    // Unconfirmed / unknown member states prove neither paused nor expired.
+    assert.deepEqual([memberPaused(state, 'unconfirmed-member'), memberDeadlineExpired(state, 'unconfirmed-member')], [false, false]);
+    assert.equal(memberDeadlineExpired(state, 'missing-confirmed'), false);
+    assert.deepEqual([memberPaused(state, 'absent'), memberDeadlineExpired(state, 'absent')], [false, false]);
+    // A confirmed expired member survives an unrelated unknown sibling making the aggregate work unconfirmed.
+    const mixedBody = {
+        supervisor_ready: true, works_complete: true, rooms: {},
+        works: [{
+            work_id: 'mixed', room: 2, confirmed: false, episode: { task_id: 'mixed', live: true },
+            activity: 'unknown', because: [],
+            members: {
+                ids: ['mixed', 'expired-helper', 'unknown-sibling', 'healthy-helper'],
+                states: {
+                    mixed: { confirmed: true, activity: 'paused', because: [paused] },
+                    'expired-helper': { confirmed: true, activity: 'paused', because: [expired, paused] },
+                    'unknown-sibling': { confirmed: false, activity: 'unknown', because: [] },
+                    'healthy-helper': { confirmed: true, activity: 'paused', because: [paused] },
+                },
+            },
+        }],
+    };
+    const mixed = reconcileWorkState(emptyWorkState(), mixedBody, 1);
+    assert.equal(memberDeadlineExpired(mixed, 'expired-helper'), true);
+    assert.equal(memberDeadlineExpired(mixed, 'unknown-sibling'), false);
+    assert.equal(memberDeadlineExpired(mixed, 'healthy-helper'), false);
+    // Disconnected, unready, partial-omitted, synthetic-without-memberStates or failed reads never carry stale expiry.
+    assert.equal(memberDeadlineExpired(reconcileWorkState(mixed, mixedBody, 1, false), 'expired-helper'), false);
+    assert.equal(memberDeadlineExpired(reconcileWorkState(mixed, { ...mixedBody, supervisor_ready: false }, 1, true), 'expired-helper'), false);
+    assert.equal(memberDeadlineExpired(reconcileWorkState(mixed, { supervisor_ready: true, works_complete: false, rooms: {}, works: [] }, 1, true), 'expired-helper'), false);
+    const unconfirmedWork = { episodes: new Map([['root', { ...state.episodes.get('root'), confirmed: false }]]) };
+    assert.deepEqual([memberPaused(unconfirmedWork, 'root'), memberDeadlineExpired(unconfirmedWork, 'root')], [false, false]);
+    const failedRead = reconcileWorkState(mixed, null, 1, true);
+    assert.deepEqual([memberPaused(failedRead, 'expired-helper'), memberDeadlineExpired(failedRead, 'expired-helper')], [false, false]);
+    assert.deepEqual([memberPaused(reconcileWorkState(state, null, 1, true), 'healthy'), memberDeadlineExpired(reconcileWorkState(state, null, 1, true), 'healthy')], [false, false]);
+
+    // indexDeadlineExpired matches per-source authority independently of Close tokens.
+    const indexed = indexDeadlineExpired({
+        active_chat_activities: [{ activity_id: 'act-exp', deadline_expired: true }, { activity_id: 'act-close-only', close_expired: { action: 'close', target: 'act-close-only', close_expired: 'a'.repeat(64) } }],
+        main_attention: [{ task_id: 'attn-exp', attention_reason: 'deadline_expired' }],
+        works: [
+            ...mixedBody.works,
+            { work_id: 'ep-exp', room: 1, confirmed: true, episode: { task_id: 'ep-exp', live: true }, activity: 'paused', because: [expired] },
+            { work_id: 'ep-unconf', room: 1, confirmed: false, episode: { task_id: 'ep-unconf', live: true }, activity: 'paused', because: [expired] },
+        ],
+    });
+    assert.deepEqual([...indexed].sort(), ['act-exp', 'attn-exp', 'ep-exp', 'expired-helper']);
 });
 
 test('controls group by action with exact targets; Resume is a button, a pending Stop leaves its escalation', () => {

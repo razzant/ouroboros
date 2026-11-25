@@ -1227,8 +1227,8 @@ static manifest.
 Check `/identity` for `presence_wake_signals: 1` before declaring signals. Older hosts may reject `facts`.
 Intake uses live provider signals; new choices use the place's live declarations. Saved wakes stay removable offline.
 A resend of a settled event with the same payload (negotiated versions and staged file paths aside) gets its saved
-answer even after a release stops declaring a signal it carried; a new event with that signal is refused. On HTTP
-503 `places_unreadable`, resend the same event.
+answer, including negotiated `attention`, even after a release stops declaring a signal it carried; a new event with
+that signal is refused. On HTTP 503 `places_unreadable`, resend the same event.
 An eligible unpublished signal retries before capture at any connected place. A proven pending import can
 also defer a core-only wake decision after capture. Retry the same event on HTTP 429 `wake_import_declarations_pending`.
 `/presence/turn` sends `disposition: retry` and `retry_after: 60` seconds. `/call/open` uses its call error envelope.
@@ -1339,6 +1339,7 @@ Use the connector's ordinary content-hash-bound skill token for:
   its custody of an event can close at the admission receipt; a release that stops polling work for finals
   declares PluginAPI 2.7, so an older host, whose handed-off roots still answer by their final, refuses it
   before import.
+  `presence_attention_version: 1` advertises the neutral `attention` fact below.
   `presence_history_import_version: 1` advertises `POST /presence/history` ("Importing
   earlier history" below); `presence_source_order_version: 1` advertises
   `event.message.source_order` on live and history events alike: an integer from 0 to
@@ -1349,7 +1350,8 @@ Use the connector's ordinary content-hash-bound skill token for:
   gap, not permission to inject owner messages or invent output identities. A
   historical record can still lack `output_ref` on a capable host.
 - `POST /presence/turn`: `event`, optional legacy `binding_id`, `staged_files`,
-  `delivery_reporting_version` and `continuation_version`. The event still carries
+  `delivery_reporting_version`, `continuation_version` and `attention_version` (the heard
+  passage below). The event still carries
   `source_event_id`, `provider`, `account_id`, `conversation_id`, `thread_id`,
   `conversation_key`, `actor`, `conversation`, `message` and `text`. The host derives
   its own canonical conversation key from `provider`, `account_id`, `conversation_id`
@@ -1422,6 +1424,10 @@ Use the connector's ordinary content-hash-bound skill token for:
   (history, the Safety occasion). Whom words address and whether they ask for work is the mind's reading: an order
   exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
   `manage_schedules` update) and the host verifies the bytes inside a message of theirs that reached that run.
+  An `actor` the connector marks `origin: "machine"` (a program it authenticated, such as a named A2A peer) is never
+  my human's, even from an account they confirmed, at the turn and on every later read: the fact can only lower
+  authority. The room and focus show the recorded program as such, and people counts and owner-account suggestions
+  do not count that arrival as a person. Without the field the existing confirmation rules apply; an older host ignores it.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
   `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),
@@ -1471,8 +1477,17 @@ an external request already accepted by the provider.
 Paused, consciousness Off/Panic, or no matching wake returns `silent` (heard).
 That final decision stays on the accepted room record: a retry stays silent after On,
 without creating a task document or retained context-source blob for the heard event.
+A connector that saw `GET /identity.presence_attention_version: 1` sends `attention_version: 1`
+on `POST /presence/turn` or as a query parameter on `GET /presence/work/{work_ref}`. A successful
+view adds `attention: {decision}`: `heard` (saved), `handed_off` (accepted by running work, not
+proof of reading), `focus_started` (a start record, not a completion), `completed_silent`
+(the model ended and selected silence), or `unknown` (no sufficient evidence). Apply `status`
+and `outcome` separately; a held reply is not chosen silence. The reason and recipient stay in
+the local history. No version means no added field. A connector reports neutral public states;
+keep local retry and transport diagnostics within its own installation.
 An exhausted or unknown allowance returns `consciousness_allowance_exhausted`,
-`disposition: retry` and `retry_after` seconds. Physical capacity keeps the existing
+`disposition: retry` and `retry_after` seconds: the event was kept but not answered, so
+offer it again after that time; it is never a heard answer. Physical capacity keeps the existing
 `presence_capacity_full` retry response. A matching event focuses consciousness in
 that room under the owner's autonomy level and allowance, independently of its own
 clock. Before allowance, rate or capacity is consulted, the conversation's current author, else its
@@ -1907,6 +1922,36 @@ subscribe_events: [skill.lifecycle]
 permission grant. Skills that perform multi-step external work should still
 print a concise success/failure marker or write structured state under
 `OUROBOROS_SKILL_STATE_DIR` so the agent can decide whether to fix or report.
+
+## Returning a later answer (`POST /late_result`)
+
+A connector with the existing `presence` grant may opt in on the manifest's reviewed message-tool row:
+`late_result: true` means that tool sends a request expecting an answer. Other tools get no reference. A supported
+host advertises `late_result_version: 1` from `/identity`. After normal tool admission it can supply `ctx.call_ref`
+for that call in a proven local Main or Project. Keep it private, never in the peer request, tool output, or UI.
+A Place without a local-only route, unknown address, or older host supplies no usable reference: keep the answer
+in the skill's letter history, readable by its letter id, without claiming a room woke.
+
+On a later answer, use the current local skill token and `POST /late_result` with exactly `call_ref`, `report_id`
+(the letter's message id, 1–256 characters from letters, digits, `_`, `.`, `:`, `@`, `+`, `-`), `label`, and
+`text` (up to 8,000 characters). Send no room, authority or task fields. The opted-in tool result carries
+`late_answer: null` when no answer arrived by its return, or `late_answer: {report_id,label,text}` for an answer
+it already includes. A completed no-answer receipt remains valid under a preview; a present answer requires
+the whole saved tool result. `200 {ok: true, report_ref, delivery}` means `tool_result` (matching letter id, label
+and literal text in that saved result; no extra room row) or `handed_off` (queued to a live reader or admitted
+as a local turn; not model inclusion). An exact repeat rejoins; a conflicting report or
+permanent refusal leaves the local letter readable. On `429 retry_after_s`, a lost connection or an unavailable
+host, retry only that same report, not the outgoing letter. The named inbound row carries the accepted text,
+the non-owner author and letter id, not the call reference. It can reach the still-reading source root or a fresh
+local consideration in that room after normal completion. A live reader's ordinary request may proceed without
+the letter. Only one candidate on the bound route may carry it; no secret-derived identity is kept. The local turn
+keeps the original wallet and deadline, shares finite execution time, and answers only in that local room while
+leaving any connector binding there untouched. Unknown authority leaves the room copy, not a new send. An interrupted
+consideration has no ordinary Continue; new owner input starts normally.
+
+The old A2A-only `/chat/allocate-internal` plus `/chat/inject` with `wait_for_response` remains supported in 7.x.
+Use a connector's `/presence/turn` and correlated `/presence/work` for new A2A receipt integrations. The old A2A
+allocator/wait variant is scheduled for removal in 8.0; ordinary owner-bound chat injection is not part of that removal.
 
 ## Telling the owner something (`POST /notify`)
 

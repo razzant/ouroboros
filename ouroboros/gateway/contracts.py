@@ -30,9 +30,9 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import ProcessingTiers, WorkLeadFields, WorkStateFields
+from ouroboros.gateway.work_contracts import ProcessingTiers, TaskCancelRequest, WorkLeadFields, WorkStateFields  # noqa: F401
 from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
-from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
+from ouroboros.gateway.history_contracts import AgentNoteFields, ChatHistoryResponse, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
     AttachmentManifestEntry, ChatAttachmentInbound, ChatAttachmentView,
@@ -120,7 +120,7 @@ class TransportMetadata(TypedDict, total=False):
     sender_label: str
 
 
-class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
+class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField, AgentNoteFields):
     """Outbound WS chat frame."""
 
     presence_contact: NotRequired[PresenceContact]
@@ -141,6 +141,9 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     origin_message_ref: NotRequired[Dict[str, Any]]
     # X3: a repair receipt whose managed task id the router mints only at promotion (typed truth, no invented id).
     task_id_pending: NotRequired[bool]
+    # The confirmed work this final answer replies about (finish_task about_work): a direct turn's
+    # terminal frame addresses exactly the task this owner turn started or told, never a fresher id.
+    about_work_task_id: NotRequired[str]
     # "finalizing": early answer during synthesis, NOT terminal; task_done settles the card/turn.
     task_phase: NotRequired[str]
     # Direct/ephemeral completed/failed/cancelled/rejected_duplicate settles activity, not early answers.
@@ -294,7 +297,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     review_overrides: NotRequired[Dict[str, Any]]  # the work's review-gate field (TaskDetailResponse), on its summary
     worker_saturation_warning: NotRequired[bool]
     source: NotRequired[str]
-    sender_label: NotRequired[str]
+    sender_label: NotRequired[str]  # a program note's rendered identity, as in history
     sender_session_id: NotRequired[str]
     client_message_id: NotRequired[str]
     subagents_mode: NotRequired[Literal["swarm"]]  # Accepted owner message, never a client claim.
@@ -324,8 +327,6 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     scheduled_for: NotRequired[str]  # the due point it was written for
     delivered_at: NotRequired[str]  # when the host showed it (later than due after downtime)
     chat_id: NotRequired[int]  # present on some transport re-broadcast paths
-    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
-    project_thread: NotRequired[bool]
 
 
 class _MediaOutbound(ChatReferenceFields):
@@ -350,8 +351,6 @@ class _MediaOutbound(ChatReferenceFields):
     transport: NotRequired[TransportMetadata]
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
-    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
-    project_thread: NotRequired[bool]
 
 
 class PhotoOutbound(_MediaOutbound):
@@ -396,7 +395,6 @@ class LinksOutbound(ChatReferenceFields):
     title: NotRequired[str]
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
-    project_thread: NotRequired[bool]
     transport: NotRequired[TransportMetadata]
 
 
@@ -442,7 +440,6 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     closed_request_id: NotRequired[str]
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
-    project_thread: NotRequired[bool]
     transport: NotRequired[TransportMetadata]
     secret_request: NotRequired[SecretRequestMeta]  # an integration-secret request: answered only by its form
 
@@ -733,6 +730,7 @@ class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also pre
     finishing_reviews: NotRequired[bool]  # review work an owner Pause lets finish runs on; display only, no count
     late_work: NotRequired[Dict[str, Any]]  # answered root whose late work remains: title, answered_at; display only
     can_resume: NotRequired[bool]
+    close_expired: NotRequired[Dict[str, Any]]  # exact WorkControl, not Resume authority
     cancelable: NotRequired[bool]
     presence_pause: NotRequired[bool]  # a live Presence turn moved to a Project as text (never a live call): Pause saves it, Restart returns it
 
@@ -1312,22 +1310,14 @@ class ContinuationOffer(TypedDict, total=False):
     action_nonce: str
 
 
-class TaskCancelRequest(TypedDict, total=False):
-    """Optional body; stop_action_id retries one action, distinct from custody ID.
-    Omission preserves legacy ingress without exact-replay assurance."""
-    cascade: bool
-    stop_policy: str
-    stop_action_id: str
-
-
 class TaskCancelResponse(TypedDict, total=False):
     ok: bool
     task_id: str
     # Cascade echoes subtree scope; immediate success follows teardown.
     cascade: bool
-    # Every 202 keeps the recorded intent pending and echoes the EFFECTIVE policy,
-    # never softening an immediate intent: a soft stop, or an immediate teardown not
-    # yet confirmed (request_id, reason_code "teardown_unconfirmed"). 200 omits them.
+    # A Stop's 202 keeps its recorded intent pending and echoes the EFFECTIVE policy, never softening an immediate
+    # intent: a soft stop, or a teardown not yet confirmed (request_id, reason_code "teardown_unconfirmed"); its 200
+    # omits them. A Close (gateway/task_close.py) has no stop_policy: 202 only while owed; 200 closed or "result_kept".
     cancel_state: str
     stop_policy: str
     request_id: str
@@ -1476,7 +1466,7 @@ from ouroboros.gateway.client_contracts import (  # noqa: E402,F401
 )
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (
-    "conversation_finished", "chat", "command",
+    "conversation_finished", "connection_profile", "chat", "command",
     "panic_accepted",  # immediate acceptance only, not proof of process exit
     "photo", "video", "document", "links",
     "quiz", "quiz_state",

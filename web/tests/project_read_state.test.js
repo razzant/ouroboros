@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { historyNodeIsProtected } from '../modules/chat_history_replay.js';
 import { createProjectReadReceipt, feedScale, isAtNewestMessage, newestMessageOffset } from '../modules/project_read_state.js';
-import { ElementStub } from './chat_dom_fixture.js';
+import { ElementStub, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 import { TS, row, late, room, placeAtTop, until, quiet } from './project_read_state_fixture.js';
 
 test('a history read already in flight cannot acknowledge a newer revision', async (t) => {
@@ -1021,7 +1021,7 @@ test('the recent page read again keeps the newest message an older page found re
     const r = room(t, { fetchHistory: async (url) => {
         const cursor = new URL(url, 'http://local').searchParams.get('cursor'), k = cursor ? Number(cursor.slice(1)) : 0;
         cursors.push(cursor ?? 'recent');
-        return { ok: true, json: async () => ({ ...pages[k], window: cursor === 'p0' ? { latest_message: null } : pages[k].window,
+        return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...pages[k], window: cursor === 'p0' ? { latest_message: null } : pages[k].window,
             page_cursor: `p${k}`, next_cursor: k < 3 ? `p${k + 1}` : null, has_more: k < 3 }) };
     } });
     const rect = ElementStub.prototype.getBoundingClientRect;

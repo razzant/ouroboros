@@ -63,6 +63,23 @@ class ToolSchemaProvider(Protocol):
         ...
 
 
+def _local_finish_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Project the existing completion tool onto the local return's dispatch contract."""
+    projected = deepcopy(schema)
+    function = projected["function"]
+    parameters = function["parameters"]
+    properties = parameters["properties"]
+    function["description"] = ("Finish considering this letter in its room. Give the local answer, or choose "
+                               "silent=true to keep any answer internal (no answer needed). This does not send "
+                               "anything back through the connector.")
+    function["parameters"] = {**parameters, "additionalProperties": False, "properties": {
+        "action": {**properties["action"], "enum": ["finish"]},
+        "answer": {**properties["answer"], "description": "The complete local answer."},
+        "silent": {**properties["silent"], "description": "Finish without posting a message, if no owner reply is owed."},
+    }}
+    return projected
+
+
 def _schema_names(names: Iterable[str] | None) -> tuple[str, ...]:
     if names is None:
         return ()
@@ -124,6 +141,12 @@ def initial_tool_schemas(
     In every mode the tools of an unpinned MCP server start without schemas
     (``on_demand_schema_names``) unless named in ``schema_names``.
     """
+    ctx = getattr(registry, "_ctx", None)
+    if getattr(ctx, "_late_report_ref", ""):
+        if not ctx.task_metadata.get("_late_result_can_finish"):
+            return []
+        return [_local_finish_schema(schema) for schema in registry.schemas()
+                if schema["function"]["name"] == "finish_task"]
     on_demand = getattr(registry, "on_demand_schema_names", frozenset)()
     requested = set(_schema_names(schema_names))
     return [schema for schema in select_tool_schemas(registry.schemas(), context_mode=context_mode,

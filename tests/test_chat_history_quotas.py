@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS
+from tests._dialogue import healthy_main_fixture as healthy_main_fixture  # noqa: F401
 from tests._store_shared import seed_result
 
 
@@ -34,7 +35,7 @@ def _lineage_row(ts, child, ev):
     })
 
 
-def test_progress_flood_does_not_evict_human_messages(tmp_path):
+def test_progress_flood_does_not_evict_human_messages(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     chat_lines = [
@@ -56,7 +57,7 @@ def test_progress_flood_does_not_evict_human_messages(tmp_path):
     assert len(progress) == 2                            # telemetry bounded by n_progress
 
 
-def test_task_bound_skill_review_refs_fold_before_human_quota(tmp_path):
+def test_task_bound_skill_review_refs_fold_before_human_quota(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     rows = [
@@ -130,7 +131,7 @@ def test_task_bound_skill_review_refs_fold_before_human_quota(tmp_path):
     assert zero_window["window"].items() >= {"complete": False, "truncated_by": ["quota"]}.items()
 
 
-def test_task_bound_skill_review_owners_use_the_progress_window(tmp_path):
+def test_task_bound_skill_review_owners_use_the_progress_window(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     rows = []
@@ -180,7 +181,7 @@ def test_task_bound_skill_review_owners_use_the_progress_window(tmp_path):
     assert expanded["window"] == {"complete": True, "truncated_by": []}
 
 
-def test_legacy_skill_refs_fold_only_with_safe_root_and_skill(tmp_path):
+def test_legacy_skill_refs_fold_only_with_safe_root_and_skill(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     rows = [
@@ -230,7 +231,7 @@ def test_legacy_skill_refs_fold_only_with_safe_root_and_skill(tmp_path):
     assert "review_group" not in unsafe
 
 
-def test_skill_review_group_dedupes_only_nonempty_job_ids_latest_wins(tmp_path):
+def test_skill_review_group_dedupes_only_nonempty_job_ids_latest_wins(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     base = {
@@ -267,7 +268,7 @@ def test_skill_review_group_dedupes_only_nonempty_job_ids_latest_wins(tmp_path):
     assert review_rows[0]["review_group"]["projected_attempt_count"] == 3
 
 
-def test_panel_chat_zero_stays_hidden_and_request_zero_still_means_main(tmp_path):
+def test_panel_chat_zero_stays_hidden_and_request_zero_still_means_main(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "chat.jsonl").write_text(
@@ -388,7 +389,7 @@ def test_delegation_role_root_respects_progress_quota(tmp_path):
     assert len(progress) == 5  # 'root' did not bypass the quota
 
 
-def test_default_quotas_keep_recent_history(tmp_path):
+def test_default_quotas_keep_recent_history(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "chat.jsonl").write_text(
@@ -466,7 +467,7 @@ def test_history_projects_terminal_review_truth_without_task_summary(tmp_path, m
     assert rows[1]["review_projection"] == projection
 
 
-def test_history_projects_terminal_review_truth_only_on_existing_summary(tmp_path, monkeypatch):
+def test_history_projects_terminal_review_truth_only_on_existing_summary(tmp_path, monkeypatch, healthy_main):
     """A retained summary is the one review-truth anchor; progress keeps only
     terminal lifecycle so replay cannot feed the same panel through two rows."""
     import ouroboros.task_status as ts_mod
@@ -589,7 +590,7 @@ def test_default_request_does_not_open_archives_when_live_tail_sufficient(
     assert "archived step" not in texts
 
 
-def test_window_metadata_complete_when_everything_fits(tmp_path):
+def test_window_metadata_complete_when_everything_fits(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "chat.jsonl").write_text(
@@ -604,7 +605,7 @@ def test_window_metadata_complete_when_everything_fits(tmp_path):
     assert window == {"complete": True, "truncated_by": []}
 
 
-def test_window_metadata_reports_quota_truncation(tmp_path):
+def test_window_metadata_reports_quota_truncation(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "chat.jsonl").write_text(
@@ -688,7 +689,7 @@ def test_review_references_use_the_progress_window_without_consuming_telemetry(t
     ]
 
 
-def test_window_metadata_reports_quota_when_slice_cuts_only_system_rows(tmp_path):
+def test_window_metadata_reports_quota_when_slice_cuts_only_system_rows(tmp_path, healthy_main):
     """MAJOR review fix: direction:"system" rows (per-task task_summary) do not
     count toward the reader's in/out quota, but the n_human tail slice still
     drops them — the window must honestly report "quota", never complete."""
@@ -933,7 +934,7 @@ def test_skill_review_group_never_inherits_legacy_subagent_lineage(tmp_path):
     assert not any(field in row for field in injected_lineage_fields)
 
 
-def test_stale_child_final_keeps_lineage_while_child_active(tmp_path, monkeypatch):
+def test_stale_child_final_keeps_lineage_while_child_active(tmp_path, monkeypatch, healthy_main):
     """POS-2: a child final older than the floor keeps its lineage when the
     child is still ACTIVE (non-terminal effective status + in-window lineage
     progress row makes it active_children-eligible)."""
@@ -978,7 +979,7 @@ def test_recent_child_final_keeps_lineage_fields(tmp_path):
     assert row["parent_task_id"] == "root"
 
 
-def test_legacy_limit_governs_human_quota_when_n_human_absent(tmp_path):
+def test_legacy_limit_governs_human_quota_when_n_human_absent(tmp_path, healthy_main):
     """The legacy `limit` parameter is the n_human DEFAULT, so shipped CLIs that
     always sent it stop getting a placebo; non-positive = absent; explicit n_human wins."""
     logs = tmp_path / "logs"

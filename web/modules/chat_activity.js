@@ -126,6 +126,9 @@ export function buildTimelineItemHtml(item, record) {
         ? item.fetchedCause : { ...item.fetchedCause, ...item.childCause });
     const fetched = facts ? [item.fetchedFull, childLineCause(facts).detail].filter(Boolean).join('\n\n') : item.fetchedFull;
     const displayBody = expanded ? (item.fullReadError || fetched || item.fullBody || item.body) : item.body;
+    const replyWords = item.replyAddress && item.outputPreview
+        && displayBody !== item.outputPreview && String(item.dedupeKey || '').startsWith('subagent-result:')
+        ? item.outputPreview.slice(0, 200) : '';
     const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull && !item.fullReadError);
     // A late-review row offers its exact applied review record (`cardRowSummary`).
     const evidenceHtml = item.serviceStop ? serviceOutputLinksHtml(item.serviceStop.links) : evidenceLinkHtml(item.evidenceRef);
@@ -160,6 +163,7 @@ export function buildTimelineItemHtml(item, record) {
             ${item.historyId ? `data-history-id="${escapeHtmlAttr(item.historyId)}"`
         : item.sourceHistoryId ? `data-source-history-id="${escapeHtmlAttr(item.sourceHistoryId)}"` : ''}
             data-expanded="${expanded ? '1' : '0'}"
+            ${item.replyAddress ? `data-work-reply-row="${item.replyRole || 'system'}"${expandable ? '' : ' tabindex="0"'} data-row-address="${escapeHtmlAttr(item.replyAddress)}"${replyWords ? ` data-row-words="${escapeHtmlAttr(replyWords)}"` : ''}` : ''}
         >
             ${headHtml}
             ${delegated ? `<div class="chat-live-line-body chat-delegated-activity" id="${escapeHtmlAttr(bodyId)}">${delegatedActivityBodyHtml(delegated, { expanded })}</div>`
@@ -1251,7 +1255,7 @@ export function unconfirmedForegroundCardIds(cards, activeIds) {
 // provisional until dispatch is confirmed or the ended host's delivery becomes unknown.
 export function markIngressSaved(root, row, bubble = ownerMessageBubble(root, row, 1)) {
     const cmid = String(row?.client_message_id || ''), state = row?.ingress_pending === true ? 'pending' : '';
-    if (row?.role !== 'user' || row.ingress_accepted !== true || !cmid) return false;
+    if (row?.role !== 'user' || row.declared_author || row.ingress_accepted !== true || !cmid) return false;
     const prior = bubble?.querySelector('[data-ingress-saved]');
     const level = prior?.dataset.ingressSaved;  // `Input saved` and a kept send's delivery doubt are final: only a running host's own fact (dispatched, pending) ends that doubt
     const ended = level === 'unconfirmed' && (row.ingress_dispatched === true || state === 'pending');

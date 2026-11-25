@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import { createChatInstance } from '../modules/chat.js';
 import { OWNER_STOP_DETAIL_MARKER, taskTerminalSummary } from '../modules/log_events.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
 
 const OWN = 'owner_requested_finalization';
 const STOP_NOW = { source: 'http_single', scope: 'single', request_id: 'ci_stopnow', stop_policy: 'immediate' };
@@ -20,7 +20,7 @@ const UNANSWERED = { lifecycle: { status: 'failed' },
 
 function chatInstance(fetchRows) {
     const { prior, mount } = installDom(async (url) => (String(url).startsWith('/api/chat/history')
-        ? { ok: true, json: async () => ({ messages: fetchRows(), window: { complete: true } }) }
+        ? { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: fetchRows(), window: { complete: true } }) }
         : { ok: true, json: async () => ({ active_direct_turns: [] }) }));
     const handlers = new Map();
     const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); }, isConnected: () => true, send() {} };

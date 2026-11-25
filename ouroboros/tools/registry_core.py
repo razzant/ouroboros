@@ -579,7 +579,8 @@ class ToolRegistry:
         schema = entry.schema
         if entry.name == "finish_task" and (self._is_local_readonly_subagent() or self._is_acting_subagent()):
             schema = copy.deepcopy(schema)
-            schema["parameters"]["properties"].pop("pending_review", None)
+            for field in ("pending_review", "about_work"):
+                schema["parameters"]["properties"].pop(field, None)
         if self._is_local_readonly_subagent():
             if entry.name == "verify_and_record" and self._readonly_tool_allowed(entry.name):
                 # The read-only actor is allowed to mint exactly one kind of

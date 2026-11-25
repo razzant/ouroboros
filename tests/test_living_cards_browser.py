@@ -730,6 +730,73 @@ def test_chat_repaint_keeps_place_across_face_switch_and_temp_rows(direct_server
                         f"(expected {expected_next_top:.2f}, got {after['nextMsgTop']:.2f})"
                     )
 
+                # 1b. Smooth-animated keyboard scroll (PageUp) across the offloaded card: exercises WebKit's
+                #     multi-frame scroll animation on both macOS and Linux (unlike macOS wheel, which jumps in 1 frame).
+                wait_at_rest = """() => new Promise(done => {
+                    const feed = document.querySelector('#chat-messages');
+                    let last = feed.scrollTop, still = 0;
+                    const tick = () => {
+                        still = feed.scrollTop === last ? still + 1 : 0;
+                        last = feed.scrollTop;
+                        if (still >= 8) done(last);
+                        else requestAnimationFrame(tick);
+                    };
+                    requestAnimationFrame(tick);
+                })"""
+                page.evaluate("""() => {
+                    const feed = document.querySelector('#chat-messages');
+                    feed.scrollTop = 4000;
+                    feed.dispatchEvent(new Event('scroll'));
+                }""")
+                page.evaluate(_SETTLE_RESTORE_FRAMES)
+                page.mouse.click(550, 400)
+                plain_before = page.evaluate("() => document.querySelector('#chat-messages').scrollTop")
+                page.keyboard.press("PageUp")
+                page.wait_for_function("b => document.querySelector('#chat-messages').scrollTop !== b", arg=plain_before, timeout=10_000)
+                plain_page_up = plain_before - page.evaluate(wait_at_rest)
+                page.evaluate("""() => {
+                    const feed = document.querySelector('#chat-messages');
+                    feed.scrollTop = feed.scrollHeight;
+                    feed.dispatchEvent(new Event('scroll'));
+                }""")
+                page.wait_for_function(
+                    """(cardId) => {
+                        const card = document.querySelector(`.chat-card-bubble[data-card-id="${cardId}"]`);
+                        return Boolean(card?.querySelector('.chat-card-face')) && !card.querySelector('iframe');
+                    }""",
+                    arg=app_card["card_id"],
+                    timeout=10_000,
+                )
+                page.evaluate(_SETTLE_RESTORE_FRAMES)
+                before_page_up = page.evaluate("""(cardId) => {
+                    const feed = document.querySelector('#chat-messages');
+                    const card = document.querySelector(`.chat-card-bubble[data-card-id="${cardId}"]`);
+                    return card.nextElementSibling.getBoundingClientRect().top - feed.getBoundingClientRect().top;
+                }""", app_card["card_id"])
+                page.locator("#chat-messages .chat-bubble:not(.typing-bubble) .message").last.click()
+                page.keyboard.press("PageUp")
+                page.wait_for_function(
+                    """(cardId) => Boolean(document.querySelector(`.chat-card-bubble[data-card-id="${cardId}"] iframe`))""",
+                    arg=app_card["card_id"],
+                    timeout=10_000,
+                )
+                page.evaluate(wait_at_rest)
+                after_page_up = page.evaluate("""(cardId) => {
+                    const feed = document.querySelector('#chat-messages');
+                    const card = document.querySelector(`.chat-card-bubble[data-card-id="${cardId}"]`);
+                    return {
+                        hasIframe: Boolean(card.querySelector('iframe')),
+                        nextMsgTop: card.nextElementSibling.getBoundingClientRect().top - feed.getBoundingClientRect().top,
+                    };
+                }""", app_card["card_id"])
+                expected_page_up_top = before_page_up + plain_page_up
+                page_up_shift = abs(after_page_up["nextMsgTop"] - expected_page_up_top)
+                assert after_page_up["hasIframe"], f"{engine}: card should stay mounted as live frame after PageUp"
+                assert page_up_shift <= 2.0, (
+                    f"{engine}: PageUp shifted visible message by {page_up_shift:.2f}px "
+                    f"(expected {expected_page_up_top:.2f}, got {after_page_up['nextMsgTop']:.2f})"
+                )
+
                 # 2. Temporary / progress rows collapsing or disappearing above and below a reference row in history.
                 ref_info = page.evaluate("""() => {
                     const feed = document.querySelector('#chat-messages');

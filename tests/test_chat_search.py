@@ -23,6 +23,7 @@ from ouroboros.gateway.history_contracts import ChatSearchResponse
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.projects_registry import bind_task_to_project, create_project
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 
 def _ts(index):
@@ -504,7 +505,7 @@ def test_the_cursor_binds_its_room_query_view_and_frozen_end(tmp_path, monkeypat
     assert (code, body["reason_code"]) == (409, "search_view_changed"), "a binding may move rows out of the room"
 
 
-def test_the_import_frontier_is_older_history_not_yet_searched_never_no_match(tmp_path):
+def test_the_import_frontier_is_older_history_not_yet_searched_never_no_match(tmp_path, healthy_main):
     from ouroboros import dialogue_import
 
     dialogue_test.seed(tmp_path, archives={"chat_20261013T110000.jsonl": [
@@ -637,6 +638,20 @@ def test_media_files_links_and_questions_carry_what_their_bubble_draws_from_neve
         "quiz_id": "q", "options": [{"label": "Weir", "detail": "Below the mill"}, {"label": "Pool"}],
         "stake": "Nesting ends soon"})
     assert legacy["quiz"] == {"quiz_id": "legacy", "options": ["Weir", None], "option_details": ["Below the mill", ""]}
+
+
+def test_a_program_note_is_searched_by_its_literal_body_under_its_author(tmp_path):
+    from ouroboros.dialogue_provenance import recorded_author
+
+    body = "The example comparison is ready."
+    _say(tmp_path, 1, "Program message received.", direction="in", role="system",
+         system_type="agent_note_received", agent_note_text=body,
+         declared_author=recorded_author("Build agent"),
+         sender_label='agent "Build agent" (declared, not verified)')
+    candidate, = _found(tmp_path, q="comparison")["candidates"]
+    assert candidate["text"] == body and candidate["role"] == "user"
+    assert candidate["declared_author"]["label"] == "Build agent"
+    assert "received" not in candidate["text"]  # the neutral receipt fact is never the shown words
 
 
 def test_the_search_runs_off_the_event_loop(tmp_path, monkeypatch):

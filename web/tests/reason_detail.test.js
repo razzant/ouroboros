@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { buildTimelineItemHtml, cardMetaKeys } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 import {
     childCauseFacts, childLineCause, reasonCodesNote, taskDoneIsTerminal, taskOutcomeSeverity, taskPresentation, taskReasonCodes, taskReasonDetail, taskReasonPhrase, taskTerminalPhase,
@@ -690,7 +690,7 @@ for (const [name, fields, stated, detailOnly = {}] of [
         const { prior, mount } = installDom(async (url, init = {}) => {
             if (String(url) === '/api/tasks/child-1' && init.cache === 'no-store') return new Promise((resolve) => reads.push(resolve));
             return { ok: true, json: async () => {
-                if (String(url).startsWith('/api/chat/history')) return { messages: rows, page_cursor: 'recent', has_more: false,
+                if (String(url).startsWith('/api/chat/history')) return { profile_scope: PREVIEW_SCOPE, messages: rows, page_cursor: 'recent', has_more: false,
                     next_cursor: null, window: { complete: true } };
                 if (String(url) === '/api/tasks/child-1') return detail;  // the card's own detail read
                 return { active_direct_turns: [] };

@@ -17,7 +17,7 @@ import ouroboros.presence_delivery as delivery
 from ouroboros.gateway.host_service import create_host_service_app
 from tests.test_host_service_api import FakeBridge, _seed_presence_behavior, _seed_token
 from tests._store_shared import seed_result
-from tests._dialogue import chat_rows, import_all
+from tests._dialogue import chat_rows, healthy_main_fixture, import_all  # noqa: F401 -- the "healthy_main" fixture
 from ouroboros import dialogue_store as ds
 from tests.test_place_focus import focus as focus, task_for
 
@@ -68,10 +68,16 @@ def _rows(tmp_path):
     return chat_rows(tmp_path)
 
 
+def _history_request(query=b""):
+    """A served request always has its app: the history door reads the serving generation from ``app.state``."""
+    return Request({"type": "http", "method": "GET", "path": "/api/chat/history", "query_string": query,
+                    "headers": [], "app": SimpleNamespace(state=SimpleNamespace())})
+
+
 @pytest.mark.parametrize("state,direction", [
     ("delivered", "out"), ("failed", "system"), ("uncertain", "system"),
 ])
-def test_http_records_exact_facts_with_nonterminal_history_type(tmp_path, state, direction):
+def test_http_records_exact_facts_with_nonterminal_history_type(tmp_path, state, direction, healthy_main):
     client = _client(tmp_path)
     payload = _payload(state=state, message={"provider_message_id": "100.2", "subject": "Café", "to": ["reader@example.test"]})
     assert _post(client, payload).json() == {"ok": True, "recorded": True, "duplicate": False,
@@ -88,11 +94,10 @@ def test_http_records_exact_facts_with_nonterminal_history_type(tmp_path, state,
 
     from ouroboros.dialogue_import import export_for_older_body
     export_for_older_body(tmp_path)  # Transition (unit H): history endpoint still owns the file reader.
-    request = Request({"type": "http", "method": "GET", "path": "/api/chat/history", "query_string": b"", "headers": []})
+    request = _history_request()
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(request))
     assert not [item for item in json.loads(response.body)["messages"] if item.get("text") == payload["text"]]
-    request = Request({"type": "http", "method": "GET", "path": "/api/chat/history",
-                       "query_string": f"chat_id={row['chat_id']}".encode(), "headers": []})
+    request = _history_request(f"chat_id={row['chat_id']}".encode())
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(request))
     projected = [item for item in json.loads(response.body)["messages"] if item.get("text") == payload["text"]]
     assert len(projected) == 1

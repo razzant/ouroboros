@@ -9,7 +9,7 @@ import {
     COLLAPSED_ACTIVITY_MAX, authoredLine, authoredTitle, boundActivityPreview, projectCollapsedActivity, wholeActivityText,
 } from '../modules/chat_activity.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const TS = '2026-10-30T12:00:00Z';
 // Longer than the preview, with Markdown the line's projection removes, and a tail only the whole text keeps.
@@ -51,7 +51,7 @@ test('the line projection is whole for an ordinary root and bounded for a child 
 
 function fixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () => String(url).startsWith('/api/chat/history')
-        ? { messages: history, window: { complete: true } } : { active_direct_turns: [] } }));
+        ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } } : { active_direct_turns: [] } }));
     const handlers = new Map();
     let generation = 0;
     const instance = createChatInstance({

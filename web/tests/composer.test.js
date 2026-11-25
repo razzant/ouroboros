@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { composerMarkup, createPlusMenu } from '../modules/composer.js';
-import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, roomKey } from './chat_dom_fixture.js';
 import { installDomDouble } from './dom_double.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -15,7 +15,7 @@ const SUFFIXES = ['input-area', 'attachment-preview', 'model-mode', 'subagents-m
 
 function fetchStub(history = []) {
     return async (url) => ({ ok: true, json: async () => (String(url).startsWith('/api/chat/history')
-        ? { messages: history, window: { complete: true } }
+        ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
         : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true }) });
 }
 
@@ -149,8 +149,8 @@ test('a room keeps its own draft: setDraft and insertAtCursor keep it, a reopene
         const { composer } = instance;
         composer.setDraft('hello world');
         assert.equal(composer.getDraft(), 'hello world');
-        assert.equal(sessionStorage.getItem('ouro_chat_draft:7'), 'hello world', 'kept under the room\'s own key');
-        assert.equal(sessionStorage.getItem('ouro_chat_draft'), null, 'never under Main\'s');
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), 'hello world', 'kept under the room\'s own key');
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft')), null, 'never under Main\'s');
         // A selection is replaced by the inserted words; the caret follows them in the focused field.
         const field = composer.input;
         let caret = null;
@@ -161,7 +161,7 @@ test('a room keeps its own draft: setDraft and insertAtCursor keep it, a reopene
         assert.equal(composer.getDraft(), 'hello there');
         assert.deepEqual(caret, [11, 11]);
         assert.equal(document.activeElement, field, 'the field has focus for the next word');
-        assert.equal(sessionStorage.getItem('ouro_chat_draft:7'), 'hello there');
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), 'hello there');
         // A collapsed caret inserts in place, nothing replaced.
         field.selectionStart = 5;
         field.selectionEnd = 5;
@@ -177,9 +177,9 @@ test('a room keeps its own draft: setDraft and insertAtCursor keep it, a reopene
         assert.equal(frames.length, 1);
         assert.deepEqual([frames[0].content, frames[0].chat_id, frames[0].project_id], ['hello, there', 7, 'p7']);
         assert.equal(instance.composer.getDraft(), '');
-        assert.equal(sessionStorage.getItem('ouro_chat_draft:7'), null, 'Send clears the kept draft');
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), null, 'Send clears the kept draft');
         instance.composer.setDraft('');
-        assert.equal(sessionStorage.getItem('ouro_chat_draft:7'), null, 'an empty draft is not kept');
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), null, 'an empty draft is not kept');
     } finally { instance.destroy(); restoreDom(env.prior); }
 });
 

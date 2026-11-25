@@ -29,12 +29,16 @@ from ouroboros.context_anchor import (CONTEXT_REFUSAL_ROUND_KEY, _restore_contex
                                       refused_request_density, reservation_refusal)
 from ouroboros.context_budget import BOOK_YIELD_PASSES, REFUSAL_PASSES, WHOLE_CATEGORY  # one rung order; dispatch stays in this driver
 from ouroboros.context_view_facts import FRESH_FACTS_KEY, SIZE_REFUSAL_KEY, remember_size_refusal
+from ouroboros.extension_late_result import return_account, return_processing_preference, take_letter_send
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import CODEX_CONTENT_POLICY_DENIED, REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_round_limits import (_coarsen_memory_view, _record_presend_fit_refusal, _run_emergency_address_pass,
                                          _shorten_book_map, book_yield_due, pre_admission_size_refusal, start_unread)
 from ouroboros.observability import new_execution_id
-from ouroboros.primary_route_observation import failed_attempt_facts, tell_failed_attempt, unasked_refusal_row, with_refusal_facts
+from ouroboros.primary_route_observation import (
+    _record_authoring_handover as _record_authoring_handover, failed_attempt_facts,
+    observe_authoring_response, tell_failed_attempt, unasked_refusal_row, with_refusal_facts,
+)
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.transcript_prefix import forget_attempt_prefix, remember_attempt_prefix, rewrite_epoch, rewrite_view, with_attempt_prefix
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
@@ -52,73 +56,6 @@ def _loop():
     from ouroboros import loop
 
     return loop
-
-
-def _record_authoring_handover(
-    tool_ctx: Any,
-    *,
-    from_model: str,
-    to_model: str,
-    reason: str,
-    tool_calls_at_handover: int,
-) -> None:
-    """Open the successor’s handover after the predecessor used tools. Trace and usage share its row."""
-    source = str(from_model or "").strip()
-    target = str(to_model or "").strip()
-    if not source or not target or source == target or tool_calls_at_handover < 1:
-        return
-    row = {
-        "from_model": source,
-        "to_model": target,
-        "reason": str(reason or "host_route_change"),
-        "tool_calls_at_handover": int(tool_calls_at_handover),
-        "reply_observed": True,
-        "recovery_prompted": False,
-        "status": "pending",
-    }
-    tool_ctx._authoring_handover = row
-    usage = getattr(tool_ctx, "_accumulated_usage", None)
-    if isinstance(usage, dict):
-        handovers = usage.setdefault("authoring_handovers", [])
-        if isinstance(handovers, list):
-            handovers.append(row)
-    trace = getattr(tool_ctx, "_execution_trace", None)
-    if isinstance(trace, dict):
-        trace.setdefault("route_handovers", []).append(row)
-
-
-def observe_authoring_response(tool_ctx: Any, model: str, *, forced: bool = False) -> None:
-    """Only a reply transfers authorship. Failed attempts leave the host's reason for the next reply."""
-    reason = getattr(tool_ctx, "_pending_handover_reason", None)
-    tool_ctx._pending_handover_reason = None
-    handover = getattr(tool_ctx, "_authoring_handover", None) or {}
-    trace = getattr(tool_ctx, "_execution_trace", None) or {}
-    usage = getattr(tool_ctx, "_accumulated_usage", None) or {}
-    source = (getattr(tool_ctx, "_completion_observation", None) or {}).get("model")
-    if not handover and model and reason != "mind_switch":
-        # Restore reunites this execution's two copies, but an old route pair proves no reply. Only its target's
-        # actual reply attaches the row, and not after an author the pair does not name or a switch the mind made.
-        routes, rows = trace.get("route_handovers"), usage.get("authoring_handovers")
-        if (isinstance(routes, list) and routes and isinstance(rows, list) and rows
-                and (row := routes[-1]) is rows[-1] and isinstance(row, dict) and row.get("to_model") == model
-                and source in (None, row.get("from_model")) and row.get("reply_observed") is not True
-                and (row.get("status") == "pending" or (row.get("status") == "incomplete"
-                    and trace.get("authoring_handover_incomplete") is row))):
-            row["reply_observed"] = True
-            tool_ctx._authoring_handover = row
-            return
-    if not (reason or handover or forced):
-        return
-    if not source:  # A retry under a new ID retains the predecessor's accepted routes in the trace.
-        routes = usage.get("accepted_routes") or trace.get("accepted_routes") or []
-        previous = routes[-1].get("to_binding") if routes else None
-        source = previous[0] if previous else None
-    if reason == "mind_switch":
-        if handover and model != handover.get("to_model"):
-            tool_ctx._authoring_handover = None  # its previous author made no selection
-        return
-    _record_authoring_handover(tool_ctx, from_model=source, to_model=model, reason=reason or "route_change",
-                               tool_calls_at_handover=len(trace.get("tool_calls") or []))
 
 
 def _adopt_fallback_route(ctx: Any, candidate: _RoundModelCallContext, messages: list, tool_schemas: list, mode: str) -> tuple:
@@ -873,6 +810,7 @@ def _dispatch_round_model(
     attempt_cap: Optional[int],
     candidate_predicate: Optional[Callable[[Any], Any]] = None,
     max_tokens: Optional[int] = None,  # the strict-shrink retry's ceiling: the failed attempt's sent allowance
+    carry_letter: bool = True,
 ) -> Tuple[Any, float]:
     from ouroboros.model_wait import current_model_wait
     from ouroboros.loop_messages import _pending_owner_input_kinds, append_context_facts
@@ -898,6 +836,8 @@ def _dispatch_round_model(
         "model_role": getattr(ctx, "model_role", ""),
         "task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})},
         context_fit_plan=plan, overrides=waiter.overrides if waiter else None)
+    restricted = bool(getattr(ctx.tools._ctx, "_late_report_ref", ""))
+    letter = take_letter_send(ctx, role=role, account=account) if restricted or carry_letter else None
     primary = getattr(ctx, "defer_resource_wait", None) is None
     if primary:
         ctx.accumulated_usage.pop(RESOURCE_REFUSAL_KEY, None)
@@ -920,34 +860,51 @@ def _dispatch_round_model(
                 role, lambda kwargs: _reprepare_waiting_main(ctx, kwargs), resource_reason=resource_reason, owner_model_wake=True))
             if ((not waiter.waits_allowed or _fallback_route_follows(ctx)) if primary else ctx.defer_resource_wait):
                 deferral = binding.enter_context(waiter.defer_resource_wait(role))
-        result = _loop().call_llm_with_retry(
-            ctx.llm, ctx.messages, ctx.active_model, ctx.tool_schemas,
-            ctx.active_effort, ctx.max_retries, ctx.drive_logs, ctx.task_id,
-            ctx.round_idx, ctx.event_queue, ctx.accumulated_usage, ctx.task_type,
-            use_local=ctx.active_use_local,
-            deadline_ts=_loop()._task_deadline_epoch(ctx.tools),
-            transport_reserve_sec=task_pacing.get_finalization_grace_sec(),
-            attempt_cap=attempt_cap,
-            stop_retry_check=(lambda: transport_repeat_stop_requested(ctx.tools._ctx, mailbox_peek=mailbox_peek)) if attempt_cap is None else None,
-            owner_input_check=(lambda: sorted(_pending_owner_input_kinds(ctx.tools._ctx, ids=True))) if attempt_cap is None else None,
-            allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
-            physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition, plan), ctx.accumulated_usage) if disposition is not None else None),
-            candidate_predicate=candidate_predicate, physical_fit_predicate=hint(admit), model_role=role, model_account_override=account,
-            processing_preference=task_processing_preference(
-                {"task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})}, model_role=role),
-            # The loop's own active-turn slot: a reprepared send keeps this exact
-            # owner because the slot survives kwargs deep-copying by identity.
-            model_turn_state=getattr(ctx.tools._ctx, "model_turn_state", None),
-            send_clock_policy=main_clock_policy(
-                getattr(ctx.tools._ctx, "task_metadata", {}), task_type=ctx.task_type),
-            configured_api_child=is_configured_api_child(ctx.tools._ctx),
-            physical_send_claim=ctx.physical_send_claim, response_meta_out=output_recovery.response_facts(ctx.tools._ctx),
-            **({"max_tokens": int(max_tokens)} if max_tokens else {}),
-        )
+        letter_skipped = False
+        try:
+            result = _loop().call_llm_with_retry(
+                ctx.llm, ctx.messages, ctx.active_model, ctx.tool_schemas,
+                ctx.active_effort, ctx.max_retries, ctx.drive_logs, ctx.task_id,
+                ctx.round_idx, ctx.event_queue, ctx.accumulated_usage, ctx.task_type,
+                use_local=ctx.active_use_local,
+                deadline_ts=_loop()._task_deadline_epoch(ctx.tools),
+                transport_reserve_sec=task_pacing.get_finalization_grace_sec(),
+                attempt_cap=attempt_cap,
+                stop_retry_check=(lambda: transport_repeat_stop_requested(ctx.tools._ctx, mailbox_peek=mailbox_peek)) if attempt_cap is None else None,
+                owner_input_check=(lambda: sorted(_pending_owner_input_kinds(ctx.tools._ctx, ids=True))) if attempt_cap is None else None,
+                allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
+                physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition, plan), ctx.accumulated_usage) if disposition is not None else None),
+                candidate_predicate=candidate_predicate, physical_fit_predicate=hint(admit), model_role=role,
+                model_account_override=return_account(ctx, account),
+                processing_preference=(return_processing_preference(ctx) if restricted else task_processing_preference(
+                    {"task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})}, model_role=role)),
+                # The loop's own active-turn slot: a reprepared send keeps this exact owner.
+                model_turn_state=getattr(ctx.tools._ctx, "model_turn_state", None),
+                send_clock_policy=main_clock_policy(
+                    getattr(ctx.tools._ctx, "task_metadata", {}), task_type=ctx.task_type),
+                configured_api_child=is_configured_api_child(ctx.tools._ctx),
+                physical_send_claim=ctx.physical_send_claim, response_meta_out=output_recovery.response_facts(ctx.tools._ctx),
+                **({"max_tokens": int(max_tokens)} if max_tokens else {}),
+                **({"local_consideration": True} if restricted else {}),
+                **({"letter_send": letter} if letter is not None else {}),
+            )
+        except PhysicalAttemptPreconditionFailed as exc:
+            from ouroboros.usage_accounting import physical_attempt_capture_from_exception
+
+            denied = physical_attempt_capture_from_exception(exc)
+            if (letter is None or restricted or (letter.claim is not None
+                    and (getattr(denied, "state", None) != "released" or denied.attempt_id != letter.claim["attempt_id"]))):
+                raise
+            # An unsent optional candidate may give way to an independently prepared plain request.
+            letter_skipped = True
+    if letter_skipped:
+        return _dispatch_round_model(ctx, adopt_ordinary_first_contact(ctx, disposition) if hint.rebound else disposition,
+                                     attempt_cap=attempt_cap, candidate_predicate=candidate_predicate,
+                                     max_tokens=max_tokens, carry_letter=False)
     ctx.accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, None)  # consumed by the call's later attempts, if any
     if hint.rebound:  # a start hint read for another scope went unsent: its ordinary view goes instead, once
         return _dispatch_round_model(ctx, adopt_ordinary_first_contact(ctx, disposition), attempt_cap=attempt_cap,
-                                     candidate_predicate=candidate_predicate, max_tokens=max_tokens)
+                                     candidate_predicate=candidate_predicate, max_tokens=max_tokens, carry_letter=False)
     capture = _loop().last_physical_attempt_capture()  # the answer's own receipt, as ``send_clock`` reads it
     if result[0] is not None:  # an accepted request is this conversation's next size anchor: the bytes it answered
         for key in (CONTEXT_REFUSAL_ROUND_KEY, SIZE_REFUSAL_KEY):  # an answer ends the round's refusal (review r2)
@@ -1064,7 +1021,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
             drive_root=ctx.drive_root or ctx.drive_logs.parent, task_id=ctx.task_id,
             event_queue=ctx.event_queue, use_local=use_local,
             task_attempt=ctx.accumulated_usage.get("_task_attempt"),
-            deadline_ts=_loop()._task_deadline_epoch(ctx.tools),
+            deadline_ts=_loop()._task_deadline_epoch(ctx.tools), **({"local_consideration": True} if getattr(ctx.tools._ctx, "_late_report_ref", "") else {}),
         )
     if observe := getattr(physical_attempt_tracker(), "prepared_messages", None):
         observe(kwargs["messages"])
@@ -1211,16 +1168,13 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
     if not (sources or own) or not root or str(meta.get("delegation_role") or "") == "subagent":
         return False
     try:
-        from ouroboros.routing_wait import message_routing_acts, recorded_act_receipt, routing_act_fields, routing_act_lines as lines
+        from ouroboros.routing_wait import append_own_routing_acts, message_routing_acts, routing_act_lines as lines
 
         root = pathlib.Path(str(root))
         acts = message_routing_acts(root, sources)
-        for ref in own:  # the exact token answers even when no owner row carries the act
-            message = str(ref.get("client_message_id") or "")
-            row = recorded_act_receipt(root, ref) if message else {}  # in the room a note's relay named for it
-            act = routing_act_fields(root, message, row or ref)
-            if act and act["status"] != "unconfirmed" and act not in acts:
-                acts.append(act)
+        replyable = append_own_routing_acts(root, own, acts)
+        if replyable:
+            tool_ctx._confirmed_reply_works = {*getattr(tool_ctx, "_confirmed_reply_works", ()), *replyable}
     except Exception:
         log.debug("routing receipts unreadable at the model boundary", exc_info=True)
         return False
@@ -1242,6 +1196,7 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
         "and late outcomes of its own unconfirmed acts, oldest first — receipts from the routing rail; "
         "each row identifies the work and its recorded outcome.",
         *current,
+        *(f"To confirm your handoff to {work}, use finish_task(about_work={work!r}, …)." for work in sorted(replyable)),
         "Not listed: another turn's act under its own agent-steer id, or an act keyed only to a task id; "
         "neither links to this message."])})
     return True

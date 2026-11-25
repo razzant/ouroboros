@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from ouroboros.dialogue_provenance import MACHINE_ORIGIN, program_speaker
 from ouroboros.tools.knowledge import _sanitize_topic
 
 
@@ -770,6 +771,7 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
                             "owner_confirmed": owner_author(accounts, place.place_id, event.actor, event.account_id,
                                                             event.conversation_id, event.message),
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
+                            **({"origin": MACHINE_ORIGIN} if event.actor.get("origin") == MACHINE_ORIGIN else {}),
                             "is_bot": "from_bot" in facts,
                             **speaker_pages(drive_root, event.provider, event.account_id, actor,
                                             unverified=event.actor.get("authenticated") is False)},
@@ -870,7 +872,8 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
         work = _previous_turn_line(previous) + ("\n" + work if work else "")
     voice = _voice_line(focus, event)
     snapshot = _thread_snapshot(focus, event)
-    who = actor.get("display_name") or actor.get("platform_actor_id") or "An author the connector did not name"
+    name = actor.get("display_name") or actor.get("platform_actor_id") or ""
+    who = program_speaker(name) if actor.get("origin") == MACHINE_ORIGIN else name or "An author the connector did not name"
     from ouroboros.place_intake import observed_change  # a change by the connector's typed facts, never the words
     changed, worded = observed_change(event.get("message")), bool(str(presence.get("observed_text") or "").strip())
     from ouroboros.presence_message_facts import connector_facts, event_reader  # the event record: the frame re-renders

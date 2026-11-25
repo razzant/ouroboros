@@ -20,6 +20,7 @@ from ouroboros import budget_pause
 from ouroboros.tool_custody import submit_tool_future
 from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC, load_settings
 from ouroboros.deadline_utils import deadline_clamped_timeout_sec
+from ouroboros.extension_late_result import acknowledge_inline_result, local_finish_call
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
@@ -1236,6 +1237,8 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
     from ouroboros.presence_context import keep_first_receipts
 
     def _execute(tc: Dict[str, Any]) -> Dict[str, Any]:
+        if not local_finish_call(tools._ctx, tc):
+            return _batch_error_result(tools, tc, "This letter may be considered locally; it authorizes no tool action.")
         receipt = validation_by_id.get(str(tc.get("id") or ""))
         if receipt is not None and not receipt.allows_execution:
             fn_name = str((tc.get("function") or {}).get("name") or "").strip()
@@ -1489,8 +1492,7 @@ def process_tool_results(
             from ouroboros.delegate_output import acknowledge_staged_output_delivery
 
             acknowledge_staged_output_delivery(ctx, exec_result, view)
-        fn_name = exec_result["fn_name"]
-        is_error = exec_result["is_error"]
+        fn_name, is_error = exec_result["fn_name"], exec_result["is_error"]
 
         if is_error:
             error_count += 1
@@ -1513,6 +1515,7 @@ def process_tool_results(
         })
         note_contribution(ctx, messages[-1], 'result_selection', form=(
             'partial_retained' if result_partial and result_source_ref else 'partial_unavailable' if result_partial else 'selected_result'))
+        acknowledge_inline_result(ctx, typed, view)
         published = (exec_result.get("result_meta") or {}).get("tool_result_meta") or {}
         if ctx is not None and published.get("sleep_question_notice") and not (is_error or result_partial):
             from ouroboros.model_sleep import acknowledge_question_delivery

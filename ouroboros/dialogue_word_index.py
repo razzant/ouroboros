@@ -42,7 +42,9 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tu
 
 log = logging.getLogger(__name__)
 
-FORMAT = 1  # the token rule and encoding; a different one is bypassed and rebuilt
+# 2: the searchable projection (``dialogue_words.fields_of``) posts an agent's note by its literal body, not the
+# neutral receipt fact; a different format is bypassed and rebuilt, so earlier postings of a note are re-indexed.
+FORMAT = 2  # the token rule and encoding; a different one is bypassed and rebuilt
 TOKEN_CHARS = 64
 # Rows one posting commit carries: a bound on how long one commit holds the write lock, never a policy. On a loaded
 # Mac one 256-row chunk held it 1.5 s and 3.0 s; at 128 the worst observed hold beside a writer was 28 ms. The first

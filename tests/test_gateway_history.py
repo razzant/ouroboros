@@ -8,11 +8,12 @@ import pytest
 
 from ouroboros import dialogue_import
 from ouroboros.gateway.history import make_chat_history_endpoint
+from tests._dialogue import healthy_main_fixture as healthy_main_fixture  # noqa: F401
 from tests._store_shared import seed_result
 
 
 @pytest.mark.parametrize("summary", ["Проверка завершена.", "Проверка завершена.\n\n42 строки в /tmp/result.csv. Следующий шаг за владельцем.", ""])
-def test_completion_gist_is_short_on_cards_room_rows_and_live_frames(tmp_path, summary):
+def test_completion_gist_is_short_on_cards_room_rows_and_live_frames(tmp_path, summary, healthy_main):
     from ouroboros.gateway.ws import _encode
     from ouroboros.task_results import load_task_result
     from tests._wake_summary_shared import seed_wake
@@ -87,7 +88,7 @@ def test_chat_history_preserves_subagent_lane_group_metadata(tmp_path):
     assert rec["task_group_id"] == "group1"
 
 
-def test_chat_history_replays_typed_direct_error_terminal_status(tmp_path):
+def test_chat_history_replays_typed_direct_error_terminal_status(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "chat.jsonl").write_text(
@@ -112,7 +113,7 @@ def test_chat_history_replays_typed_direct_error_terminal_status(tmp_path):
     assert rec["task_terminal_status"] == "failed"
 
 
-def test_chat_history_replays_delivered_document_row(tmp_path):
+def test_chat_history_replays_delivered_document_row(tmp_path, healthy_main):
     """A persisted document chat row is replayed as a msg_type=document record so
     the frontend rebuilds the file bubble on reload from the durable URL."""
     logs = tmp_path / "logs"
@@ -200,7 +201,7 @@ def test_chat_history_replays_posix_document_labels_from_live_delivery(tmp_path,
         name: row["row_address"] for name, row in rows.items()}
 
 
-def test_chat_history_replays_links_with_task_grouping_fields(tmp_path):
+def test_chat_history_replays_links_with_task_grouping_fields(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     actions = [
@@ -235,7 +236,7 @@ def test_chat_history_replays_links_with_task_grouping_fields(tmp_path):
     assert rec["task_id"] == "task-links"
 
 
-def test_chat_history_replays_durable_photo_and_keeps_legacy_row_as_text(tmp_path):
+def test_chat_history_replays_durable_photo_and_keeps_legacy_row_as_text(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     rows = [
@@ -350,7 +351,7 @@ def test_chat_history_backfills_from_rotated_archive(tmp_path):
     assert texts.index("older message before the rotation") < texts.index("newest live message")
 
 
-def test_chat_history_marks_malformed_rows_incomplete(tmp_path):
+def test_chat_history_marks_malformed_rows_incomplete(tmp_path, healthy_main):
     """A skipped JSONL row must not make the bounded window claim completeness."""
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -716,7 +717,7 @@ def test_chat_history_preserves_subagent_reconciliation_metadata(tmp_path):
     assert rec["required_capabilities"] == ["shell", "vcs"]
 
 
-def test_chat_history_task_summary_row_passes_flat_cost_fields_through(tmp_path):
+def test_chat_history_task_summary_row_passes_flat_cost_fields_through(tmp_path, healthy_main):
     """v6.82 P1: agent_task_pipeline writes the pre-synthesis cost snapshot onto
     the task_summary chat row; history replay must pass those flat fields
     through so a reload still shows the card's cost (no result file present)."""
@@ -766,7 +767,7 @@ def test_chat_history_task_summary_row_passes_flat_cost_fields_through(tmp_path)
     assert "cost_usd" not in rec and "accounted_upper_bound_usd" not in rec
 
 
-def test_chat_history_replays_task_summary_finality_without_task_result(tmp_path):
+def test_chat_history_replays_task_summary_finality_without_task_result(tmp_path, healthy_main):
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "chat.jsonl").write_text(

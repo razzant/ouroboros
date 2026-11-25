@@ -29,6 +29,7 @@
  * @property {string=} project_id  // per-project memory scope (v6.32.0)
  * @property {Object=} client_surface  // raw sending-surface observables measured at send time (pywebview/ua/viewport/matchMedia/captured_at; optional IANA timezone)
  * @property {string=} profile_scope  // data-profile digest of the serving document (ouroboros-chat-preview-scope meta); a proven mismatch with the serving connection's scope refuses the frame (#3294)
+ * @property {number=} ordinary_room  // a Send again of a copy shown on a history 503's word: that room, which the core's acceptance confirms again before saving
  */
 /**
  * @typedef {Object} CommandInbound
@@ -283,8 +284,9 @@
  */
 
 /**
- * The policy's required extensions and what ordinary work does while one is not running ('' when none is); with an
- * execution domain, `trusted` lists the only packages whose code the service runs.
+ * Required extensions and how ordinary work responds when one is not ready, including when it cannot read a
+ * fixed setting (`when_unmet` is '' with no required extensions). With an execution domain, `trusted` lists
+ * the only packages whose code the service runs.
  * @typedef {Object} SettingsDeploymentExtensions
  * @property {"hold"|"warn"|""} when_unmet
  * @property {SettingsDeploymentRequirement[]} required
@@ -446,13 +448,19 @@
  * @property {'user'=} quote_role  // the owner's ink on a recorded card answer
  * @property {string=} author_label
  * @property {string=} kind
+ * @property {'agent_note'|'late_result'|'place_machine'=} program_source  // recorded source kind, not permission
  * @property {string=} snippet
  * @property {number=} chars  // the quoted text's whole length, present when snippet cuts it
  * @property {string=} ts
  * @property {string=} task_id
  * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
+ * @property {true=} derived_question  // host-derived question quote on an owner answer bubble without its own Reply, built per room on read or single-room live frame; never stored, no owner Reply
+ * @property {string=} room_label  // only with derived_question: Main, the Project's display name, or Project when unnamed, when the question's home is another room
+ * @property {'main'|'project'=} room_label_kind  // only with derived_question + room_label: built-in chrome (Main or unnamed Project); absent for a user-named Project
  * @property {(number|null)=} telegram_room_chat_id  // the owner bot's Reply only: its Project's turn, 0 its chat's own, null refused
- * @property {boolean=} unresolved  // a missing source leaves only `{address, unresolved: true}`
+ * @property {string=} work_task_id  // addressed work, not the quoted author; empty means unresolved work
+ * @property {true=} ordinary  // the host proved the quoted row addresses no work; with neither key it could not tell
+ * @property {boolean=} unresolved  // a missing source leaves the base form `{address, unresolved: true}`; a missing card may add an empty `work_task_id`
  */
 
 /**
@@ -488,6 +496,14 @@
  * @property {{v: 1, occurred_at: ?string, source: 'executor_terminal'|'supervisor_cancel'|'unknown', attempt: Object}=} terminal_time
  */
 
+/** An agent's note's author as the host recorded it, never an owner stamp.
+ * @typedef {Object} DeclaredAuthor
+ * @property {'agent'} kind
+ * @property {string} label
+ * @property {'self_declared'|'link_key'} basis
+ * @property {string=} key_id
+ */
+
 /**
  * One `GET /api/chat/history` row (live frames call `text` `content`). A row may also carry the
  * task-progress and outcome fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
@@ -496,6 +512,7 @@
  * @property {PlaceHistoryFacts=} place_history
  * @property {PresenceContact=} presence_contact
  * @property {string=} wait_ended_at
+ * @property {string=} kind  // room_echo for a program's message saved in its recipient's room
  * @property {string=} row_address
  * @property {boolean=} reply_excerpt_disabled  // a mixed or wordless card display, not one authored passage
  * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
@@ -515,8 +532,10 @@
  * @property {ChatHistoryPosition=} history_position
  * @property {boolean=} markdown
  * @property {string=} source
- * @property {string=} sender_label
+ * @property {string=} sender_label  // an agent's note: its rendered identity, shown as is
  * @property {string=} sender_session_id
+ * @property {DeclaredAuthor=} declared_author  // an agent's note in Main: never the owner's words
+ * @property {string=} late_report_id  // the displayed letter id, not a return capability
  * @property {string=} client_message_id  // correlation id, not proof of owner authorship; use role
  * @property {"swarm"=} subagents_mode  // effective mode at acceptance; preserved on replay
  * @property {boolean=} ingress_accepted
@@ -694,6 +713,7 @@
  * @property {string=} reason_code
  * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one
  * @property {('unavailable'|'restored')=} project_registry  // Main only: its refusal, or the list back from its copy
+ * @property {number=} ordinary_room  // a newest read's 503: the room read, still one of this profile's ordinary rooms
  * @property {string=} profile_scope  // the serving generation's frozen scope; a proven foreign value never paints (#3294)
  */
 
@@ -744,6 +764,8 @@
  * @property {string=} source
  * @property {string=} sender_label
  * @property {string=} task_id
+ * @property {DeclaredAuthor=} declared_author  // an agent's note: its literal body is `text`, never the owner's words
+ * @property {string=} late_report_id  // the displayed letter id, not a return capability
  * @property {ChatSearchAttachment[]=} attachments
  * @property {boolean=} text_placeholder
  * @property {'photo'|'video'|'document'|'links'|'quiz'=} msg_type

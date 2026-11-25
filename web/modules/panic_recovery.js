@@ -9,10 +9,11 @@
 // Opening the app, a reconnect or a repaint sends nothing. It owns no polling or store: main_waiting.js hands it each
 // `/api/state` body and the socket's state; the rooms' own Resume doors stay as they are.
 import { resumeTask, withinRequestLifetime } from './api_client.js';
-import { announceMembershipGap, holdResumes, resumeAcceptedWords, resumePending, resumeRefusalWords, taskControlBusy }
+import { announceMembershipGap, closeExpiredOffer, createTaskCloseButton, deadlineExpiredWord, holdResumes, resumeAcceptedWords, resumePending, resumeRefusalWords, taskControlBusy }
     from './task_control_menu.js';
 import { createSystemMessageActions } from './ui_helpers.js';
 import { fmt, tx } from './i18n.js';
+import { indexDeadlineExpired } from './work_status.js';
 
 // One Resume answer may take this long (its writes wait on the queue and the disk); past it the outcome is unknown.
 export const RESUME_ANSWER_MS = 60_000;
@@ -41,7 +42,10 @@ export function panicRow(raw) {
     const hold = text(row.panic_hold_id);
     if (!taskId || !hold) return null;
     return { task_id: taskId, task_name: text(row.task_name), panic_hold_id: hold, project_id: text(row.project_id),
-        chat_id: Number.isInteger(row.chat_id) ? row.chat_id : null, root_task_id: text(row.root_task_id) };
+        chat_id: Number.isInteger(row.chat_id) ? row.chat_id : null, root_task_id: text(row.root_task_id),
+        ...(row.close_expired ? { close_expired: closeExpiredOffer(row.close_expired, taskId) } : {}),
+        // The host's own word that this hold's hard deadline passed, apart from any Close offer or Stop.
+        ...(row.deadline_expired === true ? { deadline_expired: true } : {}) };
 }
 
 /**
@@ -54,7 +58,7 @@ export function panicCards(data) {
     const cards = new Map();
     for (const card of list(data?.main_attention)) {
         const id = String(card?.task_id || card?.activity_id || '');
-        if (named.has(id) && card.attention_reason === 'resume' && !Object.keys(card.model_waits || {}).length) {
+        if (named.has(id) && ['resume', 'deadline_expired'].includes(card.attention_reason) && !Object.keys(card.model_waits || {}).length) {
             cards.set(id, card);
         }
     }
@@ -89,11 +93,15 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
     const answerOf = (record) => (record.answer?.hold === record.row.panic_hold_id ? record.answer : null);
     // Still stopped as far as the reads know: not gone, and no accepted or outgoing Resume holds its current stop.
     const waiting = (record) => !record.gone && !BACK.has(answerOf(record)?.kind);
+    // A hard deadline that has passed is the host's own word, read from this row, its Close offer, or the same body's
+    // exact activity, card, member or work (`late`, set by each read naming the row): such a row is a status line with
+    // no box, outside every choice and count, whatever else (its own Stop, only where the card grants it) it keeps.
+    const expired = (record) => waiting(record) && record.late === true;
     // Whether the latest read offers it to choose: still stopped and named by that read, no Resume of it out (this
     // press or a room's own door), and no answer about its current stop newer than that read. `Choose all N` counts
     // these; a press out holds every box without changing which rows they are.
     function available(record) {
-        if (!record.current || !waiting(record) || resumePending(record.row.task_id)) return false;
+        if (!record.current || !waiting(record) || expired(record) || resumePending(record.row.task_id)) return false;
         const answer = answerOf(record);
         return !answer || record.listedAt > answer.at;
     }
@@ -194,13 +202,16 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
         input.setAttribute('aria-labelledby', name.id);
         input.setAttribute('aria-describedby', `${meta.id} ${outcome.id}`);
         pick.append(input, name, meta, outcome);
-        item.append(pick);
+        // Close and the card's Stop… stand together at the row's end, whichever of them the host grants.
+        const acts = document.createElement('div');
+        acts.className = 'panic-recovery-acts';
+        item.append(pick, acts);
         input.addEventListener('change', () => {
             // A box that cannot be chosen now keeps the record's choice (a read changed it while the event was queued).
             if (choosable(record)) record.checked = input.checked === true;
             paint();
         });
-        return { item, pick, input, name, meta, outcome, stop: null };
+        return { item, pick, input, name, meta, outcome, acts, stop: null };
     }
 
     // The card's `Stop…` (its menu offers no Resume: the box is that), made once and kept while its card grants it.
@@ -209,7 +220,7 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
         if (wanted && !record.view.stop) {
             const stop = stopControl(record.row.task_id, { row: () => record.card, allowed: () => stoppable(record) });
             stop.setAttribute('aria-describedby', record.view.name.id);  // which work, in a list of them
-            record.view.item.append(stop);
+            record.view.acts.append(stop);
             record.view.stop = stop;
         }
         if (!record.view.stop) return;
@@ -279,7 +290,7 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
         if (!view) return;
         mutate(() => {
             const all = [...records.values()];
-            const open = all.filter(waiting);
+            const open = all.filter(record => waiting(record) && !expired(record));
             const offered = all.filter(available);
             const picked = chosen();
             const names = new Map();
@@ -295,8 +306,25 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
                 input.checked = record.checked && can;
                 input.disabled = !can;
                 // A row that is no longer stopped keeps no box: it is the record of its answer.
-                input.hidden = !waiting(record);
+                const late = expired(record);
+                const token = late ? record.row.close_expired || '' : '';
+                if (late) record.checked = false;
+                input.hidden = !waiting(record) || late;
                 pick.classList.toggle('is-locked', !can);
+                // The deadline word leads; an answer already recorded for this row keeps its own words beside it.
+                if (late) outcome.textContent = [deadlineExpiredWord(), outcome.textContent].filter(Boolean).join(' · ');
+                if (record.view.close && record.view.close.offer !== token) {
+                    record.view.close.remove(); record.view.close = null;
+                }
+                if (token && !record.view.close) {
+                    const close = createTaskCloseButton(record.row.task_id, { onSettled: refresh, nameId: name.id,
+                        tokenNow: () => connected && record.current && expired(record) && record.row.close_expired === token ? token : '',
+                    });
+                    close.offer = token;
+                    record.view.close = close;
+                    record.view.acts.prepend(close);
+                }
+                if (record.view.close) record.view.close.disabled = !connected || !record.current || taskControlBusy(record.row.task_id);
                 stopView(record);
                 item.hidden = !showAll && index >= SHOWN_ROWS && !record.checked;
             });
@@ -314,7 +342,7 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
             // Panic, no stop and no work, so it stays true on a host that says so only until it is ready.
             const bare = !all.length;
             // Nothing read is nothing laid out: the title, the empty list and the empty actions row take no room.
-            for (const part of [view.heading, view.list, view.actions]) part.hidden = bare;
+            for (const part of [view.heading, view.list]) part.hidden = bare;
             view.gap.textContent = listSaid !== 'partial' ? ''
                 : bare ? tx('Couldn’t check whether any tasks are waiting to resume after Panic.')
                     : tx('Some saved work could not be read, so this list may be incomplete.');
@@ -331,6 +359,8 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
             view.summary.textContent = summaryWords(all);
             view.summary.hidden = !view.summary.textContent;
             view.go.hidden = !open.length && !sending;
+            // With nothing left to resume the row of actions holds nothing: it takes no room.
+            view.actions.hidden = bare || view.go.hidden;
             view.go.textContent = sending ? tx('Sending…')
                 : picked.length ? fmt('Resume {n} selected', { n: picked.length }) : tx('Resume selected');
             view.go.disabled = sending || !picked.length;
@@ -420,6 +450,7 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
                 if (Number.isInteger(project.chat_id)) projects.set(`c:${project.chat_id}`, project.name);
             }
             const cards = panicCards(data);
+            const expiredIds = indexDeadlineExpired(data);
             // A work's card this read offers or leaves out: one the message stands for, one of its own beside it (its
             // own Stop there), none on a whole attention list; else (a list this read could not finish) the last one,
             // withdrawn.
@@ -434,8 +465,10 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
                 const record = records.get(row.task_id) || { checked: false, answer: null, card: null, view: null };
                 // A choice belongs to the stop it was made under; an answer keeps its own stop (`outcomeView`).
                 if (record.row && record.row.panic_hold_id !== row.panic_hold_id) record.checked = false;
+                const late = Boolean(row.close_expired || row.deadline_expired === true || expiredIds.has(row.task_id));
+                if (late) record.checked = false;
                 Object.assign(record, { row, rank: named.size, current: true, unseen: false, gone: false,
-                    listedAt: requestedAt, card: cardOf(row.task_id, record.card), vouched: cards.has(row.task_id) });
+                    listedAt: requestedAt, card: cardOf(row.task_id, record.card), vouched: cards.has(row.task_id), late });
                 records.set(row.task_id, record);
             }
             census = complete ? 'complete' : 'partial';
@@ -449,7 +482,13 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
                 record.current = false;
                 record.vouched = false;
                 record.card = cardOf(taskId, record.card);
-                if (census !== 'complete') { record.unseen = true; continue; }
+                if (census !== 'complete') {
+                    record.unseen = true;
+                    // On a partial Panic list, an authoritative expiry for this exact task in the same response
+                    // removes it from selection and counts immediately while preserving unseen non-expired neighbors.
+                    if (expiredIds.has(taskId)) { record.late = true; record.checked = false; }
+                    continue;
+                }
                 // A complete read proves the work no longer waits: an answered row stays as the record of its answer.
                 if (record.answer) { record.gone = true; record.checked = false; continue; }
                 // A row leaving under the keyboard hands focus to its message, never to the page.
@@ -474,7 +513,7 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
         },
         // The pill's target while something here waits on the owner: work still stopped (or not confirmed otherwise).
         target() {
-            if (!view || ![...records.values()].some(waiting)) return null;
+            if (!view || ![...records.values()].some(record => waiting(record) && !expired(record))) return null;
             return { at: Number(view.bubble.dataset.ts) || 0 };
         },
         node: () => view?.bubble || null,

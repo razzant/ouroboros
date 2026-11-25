@@ -27,7 +27,7 @@ import {
     syncParkedPhase,
     taskActivityPresentation,
 } from '../modules/task_phase_chip.js';
-import { ElementStub, TextStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, PREVIEW_SCOPE, TextStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 // A chip as the page has it: the shared status mark first, its words one text node beside it.
 const chipDoc = { createElement: (tag) => new ElementStub(tag, chipDoc), createTextNode: (data) => new TextStub(data) };
@@ -812,7 +812,7 @@ test('an ending whose only remark is a held call keeps the collapsed line of no 
                 system_type: 'task_summary', text: 'Done', history_id: `end-${taskId}`, ts: `2026-11-11T10:0${index + 2}:00Z` })),
         ];
         const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () => (String(url).startsWith('/api/chat/history')
-            ? { messages: rows, window: { complete: true } } : { active_direct_turns: [] }) }));
+            ? { profile_scope: PREVIEW_SCOPE, messages: rows, window: { complete: true } } : { active_direct_turns: [] }) }));
         const instance = createChatInstance({ ws: { on() { return () => {}; }, isConnected: () => true, send() {} },
             state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 }, updateUnreadBadge() {},
             stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),

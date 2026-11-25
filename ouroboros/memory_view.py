@@ -594,7 +594,7 @@ def _row_line(entry: Entry, author: Mapping[str, Any], texts: Mapping[str, Dict[
     row = texts.get(entry[0]["row_sha256"])
     if row is None:
         return _row_head(entry, author) + " (row unreadable by its address)"
-    return render_memory_row(entry[0], row, author=author, indent=INDENT)
+    return render_memory_row(entry[0], row, author=author, indent=INDENT, model_reply=True)
 
 
 def _spoken(entry: Entry, author: Mapping[str, Any], texts: Mapping[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -604,12 +604,13 @@ def _spoken(entry: Entry, author: Mapping[str, Any], texts: Mapping[str, Dict[st
     from ouroboros.memory_view_work import speech_facts
 
     row = texts.get(entry[0]["row_sha256"])
-    return {**speech_facts(row or entry[1], author), "owner_side": owner_speech(entry[1], author),
+    facts = speech_facts(row or entry[1], author)
+    return {**facts, "owner_side": owner_speech(entry[1], author),
             "ref": f"chat {entry[0]['chat_id']} / {entry[1].get('client_message_id') or ''}",
             "text_sha256": sha256_text(str(row.get("text") or "")) if row else "",
             "line": _row_line(entry, author, texts), "head": _row_head(entry, author), "kind": author.get("kind"),
-            "address": chat_chain.format_address(entry[0]), "ts": entry[1].get("ts"),
-            "chars": entry[1].get("text_chars", 0), "pos": entry[2]}
+            "address": chat_chain.format_address(entry[0]), "ts": entry[1].get("ts"), "pos": entry[2],
+            "chars": len(facts["program_words"]) if "program_words" in facts else entry[1].get("text_chars", 0)}
 
 
 def _typed_fact(meta: Mapping[str, Any]) -> str:
@@ -1495,10 +1496,9 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]], part=_ren
 
 
 def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "", observe=None, part=_rendered) -> str:
-    """Block C: a helper's owner words, late reviews, marks, this room, then my other conversations.
-    The floor's empty level renders the full view. Its closing note is ``### Physical floor`` or ``### Memory check``
-    for a Nano reader path. While import is pending, the room names the gap and a reader without the chronicle.
-    An observer sees the same named pieces before the blank-line join."""
+    """Block C's memory middle: a helper's owner words, late reviews, marks, this room, then my other conversations.
+    ``part`` separates program data from selected forms; ``observe`` sees named pieces before join; ``floor_note`` closes the block.
+    Before import completes, the room names the reason and a chronicle-free reader."""
     counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
     draw = (lambda key, make: observe(key, make())) if observe is not None else lambda _key, make: make()
     texts = _room_parts(snapshot, dict(level.addressed), draw, part=part)

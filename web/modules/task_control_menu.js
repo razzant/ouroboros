@@ -12,7 +12,7 @@
 // work_status.js lays them on this menu); endpoints, stop policy, request-id
 // retry and verbatim refusals are shared.
 
-import { cancelTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
+import { cancelTask, closeExpiredTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { haptic } from './haptics.js';
 import { formatUsd } from './storage_format.js';
@@ -86,6 +86,49 @@ export function createTaskResumeButton(taskId, { canResume, onSettled = () => {}
         // Settling gives back the authority held now: a connection that dropped meanwhile has withdrawn it.
         try { await resumeTaskAction(taskId, { settle: onSettled }); }
         finally { button.disabled = !resumeEligible(taskId, canResume); }
+    });
+    return button;
+}
+
+export const deadlineExpiredWord = () => tr('task.status.deadline_expired', 'Deadline expired');
+
+export function closeExpiredOffer(offer, target) {
+    return offer?.action === 'close' && offer.target === target && /^[a-f0-9]{64}$/.test(offer.close_expired || '')
+        ? offer.close_expired : '';
+}
+
+export async function closeExpiredAction(taskId, token, { close = closeExpiredTask, toast = showToast, settle } = {}) {
+    if (!token || taskControlBusy(taskId)) return;
+    const release = holdControl(taskId);
+    try {
+        const ack = await close(taskId, token);
+        if (ack?.ok !== true) throw new Error(tx('Close was not confirmed.'));
+        toast(ack.cancel_state === 'pending' ? tx('Close requested. The saved work is still being checked.')
+            : ack.reason_code === 'result_kept' ? tx('The saved result was kept.')
+                : tx('Closed.'), 'info');
+    } catch (error) {
+        toast(error?.message || tx('Close was not confirmed.'), 'warn');
+    } finally {
+        try { await settle?.(); } finally { release(); }
+    }
+}
+
+// Optional and never urgent: the neutral capsule, like the Stop… beside it. `nameId` is the element that names the
+// exact task (its row's or message's own name), which the button is described by.
+export function createTaskCloseButton(taskId, { tokenNow, onSettled, nameId = '' } = {}) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-sm btn-default ui-hit-area';
+    button.dataset.closeExpiredRun = '1';
+    if (nameId) button.setAttribute('aria-describedby', nameId);
+    button.textContent = tr('task.control.close_expired', 'Close');
+    button.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const token = tokenNow?.();
+        if (!token || taskControlBusy(taskId) || !button.isConnected) return;
+        button.disabled = true;
+        try { await closeExpiredAction(taskId, token, { settle: onSettled }); }
+        finally { button.disabled = !tokenNow?.() || taskControlBusy(taskId); }
     });
     return button;
 }
