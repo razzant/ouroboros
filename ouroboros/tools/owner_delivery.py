@@ -297,8 +297,8 @@ def lands_with_my_human(ctx: Any, evt: Dict[str, Any]) -> bool:
     except Exception:
         log.debug("delivery room unread for task %s", evt.get("task_id"), exc_info=True)
         return False
-    return name is not None or chat == WEB_UI_CHAT_ID or (
-        type(chat) is int and OWNER_ROOMS[0] <= chat <= OWNER_ROOMS[1] and presence_caller_binding(ctx) is None)
+    return name is not None or type(chat) is int and (chat == WEB_UI_CHAT_ID or (
+        OWNER_ROOMS[0] <= chat <= OWNER_ROOMS[1] and presence_caller_binding(ctx) is None))
 
 
 def delivery_audience(ctx: Any, evt: Dict[str, Any]) -> tuple[str, bool]:

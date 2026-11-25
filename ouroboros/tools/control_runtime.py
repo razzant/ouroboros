@@ -1325,13 +1325,16 @@ def _confirmed_handoff(ctx: ToolContext | None, work: str) -> bool:
 
 
 def _spoke_live_to_my_human(ctx: ToolContext | None) -> bool:
-    """A root whose live text message of this run reached a conversation its human reads: the reply mark
-    (``owner_delivery._retain_dialogue``), set only for a live ``send_message`` frame that lands there by the
-    supervisor's rule (``lands_with_my_human``; zero included, reset per turn). A text stored in the hidden task
-    record, whose reader is the caller, sets no mark, nor does a place's local room."""
+    """A root with no place binding whose live text message of this run reached a conversation its human reads:
+    the reply mark (``owner_delivery._retain_dialogue``), set only for a live ``send_message`` frame that lands there
+    by the supervisor's rule (``lands_with_my_human``; zero included, reset per turn). A text stored in the hidden
+    task record, whose reader is the caller, sets no mark. A place-bound root keeps its own case (a turn answering its
+    place) and the base's behaviour otherwise."""
+    from ouroboros.dialogue_provenance import presence_caller_binding
     from ouroboros.task_results import resolve_ctx_lineage
 
-    return getattr(ctx, "_owner_reply_revision", None) is not None and resolve_ctx_lineage(ctx)["is_root_task"]
+    return (getattr(ctx, "_owner_reply_revision", None) is not None and resolve_ctx_lineage(ctx)["is_root_task"]
+            and presence_caller_binding(ctx) is None)
 
 
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
@@ -1341,8 +1344,8 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  fold_read: bool = False, about_work: str = "") -> str:
     """Stage an author act; a finish that owes no one words may choose silence: a self-started run (an
     own-clock or focused wake, a schedule-born root without a Presence binding), which may leave a gist
-    for its human, a task that answers its place conversation or a program's note, or a root whose live text
-    message of this run already reached a conversation its human reads, not the hidden task record
+    for its human, a task that answers its place conversation or a program's note, or a root with no place binding
+    whose live text message of this run already reached a conversation its human reads, not the hidden task record
     (``_spoke_live_to_my_human``), and whose contract owes no answer; inherited binding authority alone names
     no speaker."""
     request, error = completion_request(ctx, {
@@ -1401,9 +1404,9 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         if not _spoke_live_to_my_human(ctx):
             return None, ("silent needs a finish that owes no one words: a self-started run (a consciousness wake's "
                           "own turn, or a schedule-born root without a Presence binding), a task answering its own place "
-                          "conversation or a program's note, or a root after its live text message of this run reached "
-                          "a conversation its human reads (send_user_message, accepted live, not queued; "
-                          "the hidden task record does not count)")
+                          "conversation or a program's note, or a root without a place binding after its live text "
+                          "message of this run reached a conversation its human reads (send_user_message, accepted "
+                          "live, not queued; the hidden task record does not count)")
         from ouroboros.contracts.task_contract import answer_protocol_active, review_answer_required
 
         if review_answer_required(ctx) or answer_protocol_active(ctx):

@@ -1084,8 +1084,8 @@ def test_a_silent_finish_stays_silent_through_the_facts(wake, monkeypatch):
     pending, _stored = emit(wake, text, usage, trace, bus=bus)
     assert not sends(pending) and shown == []
     # the model is told before it writes that its next words stay unspoken (review 8, Fable)
-    assert ("You chose silence, so it stays unspoken unless your human awaits a reply; finish_task without silent "
-            "speaks.") in str(wake.calls[-1])
+    assert ("You chose silence, so it stays unspoken, except that prose may be sent if your human awaits a reply; "
+            "finish_task without silent speaks.") in str(wake.calls[-1])
 
 
 def test_an_explicit_spoken_finish_ends_the_silence(wake, monkeypatch):
@@ -1371,15 +1371,15 @@ def test_a_main_notice_answers_its_human_from_a_project_room_or_a_bridge_chat(wa
     assert not trace.get("completion_refusals") and usage.get("wake_silent") is True and text == ""
 
 
-@pytest.mark.parametrize("chat", ["0", "not-a-chat", -1001, None, True, 1 << 40],
-                         ids=["string-zero", "not-a-chat", "peer", "unknown", "bool", "place-room"])
+@pytest.mark.parametrize("chat", ["0", "not-a-chat", -1001, None, True, 1.0, 1 << 40],
+                         ids=["string-zero", "not-a-chat", "peer", "unknown", "bool", "float-main", "place-room"])
 def test_only_a_room_number_my_human_reads_counts(wake, chat):
     from ouroboros.tools.owner_delivery import lands_with_my_human
 
     wake.ctx.task_id, wake.ctx.task_metadata = TASK_ID, dict(OWNER)
     assert lands_with_my_human(wake.ctx, {"chat_id": BRIDGE_CHAT, "task_id": TASK_ID}) is True
-    assert lands_with_my_human(wake.ctx, {"chat_id": chat, "task_id": TASK_ID}) is (chat is True)
-    # ``True == 1`` is Main by value, as for every reader that compares with WEB_UI_CHAT_ID; any other row is refused.
+    assert lands_with_my_human(wake.ctx, {"chat_id": 1, "task_id": TASK_ID}) is True
+    assert lands_with_my_human(wake.ctx, {"chat_id": chat, "task_id": TASK_ID}) is False, "only a room number counts"
 
 
 @pytest.mark.parametrize("room,owed", [(0, True), (1, False)], ids=["hidden-record", "main"])
@@ -1396,3 +1396,33 @@ def test_a_reply_discharges_the_owed_reply_only_where_my_human_reads_it(wake, ro
                                 "system_type": "proactive_message"})
     assert deliver_owner_event(ctx, frame) == "live"
     assert owner_reply_owed(ctx) is owed
+
+
+def test_a_place_bound_root_after_a_private_main_contact_keeps_the_base_behaviour(wake):
+    """A retained legacy binding whose place store is unreadable has no carrier; its private notice reaches Main and
+    advances the mark, yet the spoken case is for a run with no place binding: its silence is refused as on the base."""
+    from ouroboros.loop_messages import _record_owner_directive
+    from ouroboros.place_reply import carrier_now
+    from ouroboros.places import conversation_chat_id, places_path
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_runtime import _send_user_message, completion_request
+
+    ctx = wake.ctx
+    meta = {"presence": {"binding_id": "legacy-binding", "transport_skill": "connector",
+                         "event": {"source_event_id": "event-1", "conversation_key": "local:55",
+                                   "conversation_id": "55"}}}
+    chat = conversation_chat_id("local:55")
+    ctx.task_id, ctx.task_metadata, ctx.task_contract = TASK_ID, meta, {}
+    places_path(wake.root).parent.mkdir(parents=True, exist_ok=True)
+    places_path(wake.root).write_bytes(b"{")
+    ctx.current_chat_id, ctx.is_direct_chat, ctx.messages, ctx.event_queue = chat, False, [], queue.Queue()
+    ctx._owner_directives, ctx._owner_reply_revision = [], None
+    write_task_result(wake.root, TASK_ID, "running", chat_id=chat, root_task_id=TASK_ID, metadata=meta,
+                      task_contract=ctx.task_contract)
+    assert not carrier_now(ctx)
+    _record_owner_directive(ctx, source="owner_mailbox", content="Can you update me?", msg_id="mail1")
+    assert "accepted" in _send_user_message(ctx, SPOKE, destination="main", request_id="update")
+    assert [e["chat_id"] for e in sends(drained(ctx.event_queue))] == [1]
+    assert ctx._owner_reply_revision is not None, "the private notice reached Main"
+    request, error = completion_request(ctx, {"action": "finish", "silent": True})
+    assert request is None and error.startswith("silent needs a finish that owes no one words")

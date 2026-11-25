@@ -9,8 +9,8 @@ turn never ended). Three rules keep that honest for every model:
   answer) replaces the answer the facts returned, that answer is shown as an interim message first, unless the new
   answer is it or contains it whole, and the task's result keeps it apart from the final's bytes for its readers
   outside the room (``DISPLACED_ANSWER_KEY``);
-* a silent selection stays silent: prose after the facts inherits it unless its human awaits a reply, and an
-  explicit ``finish_task`` without ``silent`` speaks;
+* a silent selection stays silent: prose after the facts inherits it, except that it may be sent when its human
+  awaits a reply (a run with no place binding), and an explicit ``finish_task`` without ``silent`` speaks;
 * work after the facts (evidence changed) leaves the next prose a fresh answer bound to the new evidence; a selection
   by ``answer_sha256`` names the old answer with its old evidence, so changed evidence returns once and a repeated
   selection then delivers until new work.
@@ -23,9 +23,9 @@ from typing import Any, Dict
 
 FACTS_NOTED_CONTROL = "delivery_facts_noted"
 FACTS_NOTED_LINE = "Your next answer is delivered as written, so make it the whole answer."
-# After a silent selection: the next prose inherits that silence unless a reply is owed; told first (review 8).
-FACTS_NOTED_QUIET = (" You chose silence, so it stays unspoken unless your human awaits a reply; "
-                     "finish_task without silent speaks.")
+# After a silent selection: the next prose inherits that silence (owed replies aside); told first (review 8).
+FACTS_NOTED_QUIET = (" You chose silence, so it stays unspoken, except that prose may be sent if your human awaits a "
+                     "reply; finish_task without silent speaks.")
 # Trace key of the answers later finals displaced, in order and without repeats: the result keeps each apart from the
 # final's bytes, for consumers outside the room (``task_finalization.build_completion_observations``,
 # ``displaced_answer_note``).
