@@ -234,7 +234,10 @@ def _check_local_return(tmp_path, monkeypatch, when, *, busy_receipt=False):
         private = with_dispatch_account(measured, "example-local-binding")
         assert "dispatch_account" not in asdict(private)
         physical = AttemptRequest(model="local-example (local)", provider="local", physical_context=private)
-        assert admit(physical) and admit(physical)  # separately prepared ordinary physical requests use the same window
+        # Preparation only previews the inherited window. Before the normal RUNNING path
+        # claims it, neither candidate may send, even on the same recorded route.
+        assert admit(physical) is False
+        assert admit(physical) is False  # preparing again still does not start the turn
     assert task["task_contract"]["allowed_resources"]["network"] is False
     content = build_user_content(task)
     assert content.endswith("\n" + request["text"]) and '"Example collaborator", not verified' in content and origin in content
@@ -315,6 +318,8 @@ def test_normal_returns_debit_the_same_global_window_and_their_own_source_window
 
     def reserve(turn, scopes, prior_turn=None):
         spent, left = extension_late_result.debit_return_execution(source, scopes, prior_turn)
+        # Previewing a finite remainder does not make the next turn its owner.
+        assert not extension_late_result.return_time_owned(source, scopes, turn, f"report-{turn}", left)
         source[extension_late_result._SHARED_EXECUTION] = {
             "spent": spent,
             "active": {"task_id": turn, "report_ref": f"report-{turn}", "scopes": sorted(scopes), "seconds": left},

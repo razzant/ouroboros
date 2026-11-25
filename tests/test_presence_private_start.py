@@ -469,7 +469,12 @@ def test_a_private_start_alone_is_no_deferred_work_and_its_room_is_the_owners(co
 
 def test_a_later_arrival_and_the_final_stay_out_of_the_private_root(contact_runtime, monkeypatch):
     """No connector reads it and no place message reaches it; the outward root beside it is the negative control."""
-    from ouroboros.conversation_lease import open_root_intake, root_conversation_key
+    from ouroboros.conversation_lease import (
+        LOCAL_RESULT_INTAKE,
+        author_intake_accepting,
+        open_root_intake,
+        root_conversation_key,
+    )
     from ouroboros.dialogue_provenance import is_presence_task, presence_provenance_from_task, presence_related_work
     from ouroboros.place_intake import hand_own_arrival
     from ouroboros.place_reply import final_is_speech, reply_carrier
@@ -493,7 +498,9 @@ def test_a_later_arrival_and_the_final_stay_out_of_the_private_root(contact_runt
     _run(r, during)
     private, outward = seen["private"], seen["outward"]
     assert root_conversation_key(private) == "" and root_conversation_key(outward) == key
-    assert open_root_intake(r.root, private) is False  # its loop reads no conversation
+    assert open_root_intake(r.root, private)
+    assert author_intake_accepting(r.root, private["id"], LOCAL_RESULT_INTAKE)
+    assert not author_intake_accepting(r.root, private["id"], key)
     assert [row["task_id"] for row in conversation_works(r.root, key, [binding])] == [outward["id"]]
     assert presence_related_work(binding, private) and not is_presence_task(private)
     assert reply_carrier(private["metadata"]) == {} and reply_carrier(outward["metadata"])
