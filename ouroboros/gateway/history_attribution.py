@@ -1,16 +1,17 @@
-"""Why each ``GET /api/chat/history`` was made, counted in memory: the ``history_reads`` section of the next
-``supervisor_load`` row (``server_liveness._load_sections``; PERSISTENCE ``logs/supervisor.jsonl``).
+"""Why each ``GET /api/chat/history`` was made and what it cost, counted in memory: the ``history_reads`` section of
+the next ``supervisor_load`` row (``server_liveness._load_sections``; PERSISTENCE ``logs/supervisor.jsonl``).
 
 A client names on a read the action that began it (``reason``), its cursor's kind (``mode``), the gate or
 fallback leg that chose it (``decision``) and what the earlier leg met (``detail``) (CLIENT_CONTRACT "Reading
 history"). Telemetry only: nothing selects a page, authorizes or checks a cursor by these tags, the answer is the
-same with or without them, and a read writes nothing (DEVELOPMENT "Passive GET"). A window counts its reads per
-value of each tag (one outside its closed set is ``invalid``, an absent reason or cursor kind ``unspecified``; a
-cursor's kind is the one the selection decoded, ``history_paging.DECODED_CURSOR``, where it decoded one), per
-status and per refusal the server gave (``code``, ``refusal``, ``stream``), with the answers' bytes and their
-milliseconds in the endpoint (total, longest, and a fixed histogram for its median and tail); never a room, a tag
-as sent, a cursor, text, address or token. Not counted: a HEAD, and a request answered before the route (an
-expired session's 401, a refused origin's 403)."""
+same with or without them, and a read writes nothing (DEVELOPMENT "Passive GET"). A read's cause is its counted
+words: each tag as a value of its closed set (one outside it is ``invalid``, an absent reason or cursor kind
+``unspecified``; a cursor's kind is the one the selection decoded, ``history_paging.DECODED_CURSOR``, where it
+decoded one), its status and the refusal the server gave (``code``, ``refusal``, ``stream``). A window keeps one
+group per distinct cause with its reads, the answers' bytes and their milliseconds in the endpoint (total,
+longest), so each cost stays with what caused it; over all its reads, the same totals and a fixed histogram for
+their median and tail. Never a room, a tag as sent, a cursor, text, address or token. Not counted: a HEAD, and a
+request answered before the route (an expired session's 401, a refused origin's 403)."""
 
 from __future__ import annotations
 
@@ -40,6 +41,10 @@ _SERVER_WORD = re.compile(r"[a-z_]{1,48}")  # the server's own codes, causes and
 # The time histogram's buckets, each an upper bound in milliseconds (the last open): a measurement's fixed scale, so
 # a window's median and tail read off its counts; never a gate.
 BUCKETS = (("<0.5", 500), ("<1", 1000), ("<2", 2000), ("<5", 5000), ("<10", 10_000), (">=10", None))
+# A window's distinct causes beyond this many share one ``overflow`` group, their reads and cost kept: a bound on the
+# row's size in transport (a busy minute names a handful), never on what is counted.
+GROUPS_MAX = 64
+_OVERFLOW = (("overflow", True),)  # never a cause: every cause names its reason, mode and status
 _LOCK = threading.Lock()  # the route counts on the event loop, the supervisor loop drains on its own thread
 _WINDOW: dict = {}
 
@@ -75,24 +80,31 @@ def _fields(params, response, kind=None) -> dict:
 
 
 def _count(fields: dict, size: int, ms: int) -> None:
+    cause = tuple(sorted(fields.items()))
     with _LOCK:
         if not _WINDOW:
-            _WINDOW.update(n=0, bytes=0, total_ms=0, max_ms=0, seconds={label: 0 for label, _bound in BUCKETS})
-        _WINDOW["n"] += 1
-        _WINDOW["bytes"] += size  # uncompressed: before gzip and delivery
-        _WINDOW["total_ms"] += ms
-        _WINDOW["max_ms"] = max(_WINDOW["max_ms"], ms)
+            _WINDOW.update(n=0, bytes=0, total_ms=0, max_ms=0, seconds={label: 0 for label, _bound in BUCKETS},
+                           groups={})
+        groups = _WINDOW["groups"]
+        if cause not in groups and len(groups) - (_OVERFLOW in groups) >= GROUPS_MAX:
+            cause, fields = _OVERFLOW, dict(_OVERFLOW)
+        group = groups.setdefault(cause, {**fields, "n": 0, "bytes": 0, "total_ms": 0, "max_ms": 0})
+        for totals in (group, _WINDOW):
+            totals["n"] += 1
+            totals["bytes"] += size  # uncompressed: before gzip and delivery
+            totals["total_ms"] += ms
+            totals["max_ms"] = max(totals["max_ms"], ms)
         _WINDOW["seconds"][next(label for label, bound in BUCKETS if bound is None or ms < bound)] += 1
-        for name, value in fields.items():
-            counts = _WINDOW.setdefault(name, {})
-            counts[value] = counts.get(value, 0) + 1
 
 
 def drain() -> dict:
-    """The history reads counted since the last drain (``{}`` for none), then an empty window."""
+    """The history reads counted since the last drain (``{}`` for none), then an empty window: its totals, the time
+    histogram and ``groups``, one per cause in the order first counted (``overflow`` last when a window had one)."""
     with _LOCK:
-        window = {key: dict(value) if isinstance(value, dict) else value for key, value in _WINDOW.items()}
-        _WINDOW.clear()
+        window = dict(_WINDOW)
+        _WINDOW.clear()  # the next read starts new totals, histogram and groups: the drained ones are this copy's
+    if window:
+        window["groups"] = list(window["groups"].values())
     return window
 
 
