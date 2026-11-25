@@ -1,28 +1,47 @@
-"""Installation-owned processes and bounded generation shutdown (ARCHITECTURE §9).
+"""The installation's ownership set and the one bounded stop of a server generation (ARCHITECTURE §9).
 
-Canonical state/owned_processes.json indexes executor records and ledgered spawns,
-without replacing their per-drive custody. Atomic updates share the canonical ledger
-append lock; contended registrations/owed identities use lock-free files under
-state/owned_processes.pending, merged by every read and folded by the next writer.
-Unreadable documents remain untouched; pending copies survive and strict reads fail.
+``state/owned_processes.json`` under the canonical data root names every process this
+installation started and has not forgotten. Executor and tracked-command records enter
+through ``workspace_executor._register_process`` and leave through ``_forget_process``;
+ledgered spawns enter through ``process_custody.record_process`` and leave when the ledger
+compaction drops their row or a stop confirms their exit. The per-drive records and the PID
+ledger stay the custody they were (the reaper reads the ledger); the set is the address the
+exit reads instead of walking ``data/state``. One document, atomic replace, written under
+the canonical ledger's append lock. A registration (or a stop's owed identities, ``note_owed``)
+that cannot take that lock is never lost: it lands as one lock-free file in
+``state/owned_processes.pending/``, which every read merges and the next locked update folds in.
+A document that cannot be read is never replaced: what only it names stays owed, entries wait as
+pending files, and strict readers answer unknown until it reads again or an owner removes it.
 
-begin_owned_stop starts the generation's one grace and stamps targets before waits.
-The first explicit door cause replaces shutdown_entry.json lock-free, best effort;
-boot reports and claims it. Entry is neither exit nor Resume authority. A death before
-any recorded door is uncaused; planned worker stops have their restart transaction.
-stop_owned_work starts once; other callers join only until completion/shared deadline.
-Existing typed kill/liveness helpers retire confirmed exits and stamp the rest without
-waiting for a lock past deadline. Late targets are born stamped and their starters stop
-them. Tracked admission closes except the exit owner's finalization (exit_finalization).
+``begin_owned_stop`` is called first by every shutdown door (owner Restart, the lifespan
+teardown, the emergency exit): it starts the generation's one grace deadline and stamps
+``stop_requested_at`` on every target before any other owner waits, so a launcher kill at the
+grace still leaves every pending stop recorded. Between the two, the generation's first explicit
+door cause replaces ``state/shutdown_entry.json``: one lock-free atomic write, best effort; a
+cause-less or later door keeps it. It records entering shutdown, never an exit, a finished
+cleanup or Resume authority; the ``server_shutdown`` row still follows terminal custody. The next
+start reports that record and claims the file for its own generation, so an older cause never
+explains a death before any door; that death stays uncaused, as does a planned restart's worker
+stop before its teardown (its restart transaction records it).
 
-memory_unconfirmed covers live handles, unfinished/failed owners and in-flight starts
-without durable identities: no next-start retry can name them. ledger_unconfirmed covers
-canonical ledger debt the set could not take or an unreadable selection; boot's sweep
-reads it. finish_unconfirmed_stops retries exact stamped targets before admission and
-extensions, under the same bound, retaining survivors. start_inherited_import indexes
-older on-disk records once on a background thread, never delaying startup or exit.
-Panic stamps indexed work with zero lock wait, leaving native held-process requests to
-their current owners; indexed stops cover kept services not held in this process.
+``stop_owned_work`` is the generation's one stop. The first caller starts it; a later caller
+joins it until completion or the shared deadline and never starts a second one. It stops through
+the existing typed kill helpers, forgets what the existing liveness predicates confirm, stamps the
+rest ``unconfirmed_since`` without waiting for a lock once the deadline passed, and returns: the
+exit owner exits. A target recorded after the stop began (the owner Restart stops before the
+server exits) is born stamped; the begun door also closes tracked-command admission
+(``stop_begun``, read by ``tools/shell_process.tracked_start``) to all but the restart exit's
+own finalization after the stop (the store switch's door owner, ``exit_finalization``), and
+starters stop their late publications. What an in-memory owner leaves unconfirmed (a live handle,
+a start still in flight, an owner unfinished or failed at the deadline) is reported as
+``memory_unconfirmed`` beside the durable ids and keeps the outcome unconfirmed: no record names
+it, so no next start retries it. Debt only the canonical ledger names that no store took into the set
+at the exit, or a selection the exit could not read, is ``ledger_unconfirmed`` and keeps it unconfirmed
+too; the next start's sweep reads that ledger. The next start's ``finish_unconfirmed_stops`` retries every
+stamped record under the same bound before admission and before any extension or replacement
+process starts; what it cannot confirm stays recorded and counted. Records an older release left
+on disk are indexed once by ``start_inherited_import`` on a background thread, so no start waits
+on that walk.
 """
 
 from __future__ import annotations
@@ -830,27 +849,6 @@ def begin_owned_stop(drive_root: Any = None, *, cause: str = "") -> None:
     except Exception:
         log.warning("Owned-work stop requests not stamped at shutdown entry; the stop stamps them",
                     exc_info=True)
-
-
-def panic_owned_work(drive_root: Any) -> Dict[str, Any]:
-    """Request indexed stops without a lock wait; Panic's caller never joins past its deadline.
-
-    Stamp before signalling, independently of any ordinary shutdown already in flight.
-    The existing pending protocol names exact targets even while the custody sweep holds
-    the ledger lock; a hard exit leaves those targets for ``finish_unconfirmed_stops``.
-    """
-    root = installation_root(drive_root)
-    targets = _stamp(root, "stop_requested_at", _is_stop_target, timeout_sec=0.0)
-    from ouroboros.tools import services
-
-    # Existing native request owners signal their held processes first, without any census.
-    # Session services not held in this process need this indexed owner.
-    held = {record.proc.pid for record in services._SERVICES.copy().values()}
-    targets = [entry for entry in targets if entry.get("kind") == "supervised"
-               and entry.get("scope") == "session" and entry.get("host_pid") not in held
-               and str(entry.get("purpose") or "").startswith("service:")]
-    remaining = _stop_records(root, targets, time.monotonic() + 0.2) if targets else []
-    return {"state": "unconfirmed" if remaining else "completed", "unconfirmed": remaining}
 
 
 def stop_owned_work(drive_root: Any = None) -> Dict[str, Any]:

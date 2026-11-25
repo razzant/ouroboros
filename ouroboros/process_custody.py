@@ -719,35 +719,20 @@ def start_parent_lifeline(*, poll_sec: float = 5.0, label: str = "", stop_socket
 
 
 def live_kept_service_pids(drive_root: pathlib.Path) -> "set[int]":
-    """PIDs of still-alive, deliberately-kept (session-scope) services.
+    """Leader PIDs of the deliberately kept (session-scope) services a worker kill spares.
 
-    Used by the cancel/hard-timeout worker kill to spare ``service_teardown=keep``
-    services that are direct children of the worker: tree-killing the worker
-    would otherwise destroy services a verifier still needs, even though the
-    keep contract says they outlive the task. Only live, fingerprint-matching
-    session-scoped service entries are returned across the installation's indexed
-    drives, using the same custody selection as kept-service observation and stop.
+    Every worker kill that keeps services (cancel/hard timeout of one task, idle retirement)
+    spares them and their descendants: the keep contract says they outlive the task and the
+    worker, and a verifier or the owner may still need them. The same kept launches Activity
+    lists, Panic stops and a launch-ID Stop ends, across the installation's drives
+    (``launch_custody.kept_service_spare``): a leader proven by its recorded birth, or one the
+    retention rule keeps by its recorded fingerprint (``_fingerprint_matches``), as before the
+    selection widened; a row with neither is never spared by its live pid; never stop authority.
+    The cancel/timeout kill never waits on this read; idle retirement reads its ``blind``.
     """
-    from ouroboros.launch_custody import read_custody
+    from ouroboros.launch_custody import kept_service_spare
 
-    pids: set[int] = set()
-    try:
-        for entry in read_custody(drive_root, strict=False, every_drive=True).rows:
-            if str(entry.get("scope") or "") != "session":
-                continue
-            # Both the in-process service path (purpose "service:<name>") and the
-            # local-executor path (purpose "workspace_service:<name>") record
-            # deliberately-kept services; spare both.
-            if not str(entry.get("purpose") or "").startswith(("service:", "workspace_service:")):
-                continue
-            if not _fingerprint_matches(entry):
-                continue
-            pid = int(entry.get("pid") or 0)
-            if pid > 0:
-                pids.add(pid)
-    except Exception:
-        return pids
-    return pids
+    return kept_service_spare(drive_root).pids
 
 
 def live_daemon_root_pids(

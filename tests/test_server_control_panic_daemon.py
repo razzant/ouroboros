@@ -252,7 +252,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
             assert set(diagnostics[0]["requests"]) == {
                 "local-model", "daemon", "commands", "executors", "services", "companions",
                 "restart-successor", "scope-census", "child-123", "startup-audit", "maintenance", "storage-count",
-                "storage-free", "owned-work",
+                "storage-free", "kept-services",
             }
             # The installation-scope census is one more independent request; this root planted no marker.
             assert diagnostics[0]["requests"]["scope-census"] == {"requested": False, "reason": "no installation marker planted"}
@@ -283,13 +283,13 @@ def test_indexed_stop_never_holds_panic_exit(monkeypatch, tmp_path, failure):
         raise _ExitCalled(code)
 
     def configure():
-        monkeypatch.setattr("ouroboros.owned_shutdown.panic_owned_work", indexed)
+        monkeypatch.setattr("ouroboros.launch_custody.panic_stop_kept", indexed)
         monkeypatch.setattr("ouroboros.server_control.os._exit", report_exit)
 
     try:
         _run_panic(monkeypatch, tmp_path, daemon_stop=lambda: True,
                    diagnostics=diagnostics, configure=configure)
-        request = diagnostics[0]["requests"]["owned-work"]
+        request = diagnostics[0]["requests"]["kept-services"]
         if failure == "raises":
             assert request["requested"] is False and "index unreadable" in request["error"]
         else:
