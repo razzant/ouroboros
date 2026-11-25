@@ -480,3 +480,36 @@ test('a refused send\'s row and its error row say the two counts whole on live a
         assert.match(card.textContent, /window 80,000/);
     }
 });
+
+test('Logs offers the native recent-requests action beside Clear only on a capable shell and disposes it on pagehide', async (t) => {
+    const logs = mountLogs(t, { page: 'dashboard' });
+    await settle();
+    const slot = logs.mount.querySelector('[data-local-context-report]');
+    const band = logs.mount.querySelector('.logs-filters');
+    assert.ok(slot && band.contains(slot), 'the action stands in the band the section header carries');
+    assert.equal(slot.nextElementSibling, band.querySelector('#btn-clear-logs'), 'right before Clear, which still ends the band');
+    assert.equal(logs.mount.querySelector('.logs-card').contains(slot), false, 'never at the top of the scrolled list');
+    assert.equal(slot.hidden, true, 'browsers keep the native action hidden');
+    assert.equal(slot.querySelector('button'), null);
+
+    let opens = 0;
+    logs.window.pywebview = { api: {
+        shell_info: async () => ({ local_context_archive: true }),
+        open_local_context_report: async () => { opens += 1; return { state: 'opened' }; },
+    } };
+    logs.window.dispatchEvent({ type: 'pywebviewready' });
+    await settle();
+    assert.equal(slot.hidden, false);
+    const button = slot.querySelector('button');
+    assert.equal(button.textContent, 'Open recent requests');
+    await button.fire('click');
+    await settle();
+    assert.equal(opens, 1);
+    assert.equal(slot.querySelector('[role="status"]'), null, 'the answer does not reflow the header');
+    assert.deepEqual(logs.toasts(), ['Opened in a separate local window.']);
+
+    logs.window.dispatchEvent({ type: 'pagehide', persisted: false });
+    assert.equal(slot.hidden, true);
+    assert.equal(slot.children.length, 0);
+    assert.deepEqual(logs.toasts(), []);
+});
