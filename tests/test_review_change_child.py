@@ -321,7 +321,7 @@ def test_copy_sources_and_paid_owner_survive_execution_gc(tree, tmp_path):
     assert len(_starts()) == 1
 
 
-def test_cycle_pools_keep_repo_tool_and_root_partitions(tree, tmp_path):
+def test_cycle_pools_join_the_code_tools_and_keep_repo_and_root_partitions(tree, tmp_path):
     import shutil
     from types import SimpleNamespace
     from ouroboros.tools.commit_gate import count_paid_review_cycles
@@ -329,7 +329,8 @@ def test_cycle_pools_keep_repo_tool_and_root_partitions(tree, tmp_path):
     assert _call(child)['aggregate'] == 'PASS'
     gate = SimpleNamespace(drive_root=parent.drive_root, repo_dir=project,
                            _current_review_tool_name='commit_reviewed')
-    assert count_paid_review_cycles(gate, root_task_id=parent.task_id) == 0
+    assert count_paid_review_cycles(gate, root_task_id=parent.task_id) == 1  # the gate spends the same allowance
+    assert count_paid_review_cycles(gate, root_task_id='different-root') == 0
     # Identical Git history and remote without host copy provenance is NOT a
     # shared paid owner. A different task tree is independently counted too.
     unrelated = tmp_path / 'unregistered-repo'
@@ -343,6 +344,32 @@ def test_cycle_pools_keep_repo_tool_and_root_partitions(tree, tmp_path):
     refused = _call(parent, goal='Original tree is still capped')
     assert (refused.get('dispatch_refusal') or {}).get('kind') == 'review_cycles_exhausted', refused
     assert len(_starts()) == 3
+
+
+def test_a_commit_wave_keeps_its_source_pool_after_its_copy_record_is_gone(tree, tmp_path):
+    """A commit-gate wave bought in a registered copy counts in its source's pool, and still does once the copy's
+    record is removed; a row written before the pin resolves its physical checkout, which then owns it alone."""
+    from types import SimpleNamespace
+    from ouroboros.review_state import update_state
+    from ouroboros.subagent_worktrees import remove_worktree
+    from ouroboros.tools.commit_gate import _record_commit_attempt, count_paid_review_cycles
+    parent, child, project = tree
+    copy = _own_copy(parent, child, project, tmp_path)
+    committer = SimpleNamespace(repo_dir=copy, drive_root=parent.drive_root, task_id=child.task_id,
+                                task_metadata=child.task_metadata, _current_review_tool_name='commit_reviewed')
+    _record_commit_attempt(committer, 'candidate', 'reviewing', phase='review', paid=True, review_retry_key='wave-1')
+    [row] = load_state(parent.drive_root).attempts
+    assert (row.repo_key, row.review_budget_repo_key, row.paid) == (str(copy), str(project), True)
+
+    def source_pool(tool):
+        gate = SimpleNamespace(drive_root=parent.drive_root, repo_dir=project, _current_review_tool_name=tool)
+        return count_paid_review_cycles(gate, root_task_id=parent.task_id)
+
+    assert source_pool('commit_reviewed') == source_pool('review_change') == 1
+    assert remove_worktree(task_id=child.task_id, worktree_root=tmp_path / 'copies', data_dir=parent.drive_root)
+    assert not copy.exists() and source_pool('commit_reviewed') == source_pool('review_change') == 1
+    update_state(parent.drive_root, lambda state: setattr(state.attempts[0], 'review_budget_repo_key', ''))
+    assert source_pool('commit_reviewed') == 0  # no pin and no record: the vanished copy is its own owner
 
 
 def test_exact_sequential_cap_and_free_replay(tree, monkeypatch):

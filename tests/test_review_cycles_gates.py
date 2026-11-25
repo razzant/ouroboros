@@ -258,6 +258,90 @@ def test_resolve_root_task_id_ignores_the_followup_chain():
     assert resolve_root_task_id(subtask) == "tree-root"
 
 
+def _paid_row(drive, tool, root, attempt, *, repo, task=None):
+    from ouroboros.review_state import CommitAttemptRecord, make_repo_key, update_state, _utc_now
+
+    update_state(pathlib.Path(drive), lambda state: state.attempts.append(CommitAttemptRecord(
+        ts=_utc_now(), commit_message="wave", status="reviewed", repo_key=make_repo_key(pathlib.Path(repo)),
+        tool_name=tool, task_id=task or root, root_task_id=root, attempt=attempt, phase="review_only", paid=True,
+        review_retry_key=f"{tool}-{root}-{attempt}")))
+
+
+def test_code_review_spends_one_pool_and_result_and_skill_waves_keep_their_own(tmp_path):
+    """``review_change`` and the commit gate (its alias included) spend one allowance of a root and repository;
+    another repository of that root, another root, and the root's result and skill waves are other pools."""
+    from ouroboros.tools.commit_gate import count_paid_review_cycles
+
+    repo, other = tmp_path / "repo", tmp_path / "other-repo"
+    for path in (repo / ".git", other / ".git"):
+        path.mkdir(parents=True)
+    for attempt, tool in enumerate(("commit_reviewed", "vcs_commit_reviewed", "review_change",
+                                    "review_result", "review_result", "review_skill"), 1):
+        _paid_row(tmp_path, tool, "root-1", attempt, repo=repo)
+    _paid_row(tmp_path, "review_change", "root-1", 9, repo=other)
+    _paid_row(tmp_path, "commit_reviewed", "root-2", 1, repo=repo)
+
+    def paid(tool, root="root-1", checkout=repo):
+        ctx = types.SimpleNamespace(repo_dir=checkout, drive_root=tmp_path, task_id=root, _current_review_tool_name=tool)
+        return count_paid_review_cycles(ctx, root_task_id=root)
+
+    assert paid("commit_reviewed") == paid("review_change") == 3
+    assert paid("commit_reviewed", checkout=other) == paid("review_change", checkout=other) == 1
+    assert paid("review_change", root="root-2") == 1 and paid("commit_reviewed", root="root-3") == 0
+    assert (paid("review_result"), paid("review_skill")) == (2, 1)
+    assert paid("review_result", checkout=other) == 2  # a root's result allowance, wherever the material lives
+
+
+@pytest.mark.parametrize("link", ["valid", "tampered", "missing"])
+def test_a_continue_successor_inherits_the_waves_its_predecessors_spent_on_their_own_drives(tmp_path, monkeypatch, link):
+    """The roots a recorded Continue chain leads from share the successor's pool, their commit-gate rows read on
+    their own retained drives; a chain that is not proved, like any independent task, starts a fresh allowance."""
+    from ouroboros.owner_continue import binding_sha
+    from ouroboros.task_results import write_task_result
+    from ouroboros.task_store import patch_document
+    from ouroboros.tools.commit_gate import check_review_cycles_ceiling, count_paid_review_cycles
+
+    monkeypatch.setenv(KEY, "2")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    canonical = tmp_path / "data"
+
+    def drive(task):
+        path = canonical / "state" / "headless_tasks" / task / "data"
+        path.mkdir(parents=True)
+        return path
+
+    chain = ["first", "middle", "last"]
+    for task in (*chain, "independent"):
+        write_task_result(canonical, task, "running")
+    for predecessor, successor in zip(chain, chain[1:]):
+        binding = {"successor_task_id": successor}
+        patch_document(canonical, successor, lambda row, p=predecessor: {
+            **row, "metadata": {**(row.get("metadata") or {}), "continuation": {"predecessor_task_id": p}}})
+        if link != "missing":
+            patch_document(canonical, predecessor, lambda row, s=successor, b=binding: {**row, "continued_by": {
+                "successor_task_id": s, "binding": b,
+                "binding_sha256": binding_sha(b) if link == "valid" else "tampered", "state": "admitted"}})
+    _paid_row(drive("first"), "commit_reviewed", "first", 1, repo=repo)   # a predecessor's own drive
+    _paid_row(canonical, "review_change", "middle", 1, repo=repo)         # a review_change wave: canonical
+    _paid_row(canonical, "commit_reviewed", "independent", 1, repo=repo)  # another task: never this pool
+
+    def ctx(task, tool="commit_reviewed"):
+        return types.SimpleNamespace(repo_dir=repo, drive_root=drive(task) if task == "last" else canonical, task_id=task,
+                                     task_metadata={"budget_drive_root": str(canonical)}, _current_review_tool_name=tool)
+
+    last = ctx("last")
+    assert count_paid_review_cycles(last, root_task_id="last") == (2 if link == "valid" else 0)
+    exhausted = check_review_cycles_ceiling(last, root_task_id="last")
+    if link != "valid":
+        assert exhausted is None
+        return
+    assert exhausted["cycles_paid"] == 2 and "middle, first" in exhausted["message"], exhausted
+    assert "review_change and the commit gate" in exhausted["message"]
+    assert check_review_cycles_ceiling(ctx("independent", "review_change"), root_task_id="independent") is None
+    assert count_paid_review_cycles(ctx("first"), root_task_id="first") == 1  # a predecessor never counts its successors
+
+
 # ---------------------------------------------------------------------------
 # The free-cycle gate (Δ5.2/Δ5.4): the spent allowance replays free; a verdict refuses nothing
 

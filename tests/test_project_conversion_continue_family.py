@@ -558,3 +558,35 @@ def test_a_deleted_sibling_is_neither_adopted_nor_resurrected(tmp_path, monkeypa
     assert status == 409 and payload["reason_code"] == "project_routing_fence", payload
     assert project_binding_for_task(tmp_path, successor) is None
     assert get_reserved_project(tmp_path, room_id) == before, "the fence or tombstone is untouched"
+
+
+def test_ancestry_walks_back_over_proved_hops_only_and_reads_no_other_root(tmp_path, monkeypatch):
+    """An account that follows a Continue chain (the paid code-review pool) gets the episode and the roots it
+    continues: a proved hop joins them, an unproved one ends the walk, and no unrelated root is ever read."""
+    import ouroboros.task_results as task_results
+    from supervisor.continuation_admission import continuation_ancestry
+    from tests._owner_continue_helpers import _interrupted
+
+    successor, _workers = _family(tmp_path, monkeypatch)
+    for index in range(20):
+        _interrupted(tmp_path, f"unrelated-{index}", title=None)
+    reads, real = [], task_results.load_task_result
+    monkeypatch.setattr(task_results, "load_task_result",
+                        lambda root, task_id, **kw: reads.append(task_id) or real(root, task_id, **kw))
+    assert continuation_ancestry(tmp_path, successor) == (successor, "first")
+    assert reads == [successor, "first"], "two stored results a hop, whatever else the store holds"
+    assert continuation_ancestry(tmp_path, "first") == ("first",)  # an origin continues nothing
+    assert continuation_ancestry(tmp_path, "unrelated-3") == ("unrelated-3",)  # an independent task is fresh
+    # The admission the successor recorded must match its predecessor's claim: another nonce proves nothing.
+    admission = real(tmp_path, successor)["continuation_admission"]
+    _patch(tmp_path, successor, continuation_admission={
+        **admission, "binding": {**admission["binding"], "action_nonce": "another-press"}})
+    assert continuation_ancestry(tmp_path, successor) == (successor,)
+    # An older successor that recorded no admission is joined by its predecessor's hash-bound claim alone,
+    # and only while that claim names it.
+    _patch(tmp_path, successor, drop=("continuation_admission",),
+           metadata={"continuation": {"predecessor_task_id": "first"}})
+    assert continuation_ancestry(tmp_path, successor) == (successor, "first")
+    claim = real(tmp_path, "first")["continued_by"]
+    _patch(tmp_path, "first", continued_by={**claim, "binding_sha256": "tampered"})
+    assert continuation_ancestry(tmp_path, successor) == (successor,)

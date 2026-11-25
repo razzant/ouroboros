@@ -370,6 +370,15 @@ def test_a_foreign_base_head_is_core_untested_and_locks_nothing(h: Harness, monk
     assert result["tests"] == {"policy": "NOT_RUN", "result": "unknown"}
     assert result["aggregate"] == rl.VERDICT_FAIL and {f["seat_id"] for f in result["findings"]["critical_findings"]} == {pool[0]}
     assert sorted(f["part"] for f in result["findings"]["critical_findings"]) == ["change", "coupling"]
+    # Who found what is the record's own per-seat verdict: a packet seat asked the change alone is PASS.
+    from ouroboros.review_projection import seat_verdicts
+
+    record = rl.load_record(h.drive, result["record_id"])
+    assert result["per_row"] == record["verdict"]["per_row"] == {
+        seat: rl.VERDICT_FAIL if seat == pool[0] else rl.VERDICT_PASS for seat in pool}
+    assert any(rl.PART_COUPLING not in seat["parts"] for seat in record["rows"]), "one seat reads the packet"
+    assert {seat["seat_id"]: (seat["verdict"], seat["critical"]) for seat in seat_verdicts(record)} == {
+        seat: (rl.VERDICT_FAIL, 2) if seat == pool[0] else (rl.VERDICT_PASS, 0) for seat in pool}
     assert (result["enforcement"], result["enforcement_blocks"]) == ("advisory", False)
     assert (result["subject"]["base"], result["subject"]["head"], result["subject"]["root"]) == (
         base, head, str(h.project.resolve()))
@@ -490,6 +499,11 @@ def test_a_composed_panel_counts_pool_seats_only_and_hears_an_unmarked_row_as_a_
     assert {row["seat_id"]: row["additional"] for row in foreign["rows"]} == {pool[0]: False, "scout": True}
     assert foreign["aggregate"] == rl.VERDICT_PASS and foreign["quorum"]["required"] == 1
     assert [f["seat_id"] for f in foreign["findings"]["additional_findings"]] == ["scout"]
+    from ouroboros.review_projection import seat_verdicts
+
+    assert foreign["per_row"] == {pool[0]: rl.VERDICT_PASS, "scout": rl.VERDICT_FAIL}
+    assert [(seat["seat_id"], seat["verdict"], seat.get("additional", False)) for seat in seat_verdicts(
+        rl.load_record(h.drive, foreign["record_id"]))] == [(pool[0], rl.VERDICT_PASS, False), ("scout", rl.VERDICT_FAIL, True)]
 
     monkeypatch.setattr(rc, "get_runtime_mode", lambda: "cyber_pro")
     _stage(h.system, "body.py", "x = 1\n")
@@ -701,13 +715,23 @@ def test_the_ceiling_is_shared_by_every_subject_of_one_root(h: Harness, monkeypa
     assert h.run(subject="base..head", base=base, head=head)["reused"] is True
     assert len(h.wave.calls) == 1
 
-    # Another root keeps its own ceiling, and the gate's spend on that root is not this tool's.
-    update_state(h.drive, lambda state: state.record_attempt(CommitAttemptRecord(
-        ts="2026-10-07T00:00:00+00:00", commit_message="gate", task_id="task-rc", root_task_id="task-rc",
-        repo_key=make_repo_key(h.system.resolve()), tool_name="commit_reviewed", status="reviewed", paid=True, attempt=1)))
+    # Another repository of the root has its own allowance, which the commit gate's wave there spends too;
+    # another root's gate wave is not this root's.
+    def gate_wave(root_task_id: str) -> None:
+        update_state(h.drive, lambda state: state.record_attempt(CommitAttemptRecord(
+            ts="2026-10-07T00:00:00+00:00", commit_message="gate", task_id=root_task_id, root_task_id=root_task_id,
+            repo_key=make_repo_key(h.system.resolve()), tool_name="commit_reviewed", status="reviewed", paid=True, attempt=1)))
+
+    gate_wave("another-root")
     _stage(h.system, "body.py", "z = 3\n")
     assert h.run(root="system_repo", subject="index")["reused"] is False
     assert len(h.wave.calls) == 2
+    monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: 2)
+    gate_wave("task-rc")
+    _stage(h.system, "more.py", "w = 4\n")
+    spent = h.run(root="system_repo", subject="index")
+    assert spent["dispatch_refusal"]["kind"] == "review_cycles_exhausted" and len(h.wave.calls) == 2
+    assert "review_change and the commit gate" in spent["message"]
 
 
 # --- The call surface ---------------------------------------------------------------------

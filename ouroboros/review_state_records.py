@@ -198,8 +198,9 @@ class CommitAttemptRecord:
     review_contract_fingerprint: str = ""
     review_retry_key: str = ""
     root_task_id: str = ""
-    # Accounting owner of review_change only. The physical repo_key/retry/source
-    # remain exact; this host-proven copy source survives execution-root GC.
+    # Accounting owner of a paid code-review wave (review_change and the commit gate).
+    # The physical repo_key/retry/source remain exact; this host-proven copy source
+    # survives execution-root GC.
     review_budget_repo_key: str = ""
     # Existing process-custody identity for the process that owns every
     # process-local reviewer thread in this paid attempt. A sibling worker boot

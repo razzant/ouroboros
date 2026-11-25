@@ -48,7 +48,8 @@ explicit work-order review obligations.
   counts), then the named row's look, then ONE review wave in which every seat on the panel (the pool
   seats Ouroboros named, with a reason when narrowed), shown the same test execution fact, answers both parts of the brief. The commit
   records its preflight fact: `performed` with the record id, `skipped` for an
-  explicit `skip_advisory_review=True`, `not_performed` when no row was named.
+  explicit `skip_advisory_review=True`, `not_performed` when no row was named or
+  the review allowance left the named row no wave (its `reason`).
   `preflight_reviewer` and `skip_advisory_review=True` are opposite choices
   (`TOOL_ARG_ERROR`); an author continuation dispatches no critic and names no row.
 - Finish all edits first: a worktree mutation after the look marks the recorded

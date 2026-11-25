@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from functools import partial
 from typing import Any, Dict, List, Optional
 
 from ouroboros.owner_continue import WORK_CHAIN_MAX_HOPS as _WORK_CHAIN_MAX_HOPS
@@ -232,6 +233,62 @@ def _publication_unconfirmed(drive_root: Any, members: Any) -> bool:
         for lane in ("pending", "running") for row in document.get(lane) or ())
 
 
+def _root_result(drive_root: Any, task_id: str) -> Dict[str, Any]:
+    """A root episode's stored result, ``{}`` when it has none; a row of another task or of a child proves no lineage."""
+    from ouroboros.task_results import load_task_result
+
+    row = load_task_result(drive_root, task_id, strict=True) or {}
+    if row and (row.get("task_id") != task_id or row.get("parent_task_id")):
+        raise ValueError("unverified Continue root")
+    return row
+
+
+def _durable_admission(parent: Dict[str, Any], child: Dict[str, Any], predecessor: str) -> Optional[Dict[str, Any]]:
+    """The child's recorded admission when it matches the parent's claim; None while it records none."""
+    from ouroboros.owner_continue import continued_by_binding
+
+    claim = continued_by_binding(parent)
+    admission = _recorded_admission(child, predecessor, str(claim.get("action_nonce") or ""))
+    if admission is None:
+        return None
+    if not claim or admission.get("binding") != claim:
+        raise ValueError("unverified Continue admission")
+    return admission
+
+
+def continuation_ancestry(drive_root: Any, task_id: str) -> tuple[str, ...]:
+    """``task_id`` and the roots it continues, nearest first: what an account that follows a Continue chain reads.
+
+    Backward only, two stored results a hop, never a look at any other root. An episode's own admission, else its
+    metadata, only says where to look; the predecessor's hash-bound ``continued_by`` claim naming that episode
+    decides, and an admission the episode did record must match it (``_durable_admission``, the proof
+    ``verified_work_episodes`` rests on). A hop that cannot be proved (an unreadable result, a claim naming another
+    task, a mismatched admission, the integrity bound) ends the walk at the last proved episode.
+    """
+    from ouroboros.owner_continue import continued_by_binding
+
+    chain = [str(task_id or "")]
+    try:
+        row = _root_result(drive_root, chain[0])
+        while len(chain) < _WORK_CHAIN_MAX_HOPS:
+            admitted = "continuation_admission" in row
+            holder = row["continuation_admission"] if admitted else row.get("metadata")
+            named = holder.get("binding" if admitted else "continuation") if isinstance(holder, dict) else None
+            predecessor = named.get("predecessor_task_id") if isinstance(named, dict) else None
+            if not isinstance(predecessor, str) or not predecessor or predecessor in chain:
+                break
+            parent = _root_result(drive_root, predecessor)
+            claim = continued_by_binding(parent)
+            if (claim.get("successor_task_id") != chain[-1] or claim.get("predecessor_task_id", predecessor) != predecessor
+                    or (admitted and _durable_admission(parent, row, predecessor) is None)):
+                break
+            chain.append(predecessor)
+            row = parent
+    except Exception:
+        log.debug("Continue ancestry of %s ends at %s", task_id, chain[-1], exc_info=True)
+    return tuple(chain)
+
+
 def verified_work_episodes(drive_root: Any, task_id: str) -> tuple[str, ...]:
     """This episode and its verified Continue family, first root first, for placement (not a display guess).
 
@@ -245,24 +302,8 @@ def verified_work_episodes(drive_root: Any, task_id: str) -> tuple[str, ...]:
     Continue whose receipt and whose predecessor's claim are both unreadable.
     """
     from ouroboros.owner_continue import continued_by_binding
-    from ouroboros.task_results import load_task_result
 
-    def read(tid):
-        row = load_task_result(drive_root, tid, strict=True) or {}
-        if row and (row.get("task_id") != tid or row.get("parent_task_id")):
-            raise ValueError("unverified Continue root")
-        return row
-
-    def durable(parent, child, predecessor):
-        """The child's recorded admission when it matches the parent's claim; None while it records none."""
-        claim = continued_by_binding(parent)
-        admission = _recorded_admission(child, predecessor, str(claim.get("action_nonce") or ""))
-        if admission is None:
-            return None
-        if not claim or admission.get("binding") != claim:
-            raise ValueError("unverified Continue admission")
-        return admission
-
+    read, durable = partial(_root_result, drive_root), _durable_admission
     rows = {task_id: read(task_id)}
     first, last = task_id, task_id
     while "continuation_admission" in rows[first]:

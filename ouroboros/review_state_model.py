@@ -259,8 +259,8 @@ class AdvisoryReviewState:
     def _trim_attempt_history(self) -> None:
         """Authority-preserving eviction (Q16 fix round, F1): trimming to the
         historical cap may only evict NON-authoritative rows, oldest first.
-        Paid rows are the money ledger ``count_paid_review_cycles`` derives the
-        per-root-task ceiling from — evicting them would let a capped root task
+        Paid rows are the money ledger ``count_paid_review_cycles`` derives each
+        review pool's ceiling from — evicting them would let a capped root task
         loop until the ceiling forgets itself — and verdict-block rows are kept
         with them. Both preserved classes are bounded
         by the money ceiling itself, so only the noise portion (free refusals,

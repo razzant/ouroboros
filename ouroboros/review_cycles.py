@@ -20,25 +20,31 @@ never sent again):
   (``tools/plan_ask``) dispatches an ask whenever the mind asks, and only its
   budget gate and deadline bound it; nothing here counts plan asks;
 * result review (``review_change(subject="result")``) — paid result waves per
-  ROOT task, counted apart from the task's change-review waves (its own
-  ``tool_name`` on the attempt rows), so change reviews never spend it; the same
+  ROOT task, counted apart from the task's code-review waves (its own
+  ``tool_name`` on the attempt rows), so code reviews never spend it; the same
   number bounds the free reminders asking the author to reword a reviewed answer
   (``tools/review_result._revised``, counted by its saved questions), while an
   unread outcome and newer owner words still reach the author regardless;
-* commit gate — paid review-wave cycles per ROOT task (the whole task tree
-  shares one ceiling; a manual session is its own task; a follow-up task is a
-  fresh root). The paid fact is recorded on the attempt row AT DISPATCH and
-  the count is derived from the attempt ledger; the ceiling counts MONEY —
-  every dispatched wave counts whatever its terminal, and only UNDISPATCHED
-  attempts (free refusals/replays, preflight and assembly failures) stay
-  outside the count, which is also the only sense in which "infra retries
-  freely" applies to the ceiling. A rebuttal is content-hashed into the
-  round's identity, so a new one buys a new paid wave within the ceiling.
-  Exhaustion returns the outcome with a typed disclosure for explicit author
-  continuation, without another paid dispatch;
+* code review — ``review_change`` over code and the commit gate, its named
+  preflight look included, spend ONE allowance per (task tree, repository):
+  the whole tree shares it and a Continue successor inherits what the roots it
+  continues spent, while a manual session, a follow-up task and every other
+  independent task is a fresh root; another repository of the same tree has
+  its own allowance, and a copy counts with its source
+  (``tools/commit_gate.paid_review_pool``). The paid fact is recorded on the
+  attempt row AT DISPATCH and the count is derived from the attempt rows; the
+  ceiling counts MONEY — every dispatched wave counts whatever its terminal,
+  and only UNDISPATCHED attempts (free refusals/replays, preflight and
+  assembly failures) stay outside the count, which is also the only sense in
+  which "infra retries freely" applies to the ceiling. A rebuttal is
+  content-hashed into the round's identity, so a new one buys a new paid wave
+  within the ceiling. A commit whose allowance cannot cover both a new named
+  look and its panel leaves the wave to the panel and records the look not
+  performed. Exhaustion returns the outcome with a typed disclosure for
+  explicit author continuation, without another paid dispatch;
 * skill review (``skill_review`` → ``review_change(subject="skill")``) — paid skill waves per
   root task for a task-driven review (shared across every skill that task reviews; a
-  follow-up starts fresh), counted apart from the task's change and result waves (its own
+  follow-up starts fresh), counted apart from the task's code and result waves (its own
   ``tool_name`` on the attempt rows); the manual lane (the Skills page, a Hub install) has
   no task, so its ceiling is per CONTENT VERSION of the skill (owner Q23). A byte-identical
   skill under the same rules and panel reuses its settled verdict at $0 (the ledger's reuse

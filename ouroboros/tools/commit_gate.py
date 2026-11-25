@@ -1,7 +1,7 @@
 """The commit preflight (the author's named row, decision 3A) and the free deterministic
 checks every commit runs before review, durable commit-attempt recording, and the
-commit-side Max-Review-Cycles machinery (block classification, the per-root-task
-paid-cycle ceiling, and the review-contract fingerprint)."""
+commit-side Max-Review-Cycles machinery (block classification, the paid-cycle
+ceiling of each review pool, and the review-contract fingerprint)."""
 
 from __future__ import annotations
 
@@ -58,12 +58,9 @@ def _attempt_accepts_reviewing_update(existing: Any) -> bool:
 
 
 # Max Review Cycles semantics on the commit gate (owner Q12/Q16/Q22/Q23): the shared
-# OUROBOROS_REVIEW_MAX_CYCLES knob (``review_max_cycles()``; ``None`` = unlimited) bounds PAID
-# review-wave cycles per ROOT task (the whole task tree shares one ceiling; a manual session is
-# its own task; a follow-up task starts a fresh one). The ceiling counts MONEY: every attempt
-# that physically dispatched a wave (``paid`` recorded at dispatch) counts regardless of how it
-# terminated — only UNDISPATCHED attempts (preflight refusals, assembly failures, free replays)
-# are outside the count. Exhaustion is a free replay plus ``emit_review_cycles_exhausted``: the
+# OUROBOROS_REVIEW_MAX_CYCLES knob (``review_max_cycles()``; ``None`` = unlimited) bounds the PAID
+# waves of the code-review pool the gate spends from (``paid_review_pool``: whose waves they are and
+# what counts as paid). Exhaustion is a free replay plus ``emit_review_cycles_exhausted``: the
 # prior outcome returns for an informed author choice; explicit continuation buys no reviewer and
 # does not manufacture approval. The free identical-diff refusal left with Blocking; its reason
 # stays for the rows that carry it.
@@ -160,8 +157,9 @@ def compute_rebuttal_sha256(review_rebuttal: Any) -> str:
 
 
 def resolve_root_task_id(ctx: ToolContext) -> str:
-    """The root of the current task tree (Q23: one paid-cycle ceiling per
-    tree); a task with no recorded root is its own root. "" = unknown.
+    """The root of the current task tree (Q23: a review pool is counted per
+    tree; ``paid_review_pool`` joins the roots a Continue chain links); a task
+    with no recorded root is its own root. "" = unknown.
 
     DELIBERATE TRADEOFF (adversarial wave, machine-3): ``origin_root_task_id``
     — the follow-up chain marker — is NOT honored here, so a scheduled
@@ -271,61 +269,72 @@ def commit_review_contract_material(own: Sequence[str] = (), *, packet: Optional
                                          retrieving=retrieving)}
 
 
-def count_paid_review_cycles(ctx: ToolContext, *, root_task_id: str) -> int:
-    """Paid triad/scope cycles already spent by this root task on this
-    (repo, tool) gate, derived from the existing attempt ledger (P7 — no new
-    counter file). The ceiling counts MONEY (machine-5): every attempt that
-    physically dispatched a wave (``paid`` recorded at dispatch) counts,
-    whatever its terminal — a dispatched-then-crashed or quorum-failed wave
-    still spent reviewer money. Only UNDISPATCHED attempts (free refusals,
-    replays, preflight/assembly failures — all ``paid=False``) stay outside
-    the count; that is the whole "infra retries freely" carve-out."""
+CODE_REVIEW_TOOLS = frozenset({"review_change", "commit_reviewed", "vcs_commit_reviewed"})
+
+
+def paid_review_pool(ctx: ToolContext, root_task_id: str) -> tuple[int, tuple[str, ...]]:
+    """``(paid waves, the roots whose waves they are)`` of the pool the calling review spends from, derived from the
+    existing attempt rows (P7: no counter file). The pool counts MONEY: every attempt that physically dispatched a
+    wave (``paid``, stamped at dispatch) counts whatever its terminal; free refusals, replays and assembly
+    failures (``paid=False``) never do.
+
+    Code review is ONE pool per (task tree, repository): ``review_change`` and the commit gate spend the same
+    allowance, and a Continue successor inherits what the roots it continues spent
+    (``continuation_admission.continuation_ancestry``); an independent task starts its own. The repository is the
+    row's pinned budget owner (``review_budget_repo_key``: a copy's source by host provenance), else its physical
+    checkout resolved now. Rows are read where each wave wrote them: the canonical state (every ``review_change``
+    wave), the calling drive and the retained own drives of the tree's roots (commit-gate waves); a drive already
+    retired is not reconstructed. Result and skill waves keep their own allowance per root and kind."""
     root = str(root_task_id or "")
     if not root:
-        return 0
-    from ouroboros.review_state import load_state, make_repo_key
+        return 0, ()
+    from ouroboros.review_ledger import ledger_root
+    from ouroboros.review_state import load_state
+    from ouroboros.tools.review_change_custody import paid_repo_key, review_state_root
 
     tool = _current_review_tool_name(ctx)
-    if tool in ("review_change", "review_result", "review_skill"):  # review_change waves: canonical custody
-        from ouroboros.tools.review_change_custody import paid_repo_key, review_state_root
+    if tool in ("review_result", "review_skill"):  # a root's allowance, wherever the material lives
+        return sum(1 for item in load_state(review_state_root(ctx)).filter_attempts(tool_name=tool)
+                   if item.paid and item.root_task_id == root), (root,)
+    from ouroboros.review_state_records import _attempt_identity_tuple
+    from ouroboros.source_retention import retained_task_roots
+    from supervisor.continuation_admission import continuation_ancestry
 
-        state = load_state(review_state_root(ctx))
-        owner = paid_repo_key(ctx, ctx.repo_dir)
-        # Filter unrelated history before filesystem provenance reads; equal
-        # physical keys share one resolution within this observation only.
-        owners = {str(pathlib.Path(ctx.repo_dir).resolve()): owner}
-        paid = 0
-        for item in state.filter_attempts(tool_name=tool):
-            if not item.paid or item.root_task_id != root:
-                continue
-            if tool in ("review_result", "review_skill"):  # a root's allowance, wherever the material lives
-                paid += 1
+    canonical = review_state_root(ctx) if tool == "review_change" else ledger_root(ctx)
+    roots = continuation_ancestry(canonical, root)
+    drives = {str(path.resolve(strict=False)): path for path in (
+        canonical, pathlib.Path(ctx.drive_root), *(d for member in roots for d in retained_task_roots(canonical, member)))}
+    owner = paid_repo_key(ctx, ctx.repo_dir)
+    # Unrelated history is filtered before any provenance read; equal physical keys share one resolution.
+    owners, waves = {str(pathlib.Path(ctx.repo_dir).resolve()): owner}, set()
+    for drive in drives.values():
+        for item in load_state(drive).attempts:
+            if not item.paid or item.root_task_id not in roots or item.tool_name not in CODE_REVIEW_TOOLS:
                 continue
             key = item.review_budget_repo_key or owners.get(item.repo_key)
             if key is None:
                 key = owners[item.repo_key] = paid_repo_key(ctx, item.repo_key)
-            paid += key == owner
-        return paid
-    else:
-        state = load_state(pathlib.Path(ctx.drive_root))
-        attempts = state.filter_attempts(repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)), tool_name=tool)
-    return sum(
-        1
-        for item in attempts
-        if bool(getattr(item, "paid", False))
-        and str(getattr(item, "root_task_id", "") or "") == root
-    )
+            if key == owner:  # one wave whose row two drives hold is one wave; a reused attempt number is not
+                waves.add((*_attempt_identity_tuple(item), item.review_retry_key, item.started_ts))
+    return len(waves), roots
+
+
+def count_paid_review_cycles(ctx: ToolContext, *, root_task_id: str) -> int:
+    """Paid waves already spent from the calling review's pool (``paid_review_pool``)."""
+    return paid_review_pool(ctx, root_task_id)[0]
 
 
 def check_review_cycles_ceiling(
-    ctx: ToolContext, *, root_task_id: str
+    ctx: ToolContext, *, root_task_id: str, held: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """``None`` allows a paid dispatch; otherwise typed exhaustion facts
-    (message/cycles_paid/cap) for the per-root-task paid-cycle ceiling
-    (``review_max_cycles()``; ``None``/unknown root = unlimited). Fail-open on
+    (message/cycles_paid/cap) for the pool's paid-cycle ceiling
+    (``review_max_cycles()``; ``None``/unknown root = unlimited). ``held`` waves are
+    kept for a wave the caller is about to buy from the same pool (the commit panel
+    behind its named preflight), so one call never spends past the ceiling. Fail-open on
     ledger errors — a cost guard, not a safety gate. DISCLOSED RESIDUAL
     (skill-5): the check is read-at-gate-time with no reservation, so
-    concurrent dispatches sharing one root can each read ``paid < cap`` and
+    concurrent dispatches sharing one pool can each read ``paid < cap`` and
     overshoot by the concurrency width; the write-ahead paid stamp at first
     physical dispatch narrows but does not close that window."""
     cap = review_max_cycles()
@@ -333,20 +342,24 @@ def check_review_cycles_ceiling(
     if cap is None or not root:
         return None
     try:
-        paid = count_paid_review_cycles(ctx, root_task_id=root)
+        paid, roots = paid_review_pool(ctx, root)
     except Exception:
         log.debug("paid review-cycle count failed (fail-open)", exc_info=True)
         return None
-    if paid < cap:
+    if paid + held < cap:
         return None
-    message = (
-        f"⚠️ REVIEW_CYCLES_EXHAUSTED: this task tree (root {root}) already spent "
-        f"{paid} of {cap} paid review wave(s) "
-        "(OUROBOROS_REVIEW_MAX_CYCLES). Refusing to buy another review.\n"
-        "The paid review allowance is spent. Decide whether what was reviewed is enough: finish, "
-        "or land with a plain statement of what was not reviewed."
-    )
-    return {"message": message, "cycles_paid": paid, "cap": cap}
+    pool = ("code review of this repository (review_change and the commit gate spend one allowance)"
+            if _current_review_tool_name(ctx) in CODE_REVIEW_TOOLS else "this kind of review")
+    earlier = f", the episode(s) it continues ({', '.join(roots[1:])}) included," if len(roots) > 1 else ""
+    spent = (f"⚠️ REVIEW_CYCLES_EXHAUSTED: {pool} by this task tree (root {root}){earlier} already spent "
+             f"{paid} of {cap} paid review wave(s) (OUROBOROS_REVIEW_MAX_CYCLES)")
+    if paid < cap:  # only the held wave is left
+        message = f"{spent}; the rest is kept for the commit panel this call asks next. This look was not bought."
+    else:
+        message = (f"{spent}. Refusing to buy another review.\n"
+                   "The paid review allowance is spent. Decide whether what was reviewed is enough: finish, "
+                   "or land with a plain statement of what was not reviewed.")
+    return {"message": message, "cycles_paid": paid, "cap": cap, **({"held": held} if held else {})}
 
 
 def resolve_commit_review_reference(ctx: ToolContext, reference: Any, *, state: Any = None) -> Any:
@@ -452,7 +465,13 @@ def _record_commit_attempt(
         tool_name = _current_review_tool_name(ctx)
         task_id = str(getattr(ctx, "task_id", "") or "")
 
-        from ouroboros.tools.review_change_custody import continued_attempt, late_write_check
+        from ouroboros.tools.review_change_custody import continued_attempt, late_write_check, paid_repo_key
+        budget_owner = ""
+        if status == "reviewing":  # a wave's own row pins its pool's repository while the copy record still exists
+            try:
+                budget_owner = paid_repo_key(ctx, ctx.repo_dir)
+            except Exception:  # the count then resolves the physical checkout, as for a row older than the pin
+                log.debug("commit review budget owner unresolved", exc_info=True)
         outlived = late_write_check(ctx, phase if status == "reviewing" else "", review_record_id, triad_raw_results, scope_raw_result)
 
         def _mutate(state):
@@ -572,6 +591,7 @@ def _record_commit_attempt(
                     review_retry_key or str(getattr(existing, "review_retry_key", "") or "")
                 ),
                 root_task_id=root_task_id or str(getattr(existing, "root_task_id", "") or ""),
+                review_budget_repo_key=str(getattr(existing, "review_budget_repo_key", "") or budget_owner),
                 review_owner_session_id=str(
                     getattr(existing, "review_owner_session_id", "") or ""
                 ),
@@ -912,7 +932,10 @@ def run_commit_preflight(ctx: ToolContext, reviewer: str, *, commit_message: str
                          review_rebuttal: str) -> Dict[str, Any]:
     """The author's preflight (decision 3A): ``review_change(subject=worktree, surface=preflight,
     reviewers=[reviewer])`` over the system repository. It informs and never gates (the commit
-    panel holds the gate); a refused or crashed call is still ``performed`` with its cause."""
+    panel holds the gate); a refused or crashed call is still ``performed`` with its cause. The look
+    and the panel spend one allowance: while this call's panel is about to buy a wave
+    (``ctx._commit_panel_buys_wave``) a NEW look leaves that wave to it, and a look the allowance
+    cannot cover is ``not_performed`` with its reason and refusal record, said to the author."""
     from ouroboros.budget_pause import BudgetPauseRequested
     from ouroboros.tools import review_change as rc
     from ouroboros.usage_accounting import BudgetExceeded
@@ -922,13 +945,22 @@ def run_commit_preflight(ctx: ToolContext, reviewer: str, *, commit_message: str
         result = rc.run_review_change(ctx, root="system_repo", subject="worktree", surface="preflight",
                                       reviewers=[reviewer], goal=goal or commit_message, scope=scope,
                                       review_rebuttal=review_rebuttal,
-                                      _preflight_execution=getattr(ctx, "_preflight_execution", None))
+                                      _preflight_execution=getattr(ctx, "_preflight_execution", None),
+                                      _cycles_held=int(bool(getattr(ctx, "_commit_panel_buys_wave", False))))
     except (BudgetExceeded, BudgetPauseRequested):
         raise
     except Exception as exc:
         log.warning("commit preflight did not complete", exc_info=True)
         return {"status": "performed", "record_id": "", "reviewer": reviewer, "aggregate": "",
                 "error": f"{type(exc).__name__}: {exc}"}
+    refusal = result.get("dispatch_refusal") if isinstance(result.get("dispatch_refusal"), dict) else {}
+    if refusal.get("kind") == REASON_REVIEW_CYCLES_EXHAUSTED:
+        note = f"Preflight by {reviewer} was not performed: {refusal.get('message') or REASON_REVIEW_CYCLES_EXHAUSTED}"
+        ctx.emit_progress_fn(note)
+        if isinstance(getattr(ctx, "_review_advisory", None), list):
+            ctx._review_advisory.append(note)
+        return {"status": "not_performed", "record_id": str(result.get("record_id") or ""), "reviewer": reviewer,
+                "reason": REASON_REVIEW_CYCLES_EXHAUSTED}
     findings = dict(result.get("findings") or {})
     fact = {"status": "performed", "record_id": str(result.get("record_id") or ""), "reviewer": reviewer,
             "aggregate": str(result.get("aggregate") or "")}
@@ -1010,12 +1042,29 @@ def _return_commit_feedback(ctx: ToolContext, message: str, started: float, befo
     if offers:  # a stopped session seat continues only by the author's explicit choice, in the same wave
         choice += ("A reviewer in continuable_seats stopped with work its engine can continue: the same commit tool with "
                    "review_reference and continue_seats (no author_disposition) continues it over its frozen subject. ")
+    seats = _recorded_seat_verdicts(ctx, reference.get("review_record_id"))
     text = ("Review outcome returned before commit" + (": reviewers are still running. " if pending else ". ") + note + choice +
             "Current files are preserved; no commit, tag or push occurred.\n" + json.dumps({"review_reference": reference,
+            **({"seat_verdicts": seats} if seats else {}),
             "review_outcome": asdict(row) if row is not None else {}, **({"continuable_seats": offers} if offers else {})},
             ensure_ascii=False, default=str))
     return {"status": "reviewed", "message": text, "review_reference": reference,
             "pre_fingerprint": before, "post_fingerprint": after}
+
+
+def _recorded_seat_verdicts(ctx: ToolContext, record_id: Any) -> List[Dict[str, Any]]:
+    """Who answered what on this attempt's ledger record (``review_projection.seat_verdicts``: the record's own
+    per-seat verdicts, nothing reduced here); ``[]`` when the attempt names no record or it cannot be read."""
+    if not record_id:
+        return []
+    try:
+        from ouroboros import review_ledger
+        from ouroboros.review_projection import seat_verdicts
+
+        return seat_verdicts(review_ledger.load_record(review_ledger.ledger_root(ctx), str(record_id)) or {})
+    except Exception:
+        log.debug("seat verdicts unavailable for review record %s", record_id, exc_info=True)
+        return []
 
 
 def watch_left_commit_review(ctx: ToolContext) -> bool:
@@ -1220,7 +1269,8 @@ def prepare_author_commit_request(ctx: ToolContext, review_reference: Any, autho
 def _review_preflight_facts(ctx: ToolContext) -> Dict[str, Any]:
     """THIS attempt's preflight: ``performed`` names the ``surface=preflight`` record of the row
     the author chose, ``skipped`` is an explicit ``skip_advisory_review``, and ``not_performed``
-    is the plain fact that none was asked for (never an audited bypass)."""
+    is the plain fact that none was asked for, or that the allowance left the named row no wave
+    (its ``reason``); never an audited bypass."""
     fact = getattr(ctx, "_commit_preflight", None)
     if isinstance(fact, dict) and fact.get("status") in PREFLIGHT_STATUSES:
         return dict(fact)

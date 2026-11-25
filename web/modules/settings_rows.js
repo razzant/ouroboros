@@ -85,8 +85,9 @@ export const ROWS = [
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_REVIEW_MAX_CYCLES', keys: ['OUROBOROS_REVIEW_MAX_CYCLES'], page: 'permissions', fold: false,
         name: 'Max review cycles', meta: 'Paid cycles per task, for each kind of review.',
-        more: 'After the last one it may still correct its work. Counts paid review waves, a failed one included: result review and '
-            + 'commit review per task, skill review per task or snapshot. '
+        more: 'After the last one it may still correct its work. Counts paid review waves, a failed one included: result review '
+            + 'per task; code review per task and repository (a change review and a commit review spend the same count, and '
+            + 'Continue carries it on); skill review per task or snapshot. '
             + 'Collecting and replaying a review is free. ∞ removes the count; deadlines and budgets still apply.',
         control: { kind: 'strip', options: [{ value: '1', label: '1' }, { value: '2', label: '2' }, { value: '3', label: '3' },
             { value: '5', label: '5' }, { value: 'unlimited', label: '∞' }] },
