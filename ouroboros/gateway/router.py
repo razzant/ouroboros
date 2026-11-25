@@ -74,7 +74,7 @@ def _room_reading_routes(data_dir: pathlib.Path) -> list[BaseRoute]:
     from ouroboros.gateway.history_attribution import recorded
     from ouroboros.gateway.recall import make_recall_endpoint
 
-    # Each history read is recorded with why its client made it (history_attribution: server.log, telemetry only).
+    # Each history GET is counted with why its client made it (history_attribution: in memory, telemetry only).
     return [Route("/api/chat/history", endpoint=recorded(make_chat_history_endpoint(data_dir))),
             Route("/api/chat/search", endpoint=make_chat_search_endpoint(data_dir)),
             Route("/api/recall", endpoint=make_recall_endpoint(data_dir), methods=["GET"]),

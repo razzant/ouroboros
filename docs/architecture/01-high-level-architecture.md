@@ -527,7 +527,7 @@ ouroboros/ — agent core and shared runtime (§6)
     host_service.py, host_notify.py, host_sign_in.py, host_late_result.py — loopback Host Service, `/notify` `skill_notice`, skill sign-in tokens, call-bound late returns (§12)
     places_api.py — owner place/circle choices (every write is my human's; §12)
     history.py, history_deliveries.py — Chat projection, `msg_type` (§3)
-    history_paging.py, history_chronology.py, history_attribution.py, chat_search.py, chat_archive.py, recall.py — dialogue pages, Project `latest_arrival`, search, read-only archive, read reasons in `server.log`, neighbour door (no history copy; §3)
+    history_paging.py, history_chronology.py, history_attribution.py, chat_search.py, chat_archive.py, recall.py — dialogue pages, Project `latest_arrival`, search, read-only archive, read reasons per minute, neighbour door (no history copy; §3)
     _helpers.py — `request_json_or`, error envelope, `run_sync_to_completion`
   tools/ — Auto-discovered tool plugins (§6)
     registry.py — registry SSOT; owns shell-guard/process-tool membership sets

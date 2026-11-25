@@ -409,7 +409,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/chat/history": Shape(
         "200,400,409,503:ChatHistoryResponse", query="chat_id cursor around n_human n_progress limit reason mode decision detail",
         note="an error page echoes the cursor sent, so the same request can be repeated; "
-             "reason, mode, decision and detail only say why the read was made (recorded, never a selector)"),
+             "reason, mode, decision and detail only say why the read was made (counted, never a selector)"),
     "GET /api/chat/search": Shape(
         "200,400,409,503:ChatSearchResponse", query="chat_id q cursor",
         note="read-only; one bounded read of the room's saved messages as candidates, newest first; the cursor continues older"),
