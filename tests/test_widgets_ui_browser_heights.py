@@ -2063,6 +2063,25 @@ def test_a_small_drag_keeps_the_owners_exact_height_where_the_content_has_no_hei
         facts = page.evaluate(BODY, key)
         return facts["frame"] if facts["frame"] is not None else facts["client"]
 
+    def drag_height(key: str, dy: int, h: int) -> None:
+        selector = f'[data-widget-key="{key}"]'
+        handle = page.locator(f"{selector} [data-widget-height-handle]")
+        # A masonry box is not necessarily under the pointer yet. Hover waits for a stable,
+        # hit-testable grip; wait for the real preview before releasing the real pointer.
+        handle.hover(timeout=8_000)
+        box = handle.bounding_box()
+        assert box is not None, key
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        try:
+            page.locator(f"{selector}.resizing").wait_for(state="attached", timeout=8_000)
+            page.mouse.move(x, y + dy, steps=8)
+            page.wait_for_function("([s, h]) => document.querySelector(s)?.dataset.widgetSizeChip === `Height: ${h} px`",
+                                   arg=[selector, h], timeout=8_000)
+        finally:
+            page.mouse.up()
+
     def ready() -> None:
         page.locator(f"{card('note')} .widget-callout").wait_for(state="attached", timeout=30_000)
         page.wait_for_function("() => document.querySelector('.widgets-card:has(.widgets-card-source) [data-widget-mount]')"
@@ -2100,8 +2119,7 @@ def test_a_small_drag_keeps_the_owners_exact_height_where_the_content_has_no_hei
                 assert abs(shown(key) - 500) <= 1.5, (name, page.evaluate(BODY, key))
             # 12 px up from 500: 488 exactly; reloaded, still 488; 12 px down from there: 504 (the 8 px grid), reloaded.
             for name, key in keys.items():
-                selector = f'[data-widget-key="{key}"] [data-widget-height-handle]'
-                drag(page, selector, 0, -12, steps=8)
+                drag_height(key, -12, 488)
                 wait_stored(key, 488)
                 report[f"{name}_up"] = {"stored": stored(key), "facts": page.evaluate(BODY, key)}
                 assert abs(shown(key) - 488) <= 1.5, report[f"{name}_up"]
@@ -2111,7 +2129,7 @@ def test_a_small_drag_keeps_the_owners_exact_height_where_the_content_has_no_hei
             for name, key in keys.items():
                 report[f"{name}_reloaded"] = page.evaluate(BODY, key)
                 assert abs(shown(key) - 488) <= 1.5, (name, report[f"{name}_reloaded"])
-                drag(page, f'[data-widget-key="{key}"] [data-widget-height-handle]', 0, 12, steps=8)
+                drag_height(key, 12, 504)
                 wait_stored(key, 504)
                 assert abs(shown(key) - 504) <= 1.5, (name, page.evaluate(BODY, key))
             page.reload(wait_until="domcontentloaded", timeout=30_000)
