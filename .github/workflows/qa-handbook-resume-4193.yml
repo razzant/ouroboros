@@ -1,0 +1,40 @@
+name: Narrow handbook resume qualification
+on:
+  push:
+    branches: [qa/handbook-resume-4193]
+permissions:
+  contents: read
+jobs:
+  handbook:
+    name: Handbook resume (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Select the product commit, not this test-only branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach 'HEAD^'
+          git rev-parse HEAD 'HEAD^{tree}'
+          test "$(git rev-parse 'HEAD^{tree}')" = '78f5df92ee61c360f689b7462ecc73a7a59d2247'
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+      - name: Static checks on the changed files
+        run: python -m ruff check --select F ouroboros/context_fit.py ouroboros/memory_floor.py tests/_reference_book_fixtures.py tests/test_context_local_admission.py tests/test_required_development_book.py
+      - name: Required book on resume, exact local count, preserved maps and room rows
+        run: >-
+          python -m pytest -o addopts= -v
+          tests/test_required_development_book_resumed.py tests/test_context_local_admission.py
+          tests/test_required_development_book.py::test_cold_return_without_held_heads_never_newly_shortens_a_formerly_detailed_map
+          tests/test_required_development_book.py::test_cold_return_without_held_heads_retains_updated_chapter_map_behind_fresh_reader
+          tests/test_required_development_book.py::test_cold_return_required_book_fits_unknown_reply_total_between_start_and_under_way_limits
+          tests/test_context_envelope_fit.py
