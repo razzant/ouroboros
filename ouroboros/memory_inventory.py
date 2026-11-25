@@ -83,7 +83,8 @@ _META_FIELDS = ("chat_id", "ts", "type", "kind",  # ``kind``: the display stamp 
                 "status", "outcome", "outcome_phase", "reason_code", "outcome_final", "outcome_authority",
                 "result_ref", "presence", "presence_provenance", "host_fact", "historical_import", "source_order", "terminal_origin",
                 "wake_summary",  # a finished root's closing sentence: how my other conversations know that turn
-                "fold_read")  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
+                "fold_read",  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
+                "read_spans")  # what that work was shown whole of its room: what its acts there count as read
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
 # ``telegram_room_chat_id``: the room the host decided for the bundled bridge's Reply (``room_membership``); no
 # stored prefix lacks it wrongly, since no released body wrote it before it joined this list.
@@ -103,7 +104,8 @@ _TRANSPORT_NESTED = {
     "delivery": ("state",  # ``dialogue_provenance``, ``reaction_note``, the view's typed fact, ``place_activity``
                  "presence_provenance"),  # an older receipt's place facts (``place_row_facts``)
     "message": ("reaction",  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
-                "message_id", "forward_origin"),  # provider identity and word authorship (``places.owner_author``)
+                "message_id", "id", "ts",  # provider identity, as a thread snapshot names it (``memory_reading``)
+                "forward_origin"),  # word authorship (``places.owner_author``)
     "origin": ("kind", "task_id"),  # the work that sent my delivered message (``memory_view``'s own-row head)
     "conversation": ("title", "name", "full_name", "username", "topic_id",  # its own name (``RoomLabelResolver``)
                      "chat_type", "channel_type", "is_im", "is_mpim", "is_private", "visibility",  # who reads it
@@ -631,9 +633,25 @@ def _retelling_chars(store: ChronicleStore, ids: set) -> Dict[str, int]:
     return known
 
 
+def legacy_pointer_rows(store: ChronicleStore) -> List[Dict[str, Any]]:
+    """One compact row per legacy section or gap: room, label, period and how to open it; the activation
+    import's by block, then room, then sequence; a transfer's (``chronicle_import``) after them all, by sequence."""
+    pointers = []
+    for row in store.interpreted(kinds=("legacy", "gap")):
+        meta = row.get("metadata") or {}
+        pointers.append({"node_id": row["id"], "kind": row["kind"], "room_id": row["room_id"],
+                         "label": meta.get("label"), "legacy_type": meta.get("legacy_type"),
+                         "legacy_block": meta.get("legacy_block"), "range_text": meta.get("legacy_range_text"),
+                         "messages": meta.get("room_message_count"),  # the old writer's own count for the room
+                         "covers": row.get("covers"), "revision": row["revision"], "transfer": meta.get("transfer"),
+                         "folded_into": row["folded_into"], "sequence": row["sequence"]})
+    return sorted(pointers, key=lambda p: (p["legacy_block"] if type(p["legacy_block"]) is int else float("inf"),
+                                           bool(p["transfer"]), "" if p["transfer"] else p["room_id"], p["sequence"]))
+
+
 def legacy_pointers(store: ChronicleStore) -> List[Dict[str, Any]]:
-    """``ChronicleStore.legacy_pointer_rows``, read once per capture for its readers (shared: never changed)."""
-    return capture_memo(store.data_root, "legacy_pointers", store.legacy_pointer_rows)
+    """``legacy_pointer_rows``, read once per capture for its readers (shared: never changed)."""
+    return capture_memo(store.data_root, "legacy_pointers", lambda: legacy_pointer_rows(store))
 
 
 def legacy_units(store: ChronicleStore, root: Any) -> List[LegacyUnit]:

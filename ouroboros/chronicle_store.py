@@ -1512,25 +1512,22 @@ class ChronicleStore:
                                            "metadata": {"candidate": candidate}}) not in ("rejected", "candidate")
                        for ident, kind, candidate in look.acting_parts())
 
+    def waiting_drafts(self) -> List[Tuple[str, str]]:
+        """``(room, published)`` of each acting helper draft no decision of mine met (a retired candidate is none)."""
+        with self._reading() as look:
+            # Only a helper's record can be a draft (``undecided``): the inventory's author kind skips the rest.
+            records = [({"room_id": room, "ts": ts}, {"id": i, "kind": "page", "author": {"kind": k}})
+                       for _s, room, i, k, ts, _e in look.acting_pages() if k == "helper"]
+            records += [(None, {"id": i, "kind": "part", "author": {"kind": k}, "metadata": {"candidate": c}})
+                        for i, k, c in look.acting_parts() if k == "helper"]
+            drafts = [facts or look.get(record["id"]) or {} for facts, record in records
+                      if self._status(look, record) == "draft"]
+            return [(str(facts.get("room_id") or ""), str(facts.get("ts") or "")) for facts in drafts]
+
     def sealed_row_refs(self, room_id: Any) -> set:
         """Row refs (``row_sha256`` and ``note:<id>``) the room's acting pages seal; the rest is open."""
         with self._reading() as look:
             return look.sealed(room_id)
-
-    def legacy_pointer_rows(self) -> List[Dict[str, Any]]:
-        """One compact row per legacy section or gap: room, label, period and how to open it; the activation
-        import's by block, then room, then sequence; a transfer's (``chronicle_import``) after them all, by sequence."""
-        pointers = []
-        for row in self.interpreted(kinds=("legacy", "gap")):
-            meta = row.get("metadata") or {}
-            pointers.append({"node_id": row["id"], "kind": row["kind"], "room_id": row["room_id"],
-                             "label": meta.get("label"), "legacy_type": meta.get("legacy_type"),
-                             "legacy_block": meta.get("legacy_block"), "range_text": meta.get("legacy_range_text"),
-                             "messages": meta.get("room_message_count"),  # the old writer's own count for the room
-                             "covers": row.get("covers"), "revision": row["revision"], "transfer": meta.get("transfer"),
-                             "folded_into": row["folded_into"], "sequence": row["sequence"]})
-        return sorted(pointers, key=lambda p: (p["legacy_block"] if type(p["legacy_block"]) is int else _NO_BLOCK,
-                                               bool(p["transfer"]), "" if p["transfer"] else p["room_id"], p["sequence"]))
 
     def active_marks(self, room_id: Any = None, include_global: bool = True) -> List[Dict[str, Any]]:
         """A room's acting marks (and the global ones); ``room_id=None`` is every room's."""

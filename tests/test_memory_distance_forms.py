@@ -347,7 +347,7 @@ def test_task_telling_is_built_from_the_same_gist_and_omitted_structurally(tmp_p
         group = next(g for g in snap.conversations if any(r["room_id"] == str(chat) for r in g["rooms"]))
         from ouroboros import memory_view_conversations as conv
         text = conv.render_group(group, set(), set(), 0)
-        assert any(r["folded"] for r in group["rooms"]), [(r["room_id"], r["folded"]) for r in group["rooms"]]
+        assert any(r["folds"] for r in group["rooms"]), [(r["room_id"], r["folds"]) for r in group["rooms"]]
         assert text.count(work.first_sentence(latest)) == 1
         projection = next(t for r in group["rooms"] for t in r["tasks"] if t["task"] == "done")
     else:

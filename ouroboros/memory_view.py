@@ -986,7 +986,7 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
         from ouroboros.memory_waiting import measure
 
         waiting = measure(marks, notes, [p for p in projects if "closed" not in p] if projects is not None else None,
-                          groups)
+                          groups, store.waiting_drafts())
     return room, groups, _capture_marks(store, spec, label, marks), waiting, marks
 
 

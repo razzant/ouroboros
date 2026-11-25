@@ -216,7 +216,7 @@ def test_a_conversation_waits_while_words_where_i_spoke_are_open_and_never_for_a
     listing = _memory_read(ctx, room_id="conversations")
     assert listing.startswith("Conversations whose words no page holds: ") and "repo.2" not in listing
     newest = chat_chain.format_address(chat_chain.row_address(answer))
-    assert f"covers={{'to': '{newest}'}}" in listing
+    assert "chronicle_write" not in listing and "words read or said here await a page" in listing  # facts, no act
     assert json.loads(_chronicle_write(ctx, kind="page", room_id=str(asked["chat_id"]), text="Answered; closed.",
                                        covers={"to": newest}))["ok"]
     assert "github:me:repo.1" not in owing()
@@ -568,7 +568,14 @@ def test_unread_host_counts_do_not_create_page_debt_or_restore_it_at_the_window_
     group = _event_group(_overheard_view(tmp_path))
     ours = next(r for r in group["rooms"] if not r["overheard"])
     others = [r for r in group["rooms"] if r["overheard"]]
+    # Words nobody was shown owe no telling, where I spoke too (``memory_reading``); a word an act of mine counted does.
+    # The debt reads the capture's ``counted`` fact, never the rank (a speakerless row ranks with the considered).
+    assert not forms.owed([group])
+    ours["words"][0]["rank"] = 1
+    assert not forms.owed([group])
+    ours["words"][0].update(rank=2, counted=True)
     assert forms.owed([group])[0]["rooms"] == [ours]
+    ours["words"][0]["counted"] = False
     assert not forms.owed([{**group, "rooms": others}])
     for step, ids in (("F6g", [group["key"]]), ("F6a", [group["key"]]), ("F6a", [group["key"], "unread"])):
         expected = [] if "unread" in ids else [ours["room_id"]]

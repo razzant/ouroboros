@@ -82,7 +82,28 @@ def registry_for(root: pathlib.Path, task_id: str, meta=None, mode: str = "", mo
 
 
 def call(registry: ToolRegistry, **args) -> dict:
+    """A page's rows are read first by the same writer: a delegated draft covers only what its writer read
+    (``memory_reading``; its refusal is pinned in ``test_memory_reading_follows_delivery``)."""
+    covers = args.get("covers") or {}
+    if args.get("kind") == "page" and covers.get("from") and covers.get("to"):
+        _read(registry, {"room_id": "1", "rows": True, "from": covers["from"], "to": covers["to"]})
+    if args.get("kind") == "part":
+        for n, member in enumerate(args.get("member_ids") or ()):
+            _read(registry, {"node_id": member}, f"part-{n}")
     return json.loads(registry.execute("chronicle_write", args))
+
+
+def _read(registry: ToolRegistry, args: dict, call_id: str = "read-1") -> None:
+    """An exact read under its own tool call, then an accepted request that carried its result whole."""
+    from ouroboros import memory_reading
+    from ouroboros.tool_call_log import _ACTIVE_CALL
+
+    token = _ACTIVE_CALL.set({"tool_call_id": call_id})
+    try:
+        text = registry.execute("memory_read", args)
+    finally:
+        _ACTIVE_CALL.reset(token)
+    memory_reading.note_view(registry._ctx, None, [{"role": "tool", "tool_call_id": call_id, "content": text}])
 
 
 def status_of(root: pathlib.Path, record_id: str) -> str:

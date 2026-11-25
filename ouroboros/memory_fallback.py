@@ -45,7 +45,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import row_lineage
 from ouroboros.chronicle_quotes import SPEAKERS
-from ouroboros.chronicle_store import ChronicleStore, PublishResult, source_time_span
+from ouroboros.chronicle_store import ChronicleStore, PublishResult
 from ouroboros.consolidator import LIGHT_ANSWER_CEILING_TOKENS
 from ouroboros.dialogue_provenance import (memory_row_header, program_source, recorded_finality, render_memory_row,
                                            render_row_text, row_class)
@@ -200,7 +200,7 @@ def _stream_start(record: Mapping[str, Any]) -> float:
 def _unfolded_run(store: ChronicleStore, room: str, kind: str) -> List[str]:
     """The room's acting, unfolded records of one kind in story order (the order a part's members keep)."""
     if kind == "legacy":
-        return [p["node_id"] for p in store.legacy_pointer_rows()
+        return [p["node_id"] for p in memory_inventory.legacy_pointer_rows(store)
                 if p["kind"] == "legacy" and str(p["room_id"]) == room and not p["folded_into"]]
     return [r["id"] for r in store.pages_of_room(room) if r["kind"] == kind and not r["folded_into"]]
 
@@ -235,7 +235,7 @@ def _narrative_units(store: ChronicleStore, pointer_records: Tuple[str, ...]) ->
 
 def _legacy_units(root: pathlib.Path, store: ChronicleStore) -> Iterator[FallbackUnit]:
     """Unfolded legacy units of blocks 1-22 with established rows: block, then their first unsealed row."""
-    spans = {p["node_id"]: memory_inventory._exact_range(p) for p in store.legacy_pointer_rows()}
+    spans = {p["node_id"]: memory_inventory._exact_range(p) for p in memory_inventory.legacy_pointer_rows(store)}
     units = [unit for unit in memory_inventory.legacy_units(store, root)
              if not unit.folded and unit.raw == "exact" and type(unit.block) is int and unit.block >= 1
              and unit.uncovered and spans.get(unit.record_id)]
@@ -574,17 +574,22 @@ def _floor(items: List[_Row], budget: Optional[int], measure: Callable[[str], in
     return n, {index for index in addressed if index < n}, refs
 
 
-def _trimmed(covers: Dict[str, Any], kept: List[_Row]) -> Dict[str, Any]:
-    """The covers of the rows read: never a row given only by address, never a mind note.
+def _trimmed(root: pathlib.Path, covers: Dict[str, Any], kept: List[_Row]) -> Optional[Tuple[Dict[str, Any], List[_Row]]]:
+    """``(covers, kept)`` of the rows Light was given, or None: never a row given only by address, never a mind note,
+    never a row of running work (``memory_coverage.bound_delegated``, the one predicate delegated writers share). A
+    finished task's host/child rows count as given through that task's stamp line (its outcome), not their bodies.
 
     The helper's input holds no note of the mind, so its draft seals none; a note stays
     open and in the view until a page of the mind covers it.
     """
-    shas = [item.entry[0]["row_sha256"] for item in kept]
-    return {**covers, "rows": shas, "note_ids": [], "first": kept[0].entry[0], "last": kept[-1].entry[0],
-            "count": len(kept), "task_ids": list(dict.fromkeys(item.task for item in kept if item.task)),
-            "ts_span": source_time_span(item.entry[1].get("ts") for item in kept),
-            "stream_span": [kept[0].entry[2], kept[-1].entry[2]]}
+    from ouroboros.memory_coverage import NotShown, bound_delegated
+
+    try:
+        covers, entries, _left = bound_delegated(root, None, covers.get("room_id"), covers, [item.entry for item in kept])
+    except NotShown:
+        return None
+    held = {entry[0]["row_sha256"] for entry in entries}
+    return covers, [item for item in kept if item.entry[0]["row_sha256"] in held]
 
 
 def _page_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, budget: Optional[int],
@@ -616,7 +621,10 @@ def _page_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, b
     covers = read["covers"]
     if n < len(items):
         covers = page_covers(root, unit.room_id, from_addr=items[0].entry[0], to_addr=items[n - 1].entry[0])["covers"]
-    covers = _trimmed(covers, kept)
+    trimmed = _trimmed(root, covers, kept)
+    if trimmed is None:
+        return None
+    covers, kept = trimmed
     stamp = host_stamp(root, covers["task_ids"], rows=[(item.entry[0], item.entry[1]) for item in kept])
     prompt = _compose(head, label, items, n, addressed, owners, refs,
                       {entry["task_id"]: entry for entry in stamp["tasks"]}, tail)

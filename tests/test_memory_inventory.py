@@ -269,9 +269,9 @@ def test_a_capture_reads_the_legacy_pointers_once_for_all_its_readers(tmp_path, 
 
     shared.world(tmp_path)
     store = ChronicleStore(tmp_path)
-    expected = store.legacy_pointer_rows()
-    calls, real = [], ChronicleStore.legacy_pointer_rows
-    monkeypatch.setattr(ChronicleStore, "legacy_pointer_rows", lambda self: calls.append(1) or real(self))
+    expected = mi.legacy_pointer_rows(store)
+    calls, real = [], mi.legacy_pointer_rows
+    monkeypatch.setattr(mi, "legacy_pointer_rows", lambda each: calls.append(1) or real(each))
     monkeypatch.setattr(mi, "_UNITS", {})  # the units are counted anew
     with capture(tmp_path):
         assert mi.legacy_units(store, tmp_path) and mi.legacy_pointers(store) == expected

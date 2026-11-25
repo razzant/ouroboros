@@ -117,6 +117,8 @@ def test_reconciled_turn_replays_silent_while_completed_legacy_row_still_speaks(
 @pytest.mark.parametrize("status", [STATUS_RUNNING, STATUS_INTERRUPTED])
 def test_reopen_moves_the_host_mark_aside_exactly_once(tmp_path, monkeypatch, status):
     row = _reconciled(tmp_path, monkeypatch, "orphan-turn", status)
+    from ouroboros.task_store import patch_document  # an earlier attempt's reading never stands for the re-run's
+    patch_document(tmp_path, "orphan-turn", lambda current: {**current, "read_spans": {"room": "5", "spans": [[1, 2]]}})
     assert reopen_reconciled_presence_placeholder(tmp_path, "orphan-turn") is True
     reopened = load_task_result(tmp_path, "orphan-turn")
     assert reopened["status"] == STATUS_RUNNING and reopened["metadata"] == row["metadata"]
@@ -133,6 +135,7 @@ def test_reopen_moves_the_host_mark_aside_exactly_once(tmp_path, monkeypatch, st
     for cleared in ("reason_code", "outcome_axes", "artifact_status", "artifact_bundle", "result",
                     "status_reconciled_from", "canonical_terminal_projection_origin"):
         assert cleared not in reopened
+    assert reopened["read_spans"] == {"room": None, "spans": [], "events": [], "messages": []}  # the re-run starts empty
     # A running row is no placeholder: the transition cannot fire twice.
     before = result_signature(tmp_path, "orphan-turn")
     assert reopen_reconciled_presence_placeholder(tmp_path, "orphan-turn") is False

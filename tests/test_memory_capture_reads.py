@@ -319,7 +319,7 @@ def test_legacy_rows_are_the_rooms_rows_the_room_reader_returns(tmp_path):
         root.mkdir()
         build(root)
         store, facts = ChronicleStore(root), mi.membership_facts(root)
-        ranges = {pointer["node_id"]: (str(pointer["room_id"]), span) for pointer in store.legacy_pointer_rows()
+        ranges = {pointer["node_id"]: (str(pointer["room_id"]), span) for pointer in mi.legacy_pointer_rows(store)
                   if (span := mi._exact_range(pointer)) is not None}
         assert ranges
         by_room = {}
