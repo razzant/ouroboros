@@ -191,9 +191,10 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
         } catch { return null; }
     };
     // This room's entry first (an empty one too: it was read empty), stamped with when it was saved; then the entries
-    // saved least recently give way until all fit TOTAL_CHARS. An origin too full to take it makes that room first, then
-    // asks once more. One that cannot be written goes, alone: an older text never stands for a newer read. Only a save
-    // writes this entry: a show or a read with nothing new never rewrites words another tab may have replaced or erased.
+    // saved least recently give way until all fit TOTAL_CHARS. An origin too full to take it frees what the write adds
+    // first (its text less the text it replaces, or with its key when the room has none), then asks once more. One that
+    // cannot be written goes, alone: an older text never stands for a newer read. Only a save writes this entry: a show
+    // or a read with nothing new never rewrites words another tab may have replaced or erased.
     const write = (rows) => {
         let store = null, written = false;
         try {
@@ -217,7 +218,8 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             };
             try { store.setItem(entry, text); } catch (error) {
                 if (!full(error)) throw error;
-                giveWay(text.length);
+                const old = store.getItem(entry);
+                giveWay(old === null ? entry.length + text.length : text.length - old.length);
                 store.setItem(entry, text);
             }
             written = true;
