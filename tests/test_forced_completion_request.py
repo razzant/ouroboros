@@ -880,7 +880,7 @@ def test_a_forced_end_after_a_live_message_keeps_the_fact_that_the_run_spoke(at_
         assert _request_fact(trace)["status"] == "selected" and stored.get("wake_silent") is True
         [notice] = sends(pending)
         assert notice["terminal_origin"] == "host_notice"
-        assert notice["text"].startswith("⚠️ This run sent its message and then ended best_effort (round_limit).")
+        assert notice["text"].startswith("⚠️ This run sent a message earlier and then ended best_effort (round_limit).")
         assert "chose to finish without a message" not in notice["text"]
 
 

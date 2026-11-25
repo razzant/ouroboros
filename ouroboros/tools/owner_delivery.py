@@ -97,7 +97,7 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
         return
     # A place's local room is the Ouroboros side of the place, not my human's conversation; a frame landing in
     # Main or a Project room is, as for any work there (``delivery_audience``). Unreadable proves neither.
-    if presence_caller_binding(ctx) is not None and not private_contact and not _lands_with_my_human(ctx, evt):
+    if presence_caller_binding(ctx) is not None and not private_contact and not lands_with_my_human(ctx, evt):
         return
     if mode == "live" and kind == "send_message":
         from ouroboros.loop_messages import owner_input_revision
@@ -280,16 +280,22 @@ def _resolved_room(ctx: Any, evt: Dict[str, Any]) -> tuple[Any, Any]:
     return chat, (None if is_a2a_chat_id(chat) else project_thread_name(root, chat))
 
 
-def _lands_with_my_human(ctx: Any, evt: Dict[str, Any]) -> bool:
-    """Whether a frame lands in Main or a Project room: the rooms ``delivery_audience`` names as my human's."""
-    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+def lands_with_my_human(ctx: Any, evt: Dict[str, Any]) -> bool:
+    """Whether a frame lands in a conversation its human reads, as ``delivery_audience`` names them: a Project room;
+    Main; or, for a run with no place binding, any other conversation (an owner transport chat such as a bridge's)
+    that is neither the hidden task record nor a peer chat. A place's local room is not one; an unknown or unreadable
+    destination answers False."""
+    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID, is_a2a_chat_id
+    from ouroboros.dialogue_provenance import presence_caller_binding
 
     try:
         chat, name = _resolved_room(ctx, evt)
     except Exception:
         log.debug("delivery room unread for task %s", evt.get("task_id"), exc_info=True)
         return False
-    return name is not None or chat == WEB_UI_CHAT_ID
+    return name is not None or chat == WEB_UI_CHAT_ID or (
+        chat not in (None, "", HIDDEN_CHAT_ID) and not isinstance(chat, bool) and not is_a2a_chat_id(chat)
+        and presence_caller_binding(ctx) is None)
 
 
 def delivery_audience(ctx: Any, evt: Dict[str, Any]) -> tuple[str, bool]:

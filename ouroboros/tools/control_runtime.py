@@ -925,8 +925,6 @@ def commit_forced_work_replies(tools: object, llm_trace: dict, usage: dict) -> N
         outcomes.append(entry)
     if outcomes:
         llm_trace["forced_work_replies"] = outcomes
-    if getattr(ctx, "_owner_message_sent", False):
-        usage["owner_message_sent"] = True
 
 
 def _update_identity(ctx: ToolContext, content: str | None = None, expected_revision: str | None = None,
@@ -1327,17 +1325,18 @@ def _confirmed_handoff(ctx: ToolContext | None, work: str) -> bool:
 
 
 def _spoke_live_to_my_human(ctx: ToolContext | None) -> bool:
-    """A root whose live text message of this run reached a room its human reads: Main or a Project room.
+    """A root whose live text message of this run reached a conversation its human reads.
 
     The reply mark (``owner_delivery._retain_dialogue``: a live ``send_message`` only, zero included, reset per turn)
-    read with the room this run's own messages land in, by the supervisor's rule (``_lands_with_my_human``). The
-    hidden partition's reader is the caller, who would receive an empty result; an unreadable room is not proof."""
+    read with the room this run's own messages land in, by the supervisor's rule (``lands_with_my_human``). The
+    hidden task record does not count (its reader is the caller, who would receive an empty result), nor a place's
+    local room; an unreadable room is not proof."""
     from ouroboros.task_results import resolve_ctx_lineage
-    from ouroboros.tools.owner_delivery import _lands_with_my_human, stamp_lineage
+    from ouroboros.tools.owner_delivery import lands_with_my_human, stamp_lineage
 
     if getattr(ctx, "_owner_reply_revision", None) is None or not resolve_ctx_lineage(ctx)["is_root_task"]:
         return False
-    return _lands_with_my_human(ctx, stamp_lineage(ctx, {"chat_id": getattr(ctx, "current_chat_id", None)}))
+    return lands_with_my_human(ctx, stamp_lineage(ctx, {"chat_id": getattr(ctx, "current_chat_id", None)}))
 
 
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
@@ -1347,9 +1346,10 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  fold_read: bool = False, about_work: str = "") -> str:
     """Stage an author act; a finish that owes no one words may choose silence: a self-started run (an
     own-clock or focused wake, a schedule-born root without a Presence binding), which may leave a gist
-    for its human, a task that answers its place conversation or a program's note, or a root whose live
-    text message of this run already reached its human (``_spoke_live_to_my_human``) and whose contract
-    owes no answer; inherited binding authority alone names no speaker."""
+    for its human, a task that answers its place conversation or a program's note, or a root whose live text
+    message of this run already reached a conversation its human reads, not the hidden task record
+    (``_spoke_live_to_my_human``), and whose contract owes no answer; inherited binding authority alone names
+    no speaker."""
     request, error = completion_request(ctx, {
         "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
         "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
@@ -1407,7 +1407,8 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
             return None, ("silent needs a finish that owes no one words: a self-started run (a consciousness wake's "
                           "own turn, or a schedule-born root without a Presence binding), a task answering its own place "
                           "conversation or a program's note, or a root after its live text message of this run reached "
-                          "Main or a Project room (send_user_message, accepted live, not queued)")
+                          "a conversation its human reads (send_user_message, accepted live, not queued; "
+                          "the hidden task record does not count)")
         from ouroboros.contracts.task_contract import answer_protocol_active, review_answer_required
 
         if review_answer_required(ctx) or answer_protocol_active(ctx):

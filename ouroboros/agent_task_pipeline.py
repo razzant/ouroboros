@@ -626,8 +626,8 @@ def _stamp_presence_terminal_facts(
         task["metadata"] = {**metadata, "presence_unknown_outcome": unknown}
 
 
-def _wake_outcome_notice(text: str, loop_outcome: Dict[str, Any], custody_audit: Any = None, spoke: bool = False) -> str:
-    """The host notice a silent run's non-clean outcome publishes (``spoke``: it sent its message); ``""`` if clean.
+def _wake_outcome_notice(text: str, loop_outcome: Dict[str, Any], custody_audit: Any = None, spoke=False) -> str:
+    """The host notice a silent run's non-clean outcome publishes (``spoke``: it sent a message); ``""`` if clean.
 
     Errors, forced or degraded outcomes and delegated custody still open in the current
     audit (``custody_audit.unreconciled``) are not hidden behind silence, yet the words the
@@ -643,8 +643,8 @@ def _wake_outcome_notice(text: str, loop_outcome: Dict[str, Any], custody_audit:
         return ""
     owed = f" {TASK_CAUSE_PHRASES[WARN_DELEGATED_CUSTODY_UNRECONCILED]}" if debt else ""
     kept = " Its internal result stays in the task details." if str(text or "").strip() else ""
-    return (("⚠️ This run sent its message and then ended " if spoke else "⚠️ This run chose to finish without a message, but it ended ")
-            + f"{status or 'unknown'} ({reason or 'unspecified'}).{owed}{kept}")
+    head = "sent a message earlier and then ended" if spoke else "chose to finish without a message, but it ended"
+    return f"⚠️ This run {head} {status or 'unknown'} ({reason or 'unspecified'}).{owed}{kept}"
 
 
 def _unavailable_cost_fields(error: str) -> Dict[str, Any]:

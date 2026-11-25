@@ -882,7 +882,7 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
     presence = sealed_final.get("presence_delivery")
     if sealed_final.get("wake_silent") is True:
         heading, final_text = "Final result text:\n", (
-            "(none from the finish: the run's words reached its human in messages of this run; its silent finish sent none)"
+            "(none from the finish: this run sent its own messages earlier; its silent finish sent none)"
             if sealed_final.get("owner_message_sent") is True else
             "(none: the run finished silently; no model words were submitted)")
         if raw := str(sealed_final.get("internal_terminal_text") or ""):
