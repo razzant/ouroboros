@@ -716,7 +716,7 @@ class FallbackRun:
     usage: Dict[str, Any] = field(default_factory=dict)
     errors: List[Dict[str, Any]] = field(default_factory=list)
     input_tokens: Optional[int] = None
-    effect: str = ""  # a published draft, measured: what it folded, its characters before and after
+    effect: str = ""  # a published draft part's receipt: what it folds by room, its own and its members' words
 
 
 def _parse(text: str, *, part: bool = False) -> Optional[Dict[str, Any]]:
@@ -826,9 +826,10 @@ def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: 
             if result.ok:
                 run.outcome, run.record_id = "published", str((result.record or {}).get("id") or "")
                 if unit.kind == "part":
-                    from ouroboros.tools.chronicle import _fold_effect
+                    from ouroboros.memory_fold_receipt import fold_receipt, part_lines
 
-                    run.effect = _fold_effect(store, "a helper draft folded", draft.member_ids, answer["text"])
+                    run.effect = fold_receipt(result.record, lambda: part_lines(store, result.record,
+                                                                                "a helper draft folded"))
                 phase = "receipt_clear_failed"
                 _set_refusal(store, unit.key, None)
             elif result.reason in CONFLICT_REASONS:

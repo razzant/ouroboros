@@ -1182,11 +1182,13 @@ class ChronicleStore:
         if record.get("kind") not in ("page", "part"):
             return None
         decisions = _lookups(db).targeting(record["id"], ("decision",))
-        if decisions:
-            return "accepted" if decisions[-1][1].get("accepted") else "rejected"
-        if record.get("author", {}).get("kind") != "helper":
-            return "final"
-        return "candidate" if record.get("metadata", {}).get("candidate") else "draft"
+        return ("accepted" if decisions[-1][1].get("accepted") else "rejected") if decisions else self.undecided(record)
+
+    @staticmethod
+    def undecided(record) -> str:
+        """A page's or part's status before any decision, what a first decision's rule checks: final, candidate or draft."""
+        return "final" if record.get("author", {}).get("kind") != "helper" else (
+            "candidate" if record.get("metadata", {}).get("candidate") else "draft")
 
     def _order_key(self, db, record, cache) -> Tuple[Any, ...]:
         """Legacy sections by block, pages by ``stream_span[0]``, a part by its first member."""
