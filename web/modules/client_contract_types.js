@@ -520,6 +520,51 @@
  */
 
 /**
+ * A question about a letter, or this side's answer to it, on the letter's card (`PeerLetterPart`): its words whole
+ * within the letter protocol's bound (`chars` only past it, `text` then null); `held`: the receiver holds a question's
+ * words now; `delivery_state` 'reserved': an answer to it is reserved there, its delivery not proven. An `answered`
+ * part exists only after its delivery was confirmed.
+ * @typedef {Object} PeerLetterPart
+ * @property {string} question_id
+ * @property {string|null} text
+ * @property {string=} held
+ * @property {'reserved'=} delivery_state
+ * @property {number=} chars
+ */
+
+/**
+ * `peer_letter_card` (`PeerLetterCardFact`): one letter's card on a progress row of the work that wrote it, the same
+ * fact live and on replay; parts are keyed (task_id, letter_id, part, question_id), part letter|question|answered|answer.
+ * Letter or given-answer words past what the card carries are null beside their length (`text_chars`, `answer_chars`),
+ * read whole at `/api/tasks/{task_id}/artifacts/{letter_id}.letter.txt` or `.answer.txt` with `?letter={letter_id}`;
+ * `error_chars` marks a failure reason cut to its first part; `stop` a Stop not confirmed (a confirmed one is cancelled).
+ * @typedef {Object} PeerLetterCardFact
+ * @property {string} letter_id
+ * @property {string} place_id
+ * @property {string} to
+ * @property {string} to_seed
+ * @property {string|null} text
+ * @property {string} title
+ * @property {number|null} ceiling_usd
+ * @property {number|null} spent_usd
+ * @property {boolean} spent_final
+ * @property {'accepted_running'|'needs_input'|'waiting_owner'|'done'|'failed'|'cancelled'|'refused'|'not_sent'|'unconfirmed'|'unknown'} state
+ * @property {number=} text_chars
+ * @property {string=} phase
+ * @property {string=} refusal_code
+ * @property {string=} error
+ * @property {number=} error_chars
+ * @property {string=} at
+ * @property {PeerLetterPart=} question
+ * @property {PeerLetterPart=} answered
+ * @property {'requested'|'refused'|'unverified'=} stop
+ * @property {'given'|'none'|'held'|'unknown'=} reply
+ * @property {string=} held
+ * @property {(string|null)=} answer
+ * @property {number=} answer_chars
+ */
+
+/**
  * One `GET /api/chat/history` row (live frames call `text` `content`). A row may also carry the
  * task-progress and outcome fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
  * (`quiz_answer`, `quiz_closed`, `task_evidence`, or `summary_kind` + `historical_terminal`) are never shown.
@@ -590,6 +635,7 @@
  * @property {Object=} outcome_axes
  * @property {boolean=} _result_text_present
  * @property {string[]=} delegated_runs_unreconciled
+ * @property {PeerLetterCardFact=} peer_letter_card  // a letter's card, a progress row of its own (never the task's carrier)
  * @property {Object=} review_projection
  * @property {string=} wake_summary
  * @property {string=} suggested_name

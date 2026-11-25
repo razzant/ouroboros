@@ -417,6 +417,124 @@ def test_a_scene_is_ready_only_when_it_shows_what_its_own_tab_asked_for(tmp_path
 
 
 @pytest.mark.parametrize("engine", ENGINES)
+def test_a_letter_card_keeps_two_same_word_replies_and_reads_the_long_one_whole(tmp_path, engine):
+    """The sender room's letter cards, live-mounted through the product's own module on the synthetic stand: two replies
+    with the same words stay two notes of their own letters, a reply past the card's bound reads its whole words from
+    this side's own task-file route, and a held question says so instead of showing words. No real installation or letter."""
+    from playwright.sync_api import sync_playwright
+
+    mount = """async () => {
+        const m = await import('/static/modules/peer_letter_card.js');
+        const feed = document.createElement('div'); feed.id = 'letter-probe'; document.body.append(feed);
+        const add = (text, role, md, ts, prog, opts) => { const b = document.createElement('div'); b.className = 'chat-bubble'; feed.append(b); return b; };
+        const fact = (over) => Object.assign({ letter_id: 'L1', place_id: 'p', to: 'Velm', to_seed: 'b', text: 'Count.', title: '',
+            ceiling_usd: 2, spent_usd: 0.4, spent_final: true, state: 'done', reply: 'given', answer: 'Done.' }, over);
+        const row = (f, hid) => ({ task_id: 'gallery-share-letter', ts: '2026-11-25T12:00:00Z', history_id: hid, history_position: 1, peer_letter_card: f });
+        m.letterRow(row(fact({ letter_id: 'L1' }), 'h1'), feed, add);
+        m.letterRow(row(fact({ letter_id: 'L2' }), 'h2'), feed, add);
+        m.letterRow(row(fact({ letter_id: 'L3', answer: null, answer_chars: 9600 }), 'h3'), feed, add);
+        m.letterRow(row(fact({ letter_id: 'L4', state: 'needs_input', reply: undefined, answer: undefined,
+            question: { question_id: 'q1', text: null, held: 'peer_silent' } }), 'h4'), feed, add);
+        return [...feed.querySelectorAll('.peer-letter-card[data-letter-part="answer"]')].map(n => ({
+            letter: n.dataset.letterId, words: n.querySelector('.peer-letter-text').textContent }));
+    }"""
+    with GalleryServer() as server, sync_playwright() as pw:
+        browser = bundled_browser(pw, engine)
+        context = browser.new_context(viewport={"width": 1440, "height": 900},
+                                      extra_http_headers={"X-Gallery-Scene": "share.letter"})
+        # This probe mounts its own cards; a gallery scene would start an unrelated UI and sign reads with its own scene.
+        page = open_scene(context, f"{server.url}/?bare=1")
+        answers = page.evaluate(mount)
+        assert [a["words"] for a in answers] == ["Done.", "Done.",
+                                                 "These words are too long for this card; this work has them whole."], answers
+        assert len({a["letter"] for a in answers}) == 3, "same words, three letters, three notes"
+        assert page.evaluate("() => document.querySelector('[data-letter-part=\"question:q1\"] .peer-letter-text').textContent") \
+            .find("has not released") >= 0
+        path = "/api/tasks/gallery-share-letter/artifacts/L3.answer.txt"
+        answer = page.locator('#letter-probe [data-letter-id="L3"][data-letter-part="answer"]')
+        with page.expect_response(lambda r: r.request.method == "GET" and r.url == f"{server.url}{path}?letter=L3") as read:
+            answer.locator('[data-letter-read="answer"]').click()
+        response = read.value
+        whole = server.corpus.cards["share"]["letter"]["letter_words"]["L3"]
+        assert response.status == 200, server.requests
+        assert response.headers["content-type"].startswith("text/plain")
+        assert len(whole) == 9600 and response.body() == whole.encode("utf-8")
+        page.wait_for_function("""words => document.querySelector(
+            '#letter-probe [data-letter-id="L3"][data-letter-part="answer"] .peer-letter-text')?.textContent === words
+        """, arg=whole)
+        assert page.evaluate("() => document.scrollingElement.scrollWidth - document.scrollingElement.clientWidth") == 0
+        assert page.gallery_errors == [], page.gallery_errors
+        browser.close()
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_the_chat_places_distinct_letter_parts_and_evicts_their_saved_page(tmp_path, engine):
+    """Use chat.js's own addMessage, saved replay and page retention; only the transport is scripted."""
+    import os
+
+    from playwright.sync_api import sync_playwright
+
+    fixture = (REPO / "web/tests/history_layout_fixture.html").read_text(encoding="utf-8")
+    fixture = fixture.replace("'room_work.css'", "'room_work.css', 'peer_links.css'")
+    fixture = fixture.replace("width: 800px", "width: 100%; max-width: 800px")
+    fixture = fixture.replace("window.__reads = [];", """window.__reads = []; window.__saved = []; window.__heard = {};
+const stamp = '2026-11-25T12:00:00Z';
+window.__letters = [1, 2, 3].map(i => ({role: 'assistant', is_progress: true, task_id: 'shelf', chat_id: 2, ts: stamp,
+    peer_letter_card: { letter_id: `L${i}`, to: 'Velm', text: 'Count.', state: 'done', reply: 'given',
+        answer: i === 3 ? null : 'Done.', answer_chars: i === 3 ? 9600 : undefined,
+        ...(i === 1 ? { question: {question_id: 'q1', text: 'Which shelf?'},
+            answered: {question_id: 'q1', text: 'The small shelf.'} } : {}) }}));""")
+    fixture = fixture.replace("messages: rows(page),", "messages: page === 1 ? [...rows(1), ...window.__saved] : rows(page),")
+    fixture = fixture.replace("} else if (url.pathname.includes('/api/tasks/')) {", """} else if (url.pathname === '/api/tasks/shelf/artifacts/L3.answer.txt') {
+        window.__readReply = { query: url.search, status: 200, chars: 9600 };
+        return new Response('whole words '.repeat(800), { status: 200, headers: {'Content-Type': 'text/plain'} });
+    } else if (url.pathname.includes('/api/tasks/')) {""")
+    fixture = fixture.replace("on() { return () => {}; }", "on(name, callback) { window.__heard[name] = callback; return () => {}; }")
+    with GalleryServer() as server, sync_playwright() as pw:
+        browser = bundled_browser(pw, engine)
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.route("**/letter-chat-test", lambda route: route.fulfill(body=fixture, content_type="text/html"))
+        page.goto(f"{server.url}/letter-chat-test")
+        page.wait_for_function("window.__ready")
+        page.evaluate("() => window.__letters.forEach(window.__heard.chat)")
+        answers = page.locator('#chat-messages [data-letter-part="answer"] .peer-letter-text')
+        assert answers.all_text_contents()[:2] == ["Done.", "Done."]
+        assert answers.count() == 3
+        question = page.locator('#chat-messages [data-letter-part="question:q1"]')
+        assert question.locator(".sender").text_content() == "Velm"
+        assert question.locator(".chat-relay-from").inner_text() == "Velm"
+        reply = page.get_by_role("button", name="Read full reply")
+        reply.scroll_into_view_if_needed()
+        assert reply.evaluate("""button => {
+            const range = document.createRange(); range.selectNodeContents(button);
+            const bounds = button.getBoundingClientRect();
+            return bounds.width > 0 && bounds.height > 0 && [...range.getClientRects()].length > 0
+                && [...range.getClientRects()].every(rect => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1
+                    && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1);
+        }""")
+        if target := os.environ.get("OUROBOROS_UI_EVIDENCE_DIR"):
+            Path(target).mkdir(parents=True, exist_ok=True)
+            reply.locator('xpath=../..').screenshot(path=Path(target) / f"letter-read-390-{engine}.png")
+        reply.click()
+        page.wait_for_function("document.querySelector('[data-letter-id=L3][data-letter-part=answer] .peer-letter-text')?.textContent.length === 9600")
+        assert page.evaluate("window.__readReply") == {"query": "?letter=L3", "status": 200, "chars": 9600}
+        page.evaluate("""() => {
+            window.__saved = window.__letters.map((row, i) => ({...row, history_id: `progress:letter-${i}`,
+                history_position: {source: 'progress:r1', offset: 9976 + i}}));
+        }""")
+        for index in range(1, 8):
+            page.evaluate("""() => { const feed = document.querySelector('#chat-messages');
+                feed.dispatchEvent(new WheelEvent('wheel', {deltaY: -1})); feed.scrollTop = 160; }""")
+            page.locator("#chat-messages .chat-load-older button").evaluate("button => button.click()")
+            page.wait_for_function("n => window.__reads.includes(n) && !document.querySelector('.chat-load-older button').disabled", arg=index)
+            if index == 1:
+                assert page.locator('[data-letter-id=L1][data-history-id="progress:letter-0"]').count() == 4
+                assert page.locator("#chat-messages .peer-letter-card").count() == 8
+        assert page.locator("#chat-messages .peer-letter-card").count() == 0
+        browser.close()
+
+
+@pytest.mark.parametrize("engine", ENGINES)
 def test_the_ui_look_tool_looks_at_the_stand_through_its_own_entry_point(tmp_path, monkeypatch, engine):
     """The `look` tool of skills/ui_look, as Ouroboros calls it: its address is the port its runtime facts name (here
     the stand's), never one a caller chooses. Its stand walks the gallery's scenes as the app's places (the index's

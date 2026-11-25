@@ -221,7 +221,9 @@ export function homeAnswers(facts = {}) {
         // Its position by meaning (owner 15.11, 5A); the host's line while the next move is the owner's.
         const headline = headlineView(snapshot);
         const owner = consciousnessMark(snapshot).hue === 'owner';
-        return { text: owner || !headline.position ? headline.text : headline.position, owner };
+        // A row holds one line: the position's short words when a linked Ouroboros makes the whole longer.
+        const position = snapshot.positionShort ? tr(snapshot.positionShort, snapshot.positionShort) : headline.position;
+        return { text: owner || !position ? headline.text : position, owner };
     });
     say('dashboard:evolution', state, (s) => fmt(s.evolution_enabled === true ? 'On' : s.evolution_enabled === false ? 'Off' : 'State unknown'));
     say('page:circles', places, (p) => (Array.isArray(p.places) ? count(p.places.length, '{n} place', '{n} places') : fmt(NOT_CHECKED)));

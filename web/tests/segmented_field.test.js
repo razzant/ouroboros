@@ -23,6 +23,17 @@ test('the strip is markup alone: no hover title, no inline style, no count; its 
     assert.throws(() => renderSegmentedField({ options: labels(2) }), /requires target/);
 });
 
+test('a caller that knows the choice marks it, names the group and holds it while a write is out', () => {
+    const html = renderSegmentedField({ target: 's-x', modifier: 'data-x', chosen: 'v1', label: 'Letters', options: labels(2) });
+    assert.match(html, /data-effort-target="s-x" role="group" aria-label="Letters">/);
+    assert.match(html, /class="ui-segment" data-effort-value="v0" aria-pressed="false">Choice 0</);
+    assert.match(html, /class="ui-segment active" data-effort-value="v1" aria-pressed="true">Choice 1</);
+    const held = renderSegmentedField({ target: 's-x', chosen: 'v0', busy: true, options: labels(2) });
+    assert.match(held, /data-effort-target="s-x" aria-busy="true">/);
+    assert.equal((held.match(/ disabled>/g) || []).length, 2, 'every option is held, the chosen keeps its mark');
+    assert.match(held, /class="ui-segment active" data-effort-value="v0" aria-pressed="true" disabled>/);
+});
+
 for (const scale of [1, 0.97]) test(`the selection fill keeps layout coordinates through a page arrival at scale ${scale}`, () => {
     const values = new Map();
     const option = { matches: () => true, offsetTop: 3.25,

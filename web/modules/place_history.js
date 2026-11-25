@@ -4,7 +4,7 @@ import { previewsRefused } from './chat_preview.js';
 import { failureText } from './consciousness_api.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { bindRenderedMarkdown, mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
-import { tr } from './i18n.js';
+import { fmt, tr } from './i18n.js';
 import { sendsAsHtml, signalLabels, heardFactWord, noKindChecked } from './consciousness_words.js';
 
 export const INDEX_NOTE = 'The list finds conversations with saved incoming Place events. Older records and conversations where it only wrote may not be listed.';
@@ -117,9 +117,27 @@ function updateHeardLabels(host, place) {
     }
 }
 
+import { isReplayEvidenceRow } from './chat_activity.js';
+import { letterHeadHtml, letterStatusHtml } from './peer_letter_card.js';
+
+/** One nested letter of the opened work, before ordinary progress is filtered: its card's own facts, never a System line. */
+function letterArticle(row) {
+    const fact = row.peer_letter_card;
+    const article = document.createElement('article'); article.className = 'place-convo-row is-assistant peer-letter-card';
+    article.dataset.letterId = String(fact.letter_id || ''); article.dataset.letterPart = 'letter';
+    const words = fact.text === null ? tr('peer.letter.text.long', 'The letter is too long for this card; this work has it whole.') : fact.text;
+    article.innerHTML = `${letterHeadHtml(fact, { ts: row.ts })}<div class="chat-relay-excerpt"><p class="peer-letter-text" data-i18n-authored>${escapeHtml(words ?? '')}</p></div>${letterStatusHtml(fact)}`;
+    if (fact.state === 'done' && fact.reply === 'given') {
+        const answer = fact.answer === null ? tr('peer.letter.words.long', 'These words are too long for this card; this work has them whole.') : fact.answer;
+        article.insertAdjacentHTML('beforeend', `${letterHeadHtml(fact, { answer: true, ts: row.ts })}<div class="chat-relay-excerpt"><p class="peer-letter-text" data-i18n-authored>${escapeHtml(answer ?? '')}</p></div>`);
+    }
+    return article;
+}
+
 function messageNode(row, markdown, place) {
-    const voice = row.role === 'user' ? (row.place_history.owner_confirmed ? 'owner' : 'participant') : row.role;
-    const facts = row.place_history;
+    // A work's own row (its answer, its summary) carries no place facts: it is the work's, never the place's speech.
+    const facts = row.place_history || {};
+    const voice = row.role === 'user' ? (facts.owner_confirmed ? 'owner' : 'participant') : row.role;
     const heard = facts.attention?.decision === 'heard' ? (facts.facts || []).filter((fact) => heardFactWord(fact)).map((fact) =>
         `<span class="place-convo-fact" data-heard-fact="${escapeHtml(fact)}"></span>`).join('') : '';
     const sender = facts.sends_as && sendsAsHtml({ ...facts.sends_as, owner: facts.sends_as_owner });
@@ -174,6 +192,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         <div class="place-sheet-actions"><button type="button" class="btn btn-default btn-sm" data-history-back>Back to Place</button></div>
         <p class="place-silent-card" role="note" data-history-state></p>
         <p class="place-sheet-note">${LOCAL_NOTE}</p>
+        <p class="place-sheet-note" data-history-work hidden></p>
         <div data-history-coverage></div>
         <p class="place-sheet-status ui-status" data-history-status role="status" data-i18n-authored></p>
         <div class="place-sheet-actions"><button type="button" class="btn btn-default btn-sm" data-history-retry hidden>Try again</button>
@@ -183,6 +202,16 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         <p class="place-sheet-note">Reading sends nothing, marks nothing read and starts no work.</p>
     </section>`;
     const find = (selector) => host.querySelector(selector);
+    // A room opened for the work a letter started (`room.work`, from that work's acceptance record): its own rows are
+    // read beside the place's speech, and one line says whose work it is. No other room changes what it shows.
+    const work = room?.work?.taskId ? room.work : null;
+    const ownWork = (row) => Boolean(work) && row.task_id === work.taskId && !isReplayEvidenceRow(row) && row.system_type !== 'task_model_wait';
+    if (work) {
+        const line = find('[data-history-work]');
+        line.textContent = fmt('Work from {name}: {title}', { name: work.from || place?.label || 'Ouroboros', title: work.title || work.taskId });
+        line.dataset.i18nAuthored = '';
+        line.hidden = false;
+    }
     let closed = false, busy = false, generation = 0, controller = null, retry = null;
     const pages = [], markdown = new Set();
     const clear = () => { markdown.forEach(destroyChatMarkdown); markdown.clear(); find('[data-history-messages]').replaceChildren(); };
@@ -190,7 +219,14 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         clear();
         const seen = new Set();
         for (const { page } of pages) for (const row of page.messages) {
-            if (!row.place_history || row.is_progress || !['user', 'assistant', 'system'].includes(row.role)) continue;
+            if (ownWork(row) && row.peer_letter_card) {  // the work's own letters, before ordinary progress is filtered
+                const id = row.row_address || row.history_id;
+                if (id && seen.has(id)) continue;
+                if (id) seen.add(id);
+                find('[data-history-messages]').append(letterArticle(row));
+                continue;
+            }
+            if (!(row.place_history || ownWork(row)) || row.is_progress || !['user', 'assistant', 'system'].includes(row.role)) continue;
             const id = row.row_address || row.history_id;
             if (id && seen.has(id)) continue;
             if (id) seen.add(id);

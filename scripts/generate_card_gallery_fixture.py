@@ -474,7 +474,42 @@ def _share_cases():
             "2. **The source opens** separately, whole.\n\nCheck it with `make check` before you send it.")
     table = ("Both reports, side by side:\n\n| Report | Pages | Opens with |\n| --- | ---: | --- |\n"
              "| Summary | 2 | the decision |\n| Full report | 14 | the source |")
-    return {"card": _task_case("gallery-share-card", answer=fits), "table": _task_case("gallery-share-table", answer=table)}
+    return {"card": _task_case("gallery-share-card", answer=fits), "table": _task_case("gallery-share-table", answer=table),
+            "letter": _letter_case()}
+
+
+def _letter_case():
+    """A work's room with its letters' cards on replay: two replies with the same words stay two notes, a reply past the
+    card's bound offers its whole words from this side's own records, a held question and a reserved one say so, an
+    unconfirmed Stop is not a cancellation, and a cut failure reason is marked. All synthetic."""
+    base = _task_case("gallery-share-letter", answer="Done.")
+    rows = base["history"][0]["messages"]
+    common = {"place_id": "place-b", "to": "Velm", "to_seed": "install-b", "title": "Count", "ceiling_usd": 2.0,
+              "spent_usd": 0.4, "spent_final": True}
+
+    def letter_row(position, fact):
+        return {"history_id": f"letter-h{position}", "history_position": position, "task_id": base["task_id"],
+                "ts": STAMP, "role": "system", "is_progress": True, "narration": False,
+                "text": "Letter to Velm: " + fact["state"], "peer_letter_card": fact}
+
+    rows.extend([
+        letter_row(900, {**common, "letter_id": "L1", "text": "Count the files twice.", "state": "done",
+                         "reply": "given", "answer": "Done."}),
+        letter_row(901, {**common, "letter_id": "L2", "text": "And once more.", "state": "done",
+                         "reply": "given", "answer": "Done."}),
+        letter_row(902, {**common, "letter_id": "L3", "text": "A long count.", "state": "done",
+                         "reply": "given", "answer": None, "answer_chars": 9600}),
+        letter_row(903, {**common, "letter_id": "L4", "text": "Which folder?", "state": "needs_input",
+                         "question": {"question_id": "q1", "text": None, "held": "peer_silent"}}),
+        letter_row(904, {**common, "letter_id": "L5", "text": "Reserve it.", "state": "needs_input",
+                         "question": {"question_id": "q2", "text": "Which folder?", "delivery_state": "reserved"}}),
+        letter_row(905, {**common, "letter_id": "L6", "text": "Stop it.", "state": "accepted_running",
+                         "stop": "requested"}),
+        letter_row(906, {**common, "letter_id": "L7", "text": "It failed.", "state": "failed",
+                         "error": "reason word " * 700, "error_chars": 8400}),
+    ])
+    base["letter_words"] = {"L3": "whole words " * 800}
+    return base
 
 
 def corpus_bytes():

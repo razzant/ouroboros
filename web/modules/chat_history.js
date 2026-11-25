@@ -103,6 +103,7 @@ export function createChatHistoryPager({
     readNewest = async () => false,
     canArrive = () => false,  // a hydrated, healthy window that needs no rebuild
     arrivalGate = () => '',  // the gate `canArrive` closed, by name: it labels the newest read sent instead
+    rebaseOlderEdge = () => false,  // a horizon gap under the window may need the present before going older
     newestInFlight = () => null,
     isPageProtected = () => false,
     onState = () => {},
@@ -478,11 +479,10 @@ export function createChatHistoryPager({
         // pages still loading yield to it (`toPresent`), a read of the present already out is shared, and once the
         // reader has moved on its answer is dropped before it lands.
         latest: (stillWanted = null, tags = null) => request('latest', 0, null, true, { stillWanted, tags }),
-        // `older` or `newer` until a page brings rows or the chain ends: an empty page crosses the server's read ceiling.
-        // `rebase(state)` true first reads the present (a horizon gap below the window); `current` guards each request.
-        async edge(direction, { current = () => true, tags = null, rebase = () => false } = {}) {
-            const state = getState();
-            if (current() && rebase(state)) {
+        // Load more reads older, ↓ the present (owner 2026-09-14, 10-05), past empty pages that cross the server's read ceiling.
+        // Growth re-anchors unless the reader is walking the older chain. `current` guards each request.
+        async edge(direction, { current = () => true, tags = null } = {}) {
+            if (direction === 'older' && current() && rebaseOlderEdge(getState())) {
                 const rebased = await pager.latest(null, { ...tags, decision: 'horizon_gap' });
                 if (destroyed || rebased.status !== 'applied') return rebased;
             }

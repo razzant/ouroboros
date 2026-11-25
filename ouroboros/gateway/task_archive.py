@@ -394,6 +394,31 @@ def serve_wrap_up_document(drive_root: Any, task_id: str, name: str, request_id:
     return DescriptorResponse(spool, name, observed, media_type="text/markdown")
 
 
+def serve_letter_words(drive_root: Any, task_id: str, name: str, letter_id: str, *,
+                       other_selectors: bool) -> Response:
+    """``GET /api/tasks/{task_id}/artifacts/{letter_id}.{part}.txt?letter={letter_id}``: the whole words of one part
+    of a letter this task wrote to a linked Ouroboros, ``part`` ``letter`` or ``answer``, written on read from this
+    side's own records (``place_projection.letter_words``) like Wrap up's document: nothing is stored, no other
+    installation is read, ``no-store``; the bytes' digest rides ``x-ouroboros-artifact-sha256``. Typed refusals: 400
+    ``letter_words_invalid`` (another name or selector), 404 ``letter_not_found``, 409 ``reply_not_given`` (none, held or
+    unknown: never served) or ``answer_not_retained``, 503 ``letter_words_unavailable``."""
+    from ouroboros.gateway.peer_contracts import LETTER_ID_PATTERN
+    from ouroboros.place_projection import LetterWordsRefused, letter_words
+
+    refusal = {"reason_code": "letter_words_invalid", "task_id": task_id, "artifact": name}
+    part = name[len(letter_id) + 1:-len(".txt")] if name.startswith(f"{letter_id}.") and name.endswith(".txt") else ""
+    if other_selectors or not LETTER_ID_PATTERN.fullmatch(letter_id) or part not in ("letter", "answer"):
+        return json_error("letter names {letter_id}.letter.txt or {letter_id}.answer.txt and takes no other selector",
+                          400, **refusal)
+    try:
+        words = letter_words(drive_root, task_id, letter_id, part).encode("utf-8")
+    except LetterWordsRefused as exc:
+        return json_error(str(exc), exc.status, **{**refusal, "reason_code": exc.code})
+    return Response(words, media_type="text/plain; charset=utf-8", headers={
+        "Content-Disposition": _disposition("inline", name), "Cache-Control": "no-store",
+        "x-ouroboros-artifact-sha256": hashlib.sha256(words).hexdigest()})
+
+
 def chat_media_identity(name: str) -> Dict[str, Any]:
     """The capture identity a content-addressed chat-media name promises."""
     match = _CHAT_MEDIA_DIGEST_RE.fullmatch(str(name or ""))

@@ -184,10 +184,12 @@ _DERIVED = ("\nHost fact: this letter's cost_ceiling_usd ({ceiling}) was not you
             "explicit cost_ceiling_usd you can keep below that is another operation, read once.")
 
 
-def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: Dict[str, Any],
+def _post(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: Dict[str, Any],
           letter: Dict[str, Any], place: str, *, retry: bool = False,
-          record: Optional[Dict[str, Any]] = None, keep: Optional[tuple] = None) -> Any:
-    """POST one recorded letter through its record's engine under Pause/Stop exclusion and settle the outcome.
+          record: Optional[Dict[str, Any]] = None, keep: Optional[tuple] = None) -> tuple:
+    """POST one recorded letter through its record's engine under Pause/Stop exclusion and settle the outcome:
+    ``(result, note, sent)``: the result as decided here, never annotated; the note a Safety reading let it go with
+    (``""`` otherwise), which ``_send`` composes onto it; and the typed fact of that outcome for its card (``_out``).
 
     The letter meets its one Safety reading (``safety.check_peer_assignment``; the registry left the raw call unread)
     right before its POST, as the exact dict that is sent: a first send once its intention row landed, a retry only
@@ -196,8 +198,7 @@ def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
     first send keeps the exact ceiling it was read with for the identical request (``keep``: ``_kept_ceilings``, its
     request, whether this tree's budget rather than the mind chose that ceiling). This tree's money is read once more
     after the reading, before the handoff: a ceiling that no longer fits does not go (``sender_budget_lowered``) and
-    stays kept; a reading that lets it go and still fits drops it. The note a reading lets it through with trails the
-    result, as the registry's would. On ``retry=True``: first
+    stays kept; a reading that lets it go and still fits drops it. On ``retry=True``: first
     performs a non-creating lookup (``GET /api/letters/{id}`` via ``delegate_accepted``), which reads and sends
     nothing more, so an already-accepted letter binds cleanly even when the receiver paused the link or Resume
     marked the invocation lookup-only; and NO refusal on a retry is ever marked ``definitely_unrun`` /
@@ -210,7 +211,7 @@ def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
     from ouroboros.gateways.peer import NOTHING_SENT, UNCONFIRMED
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     from ouroboros.safety import check_peer_assignment
-    from ouroboros.tools.tool_result import ToolResult, _compose_execute_result_result, safety_refusal
+    from ouroboros.tools.tool_result import ToolResult, safety_refusal
 
     invocation_id = str(letter["letter_id"])
     shape = {"access": "readonly", "delegated": True}
@@ -228,23 +229,29 @@ def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
         })
         return bool(closed)
 
-    def _pre_post_refusal(code: str, detail: str, **facts: Any) -> Any:
-        if retry:
-            return _fail(TOOL_NAME, code, f"{detail}; the recorded letter's acceptance stays unknown and "
-                         "retry_of may check or send it again once allowed", place_id=place,
-                         retry_of=invocation_id, pending_invocation_id=invocation_id,
-                         host_code=SUBSTRATE_REFUSAL_CODE, **facts)
-        closed = _close_unsent(code, detail)
-        return _fail(TOOL_NAME, code, detail, place_id=place, host_code=SUBSTRATE_REFUSAL_CODE,
-                     pending_invocation_id=invocation_id, **({"definitely_unrun": True} if closed else {}), **facts)
+    def _out(result: Any, sent: str, code: Any = "", **seen: Any) -> tuple:
+        """One outcome of this attempt as decided here: its result, no note, and the typed fact its letter's card
+        reads (``place_projection.card_of_send``: ``sent`` started, unknown, refused or no, with its code)."""
+        return result, "", {"sent": sent, "code": str(code or ""), **seen}
 
-    def _refused(exc: Any) -> Any:
+    def _pre_post_refusal(code: str, detail: str, **facts: Any) -> tuple:
+        if retry:
+            return _out(_fail(TOOL_NAME, code, f"{detail}; the recorded letter's acceptance stays unknown and "
+                              "retry_of may check or send it again once allowed", place_id=place,
+                              retry_of=invocation_id, pending_invocation_id=invocation_id,
+                              host_code=SUBSTRATE_REFUSAL_CODE, **facts), "unknown", code)
+        closed = _close_unsent(code, detail)
+        return _out(_fail(TOOL_NAME, code, detail, place_id=place, host_code=SUBSTRATE_REFUSAL_CODE,
+                          pending_invocation_id=invocation_id, **({"definitely_unrun": True} if closed else {}),
+                          **facts), "no", code)
+
+    def _refused(exc: Any) -> tuple:
         """A POST that raised: nothing left, acceptance unknown, or the receiver's typed refusal."""
         if not entered_post or exc.code in NOTHING_SENT:
             return _pre_post_refusal(exc.code, str(exc))
         refusal = str(getattr(exc, "refusal_code", "") or "")
         if exc.code == UNCONFIRMED or not refusal:
-            return _unconfirmed_result(place, invocation_id, str(exc))
+            return _out(_unconfirmed_result(place, invocation_id, str(exc)), "unknown")
         if retry:
             # A retry refusal (e.g. link_paused after a lost first reply) never proves the first POST unrun.
             if int(getattr(exc, "status_code", 0) or 0):
@@ -253,34 +260,36 @@ def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
                     durable = read.get("reason") != "start_state_not_recorded"
                     if not durable:
                         custody.record_started(drive, entry, shape, publish=False)
-                    return _started_result(held.run_id, place, engine_ref["link_id"], letter,
-                                           durable=durable, state=read.get("state") or "running",
-                                           replayed=True, recovered_via_lookup=True)
+                    state = read.get("state") or "running"
+                    return _out(_started_result(held.run_id, place, engine_ref["link_id"], letter, durable=durable,
+                                                state=state, replayed=True, recovered_via_lookup=True),
+                                "started", state=state)
             custody.emit(drive, custody.START_FAILED, {
                 "run_id": "", "task_id": task_id, "invocation_id": invocation_id,
                 "reason": refusal, "detail": str(exc)[:500], "definite": False,
             })
-            return _fail(TOOL_NAME, exc.code, f"{exc}; the earlier send's acceptance stays unknown and "
-                         "is not marked definitely_unrun", place_id=place, refusal_code=refusal,
-                         retry_of=invocation_id, pending_invocation_id=invocation_id)
+            return _out(_fail(TOOL_NAME, exc.code, f"{exc}; the earlier send's acceptance stays unknown and "
+                              "is not marked definitely_unrun", place_id=place, refusal_code=refusal,
+                              retry_of=invocation_id, pending_invocation_id=invocation_id), "unknown", refusal)
         definite = refusal != "letter_id_reused"
         custody.emit(drive, custody.START_FAILED, {
             "run_id": "", "task_id": task_id, "invocation_id": invocation_id, "reason": refusal,
             "detail": str(exc)[:500], "definite": definite})
-        return _fail(TOOL_NAME, exc.code, str(exc), place_id=place, refusal_code=refusal,
-                     pending_invocation_id=invocation_id, **({"definitely_unrun": True} if definite else {}))
+        return _out(_fail(TOOL_NAME, exc.code, str(exc), place_id=place, refusal_code=refusal,
+                          pending_invocation_id=invocation_id, **({"definitely_unrun": True} if definite else {})),
+                    "refused" if definite else "unknown", refusal)
 
     try:
         gateway = bound_gateway(engine_ref)
     except ClaudexorUnavailable as exc:
         if retry:
-            return _fail(TOOL_NAME, exc.code, f"{exc}; the recorded letter's acceptance stays unknown and "
-                         "retry_of may check or send it again once the link is usable", place_id=place,
-                         retry_of=invocation_id, pending_invocation_id=invocation_id,
-                         host_code=SUBSTRATE_REFUSAL_CODE)
+            return _out(_fail(TOOL_NAME, exc.code, f"{exc}; the recorded letter's acceptance stays unknown and "
+                              "retry_of may check or send it again once the link is usable", place_id=place,
+                              retry_of=invocation_id, pending_invocation_id=invocation_id,
+                              host_code=SUBSTRATE_REFUSAL_CODE), "unknown", exc.code)
         return _pre_post_refusal(exc.code, str(exc))
 
-    entered_post, handle, result, note = False, None, None, ""
+    entered_post, handle, settled, note = False, None, None, ""
     try:
         if retry and record is not None:
             held, looked = delegate_accepted.recover(drive, gateway, {**record, "invocation_id": invocation_id})
@@ -288,26 +297,29 @@ def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
                 durable = looked.get("reason") != "start_state_not_recorded"
                 if not durable:
                     custody.record_started(drive, entry, shape, publish=False)
-                return _started_result(held.run_id, place, engine_ref["link_id"], letter,
-                                       durable=durable, state=looked.get("state") or "running",
-                                       replayed=True, recovered_via_lookup=True)
+                state = looked.get("state") or "running"
+                return _out(_started_result(held.run_id, place, engine_ref["link_id"], letter, durable=durable,
+                                            state=state, replayed=True, recovered_via_lookup=True),
+                            "started", state=state)
             lookup_outcome = str(looked.get("lookup") or "")
             if lookup_outcome == "found":
                 # Accepted on receiver, but local STARTED publication failed: never re-POST.
                 custody.record_started(drive, entry, shape, publish=False)
-                return _started_result(invocation_id, place, engine_ref["link_id"], letter,
-                                       durable=False, replayed=True, recovered_via_lookup=True)
+                return _out(_started_result(invocation_id, place, engine_ref["link_id"], letter,
+                                            durable=False, replayed=True, recovered_via_lookup=True), "started")
             if lookup_outcome == "unavailable":
-                return _unconfirmed_result(place, invocation_id, str(looked.get("lookup_detail") or "lookup unavailable"))
+                unread = str(looked.get("lookup_detail") or "lookup unavailable")
+                return _out(_unconfirmed_result(place, invocation_id, unread), "unknown")
             if lookup_outcome == "refused":
                 refusal = str(looked.get("refusal_code") or "peer_lookup_refused")
                 custody.emit(drive, custody.START_FAILED, {
                     "run_id": "", "task_id": task_id, "invocation_id": invocation_id,
                     "reason": refusal, "detail": str(looked.get("lookup_detail") or "")[:500], "definite": False,
                 })
-                return _fail(TOOL_NAME, refusal, str(looked.get("lookup_detail") or refusal),
-                             place_id=place, refusal_code=refusal, retry_of=invocation_id,
-                             pending_invocation_id=invocation_id, host_code=SUBSTRATE_REFUSAL_CODE)
+                return _out(_fail(TOOL_NAME, refusal, str(looked.get("lookup_detail") or refusal),
+                                  place_id=place, refusal_code=refusal, retry_of=invocation_id,
+                                  pending_invocation_id=invocation_id, host_code=SUBSTRATE_REFUSAL_CODE),
+                            "unknown", refusal)
             refused = _retry_refusal(ctx, drive, place, letter)
             if refused is not None:
                 return _pre_post_refusal(*refused)
@@ -327,7 +339,7 @@ def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
                 _close_unsent(code.lower(), note)
             if keep is not None and keep[2]:
                 note += _DERIVED.format(ceiling=_usd(float(letter["cost_ceiling_usd"])))
-            return ToolResult(status, code, text=note)
+            return _out(ToolResult(status, code, text=note), "unknown" if retry else "no", code.lower())
         if lowered is not None:
             return _pre_post_refusal("sender_budget_lowered", _lowered(*lowered), read_ceiling_usd=lowered[0],
                                      remaining_known_usd=lowered[1])
@@ -342,11 +354,11 @@ def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
                 ctx, delegate_resume.checked_start(drive, task_id, invocation_id, submit)
             )
         except delegate_resume.StartHeld as exc:
-            result = _pre_post_refusal(exc.reason, str(exc))
+            settled = _pre_post_refusal(exc.reason, str(exc))
         except (owner_pause.OwnerPauseRefused, PhysicalDispatchInterrupted) as exc:
-            result = _pre_post_refusal(getattr(exc, "code", "") or str(exc) or "owner_paused", str(exc))
+            settled = _pre_post_refusal(getattr(exc, "code", "") or str(exc) or "owner_paused", str(exc))
         except ClaudexorUnavailable as exc:
-            result = _refused(exc)
+            settled = _refused(exc)
     finally:
         gateway.close()
 
@@ -354,11 +366,26 @@ def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
         # The letter's work runs under the receiver's own authority; here it may change nothing of this workspace.
         bound = custody.bind_started(drive, entry, shape=shape, observed_state=str(handle.get("state") or ""))
         run_id = bound.custody.run_id if bound.custody is not None else invocation_id
-        result = _started_result(
+        settled = _out(_started_result(
             run_id, place, engine_ref["link_id"], letter,
             durable=bool(bound.durable), state=handle.get("state"), phase=handle.get("phase"),
             replayed=bool(retry or bound.adopted),
-        )
+        ), "started", state=handle.get("state"), phase=handle.get("phase"))
+    return settled[0], note, settled[2]
+
+
+def _send(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: Dict[str, Any],
+          letter: Dict[str, Any], place: str, *, retry: bool = False,
+          record: Optional[Dict[str, Any]] = None, keep: Optional[tuple] = None) -> Any:
+    """``_post`` the recorded letter. The typed fact of its outcome as ``_post`` decided it is also the letter's card in
+    its work's room (``place_projection.card_of_send``), a view that never changes the outcome; the note a Safety
+    reading let it go with then trails the result, as the registry's would."""
+    from ouroboros.place_projection import card_of_send
+    from ouroboros.tools.tool_result import _compose_execute_result_result
+
+    result, note, sent = _post(ctx, drive, task_id, ids, engine_ref, letter, place, retry=retry, record=record,
+                               keep=keep)
+    card_of_send(ctx, sent, letter=letter, place_id=place)
     return _compose_execute_result_result(TOOL_NAME, result, "", note) if note else result
 
 

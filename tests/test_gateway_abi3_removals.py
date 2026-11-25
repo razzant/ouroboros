@@ -210,6 +210,9 @@ class TestAliasProducerFanOutSweep:
         ("ouroboros/tools/review_skill.py", "cost_usd", "legacy_actor_records"): ("skill review record rows rendered in the legacy actor shape", 1),
         ("ouroboros/skill_owner_attestation.py", "cost_usd", "run_owner_attestation"): ("owner attestation review receipt", 1),
         ("ouroboros/tools/delegate_terminal_evidence.py", "cost_usd", "_reported_cost"): ("delegate terminal evidence rows", 4),
+        # The peer variant of the same evidence row: what the letter cost the RECEIVING Ouroboros,
+        # which booked it; this side's ledger and caps stay untouched, so it is never a gateway projection.
+        ("ouroboros/tools/delegate_terminal_evidence.py", "cost_usd", "_reported_peer_cost"): ("delegate terminal evidence rows for a peer letter's cost booked by the receiving Ouroboros", 3),
         ("ouroboros/tools/review_admission.py", "cost_usd", "triad_not_dispatched_records"): ("review admission receipt", 1),
         ("ouroboros/tools/review_change.py", "cost_usd", "run_system_review"): ("system review seat receipt, the ledger's triad_raw input; the record stores usd", 1),
         ("ouroboros/reviewer_slot_config.py", "cost_usd", "review_cost_facts"): ("reviewer seat cost receipt (the triad record's cost_usd + cost_kind pair) on ledger, plan, skill-review and slot-execution seats; /api/review-pool converts it at its boundary to the review card's cost {kind, usd} (public_slot_executions), while plan-record ask participants (GET /api/tasks, /api/tasks/{id}) and the skill-review response's raw_actor_records pass it through as nested review receipts (outcomes.py pass-through)", 1),
@@ -218,7 +221,7 @@ class TestAliasProducerFanOutSweep:
         ("ouroboros/evolution_checkpoints.py", "cost_usd", "build_solve_capability_digest"): ("evolution capability digest", 1),
         ("ouroboros/evolution_checkpoints.py", "cost_usd", "append_evolution_checkpoint"): ("evolution checkpoint records", 1),
         # custody settlement events
-        ("ouroboros/delegate_collection.py", "cost_usd", "record_terminal_money"): ("custody SETTLED event row", 1),
+        ("ouroboros/delegate_collection.py", "cost_usd", "record_terminal_money"): ("custody SETTLED event row; the peer-billed row stamps cost_usd=None (booked by the receiving Ouroboros, never zero)", 2),
         ("ouroboros/delegate_custody_usage.py", "cost_usd", "disclosed_cost"): ("one delegated run's disclosed cash facts, read field by field by the ledger session writer, custody collection, review session usage and the delegate terminal evidence row; never a gateway cost projection", 1),
         ("ouroboros/owner_stop_receipt.py", "cost_usd", "retained_run_facts"): ("frozen per-run custody accounting receipt (disclosed spend + finality), passed through as evidence; not the task's ledger upper bound", 1),
     }

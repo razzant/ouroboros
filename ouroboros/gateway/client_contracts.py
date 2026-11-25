@@ -620,6 +620,14 @@ class PlaceSummary(TypedDict):
     peer_effective: NotRequired[Dict[str, Any]]
     peer_facts: NotRequired[str]
     link: NotRequired[Optional[Dict[str, Any]]]
+    # The owner's GET /api/places only (places_view owner_reading): this link's work whose record changed last among
+    # those its letters started here, from its acceptance record ({task_id, title, status, from: the link's recorded
+    # label, room_chat_id: the room it lives in}); null when none was accepted, {unknown: true} when the task store
+    # cannot be read now. No other reader of the place views gets the field.
+    peer_work: NotRequired[Optional[Dict[str, Any]]]
+    # Likewise only there: while its arrival index lists no room, the room this side wrote to it in ({room_chat_id,
+    # wrote_at: its newest receipt there}); null when none, {unknown: true} when history cannot be read now.
+    peer_room: NotRequired[Optional[Dict[str, Any]]]
 
 
 class PlaceDisconnectRequest(TypedDict, total=False):

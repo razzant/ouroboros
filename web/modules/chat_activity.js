@@ -63,6 +63,7 @@ export function senderLabel(role, isProgress = false, systemType = '', opts = {}
         return 'System';
     }
     if (isProgress) return 'Thought';
+    if (systemType === 'peer_letter' && opts.senderLabel) return opts.senderLabel;
     // A self-initiated turn (a consciousness wake-up) signs its final bubble
     // through the same sender line the user bubble uses for its source.
     if (opts.initiator === 'consciousness') return 'Ouroboros · Consciousness';
@@ -1096,6 +1097,7 @@ export function buildMessageKey(role, text, timestamp, opts = {}) {
             'task',
             role,
             opts.systemType || '',
+            ...(opts.letterPartKey ? [opts.letterPartKey] : []),
             opts.source || '',
             opts.taskId,
             text,

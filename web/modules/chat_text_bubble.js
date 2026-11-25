@@ -108,7 +108,7 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         if (!isProgress && shown) {
             chatMedia.attachCopyControl(bubble, String(shown));
             // What Share passes on: Ouroboros's own message, Copy's exact words (a note between works is not one).
-            if (role === 'assistant' && systemType !== 'relay_entry' && opts.textPlaceholder !== true) {
+            if (role === 'assistant' && systemType !== 'relay_entry' && !String(systemType).startsWith('peer_letter') && opts.textPlaceholder !== true) {
                 recordAnswerWords(bubble, String(shown), (close) => chatMedia.holdTransient(bubble, close));
             }
         }

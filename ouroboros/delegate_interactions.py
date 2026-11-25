@@ -925,9 +925,11 @@ def _delegate_answer(
             # promptly (a re-ask, or the remaining questions of the same set,
             # are news again) instead of holding a full window over them.
             _REPORTED_INTERACTIONS.pop(rid, None)
-        if peer_run and status == "delivered" and body.get("msg_id"):
+        if peer_run and status == "delivered" and body.get("msg_id"):  # confirmed: also the letter's card
             from ouroboros.delegate_message_store import confirm_peer_answer_pin
+            from ouroboros.place_projection import observe_letter_answer
             confirm_peer_answer_pin(ctx, entry, iid, str(body.get("letter_id") or ""), str(body["msg_id"]))
+            observe_letter_answer(ctx, entry, iid, wire)
         _emit(ctx, "delegate_interaction_answered", {
             "run_id": rid, "interaction_id": iid, "status": status,
             "questions_answered": len(wire),

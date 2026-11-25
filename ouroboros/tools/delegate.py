@@ -1119,7 +1119,8 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
         return retry_terminal_result(ctx, rid, gateway=gateway).text
     if entry is None:
         return _fail("delegate_wait", "run_ownership_unknown", "custody unresolved", run_id=rid).text
-    retained = retained_terminal_result(ctx, rid, retry_money=True)
+    retained = retained_terminal_result(ctx, rid, retry_money=True)  # a letter's retained end is its card there
+    from ouroboros.place_projection import observe_letter_run as card  # a letter's read is also its card (no-op otherwise)
     if retained is not None:
         return json.dumps(retained, ensure_ascii=False, indent=2)
     started = time.monotonic()
@@ -1140,6 +1141,7 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
         detail = progress.bounded_poll(gateway, rid, bound())
         summary = custody.summary_of(detail)
         state = str(summary.get("state") or "")
+        card(ctx, entry, detail=detail)
         if getattr(entry, "resume_start_state", None) is not None:
             from ouroboros.delegate_resume import observe_bound_state, recovered_cancel_detail
             # A recovered start's first state is kept only from an answer proved to be its run in
@@ -1247,6 +1249,8 @@ def _delegate_cancel(ctx: ToolContext, run_id: str, reason: str = "") -> ToolRes
         result = custody.cancel_and_verify(custody.custody_root(ctx), gateway, entry, reason)
     finally:
         gateway.close()
+    from ouroboros.place_projection import observe_letter_stop  # a letter's Stop is also its card (no-op otherwise)
+    observe_letter_stop(ctx, entry, result)
     outcome = str(result["outcome"])
     payload = {
         "status": outcome,

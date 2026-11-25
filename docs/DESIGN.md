@@ -2155,7 +2155,8 @@ the ledges are hidden from assistive technology, and a column fanned at the bott
 room that does not fit scrolls its first card under the header, folding returning to the
 front card (a reader who was following the newest message keeps following it). On 25 Oct 2026 the owner chose «Стопка как принято», rejecting the 24 Oct upward edges that had replaced the 22 Oct deck.
 Telegram receives only a relay that passes his words, as plain text. Main keeps
-its one receipt line. The row menu (right-click, Shift+F10, ContextMenu on the focused
+its one receipt line. A letter to the owner's other Ouroboros stays in its work's room: one state line, unstacked notes
+for its question, the answer and only a reply addressed to it. The row menu (right-click, Shift+F10, ContextMenu on the focused
 row, long press on touch) offers Reply, Copy, Open project and a work card's
 Resume, Pause and Stop… exactly when the card does. Esc/outside press closes it
 and returns focus. Links, selected words and fields keep their native content menu;
@@ -2264,7 +2265,8 @@ labels, notes) stay as written.
 ### Dashboard › Consciousness
 
 The switch is one (owner 15.11, 5A): its name stays Consciousness, glossed “When Ouroboros acts”, and its positions
-are named by meaning, “Only when you write to it” off and “Also on its own and in places” on (“Also on its own” on an
+are named by meaning, “Only when you write to it” off (“… or your Ouroboroses ask for work” while one may)
+and “Also on its own and in places” on (“Also on its own” on an
 install with no place). The headline card says the gloss over the position, the host's state line beneath it, and the
 switch as “Turn off” / “Turn on”. Every turn in the app (this card, the chip's Shade, Activity's row) is one part
 (`consciousness_switch.js`): before turning either way (the owner chose both, 17.11), when the install has places, a
@@ -2321,7 +2323,14 @@ position until closure. Host words use `tr`/`fmt`; summaries, notes and names us
 #### Circles and Add
 
 Circles (first tool) is the one home of places; Dashboard, Settings and a connector's Skills sheet
-point to it. One card: circles in the owner's order, one open, then “Not in a circle” (open while
+point to it. Your Ouroboroses heads it: rows oldest first; its conversation opens in the place sheet's
+reader, where it wrote while nothing has arrived. Each side asks who can log in to the other Ouroboros’s computer:
+Only me permits its work requests here, Other people too permits messages only. The sheet names both directions;
+the other side’s choice at introduction is not live permission. Its suggested rule is Ouroboros’s until edited;
+the later switch changes work requests without gating messages. A linked Ouroboros also appears in its assigned
+circle; the rule edit keeps the draft and shows the saved rule if it changed elsewhere. Open work opens the room the
+latest accepted work’s record names. Then one
+card: circles in the owner's order, one open, then “Not in a circle” (open while
 no circle exists). An open circle shows its words whole in their author's voice (owner tint for
 the owner's only), Edit (name, words, model, Delete), Add a place and its rows; Delete names how many
 places keep their connection and lose its words. No feed, summary or wake list: Main holds attention.
