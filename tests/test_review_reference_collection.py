@@ -408,11 +408,13 @@ def test_a_recorded_continue_successor_reads_and_decides_on_its_predecessors_rev
     reference = json.loads(out["result"].split("\n", 1)[1])["review_reference"]
     successor = f"{relation}-task"
     write_task_result(a.data, TASK, "completed", chat_id=7)
-    write_task_result(a.data, successor, "running", chat_id=7,
-                      **({"root_task_id": TASK, "parent_task_id": TASK} if relation == "sibling" else {}))
+    # A sibling has the root, the parent and the successor's own backward hint to the author, but no forward claim.
+    kin = {"root_task_id": TASK, "parent_task_id": TASK, "metadata": {"continuation": {"predecessor_task_id": TASK}}}
+    write_task_result(a.data, successor, "running", chat_id=7, **(kin if relation == "sibling" else {}))
     if relation == "continued":
         _record_continue(a, TASK, successor)
     a.ctx.task_id, rounds, head = successor, list(a.reviewer.rounds), _git(a.repo, "rev-parse", "HEAD")
+    index = _git(a.repo, "write-tree")
     with _successor_scope(a, successor):
         read = a.git._commit_reviewed(a.ctx, review_reference=reference)
     if relation != "continued":
@@ -426,7 +428,7 @@ def test_a_recorded_continue_successor_reads_and_decides_on_its_predecessors_rev
     assert a.reviewer.rounds == rounds, "no reviewer was sent for either call"
     if relation != "continued":
         assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in decided and "another task" in decided, decided
-        assert _git(a.repo, "rev-parse", "HEAD") == head
+        assert (_git(a.repo, "rev-parse", "HEAD"), _git(a.repo, "write-tree")) == (head, index)
         return
     assert _git(a.repo, "rev-parse", "HEAD") != head, decided
     assert _git(a.repo, "show", "HEAD:change.py") == "value = 2"
@@ -450,7 +452,7 @@ def _other_tasks_paid_rows(a, count):
         update_state(a.data, lambda state, row=row: state.record_attempt(row))
 
 
-@pytest.mark.parametrize("actor", ["own", "successor"])
+@pytest.mark.parametrize("actor", ["own", "successor", "separate_successor"])
 def test_an_evicted_free_replay_of_a_paid_outcome_keeps_its_reference_for_the_authors_decision(author, actor):  # noqa: F811
     """#2830 (Astra, 9 Nov): the unchanged commit call collects the settled paid wave at $0 under its own free row and
     returns THAT row's reference. Once the bounded hot history evicts the free row, the explicit Advisory decision on
@@ -478,12 +480,16 @@ def test_an_evicted_free_replay_of_a_paid_outcome_keeps_its_reference_for_the_au
     _other_tasks_paid_rows(a, 55)
     assert not [row for row in load_state(a.data).attempts if row.task_id == TASK and row.attempt == reference["attempt"]]
     deciding = TASK
-    if actor == "successor":
+    if actor != "own":
         deciding = "successor-task"
         write_task_result(a.data, TASK, "completed", chat_id=7)
         write_task_result(a.data, deciding, "running", chat_id=7)
         _record_continue(a, TASK, deciding)
         a.ctx.task_id = deciding
+        if actor == "separate_successor":
+            a.ctx.budget_drive_root = a.data
+            a.ctx.drive_root = a.data / "state/headless_tasks/successor-task/data"
+            a.ctx.drive_root.mkdir(parents=True)
     (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")  # the author's later correction
     head = _git(a.repo, "rev-parse", "HEAD")
     decision = {"disposition": "partial", "rationale": "I read the replayed outcome and land my later correction."}
@@ -494,7 +500,7 @@ def test_an_evicted_free_replay_of_a_paid_outcome_keeps_its_reference_for_the_au
     assert _git(a.repo, "show", "HEAD:change.py") == "value = 3"
     assert sorted(a.reviewer.rounds) == rounds, "the decision sent nothing"
     rows = load_state(a.data).attempts
-    [own] = [row for row in rows if row.task_id == deciding and row.status == "succeeded"]
+    [own] = [row for row in load_state(a.ctx.drive_root).attempts if row.task_id == deciding and row.status == "succeeded"]
     assert own.author_disposition.get("review_reference") == reference, own.author_disposition
     assert own.author_disposition["disposition"] == "partial" and own.author_disposition["subject_hash"]
     assert (own.task_id, own.attempt) != (reference["task_id"], reference["attempt"]), "the reference's identity is its own"
@@ -575,12 +581,12 @@ def _held_state_lock(monkeypatch, custody):
 
     real_settle, guard, held = custody.settle_collected_attempt, threading.Lock(), {"fd": None, "open": True}
 
-    def contended(root, attempt, seats, record):
+    def contended(root, attempt, seats, record, **kwargs):
         with guard:
             if held["open"] and held["fd"] is None:
                 held.update(root=root, fd=acquire_review_state_lock(root))
                 assert held["fd"] is not None
-        return real_settle(root, attempt, seats, record)
+        return real_settle(root, attempt, seats, record, **kwargs)
 
     def release():
         with guard:
@@ -705,3 +711,554 @@ def test_a_busy_review_state_before_settlement_is_a_typed_recoverable_refusal(au
     assert published is not sentinel and published.text == text, published
     assert (published.status, published.code) == ("unavailable", "LEGACY_UNAVAILABLE"), published
     assert "paid attempt" not in text and "may already have been sent" in text and "new key" in text
+
+
+def _setup_pooled_continue(tmp_path):
+    """A pooled predecessor with an empty task_drives/<pred>/task_scripts folder, a verified Continue, and a forked successor."""
+    from ouroboros.owner_continue import binding_sha
+    from ouroboros.review_state import make_repo_key
+    from ouroboros.task_store import patch_document
+    from tests._git_review_pipeline_shared import _make_ctx
+
+    pred, succ = "synthetic-pooled-pred", "synthetic-fork-succ"
+    ctx = _make_ctx(tmp_path)
+    canonical = tmp_path / "canonical"
+    scripts_drive = canonical / "task_drives" / pred
+    fork = canonical / "state" / "headless_tasks" / succ / "data"
+    for path in (canonical, scripts_drive / "task_scripts", fork):
+        path.mkdir(parents=True, exist_ok=True)
+    write_task_result(canonical, pred, "completed", chat_id=7)
+    write_task_result(canonical, succ, "running", chat_id=7)
+    binding = {"successor_task_id": succ}
+    patch_document(canonical, pred, lambda row: {**row, "continued_by": {
+        "successor_task_id": succ, "binding": binding, "binding_sha256": binding_sha(binding), "state": "admitted"}})
+    patch_document(canonical, succ, lambda row: {**row, "metadata": {**(row.get("metadata") or {}),
+                                                                      "continuation": {"predecessor_task_id": pred}}})
+    ctx.task_id, ctx.budget_drive_root, ctx.drive_root = succ, canonical, fork
+    return ctx, canonical, scripts_drive, fork, make_repo_key(ctx.repo_dir), pred, succ
+
+
+def test_locate_commit_source_prefers_genuine_row_on_later_drive_over_not_dispatched_recovery(tmp_path):
+    """Pooled predecessor has task_drives/<pred>/task_scripts while its genuine NOT_DISPATCHED attempt row lives on
+    canonical: Pass 1 checks every admitted drive before cold recovery, so the original row (and its commit_message)
+    wins; only once evicted from every admitted drive does cold NOT_DISPATCHED recovery stand."""
+    from ouroboros.review_ledger import VERDICT_NOT_DISPATCHED, write_record
+    from ouroboros.review_state import CommitAttemptRecord, update_state
+    from ouroboros.tools.commit_gate import resolve_commit_review_reference
+    from ouroboros.tools.review_collection import locate_commit_source
+
+    ctx, canonical, scripts_drive, _fork, key, pred, _succ = _setup_pooled_continue(tmp_path)
+    record_id, fp = "rl-nd-pooled", "fp-nd-pooled"
+    write_record(canonical, {
+        "record_id": record_id, "surface": "commit_gate", "state": "settled", "task_id": pred, "root_task_id": pred,
+        "ts": "2026-11-20T10:00:00+00:00", "subject": {"root": str(ctx.repo_dir)},
+        "fingerprints": {"binding": fp}, "verdict": {"aggregate": VERDICT_NOT_DISPATCHED},
+        "dispatch_refusal": {"kind": "review_cycles_exhausted"}, "rows": [],
+    })
+    genuine = CommitAttemptRecord(
+        ts="2026-11-20T10:00:00+00:00", commit_message="Original pooled commit message", status="reviewed",
+        phase="review_only", block_reason="review_cycles_exhausted", repo_key=key, tool_name="commit_reviewed",
+        task_id=pred, root_task_id=pred, attempt=1, paid=False, pre_review_fingerprint=fp, review_record_id=record_id,
+    )
+    update_state(canonical, lambda state: state.record_attempt(genuine))
+    ref = {"surface": "commit", "repo_key": key, "task_id": pred, "tool_name": "commit_reviewed",
+           "attempt": 1, "pre_review_fingerprint": fp, "review_record_id": record_id}
+
+    root, found = locate_commit_source(ctx, ref, record_id=record_id, recover=True)
+    assert root == canonical and found.commit_message == "Original pooled commit message", (root, found)
+    resolved = resolve_commit_review_reference(ctx, ref)
+    assert resolved.commit_message == "Original pooled commit message" and ctx._author_commit_source_root == canonical
+
+    # Once evicted from canonical too, supported cold NOT_DISPATCHED recovery still works without touching scripts_drive.
+    update_state(canonical, lambda state: state.attempts.clear())
+    rec_root, recovered = locate_commit_source(ctx, ref, record_id=record_id, recover=True)
+    assert rec_root == canonical and recovered is not None
+    assert recovered.commit_message == "" and recovered.block_reason == "review_cycles_exhausted"
+    assert not (scripts_drive / "locks").exists()
+
+
+def test_locate_commit_source_recovers_evicted_free_replay_on_later_drive_without_forging_missing_paid(tmp_path):
+    """An evicted free replay of a paid wave recovers the genuine paid row from a later admitted drive without
+    re-reading disks; missing paid evidence stays unavailable even if a foreign fork or wrong-record same-number row exists."""
+    from ouroboros.review_ledger import write_record
+    from ouroboros.review_state import CommitAttemptRecord, update_state
+    from ouroboros.tools.commit_gate import resolve_commit_review_reference
+    from ouroboros.tools.review_collection import commit_attempt_roots, locate_commit_source
+
+    ctx, canonical, scripts_drive, fork, key, pred, _succ = _setup_pooled_continue(tmp_path)
+    record_id, fp = "rl-paid-pooled", "fp-paid-pooled"
+    write_record(canonical, {
+        "record_id": record_id, "surface": "commit_gate", "state": "settled", "task_id": pred, "root_task_id": pred,
+        "ts": "2026-11-20T10:00:00+00:00", "subject": {"root": str(ctx.repo_dir)},
+        "fingerprints": {"binding": fp}, "verdict": {"aggregate": "PASS"},
+        "rows": [{"seat_id": "first", "operation_id": "op-1", "status": "responded"}],
+    })
+    paid = CommitAttemptRecord(
+        ts="2026-11-20T10:00:00+00:00", commit_message="Original paid wave", status="reviewed", phase="review_only",
+        repo_key=key, tool_name="commit_reviewed", task_id=pred, root_task_id=pred, attempt=1, paid=True,
+        pre_review_fingerprint=fp, review_record_id=record_id,
+        triad_raw_results=[{"slot_id": "first", "operation_id": "op-1", "status": "ok"}],
+    )
+    update_state(canonical, lambda state: state.record_attempt(paid))
+    # Reference names evicted free replay attempt 2 of the same paid record.
+    ref = {"surface": "commit", "repo_key": key, "task_id": pred, "tool_name": "commit_reviewed",
+           "attempt": 2, "pre_review_fingerprint": fp, "review_record_id": record_id}
+
+    root, found = locate_commit_source(ctx, ref, record_id=record_id, recover=True)
+    assert root == canonical and found is not None and found.paid and found.attempt == 1 and found.commit_message == "Original paid wave"
+
+    # Remove paid row from canonical; plant a same-attempt wrong-record row on scripts_drive and a copy on the fork.
+    update_state(canonical, lambda state: state.attempts.clear())
+    update_state(scripts_drive, lambda state: state.record_attempt(CommitAttemptRecord(
+        ts="2026-11-20T11:00:00+00:00", commit_message="Wrong record same attempt", status="reviewed", phase="review_only",
+        repo_key=key, tool_name="commit_reviewed", task_id=pred, root_task_id=pred, attempt=2, paid=True,
+        pre_review_fingerprint=fp, review_record_id="rl-other",
+    )))
+    update_state(fork, lambda state: state.record_attempt(paid))
+    assert locate_commit_source(ctx, ref, record_id=record_id, recover=True) == (None, None)
+    with pytest.raises(ValueError, match="REVIEW_PREDECESSOR_SOURCE_UNAVAILABLE"):
+        resolve_commit_review_reference(ctx, ref)
+
+    # An unrelated task without a Continue claim gets no admitted roots.
+    ctx.task_id = "synthetic-stranger"
+    assert commit_attempt_roots(ctx, pred) == []
+    assert locate_commit_source(ctx, ref, record_id=record_id, recover=True) == (None, None)
+
+
+@pytest.mark.parametrize("initial_state", ["pending", "settled"])
+@pytest.mark.parametrize("caller", ["own_changed_index", "continue_successor"])
+def test_pending_additional_adviser_stays_live_for_readonly_collection_without_dispatch(tmp_path, monkeypatch, caller, initial_state):
+    """Trigger 1 (#2901): a mixed commit wave whose counted seats closed while an additional adviser is still open —
+    whether initially ``state=pending`` or ``state=settled`` — must keep read-only collection live through a synthetic
+    read-only gateway (no-op before terminal, zero dispatch), surface the adviser's late terminal answer on the same
+    reference, and preserve earlier counted answers, verdict/both questions, author decision and settled status."""
+    from dataclasses import asdict
+
+    from ouroboros import claudexor_daemon, delegate_custody, observability, review_ledger as rl, review_substrate
+    from ouroboros.review_dispatch import review_operation_binding
+    from ouroboros.review_records import ReviewRequest, ReviewRouteKind, ReviewSlot
+    from ouroboros.review_state import CommitAttemptRecord, load_state, update_state
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.review_collection import collect_commit_reference
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
+    from tests.test_review_ledger import BOTH, _facts, _plan, _raw
+    from tests.test_unwaited_review_settlement import FAIL_TEXT, TASK, _commit_world, _seat, _two_part_pass
+
+    world = _commit_world(tmp_path, monkeypatch, adviser=True)
+    # Give world.repo an initial commit so git diff/fingerprint reads cleanly on changed index.
+    (world.repo / "base.py").write_text("base = 1\n", encoding="utf-8")
+    _git(world.repo, "config", "user.email", "t@t")
+    _git(world.repo, "config", "user.name", "t")
+    _git(world.repo, "add", "base.py")
+    _git(world.repo, "commit", "-qm", "init")
+
+    if initial_state == "pending":
+        # Settle counted seats s1 & s2 onto a pending record while leaving additional adviser a1 open.
+        running_a1 = {**world.attempt.triad_raw_results[-1], "surface": "multi_model_review", "parts": ["change"]}
+        with monkeypatch.context() as mp:
+            mp.setattr(review_pause, "_left_seats", lambda _rec: (world.attempt, [_seat("s1"), _seat("s2"), running_a1], ""))
+            assert review_pause._settled_aggregate(world.left) == ""
+        a1_policy = {"parts": ["change"], "output_shape": "array", "additional": True}
+        terminal_text = FAIL_TEXT
+    else:
+        # Initial dispatch where counted seats s1 & s2 already closed and additional adviser a1 is still running:
+        # build_wave_record writes state="settled" with PASS on both questions and a1 pending.
+        raws = [
+            _raw("s1", "m1", "responded", parts=BOTH, operation_id="op-s1", operation_state="settled", raw_text=_two_part_pass()),
+            _raw("s2", "m2", "responded", parts=("change",), operation_id="op-s2", operation_state="settled", raw_text="[]"),
+            _raw("a1", "m3", "pending", parts=BOTH, operation_id="op-a1", operation_state="in_flight", late_result_pending=True),
+        ]
+        plans = [_plan("s1", "m1", parts=BOTH), _plan("s2", "m2", parts=("change",)),
+                 _plan("a1", "m3", route="agent_session", parts=BOTH, additional=True)]
+        built = rl.build_wave_record(
+            _facts(raws, rows=plans, task_id=TASK, review_wave_id="round-1", retry_key="round-1",
+                   binding_fingerprint="fp-reviewed"),
+            surface="commit_gate", drive_root=world.data,
+        )
+        rl.write_record(world.data, built)
+        rl.note_author_decision(world.data, built.record_id, {"disposition": "accepted", "rationale": "counted seats passed"})
+        world.record_id = built.record_id
+        a1_row_attempt = dict(world.attempt.triad_raw_results[-1])
+        s1_done, s2_done = _seat("s1"), _seat("s2")
+        s1_done.pop("surface", None)
+        s2_done.pop("surface", None)
+        update_state(world.data, lambda st: st.record_attempt(CommitAttemptRecord(
+            ts=world.attempt.ts, commit_message=world.attempt.commit_message, status="reviewed", phase="review_only",
+            task_id=TASK, repo_key=world.attempt.repo_key, tool_name="commit_reviewed", attempt=world.attempt.attempt,
+            paid=True, late_result_pending=True, pre_review_fingerprint="fp-reviewed", review_retry_key="round-1",
+            review_record_id=built.record_id, triad_raw_results=[s1_done, s2_done, a1_row_attempt],
+        )))
+        a1_policy = {"parts": list(BOTH), "output_shape": "two_part", "additional": True}
+        coupling_items = [{"item": item, "verdict": "FAIL" if idx == 0 else "PASS", "severity": "critical" if idx == 0 else "advisory",
+                           "reason": "adviser coupling finding" if idx == 0 else "ok"}
+                          for idx, item in enumerate(sorted(SCOPE_REQUIRED_ITEMS))]
+        terminal_text = json.dumps({
+            "change": [{"item": "bug", "verdict": "FAIL", "severity": "critical", "reason": "adviser change finding"}],
+            "change_clean": False, "coupling": coupling_items,
+        })
+
+    # Persist a1's real prompt assignment and started delegated run custody (observed read-only via synthetic gateway).
+    req = ReviewRequest(
+        surface="multi_model_review", goal="candidate", task_id=TASK, retry_key="round-1", policy=a1_policy,
+        reconciliation_identity={"subject_hash": "sub-hash", "root_task_id": TASK, "review_contract": "c1", "roster_hash": "r1"},
+    )
+    slot = ReviewSlot(slot_id="a1", model="m3", route=ReviewRouteKind.AGENT_SESSION)
+    binding = review_operation_binding(req, slot, "op-a1")
+    observability.persist_call(
+        world.data, task_id=TASK, call_id="op-a1_prompt", call_type="multi_model_review_prompt",
+        payload={"request": asdict(req), "slot": asdict(slot)},
+        manifest={"surface": req.surface, "slot_id": "a1", "model": "m3", "review_operation_binding": binding},
+    )
+    assert delegate_custody.record_start_requested(
+        world.data, invocation_id="inv-a1", task_id=TASK, root_task_id=TASK, surface=req.surface,
+        slot_id="a1", operation_id="op-a1", route="codex",
+        request={"primaryHarness": "codex", "harnesses": ["codex"], "mode": "ask", "access": "readonly",
+                 "authPreference": "subscription", "scope": {"kind": "project", "root": str(world.repo)}},
+    )
+
+    gateway_state = {"detail": {"summary": {"runId": "run-a1", "state": "running"}}, "calls": []}
+
+    class _ReadOnlyGateway:
+        def get_run(self, run_id, *, timeout_sec=None):
+            gateway_state["calls"].append(("get_run", run_id))
+            return gateway_state["detail"]
+
+        def get_run_artifact(self, run_id, path):
+            gateway_state["calls"].append(("artifact", path))
+            return b""
+
+        def close(self):
+            gateway_state["calls"].append(("close",))
+
+        def __getattr__(self, name):
+            pytest.fail(f"read-only collection must never call gateway.{name}")
+
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda *_a, **_k: _ReadOnlyGateway())
+    monkeypatch.setattr(review_substrate, "run_review_request", lambda *_a, **_k: pytest.fail("must never dispatch"))
+
+    saved = load_state(world.data).attempts[-1]
+    before_rec = rl.load_record(world.data, world.record_id)
+    assert before_rec["state"] == initial_state
+    assert (saved.status, saved.phase, saved.late_result_pending) == ("reviewed", "review_only", True)
+
+    if caller == "continue_successor":
+        succ = "synthetic-adviser-succ"
+        write_task_result(world.data, TASK, "completed", chat_id=7)
+        write_task_result(world.data, succ, "running", chat_id=7)
+        _record_continue(type("A", (), {"data": world.data})(), TASK, succ)
+        fork = world.data / "state" / "headless_tasks" / succ / "data"
+        fork.mkdir(parents=True, exist_ok=True)
+        ctx = ToolContext(repo_dir=world.repo, drive_root=fork, budget_drive_root=world.data, task_id=succ)
+    else:
+        # Index differs from fp-reviewed ("exact=False"): own author reads the wave read-only without dispatching.
+        (world.repo / "changed.py").write_text("x = 1\n", encoding="utf-8")
+        _git(world.repo, "add", "changed.py")
+        ctx = ToolContext(repo_dir=world.repo, drive_root=world.data, task_id=TASK)
+
+    ref = {"surface": "commit", "repo_key": saved.repo_key, "task_id": TASK, "tool_name": "commit_reviewed",
+           "attempt": saved.attempt, "pre_review_fingerprint": saved.pre_review_fingerprint, "review_record_id": world.record_id}
+    before_index = rl.index_path(world.data).read_bytes()
+
+    # Step 0: before record_started (only an unbound pending invocation token) -> read-only no-op, zero dispatch/gateway.
+    unbound = collect_commit_reference(ctx, ref)
+    assert unbound.startswith("Review outcome collected read-only"), unbound
+    assert "no new reviewer was sent" in unbound and "still running" in unbound, unbound
+    unbound_payload = _handback(unbound)
+    assert unbound_payload["state"] == initial_state
+    assert next(r for r in unbound_payload["rows"] if r["seat_id"] == "a1")["status"] == "pending"
+    assert rl.load_record(world.data, world.record_id) == before_rec
+    assert rl.index_path(world.data).read_bytes() == before_index
+    assert load_state(world.data).attempts[-1] == saved
+    assert gateway_state["calls"] == []
+
+    # Bind the delegated run and verify running -> terminal -> already-settled read-back.
+    assert delegate_custody.record_started(
+        world.data, delegate_custody.RunCustody(
+            run_id="run-a1", task_id=TASK, root_task_id=TASK, route_id="codex", model="m3", invocation_id="inv-a1"),
+    )
+
+    # Step 1: adviser still running on synthetic gateway -> stays live, pure no-op on record/attempt, zero dispatch.
+    still_open = collect_commit_reference(ctx, ref)
+    assert still_open.startswith("Review outcome collected read-only"), still_open
+    assert "no new reviewer was sent" in still_open and "still running" in still_open, still_open
+    open_payload = _handback(still_open)
+    assert open_payload["state"] == initial_state
+    assert next(r for r in open_payload["rows"] if r["seat_id"] == "a1")["status"] == "pending"
+    assert rl.load_record(world.data, world.record_id) == before_rec
+    assert rl.index_path(world.data).read_bytes() == before_index
+    assert load_state(world.data).attempts[-1] == saved
+    assert ("get_run", "run-a1") in gateway_state["calls"]
+
+    # Step 2: adviser's terminal answer becomes available through the synthetic gateway -> visible on same reference.
+    gateway_state["calls"].clear()
+    gateway_state["detail"] = {
+        "summary": {"runId": "run-a1", "state": "succeeded", "outputConformance": "passed"},
+        "primaryOutput": {"text": terminal_text, "truncated": False},
+    }
+    settled = collect_commit_reference(ctx, ref)
+    assert settled.startswith("Review outcome collected read-only") and "no new reviewer was sent" in settled, settled
+    assert "still running" not in settled, settled
+    payload = _handback(settled)
+    assert payload["state"] == "settled", payload
+    a1_row = next(r for r in payload["rows"] if r["seat_id"] == "a1")
+    assert a1_row["status"] == "responded" and a1_row["operation_id"] == "op-a1", a1_row
+    after_rec = rl.load_record(world.data, world.record_id)
+    assert after_rec["state"] == "settled" and after_rec["revision"] == before_rec["revision"] + 1
+    assert after_rec["rows"][:2] == before_rec["rows"][:2], "earlier counted answers must remain untouched"
+    assert after_rec["verdict"]["aggregate"] == before_rec["verdict"]["aggregate"] == "PASS"
+    assert after_rec["verdict"]["per_question"] == before_rec["verdict"]["per_question"] == {"change": "PASS", "coupling": "PASS"}
+    assert after_rec["verdict"]["quorum"] == before_rec["verdict"]["quorum"]
+    assert after_rec["verdict"]["critical_findings"] == [] and after_rec["verdict"]["advisory_findings"] == []
+    assert after_rec["verdict"]["per_row"] == {"s1": "PASS", "s2": "PASS", "a1": "FAIL"}
+    assert len(after_rec["verdict"]["additional_findings"]) == (2 if initial_state == "settled" else 1)
+    assert after_rec["author_decision"] == before_rec["author_decision"]
+    assert rl.record_sources_resolvable(world.data, after_rec)
+    assert payload["review_reference"]["shown_outcomes"] != open_payload["review_reference"]["shown_outcomes"]
+    updated = load_state(world.data).attempts[-1]
+    assert not updated.late_result_pending and not next(
+        r for r in updated.triad_raw_results if r["slot_id"] == "a1").get("pending_invocation_id")
+
+    # Step 3: now every seat is closed -> subsequent read-back returns already settled without hitting gateway again.
+    gateway_state["calls"].clear()
+    already = collect_commit_reference(ctx, ref)
+    assert already.startswith("Review outcome already settled, returned read-only"), already
+    assert _handback(already)["state"] == "settled" and gateway_state["calls"] == []
+
+
+def test_collect_change_keeps_settled_early_return_without_dispatching_open_adviser(tmp_path, monkeypatch):
+    """Non-read-only ``collect_change`` on a settled mixed record keeps its early return and never dispatches a cold
+    pending adviser invocation through ``run_review_request``."""
+    from dataclasses import asdict
+
+    from ouroboros import delegate_custody, observability, review_ledger as rl, review_substrate
+    from ouroboros.review_dispatch import review_operation_binding
+    from ouroboros.review_records import ReviewRequest, ReviewRouteKind, ReviewSlot
+    from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, update_state
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.review_collection import collect_change
+    from tests.test_review_ledger import _facts, _plan, _raw
+    from tests.test_unwaited_review_settlement import TASK, _data, _seat
+
+    data, repo = _data(tmp_path / "data"), tmp_path / "repo"
+    repo.mkdir()
+    raws = [
+        _raw("s1", "m1", "responded", parts=("change",), operation_id="op-s1", operation_state="settled", raw_text="[]"),
+        _raw("a1", "m3", "pending", parts=("change",), operation_id="op-a1", operation_state="in_flight", late_result_pending=True),
+    ]
+    plans = [_plan("s1", "m1", parts=("change",)), _plan("a1", "m3", route="agent_session", parts=("change",), additional=True)]
+    built = rl.build_wave_record(_facts(raws, rows=plans, task_id=TASK, review_wave_id="round-1", retry_key="round-1"),
+                                 surface="change", drive_root=data)
+    rl.write_record(data, built)
+    assert rl.open_additional_seats(rl.load_record(data, built.record_id))
+    s1_done = {k: v for k, v in _seat("s1").items() if k != "surface"}
+    a1_open = {"slot_id": "a1", "model_id": "m3", "status": "error", "operation_id": "op-a1", "operation_state": "in_flight",
+               "late_result_pending": True, "pending_invocation_id": "inv-a1", "review_plan": {"additional": True}}
+    update_state(data, lambda st: st.record_attempt(CommitAttemptRecord(
+        ts="2026-11-20T10:00:00+00:00", commit_message="change", status="reviewed", phase="review", task_id=TASK,
+        repo_key=make_repo_key(repo), tool_name="review_change", attempt=1, paid=True, late_result_pending=True,
+        pre_review_fingerprint="fp-change", review_retry_key="round-1", review_record_id=built.record_id,
+        triad_raw_results=[s1_done, a1_open],
+    )))
+    req = ReviewRequest(
+        surface="multi_model_review", goal="candidate", task_id=TASK, retry_key="round-1",
+        policy={"parts": ["change"], "output_shape": "array", "additional": True},
+        reconciliation_identity={"subject_hash": "sub-hash", "root_task_id": TASK, "review_contract": "c1", "roster_hash": "r1"},
+    )
+    slot = ReviewSlot(slot_id="a1", model="m3", route=ReviewRouteKind.AGENT_SESSION)
+    observability.persist_call(
+        data, task_id=TASK, call_id="op-a1_prompt", call_type="multi_model_review_prompt",
+        payload={"request": asdict(req), "slot": asdict(slot)},
+        manifest={"surface": req.surface, "slot_id": "a1", "model": "m3",
+                  "review_operation_binding": review_operation_binding(req, slot, "op-a1")},
+    )
+    assert delegate_custody.record_start_requested(
+        data, invocation_id="inv-a1", task_id=TASK, root_task_id=TASK, surface=req.surface, slot_id="a1",
+        operation_id="op-a1", route="codex",
+        request={"primaryHarness": "codex", "harnesses": ["codex"], "mode": "ask", "access": "readonly",
+                 "authPreference": "subscription", "scope": {"kind": "project", "root": str(repo)}},
+    )
+    monkeypatch.setattr(review_substrate, "run_review_request", lambda *_a, **_k: pytest.fail("must never dispatch"))
+
+    saved = load_state(data).attempts[-1]
+    ctx = ToolContext(repo_dir=repo, drive_root=data, task_id=TASK)
+    payload = collect_change(ctx, {"record_id": built.record_id, "task_id": TASK, "surface": "change"})
+    assert payload["record_id"] == built.record_id and payload["state"] == "settled" and payload["reused"] is True
+    assert next(r for r in payload["rows"] if r["seat_id"] == "a1")["status"] == "pending"
+    assert load_state(data).attempts[-1] == saved
+
+
+def test_locate_commit_source_refuses_stale_canonical_on_unreadable_retry_placement(tmp_path, monkeypatch):
+    """Trigger 2 (#2901): an unreadable higher-priority retry placement raises instead of silently selecting a stale
+    canonical attempt row, while confirmed absence or nonmatch still falls through cleanly."""
+    from ouroboros import task_store
+    from ouroboros.review_ledger import write_record
+    from ouroboros.review_state import CommitAttemptRecord, update_state
+    from ouroboros.store import StoreBusy
+    from ouroboros.tools.commit_gate import prepare_author_commit_request
+    from ouroboros.tools.review_collection import collect_commit_reference, commit_attempt_roots, locate_commit_source
+
+    ctx, canonical, scripts_drive, _fork, key, pred, _succ = _setup_pooled_continue(tmp_path)
+    scripts_drive.joinpath("task_scripts").rmdir()
+    scripts_drive.rmdir()  # no own drive for pred: pred ran as a retry occupying origin's drive
+    origin_drive = canonical / "task_drives" / "retry-origin"
+    origin_drive.mkdir(parents=True, exist_ok=True)
+    write_task_result(canonical, pred, "completed", chat_id=7, child_drive_root=str(origin_drive))
+    # Re-attach verified Continue claim after updating pred's canonical row.
+    _record_continue(type("A", (), {"data": canonical})(), pred, ctx.task_id)
+
+    record_id, fp = "rl-retry-src", "fp-retry-src"
+    write_record(canonical, {
+        "record_id": record_id, "surface": "commit_gate", "state": "settled", "task_id": pred, "root_task_id": pred,
+        "ts": "2026-11-20T10:00:00+00:00", "subject": {"root": str(ctx.repo_dir)},
+        "fingerprints": {"binding": fp}, "verdict": {"aggregate": "PASS"},
+        "rows": [{"seat_id": "first", "operation_id": "op-1", "status": "responded"}],
+    })
+    stale = CommitAttemptRecord(
+        ts="2026-11-20T09:00:00+00:00", commit_message="Stale canonical copy", status="reviewed", phase="review_only",
+        repo_key=key, tool_name="commit_reviewed", task_id=pred, root_task_id=pred, attempt=1, paid=True,
+        pre_review_fingerprint=fp, review_record_id=record_id,
+        triad_raw_results=[{"slot_id": "first", "operation_id": "op-1", "status": "ok"}],
+    )
+    update_state(canonical, lambda state: state.record_attempt(stale))
+    ref = {"surface": "commit", "repo_key": key, "task_id": pred, "tool_name": "commit_reviewed",
+           "attempt": 1, "pre_review_fingerprint": fp, "review_record_id": record_id}
+
+    real_read = task_store.read_document
+
+    def busy_origin(root, task_id, *args, **kwargs):
+        if task_id == pred and root.resolve(strict=False) == origin_drive.resolve(strict=False):
+            raise StoreBusy("retry child store busy", reason="contention")
+        return real_read(root, task_id, *args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(task_store, "read_document", busy_origin)
+        with pytest.raises(StoreBusy):
+            commit_attempt_roots(ctx, pred, verified_canonical=canonical)
+        with pytest.raises(StoreBusy):
+            locate_commit_source(ctx, ref, record_id=record_id, recover=True)
+        collected = collect_commit_reference(ctx, ref)
+        assert "REVIEW_SOURCE_UNAVAILABLE" in collected and "Stale canonical copy" not in collected, collected
+        refused = prepare_author_commit_request(
+            ctx, ref, {"disposition": "accepted", "rationale": "must refuse when retry store is busy"}, "")
+        assert "REVIEW_SOURCE_UNAVAILABLE" in refused and "This call submitted no reviewer request" in refused, refused
+        assert "same review_reference" in refused and "TOOL_ARG_ERROR" not in refused, refused
+
+    # Canonical store busy during retry discovery must also refuse rather than fall through to stale canonical.
+    def busy_canonical(root, task_id, *args, **kwargs):
+        if task_id == pred and root.resolve(strict=False) == canonical.resolve(strict=False):
+            raise StoreBusy("canonical store busy", reason="contention")
+        return real_read(root, task_id, *args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(task_store, "read_document", busy_canonical)
+        with pytest.raises(StoreBusy):
+            commit_attempt_roots(ctx, pred, verified_canonical=canonical)
+
+    # Confirmed nonmatch (origin store readable without pred's row) still falls through to canonical cleanly.
+    root, found = locate_commit_source(ctx, ref, record_id=record_id, recover=True)
+    assert root == canonical and found is not None and found.commit_message == "Stale canonical copy"
+
+
+def _retained_mixed_commit(tmp_path, *, compacted=False):
+    from ouroboros import review_ledger as rl
+    from ouroboros.review_state import CommitAttemptRecord, update_state
+    from ouroboros.tools.review_collection import reference_for
+    from tests.test_review_ledger import BOTH, _facts, _plan, _raw
+    from tests.test_unwaited_review_settlement import _two_part_pass
+
+    ctx, ledger, source, _fork, key, predecessor, _succ = _setup_pooled_continue(tmp_path)
+    raw = [_raw("s1", "m1", parts=BOTH, operation_id="op-s1", operation_state="settled", raw_text=_two_part_pass()),
+           _raw("a1", "m3", "pending", operation_id="op-a1", operation_state="in_flight")]
+    plans = [_plan("s1", "m1", parts=BOTH), _plan("a1", "m3", route="agent_session", additional=True)]
+    built = rl.build_wave_record(_facts(raw, rows=plans, task_id=predecessor, review_wave_id="review-mixed",
+                                       retry_key="review-mixed", binding_fingerprint="fp-mixed"),
+                                 surface="commit_gate", drive_root=ledger)
+    rl.write_record(ledger, built)
+    record = rl.load_record(ledger, built.record_id)
+    rows = [{"slot_id": "s1", "operation_id": "op-s1", "status": "ok"},
+            {"slot_id": "a1", "operation_id": "op-a1", "status": "pending", "operation_state": "in_flight",
+             "additional": True}]
+    attempt = CommitAttemptRecord(
+        ts=record["ts"], commit_message="Read the mixed wave", status="reviewed", phase="review_only",
+        repo_key=key, tool_name="commit_reviewed", task_id=predecessor, attempt=1, paid=True,
+        pre_review_fingerprint="fp-mixed", review_record_id=record["record_id"], review_retry_key="review-mixed",
+        raw_stripped=compacted, triad_raw_results=[] if compacted else rows,
+    )
+    update_state(source, lambda state: state.record_attempt(attempt))
+    return ctx, ledger, source, record, attempt, reference_for(record, attempt)
+
+
+@pytest.mark.parametrize("condition", ["retired", "busy"])
+def test_foreign_attempt_update_does_not_lose_saved_answer(tmp_path, monkeypatch, condition):
+    from contextlib import nullcontext
+    from ouroboros import review_ledger as rl, task_custody
+    from ouroboros.tools.review_collection import collect_commit_reference
+    from tests.test_unwaited_review_settlement import _seat
+
+    ctx, ledger, source, record, attempt, ref = _retained_mixed_commit(tmp_path)
+    calls = []
+
+    def collect_then_change_source(_coordinates):
+        calls.append("attach-only read")
+        if condition == "retired":
+            source.rename(source.with_name("retired-source"))
+        else:
+            monkeypatch.setattr(task_custody, "task_custody_lock", lambda *a, **kw: nullcontext(False))
+        adviser = {**_seat("a1"), "review_wave_id": record["review_wave_id"]}
+        return attempt, [adviser], ""
+
+    monkeypatch.setattr(review_pause, "_left_seats", collect_then_change_source)
+    text = collect_commit_reference(ctx, ref)
+    result = _handback(text)
+    assert calls == ["attach-only read"]
+    assert result["aggregate"] == "PASS" and result["rows"][0] == record["rows"][0]
+    assert result["rows"][1]["status"] == "responded"
+    assert rl.load_record(ledger, record["record_id"])["rows"] == result["rows"]
+    assert result["attempt_row"]["state"] == "deferred" and "same reference" in result["attempt_row"]["next"]
+    assert source.exists() == (condition == "busy")
+
+
+def test_compacted_mixed_commit_returns_counted_evidence_without_a_live_adviser_claim(tmp_path, monkeypatch):
+    from ouroboros.tools.review_collection import collect_commit_reference
+
+    ctx, _ledger, _source, record, _attempt, ref = _retained_mixed_commit(tmp_path, compacted=True)
+    monkeypatch.setattr(review_pause, "_left_seats", lambda _record: pytest.fail("compacted row has no roster to collect"))
+    text = collect_commit_reference(ctx, ref)
+    payload = _handback(text)
+    assert payload["aggregate"] == "PASS" and payload["rows"] == record["rows"]
+    assert payload["continuable_seats"] == [] and "outcome is unknown" in text and "still running" not in text
+    assert "no new reviewer was sent" in text
+
+
+@pytest.mark.parametrize("outcome_saved", [False, True])
+def test_explicit_continuation_storage_failure_reuses_the_same_reference(tmp_path, monkeypatch, outcome_saved):
+    from types import SimpleNamespace
+    from ouroboros import review_ledger as rl
+    from ouroboros.store import StoreBusy
+    from ouroboros.tools import review_change_custody as custody, review_collection as collection
+
+    ctx, ledger, _source, record, attempt, ref = _retained_mixed_commit(tmp_path)
+    dispatched = []
+    chosen = [{"seat_id": "a1", "operation_id": "op-a1"}]
+    monkeypatch.setattr(collection, "continue_or_repair", lambda *_a: (
+        {**record, "state": "pending"}, attempt, {"continued": chosen}))
+    seat = SimpleNamespace(slot=SimpleNamespace(slot_id="a1"), parts=["change"])
+    monkeypatch.setattr(custody, "recorded_change_panel", lambda *_a: SimpleNamespace(seats=[seat]))
+
+    def read_and_send(*_args):
+        dispatched.append("op-a1")
+        if outcome_saved:
+            def finish(saved):
+                saved["rows"][1].update(status="responded", operation_state="settled")
+                return saved
+            rl.revise_record(ledger, record["record_id"], finish)
+        raise StoreBusy("collection write busy", reason="contention")
+
+    monkeypatch.setattr(custody, "collect_recorded_commit_actor", read_and_send)
+    text = collection.collect_commit_reference(ctx, ref, continue_seats=chosen)
+    assert dispatched == ["op-a1"]
+    if outcome_saved:
+        assert _handback(text)["rows"][1]["status"] == "responded"
+    else:
+        assert "may already have been sent" in text and "same review_reference" in text and "at $0" in text
+    assert "no new reviewer was sent" not in text and "TOOL_ARG_ERROR" not in text and "new review" not in text

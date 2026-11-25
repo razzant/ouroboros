@@ -550,6 +550,7 @@ def _reset_commit_review_state(ctx):
     ctx._current_review_attempt_number = None
     ctx._collect_commit_source = ctx._review_collected_peer = None  # the reference or exact peer this call collects
     ctx._author_commit_source = ctx._author_commit_scope = None  # the reference's reviewed subject (``author_scope``)
+    ctx._author_commit_source_root = None
     ctx._author_commit_decision = None
     ctx._author_commit_record = None
     ctx._commit_review_status = "unknown"

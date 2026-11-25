@@ -24,6 +24,9 @@ EVENTS = "custody_event_ordinals"
 ORDINAL = "custody_append_ordinal"
 COMPLETE = "custody_invocations_complete"
 LEGACY_GAP = "legacy_gap"
+# A newly selected review Continue's START is recorded ``unsent``; START_HANDOFF, written right before its first
+# transport call, moves it to ``entered`` and never back. No ``handoff`` (any other start, an older row) is unknown.
+HANDOFF_UNSENT, HANDOFF_ENTERED = "unsent", "entered"
 
 
 def operation_key(operation_id: str, slot_id: str) -> str:
@@ -51,6 +54,7 @@ def advance(record: dict, event: dict, ordinal: int) -> dict:
 
     record = dict(record or {"state": "pending", "run_id": ""})
     kind = event.get("type")
+    record = _handoff(record, event)
     if kind == START_REQUESTED and not record.get("request"):
         record.update(request=dict(event), request_ordinal=ordinal)
     elif kind == START_RISK_ACCEPTED and record.get("request") and record["state"] == "pending":
@@ -61,6 +65,18 @@ def advance(record: dict, event: dict, ordinal: int) -> dict:
         record.update(state="started", run_id=str(event.get("run_id") or ""), started_ordinal=ordinal)
     elif kind in (START_UNSENT, START_FAILED) and event.get("definite") is True and record["state"] != "started":
         record["state"] = "failed_definite"
+    return record
+
+
+def _handoff(record: dict, event: dict) -> dict:
+    """The one-way handoff fact (``HANDOFF_UNSENT``): only the FIRST request may open it, any START_HANDOFF closes it."""
+    from ouroboros.delegate_custody import START_HANDOFF, START_REQUESTED
+
+    if event.get("type") == START_HANDOFF:
+        return {**record, "handoff": HANDOFF_ENTERED}
+    if (event.get("type") == START_REQUESTED and not record.get("request") and "handoff" not in record
+            and event.get("handoff") == HANDOFF_UNSENT):
+        return {**record, "handoff": HANDOFF_UNSENT}
     return record
 
 
@@ -100,15 +116,19 @@ def decision_facts(record):
     return {"resume_decisions": copy.deepcopy(record["resume_decisions"])} if record.get("resume_decisions") else {}
 
 
+def handoff_facts(record):
+    return {"handoff": record["handoff"]} if record.get("handoff") in (HANDOFF_UNSENT, HANDOFF_ENTERED) else {}
+
+
 def reduce_event(txn, event: dict, ordinal: int) -> Optional[dict]:
-    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED
+    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED, START_HANDOFF
 
     iid, kind = str(event.get("invocation_id") or ""), event.get("type")
     if kind == START_REQUESTED:
         key = operation_key(str(event.get("operation_id") or ""), str(event.get("slot_id") or ""))
         if txn.get_row(OPERATIONS, key) is None:
             txn.put_row(OPERATIONS, key, {"invocation_id": iid, "request_ordinal": ordinal})
-    if not iid or kind not in (START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED):
+    if not iid or kind not in (START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED, START_HANDOFF):
         return None
     record = txn.get_row(INVOCATIONS, iid)
     if record is None:
@@ -142,7 +162,7 @@ def _answer(root, record: Optional[dict], request_facts) -> Optional[dict]:
         return {"state": LEGACY_GAP, "run_id": "", "reason": record["reason"]}
     if not record.get("request"):
         return None  # A complete modern fold without REQUESTED has no invocation.
-    return {**request_facts(root, record["request"]), **decision_facts(record),
+    return {**request_facts(root, record["request"]), **decision_facts(record), **handoff_facts(record),
             "state": record["state"], "run_id": record["run_id"]}
 
 
@@ -192,6 +212,7 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
     insufficient stored evidence returns ``legacy_gap``, never an absent run.
     """
     from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED, _unique_rows
+    from ouroboros.delegate_custody import START_HANDOFF
 
     target = str(invocation_id or "").strip()
     if not target:
@@ -201,13 +222,16 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
 
         return invocation(drive_root, target, _request_facts)
     found: Optional[Dict[str, Any]] = None
-    state, run_id = "pending", ""
+    state, run_id, handoff = "pending", "", ""
     for row in _unique_rows(rows):
         if str(row.get("invocation_id") or "") != target:
             continue
         kind = str(row.get("type") or "")
-        if kind == START_REQUESTED and found is None:
+        if kind == START_HANDOFF:
+            handoff = HANDOFF_ENTERED
+        elif kind == START_REQUESTED and found is None:
             found = _request_facts(drive_root, row)
+            handoff = handoff or (HANDOFF_UNSENT if row.get("handoff") == HANDOFF_UNSENT else "")
         elif kind == START_RISK_ACCEPTED and found is not None and state == "pending":
             found.setdefault("resume_decisions", {})[row["resuming_task_id"]] = row["decision"]
         elif kind == STARTED:
@@ -216,7 +240,7 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
             state = "failed_definite"
     if found is None:
         return None
-    return {**found, "state": state, "run_id": run_id}
+    return {**found, **({"handoff": handoff} if handoff else {}), "state": state, "run_id": run_id}
 
 
 def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:

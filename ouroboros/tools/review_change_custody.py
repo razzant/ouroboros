@@ -1,22 +1,14 @@
-"""The custody side of one ``review_change`` wave.
+"""The custody side of one ``review_change`` wave (``review_change.py`` owns the brief and ledger).
 
-``ouroboros/tools/review_change.py`` owns the request, the wave and its ledger
-record; what the shared review state (``review_state``) knows about the wave lives
-here: the reserved attempt row the per-task cycle ceiling counts once a physical
-send stamps it paid, the delegated start token checkpointed onto its exact reserved
-seat, the settled row carrying the wave's final roster — and the rejoin. Before a rerun pays again, the
-open operation of the SAME logical round on the SAME task (identity c,
-``review_subject.review_retry_key``) is collected through the commit gate's
-reconcile-only path (``review_custody``: settled seats replay, the exact pending
-delegated invocation is rejoined, nothing new is sent). A rejoin reads the retained
-checkout at the deterministic path of this task's round
-(``review_subject.checkout_token``), so its custody attempt key and every
-operation's recovery binding are those of the operation it rejoins, in this process
-or after a restart; another task's wave of the round has its own path. The exact repair of a
-persisted attempt an earlier writer left held lives here too (``repair_settled_attempt``; for
-the checkout pass, all held attempts in one write, ``repair_held_attempts``; for a collection that reads a settled
-record, ``reconcile_collected_attempt``, #2779), and so does reading an author continuation's evicted free outcome
-back from its settled record (``commit_reference_source``, #2830).
+Shared review state reserves the exact roster, counts the wave once stamped paid, and checkpoints
+its delegated start tokens and settled outcomes. An open operation of the same logical round and
+task (``review_subject.review_retry_key``) replays settled seats and rejoins the exact pending token
+without a replacement send. The deterministic checkout token preserves that operation's binding
+across restart; another task's wave has its own path.
+
+The same custody reconciles exact held rows (``repair_settled_attempt``, ``repair_held_attempts``),
+projects already-collected feedback without replacing it (#2779), and recovers an evicted free
+author outcome from the bound ledger record (``commit_reference_source``, #2830).
 """
 
 from __future__ import annotations
@@ -413,12 +405,16 @@ def collect_recorded_commit_actor(ctx, surface: str, slot_id: str, retry_key: st
     """Join a live original seat; otherwise collect its recorded source/token."""
     from dataclasses import asdict
     from ouroboros.delegate_custody import invocation_record
+    from ouroboros.delegate_invocation import HANDOFF_UNSENT
     from ouroboros.review_live_join import preparing_live_review_assignment, recorded_live_review_attempt
     from ouroboros.review_operation import collect_recorded_review_actor, recorded_review_assignment, recover_review_producer
+    from ouroboros.review_session_custody import lookup_recorded_continuation_start
     from ouroboros.review_substrate import run_review_request
-    from ouroboros.review_custody import custody_root
+    from ouroboros.review_custody import _row_is_pending, custody_root
 
     row = ((getattr(ctx, "_review_frozen_rows", {}) or {}).get(surface, {}) or {}).get(slot_id, {})
+    if getattr(ctx, "_review_read_only", False) and row and not _row_is_pending(row):
+        return dict(row)
     identity = _recorded_commit_identity(ctx, surface, row, retry_key)
     root = custody_root(ctx)
     try:
@@ -431,26 +427,34 @@ def collect_recorded_commit_actor(ctx, surface: str, slot_id: str, retry_key: st
     except (OSError, ValueError, KeyError, TypeError):
         return collect_recorded_review_actor(root, **identity, usage_ctx=ctx)
     recovered = recover_review_producer(root, request, slot, row)
-    if recovered is not None and recovered.operation_state != "in_flight":
+    if recovered is not None and recovered.operation_state != "in_flight" and recovered.failure_code != "review_continuation_handoff_unknown":
         from ouroboros.review_seat_outcome import publish_seat_execution
-
         publish_seat_execution(request, slot, recovered, ctx)
         return asdict(recovered)
     token = str(row.get("pending_invocation_id") or (row.get("usage") or {}).get("pending_invocation_id")
                 or (row.get("recovery_binding") or {}).get("pending_invocation_id") or "")
     invocation = invocation_record(root, token) if token else None
     live = recorded_live_review_attempt(request, slot, row)
-    if live is None and (not invocation or invocation.get("state") != "pending"):
+    continuation = live is None and row.get("operation_id") in getattr(ctx, "_review_continuation_seats", ())
+    foreign = identity["task_id"] != str(getattr(ctx, "task_id", "") or "")
+    if live is None and ((foreign and not continuation) or getattr(ctx, "_review_read_only", False)
+                         or not invocation or invocation.get("state") != "pending"):
         return collect_recorded_review_actor(root, **identity, usage_ctx=ctx)
-    # The existing custody drain joins a matching local worker, including API
-    # work detached by Pause. Cold collection above remains nonblocking.
-    # Only an unresolved original start can require a POST, with the existing
-    # invocation token and its raw recorded request. No replacement is admitted.
+    if continuation and foreign and invocation.get("handoff") != HANDOFF_UNSENT:
+        bound, actor = lookup_recorded_continuation_start(root, request, slot, row, token)
+        if not bound:
+            return asdict(actor)
+    # Local worker join or unresolved start (for cold foreign continuation: only proven HANDOFF_UNSENT or lookup-bound).
     request.reconcile_only = True
-    collector = ctx
+    collector = copy.copy(ctx) if continuation or live is not None else ctx
+    if continuation:
+        collector._review_receptive_continuation = True  # This exact pending invocation, not a cold read.
+        collector._review_continuation_first_send_only = foreign
+        collector.task_metadata = {**dict(getattr(ctx, "task_metadata", {}) or {}),  # original payer's own caps
+                                   "root_task_id": invocation.get("root_task_id") or identity["root_task_id"] or identity["task_id"],
+                                   "parent_task_id": invocation.get("parent_task_id") or ""}
     if live is not None:
         # Coordinator defaults must not fill original unknowns from today's author.
-        collector = copy.copy(ctx)
         collector._review_live_join_only = True
         collector.task_attempt = request.task_attempt
         collector.task_metadata = {**dict(getattr(ctx, "task_metadata", {}) or {}),
@@ -498,7 +502,7 @@ def _merge_seat(rows, incoming):
 
     key = str(incoming.get("slot_id") or incoming.get("slot") or "")
     old = rows.get(key) or {}
-    if old and not _row_is_pending(old) and _row_is_pending(incoming):
+    if old and not _row_is_pending(old) and (_row_is_pending(incoming) or not old.get("pending_invocation_id")):
         return
     if old.get("operation_id") and incoming.get("operation_id") not in (None, "", old["operation_id"]):
         return
@@ -547,7 +551,7 @@ def _settled_row(current, seats, record):
                    review_record_id=record["record_id"])
 
 
-def settle_collected_attempt(root, attempt, seats, record):
+def settle_collected_attempt(root, attempt, seats, record, *, ledger=None):
     """Merge each collected seat against the current attempt under its state lock (``_settled_row``). The record's
     verdict and every recorded answer stay as they are, and a collection that changes nothing (a periodic replay of a
     wave still waiting, a seat already merged) writes nothing (``ReviewStateMutation``)."""
@@ -555,30 +559,31 @@ def settle_collected_attempt(root, attempt, seats, record):
 
     def mutate(state):
         for index, current in enumerate(state.attempts):
-            if (current.repo_key, current.tool_name, current.task_id, current.attempt) != (
-                    attempt.repo_key, attempt.tool_name, attempt.task_id, attempt.attempt):
+            if current.raw_stripped or (current.repo_key, current.tool_name, current.task_id, current.attempt) != (
+                    attempt.repo_key, attempt.tool_name, attempt.task_id, attempt.attempt) or (
+                    current.review_record_id and current.review_record_id != record["record_id"]):
                 continue
             state.attempts[index] = _settled_row(current, seats, record)
             # The saved bytes decide: the file keeps each seat's named evidence as a reference to its producer
             # payload, so a seat collected again with its full inventory differs in memory and not on disk.
             return ReviewStateMutation(None, changed=False)
         raise LookupError("the paid attempt disappeared before collection was saved")
-    update_state(root, mutate)
+    if ledger is None or pathlib.Path(root) == pathlib.Path(ledger):
+        update_state(root, mutate)
+        return
+    from ouroboros.review_state_custody import existing_attempt_write
+    with existing_attempt_write(ledger, root) as gap:
+        if gap:
+            raise LookupError(gap)
+        update_state(root, mutate, lock_timeout_sec=0)
 
 
-def settled_record(ledger, attempt, record=None, *, rows_closed=True):
-    """The attempt's bound review record, read without a lock from the ``ledger`` drive (or the ``record`` a caller
-    already read by that id), once its counted seats positively settled, whatever their verdict (an additional seat
-    may still run): ``None`` unless that exact record is this attempt's (its task, and for a commit its staged
-    fingerprint), names at least one counted seat, each under its operation and none open, and an attempt that still
-    keeps its rows holds those same counted operations closed. A missing, foreign, unreadable, empty or reopened
-    record, or a counted seat still open or unbound on either side, proves nothing. ``rows_closed=False`` asks for
-    the record's own proof alone: the caller proves each of the attempt's rows itself (``settled_seats``). A settled
-    record that seated advisers alone has no counted seat to wait for; a running adviser keeps only its own custody."""
+def settled_record(ledger, attempt, record=None, *, rows_closed=True, all_seats=False):
+    """The attempt's bound review record once its counted seats settled (``all_seats=True`` also requires the record
+    settled and every non-advisers-only seat closed on record and uncompacted attempt); ``None`` otherwise."""
     from ouroboros.review_custody import _row_is_pending
-    from ouroboros.review_ledger import counted_pending, load_record
+    from ouroboros.review_ledger import advisers_only, counted_pending, load_record, seat_open
     from ouroboros.review_state import _attempt_review_roster_rows, counted_roster_rows
-    from ouroboros.review_ledger import advisers_only
 
     record_id = str(getattr(attempt, "review_record_id", "") or "")
     try:
@@ -586,17 +591,20 @@ def settled_record(ledger, attempt, record=None, *, rows_closed=True):
             load_record(ledger, record_id) if record_id else None)
     except (OSError, ValueError):
         return None
-    seats = counted_roster_rows([row for row in (record or {}).get("rows") or [] if isinstance(row, dict)])
-    alone = bool(record) and advisers_only(record) and record.get("state") == "settled"
-    if (not record or record.get("task_id") != attempt.task_id or not (seats or alone) or counted_pending(record.get("rows") or [])
+    rows = [row for row in (record or {}).get("rows") or [] if isinstance(row, dict)]
+    seats, alone = counted_roster_rows(rows), bool(record) and advisers_only(record) and record.get("state") == "settled"
+    if (not record or record.get("task_id") != attempt.task_id or not (seats or alone) or counted_pending(rows)
             or not all(seat.get("operation_id") for seat in seats)
+            or (all_seats and (record.get("state") != "settled" or (not alone and any(seat_open(seat) for seat in rows))))
             or (attempt.tool_name in _SETTLED_PROJECTION
                 and (record.get("fingerprints") or {}).get("binding") != attempt.pre_review_fingerprint)):
         return None
-    confirmed = {str(seat.get("seat_id") or ""): str(seat["operation_id"]) for seat in seats}
-    own = counted_roster_rows(_attempt_review_roster_rows(attempt))
-    if rows_closed and not attempt.raw_stripped and (not (own or alone) or any(_row_is_pending(row) or confirmed.get(
-            str(row.get("slot_id") or row.get("slot") or "")) != str(row.get("operation_id") or "") for row in own)):
+    confirmed = {str(seat.get("seat_id") or ""): str(seat.get("operation_id") or "") for seat in (rows if all_seats else seats)}
+    lost = {str(seat.get("seat_id") or "") for seat in rows if seat.get("operation_state") == "custody_lost"}
+    own = (lambda r: r if all_seats and not alone else counted_roster_rows(r))(_attempt_review_roster_rows(attempt))
+    if rows_closed and not attempt.raw_stripped and (not (own or alone) or any(
+            (_row_is_pending(row) and not (all_seats and row.get("operation_state") == "custody_lost" and str(row.get("slot_id") or row.get("slot") or "") in lost))
+            or confirmed.get(str(row.get("slot_id") or row.get("slot") or "")) != str(row.get("operation_id") or "") for row in own)):
         return None
     return record
 
@@ -718,7 +726,7 @@ def repair_settled_attempt(root, ledger, attempt):
     if _settled_row(attempt, found[1], found[0]) == attempt:
         return attempt
     try:
-        settle_collected_attempt(root, attempt, found[1], found[0])
+        settle_collected_attempt(root, attempt, found[1], found[0], ledger=ledger)
         return load_state(pathlib.Path(root)).latest_attempt_for(
             repo_key=attempt.repo_key, tool_name=attempt.tool_name, task_id=attempt.task_id, attempt=int(attempt.attempt or 0))
     except (OSError, LookupError, ValueError):
@@ -734,7 +742,7 @@ def reconcile_collected_attempt(root, ledger, attempt, record):
     busy raises ``ReviewStateLockError`` for the caller to report."""
     found = settled_seats(ledger, attempt, record)
     if found is not None and _settled_row(attempt, found[1], found[0]) != attempt:
-        settle_collected_attempt(root, attempt, found[1], found[0])
+        settle_collected_attempt(root, attempt, found[1], found[0], ledger=ledger)
 
 
 def _invocation_closed(root, attempt, row):
@@ -839,14 +847,14 @@ def repair_held_attempts(root, state, ledger=None):
         return state
 
 
-def repaired_commit_source(ctx, source):
+def repaired_commit_source(ctx, source, root):
     """``source`` after its exact repair (``repair_settled_attempt``), for a resolver about to refuse its phase."""
     from ouroboros.review_ledger import ledger_root
 
-    return repair_settled_attempt(pathlib.Path(ctx.drive_root), ledger_root(ctx), source) or source
+    return repair_settled_attempt(pathlib.Path(root), ledger_root(ctx), source) or source
 
 
-def commit_reference_source(ctx, reference, state, source, *, locked):
+def commit_reference_source(ctx, reference, state, source, *, locked, root=None):
     """The attempt row whose evidence an author continuation's commit ``reference`` names, for
     ``commit_gate.resolve_commit_review_reference``: the row the reference names while the bounded hot history holds it,
     else the exact evidence the ledger keeps for it (``recorded_commit_source``; ``ReviewState._trim_attempt_history``
@@ -862,7 +870,7 @@ def commit_reference_source(ctx, reference, state, source, *, locked):
         return source if source is not None else (
             getattr(ctx, "_author_commit_source", None) if bound_reference(ctx, reference) else None)
     source = recorded_commit_source(ctx, reference, state) if source is None else source
-    return repaired_commit_source(ctx, source) if source is not None and source.status == "reviewing" else source
+    return repaired_commit_source(ctx, source, root or ctx.drive_root) if source is not None and source.status == "reviewing" else source
 
 
 _REFERENCE_IDENTITY = ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint", "review_record_id")
@@ -919,7 +927,7 @@ def recorded_commit_source(ctx, reference, state):
             or record.get("task_id") != reference.get("task_id") or (root and make_repo_key(pathlib.Path(root)) != reference.get("repo_key"))
             or (record.get("fingerprints") or {}).get("binding") != reference.get("pre_review_fingerprint")):
         return None
-    paid = next((row for row in reversed(state.attempts) if row.paid and row.review_record_id == record_id
+    paid = next((row for row in reversed(state.attempts) if row.paid and row.review_record_id == record_id and row.repo_key == reference.get("repo_key")
                  and row.task_id == record["task_id"] and row.tool_name == reference.get("tool_name")), None)
     verdict = record.get("verdict") or {}
     if paid is not None or verdict.get("aggregate") != VERDICT_NOT_DISPATCHED:

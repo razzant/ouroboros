@@ -61,6 +61,7 @@ from ouroboros.review_session_custody import (
     recover_review_start,
     recorded_review_shape,
     review_recovery_facts, continuation_send_admitted, rejoin_recorded_review,
+    continuation_send_source, refuse_budget_pausing_send, continuation_held,
     join_recorded_review_continuation, stopped_review_failure, full_session_text as _full_session_text,
 )
 from ouroboros.review_session_preparation import prepare_review_session_request, render_review_session_prompt
@@ -106,12 +107,15 @@ class ReviewRouteUnavailable(RuntimeError):
 
     A missing route fails loudly on its own slot; it never falls back to another
     route, model, or profile. ``code`` is the machine-readable refusal vocabulary
-    (a ``route_health`` reason or a site code); "" is an uncoded raise.
+    (a ``route_health`` reason or a site code); "" is an uncoded raise. ``held_before_send``: a temporary pause refused
+    a selected continuation whose START is durably never handed off (``never_handed_off``), so its token keeps the fate
+    it had (``review_custody``).
     """
 
-    def __init__(self, message: str, *, code: str = "") -> None:
+    def __init__(self, message: str, *, code: str = "", held_before_send: bool = False) -> None:
         super().__init__(message)
         self.code = str(code or "")
+        self.held_before_send = bool(held_before_send)
 
 class ReviewPollUnavailable(ReviewRouteUnavailable):
     """A LIVE delegated review session could not be observed (#1547): the run started
@@ -657,6 +661,7 @@ class SessionInvocation:
     access: str = ""
     checking_source: Optional[Dict[str, Any]] = None
     answer_binding: Optional[Dict[str, Any]] = None
+    first_send_only: bool = False
 
 def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                                  invocation: SessionInvocation) -> Dict[str, Any]:
@@ -763,11 +768,9 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 input_limit=(getattr(gateway, "ask_input_limits", lambda: {})() or {}).get(route.route_id),
                 source_root=custody_drive, delivery_facts=delivery_facts, gateway=gateway)
         if not run_id:
-            from ouroboros.budget_pause import dispatch_fenced
-            if dispatch_fenced(task_id):  # Observation-only while the owning task pauses (#1196): a fresh
-                # start AND a pending-invocation replay are both a new POST; the row stays pending for Resume.
-                raise ReviewRouteUnavailable("the owning task is entering an exact pause; no delegated review is "
-                                             "started or re-posted while it pauses", code="budget_pausing_no_send")
+            author = continuation_send_source(invocation)  # a selected continuation answers to its deciding task
+            refuse_budget_pausing_send(invocation, author.task_id if author is not None else task_id, generation_end,
+                                       run_request, str(route.model or ""), custody_drive)
             if (not recovering and invocation.owner_deadline_at and owner_deadline_exhausted(
                 deadline_at=invocation.owner_deadline_at, reserve_sec=get_finalization_grace_sec())):
                 raise _deadline_exhausted_error()
@@ -808,17 +811,18 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
 
             def submit():
                 nonlocal start_attempted
-                continuation_send_admitted(invocation, generation_end, run_request, str(route.model or ""))  # the last step
+                continuation_send_admitted(invocation, generation_end, run_request, str(route.model or ""), custody_drive)
                 start_attempted = True  # Admission and preparation are not a POST.
                 if use_thread:
                     from ouroboros.review_thread_continuity import start_review_thread_turn
                     return start_review_thread_turn(gateway, thread_id, run_request, idempotency_key=invocation_id)
                 return gateway.start_run(run_request, idempotency_key=invocation_id)
             try:
-                launch_source = SimpleNamespace(drive_root=custody_drive, task_id=task_id, root_task_id=root_task_id)
+                launch_source = author or SimpleNamespace(drive_root=custody_drive, task_id=task_id, root_task_id=root_task_id)
                 handle = run_operation(launch_source, submit)
             except OwnerPauseRefused as exc:  # the launch fence, before any POST
-                raise ReviewRouteUnavailable("New delegated review start is fenced.", code=getattr(exc, "code", str(exc))) from exc
+                raise ReviewRouteUnavailable("New delegated review start is fenced.", code=getattr(exc, "code", str(exc)),
+                    held_before_send=exc.held and continuation_held(custody_drive, invocation, generation_end, run_request, str(route.model or ""))) from exc
             except ClaudexorUnavailable as exc:  # no answer proves the POST created nothing: read what it accepted
                 started_custody, exc.accepted_start_lookup = accepted_after_refusal(custody_drive, gateway, invocation_id, exc)
                 if started_custody is None:
@@ -919,6 +923,8 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
         }
     except BaseException as exc:
         registry_preparation.close()
+        if start_attempted:
+            exc.delegated_start_attempted = True
         if unrequested:  # fresh preparation only: no paid stamp or START_REQUESTED write
             exc.delegated_start_unrequested = True
         if gateway is not None and not run_id and (project_id or invocation_id):
@@ -1233,6 +1239,8 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
         self._pending_invocation_checkpoint: Optional[Callable[[str], None]] = None
         # A settled run failure is replayed rather than billed twice.
         self._settled_failure: Optional[BaseException] = None
+        self._first_send_only = False
+        self._handoff_entered = False
 
     # -- prompt (route-owned; never the api pack) ------------------------------
 
@@ -1272,13 +1280,15 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
         try:
             self._run_session()
         except BaseException as exc:
+            if getattr(exc, "delegated_start_attempted", False):
+                self._handoff_entered = True
             self._run_id = str(getattr(exc, "delegated_run_id", "") or self._run_id)
             started = bool(self._run_id or getattr(exc, "delegated_run_started", False))
             if started:
                 self._session_usage = dict(getattr(exc, "delegated_usage", None) or session_usage_facts(self._run_id))
                 observe_session_usage(self.usage_observer, {**self._session_usage, "cost": None})
             self._session_usage["checking_evidence"] = getattr(exc, "checking_evidence", None) or {}  # this attempt's own
-            if not self._retry_state.get("pending_invocation_id"):
+            if not self._retry_state.get("pending_invocation_id") or getattr(exc, "code", "") == "review_continuation_handoff_unknown":
                 self._settled_failure = exc
             raise
         observe_session_usage(self.usage_observer, self._session_usage)
@@ -1355,6 +1365,7 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
                 checking_source=getattr(request, "checking_source", None) or None,
                 answer_binding=(review_operation_binding(request, slot, self.assignment.call_id)
                                 if request.surface == "multi_model_review" else None),
+                first_send_only=bool(self._first_send_only and not self._handoff_entered),
             )
         except BaseException as exc:
             if not self._retry_state and not request.reconcile_only:

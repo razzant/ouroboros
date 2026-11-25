@@ -32,6 +32,7 @@ import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros.model_wait import TaskModelWait, control_probe_requires_current, control_probe_active
@@ -213,6 +214,8 @@ class ReviewOperation:
         self.identity = controller_identity()
         self.result_root = pathlib.Path(result_root)
         self.checkpointed = False
+        self.continuation_author = None
+        self.continuation_pause_seen = False
         self.closed = False
         self._closing = self._published = False  # one final publisher at a time
         self.control_state = ""
@@ -359,9 +362,11 @@ def drain_local_review_attempts(task_id: str, *, timeout_sec: float, spare_detac
                 live = {id(op) for op in _LIVE.values()
                         if op.task_id == str(task_id) and not op.closed and op.author_detached}
         with rc._ACTIVE_LOCK:
+            # A successor's continued worker keeps its predecessor's wave and billing keys but is its own operation.
             mine = [entry for entry in rc._ACTIVE.values()
                     if str(task_id) in str(getattr(entry, "wave_key", "") or "").split("|")
-                    or f"|{task_id}|" in f"|{getattr(entry, 'key', '')}|"]
+                    or f"|{task_id}|" in f"|{getattr(entry, 'key', '')}|"
+                    or getattr(getattr(entry, "operation", None), "task_id", None) == str(task_id)]
     except Exception:
         log.debug("Review attempt registry unavailable at budget pause", exc_info=True)
         return {"drained": False, "registry": "unavailable", "settled": settled, "unsettled": unsettled}
@@ -392,6 +397,16 @@ def current_review_operation() -> Optional[ReviewOperation]:
     return _BOUND.get()
 
 
+@contextlib.contextmanager
+def bind_review_operation(operation):
+    """Carry only this worker's own review operation, not the author's context."""
+    token = _BOUND.set(operation)
+    try:
+        yield
+    finally:
+        _BOUND.reset(token)
+
+
 def release_review_operation(entry: Any) -> None:
     """A settled physical worker may be its operation's last one."""
     operation = getattr(entry, "operation", None)
@@ -420,18 +435,20 @@ def review_operation_scope(*, request: Any, slots: List[Any], usage_ctx: Any,
                            task_id: str) -> Iterator[OperationBinding]:
     """Own one panel's wait, controls and lifetime before computing slot windows.
 
-    Drain and workers share operation clocks. If every slot relays one live local
-    operation, bind its controller/clocks/scopes; otherwise own only the new sends.
-    Without a task wait owner (collection or dispatch outside a task frame), bind
-    nothing."""
+    Drain and workers share operation clocks. If every slot relays one live local operation, bind its
+    controller/clocks/scopes; otherwise own only the new sends. Without a task wait owner (collection or
+    dispatch outside a task frame), bind nothing; a cold read stays nonblocking. An explicit continuation
+    owns its exact recorded invocation before a local worker exists: the wave's task keeps its evidence and
+    charges, the deciding author its controls and drain (``continuation_author``)."""
     from ouroboros.model_wait import current_model_wait, operation_wait_scope
     from ouroboros.review_custody import review_dispatch_plan
     from ouroboros.review_live_join import live_join_operation
 
     parent = current_model_wait()
     reconcile = bool(getattr(request, "reconcile_only", False))
+    continuing = reconcile and bool(getattr(usage_ctx, "_review_receptive_continuation", False))
     live = live_join_operation(request, slots, usage_ctx) if parent is not None and reconcile else None
-    if parent is None or (reconcile and live is None):
+    if parent is None or (reconcile and live is None and not continuing):
         yield OperationBinding()
         return
     plan = review_dispatch_plan(request, slots, usage_ctx)
@@ -442,34 +459,38 @@ def review_operation_scope(*, request: Any, slots: List[Any], usage_ctx: Any,
         binding.operation = live  # no new owner, even if settlement races
     elif not sends and len(relayed) == 1:
         binding.operation = next(iter(relayed.values()))
+    elif reconcile and not sends:
+        yield binding
+        return
     else:
+        from ouroboros.review_pause import _author_coordinates, author_fence_closed, author_paused
+
         root = _result_root(usage_ctx, parent)
-        binding.operation = ReviewOperation(parent=parent, request=request, task_id=str(task_id or ""),
-                                            result_root=root or pathlib.Path(str(parent.canonical_root)))
+        operation = binding.operation = ReviewOperation(parent=parent, request=request,
+            task_id=parent.task_id if continuing else str(task_id or ""),
+            result_root=root or pathlib.Path(str(parent.canonical_root)))
+        if continuing:
+            # The wave's task owns evidence and charges, but today's author owns this new submission.
+            drive, root_id, member = _author_coordinates(parent)
+            operation.continuation_author = SimpleNamespace(drive_root=drive, root_task_id=root_id, task_id=member)
+        paused = bool(sends and author_fence_closed(parent))
+        # Only a positively read Pause holds the selected send for Resume; an unreadable fence just refuses it.
+        operation.continuation_pause_seen = continuing and paused and author_paused(operation)
         with _LOCK:
-            _LIVE[binding.operation.owner_id] = binding.operation
-        if sends:
-            from ouroboros.review_pause import author_fence_closed
+            _LIVE[operation.owner_id] = operation
+        if paused and not continuing:
+            from ouroboros.owner_pause import NOT_STARTED_TEXT
 
-            if author_fence_closed(parent):
-                # A NEW panel under the owner's accepted Pause never starts: every
-                # send slot is refused at $0, exactly as a fenced tool handoff is.
-                from ouroboros.owner_pause import NOT_STARTED_TEXT
-
-                binding.refused = {slot_id: NOT_STARTED_TEXT for slot_id in sends}
-            else:
-                _retain_before_dispatch(binding.operation, sends, usage_ctx, root)
+            binding.refused = {slot_id: NOT_STARTED_TEXT for slot_id in sends}
+        elif sends and not paused:
+            _retain_before_dispatch(operation, sends, usage_ctx, root)
     operation = binding.operation
     operation.enter()
     try:
-        token = _BOUND.set(operation)
-        try:
-            from ouroboros.review_pause import author_drain
+        from ouroboros.review_pause import author_drain
 
-            with author_drain(parent, operation), operation_wait_scope(operation.wait):
-                yield binding
-        finally:
-            _BOUND.reset(token)
+        with bind_review_operation(operation), author_drain(parent, operation), operation_wait_scope(operation.wait):
+            yield binding
     finally:
         operation.drain_returned()
 
