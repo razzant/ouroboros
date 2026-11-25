@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - Python < 3.11
 
 class SignInRequest(TypedDict, total=False):
     """``POST /api/sign-in``: ``begin`` selects a saved ``client`` or explicitly asks to ``register_client``
-    when none is saved, naming the ``issuer`` shown; ``account`` names the row to sign in again. ``complete`` accepts the provider's
+    when none can start a sign-in, naming the ``issuer`` shown; ``account`` names the row to sign in again. ``complete`` accepts the provider's
     return or ``returned_url``, optionally tied to the editor's ``attempt_id``; ``cancel`` retires that attempt.
     ``disconnect``/``revoke`` name the account. ``client_save`` takes the approved ``issuer`` and, for
     explicit mode, the whole ``endpoints`` map plus ``client``; a blank secret or client ID keeps the saved
@@ -69,9 +69,9 @@ class SignInResponse(TypedDict, total=False):
     error: str
 
 
-# One of the owner's clients of an issuer: ``return`` is ``loopback`` or ``exact:<address>`` (a keyword, hence
-# the functional form); ``secret_set`` says a secret is saved, never what it is; ``registration`` names the exact registration shown
-# (client ID, provider addresses, return) without revealing it.
+# A client of an issuer: ``return`` is ``loopback``, ``exact:<address>`` or a handover's ``unknown``.
+# ``secret_set`` says a secret is saved, never what it is. Only clients with a known return have a
+# ``registration`` naming the exact client ID, provider addresses and return shown.
 SignInClientRow = TypedDict("SignInClientRow", {
     "id": Required[str], "label": str, "issuer": str, "client_id_tail": str, "return": str, "source": str,
     "secret_set": bool, "registration": str, "used_by": List[Dict[str, Any]]}, total=False)

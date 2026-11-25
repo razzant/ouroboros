@@ -46,7 +46,7 @@ Per-call children proxy tools, routes, WS, UI, settings and companions under scr
 
 ### Service sign-in
 
-`sign_in` declares providers/scopes; `service_sign_in.py` freezes the card's literal ceiling or keeps the old grant's exact scope. `oauth_engine.py` (also MCP) records one exchange and unmet scopes, locking pending then account before cleanup. Disconnect forgets locally, Revoke awaits provider confirmation of every token, and Host Service returns only the skill's scoped bearer (§12), never refresh tokens or client secrets.
+`sign_in` lists providers/scopes. `service_sign_in` pins literal card scopes, imports exact granted ones, reads receipts locally. `oauth_engine` (also MCP) records one exchange and unmet scopes. Filing locks pending then account before cleanup. Disconnect is local; Revoke forgets only once the provider confirms every token. A skill gets only its scoped bearer (§12), consent-bound on request, never refresh/client secrets.
 
 ### Live Conversation and provider packages
 
