@@ -9,6 +9,7 @@ moved or removed. Only a copy that no row names, made by a ``telegram_send`` tha
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import os
@@ -270,6 +271,37 @@ def close_verified(verified_fds: Optional[Dict[str, Tuple[int, int]]]) -> None:
         except OSError:
             pass
     verified_fds.clear()
+
+
+async def run_owned_in_thread(fn: Callable[[], Any], closer: Callable[[Any], None]) -> Any:
+    """Run ``fn`` in a worker thread with deterministic resource cleanup across cancel and loop shutdown."""
+    lock = threading.Lock()
+    state: Dict[str, Any] = {"abandoned": False, "done": False, "result": None}
+
+    def _worker() -> Any:
+        with lock:
+            if state["abandoned"]:
+                return None
+        res = fn()
+        with lock:
+            if state["abandoned"]:
+                must_close = True
+            else:
+                state["result"], state["done"], must_close = res, True, False
+        if must_close:
+            closer(res)
+        return res
+
+    try:
+        return await asyncio.to_thread(_worker)
+    except BaseException:
+        with lock:
+            state["abandoned"] = True
+            res_to_close = state["result"] if state["done"] else None
+            state["result"] = None
+        if res_to_close is not None:
+            closer(res_to_close)
+        raise
 
 
 def open_verified(

@@ -499,7 +499,7 @@ def test_non_owner_chats_topics_reactions_discovery_and_status_route(tmp_path):
 
 
 def test_presence_worker_and_tools_delivery_receipt_and_place_hold(tmp_path, monkeypatch):
-    plugin = _load_plugin("tg_unified_tools_test")
+    _load_plugin("tg_unified_tools_test")
     state_dir = tmp_path / "state" / "skills" / "telegram"
     state_dir.mkdir(parents=True)
     api = _FakeApi(state_dir, data_dir=tmp_path)

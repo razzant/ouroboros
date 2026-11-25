@@ -8,7 +8,6 @@ from typing import Any, Dict, List
 import pytest
 
 from ouroboros import extension_loader
-from ouroboros.extension_process_runner import _handler_wants_ctx
 from ouroboros.skill_builtin import install_builtin_skill
 from ouroboros.skill_loader import find_skill, save_enabled
 from ouroboros.tools.extension_dispatch import _dispatch_extension_tool_result

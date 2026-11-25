@@ -553,7 +553,7 @@ async def _wait_for_owner(
         if owner <= 0:
             status.transition(
                 "waiting_owner",
-                "Set Owner Chat ID in Settings → Telegram (or confirm pairing from Ouroboros).",
+                "Set Owner Chat ID in Settings → Extensions → Telegram (or confirm pairing from Ouroboros).",
                 reason_code="waiting_private_owner",
             )
             await _wait_or_stop(5.0, stop_event)

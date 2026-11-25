@@ -18,8 +18,6 @@ RELEASE_ROW = re.compile(r"^\| \d+\.\d+\.\d+\S* \| \d{4}-\d{2}-\d{2} \|")
 # them, so no release date is promised: they stay dead text until a skill release rewrites them.
 _TELEGRAM_DEBT = "dead text in the Telegram skill, wording only; stays until a skill release rewrites it"
 PROTECTED_KNOWN = {
-    ('skills/telegram/lib/telegram_api.py', 1093): _TELEGRAM_DEBT,
-    ('skills/telegram/lib/telegram_api.py', 1098): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 1): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 147): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 205): _TELEGRAM_DEBT,

@@ -14,7 +14,6 @@ from . import outbox_files
 from .custody import CustodyStore
 from .delivery import tool_origin
 from .file_access import (
-    authorize_upload_path,
     caller_scope,
     idempotency_fingerprint,
     open_authorized_upload,

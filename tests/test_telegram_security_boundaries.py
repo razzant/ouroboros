@@ -184,7 +184,7 @@ def test_group1_owner_pairing_revocation_identity_and_https(tmp_path):
 
 
 def test_group2_secret_ledger_quotes_edits_uncertain_and_fail_closed(tmp_path):
-    plugin = _load_plugin("tg_sec_g2")
+    _load_plugin("tg_sec_g2")
     from tg_sec_g2.lib import telegram_quiz, telegram_secret_guard as sg
 
     api = _StubApi(tmp_path / "state")
@@ -332,11 +332,11 @@ def test_group3_panic_isolation_overflow_literal_commands_and_retry(tmp_path, mo
 
 
 def test_group4_chats_topics_receipts_moderation_albums_and_rechecks(tmp_path):
-    plugin = _load_plugin("tg_sec_g4")
+    _load_plugin("tg_sec_g4")
     from tg_sec_g4.lib.presence.custody import CustodyStore
     from tg_sec_g4.lib.presence.file_access import receipt_visible_to
     from tg_sec_g4.lib.presence.host import PlaceBindingRevoked
-    from tg_sec_g4.lib.presence.outbox_worker import LeaseLost, ReactionDeliveryHelper
+    from tg_sec_g4.lib.presence.outbox_worker import ReactionDeliveryHelper
     from tg_sec_g4.lib.presence.runtime import PresenceRuntime
     from tg_sec_g4.lib.presence.tools import (
         make_moderation_tool, make_operation_tool, make_send_tool, make_typing_tool,
@@ -484,7 +484,7 @@ def test_group4_chats_topics_receipts_moderation_albums_and_rechecks(tmp_path):
 
 
 def test_group5_zero_toctou_legacy_hold_streaming_and_reclaim(tmp_path):
-    plugin = _load_plugin("tg_sec_g5")
+    _load_plugin("tg_sec_g5")
     from tg_sec_g5.lib.presence import outbox_files
     from tg_sec_g5.lib.presence.custody import CustodyStore
     from tg_sec_g5.lib.presence.file_access import _open_confined_regular_fd
@@ -582,11 +582,10 @@ def test_group5_zero_toctou_legacy_hold_streaming_and_reclaim(tmp_path):
 
 
 def test_group6_protocol_detection_downgrade_hold_and_lease_fencing(tmp_path):
-    plugin = _load_plugin("tg_sec_g6")
+    _load_plugin("tg_sec_g6")
     from tg_sec_g6.lib.presence.custody import CustodyStore
     from tg_sec_g6.lib.presence.events import TelegramEvent
     from tg_sec_g6.lib.presence.host import PresenceHostClient
-    from tg_sec_g6.lib.presence.runtime import PresenceRuntime
 
     # 1) places_version=1 WITHOUT presence_place_binding_version -> detected separately; bind_place returns None (no loop!)
     class _Transport:

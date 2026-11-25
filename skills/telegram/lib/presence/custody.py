@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence
 from . import discovery, outbox_files
 from .custody_schema import (
     ALBUM_EARLIER, CALL_STARTED, CLAIMABLE_INBOX, CLAIMABLE_OUTBOX, CLAIMABLE_WORK, CONFIRMED_BOT_KEY,
-    HELD_REPORTS_SQL, PRESENCE_WORK_TABLE, REACTION_ATTEMPTS_MARKED, REACTION_WITHHELD, REMEMBER_MESSAGE,
+    PRESENCE_WORK_TABLE, REACTION_ATTEMPTS_MARKED, REACTION_WITHHELD, REMEMBER_MESSAGE,
     STAMP_PATH, UNANSWERED_ATTEMPT, UNMARKED_NO_EFFECT, UNRECORDED_SEND_NO_EFFECT, InboxFullError, InboxLease,
     OutboxLease, WorkLease, anchor_message_id, build_delivery_receipt, build_status_snapshot, chat_forum,
     compact_json, held_by_clause, lease_releasable, migrate_custody_schema, newest_chat_forum, recorded_calls,

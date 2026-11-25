@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import stat
+import threading
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -25,7 +26,8 @@ from ...scripts.telegram_settings import (
     validate_telegram_files_dir,
     validate_telegram_proxy,
 )
-from .formatting import _telegram_html_to_plain, prepare_caption, prepare_text
+from .formatting import _telegram_html_to_plain, prepare_text
+from .outbox_files import close_verified, run_owned_in_thread
 
 CLOUD_API_SERVER = "https://api.telegram.org"
 CLOUD_DOWNLOAD_LIMIT = 20 * 1024 * 1024
@@ -475,18 +477,41 @@ class PresenceBotClient:
         verified_fds: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> Any:
         self._check_binding(endpoint)
-        open_task = asyncio.ensure_future(asyncio.to_thread(_AsyncMultipartStream.open, fields, file_specs, verified_fds))
+        owned_vfds: Optional[Dict[str, Tuple[int, int]]] = None
+        if verified_fds is not None:
+            owned_vfds = {}
+            try:
+                for key, (raw_fd, raw_size) in verified_fds.items():
+                    owned_vfds[key] = (os.dup(int(raw_fd)), int(raw_size))
+            except BaseException:
+                close_verified(owned_vfds)
+                raise
+        worker_lock = threading.Lock()
+        worker_state = {"claimed": False, "aborted": False}
+
+        def _open_owned() -> "_AsyncMultipartStream":
+            with worker_lock:
+                if worker_state["aborted"]:
+                    raise asyncio.CancelledError()
+                worker_state["claimed"] = True
+            try:
+                return _AsyncMultipartStream.open(fields, file_specs, owned_vfds)
+            finally:
+                close_verified(owned_vfds)
+
         try:
-            stream = await asyncio.shield(open_task)
-        except asyncio.CancelledError:
-            open_task.add_done_callback(
-                lambda fut: fut.result().close_sync() if not fut.cancelled() and fut.exception() is None else None
-            )
+            stream = await run_owned_in_thread(_open_owned, lambda st: st.close_sync())
+        except BaseException as exc:
+            with worker_lock:
+                worker_state["aborted"] = True
+                not_started = not worker_state["claimed"]
+            if not_started:
+                close_verified(owned_vfds)
+            if isinstance(exc, TelegramRequestNotSent):
+                raise
+            if isinstance(exc, OSError):
+                raise TelegramRequestNotSent("upload", type(exc).__name__) from None
             raise
-        except TelegramRequestNotSent:
-            raise
-        except OSError as exc:
-            raise TelegramRequestNotSent("upload", type(exc).__name__) from None
         url = f"{self._api_server}/bot{self._token}/{endpoint}"
         headers = {
             "Content-Type": f"multipart/form-data; boundary={stream.boundary}",
@@ -529,6 +554,10 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
             + len(tail)
         )
         self._closed = False
+        self._io_lock = threading.Lock()
+        self._in_flight = 0
+        self._close_requested = False
+        self._fds_closed = False
 
     @classmethod
     def open(
@@ -595,16 +624,40 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
             raise
         return cls(boundary, field_parts, file_parts, b"--" + b_bytes + b"--\r\n")
 
+    def _run_fd_io(self, op: Callable[[], Any]) -> Any:
+        with self._io_lock:
+            if self._close_requested or self._fds_closed:
+                raise OSError("multipart stream closed")
+            self._in_flight += 1
+        try:
+            return op()
+        finally:
+            with self._io_lock:
+                self._in_flight -= 1
+                close_now = self._close_requested and self._in_flight == 0 and not self._fds_closed
+                if close_now:
+                    self._fds_closed = True
+            if close_now:
+                self._close_fds_now()
+
+    def _close_fds_now(self) -> None:
+        for _h, fd, _sz in self._file_parts:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
     async def __aiter__(self):
         try:
             for part in self._field_parts:
                 yield part
             for hdr, fd, expected in self._file_parts:
                 yield hdr
-                await asyncio.to_thread(os.lseek, fd, 0, os.SEEK_SET)
+                await asyncio.to_thread(self._run_fd_io, lambda f=fd: os.lseek(f, 0, os.SEEK_SET))
                 remaining = expected
                 while remaining > 0:
-                    chunk = await asyncio.to_thread(os.read, fd, min(_UPLOAD_STREAM_CHUNK, remaining))
+                    want = min(_UPLOAD_STREAM_CHUNK, remaining)
+                    chunk = await asyncio.to_thread(self._run_fd_io, lambda f=fd, n=want: os.read(f, n))
                     if not chunk:
                         raise OSError("frozen upload file truncated during streaming")
                     remaining -= len(chunk)
@@ -615,14 +668,13 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
             await self.aclose()
 
     def close_sync(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        for _h, fd, _sz in self._file_parts:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        with self._io_lock:
+            self._closed = True
+            self._close_requested = True
+            if self._in_flight > 0 or self._fds_closed:
+                return
+            self._fds_closed = True
+        self._close_fds_now()
 
     async def aclose(self) -> None:
         self.close_sync()

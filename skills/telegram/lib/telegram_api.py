@@ -1085,12 +1085,12 @@ _MENU_TEXTS_EN = {
         "• `/main <text>` — Send one message straight to Main chat (shortcut `/m`)\n"
         "• `/language` — Change interface language  |  `/help` — Show this guide\n"
         "• `/status` — Request live system status  |  `/panic` — Emergency stop\n\n"
-        "Modes description (changed in Web UI → Settings → Telegram):\n"
+        "Modes description (changed in Web UI → Settings → Extensions → Telegram):\n"
         "• **strict** — allow only `/menu`, `/mode`, `/main`, `/help`, `/language` and owner `/panic`\n"
         "• **safe_commands** — allow status monitoring\n"
         "• **full_access** — allow status + background loop start/stop"
     ),
-    "slash_blocked_strict": "⛔ Slash commands are not allowed in strict mode. Use `/menu` to see available options, or change mode in Settings → Telegram.",
+    "slash_blocked_strict": "⛔ Slash commands are not allowed in strict mode. Use `/menu` to see available options, or change mode in Settings → Extensions → Telegram.",
     "slash_blocked_mode": "⛔ This command is not allowed in the current mode. Use `/menu` to see available options.",
     "not_authorized": "Not authorized",
     "updating_status": "Updating status metrics...",

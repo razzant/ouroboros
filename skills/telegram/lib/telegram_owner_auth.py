@@ -10,7 +10,9 @@ import os
 import pathlib
 import re
 import secrets
+import threading
 import time
+from collections import deque
 from typing import Any, Dict, Optional
 
 from ..scripts.telegram_settings import (
@@ -43,13 +45,36 @@ def _pairing_path(state_dir: Any) -> pathlib.Path:
     return _resolve_state_dir(state_dir) / _PAIRING_FILE
 
 
+_BURNED_LOCK = threading.Lock()
+_BURNED_ORDER: deque[str] = deque()
+_BURNED_HASHES: set[str] = set()
+_CODE_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _mark_burned_in_memory(code: str) -> None:
+    digest = _sha256_text(code)
+    with _BURNED_LOCK:
+        if digest in _BURNED_HASHES:
+            return
+        _BURNED_HASHES.add(digest)
+        _BURNED_ORDER.append(digest)
+        while len(_BURNED_ORDER) > 256:
+            _BURNED_HASHES.discard(_BURNED_ORDER.popleft())
+
+
+def _is_burned_in_memory(code: str) -> bool:
+    digest = _sha256_text(code)
+    with _BURNED_LOCK:
+        return digest in _BURNED_HASHES
+
+
 def _sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _const_eq(a: str, b: str) -> bool:
-    """Constant-time UTF-8 string comparison that never raises TypeError on non-ASCII inputs."""
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+    """Constant-time UTF-8 string comparison safe for non-ASCII and lone surrogates."""
+    return hmac.compare_digest(a.encode("utf-8", "surrogatepass"), b.encode("utf-8", "surrogatepass"))
 
 
 def _write_private_json(path: pathlib.Path, payload: Dict[str, Any]) -> None:
@@ -84,8 +109,8 @@ def _read_pairing_record(path: pathlib.Path) -> Optional[Dict[str, Any]]:
 def _clear_pairing_unlocked(path: pathlib.Path) -> None:
     try:
         path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        raise TelegramSettingsError("Could not remove owner pairing challenge.") from exc
 
 
 def clear_owner_pairing(state_dir: Any) -> None:
@@ -95,19 +120,22 @@ def clear_owner_pairing(state_dir: Any) -> None:
 
 
 def _burn_active_code_if_matches(root: pathlib.Path, candidate: str) -> bool:
-    """Compare and consume ``candidate`` against the active challenge atomically under ``settings_lock``."""
+    """Compare and consume ``candidate`` against the active challenge atomically under ``settings_lock``.
+
+    Returns ``False`` only when the lock succeeded and the live challenge no longer matches ``candidate``.
+    Propagates ``TelegramSettingsError`` if acquiring the lock or removing the file fails so the poller
+    halts the batch and retries before any subsequent redemption update runs.
+    """
     if not candidate:
         return False
-    try:
-        with settings_lock(root):
-            path = _pairing_path(root)
-            record = _read_pairing_record(path)
-            active_code = str((record or {}).get("code") or "")
-            if active_code and _const_eq(active_code, candidate):
-                _clear_pairing_unlocked(path)
-                return True
-            return False
-    except (TelegramSettingsError, OSError):
+    _mark_burned_in_memory(candidate)
+    with settings_lock(root):
+        path = _pairing_path(root)
+        record = _read_pairing_record(path)
+        active_code = str((record or {}).get("code") or "")
+        if active_code and _const_eq(active_code, candidate):
+            _clear_pairing_unlocked(path)
+            return True
         return False
 
 
@@ -170,7 +198,8 @@ def redeem_owner_pairing_code(
                 _clear_pairing_unlocked(path)
                 return False
             expected = str(record.get("code") or "")
-            if not expected:
+            if not expected or _is_burned_in_memory(expected):
+                _clear_pairing_unlocked(path)
                 return False
             bounds = _parse_pairing_bounds(record)
             if bounds is None:
@@ -222,17 +251,18 @@ def is_pairing_command(state_dir: Any, message: Any) -> bool:
     pair_any = _PAIR_ANY_RE.match(cleaned)
     start_match = _START_ARG_RE.match(cleaned)
     pairing_file = _pairing_path(root)
+    record = _read_pairing_record(pairing_file) if pairing_file.is_file() else None
+    active_code = str((record or {}).get("code") or "")
+    if active_code and (not is_private or pair_any or start_match):
+        matched = any(_const_eq(active_code, tok) for tok in _CODE_TOKEN_RE.findall(cleaned)) or (
+            not is_private and active_code in cleaned
+        )
+        if matched:
+            # Burn exposed active code atomically under settings_lock (propagates TelegramSettingsError
+            # on lock/unlink failure so the poller rewinds offset and halts the batch before redemption).
+            _burn_active_code_if_matches(root, active_code)
+            return True
     if not pair_any and not start_match:
-        # Also burn an active pairing code pasted bare (without /pair or /start) into a group chat.
-        if not is_private and pairing_file.is_file():
-            record = _read_pairing_record(pairing_file)
-            active_code = str((record or {}).get("code") or "")
-            if active_code:
-                for token in cleaned.split():
-                    stripped = token.strip("`'\"()[]{}<>.,;:!?")
-                    if stripped and _const_eq(active_code, stripped):
-                        _burn_active_code_if_matches(root, stripped)
-                        return True
         return False
     arg = ""
     if pair_any:
@@ -240,12 +270,6 @@ def is_pairing_command(state_dir: Any, message: Any) -> bool:
         arg = parts[1] if len(parts) >= 2 else ""
     elif start_match:
         arg = start_match.group(1)
-    record = _read_pairing_record(pairing_file)
-    active_code = str((record or {}).get("code") or "")
-    if active_code and arg and _const_eq(active_code, arg):
-        # Burn exposed active code atomically under settings_lock (never deletes a concurrently re-issued code).
-        _burn_active_code_if_matches(root, arg)
-        return True
     if pair_any:
         return True
     owner = live_owner_chat_id(root)

@@ -234,7 +234,7 @@ def test_content_with_a_verified_home_goes_once_the_home_is_read_again(tmp_path,
         from ouroboros.artifacts import resolve_chat_media_path
 
         resolve_chat_media_path(data, media["task_id"], media["name"]).unlink()  # gone before its end
-        async with _Origin(["403"] * 9, port=closed) as origin:
+        async with _Origin(["403"] * 9, port=closed):
             await bridge.drain()
         assert [(r["state"], bool(r.get("held"))) for r in bridge.records()] == [
             ("refused", False)] * 4 + [("refused", True), ("refused", False), ("refused", True),

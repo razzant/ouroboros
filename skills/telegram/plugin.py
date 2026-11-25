@@ -20,8 +20,8 @@ from ouroboros.utils import in_worker_process
 from .lib.telegram_api import (
     OUTBOUND_JOURNAL, TELEGRAM_RETRY_INITIAL_SEC, TelegramBindingChanged, TelegramClient,
     TelegramRequestRejected, TelegramTokenMissing, TelegramTransportError,
-    is_transient_telegram_error, markdown_to_telegram_html, message_chunks,
-    replacing_request, next_telegram_retry_delay, _LOCALIZED_TEXTS, _MAX_TELEGRAM_UPLOAD_BYTES, _u16len,
+    is_transient_telegram_error, message_chunks, replacing_request, next_telegram_retry_delay,
+    _LOCALIZED_TEXTS, _u16len,
 )
 from .lib.telegram_state import (
     _state_file, _load_settings, _is_silent_mode_enabled,
@@ -53,11 +53,9 @@ from .lib.telegram_panels import (
     _build_menu_mind,
     _build_menu_settings,
     _build_menu_status,
-    build_mode_panel,
     settings_section_schema,
 )
 from .lib.telegram_media_handlers import (
-    is_native_audio_document as _is_native_audio_document,
     make_document_handler,
     make_links_handler,
     make_photo_handler,
@@ -195,12 +193,7 @@ def _translate_command(text: str, command_mode: str) -> str | None:
 
 
 def _is_exact_bot_command(text: str, command: str) -> bool:
-    normalized = str(text or "").strip().lower()
-    return normalized == command or (
-        normalized.startswith(command + "@")
-        and " " not in normalized
-        and normalized.count("@") == 1
-    )
+    return bool(re.fullmatch(re.escape(command.lower()) + r"(?:@[a-z0-9_]+)?", str(text or "").strip().lower()))
 
 
 async def _mode_panel_for_chat(api, chat_id: int, lang: str) -> tuple[str, list[list[dict]]]:
