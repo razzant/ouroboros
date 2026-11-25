@@ -1,0 +1,58 @@
+name: Bundled Telegram upgrade (focused)
+
+on:
+  push:
+    branches: ['qa/tg-4274-narrow']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-tg-4274-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CANDIDATE_SHA: '1f8cab6d0416639a5720e1b7b8bddb6ebd72d912'
+  PYTHONUTF8: '1'
+
+jobs:
+  qa:
+    name: qa · ${{ matrix.os }} · bundled Telegram upgrade
+    if: ${{ github.ref == 'refs/heads/qa/tg-4274-narrow' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - name: The candidate is a full commit id
+        run: |
+          printf '%s' "$CANDIDATE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: The checkout is exactly the named candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: false
+      - name: Exercise the reported upgrade in an isolated profile
+        timeout-minutes: 20
+        run: |
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          status=0
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" --evidence-dir "$RUNNER_TEMP/qa-tg-4274" --timeout 900 \
+            -- "$py" -m pytest -o addopts= -q -p no:cacheprovider --tb=short -rA \
+            tests/test_builtin_skill_source.py::test_bundled_telegram_reseed_delivers_the_current_version || status=$?
+          echo "safe_test exit status: $status"
+          echo "safe_test exit status on $RUNNER_OS: $status" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
